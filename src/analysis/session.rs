@@ -1039,6 +1039,9 @@ struct SpectrogramSessionState {
     /// The left of a centered view, while the session decodes it after the
     /// columns at the playhead.
     backfill: Option<Backfill>,
+    /// The column after the file's last, once the session has decoded to
+    /// its end: the extent every later chunk carries as its estimate.
+    end_column: Option<u64>,
 }
 
 /// Action returned by command processing in the session loop.
@@ -1275,6 +1278,7 @@ fn run_spectrogram_session(
         failure: None,
         queued_commands,
         backfill,
+        end_column: None,
     };
     enqueue_leading_silence(&mut session.stfts, leading_silence);
 
@@ -1388,6 +1392,7 @@ fn run_spectrogram_session(
                 source = new_source;
                 session.source_reached_eof = false;
                 session.rejected_continuation = None;
+                session.end_column = None;
                 session.timeline = AudioTimeline::new(0);
                 session.track_token = track_token;
                 session.path = path;
@@ -1423,11 +1428,7 @@ fn run_spectrogram_session(
                     SpectrogramWorkerCommand::NewTrack { handoff, .. } if handoff.finalize_previous
                 );
                 // A session parked at EOF has published its extent already.
-                let published_end = session.source_reached_eof
-                    || session
-                        .backfill
-                        .is_some_and(|backfill| backfill.right_ended);
-                if finalize && !published_end && decoded_frontier(&session) > 0 {
+                if finalize && !session.source_reached_eof && decoded_frontier(&session) > 0 {
                     session_emit_finalize_chunk(&session, event_tx);
                 }
                 profile_eprintln!(
@@ -1754,10 +1755,11 @@ fn session_decode_loop(
                         continue;
                     }
                     if session.pending_continue.is_none() {
-                        // The right ends here: publish where, then fill the
-                        // left before parking.
+                        // The right ends here. The chunks of the left carry
+                        // where, and the end is published once they are
+                        // sent: until then more columns come.
                         session_flush_chunk(session, event_tx, columns_produced_out);
-                        session_emit_finalize_chunk(session, event_tx);
+                        record_end_column(session);
                         session.backfill = Some(Backfill {
                             right_ended: true,
                             ..backfill
@@ -1772,6 +1774,7 @@ fn session_decode_loop(
                 // exits leaves the UI using a padded estimate.
                 session.source_reached_eof = true;
                 session_flush_chunk(session, event_tx, columns_produced_out);
+                record_end_column(session);
                 session_emit_finalize_chunk(session, event_tx);
                 break;
             }
@@ -2291,8 +2294,16 @@ fn step_backfill(
     Ok(())
 }
 
+/// The session has decoded its file to the end: the column after its last
+/// is the file's extent, which the chunks it sends from now on carry,
+/// rather than an estimate that may be padded or a fallback.
+fn record_end_column(session: &mut SpectrogramSessionState) {
+    session.end_column = Some(session.columns_produced);
+    session.total_columns_estimate = u64_to_u32_saturating(session.columns_produced);
+}
+
 /// Stop filling the left of the view, and go on with the right where the
-/// session left it, or park at its end.
+/// session left it, or park at its end, publishing it.
 fn end_backfill(
     session: &mut SpectrogramSessionState,
     source: &mut AudioFrameSource,
@@ -2309,10 +2320,11 @@ fn end_backfill(
     session_emit_pending_chunk(session, event_tx, columns_produced_out);
     session.backfill = None;
     if backfill.right_ended {
-        // The end is published, and the session parks there.
+        // Every column is sent: publish the end, and park there.
         session.columns_produced = resume;
         session.chunk_start_index = resume;
         session.source_reached_eof = true;
+        session_emit_finalize_chunk(session, event_tx);
         return Ok(());
     }
     reposition_decoder(session, source, resume)
@@ -2665,6 +2677,10 @@ fn maybe_update_columns_estimate(
     generation: &AtomicU64,
     track_duration_ms_out: &AtomicU64,
 ) {
+    // The file's end, once decoded, is its extent.
+    if session.end_column.is_some() {
+        return;
+    }
     let estimate = u64::from(session.total_columns_estimate);
     let produced = decoded_frontier(session);
 
@@ -3596,6 +3612,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         };
 
         match handle_single_command(
@@ -3712,6 +3729,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         };
 
         assert!(post_reset_window_active(&session));
@@ -3767,6 +3785,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3832,6 +3851,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3889,6 +3909,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         };
 
         let cols_out = AtomicU64::new(0);
@@ -3977,6 +3998,7 @@ mod tests {
             failure: None,
             queued_commands: VecDeque::new(),
             backfill: None,
+            end_column: None,
         }
     }
 
@@ -7310,6 +7332,101 @@ mod tests {
         for (index, bytes) in columns_of(&chunks) {
             assert_eq!(Some(&bytes), reference.get(&index), "column {index}");
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_session_whose_right_reaches_the_end_publishes_it_after_its_left() {
+        // Near the end of the file the right of the view reaches it before
+        // the left is decoded. The left's chunks carry the file's extent,
+        // not the padded estimate, and the end is published once they are
+        // sent: a zoom waiting for the whole view waits for it.
+        let path = write_noise_fixture("end", 2);
+        let target = 110.0;
+        let start = backfill_column(backfill_start_seconds(target));
+        let playhead = backfill_column(target);
+        let chunks = run_watched_session(
+            backfill_session_on(&path, 2, target),
+            1,
+            unbounded(),
+            &Arc::new(AtomicU64::new(1)),
+            |_| {},
+            ends_complete,
+        );
+        let spans = spans_of(&chunks);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].0, playhead);
+        assert_eq!(spans[1], (start, playhead));
+        let end = spans[0].1;
+        let first_left = chunks
+            .iter()
+            .position(|chunk| {
+                chunk.column_count > 0 && u64::from(chunk.start_column_index) < playhead
+            })
+            .unwrap();
+        // Before the end the estimate is the file's, with its padding.
+        assert!(
+            u64::from(chunks[1].total_columns_estimate) > end,
+            "{} {end}",
+            chunks[1].total_columns_estimate
+        );
+        for chunk in &chunks[first_left..] {
+            assert_eq!(u64::from(chunk.total_columns_estimate), end);
+        }
+        let finals: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, chunk)| chunk.complete)
+            .collect();
+        assert_eq!(finals.len(), 1);
+        assert_eq!(
+            finals[0].0,
+            chunks.len() - 1,
+            "the end comes after every column"
+        );
+        assert_eq!(u64::from(finals[0].1.total_columns_estimate), end);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_gapless_switch_during_the_left_after_the_end_publishes_the_end() {
+        let path = write_noise_fixture("switch", 2);
+        let target = 110.0;
+        let playhead = backfill_column(target);
+        let command = backfill_session_on(&path, 2, target);
+        let mut successor = command.clone();
+        if let SpectrogramWorkerCommand::NewTrack {
+            track_token,
+            handoff,
+            ..
+        } = &mut successor
+        {
+            *track_token += 1;
+            handoff.finalize_previous = true;
+        }
+        let (commands, command_rx) = unbounded();
+        let switch = commands.clone();
+        let sent = AtomicBool::new(false);
+        let chunks = run_watched_session(
+            command,
+            1,
+            (commands, command_rx),
+            &Arc::new(AtomicU64::new(1)),
+            move |chunk| {
+                if chunk.column_count > 0
+                    && u64::from(chunk.start_column_index) < playhead
+                    && !sent.swap(true, Ordering::Relaxed)
+                {
+                    switch.send(successor.clone()).unwrap();
+                }
+            },
+            |_| false,
+        );
+        let end = spans_of(&chunks)[0].1;
+        let finals: Vec<_> = chunks.iter().filter(|chunk| chunk.complete).collect();
+        assert_eq!(finals.len(), 1, "the end is published once");
+        assert_eq!(u64::from(finals[0].total_columns_estimate), end);
+        assert!(chunks.last().unwrap().complete);
         std::fs::remove_file(path).unwrap();
     }
 

@@ -2627,11 +2627,13 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedTotalColumnsEstimate = totalEstimate;
             m_precomputedCanvasDirty = true;
         }
-        // The session has ended, so whatever the freeze waits for will not
-        // arrive: show what there is rather than the frozen image of another
+        // The session has ended, and sent every column it decodes, the
+        // left of a centered view after the right included, so whatever
+        // the freeze waits for will not arrive: show what there is rather than the frozen image of another
         // position while playback goes on.  A zoom waits for its own session.
         if (m_zoomFillActive && !m_awaitingZoomData) {
             m_zoomFillActive = false;
+            m_seekFillActive = false;
             m_precomputedCanvasDirty = true;
         }
         update();

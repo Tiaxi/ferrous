@@ -1248,6 +1248,7 @@ private slots:
     void spectrogramStaleBackfillIsDropped();
     void spectrogramSeekShowsThePlayheadFirstAndFillsTheLeftIn();
     void spectrogramZoomFreezeWaitsForTheBackfill();
+    void spectrogramZoomNearTheEndWaitsForTheLeftAndKeepsTheEnd();
     void spectrogramRingGrowthKeepsRollingHistory();
     void spectrogramRingChangeBenchmark();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
@@ -10393,55 +10394,49 @@ void SpectrogramSmokeTest::spectrogramFullscreenRefillAfterSeekCoversLeftEdge() 
 }
 
 void SpectrogramSmokeTest::spectrogramSeekFreezeEndsWithTheSession() {
-    // A session that started right of the view's left edge reached the end
-    // of the track, so no column will ever cover that edge. A zoom's freeze
-    // must not wait for one, or the image of the position before it stays
-    // on screen while playback goes on. A seek's ends with the playhead's
-    // columns.
+    // A seek past the end of the audio, whose estimate overshot: the session
+    // decodes the view up to the end, and the playhead's column, which a
+    // seek's freeze waits for, never comes. The end of the session, sent
+    // once all its columns are, must end the freeze, or the image of the
+    // position before the seek stays on screen while playback goes on.
     SpectrogramItem item;
     item.setWidth(320);
     item.setHeight(180);
     item.setDisplayMode(1);
     constexpr int bins = 4;
-    constexpr int end = 5000;
+    constexpr int estimate = 5000;
+    constexpr int end = 4900;
     constexpr quint64 token = 7;
     item.feedPrecomputedChunk(QByteArray(640 * bins, '\x30'), bins, 0, 640,
-        0, end, 44100, 1024, false, true, token, true, 1);
+        0, estimate, 44100, 1024, false, true, token, true, 1);
     {
         QMutexLocker lock(&item.m_stateMutex);
         item.ensureMapping(180);
         rebuildCanvasNow(item, 320, 180, 0, 319, false);
     }
     QVERIFY(!item.m_canvas.isNull());
-    testClock(item).holdAt(4900.0 * 1024.0 / 44100.0);
+    testClock(item).holdAt(4950.0 * 1024.0 / 44100.0);
 
     item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
         false, true, token, true, 2);
     QVERIFY(item.m_zoomFillActive);
     QVERIFY(item.m_seekFillActive);
-    item.feedPrecomputedChunk({}, bins, 0, 0, 4900, end, 44100, 1024,
+    item.feedPrecomputedChunk({}, bins, 0, 0, 4700, estimate, 44100, 1024,
         false, true, token, true, 2);
-    QVERIFY2(item.m_zoomFillActive, "nothing at the playhead yet");
-    item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
-        4900, end, 44100, 1024, false, false, token, false, 2);
-    QVERIFY2(!item.m_zoomFillActive, "the playhead's columns end a seek's freeze");
-    QVERIFY(!item.m_seekFillActive);
-
-    // A zoom's freeze waits for the left of the view, which may still arrive.
-    item.m_zoomFillActive = true;
-    item.feedPrecomputedChunk(QByteArray(bins, '\x60'), bins, 0, 1,
-        4999, end, 44100, 1024, false, false, token, false, 2);
-    QVERIFY2(item.m_zoomFillActive, "the left of the view may still arrive");
+    item.feedPrecomputedChunk(QByteArray(200 * bins, '\x60'), bins, 0, 200,
+        4700, estimate, 44100, 1024, false, false, token, false, 2);
+    QVERIFY2(item.m_zoomFillActive, "the playhead's column may still arrive");
 
     // Another session's end says nothing of this one's.
     item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 44100, 1024,
         true, false, token - 1, false, 2);
     QVERIFY(item.m_zoomFillActive);
 
-    // The estimate was right: only the end of the session has news.
+    // Nothing arrives after this session's end.
     item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 44100, 1024,
         true, false, token, false, 2);
     QVERIFY2(!item.m_zoomFillActive, "nothing more arrives to end the freeze");
+    QVERIFY(!item.m_seekFillActive);
     QVERIFY(item.m_precomputedCanvasDirty);
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, end);
 
@@ -10470,13 +10465,12 @@ void SpectrogramSmokeTest::spectrogramEndSeekReleasesCanvasOnFinalize() {
         rebuildCanvasNow(item, 320, 180, 0, 319, false);
     }
     QVERIFY(!item.m_canvas.isNull());
-    testClock(item).holdAt(3990.0 * 1024.0 / 44100.0);
+    // A seek between the end of the audio and the end of its estimate: the
+    // playhead's column, which the seek's freeze waits for, never comes.
+    testClock(item).holdAt(4050.0 * 1024.0 / 44100.0);
     item.feedPrecomputedChunk({}, 0, 0, 0, 0, 0, 0, 0,
         false, true, token, true);
     QVERIFY(item.m_zoomFillActive);
-    // A freeze that waits for the view, as a zoom's does: a seek's ends
-    // with the playhead's columns.
-    item.m_seekFillActive = false;
     item.feedPrecomputedChunk({}, bins, 0, 0, 3600, estimatedEnd, 44100, 1024,
         false, true, token, true, 2);
     item.feedPrecomputedChunk(QByteArray(400 * bins, '\x60'), bins, 0, 400,
@@ -15922,6 +15916,68 @@ void SpectrogramSmokeTest::spectrogramZoomFreezeWaitsForTheBackfill() {
     QVERIFY(ringHoldsBackfillColumn(item, left));
     QVERIFY2(item.m_zoomFillActive, "columns left of the playhead are missing");
     feedBackfillColumns(item, left + 10, static_cast<int>(playhead - left - 10), 2, 7, 4, hop);
+    QVERIFY(!item.m_zoomFillActive);
+}
+
+void SpectrogramSmokeTest::spectrogramZoomNearTheEndWaitsForTheLeftAndKeepsTheEnd() {
+    // Zooming in near the end: the session's right reaches the end of the
+    // file before its left is decoded. The left's chunks carry the file's
+    // extent, which ends the view there, and the end of the session comes
+    // after them. The zoom shows its data once the left is in, and the
+    // extent stays.
+    SpectrogramItem item;
+    item.setWidth(320);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    feedSessionReset(item, 0, 1);
+    feedBackfillColumns(item, 0, 2000, 1);
+    testClock(item).holdAt(30.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = 4;
+        item.ensureMapping(16);
+        rebuildCanvasNow(item, 320, 16, 1406 - 160, 1406 + 159, false);
+    }
+    QVERIFY(!item.m_canvas.isNull());
+    constexpr int hop = 512;
+    constexpr int bins = 4;
+    constexpr int padded = 100'000;
+    constexpr int end = 3000;
+    constexpr qint64 playhead = 2812;
+    // The view of the end: 640 columns up to it.
+    constexpr qint64 left = end - 640;
+    constexpr qint64 start = left - 188;
+    const auto feed = [&item](qint64 first, qint64 last, int estimate) {
+        const int count = static_cast<int>(last - first);
+        QByteArray data(qsizetype(bins) * count, '\0');
+        for (int column = 0; column < count; ++column) {
+            std::fill_n(data.data() + qsizetype(column) * bins, bins,
+                backfillColumnByte(first + column));
+        }
+        item.feedPrecomputedChunk(data, bins, 0, count, static_cast<int>(first), estimate,
+            48'000, hop, false, false, 7, false, 2);
+    };
+    item.feedPrecomputedChunk({}, bins, 0, 0, static_cast<int>(start), padded,
+        48'000, hop, false, true, 7, true, 2);
+    feed(playhead, playhead + 1, padded);
+    // As a zoom freezes the canvas until its data covers the view.
+    item.m_zoomFillActive = true;
+    item.m_seekFillActive = false;
+    feed(playhead + 1, end, padded);
+    QVERIFY(item.m_zoomFillActive);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, padded);
+
+    // The left, with the extent: the decoded end is near, but the left of
+    // the view is not all in yet.
+    feed(start, left + 100, end);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, end);
+    QVERIFY2(item.m_zoomFillActive, "columns left of the playhead are missing");
+    feed(left + 100, playhead, end);
+    QVERIFY(!item.m_zoomFillActive);
+
+    // The end of the session keeps the extent.
+    item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 48'000, hop, true, false, 7, false, 2);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, end);
     QVERIFY(!item.m_zoomFillActive);
 }
 
