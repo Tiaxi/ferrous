@@ -79,6 +79,7 @@
 #include "../src/WaveformItem.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/LevelMeterItem.h"
+#include "../src/WindowPresence.h"
 #undef private
 #undef protected
 
@@ -126,6 +127,39 @@ void setTestPositionAgo(Item &item, double seconds, double agoSeconds) {
     clock.applySample(sample, false);
     sample.advancing = true;
     clock.applySample(sample, false);
+}
+
+// Lets `window` count as on screen without showing it, so that the test,
+// not the window, draws the items in it.
+void presentWithoutDrawing(QWindow &window) {
+    WindowPresence *presence = WindowPresence::of(&window);
+    presence->m_isVisible = [](const QWindow &) { return true; };
+    presence->m_isExposed = [](const QWindow &) { return true; };
+    presence->update();
+}
+
+// Makes `window`'s presence see it exposed or not, as an expose event
+// from the platform tells it; a window that stops being exposed still
+// counts as shown until its grace ends.
+void setTestExposed(QWindow &window, bool exposed) {
+    for (WindowPresence *presence : window.findChildren<WindowPresence *>()) {
+        if (presence->window() == &window) {
+            presence->m_isExposed = [exposed](const QWindow &) { return exposed; };
+        }
+    }
+    QExposeEvent event(exposed ? QRegion(QRect(QPoint(), window.size())) : QRegion());
+    QCoreApplication::sendEvent(&window, &event);
+}
+
+// Ends the grace of `window`'s presences, as if they had stayed unexposed
+// for it.
+void endTestUnexposedGrace(QWindow &window) {
+    for (WindowPresence *presence : window.findChildren<WindowPresence *>()) {
+        if (presence->window() == &window && presence->m_unexposedGrace.isActive()) {
+            presence->m_unexposedGrace.stop();
+            presence->unexposedGraceEnded();
+        }
+    }
 }
 
 // Time a test sets for an item and its clock, so that nothing the test
@@ -1167,6 +1201,7 @@ private slots:
     void spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer();
     void spectrogramDecodedEndMovesTheCenteredViewAtOnce();
     void spectrogramPanesShareTheirWindowsFrameSchedule();
+    void spectrogramPaneNoOneSeesAsksForNoPlaybackFrames();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
     void spectrogramIdleViewDrawsOnlyFramesThatDiffer();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
@@ -1360,6 +1395,7 @@ private slots:
     void waveformEditorPlaybackBenchmark();
     void waveformSceneGraphLaysOutEachLabelOnce();
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
+    void waveformEditorNoOneSeesAsksForNoPlaybackFrames();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
@@ -1467,6 +1503,7 @@ private slots:
     void queueColumnWidthsSurviveARestart();
     void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
     void quittingWhileMinimizedKeepsTheWindowMaximized();
+    void aWindowOffScreenStopsTheClockAndTheFeeds();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
 };
@@ -3995,6 +4032,91 @@ void WindowSmokeTest::quittingWhileMinimizedKeepsTheWindowMaximized() {
     window->showMinimized();
     QTRY_COMPARE(window->visibility(), QWindow::Minimized);
     QCOMPARE(savedLayout().value(QStringLiteral("maximized")).toBool(), false);
+}
+
+void WindowSmokeTest::aWindowOffScreenStopsTheClockAndTheFeeds() {
+    // On Wayland a minimized window, or one whose display is off, keeps its
+    // visibility and only stops being exposed. Once it has stayed so for a
+    // while, the clock's frame updates, the level meter and the views'
+    // frames stop (BridgeClientTest covers the analysis); a brief
+    // unexposure, such as a desktop switch, stops nothing. Back on screen,
+    // they show playback as it is then.
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    PlaybackClock *clock = bridge.playbackClock();
+    qint64 nowNs = monotonicNowNs();
+    clock->setTimeSource([&nowNs]() { return nowNs; });
+    QTRY_VERIFY(clock->frameUpdatesEnabled());
+    // Playing, as the engine reports it. The backend plays nothing, and
+    // no event loop runs between these samples and the checks of them.
+    const auto play = [&](double position) {
+        PlaybackSample sample;
+        sample.positionSeconds = position;
+        sample.sampledAtNs = nowNs;
+        sample.advancing = true;
+        sample.durationSeconds = 300.0;
+        sample.trackToken = 1;
+        clock->applySample(sample, true);
+    };
+    play(10.0);
+    QVERIFY(clock->nextTickNs().has_value());
+    auto *meter = window->findChild<LevelMeterItem *>(QStringLiteral("levelMeter"));
+    QVERIFY(meter != nullptr);
+    meter->setVisible(true);
+    QVERIFY(meter->visibleForPlayback());
+    QSignalSpy feedChanges(clock, &PlaybackClock::frameUpdatesEnabledChanged);
+
+    setTestExposed(*window, false);
+    QCoreApplication::processEvents();
+    QVERIFY(clock->frameUpdatesEnabled());
+    QVERIFY(meter->visibleForPlayback());
+    setTestExposed(*window, true);
+    QCOMPARE(feedChanges.size(), 0);
+
+    setTestExposed(*window, false);
+    endTestUnexposedGrace(*window);
+    QVERIFY(!clock->frameUpdatesEnabled());
+    QVERIFY(!clock->nextTickNs().has_value());
+    QVERIFY(!meter->visibleForPlayback());
+    // The panes the repeater made are items of the scene, not children.
+    QList<SpectrogramItem *> panes;
+    std::function<void(QQuickItem *)> collect = [&panes, &collect](QQuickItem *item) {
+        if (auto *pane = qobject_cast<SpectrogramItem *>(item)) {
+            panes.push_back(pane);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            collect(child);
+        }
+    };
+    collect(window->contentItem());
+    QVERIFY(!panes.isEmpty());
+    for (SpectrogramItem *pane : panes) {
+        QVERIFY(!pane->showsPlaybackFrames());
+        QVERIFY(pane->m_frameScheduler == nullptr || pane->m_frameScheduler->dueNs(pane) < 0);
+    }
+    // The engine's samples still move it, and nothing else does.
+    nowNs += 5'000'000'000;
+    play(15.0);
+    QCOMPARE(clock->positionSeconds(), 15.0);
+    QVERIFY(!clock->nextTickNs().has_value());
+    nowNs += 2'000'000'000;
+    QCOMPARE(clock->positionSeconds(), 15.0);
+
+    setTestExposed(*window, true);
+    QVERIFY(clock->frameUpdatesEnabled());
+    QCOMPARE(clock->positionSeconds(), 17.0);
+    QCOMPARE(clock->positionText(), QStringLiteral("00:17"));
+    QVERIFY(clock->nextTickNs().has_value());
+    QVERIFY(meter->visibleForPlayback());
+    for (SpectrogramItem *pane : panes) {
+        QCOMPARE(pane->showsPlaybackFrames(), pane->isVisible());
+    }
+    clock->setTimeSource({});
+    QVERIFY(closeThroughTheQuitFlow(window));
 }
 
 void ErrorsSmokeTest::quitActionClosesTheWindowThroughItsCloseHandler() {
@@ -9588,6 +9710,8 @@ void WaveformSmokeTest::waveformEditorMadeInAWindowSchedulesPlaybackFrames() {
     window.resize(400, 100);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    // The window's presence, which its views share, follows it already.
+    WindowPresence::of(&window);
     const int frameListeners = window.frameSwappedListeners();
     const int visibilityListeners = window.visibleChangedListeners();
     auto *item = new WaveformEditorItem(window.contentItem());
@@ -9617,6 +9741,8 @@ void WaveformSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
     window.resize(400, 100);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    // The window's presence, which its views share, follows it already.
+    WindowPresence::of(&window);
     const int frameListeners = window.frameSwappedListeners();
     const int visibilityListeners = window.visibleChangedListeners();
     QQmlEngine engine;
@@ -9900,6 +10026,101 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     item.setPlaying(false);
     QCOMPARE(dueInMs(), -1);
     QVERIFY(!item.m_frameScheduler->timerActive());
+}
+
+void WaveformSmokeTest::waveformEditorNoOneSeesAsksForNoPlaybackFrames() {
+    // A waveform no one sees, such as the one behind the spectrogram view
+    // or one in a window off screen, follows the clock but asks for no
+    // frames. Shown again, it asks for one; its frames follow from there.
+    // Zoomed in, the view follows the playhead a device pixel at a time.
+    QQuickWindow window;
+    window.resize(1000, 100);
+    presentWithoutDrawing(window);
+    TestTime time;
+    auto *item = new WaveformEditorItem(window.contentItem());
+    time.drive(*item);
+    item->setWidth(1000);
+    item->setHeight(100);
+    item->setDurationSeconds(100.0);
+    item->setOverviewComplete(true);
+    item->setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    item->setZoomLevel(8.0);
+    setTestPosition(*item, 50.0);
+    item->setPlaying(true);
+    setTestPosition(*item, 50.0);
+    // The window does not draw it; the test does.
+    QImage canvas(1000, 100, QImage::Format_RGB32);
+    const auto paint = [item, &canvas]() {
+        QPainter painter(&canvas);
+        item->paint(&painter);
+    };
+    const auto scheduled = [item]() {
+        return item->m_frameScheduler != nullptr && item->m_frameScheduler->dueNs(item) >= 0;
+    };
+    paint();
+    item->handleWindowFrameSwapped();
+    QVERIFY(scheduled());
+    PlaybackFrameScheduler *scheduler = item->m_frameScheduler;
+    PlaybackClock &clock = testClock(*item);
+    // Half a second of the engine's samples, which correct the clock's
+    // course, while the window draws frames for its other items; then a
+    // seek and another track.
+    const auto playOn = [&]() {
+        PlaybackSample sample;
+        sample.advancing = true;
+        sample.trackToken = clock.state().trackToken;
+        for (int i = 0; i < 12; ++i) {
+            time.advance(0.04);
+            sample.positionSeconds = clock.positionAt(time.nowNs) + 0.001;
+            sample.sampledAtNs = time.nowNs;
+            clock.applySample(sample, false);
+            item->handleWindowFrameSwapped();
+        }
+        sample.positionSeconds = 70.0;
+        clock.applySample(sample, true);
+        sample.trackToken += 1;
+        sample.positionSeconds = 60.0;
+        clock.applySample(sample, false);
+    };
+
+    item->setVisible(false);
+    QVERIFY(!scheduled());
+    QVERIFY(!scheduler->timerActive());
+    quint64 requested = item->m_playbackFrameRequests;
+    playOn();
+    QCOMPARE(item->m_playbackFrameRequests, requested);
+    QVERIFY(!scheduled());
+    QVERIFY(!scheduler->timerActive());
+    item->setVisible(true);
+    QCOMPARE(item->m_playbackFrameRequests, requested + 1);
+    {
+        // The frame shows the view at the playhead now.
+        QMutexLocker lock(&item->m_stateMutex);
+        const auto [start, end] = item->visibleRangeLocked();
+        const double position = clock.positionAt(time.nowNs);
+        QVERIFY(start <= position && position <= end);
+    }
+    paint();
+    item->handleWindowFrameSwapped();
+    QVERIFY(scheduled());
+
+    // Its window off screen: a brief unexposure changes nothing; once its
+    // grace ends, the view stops asking for frames.
+    setTestExposed(window, false);
+    QVERIFY(scheduled());
+    endTestUnexposedGrace(window);
+    QVERIFY(!scheduled());
+    QVERIFY(!scheduler->timerActive());
+    requested = item->m_playbackFrameRequests;
+    playOn();
+    QCOMPARE(item->m_playbackFrameRequests, requested);
+    QVERIFY(!scheduler->timerActive());
+    setTestExposed(window, true);
+    QCOMPARE(item->m_playbackFrameRequests, requested + 1);
+    paint();
+    item->handleWindowFrameSwapped();
+    QVERIFY(scheduled());
+    delete item;
 }
 
 void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
@@ -12145,6 +12366,7 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     QFETCH(double, scale);
     QQuickWindow window;
     window.resize(400, 100);
+    presentWithoutDrawing(window);
     if (scale != 1.0) {
         QScreen *screen = hiDpiTestScreen(scale);
         if (screen == nullptr) {
@@ -12275,6 +12497,7 @@ void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel() {
     QFETCH(double, scale);
     QQuickWindow window;
     window.resize(400, 100);
+    presentWithoutDrawing(window);
     if (scale != 1.0) {
         QScreen *screen = hiDpiTestScreen(scale);
         if (screen == nullptr) {
@@ -12627,6 +12850,7 @@ void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
     // such as the fullscreen viewer, waits on that window's schedule.
     QQuickWindow window;
     window.resize(400, 100);
+    presentWithoutDrawing(window);
     TestTime time;
     std::array<SpectrogramItem *, 2> panes{};
     for (int i = 0; i < 2; ++i) {
@@ -12656,6 +12880,7 @@ void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
 
     QQuickWindow viewer;
     viewer.resize(400, 100);
+    presentWithoutDrawing(viewer);
     panes[1]->handleWindowAfterAnimating();
     QVERIFY(scheduler->dueNs(panes[1]) >= 0);
     panes[1]->setParentItem(viewer.contentItem());
@@ -12670,6 +12895,94 @@ void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
     delete panes[1];
     delete nodes[0];
     delete nodes[1];
+}
+
+void SpectrogramSmokeTest::spectrogramPaneNoOneSeesAsksForNoPlaybackFrames() {
+    // A pane no one sees, such as the spectrogram behind the waveform view
+    // or one in a window off screen, follows the clock but asks for no
+    // frames. Shown again, it asks for one, which shows playback where it
+    // is then; its frames follow from there.
+    QQuickWindow window;
+    window.resize(400, 100);
+    presentWithoutDrawing(window);
+    TestTime time;
+    // The window does not draw it; the test does.
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    prepareScrollingPlayback(item, time, 1);
+    QSGNode *node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(playbackFrameScheduled(item));
+    PlaybackFrameScheduler *scheduler = item.m_frameScheduler;
+    QVERIFY(scheduler->timerActive());
+    PlaybackClock &clock = testClock(item);
+    // Half a second of the engine's samples, which correct the clock's
+    // course, while the window draws frames for its other items; then a
+    // seek.
+    const auto playOn = [&]() {
+        PlaybackSample sample;
+        sample.advancing = true;
+        sample.trackToken = clock.state().trackToken;
+        for (int i = 0; i < 12; ++i) {
+            time.advance(0.04);
+            sample.positionSeconds = clock.positionAt(time.nowNs) + 0.001;
+            sample.sampledAtNs = time.nowNs;
+            clock.applySample(sample, false);
+            item.handleWindowAfterAnimating();
+        }
+        sample.positionSeconds = 50.0;
+        clock.applySample(sample, true);
+    };
+    const auto showsPlaybackNow = [&]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return std::abs(item.m_positionSeconds - clock.positionAt(time.nowNs)) < 1e-9;
+    };
+
+    item.setVisible(false);
+    QVERIFY(!playbackFrameScheduled(item));
+    QVERIFY(!scheduler->timerActive());
+    quint64 requested = item.m_playbackFrameRequests;
+    playOn();
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(!playbackFrameScheduled(item));
+    QVERIFY(!scheduler->timerActive());
+    item.setVisible(true);
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(showsPlaybackNow());
+    {
+        // Its canvas is drawn again from the data it kept.
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_precomputedCanvasDirty);
+    }
+    delete node;
+    node = paintSettled(item, nullptr);
+    node = item.updatePaintNode(node, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(playbackFrameScheduled(item));
+
+    // Its window off screen: a brief unexposure changes nothing; once its
+    // grace ends, the pane stops asking for frames.
+    setTestExposed(window, false);
+    QVERIFY(WindowPresence::of(&window)->shown());
+    QVERIFY(playbackFrameScheduled(item));
+    endTestUnexposedGrace(window);
+    QVERIFY(!WindowPresence::of(&window)->shown());
+    QVERIFY(!playbackFrameScheduled(item));
+    QVERIFY(!scheduler->timerActive());
+    requested = item.m_playbackFrameRequests;
+    playOn();
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(!scheduler->timerActive());
+    setTestExposed(window, true);
+    QVERIFY(WindowPresence::of(&window)->shown());
+    QCOMPARE(item.m_playbackFrameRequests, requested + 1);
+    QVERIFY(showsPlaybackNow());
+    node = paintSettled(item, node);
+    node = item.updatePaintNode(node, nullptr);
+    item.handleWindowAfterAnimating();
+    QVERIFY(playbackFrameScheduled(item));
+    delete &item;
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce() {

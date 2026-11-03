@@ -55,8 +55,8 @@ ApplicationWindow {
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
     readonly property int uiPopupTransitionMs: 0
-    readonly property bool visualFeedsEnabled: visible
-        && visibility !== Window.Minimized
+    // Whether the window is on screen: visible, not minimized, and exposed.
+    readonly property bool visualFeedsEnabled: windowPresence.shown
     readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
     readonly property var uiBridge: (typeof bridge !== "undefined" && bridge)
         ? bridge
@@ -96,6 +96,11 @@ ApplicationWindow {
     readonly property color uiSelectionColor: uiPalette.uiSelectionColor
     readonly property color uiSelectionTextColor: uiPalette.uiSelectionTextColor
     readonly property color uiActiveIndicatorColor: uiPalette.uiActiveIndicatorColor
+
+    WindowPresence {
+        id: windowPresence
+        window: root
+    }
 
     Components.UiPalette {
         id: uiPaletteObject

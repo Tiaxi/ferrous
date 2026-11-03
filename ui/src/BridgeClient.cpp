@@ -8,6 +8,7 @@
 #include "SpectrogramItem.h"
 #include "SpectrogramSeekTrace.h"
 #include "SpectrogramTraceLogging.h"
+#include "WindowPresence.h"
 
 #include <algorithm>
 #include <cmath>
@@ -2634,7 +2635,8 @@ void BridgeClient::unregisterSpectrogramItem(QObject *item) {
 void BridgeClient::observeSpectrogramWindow(QQuickWindow *window) {
     if (window == nullptr || m_spectrogramWindows.contains(window)) return;
     m_spectrogramWindows.insert(window);
-    connect(window, &QWindow::visibilityChanged, this, &BridgeClient::scheduleSpectrogramActivityUpdate);
+    connect(WindowPresence::of(window), &WindowPresence::shownChanged,
+            this, &BridgeClient::scheduleSpectrogramActivityUpdate);
     connect(window, &QObject::destroyed, this, [this, window]() {
         m_spectrogramWindows.remove(window);
         scheduleSpectrogramActivityUpdate();
@@ -2650,11 +2652,13 @@ void BridgeClient::scheduleSpectrogramActivityUpdate() {
 void BridgeClient::updateSpectrogramActivity() {
     m_spectrogramActivityPending = false;
     m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) { return route.item.isNull(); });
+    // A brief unexposure keeps the window shown (see WindowPresence), so
+    // it does not restart analysis.
     const bool active = std::any_of(m_spectrogramRoutes.cbegin(), m_spectrogramRoutes.cend(), [](const SpectrogramRoute &route) {
         const auto *view = qobject_cast<QQuickItem *>(route.item.data());
-        const auto *window = view != nullptr ? view->window() : nullptr;
+        QQuickWindow *window = view != nullptr ? view->window() : nullptr;
         return view != nullptr && view->isVisible() && window != nullptr
-            && window->isVisible() && window->visibility() != QWindow::Minimized;
+            && WindowPresence::of(window)->shown();
     });
     if (active == m_spectrogramActive) return;
     m_spectrogramActive = active;

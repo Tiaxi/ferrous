@@ -25,6 +25,7 @@
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "WindowPresence.h"
 
 class QQuickWindow;
 class QSGNode;
@@ -545,6 +546,12 @@ private:
     void schedulePlaybackFrame();
     void requestPlaybackFrame() override;
     void cancelPlaybackFrame();
+    // Whether anyone would see a frame of playback: the item is visible,
+    // and its window, if it has one, is on screen (see WindowPresence).
+    // Playback frames are only asked for then.
+    bool showsPlaybackFrames() const;
+    // Its window came on screen or left it.
+    void windowPresenceChanged();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
         int totalColumnsEstimate{0};
@@ -671,6 +678,8 @@ private:
     quint64 m_sceneGraphGeneration{0};
     QMetaObject::Connection m_animationTickConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
+    QPointer<WindowPresence> m_windowPresence;
+    QMetaObject::Connection m_windowPresenceConnection;
 
     // Ring-buffer spectrogram storage.
     SpectrogramRingStorage m_ring;    // capacity columns of bins_per_column bytes

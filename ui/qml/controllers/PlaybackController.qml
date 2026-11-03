@@ -7,7 +7,7 @@ QtObject {
     id: root
 
     required property var uiBridge
-    // Whether the window shows playback: it is visible and not minimized.
+    // Whether the window shows playback: it is on screen; see WindowPresence.
     property bool visualFeedsEnabled: false
 
     property string stoppedSpectrogramTrackPath: ""

@@ -3,6 +3,7 @@
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
 #include "PlaybackClock.h"
+#include "WindowPresence.h"
 
 #include <QFutureWatcher>
 #include <QImage>
@@ -199,8 +200,7 @@ void LevelMeterItem::setChannelCountHint(int value) {
 }
 
 bool LevelMeterItem::visibleForPlayback() const {
-    return isVisible() && window() && window()->isVisible()
-        && window()->visibility() != QWindow::Minimized;
+    return isVisible() && window() && WindowPresence::of(window())->shown();
 }
 
 void LevelMeterItem::bindWindow(QQuickWindow *next) {
@@ -210,7 +210,7 @@ void LevelMeterItem::bindWindow(QQuickWindow *next) {
         // Presentation drives animation; no fixed-rate timer limits high-refresh displays.
         m_frameConnection = connect(next, &QQuickWindow::frameSwapped,
                                     this, &LevelMeterItem::tick, Qt::QueuedConnection);
-        m_visibilityConnection = connect(next, &QWindow::visibilityChanged,
+        m_visibilityConnection = connect(WindowPresence::of(next), &WindowPresence::shownChanged,
                                          this, &LevelMeterItem::visibilityChanged);
     }
     visibilityChanged();

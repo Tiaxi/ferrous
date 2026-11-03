@@ -39,6 +39,7 @@
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformEditorItem.h"
 #include "../src/WaveformItem.h"
+#include "../src/WindowPresence.h"
 #include "TestPlatform.h"
 
 namespace {
@@ -319,6 +320,7 @@ void AccessibilityTest::initTestCase() {
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
+    qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
 }
 
 void AccessibilityTest::init() {

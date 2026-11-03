@@ -29,6 +29,7 @@
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
+#include "WindowPresence.h"
 
 class QHoverEvent;
 class QMouseEvent;
@@ -297,6 +298,12 @@ private:
     void schedulePlaybackFrame(qint64 delayNs, qint64 nowNs);
     void requestPlaybackFrame() override;
     void cancelPlaybackFrame();
+    // Whether anyone would see a frame of playback: the item is visible,
+    // and its window, if it has one, is on screen (see WindowPresence).
+    // Playback frames are only asked for then.
+    bool showsPlaybackFrames() const;
+    // The item or its window came on screen or left it.
+    void shownChanged();
     // The window's scheduler, or the item's own outside a window.
     PlaybackFrameScheduler *frameScheduler();
     bool cacheCoversRangeLocked(double start, double end) const;
@@ -431,6 +438,8 @@ private:
     std::chrono::steady_clock::time_point m_lastFrameTime;
     QMetaObject::Connection m_frameSwappedConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
+    QPointer<WindowPresence> m_windowPresence;
+    QMetaObject::Connection m_windowPresenceConnection;
     QTimer m_requestTimer;
     // Wakes the next playback frame, with the other views of the window.
     QPointer<PlaybackFrameScheduler> m_frameScheduler;

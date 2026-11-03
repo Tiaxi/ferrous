@@ -11,6 +11,7 @@
 #include "SpectrogramItem.h"
 #include "WaveformEditorItem.h"
 #include "WaveformItem.h"
+#include "WindowPresence.h"
 
 void registerFerrousQmlTypes() {
     FerrousLocalization::registerQmlTypes();
@@ -18,6 +19,7 @@ void registerFerrousQmlTypes() {
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
+    qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
     qmlRegisterUncreatableType<PlaybackClock>(
         "FerrousUi", 1, 0, "PlaybackClock", QStringLiteral("The bridge owns the playback clock"));
 }

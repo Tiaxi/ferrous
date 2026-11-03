@@ -210,6 +210,7 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
 #endif
     connect(&m_requestTimer, &QTimer::timeout, this, &WaveformEditorItem::requestDetailWindow);
     connect(this, &QQuickItem::windowChanged, this, &WaveformEditorItem::bindWindowFrameLoop);
+    connect(this, &QQuickItem::visibleChanged, this, &WaveformEditorItem::shownChanged);
     // An item made with a parent in a window already has it; no change follows.
     if (window()) bindWindowFrameLoop(window());
 }
@@ -221,6 +222,7 @@ WaveformEditorItem::~WaveformEditorItem() {
     disconnect(this, nullptr, this, nullptr);
     disconnect(m_frameSwappedConnection);
     disconnect(m_windowVisibilityConnection);
+    disconnect(m_windowPresenceConnection);
     cancelPlaybackFrame();
     if (m_decodeCancelled) m_decodeCancelled->store(true);
 }
@@ -1280,8 +1282,11 @@ void WaveformEditorItem::updateFpsEstimateLocked() {
 void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
     if (m_frameSwappedConnection) disconnect(m_frameSwappedConnection);
     if (m_windowVisibilityConnection) disconnect(m_windowVisibilityConnection);
+    disconnect(m_windowPresenceConnection);
     m_frameSwappedConnection = {};
     m_windowVisibilityConnection = {};
+    m_windowPresenceConnection = {};
+    m_windowPresence = WindowPresence::of(window);
     // The new window draws a frame of its own, which schedules the next
     // one with the new window's views.
     cancelPlaybackFrame();
@@ -1301,7 +1306,25 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
             if (visible && playing()) update();
         },
         Qt::QueuedConnection);
+    m_windowPresenceConnection = connect(
+        m_windowPresence, &WindowPresence::shownChanged,
+        this, &WaveformEditorItem::shownChanged);
     if (playing()) update();
+}
+
+bool WaveformEditorItem::showsPlaybackFrames() const {
+    return isVisible() && (window() == nullptr || (m_windowPresence && m_windowPresence->shown()));
+}
+
+void WaveformEditorItem::shownChanged() {
+    if (!showsPlaybackFrames()) {
+        // Nothing would see them: no frames until it is shown again.
+        cancelPlaybackFrame();
+        return;
+    }
+    // One frame shows playback as it is now, also a seek made while it
+    // was hidden; the frames that follow it ask for their own.
+    requestPlaybackFrame();
 }
 
 void WaveformEditorItem::handleWindowFrameSwapped() {
@@ -1423,7 +1446,10 @@ qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
 }
 
 void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
-    if (delayNs == 0) {
+    if (!showsPlaybackFrames()) {
+        // Showing it asks for its frame.
+        cancelPlaybackFrame();
+    } else if (delayNs == 0) {
         cancelPlaybackFrame();
         requestPlaybackFrame();
     } else if (delayNs < 0) {
@@ -1435,6 +1461,12 @@ void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
 }
 
 void WaveformEditorItem::requestPlaybackFrame() {
+    if (!showsPlaybackFrames()) {
+        // A view no one sees keeps its state up to date without frames;
+        // showing it asks for one.
+        cancelPlaybackFrame();
+        return;
+    }
     ++m_playbackFrameRequests;
     update();
 }
