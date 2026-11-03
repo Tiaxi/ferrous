@@ -271,6 +271,9 @@ public:
         for (int ms : {500, 1000, 2000, 4000, 8000, 15000}) {
             QTimer::singleShot(ms, this, [this] { hookWindows(); });
         }
+        // And as a window is shown, before its first frame, for windows the
+        // app makes later, such as the fullscreen viewers.
+        qApp->installEventFilter(this);
         connect(qApp, &QCoreApplication::aboutToQuit, this, [this] { shutdown(); });
         // FERROUS_PROBE_STALL=<ms> starts the watchdog with the app, for
         // startup measurements.
@@ -302,6 +305,16 @@ public:
             return true;
         }
         return QObject::event(e);
+    }
+
+    bool eventFilter(QObject *watched, QEvent *e) override {
+        if (e->type() == QEvent::Show) {
+            auto *window = qobject_cast<QQuickWindow *>(watched);
+            if (window != nullptr && !m_hooked.contains(window)) {
+                hookWindows();
+            }
+        }
+        return QObject::eventFilter(watched, e);
     }
 
 private:

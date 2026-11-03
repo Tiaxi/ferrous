@@ -191,10 +191,12 @@ ApplicationWindow {
     // errors open in its window. Anything else is drawn in the main window,
     // above the viewer popups.
     readonly property var recentErrorsHost: {
-        if (root.useWholeScreenViewerMode && viewerController.spectrogramViewerOpen) {
+        if (root.useWholeScreenViewerMode && viewerController.spectrogramViewerOpen
+                && spectrogramViewerShell.windowHost) {
             return spectrogramViewerShell.windowHost
         }
-        if (root.useWholeScreenViewerMode && viewerController.albumArtViewerOpen) {
+        if (root.useWholeScreenViewerMode && viewerController.albumArtViewerOpen
+                && albumArtViewerShell.windowHost) {
             return albumArtViewerShell.windowHost
         }
         return root.overlayHost
@@ -215,7 +217,7 @@ ApplicationWindow {
     function openItunesArtworkDialog() {
         viewerController.openItunesArtworkDialog(
             itunesArtworkDialog,
-            albumArtViewerShell.windowHost,
+            albumArtViewerShell.windowHost || root.overlayHost,
             root.overlayHost)
     }
 
@@ -1365,9 +1367,12 @@ ApplicationWindow {
     Item {
         id: visualizationSurface
         objectName: "visualizationSurface"
+        // The fullscreen window is made as the viewer first opens, so for a
+        // moment it may not be there yet: the views stay where they are
+        // until it is, rather than leave every window.
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
-                ? spectrogramViewerShell.windowHost
+                ? (spectrogramViewerShell.windowHost || spectrogramPane.hostItem)
                 : spectrogramViewerShell.popupHost)
             : spectrogramPane.hostItem
         visible: parent !== null
@@ -1471,8 +1476,11 @@ ApplicationWindow {
 
     Viewers.AlbumArtSurface {
         id: albumArtSurface
+        objectName: "albumArtSurface"
         parent: viewerController.albumArtViewerOpen
-            ? (root.useWholeScreenViewerMode ? albumArtViewerShell.windowHost : albumArtViewerShell.popupHost)
+            ? (root.useWholeScreenViewerMode
+                ? (albumArtViewerShell.windowHost || albumArtMainHost)
+                : albumArtViewerShell.popupHost)
             : albumArtMainHost
         visible: viewerController.albumArtViewerOpen
         anchors.fill: parent

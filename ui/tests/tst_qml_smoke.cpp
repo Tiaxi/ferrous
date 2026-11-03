@@ -1389,6 +1389,7 @@ private slots:
     void waveformEditorUsesSceneGraphAndNativeFrameInterpolation();
     void waveformSceneGraphReusesTextures();
     void waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn();
+    void waveformEditorHiddenDrawsNothing();
     void waveformEditorMadeInAWindowSchedulesPlaybackFrames();
     void waveformEditorParentedByQmlBindsItsWindowOnce();
     void waveformSceneGraphMatchesRaster_data();
@@ -1484,6 +1485,7 @@ private slots:
     void spaceTypesIntoTextFields();
     void playbackShortcutsWorkInTheViewers();
     void viewerShortcutsOpenAndCloseTheViewers();
+    void fullscreenViewerWindowsAreMadeOnFirstOpenAndKept();
     void visualizationModeSwitchTakesKeyboardFocus();
     void visualizationModeSwitchStaysClearOfTheCornerOverlays();
     void visualizationModeSwitchLeavesTheCornerToTheView();
@@ -9662,6 +9664,51 @@ void WaveformSmokeTest::waveformSceneGraphReusesTextures() {
     QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, native ? quint64{1} : quint64{0});
     if (native) QCOMPARE(WaveformSceneGraph::statistics(node).residentBytes, quint64{4096 * 180 * 4});
     delete node;
+}
+
+void WaveformSmokeTest::waveformEditorHiddenDrawsNothing() {
+    // Qt asks a hidden item for its node too, whenever it is made dirty or
+    // enters a window: the waveform that the spectrogram replaces, for one,
+    // as it moves into the fullscreen viewer with it, where it drew a whole
+    // screen of pixels into the viewer's first frame. Hidden, the editor
+    // draws nothing and keeps the node it has; shown again, it asks for a
+    // frame, which draws it as it is then.
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *item = new WaveformEditorItem;
+    item->setParentItem(window.contentItem());
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(60.0);
+    item->setOverviewComplete(true);
+    item->setOverviewData(QByteArray(8192, static_cast<char>(128)));
+    item->setVisible(false);
+    QCOMPARE(item->updatePaintNode(nullptr, nullptr), nullptr);
+
+    item->setVisible(true);
+    QSGNode *node = item->updatePaintNode(nullptr, nullptr);
+    QVERIFY(node != nullptr);
+    const auto guard = qScopeGuard([&node]() { delete node; });
+    QVERIFY(WaveformSceneGraph::statistics(node).uploadedBytes >= 400 * 100 * 4);
+    node = item->updatePaintNode(node, nullptr);
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+
+    // Hidden, a change draws nothing.
+    item->setVisible(false);
+    item->setOverviewData(QByteArray(8192, static_cast<char>(32)));
+    QSGNode *const kept = node;
+    node = item->updatePaintNode(node, nullptr);
+    QCOMPARE(node, kept);
+    QCOMPARE(WaveformSceneGraph::statistics(node).textureUploads, quint64{0});
+
+    // Shown, it asks for a frame, which draws the change.
+    const quint64 requests = item->m_playbackFrameRequests;
+    item->setVisible(true);
+    QVERIFY(item->m_playbackFrameRequests > requests);
+    node = item->updatePaintNode(node, nullptr);
+    QVERIFY(WaveformSceneGraph::statistics(node).textureUploads > 0);
 }
 
 void WaveformSmokeTest::waveformEditorDestroyedInItsWindowRunsNoHandlersOfItsOwn() {
@@ -18065,6 +18112,12 @@ QQuickWindow *loadActiveMainWindow(QQmlApplicationEngine &engine, LibraryTreeMod
     return QTest::qWaitForWindowActive(window) ? window : nullptr;
 }
 
+// The window of a viewer over the whole screen, named `name`: made the
+// first time the viewer opens there. Null until then.
+QQuickWindow *viewerWindowNamed(QQmlApplicationEngine &engine, const QString &name) {
+    return qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst()->findChild<QObject *>(name));
+}
+
 // Sends a wheel event at `scenePosition`; returns whether something took it.
 bool sendWheel(QQuickWindow *window, QPointF scenePosition, QPoint pixelDelta, QPoint angleDelta) {
     QWheelEvent event(scenePosition, window->mapToGlobal(scenePosition),
@@ -18681,6 +18734,114 @@ void TransportInputSmokeTest::viewerShortcutsOpenAndCloseTheViewers() {
     QTest::keyClick(fullscreen, Qt::Key_F11);
     QTRY_VERIFY(!spectrogramOpen());
     QTRY_VERIFY(!fullscreen->isVisible());
+}
+
+void TransportInputSmokeTest::fullscreenViewerWindowsAreMadeOnFirstOpenAndKept() {
+    // The viewers' windows over the whole screen are made the first time
+    // each viewer opens there, not at startup, and not for the viewer in
+    // the main window. Closed, a viewer's window is hidden and kept, with
+    // its graphics and scene graph, so that opening it again makes no
+    // window and sets up no graphics; hidden, it counts as off screen.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *albumArt = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr && albumArt != nullptr);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    const QString spectrogramName = QStringLiteral("spectrogramFullscreenWindow");
+    const QString albumArtName = QStringLiteral("albumArtFullscreenWindow");
+    const auto windowsNamed = [](const QString &name) {
+        qsizetype count = 0;
+        for (QWindow *each : QGuiApplication::allWindows()) {
+            count += each->objectName() == name ? 1 : 0;
+        }
+        return count;
+    };
+    QCOMPARE(windowsNamed(spectrogramName), 0);
+    QCOMPARE(windowsNamed(albumArtName), 0);
+    QVERIFY(viewerWindowNamed(engine, spectrogramName) == nullptr);
+    QVERIFY(viewerWindowNamed(engine, albumArtName) == nullptr);
+
+    // In the main window, they make none.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QCOMPARE(surface->window(), window);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QCoreApplication::processEvents();
+    QCOMPARE(windowsNamed(spectrogramName), 0);
+    QCOMPARE(windowsNamed(albumArtName), 0);
+
+    bridge->setProperty("viewerFullscreenMode", 1);
+    struct Viewer {
+        const char *open;
+        const char *close;
+        const char *openProperty;
+        QString windowName;
+        QQuickItem *content;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "closeSpectrogramViewer", "spectrogramViewerOpen",
+         spectrogramName, surface},
+        {"openAlbumArtViewerForCurrentArt", "closeAlbumArtViewer", "albumArtViewerOpen",
+         albumArtName, albumArt},
+    };
+    for (const Viewer &shown : viewers) {
+        const QByteArray name = shown.windowName.toUtf8();
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        // Made as the viewer opens, before the platform shows it.
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, shown.windowName);
+        QVERIFY2(fullscreen != nullptr, name.constData());
+        QSignalSpy initialized(fullscreen, &QQuickWindow::sceneGraphInitialized);
+        QSignalSpy invalidated(fullscreen, &QQuickWindow::sceneGraphInvalidated);
+        QSignalSpy destroyed(fullscreen, &QObject::destroyed);
+        QVERIFY(fullscreen->isPersistentGraphics());
+        QVERIFY(fullscreen->isPersistentSceneGraph());
+        WindowPresence *presence = WindowPresence::of(fullscreen);
+        for (int open = 0; open < 3; ++open) {
+            if (open > 0) {
+                QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+            }
+            QTRY_VERIFY2(viewer->property(shown.openProperty).toBool(), name.constData());
+            QCOMPARE(viewerWindowNamed(engine, shown.windowName), fullscreen);
+            QCOMPARE(windowsNamed(shown.windowName), 1);
+            QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
+            QTRY_COMPARE(shown.content->window(), fullscreen);
+            QTRY_VERIFY2(presence->shown(), name.constData());
+
+            QVERIFY(QMetaObject::invokeMethod(viewer, shown.close));
+            QTRY_VERIFY2(!fullscreen->isVisible(), name.constData());
+            // Hidden, it is off screen, and what it showed is back in the
+            // main window, which is on screen.
+            QVERIFY2(!presence->shown(), name.constData());
+            if (shown.content == surface) {
+                QTRY_COMPARE(surface->window(), window);
+                QVERIFY(WindowPresence::of(window)->shown());
+            }
+        }
+        QCOMPARE(destroyed.count(), 0);
+        QCOMPARE(windowsNamed(shown.windowName), 1);
+        // Its scene graph was set up once, at the first open, if the
+        // renderer has one, and kept while it was hidden.
+        QVERIFY2(initialized.count() <= 1, name.constData());
+        QCOMPARE(invalidated.count(), 0);
+    }
+    QVERIFY(finishIncubation(engine));
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
@@ -19597,11 +19758,10 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
          QStringLiteral("albumArtFullscreenErrorBanner")},
     };
     for (const Viewer &shown : viewers) {
-        auto *fullscreen = qobject_cast<QQuickWindow *>(
-            engine.rootObjects().constFirst()->findChild<QObject *>(shown.windowName));
-        QVERIFY(fullscreen != nullptr);
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
         QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, shown.windowName);
+        QVERIFY(fullscreen != nullptr);
         QVERIFY(QTest::qWaitForWindowActive(fullscreen));
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
                                 1, 0, QStringLiteral("/music/bad.flac")));
@@ -19811,14 +19971,13 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
     for (const Viewer &shown : viewers) {
         const QByteArray name(shown.bannerName);
         bridge->setProperty("viewerFullscreenMode", shown.fullscreenMode);
-        QQuickWindow *host = window;
-        if (shown.windowName != nullptr) {
-            host = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst()->findChild<QObject *>(
-                QLatin1String(shown.windowName)));
-            QVERIFY(host != nullptr);
-        }
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
         QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QQuickWindow *host = window;
+        if (shown.windowName != nullptr) {
+            host = viewerWindowNamed(engine, QLatin1String(shown.windowName));
+            QVERIFY(host != nullptr);
+        }
         QVERIFY(QTest::qWaitForWindowActive(host));
 
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
@@ -19891,12 +20050,9 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
-    auto *fullscreen = qobject_cast<QQuickWindow *>(
-        engine.rootObjects().constFirst()->findChild<QObject *>(
-            QStringLiteral("spectrogramFullscreenWindow")));
     auto *statusButton = window->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
     QVERIFY(bridge != nullptr && viewer != nullptr && errors != nullptr && dialog != nullptr
-            && fullscreen != nullptr && statusButton != nullptr);
+            && statusButton != nullptr);
     QQuickItem *content = popupContent(dialog);
     QVERIFY(content != nullptr);
     QQuickItem *closeButton = itemNamed(content, QStringLiteral("errorHistoryCloseButton"));
@@ -19908,6 +20064,8 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
     // desktop's media controls. The dialog then cannot stay in its window,
     // which would leave it out of reach.
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
     QVERIFY(QTest::qWaitForWindowActive(fullscreen));
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
@@ -19962,11 +20120,10 @@ void ErrorsSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
          "albumArtFullscreenErrorBanner"},
     };
     for (const auto &[open, openProperty, windowName, bannerName] : viewers) {
-        auto *fullscreen = qobject_cast<QQuickWindow *>(
-            engine.rootObjects().constFirst()->findChild<QObject *>(QLatin1String(windowName)));
-        QVERIFY(fullscreen != nullptr);
         QVERIFY(QMetaObject::invokeMethod(viewer, open));
         QTRY_VERIFY(viewer->property(openProperty).toBool());
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, QLatin1String(windowName));
+        QVERIFY(fullscreen != nullptr);
         QVERIFY(QTest::qWaitForWindowActive(fullscreen));
         QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
         QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
@@ -21189,6 +21346,29 @@ void SpectrogramSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
     shownIn = &window;
     QVERIFY(settle());
     QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("back in the first window"), true));
+
+    // The fullscreen viewer's window is hidden when the viewer closes, and
+    // kept with its graphics and scene graph. Closing takes the pane out
+    // and hides the window at once, so that the window keeps the pane's
+    // old node, and its textures, until it draws again: as it opens again,
+    // and takes the pane again, in the same frame.
+    QVERIFY(other.isPersistentGraphics() && other.isPersistentSceneGraph());
+    item.setParentItem(other.contentItem());
+    shownIn = &other;
+    QVERIFY(settle());
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("in the viewer's window again"), true));
+    item.setParentItem(window.contentItem());
+    other.hide();
+    shownIn = &window;
+    QVERIFY(settle());
+    QVERIFY(play(5, 1.0 / 30.0, QStringLiteral("the viewer closed"), true));
+    other.show();
+    item.setParentItem(other.contentItem());
+    shownIn = &other;
+    QVERIFY(QTest::qWaitForWindowExposed(&other));
+    QVERIFY(firstFrame(other));
+    QVERIFY(settle());
+    QVERIFY(play(10, 1.0 / 30.0, QStringLiteral("the viewer opened again"), true));
 }
 
 void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {

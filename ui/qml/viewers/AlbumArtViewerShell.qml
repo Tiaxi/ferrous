@@ -24,12 +24,25 @@ Item {
     property var errorController: null
 
     property alias popupHost: albumArtPopupHost
-    property alias windowHost: albumArtWindowHost
+    // The window of the viewer over the whole screen, and the item in it
+    // that holds the album art; null until the viewer first opens there.
+    readonly property Window fullscreenWindow: albumArtFullscreenWindowLoader.item
+    readonly property Item windowHost: root.fullscreenWindow ? root.fullscreenWindow.host : null
     readonly property real popupWidth: albumArtViewer.width
     readonly property real popupHeight: albumArtViewer.height
-    readonly property real wholeScreenWidth: albumArtFullscreenWindow.width
-    readonly property real wholeScreenHeight: albumArtFullscreenWindow.height
-    readonly property bool wholeScreenVisible: albumArtFullscreenWindow.visibility === Window.FullScreen
+    readonly property real wholeScreenWidth: root.fullscreenWindow ? root.fullscreenWindow.width : 0
+    readonly property real wholeScreenHeight: root.fullscreenWindow ? root.fullscreenWindow.height : 0
+    readonly property bool wholeScreenVisible: root.fullscreenWindow !== null
+        && root.fullscreenWindow.visibility === Window.FullScreen
+    readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
+
+    // Made the first time the viewer opens over the whole screen and kept,
+    // hidden while the viewer is closed, as the visualization viewer's is.
+    onWholeScreenOpenChanged: {
+        if (root.wholeScreenOpen) {
+            albumArtFullscreenWindowLoader.active = true
+        }
+    }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
     onUseWholeScreenViewerModeChanged: {
@@ -46,19 +59,24 @@ Item {
         } else if (albumArtViewer.visible) {
             albumArtViewer.close()
         }
-        if (root.viewerOpen && root.useWholeScreenViewerMode) {
-            albumArtFullscreenWindow.requestActivate()
+        if (root.wholeScreenOpen && root.fullscreenWindow) {
+            root.fullscreenWindow.requestActivate()
             root.focusFullscreen()
         }
     }
 
     function focusFullscreen() {
         if (root.wholeScreenVisible) {
-            albumArtFullscreenFocusSink.forceActiveFocus()
+            root.fullscreenWindow.focusSink.forceActiveFocus()
         }
     }
 
-    Component.onCompleted: Qt.callLater(root.syncPresentation)
+    Component.onCompleted: {
+        if (root.wholeScreenOpen) {
+            albumArtFullscreenWindowLoader.active = true
+        }
+        Qt.callLater(root.syncPresentation)
+    }
 
     Popup {
         id: albumArtViewer
@@ -153,95 +171,105 @@ Item {
         }
     }
 
-    Window {
-        id: albumArtFullscreenWindow
-        objectName: "albumArtFullscreenWindow"
-        screen: root.windowRoot.screen
-        transientParent: root.windowRoot
-        modality: Qt.ApplicationModal
-        flags: Qt.Window | Qt.FramelessWindowHint
-        visibility: root.viewerOpen && root.useWholeScreenViewerMode
-            ? Window.FullScreen
-            : Window.Hidden
-        color: "#000000"
-        title: root.titleText
+    Loader {
+        id: albumArtFullscreenWindowLoader
+        objectName: "albumArtFullscreenWindowLoader"
+        active: false
 
-        onVisibilityChanged: function() {
-            if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
-                requestActivate()
-                root.focusFullscreen()
-            }
-        }
+        sourceComponent: Component {
+            Window {
+                id: albumArtFullscreenWindow
+                objectName: "albumArtFullscreenWindow"
+                readonly property Item host: albumArtWindowHost
+                readonly property Item focusSink: albumArtFullscreenFocusSink
+                screen: root.windowRoot.screen
+                transientParent: root.windowRoot
+                modality: Qt.ApplicationModal
+                flags: Qt.Window | Qt.FramelessWindowHint
+                visibility: root.viewerOpen && root.useWholeScreenViewerMode
+                    ? Window.FullScreen
+                    : Window.Hidden
+                color: "#000000"
+                title: root.titleText
 
-        onClosing: function(close) {
-            if (root.viewerOpen && root.useWholeScreenViewerMode) {
-                root.closeViewer()
-            }
-        }
-
-        FocusScope {
-            id: albumArtFullscreenFocusSink
-            anchors.fill: parent
-            focus: albumArtFullscreenWindow.visibility === Window.FullScreen
-            // Above the viewer, and inside the scope that handles the
-            // viewer's keys, so they work while the error's buttons have focus.
-            z: 30
-
-            Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                    event.accepted = true
-                    root.closeViewer()
-                } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
-                    event.accepted = true
-                    root.switchComparisonImage()
-                } else if (event.key === Qt.Key_Menu
-                        || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
-                    event.accepted = true
-                    root.openContextMenu()
+                onVisibilityChanged: function() {
+                    if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
+                        requestActivate()
+                        root.focusFullscreen()
+                    }
                 }
-            }
 
-            Components.ErrorBanner {
-                objectName: "albumArtFullscreenErrorBanner"
-                anchors.bottom: parent.bottom
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottomMargin: 24
-                width: Math.min(parent.width - 48, 720)
-                errorController: root.errorController
-                active: root.viewerOpen && root.useWholeScreenViewerMode
-            }
-        }
+                onClosing: function(close) {
+                    if (root.viewerOpen && root.useWholeScreenViewerMode) {
+                        root.closeViewer()
+                    }
+                }
 
-        Shortcut {
-            sequence: "I"
-            context: Qt.WindowShortcut
-            enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
-            onActivated: root.toggleInfoVisible()
-        }
+                FocusScope {
+                    id: albumArtFullscreenFocusSink
+                    anchors.fill: parent
+                    focus: albumArtFullscreenWindow.visibility === Window.FullScreen
+                    // Above the viewer, and inside the scope that handles the
+                    // viewer's keys, so they work while the error's buttons have focus.
+                    z: 30
 
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onPressed: root.focusFullscreen()
-            onClicked: root.closeViewer()
-        }
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape) {
+                            event.accepted = true
+                            root.closeViewer()
+                        } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                            event.accepted = true
+                            root.switchComparisonImage()
+                        } else if (event.key === Qt.Key_Menu
+                                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                            event.accepted = true
+                            root.openContextMenu()
+                        }
+                    }
 
-        Components.ViewerCloseButton {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            fillColor: Qt.rgba(1, 1, 1, 0.16)
-            borderColor: Qt.rgba(1, 1, 1, 0.52)
-            onClicked: root.closeViewer()
-        }
+                    Components.ErrorBanner {
+                        objectName: "albumArtFullscreenErrorBanner"
+                        anchors.bottom: parent.bottom
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.bottomMargin: 24
+                        width: Math.min(parent.width - 48, 720)
+                        errorController: root.errorController
+                        active: root.viewerOpen && root.useWholeScreenViewerMode
+                    }
+                }
 
-        Item {
-            anchors.fill: parent
+                Shortcut {
+                    sequence: "I"
+                    context: Qt.WindowShortcut
+                    enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
+                    onActivated: root.toggleInfoVisible()
+                }
 
-            Item {
-                id: albumArtWindowHost
-                anchors.fill: parent
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton
+                    onPressed: root.focusFullscreen()
+                    onClicked: root.closeViewer()
+                }
+
+                Components.ViewerCloseButton {
+                    z: 20
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.margins: 12
+                    fillColor: Qt.rgba(1, 1, 1, 0.16)
+                    borderColor: Qt.rgba(1, 1, 1, 0.52)
+                    onClicked: root.closeViewer()
+                }
+
+                Item {
+                    anchors.fill: parent
+
+                    Item {
+                        id: albumArtWindowHost
+                        anchors.fill: parent
+                    }
+                }
             }
         }
     }
