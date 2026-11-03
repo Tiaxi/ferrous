@@ -67,6 +67,10 @@ QString fpsCounterText(int fps) {
     return format.arg(fps);
 }
 
+// How far short of a column's edge a time is still on it: a fraction of a
+// pixel, as a time mapped there and back can be.
+constexpr double kColumnEpsilon = 1e-6;
+
 // The view's time axis: `width` logical pixels from `start` to `end`, which
 // is how the body is drawn. The playhead, the grid, the crosshair and seeks
 // use the device columns, `scale` to a logical pixel: a time is shown on the
@@ -85,7 +89,7 @@ struct TimeAxis {
     // column's edge, as a time mapped there and back can be, is on it.
     int columnAt(double x) const {
         return std::clamp(
-            static_cast<int>(std::floor(x * scale + 1e-6)), 0, columns() - 1);
+            static_cast<int>(std::floor(x * scale + kColumnEpsilon)), 0, columns() - 1);
     }
     int columnOf(double time) const {
         return columnAt((time - start) / (end - start) * width);
@@ -196,9 +200,6 @@ WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     m_requestTimer.setSingleShot(true);
-    m_playbackFrameTimer.setSingleShot(true);
-    m_playbackFrameTimer.setTimerType(Qt::PreciseTimer);
-    connect(&m_playbackFrameTimer, &QTimer::timeout, this, &WaveformEditorItem::requestPlaybackFrame);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_profile.enabled = qEnvironmentVariableIsSet("FERROUS_PROFILE_WAVEFORM")
         || qEnvironmentVariableIsSet("FERROUS_PROFILE_UI")
@@ -220,6 +221,7 @@ WaveformEditorItem::~WaveformEditorItem() {
     disconnect(this, nullptr, this, nullptr);
     disconnect(m_frameSwappedConnection);
     disconnect(m_windowVisibilityConnection);
+    cancelPlaybackFrame();
     if (m_decodeCancelled) m_decodeCancelled->store(true);
 }
 
@@ -326,6 +328,7 @@ void WaveformEditorItem::clockStateChanged() {
     bool cacheNeedsUpdate = false;
     bool courseCorrection = false;
     qint64 frameDelayNs = 0;
+    const qint64 nowNs = m_nowNs();
     {
         QMutexLocker lock(&m_stateMutex);
         // A sample that only corrects the course of playback moves nothing
@@ -357,13 +360,14 @@ void WaveformEditorItem::clockStateChanged() {
             && rangeMoved
             && !cacheCoversRangeLocked(start, end);
         if (cacheNeedsUpdate) invalidateCacheLocked();
-        if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(m_nowNs());
+        if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
     emit positionSecondsChanged();
     if (request) scheduleDetailRequest();
     if (courseCorrection) {
-        schedulePlaybackFrame(frameDelayNs);
+        schedulePlaybackFrame(frameDelayNs, nowNs);
     } else {
+        cancelPlaybackFrame();
         requestPlaybackFrame();
     }
 }
@@ -373,11 +377,11 @@ void WaveformEditorItem::setPlaying(bool value) {
         QMutexLocker lock(&m_stateMutex);
         if (m_playing == value) return;
         m_playing = value;
-        if (!value) m_playbackFrameTimer.stop();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (value) m_profile.frameInitialized = false;
 #endif
     }
+    if (!value) cancelPlaybackFrame();
     emit playingChanged();
     update();
 }
@@ -952,13 +956,30 @@ bool WaveformEditorItem::detailResolutionCoversPixelSpanLocked(
     }
     return visiblePoints >= requiredPoints * 0.9;
 }
+double WaveformEditorItem::deviceColumnsLocked() const {
+    // As TimeAxis counts them over the canvas.
+    const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
+    return static_cast<double>(canvasWidth) * renderScaleLocked();
+}
+
+double WaveformEditorItem::followingStartLocked(double span, double position) const {
+    const double columns = deviceColumnsLocked();
+    const double column = span / columns;
+    // As TimeAxis::columnAt, so that the playhead's column in the view is
+    // its column of the track less the view's first.
+    const double playheadColumn = std::floor(position / column + kColumnEpsilon);
+    const double middleColumn = std::floor(columns * 0.5 + kColumnEpsilon);
+    return (playheadColumn - middleColumn) * column;
+}
+
 std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
     double zoomLevel, qint64 nowNs) const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
     const double span = m_durationSeconds / std::max(1.0, zoomLevel);
     if (span >= m_durationSeconds * 0.9999) return {0.0, m_durationSeconds};
-    double start = displayedPositionSecondsLocked(nowNs) - span * 0.5;
-    start = std::clamp(start, 0.0, m_durationSeconds - span);
+    const double start = std::clamp(
+        followingStartLocked(span, displayedPositionSecondsLocked(nowNs)),
+        0.0, m_durationSeconds - span);
     return {start, start + span};
 }
 
@@ -1258,6 +1279,10 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
     if (m_windowVisibilityConnection) disconnect(m_windowVisibilityConnection);
     m_frameSwappedConnection = {};
     m_windowVisibilityConnection = {};
+    // The new window draws a frame of its own, which schedules the next
+    // one with the new window's views.
+    cancelPlaybackFrame();
+    m_frameScheduler = nullptr;
     if (window == nullptr) return;
     m_frameSwappedConnection = connect(
         window,
@@ -1280,6 +1305,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
     if (!isVisible()) return;
     bool request = false;
     qint64 frameDelayNs = 0;
+    const qint64 nowNs = m_nowNs();
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto profileNow = std::chrono::steady_clock::now();
     bool profileLogGap = false;
@@ -1306,7 +1332,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
             invalidateCacheLocked();
         }
         // Detail arriving asks for its own frame.
-        frameDelayNs = playbackFrameDelayNsLocked(m_nowNs());
+        frameDelayNs = playbackFrameDelayNsLocked(nowNs);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) {
             if (m_profile.frameInitialized) {
@@ -1348,22 +1374,26 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
     // At the first raw-sample zoom, the point cap can leave less than 40 ms
     // of headroom when prefetch becomes due. Do not spend it on zoom debounce.
     if (request) scheduleDetailRequest(true);
-    schedulePlaybackFrame(frameDelayNs);
+    schedulePlaybackFrame(frameDelayNs, nowNs);
 }
 
 double WaveformEditorItem::frameChangeSecondsLocked(
     double visibleStart, double visibleEnd, double position, int width) const {
-    constexpr double kMoving = std::numeric_limits<double>::quiet_NaN();
     const double span = visibleEnd - visibleStart;
     if (span <= 0.0 || width < 2) return std::numeric_limits<double>::infinity();
-    if (playbackTilesEligibleLocked(visibleStart, visibleEnd)) return kMoving;
-    // The view follows the playhead, unless it shows the whole track or
-    // an end of it.
+    // The view follows the playhead a device column at a time, unless it
+    // shows the whole track or is held at an end of it; see
+    // visibleRangeForZoomLocked. Following, or held at the start, which
+    // is on the track's grid, both the view and the playhead change when
+    // the playhead reaches its next column of the track.
     const bool wholeTrack = span >= m_durationSeconds * 0.9999;
-    const double followFrom = span * 0.5;
-    const double followTo = m_durationSeconds - span * 0.5;
-    if (!wholeTrack && position > followFrom && position < followTo) return kMoving;
-    // Until then, the playhead moves a device column at a time, and leaves
+    if (!wholeTrack
+        && followingStartLocked(span, position) < m_durationSeconds - span) {
+        const double column = span / deviceColumnsLocked();
+        const double playheadColumn = std::floor(position / column + kColumnEpsilon);
+        return (playheadColumn + 1.0 - kColumnEpsilon) * column;
+    }
+    // Held still, the playhead moves a device column at a time, and leaves
     // the view after its end: see paint.
     const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
     double change = std::numeric_limits<double>::infinity();
@@ -1374,7 +1404,6 @@ double WaveformEditorItem::frameChangeSecondsLocked(
             axis.timeAt(axis.columnOf(position) + 1),
             std::nextafter(visibleEnd, std::numeric_limits<double>::infinity()));
     }
-    if (!wholeTrack && position <= followFrom) change = std::min(change, followFrom);
     return change;
 }
 
@@ -1390,23 +1419,33 @@ qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
     return *changesAt > nowNs ? *changesAt - nowNs : 0;
 }
 
-void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs) {
+void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
     if (delayNs == 0) {
-        m_playbackFrameTimer.stop();
+        cancelPlaybackFrame();
         requestPlaybackFrame();
     } else if (delayNs < 0) {
         // Nothing moves until the clock changes course, which reschedules.
-        m_playbackFrameTimer.stop();
+        cancelPlaybackFrame();
     } else {
-        // Whole milliseconds, rounded up: the frame is not due before.
-        const qint64 delayMs = (delayNs + 999'999) / 1'000'000;
-        m_playbackFrameTimer.start(static_cast<int>(std::min<qint64>(delayMs, 3'600'000)));
+        frameScheduler()->schedule(this, nowNs + delayNs, nowNs);
     }
 }
 
 void WaveformEditorItem::requestPlaybackFrame() {
     ++m_playbackFrameRequests;
     update();
+}
+
+void WaveformEditorItem::cancelPlaybackFrame() {
+    if (m_frameScheduler != nullptr) m_frameScheduler->cancel(this);
+}
+
+PlaybackFrameScheduler *WaveformEditorItem::frameScheduler() {
+    if (m_frameScheduler == nullptr) {
+        QObject *owner = window();
+        m_frameScheduler = PlaybackFrameScheduler::of(owner != nullptr ? owner : this);
+    }
+    return m_frameScheduler;
 }
 
 bool WaveformEditorItem::cacheCoversRangeLocked(double start, double end) const {
@@ -1657,7 +1696,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     QSizeF reservedCorner;
     bool directDetail = false;
     bool playbackTilesComplete = false;
-    [[maybe_unused]] int playbackTilesRendered = 0;
+    int playbackTilesRendered = 0;
     std::vector<PlaybackTilePaint> playbackTilePaints;
     bool presentationCommitted = false;
     bool stagingContinues = false;
@@ -1732,8 +1771,12 @@ void WaveformEditorItem::paint(QPainter *painter) {
         crosshair = m_crosshairEnabled;
         scale = renderScaleLocked();
         position = displayedPositionSecondsLocked(frameNs);
-        m_paintedFrameChangeSeconds = frameChangeSecondsLocked(
-            visibleStart, visibleEnd, position, canvasWidth);
+        // Playback tiles still to draw for the view come in the next
+        // frames, a few at a time.
+        const bool tilesContinue = playbackTilesRendered > 0 && !playbackTilesComplete;
+        m_paintedFrameChangeSeconds = tilesContinue
+            ? std::numeric_limits<double>::quiet_NaN()
+            : frameChangeSecondsLocked(visibleStart, visibleEnd, position, canvasWidth);
         cacheStart = m_cacheStartSeconds;
         cacheSecondsPerPixel = m_cacheSecondsPerPixel;
         channels = displayedChannelCountLocked();
