@@ -381,6 +381,7 @@ private slots:
     void searchRetainAndReuseIntegration();
     void coverImageProviderLoadsValidImage();
     void coverImageProviderRespectsRequestedSize();
+    void coverImageProviderNeverEnlargesACover();
     void coverImageProviderHandlesMissingFile();
     void coverImageProviderCancelDoesNotCrash();
     void coverImageProviderUrlForPathFormat();
@@ -6760,6 +6761,63 @@ void BridgeClientTest::coverImageProviderRespectsRequestedSize() {
 
     delete factory;
     delete response;
+}
+
+void BridgeClientTest::coverImageProviderNeverEnlargesACover() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+
+    // The size the provider decodes `file` at for `requested`, or an
+    // invalid size if it gives no image.
+    const auto decodedSize = [](const QString &file, const QSize &requested) {
+        CoverImageProvider provider;
+        std::unique_ptr<QQuickImageResponse> response(
+            provider.requestImageResponse(file, requested));
+        provider.waitForDone();
+        std::unique_ptr<QQuickTextureFactory> factory(response->textureFactory());
+        if (factory == nullptr) {
+            return QSize();
+        }
+        return factory->image().size();
+    };
+
+    // JPEG decodes at the scaled size itself; PNG is scaled after decoding.
+    for (const char *format : {"JPG", "PNG"}) {
+        const QString suffix = QString::fromLatin1(format).toLower();
+        const QString square = tempDir.filePath(QStringLiteral("square.") + suffix);
+        const QString wide = tempDir.filePath(QStringLiteral("wide.") + suffix);
+        QImage squareImage(1000, 1000, QImage::Format_RGB32);
+        squareImage.fill(Qt::darkCyan);
+        QVERIFY(squareImage.save(square, format));
+        QImage wideImage(1000, 500, QImage::Format_RGB32);
+        wideImage.fill(Qt::darkMagenta);
+        QVERIFY(wideImage.save(wide, format));
+
+        // The album art viewer asks for the size of a large window: the
+        // cover is decoded at its own size, not enlarged to 1412x1412, so it
+        // takes 1000 * 1000 * 4 bytes instead of 1412 * 1412 * 4.
+        QCOMPARE(decodedSize(square, QSize(3440, 1412)), QSize(1000, 1000));
+        QCOMPARE(decodedSize(wide, QSize(3440, 1412)), QSize(1000, 500));
+        QCOMPARE(decodedSize(wide, QSize(3440, 400)), QSize(800, 400));
+        // A request no larger than either side still scales the cover down.
+        QCOMPARE(decodedSize(square, QSize(500, 500)), QSize(500, 500));
+        QCOMPARE(decodedSize(wide, QSize(500, 500)), QSize(500, 250));
+        QCOMPARE(decodedSize(square, QSize(1000, 1000)), QSize(1000, 1000));
+        // An invalid size asks for the cover as it is.
+        QCOMPARE(decodedSize(square, QSize()), QSize(1000, 1000));
+        QCOMPARE(decodedSize(wide, QSize()), QSize(1000, 500));
+        // An empty size gives no image, as it did before.
+        QCOMPARE(decodedSize(square, QSize(0, 0)), QSize());
+        QCOMPARE(decodedSize(square, QSize(500, 0)), QSize());
+    }
+
+    // A source of unknown size keeps the size fitted to the request.
+    QCOMPARE(CoverImageResponse::decodeSize(QSize(), QSize(300, 200)),
+             QSize().scaled(QSize(300, 200), Qt::KeepAspectRatio));
+    QCOMPARE(CoverImageResponse::decodeSize(QSize(600, 600), QSize(3440, 1412)),
+             QSize(600, 600));
+    QCOMPARE(CoverImageResponse::decodeSize(QSize(2000, 3000), QSize(3440, 1412)),
+             QSize(941, 1412));
 }
 
 void BridgeClientTest::coverImageProviderHandlesMissingFile() {

@@ -25,6 +25,11 @@ public:
     // still observe completion.
     bool isFinished() const;
 
+    // The size to decode an image of sourceSize at for a valid requestedSize:
+    // sourceSize fitted into requestedSize with its aspect ratio kept, but
+    // never larger than sourceSize.
+    static QSize decodeSize(const QSize &sourceSize, const QSize &requestedSize);
+
 private:
     QString m_filePath;
     QSize m_requestedSize;

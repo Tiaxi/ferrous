@@ -62,6 +62,7 @@
 #include <utility>
 
 #include "../src/BridgeClient.h"
+#include "../src/CoverImageProvider.h"
 #include "../src/DiagnosticsLog.h"
 #include "../src/DisplaySleepInhibitor.h"
 #include "../src/LibraryTreeModel.h"
@@ -1481,6 +1482,7 @@ private slots:
     void playbackControllerReadsTheBridgeClock();
     void mainWindowStopsPositionFramesWhileHidden();
     void albumArtZoomFollowsTheWheelDelta();
+    void albumArtSmallerThanTheRequestIsShownScaledUp();
     void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void spaceTypesIntoTextFields();
     void playbackShortcutsWorkInTheViewers();
@@ -18329,6 +18331,125 @@ Window {
     QVERIFY(std::abs(zoom() - expected) < 1e-9);
     QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -1200)));
     QCOMPARE(zoom(), 1.0);
+}
+
+void TransportInputSmokeTest::albumArtSmallerThanTheRequestIsShownScaledUp() {
+    // The cover provider decodes a cover smaller than the requested size at
+    // its own size; the album art viewer and the tile still show it fitted
+    // to their area, as they did when it was enlarged on decoding.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(300, 200, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("testCoverUrl"), CoverImageProvider::urlForPath(coverPath));
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    width: 1200
+    height: 600
+    visible: true
+    property alias surface: surface
+    property alias tile: tile
+
+    Action { id: replaceFromItunesAction }
+    QtObject {
+        id: bridge
+        property string currentTrackCoverPath: testCoverUrl
+    }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: testCoverUrl
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 1200
+        viewerDecodeHeight: 600
+        infoOverlayText: ""
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        toggleInfoVisible: function() {}
+        focusFullscreen: function() {}
+        comparisonLabel: ""
+        comparisonModeAvailable: false
+    }
+
+    Components.AlbumArtTile {
+        id: tile
+        width: 320
+        height: 320
+        uiBridge: bridge
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        openAlbumArtViewer: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+
+    const auto imageIn = [&root](const char *name) -> QQuickItem * {
+        auto *item = qvariant_cast<QQuickItem *>(root->property(name));
+        QList<QQuickItem *> items;
+        if (item != nullptr) {
+            collectQuickItems(item, &items);
+        }
+        for (QQuickItem *each : items) {
+            if (each->inherits("QQuickImage")) {
+                return each;
+            }
+        }
+        return nullptr;
+    };
+    struct Expected {
+        const char *view;
+        QSizeF painted;
+        QPointF paintedCenter;
+    };
+    // The viewer fits the cover to its 1200x600 area, centred; the tile to
+    // its 320x320 square.
+    const QList<Expected> views{
+        {"surface", QSizeF(900, 600), QPointF(600, 300)},
+        {"tile", QSizeF(320, 320.0 * 2 / 3), QPointF(160, 160)},
+    };
+    for (const Expected &expected : views) {
+        QQuickItem *image = imageIn(expected.view);
+        QVERIFY2(image != nullptr, expected.view);
+        // Image.Ready is 1.
+        QTRY_COMPARE_WITH_TIMEOUT(image->property("status").toInt(), 1, 5000);
+        QCOMPARE(QSize(image->property("implicitWidth").toInt(),
+                       image->property("implicitHeight").toInt()),
+                 QSize(300, 200));
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        QVERIFY2(std::abs(painted.width() - expected.painted.width()) < 0.5
+                     && std::abs(painted.height() - expected.painted.height()) < 0.5,
+                 qPrintable(QStringLiteral("%1 painted %2x%3")
+                                .arg(QLatin1String(expected.view))
+                                .arg(painted.width())
+                                .arg(painted.height())));
+        const QPointF center = image->mapToScene(
+            QPointF(image->width() / 2, image->height() / 2));
+        QCOMPARE(center, expected.paintedCenter);
+    }
 }
 
 void SpectrogramSmokeTest::spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll() {
