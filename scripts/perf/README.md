@@ -34,8 +34,10 @@ thread of the process (thread names with digits folded to `#`).
   waveform (first and complete) and the spectrogram columns until the
   session reaches the end of the file or parks at its lookahead. Options:
   `--fft`, `--view per-channel|downmix`, `--mode centered|rolling`,
-  `--width`. `FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS=100000` lets a centered
-  session decode up to the 64 MiB lookahead budget, the whole track for most.
+  `--width`, `--zoom` (default 1; at 0.5 a column spans twice the audio).
+  `FERROUS_SPECTROGRAM_LOOKAHEAD_SECONDS=100000` lets a centered session
+  decode up to the 64 MiB lookahead budget, the whole track for most; a
+  lower `--zoom` makes the budget cover a longer track.
   `spectral_hash` is an FNV-1a hash of every chunk's start column, column
   count and levels, in order, to check that a change leaves the output alone.
 - `seek FILE`: plays the file through `FrontendBridgeHandle` with the

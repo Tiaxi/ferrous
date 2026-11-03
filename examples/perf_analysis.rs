@@ -60,6 +60,8 @@ struct Options {
     view: SpectrogramViewMode,
     mode: SpectrogramDisplayMode,
     width: u32,
+    /// The spectrogram's zoom level; below 1 a column spans more audio.
+    zoom: f32,
     timeout: Duration,
     /// Seek targets as fractions of the duration.
     seeks: Vec<f64>,
@@ -86,6 +88,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         view: SpectrogramViewMode::PerChannel,
         mode: SpectrogramDisplayMode::Centered,
         width: 3440,
+        zoom: 1.0,
         timeout: Duration::from_secs(600),
         seeks: vec![0.6, 0.2, 0.8, 0.4, 0.65],
         settle: 3.0,
@@ -116,6 +119,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 };
             }
             "--width" => options.width = value()?.parse().map_err(|_| "bad --width")?,
+            "--zoom" => options.zoom = value()?.parse().map_err(|_| "bad --zoom")?,
             "--timeout" => {
                 options.timeout =
                     Duration::from_secs(value()?.parse().map_err(|_| "bad --timeout")?);
@@ -341,6 +345,7 @@ fn run_analysis(options: &Options) -> Result<Fields, String> {
     engine.command(AnalysisCommand::SetSpectrogramViewMode(options.view));
     engine.command(AnalysisCommand::SetSpectrogramDisplayMode(options.mode));
     engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(options.width));
+    engine.command(AnalysisCommand::SetSpectrogramZoomLevel(options.zoom));
     engine.command(AnalysisCommand::SetSpectrogramActive(true));
     let started = Instant::now();
     engine.command(AnalysisCommand::SetTrack {
@@ -480,6 +485,7 @@ impl AnalysisTally {
         field(&mut fields, "view", format!("\"{:?}\"", options.view));
         field(&mut fields, "display", format!("\"{:?}\"", options.mode));
         field(&mut fields, "width", options.width);
+        field(&mut fields, "zoom", options.zoom);
         field(&mut fields, "waveform_first_ms", ms(self.first_peaks));
         field(&mut fields, "waveform_done_ms", ms(self.waveform_done));
         field(

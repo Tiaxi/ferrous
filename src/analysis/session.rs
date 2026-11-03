@@ -3058,6 +3058,192 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// A raw DTS stream whose sample rate changes mid-stream, as a DTS 96/24
+    /// stream's does where its decoder falls back to the 48 kHz core of a
+    /// damaged frame: a 440 Hz tone, 1.0 s at 48 kHz, then 1.02 s at 44.1
+    /// kHz, then 1.0 s at 48 kHz again.
+    #[cfg(feature = "gst")]
+    fn write_rate_change_fixture() -> PathBuf {
+        use crate::raw_audio::{TEST_DTS, TEST_DTS_44K};
+
+        let path = crate::paths::test_root().join("session-rate-change.dts");
+        std::fs::create_dir_all(path.parent().expect("folder")).expect("folder");
+        let stream = [
+            TEST_DTS,
+            TEST_DTS,
+            TEST_DTS_44K,
+            TEST_DTS_44K,
+            TEST_DTS,
+            TEST_DTS,
+        ]
+        .concat();
+        std::fs::write(&path, stream).expect("write fixture");
+        path
+    }
+
+    /// The columns of the session that sends `events`, up to its end, by
+    /// index. Fails with the session's error if it fails.
+    #[cfg(feature = "gst")]
+    fn session_columns_to_end(
+        events: &Receiver<AnalysisEvent>,
+        reports: &Receiver<SessionReport>,
+    ) -> std::collections::BTreeMap<u32, Vec<u8>> {
+        let mut columns = std::collections::BTreeMap::new();
+        let end = wait_for_chunk(events, |chunk| {
+            // A failing session clears the view with a chunk of no bins.
+            if chunk.complete || (chunk.buffer_reset && chunk.bins_per_column == 0) {
+                return true;
+            }
+            let width = usize::from(chunk.bins_per_column) * usize::from(chunk.channel_count);
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                columns.insert(
+                    chunk.start_column_index + u32::try_from(offset).unwrap(),
+                    column.to_vec(),
+                );
+            }
+            false
+        })
+        .unwrap_or_else(|error| panic!("no end of the session: {error}"));
+        if !end.complete {
+            let error =
+                std::iter::from_fn(|| reports.recv_timeout(OUTPUT_WAIT).ok()).find_map(|report| {
+                    match report {
+                        SessionReport::Failed { error, .. } => Some(error),
+                        _ => None,
+                    }
+                });
+            panic!(
+                "the session failed after {} columns: {error:?}",
+                columns.len()
+            );
+        }
+        columns
+    }
+
+    /// The bin of the loudest value of `column`.
+    #[cfg(feature = "gst")]
+    fn loudest_bin(column: &[u8]) -> usize {
+        column
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, value)| *value)
+            .map(|(bin, _)| bin)
+            .expect("bins")
+    }
+
+    /// The spectrogram of a stream whose sample rate changes mid-stream
+    /// goes on over all of it, at the rate it started at, with its columns
+    /// on the absolute grid: there is a column for every hop of the stream,
+    /// the tone stays in its bin, also where the stream is at 44.1 kHz, and
+    /// seeks into, past and back across that stretch land on their columns.
+    #[cfg(feature = "gst")]
+    #[test]
+    fn a_stream_whose_rate_changes_mid_stream_gets_columns_over_all_of_it() {
+        // The frames of the fixture at 48 kHz: 1.0 s at 48 kHz, 1.021 s at
+        // 44.1 kHz, then 1.0 s at 48 kHz.
+        const STREAM_FRAMES: usize = 145_296;
+        let path = write_rate_change_fixture();
+        let (fft, zoom) = (8_192, 1.0);
+        let hop = super::super::zoom_hop_size(fft, zoom);
+        let command = SpectrogramWorkerCommand::NewTrack {
+            track_token: 1,
+            generation: 1,
+            path: path.clone(),
+            fft_size: fft,
+            hop_size: hop,
+            zoom_level: zoom,
+            widget_width: 320,
+            channel_count: 1,
+            start_seconds: 0.0,
+            target_position_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::PerChannel,
+            display_mode: SpectrogramDisplayMode::Centered,
+            handoff: SessionHandoff::default(),
+        };
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let (reports, report_rx) = unbounded();
+        let worker = std::thread::spawn(move || {
+            run_spectrogram_session(
+                QueuedCommand::alone(command),
+                &command_rx,
+                &events,
+                &AtomicU64::new(1),
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &reports,
+            )
+        });
+
+        // A column for each hop whose window the stream fills, from the
+        // first on, without a gap.
+        let reference = session_columns_to_end(&event_rx, &report_rx);
+        let count = u32::try_from(reference.len()).unwrap();
+        assert!(reference.keys().copied().eq(0..count));
+        let expected = (STREAM_FRAMES - fft / 2) / hop + 1;
+        assert!(
+            reference.len().abs_diff(expected) <= 1,
+            "{} columns of {expected}",
+            reference.len()
+        );
+        // The 440 Hz tone, at 44.1 kHz analysed as 48 kHz audio, would be
+        // seven bins higher.
+        let tone = loudest_bin(&reference[&10]);
+        for (index, column) in &reference {
+            assert!(
+                loudest_bin(column).abs_diff(tone) <= 1,
+                "column {index}: the tone is in bin {} of {tone}",
+                loudest_bin(column)
+            );
+        }
+
+        // Seeks start at the playhead when rolling.
+        commands
+            .send(SpectrogramWorkerCommand::SetDisplayMode(
+                SpectrogramDisplayMode::Rolling,
+            ))
+            .unwrap();
+        // The columns whose windows end before the stream changes rate.
+        let before_change = stft_seek_grid(1.0, 48_000, hop, hop).0 - fft as u64 / 2 / hop as u64;
+        for seek in [2.5, 1.5, 0.7] {
+            commands
+                .send(SpectrogramWorkerCommand::Seek {
+                    position_seconds: seek,
+                })
+                .unwrap();
+            let columns = session_columns_to_end(&event_rx, &report_rx);
+            let first = u32::try_from(stft_seek_grid(seek, 48_000, hop, hop).0).unwrap();
+            assert!(
+                columns.keys().copied().eq(first..count),
+                "seek {seek}: columns {:?} to {:?}",
+                columns.keys().next(),
+                columns.keys().last()
+            );
+            for (index, column) in &columns {
+                if seek > 2.1 || u64::from(*index) < before_change {
+                    // The audio the reading from the start decoded.
+                    assert_eq!(column, &reference[index], "seek {seek}: column {index}");
+                } else {
+                    // The fixture's parser times a seek into its stretch at
+                    // 44.1 kHz, whose frames are shorter, about 1 ms early,
+                    // also without any conversion, and that till the end. A
+                    // DTS 96/24 stream keeps the length of its frames.
+                    assert!(
+                        loudest_bin(column).abs_diff(tone) <= 1,
+                        "seek {seek}: column {index}"
+                    );
+                }
+            }
+        }
+        commands
+            .send(SpectrogramWorkerCommand::StopSession)
+            .unwrap();
+        worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn synchronized_stft_does_not_consume_a_channel_before_all_are_ready() {
         let mut stfts = vec![StftComputer::new(512, 1_024), StftComputer::new(512, 1_024)];
