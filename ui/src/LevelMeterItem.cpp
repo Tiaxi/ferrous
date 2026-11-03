@@ -141,6 +141,7 @@ void LevelMeterItem::setSourcePath(const QString &value) {
     if (m_sourcePath == value) return;
     m_sourcePath = value;
     reset();
+    updateReaderLease();
     emit sourcePathChanged();
 }
 
@@ -219,6 +220,12 @@ void LevelMeterItem::bindWindow(QQuickWindow *next) {
 void LevelMeterItem::visibilityChanged() {
     if (!visibleForPlayback()) reset();
     else scheduleTick();
+    updateReaderLease();
+}
+
+void LevelMeterItem::updateReaderLease() {
+    // After reset() cancelled the request of a meter that went away.
+    m_readerLease.setPath(visibleForPlayback() ? m_sourcePath : QString());
 }
 
 void LevelMeterItem::scheduleTick() {

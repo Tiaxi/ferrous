@@ -16,8 +16,17 @@ use super::waveform_pyramid::{PyramidTile, COARSE_SUMMARY_FRAMES};
 use crate::file_identity::FileId;
 
 pub(super) const TILE_FRAMES: u64 = 16_384;
+/// PCM of the windows that read it: those at less than `SUMMARY_FRAMES`
+/// frames a point. Summaries are built from the PCM they decode without
+/// keeping it.
 const PCM_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const SUMMARY_CACHE_BYTES: usize = 16 * 1024 * 1024;
+/// What the PCM and fine summary caches hold while only the level meter
+/// reads the file. Its two-second windows read little PCM, and each the
+/// summaries of the tiles the one before it ended in: two seconds of
+/// 192 kHz 7.1 audio take 0.8 MiB of them.
+const METER_PCM_CACHE_BYTES: usize = 2 * 1024 * 1024;
+const METER_SUMMARY_CACHE_BYTES: usize = 2 * 1024 * 1024;
 /// Coarse summaries, kept for the session outside the LRU: a whole-track or
 /// zoomed-out window reads every tile of the track, and the fine levels of a
 /// hi-res surround track exceed the LRU's budget. This holds ~26 minutes of
@@ -29,30 +38,91 @@ pub(super) const COARSE_SUMMARY_BYTES: usize = 16 * 1024 * 1024;
 // detail view share one active-track decoder and cache across those threads
 // instead of depending on thread-local affinity. Each holds the decoder for
 // one tile at a time, so neither waits for the other's whole window.
-static SERVICE: Mutex<ServiceSlot> = Mutex::new(ServiceSlot {
-    session: None,
-    opening: false,
-    prefill: None,
-});
-/// Signalled when an open of a session ends.
-static OPENED: Condvar = Condvar::new();
+static SERVICE: Service = Service::new();
 /// How often a request waiting for another's open looks at its cancellation.
 const CANCELLATION_CHECK_INTERVAL: Duration = Duration::from_millis(5);
+
+pub(super) struct Service {
+    slot: Mutex<ServiceSlot>,
+    /// Signalled when an open of a session ends.
+    opened: Condvar,
+}
+
+impl Service {
+    pub(super) const fn new() -> Self {
+        Self {
+            slot: Mutex::new(ServiceSlot::empty()),
+            opened: Condvar::new(),
+        }
+    }
+
+    pub(super) fn lock(&self) -> MutexGuard<'_, ServiceSlot> {
+        // The slot is consistent between statements, so a panic elsewhere
+        // cannot leave it half-changed.
+        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// What reads the waveform detail of a file, as the UI tells the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaveformReader {
+    /// A waveform view, which zooms and scrolls over the whole file.
+    View,
+    /// The level meter, which reads two seconds at the playhead.
+    Meter,
+}
+
+/// What the readers of a file need of its session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Demand {
+    /// Nothing reads it: the session closes.
+    None,
+    /// Only the level meter: the fine caches shrink to its windows.
+    Meter,
+    /// A view: the caches keep their whole budgets.
+    View,
+}
 
 pub(super) struct ServiceSlot {
     session: Option<Arc<WaveformSession>>,
     /// Whether a request is opening a session. One file is opened at a
     /// time, so requests for the same file share one decoder.
     opening: bool,
-    /// Coarse summaries the overview decode built for a file the service
-    /// had no session for, which the session that opens it takes.
+    /// Coarse summaries for a file the service has no session for, which
+    /// the session that opens it takes: those the overview decode built,
+    /// or those a session of the current track kept when it closed.
     prefill: Option<CoarsePrefill>,
+    /// The readers the UI holds, by file and kind, with their counts.
+    readers: Vec<(PathBuf, WaveformReader, usize)>,
+    /// The file of the track that plays, once the analysis has told.
+    current: Option<PathBuf>,
+}
+
+/// What the service no longer holds, dropped once it is unlocked: the last
+/// reference to a session closes its decoder, which for `GStreamer` stops
+/// a pipeline.
+#[derive(Default)]
+#[must_use]
+pub(super) struct Released {
+    session: Option<Arc<WaveformSession>>,
+    prefill: Option<CoarsePrefill>,
+    pcm: Vec<Arc<PcmTile>>,
+    summaries: Vec<Arc<PyramidTile>>,
+}
+
+impl Released {
+    /// Whether it holds anything.
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.session.is_none()
+            && self.prefill.is_none()
+            && self.pcm.is_empty()
+            && self.summaries.is_empty()
+    }
 }
 
 fn lock_service() -> MutexGuard<'static, ServiceSlot> {
-    // The slot is consistent between statements, so a panic elsewhere
-    // cannot leave it half-changed.
-    SERVICE.lock().unwrap_or_else(PoisonError::into_inner)
+    SERVICE.lock()
 }
 
 /// The file at a path, as the service tells one from another: by its path,
@@ -141,6 +211,8 @@ struct TileCache<T> {
     tiles: HashMap<u64, (Arc<T>, usize, u64)>,
     bytes: usize,
     budget: usize,
+    /// A lower limit while the readers need less than the budget.
+    cap: usize,
     access: u64,
 }
 
@@ -150,8 +222,36 @@ impl<T> TileCache<T> {
             tiles: HashMap::new(),
             bytes: 0,
             budget,
+            cap: usize::MAX,
             access: 0,
         }
+    }
+
+    fn limit(&self) -> usize {
+        self.budget.min(self.cap)
+    }
+
+    /// Hold at most `cap` bytes, or the budget if that is less. Returns the
+    /// tiles that no longer fit, which the least recently used are.
+    fn set_cap(&mut self, cap: usize) -> Vec<Arc<T>> {
+        self.cap = cap;
+        let limit = self.limit();
+        if self.bytes <= limit {
+            return Vec::new();
+        }
+        let mut tiles: Vec<_> = self.tiles.drain().collect();
+        tiles.sort_unstable_by_key(|(_, (_, _, accessed))| std::cmp::Reverse(*accessed));
+        self.bytes = 0;
+        let mut evicted = Vec::new();
+        for (index, (tile, bytes, accessed)) in tiles {
+            if self.bytes + bytes <= limit {
+                self.bytes += bytes;
+                self.tiles.insert(index, (tile, bytes, accessed));
+            } else {
+                evicted.push(tile);
+            }
+        }
+        evicted
     }
 
     fn get(&mut self, index: u64) -> Option<Arc<T>> {
@@ -163,10 +263,11 @@ impl<T> TileCache<T> {
     }
 
     fn insert(&mut self, index: u64, tile: Arc<T>, bytes: usize) {
-        if bytes > self.budget {
+        let limit = self.limit();
+        if bytes > limit {
             return;
         }
-        while self.bytes + bytes > self.budget {
+        while self.bytes + bytes > limit {
             let Some(oldest) = self
                 .tiles
                 .iter()
@@ -258,16 +359,31 @@ struct Caches {
     /// whose end falls short of the end of the file reads it as PCM, so it
     /// is kept outside the LRU, which zoomed windows cycle through.
     last_tile: Option<(u64, Arc<PcmTile>)>,
+    /// The PCM and fine summary bytes kept while only the meter reads.
+    meter_bytes: (usize, usize),
+    /// The tile decoded last, kept or not: a request that waited for its
+    /// decode, as the meter's for a tile a view's window decodes, or the
+    /// next window that ends within it, reads it without decoding it again.
+    recent: Option<(u64, Arc<PcmTile>)>,
 }
 
 impl Caches {
-    fn pcm(&mut self, index: u64) -> Option<Arc<PcmTile>> {
-        let tile = self.pcm.get(index).or_else(|| {
-            self.last_tile
-                .as_ref()
-                .filter(|(last, _)| *last == index)
-                .map(|(_, tile)| Arc::clone(tile))
-        })?;
+    /// The PCM of tile `index`, if a cache holds it; one only the tile
+    /// decoded last is moves into the LRU if the reader `keep`s it.
+    fn pcm(&mut self, index: u64, keep: bool) -> Option<Arc<PcmTile>> {
+        if let Some(tile) = self.pcm.get(index) {
+            self.keep_if_last(index, &tile);
+            return Some(tile);
+        }
+        let tile = self
+            .last_tile
+            .iter()
+            .chain(&self.recent)
+            .find(|(at, _)| *at == index)
+            .map(|(_, tile)| Arc::clone(tile))?;
+        if keep && !tile.segments.is_empty() {
+            self.pcm.insert(index, Arc::clone(&tile), tile.bytes());
+        }
         self.keep_if_last(index, &tile);
         Some(tile)
     }
@@ -331,6 +447,8 @@ impl WaveformSession {
                 coarse_summaries: RetainedTiles::new(COARSE_SUMMARY_BYTES),
                 eof_frame: None,
                 last_tile: None,
+                meter_bytes: (METER_PCM_CACHE_BYTES, METER_SUMMARY_CACHE_BYTES),
+                recent: None,
             }),
             decoder: Mutex::new(Decoder {
                 source,
@@ -351,13 +469,27 @@ impl WaveformSession {
         self.caches.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The PCM of tile `index`, for a window that reads it at sample
+    /// resolution; it stays cached for the next such window.
     pub(super) fn tile(
         &self,
         index: u64,
         cancelled: &impl Fn() -> bool,
     ) -> anyhow::Result<Arc<PcmTile>> {
+        self.pcm(index, true, cancelled)
+    }
+
+    /// The PCM of tile `index`, from the cache or decoded, and then cached
+    /// if `keep`. The tile that holds the end of the file is kept either
+    /// way.
+    fn pcm(
+        &self,
+        index: u64,
+        keep: bool,
+        cancelled: &impl Fn() -> bool,
+    ) -> anyhow::Result<Arc<PcmTile>> {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        if let Some(tile) = self.caches().pcm(index) {
+        if let Some(tile) = self.caches().pcm(index, keep) {
             return Ok(tile);
         }
         let tile = {
@@ -367,7 +499,7 @@ impl WaveformSession {
             };
             // Another request may have decoded it while this one waited,
             // or this one may have been cancelled meanwhile.
-            if let Some(tile) = self.caches().pcm(index) {
+            if let Some(tile) = self.caches().pcm(index, keep) {
                 return Ok(tile);
             }
             anyhow::ensure!(!cancelled(), "waveform decode cancelled");
@@ -381,10 +513,11 @@ impl WaveformSession {
             let tile = Arc::new(tile);
             let mut caches = self.caches();
             caches.eof_frame = caches.eof_frame.or(eof_frame);
-            if !tile.segments.is_empty() {
+            if keep && !tile.segments.is_empty() {
                 caches.pcm.insert(index, Arc::clone(&tile), tile.bytes());
             }
             caches.keep_if_last(index, &tile);
+            caches.recent = Some((index, Arc::clone(&tile)));
             tile
         };
         #[cfg(test)]
@@ -401,29 +534,57 @@ impl WaveformSession {
         cancelled: &impl Fn() -> bool,
     ) -> anyhow::Result<Arc<PyramidTile>> {
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        let coarse = frames_per_point >= COARSE_SUMMARY_FRAMES;
-        let hit = {
-            let mut caches = self.caches();
-            if coarse {
-                caches.coarse_summaries.get(index).or_else(|| {
-                    // The store may be full. Fine rows aggregate exactly
-                    // into coarse ones, so the LRU spares a decode.
-                    let fine = caches.summaries.get(index)?;
-                    let coarse = Arc::new(PyramidTile::coarse_from(&fine));
-                    caches
-                        .coarse_summaries
-                        .insert(index, Arc::clone(&coarse), coarse.bytes());
-                    Some(coarse)
-                })
-            } else {
-                caches.summaries.get(index)
-            }
-        };
-        if let Some(tile) = hit {
+        if let Some(tile) = self.cached_summary(index, frames_per_point) {
             return Ok(tile);
         }
-        let pcm = self.tile(index, cancelled)?;
-        let (fine, coarse_levels) = PyramidTile::build(&pcm, index, self.channels);
+        // A window that reads summaries reads no PCM of the tile again.
+        let pcm = self.pcm(index, false, cancelled)?;
+        Ok(self.summarize(index, frames_per_point, &pcm))
+    }
+
+    /// The PCM of tile `index` for a window at `frames_per_point` that
+    /// reads summaries but ends within the tile, and the tile's summary at
+    /// that resolution. The PCM is not kept: a later window over the tile,
+    /// as the next one of playback is, reads the summary, which is.
+    pub(super) fn clipped_tile(
+        &self,
+        index: u64,
+        frames_per_point: u64,
+        cancelled: &impl Fn() -> bool,
+    ) -> anyhow::Result<(Arc<PcmTile>, Arc<PyramidTile>)> {
+        let pcm = self.pcm(index, false, cancelled)?;
+        let summary = match self.cached_summary(index, frames_per_point) {
+            Some(summary) => summary,
+            None => self.summarize(index, frames_per_point, &pcm),
+        };
+        Ok((pcm, summary))
+    }
+
+    /// The cached summary levels of tile `index` for `frames_per_point`:
+    /// the coarse ones from `COARSE_SUMMARY_FRAMES` on, otherwise the fine
+    /// ones.
+    fn cached_summary(&self, index: u64, frames_per_point: u64) -> Option<Arc<PyramidTile>> {
+        let mut caches = self.caches();
+        if frames_per_point >= COARSE_SUMMARY_FRAMES {
+            caches.coarse_summaries.get(index).or_else(|| {
+                // The store may be full. Fine rows aggregate exactly
+                // into coarse ones, so the LRU spares a decode.
+                let fine = caches.summaries.get(index)?;
+                let coarse = Arc::new(PyramidTile::coarse_from(&fine));
+                caches
+                    .coarse_summaries
+                    .insert(index, Arc::clone(&coarse), coarse.bytes());
+                Some(coarse)
+            })
+        } else {
+            caches.summaries.get(index)
+        }
+    }
+
+    /// Build the summary levels of tile `index` from its PCM, keep them,
+    /// and return those for `frames_per_point`.
+    fn summarize(&self, index: u64, frames_per_point: u64, pcm: &PcmTile) -> Arc<PyramidTile> {
+        let (fine, coarse_levels) = PyramidTile::build(pcm, index, self.channels);
         let (fine, coarse_levels) = (Arc::new(fine), Arc::new(coarse_levels));
         if !pcm.segments.is_empty() {
             let mut caches = self.caches();
@@ -436,7 +597,55 @@ impl WaveformSession {
                 coarse_levels.bytes(),
             );
         }
-        Ok(if coarse { coarse_levels } else { fine })
+        if frames_per_point >= COARSE_SUMMARY_FRAMES {
+            coarse_levels
+        } else {
+            fine
+        }
+    }
+
+    /// Size the fine caches for what reads the file: their budgets for a
+    /// view, a little for the level meter alone. Returns what no longer
+    /// fits.
+    fn size_for(&self, demand: Demand) -> (Vec<Arc<PcmTile>>, Vec<Arc<PyramidTile>>) {
+        let mut caches = self.caches();
+        let (pcm, summaries) = if demand == Demand::Meter {
+            caches.meter_bytes
+        } else {
+            (usize::MAX, usize::MAX)
+        };
+        (caches.pcm.set_cap(pcm), caches.summaries.set_cap(summaries))
+    }
+
+    /// Take the coarse summaries, the end of the file and the PCM of its
+    /// last tile, for a session of the file to open with when a view reads
+    /// it again. A session that is unsure which file it read, or whose
+    /// decode broke, gives none. Requests still reading the session keep
+    /// working: they decode what they miss.
+    fn take_coarse(&self) -> Option<CoarsePrefill> {
+        if !self.confirmed || self.broken.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut caches = self.caches();
+        let budget = caches.coarse_summaries.budget;
+        let store = std::mem::replace(&mut caches.coarse_summaries, RetainedTiles::new(budget));
+        let eof_frame = caches.eof_frame;
+        let last_tile = caches.last_tile.clone();
+        drop(caches);
+        if store.tiles.is_empty() && last_tile.is_none() {
+            return None;
+        }
+        let mut tiles: Vec<_> = store.tiles.into_iter().collect();
+        tiles.sort_unstable_by_key(|&(index, _)| index);
+        Some(CoarsePrefill {
+            identity: self.identity.clone(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            gstreamer: self.gstreamer,
+            tiles,
+            eof_frame,
+            last_tile,
+        })
     }
 
     /// Whether every frame of tile `index` lies before `end_frame`: the
@@ -451,6 +660,7 @@ impl WaveformSession {
         let mut caches = self.caches();
         caches.pcm = TileCache::new(0);
         caches.last_tile = None;
+        caches.recent = None;
     }
 
     #[cfg(test)]
@@ -458,6 +668,18 @@ impl WaveformSession {
         let mut caches = self.caches();
         caches.pcm.budget = pcm_bytes;
         caches.summaries.budget = summary_bytes;
+    }
+
+    /// Keep `pcm_bytes` and `summary_bytes` while only the meter reads.
+    #[cfg(test)]
+    pub(super) fn limit_meter_caches(&self, pcm_bytes: usize, summary_bytes: usize) {
+        self.caches().meter_bytes = (pcm_bytes, summary_bytes);
+    }
+
+    /// Whether the PCM of the file's last tile is kept.
+    #[cfg(test)]
+    pub(super) fn keeps_last_tile(&self) -> bool {
+        self.caches().last_tile.is_some()
     }
 
     #[cfg(test)]
@@ -473,6 +695,19 @@ impl WaveformSession {
             caches.coarse_summaries.bytes,
             caches.coarse_summaries.budget,
         )
+    }
+
+    /// How many tiles the PCM cache holds, and its bytes.
+    #[cfg(test)]
+    pub(super) fn cached_pcm(&self) -> (usize, usize) {
+        let caches = self.caches();
+        (caches.pcm.tiles.len(), caches.pcm.bytes)
+    }
+
+    /// The bytes the fine summary cache holds.
+    #[cfg(test)]
+    pub(super) fn cached_summary_bytes(&self) -> usize {
+        self.caches().summaries.bytes
     }
 
     #[cfg(test)]
@@ -706,10 +941,12 @@ impl WaveformSession {
             return;
         }
         let mut caches = self.caches();
-        if caches.eof_frame.is_some_and(|eof| eof != eof_frame) {
-            return;
+        if let (Some(known), Some(given)) = (caches.eof_frame, eof_frame) {
+            if known != given {
+                return;
+            }
         }
-        caches.eof_frame = Some(eof_frame);
+        caches.eof_frame = caches.eof_frame.or(eof_frame);
         for (index, tile) in tiles {
             let bytes = tile.bytes();
             caches.coarse_summaries.insert(index, tile, bytes);
@@ -725,14 +962,150 @@ impl WaveformSession {
 }
 
 impl ServiceSlot {
+    const fn empty() -> Self {
+        Self {
+            session: None,
+            opening: false,
+            prefill: None,
+            readers: Vec::new(),
+            current: None,
+        }
+    }
+
     /// A slot with `session` open, for tests of the handover.
     #[cfg(test)]
     pub(super) fn holding(session: Option<Arc<WaveformSession>>) -> Self {
         Self {
             session,
-            opening: false,
-            prefill: None,
+            ..Self::empty()
         }
+    }
+
+    /// The session open, for tests.
+    #[cfg(test)]
+    pub(super) fn session(&self) -> Option<&Arc<WaveformSession>> {
+        self.session.as_ref()
+    }
+
+    /// What the readers of the file at `path` need of its session.
+    fn demand(&self, path: &Path) -> Demand {
+        let mut demand = Demand::None;
+        for (_, reader, _) in self.readers.iter().filter(|(of, _, _)| of == path) {
+            demand = match reader {
+                WaveformReader::View => Demand::View,
+                WaveformReader::Meter if demand == Demand::None => Demand::Meter,
+                WaveformReader::Meter => demand,
+            };
+        }
+        demand
+    }
+
+    /// A `reader` of the file at `path` starts reading it. A view of the
+    /// file open gives its caches their whole budgets back at once.
+    pub(super) fn retain(&mut self, path: &Path, reader: WaveformReader) {
+        match self
+            .readers
+            .iter_mut()
+            .find(|(of, kind, _)| of == path && *kind == reader)
+        {
+            Some((_, _, count)) => *count = count.saturating_add(1),
+            None => self.readers.push((path.to_path_buf(), reader, 1)),
+        }
+        if let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|session| session.identity.path == path)
+            .filter(|_| reader == WaveformReader::View)
+        {
+            // Raising the limits evicts nothing; lowering them is left to
+            // `settle`, off the UI thread.
+            let _ = session.size_for(Demand::View);
+        }
+    }
+
+    /// A `reader` of the file at `path` stops reading it. What its session
+    /// holds is released by [`Self::settle`], which may take longer.
+    pub(super) fn release(&mut self, path: &Path, reader: WaveformReader) {
+        if let Some(at) = self
+            .readers
+            .iter()
+            .position(|(of, kind, _)| of == path && *kind == reader)
+        {
+            let count = &mut self.readers[at].2;
+            *count -= 1;
+            if *count == 0 {
+                self.readers.swap_remove(at);
+            }
+        }
+    }
+
+    /// Release what the readers of the open session's file no longer need.
+    /// With only the level meter reading it, the fine caches shrink to its
+    /// windows. With nothing reading it, the session closes, and if its
+    /// file is the current track's, its coarse summaries stay, for a view
+    /// shown again to open it with.
+    pub(super) fn settle(&mut self) -> Released {
+        let mut released = Released::default();
+        let Some(session) = self.session.as_ref() else {
+            return released;
+        };
+        match self.demand(&session.identity.path) {
+            Demand::View => {}
+            Demand::Meter => {
+                (released.pcm, released.summaries) = session.size_for(Demand::Meter);
+            }
+            Demand::None => {
+                let session = self.session.take();
+                let coarse = session
+                    .as_ref()
+                    .filter(|session| {
+                        self.current
+                            .as_ref()
+                            .is_none_or(|current| *current == session.identity.path)
+                    })
+                    .and_then(|session| session.take_coarse());
+                if let Some(coarse) = coarse {
+                    released.prefill = self.keep_prefill(coarse);
+                }
+                released.session = session;
+            }
+        }
+        released
+    }
+
+    /// Keep `prefill` for the next session of its file, unless the slot
+    /// holds more of that file already. Returns the summaries it does not
+    /// keep.
+    fn keep_prefill(&mut self, prefill: CoarsePrefill) -> Option<CoarsePrefill> {
+        match &self.prefill {
+            Some(kept)
+                if kept.identity.path == prefill.identity.path
+                    && kept.tiles.len() >= prefill.tiles.len() =>
+            {
+                Some(prefill)
+            }
+            _ => self.prefill.replace(prefill),
+        }
+    }
+
+    /// The track at `path` starts playing: what the service holds of
+    /// another file and nothing reads is no longer needed. A session that
+    /// a reader still holds closes once it releases it.
+    pub(super) fn track_changed(&mut self, path: &Path) -> Released {
+        self.current = Some(path.to_path_buf());
+        let mut released = Released {
+            prefill: self
+                .prefill
+                .take_if(|prefill| prefill.identity.path != path),
+            ..Released::default()
+        };
+        if let Some(session) = self.session.as_ref() {
+            let other = session.identity.path != path;
+            if other && self.demand(&session.identity.path) == Demand::None {
+                released.session = self.session.take();
+            }
+        }
+        released
     }
 
     /// The identity of the file whose summaries the slot keeps.
@@ -780,37 +1153,59 @@ pub(super) fn offer_prefill(prefill: CoarsePrefill) {
     drop(replaced);
 }
 
-/// Drop the coarse summaries the overview decode built that no session
-/// took, as when another track starts.
-pub(super) fn discard_prefill() {
-    let prefill = lock_service().prefill.take();
-    drop(prefill);
+/// The track at `path` starts playing: drop what the service holds of
+/// another file that nothing reads, such as the coarse summaries the last
+/// track's overview decode built that no session took.
+pub(super) fn track_changed(path: &Path) {
+    let released = lock_service().track_changed(path);
+    drop(released);
+}
+
+/// A `reader` in the UI starts reading the file at `path`.
+pub(crate) fn retain_reader(path: &Path, reader: WaveformReader) {
+    lock_service().retain(path, reader);
+}
+
+/// A `reader` in the UI stops reading the file at `path`. Call
+/// [`release_unread`] then, off the UI thread.
+pub(crate) fn release_reader(path: &Path, reader: WaveformReader) {
+    lock_service().release(path, reader);
+}
+
+/// Release what the UI's readers no longer need; see
+/// [`ServiceSlot::settle`]. Closing a session can take a while: a
+/// `GStreamer` decoder stops its pipeline.
+pub(crate) fn release_unread() {
+    let released = lock_service().settle();
+    drop(released);
 }
 
 /// Clears the opening flag, and wakes the requests waiting for it, when an
 /// open ends, by a panic included.
-struct OpeningGuard;
+struct OpeningGuard<'a>(&'a Service);
 
-impl Drop for OpeningGuard {
+impl Drop for OpeningGuard<'_> {
     fn drop(&mut self) {
-        lock_service().opening = false;
-        OPENED.notify_all();
+        self.0.lock().opening = false;
+        self.0.opened.notify_all();
     }
 }
 
-/// The shared session for the file at `path`, opened if it is not open.
-fn shared_session(
+/// The session of `service` for the file at `path`, opened if it is not
+/// open.
+pub(super) fn shared_session(
+    service: &Service,
     path: &Path,
     cancelled: &impl Fn() -> bool,
 ) -> anyhow::Result<Arc<WaveformSession>> {
     anyhow::ensure!(!cancelled(), "waveform decode cancelled");
     let identity = SourceIdentity::read(path)?;
-    let mut service = lock_service();
+    let mut slot = service.lock();
     loop {
         // Before every wait and before opening: a request cancelled while
         // it waited, by a skip to another track, must not open its file.
         anyhow::ensure!(!cancelled(), "waveform decode cancelled");
-        if let Some(session) = service
+        if let Some(session) = slot
             .session
             .as_ref()
             .filter(|session| session.identity == identity)
@@ -818,30 +1213,40 @@ fn shared_session(
         {
             return Ok(Arc::clone(session));
         }
-        if !service.opening {
+        if !slot.opening {
             break;
         }
         // The decoder is needed before anything can be read, and the
         // request opening one may be opening this file. Qt cancels a
         // request by setting a flag, which wakes nothing, so the wait ends
         // now and then to look at it; the end of the open wakes it at once.
-        service = OPENED
-            .wait_timeout(service, CANCELLATION_CHECK_INTERVAL)
+        slot = service
+            .opened
+            .wait_timeout(slot, CANCELLATION_CHECK_INTERVAL)
             .map_or_else(|poisoned| poisoned.into_inner().0, |(guard, _)| guard);
     }
     // Release the previous decoder before opening another; requests still
     // reading it keep it until they finish their tile.
-    service.session = None;
-    service.opening = true;
-    drop(service);
-    let opening = OpeningGuard;
+    let previous = slot.session.take();
+    slot.opening = true;
+    drop(slot);
+    drop(previous);
+    let opening = OpeningGuard(service);
     #[cfg(test)]
     test_hooks::opening();
     let session = Arc::new(WaveformSession::open(path)?);
-    let mut service = lock_service();
-    service.hand_over(&session);
-    service.session = Some(Arc::clone(&session));
-    drop(service);
+    let mut slot = service.lock();
+    // A request cancelled meanwhile, as when its reader went away, leaves
+    // nothing behind that nothing would read.
+    anyhow::ensure!(!cancelled(), "waveform decode cancelled");
+    slot.hand_over(&session);
+    let demand = slot.demand(path);
+    if demand != Demand::None {
+        // Nothing to evict yet.
+        let _ = session.size_for(demand);
+    }
+    slot.session = Some(Arc::clone(&session));
+    drop(slot);
     drop(opening);
     Ok(session)
 }
@@ -851,7 +1256,7 @@ pub(super) fn with_session<T>(
     cancelled: &impl Fn() -> bool,
     operation: impl FnOnce(&WaveformSession) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
-    let session = shared_session(path, cancelled)?;
+    let session = shared_session(&SERVICE, path, cancelled)?;
     operation(&session)
 }
 
@@ -1054,7 +1459,7 @@ mod tests {
                 "{name}: the tiles that hold audio"
             );
             assert!(built == tiles, "{name}: the summaries differ");
-            assert_eq!(Some(prefill.eof_frame), eof, "{name}: the end of the file");
+            assert_eq!(prefill.eof_frame, eof, "{name}: the end of the file");
             let built_last = prefill
                 .last_tile
                 .as_ref()
@@ -1229,7 +1634,7 @@ mod tests {
                 let _ = opening_tx.send(());
                 let _ = release_rx.recv();
             });
-            shared_session(&opener_path, &|| false).map(|_| ())
+            shared_session(&SERVICE, &opener_path, &|| false).map(|_| ())
         });
         opening_rx
             .recv_timeout(Duration::from_secs(10))
@@ -1248,7 +1653,7 @@ mod tests {
                 let _ = checked_tx.send(());
                 waiter_cancel.load(Ordering::Relaxed)
             };
-            let result = shared_session(&waiter_path, &cancelled).map(|_| ());
+            let result = shared_session(&SERVICE, &waiter_path, &cancelled).map(|_| ());
             let _ = done_tx.send(());
             result
         });
@@ -1269,6 +1674,348 @@ mod tests {
         for path in [a, b] {
             std::fs::remove_file(path).expect("remove fixture");
         }
+    }
+
+    /// A WAV fixture of `frames` frames in `channels` channels at 48 kHz,
+    /// named for the test, with a different value in every frame.
+    fn reader_fixture(name: &str, frames: usize, channels: u16) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ferrous-waveform-readers-{}-{name}.wav",
+            std::process::id()
+        ));
+        let samples: Vec<i16> = (0..frames * usize::from(channels))
+            .map(|i| i16::try_from((i * 7_919) % 60_001).unwrap_or(0) - 30_000)
+            .collect();
+        super::super::waveform_window::tests::write_test_wave_to(&path, &samples, 48_000, channels);
+        path
+    }
+
+    /// The whole track as a view shows it: coarse summaries.
+    fn whole_track(session: &WaveformSession, frames: usize) -> WaveformWindow {
+        let seconds = f64::from(u32::try_from(frames).unwrap()) / 48_000.0;
+        let window = decode_window(session, 0.0, seconds, 20, &|| false).expect("whole track");
+        assert!(u64::from(window.frames_per_point) >= COARSE_SUMMARY_FRAMES);
+        window
+    }
+
+    /// A zoomed view, of fine summaries, which ends within a tile.
+    fn zoomed(session: &WaveformSession) -> WaveformWindow {
+        decode_window(session, 0.5, 1.5, 375, &|| false).expect("zoomed")
+    }
+
+    /// A view at sample resolution.
+    fn samples(session: &WaveformSession) -> WaveformWindow {
+        decode_window(session, 1.0, 1.01, 480, &|| false).expect("samples")
+    }
+
+    fn same(a: &WaveformWindow, b: &WaveformWindow) -> bool {
+        a.frames_per_point == b.frames_per_point
+            && a.start_seconds.to_bits() == b.start_seconds.to_bits()
+            && a.end_seconds.to_bits() == b.end_seconds.to_bits()
+            && a.extrema == b.extrema
+            && a.downmix_extrema == b.downmix_extrema
+    }
+
+    use super::super::waveform_window::{decode_window, WaveformWindow};
+
+    #[test]
+    fn windows_of_summaries_cache_no_pcm_but_the_last_tile() {
+        // Ten tiles and a bit.
+        let frames = 10 * 16_384 + 1_001;
+        let path = reader_fixture("summaries-no-pcm", frames, 2);
+        let session = WaveformSession::open(&path).expect("open fixture");
+        let whole = whole_track(&session, frames);
+        assert_eq!(session.decoded_tiles(), 11);
+        assert_eq!(session.cached_pcm(), (0, 0), "whole track");
+        assert!(session.keeps_last_tile());
+        // The zoomed window ends within tile 4: it reads that tile's PCM,
+        // and keeps its summaries, not the PCM.
+        let zoomed_window = zoomed(&session);
+        assert_eq!(session.cached_pcm(), (0, 0), "zoomed");
+        assert_eq!(session.decoded_tiles(), 12, "the clipped tile");
+        // The next window, as playback asks for it, reads the summaries of
+        // that tile without decoding it again.
+        decode_window(&session, 1.4, 2.4, 375, &|| false).expect("next window");
+        assert_eq!(session.decoded_tiles(), 13, "only its own clipped tile");
+        // A view at sample resolution keeps the PCM it reads.
+        samples(&session);
+        assert_eq!(session.cached_pcm().0, 1);
+
+        // The same windows as a session that kept every tile's PCM gives.
+        let reference = WaveformSession::open(&path).expect("open fixture");
+        for index in 0..11 {
+            reference.tile(index, &|| false).expect("tile");
+        }
+        assert!(same(&whole, &whole_track(&reference, frames)));
+        assert!(same(&zoomed_window, &zoomed(&reference)));
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn the_last_reader_closes_the_session_and_the_current_track_keeps_its_coarse_summaries() {
+        let frames = 10 * 16_384 + 1_001;
+        let path = reader_fixture("release-current", frames, 2);
+        let service = Service::new();
+        service.lock().retain(&path, WaveformReader::View);
+        let first = shared_session(&service, &path, &|| false).expect("session");
+        let whole = whole_track(&first, frames);
+        let zoomed_window = zoomed(&first);
+        let samples_window = samples(&first);
+        let coarse = first.coarse_tiles();
+        assert_eq!(coarse, 11);
+        // Another view of the file, as the fullscreen viewer's, and the
+        // meter: the session stays while any of them reads it.
+        service.lock().retain(&path, WaveformReader::View);
+        service.lock().retain(&path, WaveformReader::Meter);
+        for reader in [WaveformReader::View, WaveformReader::Meter] {
+            service.lock().release(&path, reader);
+            let released = service.lock().settle();
+            assert!(released.session.is_none());
+            assert!(service
+                .lock()
+                .session()
+                .is_some_and(|open| Arc::ptr_eq(open, &first)));
+        }
+
+        service.lock().release(&path, WaveformReader::View);
+        let released = service.lock().settle();
+        let closed = released.session.as_ref().expect("the session closes");
+        assert!(Arc::ptr_eq(closed, &first));
+        drop(released);
+        {
+            let slot = service.lock();
+            assert!(slot.session().is_none());
+            assert_eq!(slot.prefill_identity(), Some(first.identity()));
+        }
+        drop(first);
+        // Nothing more to release.
+        assert!(service.lock().settle().is_empty());
+
+        // Shown again: the file opens again with the summaries kept. The
+        // whole track decodes nothing; the zoomed views decode what they
+        // read, and every window is the same as before.
+        service.lock().retain(&path, WaveformReader::View);
+        let second = shared_session(&service, &path, &|| false).expect("session");
+        assert!(second.adopted());
+        assert!(service.lock().prefill_identity().is_none());
+        assert!(same(&whole, &whole_track(&second, frames)));
+        assert_eq!(second.decoded_tiles(), 0, "the whole track decodes nothing");
+        assert!(same(&zoomed_window, &zoomed(&second)));
+        assert!(same(&samples_window, &samples(&second)));
+        assert!(second.decoded_tiles() > 0);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_session_of_another_track_closes_without_keeping_anything() {
+        let frames = 4 * 16_384 + 7;
+        let a = reader_fixture("release-other-a", frames, 1);
+        let b = reader_fixture("release-other-b", frames, 1);
+        let service = Service::new();
+        service.lock().retain(&a, WaveformReader::View);
+        let session = shared_session(&service, &a, &|| false).expect("session");
+        whole_track(&session, frames);
+        // The next track starts before the view moves to it: the session
+        // stays while the view reads it.
+        assert!(service.lock().track_changed(&b).is_empty());
+        assert!(service.lock().session().is_some());
+        service.lock().release(&a, WaveformReader::View);
+        let released = service.lock().settle();
+        assert!(released.session.is_some());
+        assert!(released.prefill.is_none());
+        drop(released);
+        assert!(service.lock().prefill_identity().is_none());
+
+        // The view moves to the next track first: the track change closes
+        // the session that nothing reads.
+        service.lock().retain(&a, WaveformReader::View);
+        whole_track(
+            &shared_session(&service, &a, &|| false).expect("session"),
+            frames,
+        );
+        service.lock().release(&a, WaveformReader::View);
+        service.lock().current = None;
+        let released = service.lock().settle();
+        assert!(released.session.is_some(), "closed");
+        drop(released);
+        assert!(
+            service.lock().prefill_identity().is_some(),
+            "track not known"
+        );
+        let released = service.lock().track_changed(&b);
+        assert!(released.prefill.is_some(), "of another track");
+        for path in [a, b] {
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn a_track_change_keeps_the_summaries_waiting_for_its_file() {
+        use super::super::waveform_prefill::PrefillBuilder;
+        let frames = 3 * 16_384 + 5;
+        let a = reader_fixture("prefill-kept-a", frames, 1);
+        let b = reader_fixture("prefill-kept-b", frames, 1);
+        let identity = SourceIdentity::read(&a).expect("identity");
+        let mut builder = PrefillBuilder::of(identity.clone(), 48_000, 1, false);
+        builder.push(0, &vec![0.25; frames], 1);
+        let prefill = builder.finish().expect("a complete decode");
+
+        // The overview of A built them before any view opened it.
+        let service = Service::new();
+        assert!(service.lock().offer(prefill.clone()).is_none());
+        // A starts again (Repeat-One), or its track change comes after the
+        // overview: they stay for the session that opens A.
+        assert!(service.lock().track_changed(&a).is_empty());
+        // A session of B that a view stopped reading closes, and leaves
+        // them alone.
+        service.lock().retain(&b, WaveformReader::View);
+        drop(shared_session(&service, &b, &|| false).expect("session of B"));
+        service.lock().release(&b, WaveformReader::View);
+        let released = service.lock().settle();
+        assert!(released.session.is_some() && released.prefill.is_none());
+        drop(released);
+        assert_eq!(service.lock().prefill_identity(), Some(&identity));
+        // The view shows A: its session takes them.
+        service.lock().retain(&a, WaveformReader::View);
+        let session = shared_session(&service, &a, &|| false).expect("session of A");
+        assert!(session.adopted());
+        whole_track(&session, frames);
+        assert_eq!(session.decoded_tiles(), 0);
+        // Another track drops them if no session took them.
+        assert!(service.lock().offer(prefill).is_none());
+        assert!(service.lock().track_changed(&b).prefill.is_none(), "taken");
+        for path in [a, b] {
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
+
+    #[test]
+    fn the_meter_alone_keeps_little_of_the_fine_caches() {
+        let frames = 12 * 16_384;
+        let path = reader_fixture("meter-alone", frames, 2);
+        let service = Service::new();
+        service.lock().retain(&path, WaveformReader::Meter);
+        let session = shared_session(&service, &path, &|| false).expect("session");
+        let tile_summary = session.summary(0, 64, &|| false).expect("summary").bytes();
+        // Room for the PCM of one tile, not two.
+        let meter_pcm = 16_384 * 2 * 4 * 5 / 4;
+        session.limit_meter_caches(meter_pcm, 3 * tile_summary);
+        assert!(service.lock().settle().is_empty());
+        // Meter windows over the file, at 64 frames a point, and at sample
+        // resolution.
+        let mut start = 0.0;
+        while start < 3.5 {
+            decode_window(&session, start, start + 0.5, 375, &|| false).expect("meter");
+            decode_window(&session, start, start + 0.01, 480, &|| false).expect("meter");
+            start += 0.3;
+        }
+        assert!(session.cached_summary_bytes() <= 3 * tile_summary);
+        assert!(session.cached_pcm().1 <= meter_pcm);
+        assert_eq!(session.cached_pcm().0, 1);
+
+        // A view of the file has the whole budgets.
+        service.lock().retain(&path, WaveformReader::View);
+        whole_track(&session, frames);
+        zoomed(&session);
+        let view_summaries = session.cached_summary_bytes();
+        assert!(view_summaries > 3 * tile_summary);
+        for start in [1.0, 2.0, 3.0] {
+            decode_window(&session, start, start + 0.01, 480, &|| false).expect("view");
+        }
+        assert_eq!(session.cached_pcm().0, 4);
+
+        // Once it is gone, they shrink back to the meter's, which keeps
+        // the session, and the windows stay the same.
+        let before = zoomed(&session);
+        service.lock().release(&path, WaveformReader::View);
+        let released = service.lock().settle();
+        assert!(released.session.is_none());
+        assert!(!released.summaries.is_empty() && !released.pcm.is_empty());
+        drop(released);
+        assert!(session.cached_summary_bytes() <= 3 * tile_summary);
+        assert!(session.cached_pcm().1 <= meter_pcm);
+        assert!(same(&before, &zoomed(&session)));
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_request_reading_a_session_as_it_closes_finishes_with_the_same_window() {
+        let frames = 10 * 16_384 + 1_001;
+        let path = reader_fixture("release-in-flight", frames, 2);
+        let reference = whole_track(&WaveformSession::open(&path).expect("open"), frames);
+        let service = Service::new();
+        service.lock().retain(&path, WaveformReader::View);
+        let session = shared_session(&service, &path, &|| false).expect("session");
+        let (paused_tx, paused_rx) = crossbeam_channel::bounded(1);
+        let (resume_tx, resume_rx) = crossbeam_channel::bounded::<()>(1);
+        std::thread::scope(|scope| {
+            let session = &session;
+            let request = scope.spawn(move || {
+                let mut tiles = 0;
+                test_hooks::after_each_tile(move || {
+                    tiles += 1;
+                    if tiles == 3 {
+                        let _ = paused_tx.send(());
+                        let _ = resume_rx.recv();
+                    }
+                });
+                whole_track(session, frames)
+            });
+            paused_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the request decodes");
+            // The view goes away while its request reads the session.
+            service.lock().release(&path, WaveformReader::View);
+            let released = service.lock().settle();
+            assert!(released.session.is_some());
+            drop(released);
+            assert!(service.lock().session().is_none());
+            drop(resume_tx);
+            let window = request.join().expect("request");
+            assert!(same(&window, &reference));
+        });
+        // The summaries taken mid-read are a part of the file's; a session
+        // that opens with them reads the rest.
+        service.lock().retain(&path, WaveformReader::View);
+        let again = shared_session(&service, &path, &|| false).expect("session");
+        assert!(!Arc::ptr_eq(&again, &session));
+        assert!(again.adopted());
+        assert!(same(&whole_track(&again, frames), &reference));
+        assert_eq!(
+            again.decoded_tiles(),
+            11 - 2,
+            "the tiles read before the release"
+        );
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn a_request_cancelled_while_it_opens_its_file_keeps_no_session() {
+        let frames = 2 * 16_384 + 3;
+        let path = reader_fixture("cancelled-open", frames, 1);
+        let identity = SourceIdentity::read(&path).expect("identity");
+        let mut builder =
+            super::super::waveform_prefill::PrefillBuilder::of(identity.clone(), 48_000, 1, false);
+        builder.push(0, &vec![0.5; frames], 1);
+        let service = Service::new();
+        assert!(service
+            .lock()
+            .offer(builder.finish().expect("prefill"))
+            .is_none());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let hook_cancel = Arc::clone(&cancel);
+        test_hooks::before_each_open(move || hook_cancel.store(true, Ordering::Relaxed));
+        let error = shared_session(&service, &path, &|| cancel.load(Ordering::Relaxed))
+            .err()
+            .expect("cancelled");
+        test_hooks::before_each_open(|| {});
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        let slot = service.lock();
+        assert!(slot.session().is_none());
+        assert!(!slot.opening);
+        assert_eq!(slot.prefill_identity(), Some(&identity), "still waiting");
+        drop(slot);
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]

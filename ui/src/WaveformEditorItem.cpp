@@ -266,6 +266,8 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         m_zoomFallbackToOverview = false;
         invalidateCacheLocked();
     }
+    // After its request for the previous file was cancelled.
+    updateReaderLease();
     emit sourcePathChanged();
     emit channelCountChanged();
     emit sampleRateHzChanged();
@@ -1327,13 +1329,19 @@ void WaveformEditorItem::shownChanged() {
         // it is shown again. The detail it has stays.
         cancelPlaybackFrame();
         m_requestTimer.stop();
-        QMutexLocker lock(&m_stateMutex);
-        if (m_decodeActive || m_requestInFlight) {
-            invalidateDetailRequestLocked();
-            clearPendingRequestLocked();
+        {
+            QMutexLocker lock(&m_stateMutex);
+            if (m_decodeActive || m_requestInFlight) {
+                invalidateDetailRequestLocked();
+                clearPendingRequestLocked();
+            }
         }
+        // The service keeps the coarse summaries of the current track,
+        // which show the whole track again at once, and frees the rest.
+        updateReaderLease();
         return;
     }
+    updateReaderLease();
     bool request = false;
     {
         QMutexLocker lock(&m_stateMutex);
@@ -1345,6 +1353,10 @@ void WaveformEditorItem::shownChanged() {
     // One frame shows playback as it is now, also a seek made while it
     // was hidden; the frames that follow it ask for their own.
     requestPlaybackFrame();
+}
+
+void WaveformEditorItem::updateReaderLease() {
+    m_readerLease.setPath(shownOnScreen() ? sourcePath() : QString());
 }
 
 void WaveformEditorItem::handleWindowFrameSwapped() {

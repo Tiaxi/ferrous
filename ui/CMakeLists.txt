@@ -117,6 +117,7 @@ qt_add_executable(ferrous
     src/PlaybackClock.cpp
     src/PlaybackFrameScheduler.cpp
     src/WindowPresence.cpp
+    src/WaveformReaderLease.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
@@ -404,6 +405,7 @@ if(BUILD_TESTING)
         src/LevelMeterItem.cpp
         src/PlaybackClock.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
     )
     target_include_directories(ferrous_level_meter_tests PRIVATE src)
     set_target_properties(ferrous_level_meter_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
@@ -437,6 +439,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -534,6 +537,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -639,6 +643,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -700,6 +705,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
         src/QmlTypes.cpp
         src/SpectrogramItem.cpp
         src/WaveformEditorItem.cpp
@@ -809,6 +815,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
