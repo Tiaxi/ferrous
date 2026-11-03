@@ -107,6 +107,8 @@ qt_add_executable(ferrous
     src/DiagnosticsLog.cpp
     src/Localization.cpp
     src/DisplaySleepInhibitor.cpp
+    src/HeapAllocator.cpp
+    src/HeapTrimmer.cpp
     src/BinaryBridgeCodec.cpp
     src/BridgeClient.cpp
     src/QueueRows.cpp
@@ -399,6 +401,17 @@ if(BUILD_TESTING)
     ferrous_enable_strict_warnings(ferrous_console_tee_tests)
     add_test(NAME ferrous_console_tee_tests COMMAND ferrous_console_tee_tests)
     set_tests_properties(ferrous_console_tee_tests PROPERTIES TIMEOUT 60)
+
+    qt_add_executable(ferrous_heap_allocator_tests
+        tests/tst_heap_allocator.cpp
+        src/HeapAllocator.cpp
+        src/HeapTrimmer.cpp
+    )
+    target_include_directories(ferrous_heap_allocator_tests PRIVATE src)
+    target_link_libraries(ferrous_heap_allocator_tests PRIVATE Qt6::Core Qt6::Test)
+    ferrous_enable_strict_warnings(ferrous_heap_allocator_tests)
+    add_test(NAME ferrous_heap_allocator_tests COMMAND ferrous_heap_allocator_tests)
+    set_tests_properties(ferrous_heap_allocator_tests PROPERTIES TIMEOUT 60)
 
     qt_add_executable(ferrous_level_meter_tests
         tests/tst_level_meter.cpp
