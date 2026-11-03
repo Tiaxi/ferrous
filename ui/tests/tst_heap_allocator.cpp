@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QSemaphore>
 #include <QSignalSpy>
@@ -18,13 +20,47 @@
 #include "HeapAllocator.h"
 #include "HeapTrimmer.h"
 
+// Sanitizers that replace malloc intercept mallopt (it returns 0) and serve
+// allocations mallinfo2 cannot see, so the allocator policy cannot be checked
+// under them. Each check is nested: an undefined function-like macro is a
+// preprocessor error even after a false `defined` test in the same #if.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define FERROUS_SANITIZED_ALLOCATOR 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) \
+    || __has_feature(thread_sanitizer)
+#define FERROUS_SANITIZED_ALLOCATOR 1
+#endif
+#endif
+
+#if defined(__GLIBC__)
+#if __GLIBC_PREREQ(2, 33)
+#define FERROUS_HAVE_MALLINFO2 1
+#endif
+#endif
+
+#if defined(FERROUS_HAVE_MALLINFO2) && !defined(FERROUS_SANITIZED_ALLOCATOR)
+#define FERROUS_PROBE_ALLOCATOR 1
+#endif
+
 namespace {
+
+#if defined(FERROUS_PROBE_ALLOCATOR)
+// Set in the environment of a child copy of this binary that runs
+// runAllocatorProbe instead of the tests: "configured" applies the policy
+// first, "unconfigured" leaves glibc's defaults.
+constexpr char kProbeModeVariable[] = "FERROUS_HEAP_ALLOCATOR_PROBE";
+
+// The probe's exit codes.
+enum ProbeResult : int {
+    ProbeLargeBlocksMapped = 0,
+    ProbeLargeBlockFromArena = 10,
+    ProbeLargeBlockKept = 11,
+    ProbeSmallBlockMapped = 12,
+};
 
 // Keeps the compiler from pairing up and dropping a malloc and its free.
 void *volatile g_sink = nullptr;
-
-#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 33)
-#define FERROUS_HAVE_MALLINFO2 1
 
 std::size_t mmappedBytes() {
     return mallinfo2().hblkhd;
@@ -41,6 +77,58 @@ std::size_t mmappedGrowthFor(std::size_t size) {
     std::free(block);
     g_sink = nullptr;
     return during > before ? during - before : 0;
+}
+
+// Runs in a fresh process, before anything else, with no malloc tunables:
+// whether a large block is mapped after a larger mapped block was freed.
+int runAllocatorProbe(bool configure) {
+    if (configure) {
+        FerrousHeap::configureAllocator(nullptr);
+    }
+    // Large enough that the arena's top, which a fresh process keeps small,
+    // cannot serve it: a block that fits there is never mapped.
+    constexpr std::size_t large = 1024 * 1024;
+    // A free of a mapped block raises glibc's adaptive threshold to its size.
+    constexpr std::size_t larger = 16 * 1024 * 1024;
+    if (mmappedGrowthFor(larger) < larger || mmappedGrowthFor(large) < large) {
+        return ProbeLargeBlockFromArena;
+    }
+    const std::size_t before = mmappedBytes();
+    g_sink = std::malloc(large);
+    std::free(g_sink);
+    g_sink = nullptr;
+    if (mmappedBytes() != before) {
+        return ProbeLargeBlockKept;
+    }
+    if (mmappedGrowthFor(FerrousHeap::kMmapThresholdBytes / 2) != 0) {
+        return ProbeSmallBlockMapped;
+    }
+    return ProbeLargeBlocksMapped;
+}
+
+// Runs the probe in a child copy of this binary without malloc tunables, so
+// neither this process's heap nor its environment decides the outcome.
+int runProbeChild(const char *mode, QByteArray *output) {
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    const QStringList keys = environment.keys();
+    for (const QString &key : keys) {
+        if (key == QLatin1String("GLIBC_TUNABLES") || key.startsWith(QLatin1String("MALLOC_"))) {
+            environment.remove(key);
+        }
+    }
+    environment.insert(QString::fromLatin1(kProbeModeVariable), QString::fromLatin1(mode));
+    QProcess child;
+    child.setProcessEnvironment(environment);
+    child.setProcessChannelMode(QProcess::MergedChannels);
+    child.start(QCoreApplication::applicationFilePath(), QStringList{});
+    if (!child.waitForFinished(30000) || child.exitStatus() != QProcess::NormalExit) {
+        child.kill();
+        child.waitForFinished();
+        *output = child.readAll();
+        return -1;
+    }
+    *output = child.readAll();
+    return child.exitCode();
 }
 #endif
 
@@ -87,6 +175,9 @@ void HeapAllocatorTest::reportsWhetherTheLibraryIsGlibc() {
     const FerrousHeap::AllocatorSetup setup = FerrousHeap::configureAllocator(nullptr);
 #if defined(__GLIBC__)
     QVERIFY(setup.supported);
+#if defined(FERROUS_SANITIZED_ALLOCATOR)
+    QSKIP("the sanitizer's allocator intercepts mallopt");
+#endif
     QVERIFY(setup.mmapThresholdFixed);
     QVERIFY(setup.trimThresholdFixed);
 #else
@@ -98,22 +189,20 @@ void HeapAllocatorTest::reportsWhetherTheLibraryIsGlibc() {
 }
 
 void HeapAllocatorTest::largeBlocksStayMappedAfterALargerFree() {
-#if defined(FERROUS_HAVE_MALLINFO2)
-    FerrousHeap::configureAllocator(nullptr);
-    constexpr std::size_t large = 256 * 1024;
-    QVERIFY(mmappedGrowthFor(large) >= large);
-    // A free of a mapped block raises glibc's adaptive threshold to its size;
-    // with the threshold fixed, the next large block is mapped all the same
-    // and goes back to the system when it is freed.
-    QVERIFY(mmappedGrowthFor(8 * 1024 * 1024) >= 8 * 1024 * 1024);
-    QVERIFY(mmappedGrowthFor(large) >= large);
-    const std::size_t before = mmappedBytes();
-    g_sink = std::malloc(large);
-    std::free(g_sink);
-    g_sink = nullptr;
-    QCOMPARE(mmappedBytes(), before);
-    // Smaller blocks still come from the arenas.
-    QCOMPARE(mmappedGrowthFor(FerrousHeap::kMmapThresholdBytes / 2), std::size_t{0});
+#if defined(FERROUS_SANITIZED_ALLOCATOR)
+    QSKIP("the sanitizer's allocator replaces glibc's, which mallinfo2 reports on");
+#elif defined(FERROUS_PROBE_ALLOCATOR)
+    QByteArray output;
+    // With the policy, large blocks are mapped and go back when freed, and
+    // small ones still come from the arenas.
+    int result = runProbeChild("configured", &output);
+    QVERIFY2(result == ProbeLargeBlocksMapped,
+        qPrintable(QStringLiteral("probe exit %1: %2").arg(result).arg(QString::fromLocal8Bit(output))));
+    // Without it, glibc's adaptive threshold serves the large block from an
+    // arena, so the probe tells the two apart.
+    result = runProbeChild("unconfigured", &output);
+    QVERIFY2(result == ProbeLargeBlockFromArena,
+        qPrintable(QStringLiteral("probe exit %1: %2").arg(result).arg(QString::fromLocal8Bit(output))));
 #else
     QSKIP("needs glibc 2.33 or later for mallinfo2");
 #endif
@@ -125,6 +214,9 @@ void HeapAllocatorTest::leavesThresholdsTheUserTuned() {
 #if defined(__GLIBC__)
     QVERIFY(setup.supported);
     QVERIFY(!setup.mmapThresholdFixed);
+#if defined(FERROUS_SANITIZED_ALLOCATOR)
+    QSKIP("the sanitizer's allocator intercepts mallopt");
+#endif
     QVERIFY(setup.trimThresholdFixed);
 #else
     QVERIFY(!setup.supported);
@@ -253,6 +345,17 @@ void HeapAllocatorTest::trimsWithTheSystemAllocatorOnlyOnGlibc() {
     FerrousHeap::trimFreedHeap();
 }
 
-QTEST_GUILESS_MAIN(HeapAllocatorTest)
+int main(int argc, char *argv[]) {
+#if defined(FERROUS_PROBE_ALLOCATOR)
+    // The probe child: first thing, before Qt allocates.
+    if (const char *mode = std::getenv(kProbeModeVariable)) {
+        return runAllocatorProbe(std::strcmp(mode, "configured") == 0);
+    }
+#endif
+    QCoreApplication app(argc, argv);
+    HeapAllocatorTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 
 #include "tst_heap_allocator.moc"
