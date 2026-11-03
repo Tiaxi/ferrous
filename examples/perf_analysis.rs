@@ -65,8 +65,8 @@ struct Options {
     timeout: Duration,
     /// Seek targets as fractions of the duration.
     seeks: Vec<f64>,
-    /// Seconds to wait after each seek.
-    settle: f64,
+    /// Seconds to wait after each seek, in order; the last for the rest.
+    settle: Vec<f64>,
     /// Seconds of playback before the first seek.
     warmup: f64,
     /// Wait for the analysis to go idle before the first seek.
@@ -81,6 +81,17 @@ struct Options {
     hold: f64,
 }
 
+impl Options {
+    /// The seconds to wait after seek `index`, or in each state of `idle`.
+    fn settle_for(&self, index: usize) -> f64 {
+        self.settle
+            .get(index)
+            .or(self.settle.last())
+            .copied()
+            .unwrap_or(3.0)
+    }
+}
+
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
         file: PathBuf::new(),
@@ -91,7 +102,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         zoom: 1.0,
         timeout: Duration::from_secs(600),
         seeks: vec![0.6, 0.2, 0.8, 0.4, 0.65],
-        settle: 3.0,
+        settle: vec![3.0],
         warmup: 4.0,
         idle: false,
         volume: 0.15,
@@ -131,7 +142,13 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                     .collect::<Result<_, _>>()
                     .map_err(|_| "bad --seeks")?;
             }
-            "--settle" => options.settle = value()?.parse().map_err(|_| "bad --settle")?,
+            "--settle" => {
+                options.settle = value()?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "bad --settle")?;
+            }
             "--warmup" => options.warmup = value()?.parse().map_err(|_| "bad --warmup")?,
             "--idle" => options.idle = true,
             "--volume" => options.volume = value()?.parse().map_err(|_| "bad --volume")?,
@@ -556,10 +573,10 @@ struct SeekTiming {
     /// The session reset for the seek; without one, the columns at the
     /// target were there already.
     reset: bool,
-    /// The first chunk that covers the target column.
+    /// The first chunk that covers the target column, since the last reset.
     target_chunk: Option<Duration>,
     /// When every column of a centered view of the target, at zoom 1,
-    /// had arrived since the reset.
+    /// had arrived since the last reset.
     view_complete: Option<Duration>,
     /// Snapshots the bridge sent while the seek settled.
     snapshots: u64,
@@ -655,7 +672,11 @@ fn run_seek(options: &Options) -> Result<Fields, String> {
     let targets: Vec<f64> = options.seeks.iter().map(|f| f * bridge.duration).collect();
     let timings: Vec<SeekTiming> = targets
         .into_iter()
-        .map(|target| measure_seek(&mut bridge, target, options.settle, options.width))
+        .enumerate()
+        .map(|(index, target)| {
+            let settle = options.settle_for(index);
+            measure_seek(&mut bridge, target, settle, options.width)
+        })
         .collect();
     let _ = bridge.handle.shutdown();
 
@@ -767,36 +788,43 @@ fn measure_seek(bridge: &mut Bridge, target: f64, settle: f64, width: u32) -> Se
                 start,
                 count,
             } => {
-                timing.reset |= reset;
-                if timing.reset {
+                if reset {
+                    // The view starts over: what came before is gone.
+                    timing.reset = true;
                     timing.first_chunk.get_or_insert(elapsed);
-                    // Column indices are far below 2^52, and targets positive.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let target_column = (target * bridge.column_rate) as u64;
-                    if count > 0 && start <= target_column && target_column < start + count {
-                        timing.target_chunk.get_or_insert(elapsed);
+                    timing.target_chunk = None;
+                    timing.view_complete = None;
+                    view = None;
+                }
+                // Columns of the session decoding before the seek count
+                // too: a seek it takes without a reset leaves the view to
+                // them.
+                // Column indices are far below 2^52, and targets positive.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let target_column = (target * bridge.column_rate) as u64;
+                if count > 0 && start <= target_column && target_column < start + count {
+                    timing.target_chunk.get_or_insert(elapsed);
+                }
+                let (left, seen) = view.get_or_insert_with(|| {
+                    let (left, columns) =
+                        view_columns(target_column, width, bridge.duration, bridge.column_rate);
+                    view_missing = columns;
+                    (left, vec![false; columns])
+                });
+                for column in start..start + count {
+                    let Some(offset) = column
+                        .checked_sub(*left)
+                        .and_then(|offset| usize::try_from(offset).ok())
+                    else {
+                        continue;
+                    };
+                    if let Some(slot) = seen.get_mut(offset).filter(|slot| !**slot) {
+                        *slot = true;
+                        view_missing -= 1;
                     }
-                    let (left, seen) = view.get_or_insert_with(|| {
-                        let (left, columns) =
-                            view_columns(target_column, width, bridge.duration, bridge.column_rate);
-                        view_missing = columns;
-                        (left, vec![false; columns])
-                    });
-                    for column in start..start + count {
-                        let Some(offset) = column
-                            .checked_sub(*left)
-                            .and_then(|offset| usize::try_from(offset).ok())
-                        else {
-                            continue;
-                        };
-                        if let Some(slot) = seen.get_mut(offset).filter(|slot| !**slot) {
-                            *slot = true;
-                            view_missing -= 1;
-                        }
-                    }
-                    if view_missing == 0 && count > 0 {
-                        timing.view_complete.get_or_insert(elapsed);
-                    }
+                }
+                if view_missing == 0 && count > 0 {
+                    timing.view_complete.get_or_insert(elapsed);
                 }
             }
             Seen::Nothing => {}
@@ -1099,7 +1127,7 @@ fn run_idle(options: &Options) -> Result<Fields, String> {
         handle.send(1, &[])?;
         std::thread::sleep(Duration::from_secs_f64(options.warmup));
         let hold = Duration::from_secs_f64(options.hold);
-        let settle = Duration::from_secs_f64(options.settle);
+        let settle = Duration::from_secs_f64(options.settle_for(0));
         let mut fields = Fields::new();
         field(&mut fields, "mode", "\"idle\"");
         field(

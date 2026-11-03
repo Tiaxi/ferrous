@@ -1855,12 +1855,14 @@ impl AnalysisRuntimeState {
 
         if self.display_mode == SpectrogramDisplayMode::Centered {
             // Windowed centered: check if the seek target is within the
-            // already-decoded window before restarting the session.  The
+            // window the session decodes before restarting it.  The
             // window extends from the session start for approximately
             // 2× the visible screen width plus lookahead (~10 s).  If
-            // the seek is inside, the data is already in the ring buffer
-            // — just send a PositionUpdate so the display shifts without
-            // a costly session restart.
+            // the seek is inside, the session takes it: it keeps its
+            // columns when what it has decoded covers the view, and
+            // otherwise seeks to the view itself, without a restart.
+            // Only the worker knows what it has decoded so far, which
+            // after a recent restart can be far less than the window.
             // Use the larger of the current margin and the session's
             // original margin.  The widget width can change between
             // session start and seek (e.g. fullscreen toggle), which
@@ -1885,13 +1887,12 @@ impl AnalysisRuntimeState {
                 Self::centered_visible_left_edge_seconds(position_seconds, margin, ctx);
             let retained_window_start = self.centered_retained_start_seconds(ctx);
             if visible_left >= retained_window_start && position_seconds <= window_end {
-                // Seek within decoded window — cheap position update.
-                let adjusted = position_seconds + self.spectrogram_position_offset;
+                // A seek, not a position: a position the session has not
+                // decoded up to yet would have it decode every column
+                // before the playhead's.
                 let _ = ctx
                     .spectrogram_cmd_tx
-                    .send(SpectrogramWorkerCommand::PositionUpdate {
-                        position_seconds: adjusted,
-                    });
+                    .send(SpectrogramWorkerCommand::Seek { position_seconds });
             } else {
                 // Seek outside decoded window — restart session and clear
                 // the ring buffer.
@@ -3290,9 +3291,10 @@ mod tests {
     }
 
     #[test]
-    fn centered_seek_within_window_sends_position_update() {
-        // Seeking within the decoded window should send a cheap
-        // PositionUpdate, not restart the session.
+    fn centered_seek_within_window_is_left_to_the_session() {
+        // Seeking within the session's window does not restart it: the
+        // session keeps its columns if they cover the view, and seeks to
+        // the view otherwise.  A position would never seek forward to it.
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
@@ -3320,8 +3322,8 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "centered seek within window should send PositionUpdate, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::Seek { position_seconds } if position_seconds == 60.0),
+            "centered seek within window should go to the session, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
@@ -3498,8 +3500,8 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "small seek after a fast centered restart should reuse the replenishing window, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
+            "small seek after a fast centered restart should go to the running session, got {cmd:?}"
         );
         assert!(
             event_rx.try_recv().is_err(),
@@ -3755,8 +3757,8 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "seek near EOF whose detached left edge is covered should reuse the window, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
+            "seek near EOF whose detached left edge is covered should go to the running session, got {cmd:?}"
         );
         assert!(
             event_rx.try_recv().is_err(),
@@ -3802,8 +3804,8 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "seek should stay within the already-decoded max-width window, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
+            "seek within the max-width window should go to the running session, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
@@ -3847,8 +3849,8 @@ mod tests {
 
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
-            matches!(cmd, SpectrogramWorkerCommand::PositionUpdate { .. }),
-            "seek should stay within the already-decoded raw-surround window, got {cmd:?}"
+            matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
+            "seek within the raw-surround window should go to the running session, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
@@ -5651,10 +5653,10 @@ mod tests {
                     "{commands:?}"
                 );
             } else {
-                // Queued columns belong to the decoded window, which the
-                // target is inside: nothing restarts or clears.
+                // The target is inside the session's window: the session
+                // takes the seek, and nothing restarts or clears.
                 assert!(
-                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::PositionUpdate {
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek {
                         position_seconds
                     }] if (*position_seconds - 5.0).abs() < 0.001),
                     "{commands:?}"
