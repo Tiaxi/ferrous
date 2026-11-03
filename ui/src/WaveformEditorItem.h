@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "PlaybackClock.h"
+#include "PlaybackFrameScheduler.h"
 
 class QHoverEvent;
 class QMouseEvent;
@@ -35,7 +36,7 @@ class QPainter;
 class QQuickWindow;
 class QWheelEvent;
 
-class WaveformEditorItem : public QQuickItem {
+class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Client {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
     Q_PROPERTY(QByteArray overviewData READ overviewData WRITE setOverviewData NOTIFY overviewDataChanged)
@@ -237,6 +238,15 @@ private:
     std::pair<double, double> visibleRangeForZoomLocked(
         double zoomLevel, qint64 nowNs) const;
     std::pair<double, double> visibleRangeForZoomLocked(double zoomLevel) const;
+    // The device columns of the view, which may end in a fraction of one.
+    double deviceColumnsLocked() const;
+    // Where a view of `span` seconds that follows the playhead at
+    // `position` starts, before it is kept within the track: on the
+    // column of the track's grid that keeps the playhead on the view's
+    // middle column. It moves a whole device column at a time, when the
+    // playhead reaches its next column, so that the frames between are
+    // the same.
+    double followingStartLocked(double span, double position) const;
     std::pair<double, double> visibleRangeLocked(qint64 nowNs) const;
     std::pair<double, double> visibleRangeLocked() const;
     std::pair<double, double> detailRequestVisibleRangeLocked() const;
@@ -277,14 +287,18 @@ private:
     // keeps its course.
     qint64 playbackFrameDelayNsLocked(qint64 nowNs) const;
     // Where playback makes a frame of this view, with the playhead at
-    // `position`, out of date: the playhead's next pixel, or the view
-    // starting to follow it. NaN while the view moves with playback, and
-    // infinity if it never does.
+    // `position`, out of date: the playhead's next device column, where
+    // the view moves on or the playhead does, or where the playhead
+    // leaves the view. Infinity if it never does.
     double frameChangeSecondsLocked(
         double visibleStart, double visibleEnd, double position, int width) const;
-    // Asks for the next frame of playback, now or once it would differ.
-    void schedulePlaybackFrame(qint64 delayNs);
-    void requestPlaybackFrame();
+    // Asks for the next frame of playback, now or once it would differ,
+    // delayNs from nowNs; see playbackFrameDelayNsLocked.
+    void schedulePlaybackFrame(qint64 delayNs, qint64 nowNs);
+    void requestPlaybackFrame() override;
+    void cancelPlaybackFrame();
+    // The window's scheduler, or the item's own outside a window.
+    PlaybackFrameScheduler *frameScheduler();
     bool cacheCoversRangeLocked(double start, double end) const;
     void invalidateCacheLocked();
     void clearStagedCacheLocked();
@@ -418,12 +432,12 @@ private:
     QMetaObject::Connection m_frameSwappedConnection;
     QMetaObject::Connection m_windowVisibilityConnection;
     QTimer m_requestTimer;
-    // Wakes the next playback frame of a view that stays still.
-    QTimer m_playbackFrameTimer;
+    // Wakes the next playback frame, with the other views of the window.
+    QPointer<PlaybackFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
     quint64 m_playbackFrameRequests{0};
-    // frameChangeSecondsLocked of the frame painted last; NaN, moving,
-    // until the first.
+    // frameChangeSecondsLocked of the frame painted last; NaN, due at
+    // once, until the first and while playback tiles are still drawn.
     double m_paintedFrameChangeSeconds{std::numeric_limits<double>::quiet_NaN()};
     std::atomic_bool m_guiContinuationQueued{false};
     std::atomic_bool m_guiRepaintPending{false};

@@ -6462,88 +6462,12 @@ void SpectrogramItem::cancelPlaybackFrame() {
     }
 }
 
-SpectrogramFrameScheduler *SpectrogramItem::frameScheduler() {
+PlaybackFrameScheduler *SpectrogramItem::frameScheduler() {
     if (m_frameScheduler == nullptr) {
         QObject *owner = window();
-        if (owner == nullptr) {
-            owner = this;
-        }
-        m_frameScheduler = owner->findChild<SpectrogramFrameScheduler *>(
-            QString(), Qt::FindDirectChildrenOnly);
-        if (m_frameScheduler == nullptr) {
-            m_frameScheduler = new SpectrogramFrameScheduler(owner);
-        }
+        m_frameScheduler = PlaybackFrameScheduler::of(owner != nullptr ? owner : this);
     }
     return m_frameScheduler;
-}
-
-SpectrogramFrameScheduler::SpectrogramFrameScheduler(QObject *parent)
-    : QObject(parent),
-      m_nowNs(monotonicNowNs) {
-    m_timer.setSingleShot(true);
-    m_timer.setTimerType(Qt::PreciseTimer);
-    connect(&m_timer, &QTimer::timeout, this, &SpectrogramFrameScheduler::fire);
-}
-
-void SpectrogramFrameScheduler::schedule(SpectrogramItem *item, qint64 dueNs, qint64 nowNs) {
-    // Whole milliseconds, rounded up: the frame is not due before.
-    const qint64 dueMs = dueNs / 1'000'000 + (dueNs % 1'000'000 > 0 ? 1 : 0);
-    const auto it = m_dueMs.constFind(item);
-    if (it != m_dueMs.cend() && it.value() == dueMs && m_timer.isActive()) {
-        return;
-    }
-    m_dueMs.insert(item, dueMs);
-    arm(nowNs);
-}
-
-void SpectrogramFrameScheduler::cancel(const SpectrogramItem *item) {
-    if (m_dueMs.remove(const_cast<SpectrogramItem *>(item)) == 0) {
-        return;
-    }
-    if (m_dueMs.isEmpty()) {
-        m_timer.stop();
-    }
-}
-
-qint64 SpectrogramFrameScheduler::dueNs(const SpectrogramItem *item) const {
-    const auto it = m_dueMs.constFind(const_cast<SpectrogramItem *>(item));
-    return it != m_dueMs.cend() ? it.value() * 1'000'000 : -1;
-}
-
-void SpectrogramFrameScheduler::arm(qint64 nowNs) {
-    if (m_dueMs.isEmpty()) {
-        m_timer.stop();
-        return;
-    }
-    const qint64 firstMs = *std::min_element(m_dueMs.cbegin(), m_dueMs.cend());
-    if (m_timer.isActive() && m_armedMs == firstMs) {
-        return;
-    }
-    const qint64 untilNs = std::max<qint64>(0, firstMs * 1'000'000 - nowNs);
-    const qint64 untilMs = untilNs / 1'000'000 + (untilNs % 1'000'000 > 0 ? 1 : 0);
-    m_armedMs = firstMs;
-    m_timer.start(static_cast<int>(std::min<qint64>(untilMs, 3'600'000)));
-}
-
-void SpectrogramFrameScheduler::fire() {
-    // The timer fires at the millisecond it was armed for or after it, as
-    // late as the event loop lets it: every frame due by then is asked for
-    // now, in the same frame of the window.
-    const qint64 nowNs = std::max(m_nowNs(), m_armedMs * 1'000'000);
-    const qint64 reachedMs = nowNs / 1'000'000;
-    QVector<SpectrogramItem *> due;
-    for (auto it = m_dueMs.begin(); it != m_dueMs.end();) {
-        if (it.value() <= reachedMs) {
-            due.push_back(it.key());
-            it = m_dueMs.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    arm(nowNs);
-    for (SpectrogramItem *item : due) {
-        item->requestPlaybackFrame();
-    }
 }
 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

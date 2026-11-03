@@ -114,6 +114,7 @@ qt_add_executable(ferrous
     src/MprisController.cpp
     src/CoverRevisionLinks.cpp
     src/PlaybackClock.cpp
+    src/PlaybackFrameScheduler.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
     src/SpectrogramItem.cpp
@@ -429,6 +430,7 @@ if(BUILD_TESTING)
         src/MprisController.cpp
         src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -523,6 +525,7 @@ if(BUILD_TESTING)
         src/MprisController.cpp
         src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -625,6 +628,7 @@ if(BUILD_TESTING)
         src/MprisController.cpp
         src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp
@@ -684,6 +688,7 @@ if(BUILD_TESTING)
         src/LibraryTreeModel.cpp
         src/Localization.cpp
         src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
         src/QmlTypes.cpp
         src/SpectrogramItem.cpp
         src/WaveformEditorItem.cpp
@@ -790,6 +795,7 @@ if(BUILD_TESTING)
         src/MprisController.cpp
         src/CoverRevisionLinks.cpp
         src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
         src/SpectrogramItem.cpp

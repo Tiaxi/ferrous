@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "PlaybackClock.h"
+#include "PlaybackFrameScheduler.h"
 
 class QQuickWindow;
 class QSGNode;
@@ -206,40 +207,7 @@ struct SpectrogramSceneStatistics {
     qint64 overlayTextureBytes{0};
 };
 
-class SpectrogramItem;
-
-// Wakes the spectrogram panes of a window for their next playback frames,
-// with one timer for all of them. Frames are due on a grid of whole
-// milliseconds of the monotonic clock, rounded up, so panes whose pixels
-// change at the same time ask for the same frame of the window.
-class SpectrogramFrameScheduler : public QObject {
-    Q_OBJECT
-
-public:
-    explicit SpectrogramFrameScheduler(QObject *parent = nullptr);
-
-    // Asks for `item`'s frame at dueNs, nowNs being now, in place of the
-    // one it asked for before.
-    void schedule(SpectrogramItem *item, qint64 dueNs, qint64 nowNs);
-    void cancel(const SpectrogramItem *item);
-    // The time `item`'s frame is due at, rounded up to its millisecond,
-    // or -1 for none.
-    qint64 dueNs(const SpectrogramItem *item) const;
-    bool timerActive() const { return m_timer.isActive(); }
-
-private:
-    void arm(qint64 nowNs);
-    void fire();
-
-    // Now on the monotonic clock; tests set their own.
-    std::function<qint64()> m_nowNs;
-    QTimer m_timer;
-    QHash<SpectrogramItem *, qint64> m_dueMs;
-    // The millisecond the timer fires for.
-    qint64 m_armedMs{0};
-};
-
-class SpectrogramItem : public QQuickItem {
+class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client {
     Q_OBJECT
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY dbRangeChanged)
     Q_PROPERTY(bool logScale READ logScale WRITE setLogScale NOTIFY logScaleChanged)
@@ -380,8 +348,6 @@ protected:
     void releaseResources() override;
 
 private:
-    friend class SpectrogramFrameScheduler;
-
     static constexpr int kGradientTableSize = 2048;
     // The columns of a canvas texture tile for the software renderer, whose
     // textures cannot be updated in place: each is made again when one of
@@ -577,7 +543,7 @@ private:
     // Asks for the next frame of playback, now or once it would differ
     // from the last one.
     void schedulePlaybackFrame();
-    void requestPlaybackFrame();
+    void requestPlaybackFrame() override;
     void cancelPlaybackFrame();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
@@ -606,7 +572,7 @@ private:
         qint64 firstColumn,
         qint64 maxColumnBefore) const;
     // The window's scheduler, or the item's own outside a window.
-    SpectrogramFrameScheduler *frameScheduler();
+    PlaybackFrameScheduler *frameScheduler();
     // How long until the last frame would change, in nanoseconds from
     // nowNs: zero for now, or -1 for not while the clock keeps its course.
     qint64 playbackFrameDelayNsLocked(qint64 nowNs) const;
@@ -851,7 +817,7 @@ private:
     };
     IdleView m_idleView;
     // Wakes playback frames until then; see schedulePlaybackFrame.
-    QPointer<SpectrogramFrameScheduler> m_frameScheduler;
+    QPointer<PlaybackFrameScheduler> m_frameScheduler;
     // How many playback frames the item has asked for, for tests.
     quint64 m_playbackFrameRequests{0};
     // How many frames steady data chunks have asked for, for tests.

@@ -1362,6 +1362,10 @@ private slots:
     void waveformEditorIdleViewWaitsForThePlayheadsNextPixel();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
+    void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
+    void waveformEditorFollowingViewDrawsOnlyAtPixelSteps();
+    void waveformEditorFollowingViewShowsJumpsAndPausesAtOnce();
+    void waveformEditorInteractionDrawsAtOnceWhileFollowing();
     void waveformEditorCachesAtDevicePixels();
     void waveformEditorScaleChangeRedrawsItsCacheOnce();
     void waveformItemCachesAtDevicePixels();
@@ -9563,7 +9567,7 @@ public:
     int visibleChangedListeners() const { return receivers(SIGNAL(visibleChanged(bool))); }
 };
 
-// A track that the editor, zoomed in, follows on every presented frame.
+// A track that the editor, zoomed in, follows: 12.8 pixels a second.
 void playFollowingThePlayhead(WaveformEditorItem &item) {
     item.setWidth(400);
     item.setHeight(100);
@@ -9848,21 +9852,26 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     item.handleWindowFrameSwapped();
     // The whole track is in view: no frame until pixel 101 at 10.1 s.
     QCOMPARE(item.m_playbackFrameRequests, requested);
-    QVERIFY(item.m_playbackFrameTimer.isActive());
     // Due in 80 ms, rounded up to whole milliseconds; the timer then wakes it.
-    const int dueInMs = item.m_playbackFrameTimer.interval();
-    QVERIFY2(dueInMs == 80 || dueInMs == 81, qPrintable(QString::number(dueInMs)));
+    const auto dueInMs = [&item, &time]() {
+        const qint64 due = item.m_frameScheduler != nullptr
+            ? item.m_frameScheduler->dueNs(&item) : -1;
+        return due >= 0 ? (due - time.nowNs + 999'999) / 1'000'000 : -1;
+    };
+    QVERIFY2(dueInMs() == 80 || dueInMs() == 81, qPrintable(QString::number(dueInMs())));
+    QVERIFY(item.m_frameScheduler->timerActive());
     QTRY_COMPARE(item.m_playbackFrameRequests, requested + 1);
 
-    // Zoomed in, the view follows the playhead every frame.
+    // Zoomed in, the view follows the playhead a device pixel at a time:
+    // 12.5 s over 1000 pixels, the next in 12.5 ms.
     item.setZoomLevel(8.0);
     setTestPosition(item, 50.0);
     const quint64 zoomed = item.m_playbackFrameRequests;
-    for (int frame = 1; frame <= 3; ++frame) {
-        paint();
-        item.handleWindowFrameSwapped();
-        QCOMPARE(item.m_playbackFrameRequests, zoomed + frame);
-    }
+    paint();
+    item.handleWindowFrameSwapped();
+    QCOMPARE(item.m_playbackFrameRequests, zoomed);
+    // Rounded up to the scheduler's milliseconds, from the test's time.
+    QVERIFY2(dueInMs() == 13 || dueInMs() == 14, qPrintable(QString::number(dueInMs())));
     // Until the playhead reaches the middle of a view that starts at the
     // track's start, the view stays where it is.
     setTestPosition(item, 6.2);
@@ -9870,8 +9879,7 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     paint();
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, atStart);
-    QVERIFY(item.m_playbackFrameTimer.isActive());
-    QVERIFY(item.m_playbackFrameTimer.interval() <= 13);
+    QVERIFY(dueInMs() >= 0 && dueInMs() <= 14);
     // A course correction reschedules without a frame; a seek shows at once.
     PlaybackClock &clock = testClock(item);
     PlaybackSample sample;
@@ -9881,12 +9889,17 @@ void WaveformSmokeTest::waveformEditorIdleViewWaitsForThePlayheadsNextPixel() {
     sample.trackToken = clock.state().trackToken;
     clock.applySample(sample, false);
     QCOMPARE(item.m_playbackFrameRequests, atStart);
-    QVERIFY(item.m_playbackFrameTimer.isActive());
+    QVERIFY(dueInMs() >= 0);
     sample.positionSeconds = 1.0;
     clock.applySample(sample, true);
     QCOMPARE(item.m_playbackFrameRequests, atStart + 1);
+    QCOMPARE(dueInMs(), -1);
+    paint();
+    item.handleWindowFrameSwapped();
+    QVERIFY(dueInMs() >= 0);
     item.setPlaying(false);
-    QVERIFY(!item.m_playbackFrameTimer.isActive());
+    QCOMPARE(dueInMs(), -1);
+    QVERIFY(!item.m_frameScheduler->timerActive());
 }
 
 void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
@@ -9916,7 +9929,7 @@ void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     const quint64 requested = item.m_playbackFrameRequests;
     item.handleWindowFrameSwapped();
     QCOMPARE(item.m_playbackFrameRequests, requested + 1);
-    QVERIFY(!item.m_playbackFrameTimer.isActive());
+    QVERIFY(item.m_frameScheduler == nullptr || item.m_frameScheduler->dueNs(&item) < 0);
     // A course correction then does not postpone it either.
     {
         QPainter painter(&canvas);
@@ -9956,12 +9969,428 @@ void WaveformSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {
     QTest::qWait(1000);
     QVERIFY2(frames >= 2 && frames <= 7, qPrintable(QString::number(frames)));
     const int idleFrames = frames;
-    // Zoomed in, the view scrolls every frame.
+    // Zoomed in, the view scrolls a pixel at a time, 32 a second, and
+    // draws a frame for each, not one for every frame the window could.
     item.setZoomLevel(8.0);
     QTest::qWait(300);
     frames = 0;
     QTest::qWait(1000);
-    QVERIFY2(frames >= 4 * std::max(idleFrames, 5), qPrintable(QString::number(frames)));
+    QVERIFY2(frames >= 2 * std::max(idleFrames, 5) && frames <= 40,
+        qPrintable(QString::number(frames)));
+}
+
+namespace {
+// The frames of a window for a waveform editor that plays on the test's
+// time: it draws a frame whenever the editor asks for one, then tells the
+// editor that the frame is on screen, as the window's frameSwapped does.
+struct WaveformFrameLoop {
+    WaveformEditorItem &item;
+    TestTime &time;
+    double scale{1.0};
+    QImage shown;
+    quint64 seen{0};
+    int frames{0};
+    // Set when the editor kept asking for frames without end.
+    bool runaway{false};
+
+    WaveformFrameLoop(WaveformEditorItem &editor, TestTime &testTime)
+        : item(editor), time(testTime) {
+        scale = editor.window() != nullptr ? editor.window()->effectiveDevicePixelRatio() : 1.0;
+        item.frameScheduler()->m_nowNs = [&testTime]() { return testTime.nowNs; };
+        seen = item.m_playbackFrameRequests - 1;
+    }
+
+    QImage draw() const {
+        const int width = static_cast<int>(std::floor(item.width()));
+        const int height = static_cast<int>(std::floor(item.height()));
+        QImage image(QSize(static_cast<int>(std::lround(width * scale)),
+                         static_cast<int>(std::lround(height * scale))),
+            QImage::Format_RGB32);
+        image.setDevicePixelRatio(scale);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        item.paint(&painter);
+        return image;
+    }
+
+    // Wakes the frame due by now, if any, and draws the frames asked for.
+    void settle() {
+        PlaybackFrameScheduler *scheduler = item.m_frameScheduler;
+        if (scheduler != nullptr) {
+            const qint64 due = scheduler->dueNs(&item);
+            if (due >= 0 && due <= time.nowNs) {
+                scheduler->fire();
+            }
+        }
+        for (int i = 0; item.m_playbackFrameRequests != seen; ++i) {
+            if (i >= 64) {
+                runaway = true;
+                return;
+            }
+            seen = item.m_playbackFrameRequests;
+            shown = draw();
+            ++frames;
+            item.handleWindowFrameSwapped();
+        }
+    }
+
+    // Plays `seconds` a millisecond at a time. Each frame must move the
+    // view on by a device column, with the playhead on the view's middle
+    // one, `middle`, and between frames the view must be the one shown.
+    // Returns an error, or none.
+    QString play(double seconds, int middle, int *framesDrawn = nullptr) {
+        const int before = frames;
+        QImage previous = shown;
+        for (int ms = 1; ms <= std::lround(seconds * 1000.0); ++ms) {
+            time.advance(0.001);
+            const int drawn = frames;
+            settle();
+            if (runaway) {
+                return QStringLiteral("frames without end at %1 ms").arg(ms);
+            }
+            if (frames > drawn + 1) {
+                return QStringLiteral("%1 frames at %2 ms").arg(frames - drawn).arg(ms);
+            }
+            if (frames > drawn && middle >= 0 && !movedOneColumn(previous, shown, middle)) {
+                return QStringLiteral("the frame at %1 ms did not move the view by a column").arg(ms);
+            }
+            previous = shown;
+            if (draw() != shown) {
+                return QStringLiteral("the view changed without a frame at %1 ms").arg(ms);
+            }
+        }
+        if (framesDrawn != nullptr) {
+            *framesDrawn = frames - before;
+        }
+        return QString();
+    }
+
+    // Whether `after` is `before` moved left by a device column, but for
+    // the columns of the playhead, at `middle`, and next to it, and the
+    // dashed centre line of the one channel, which stays with the view.
+    bool movedOneColumn(const QImage &before, const QImage &after, int middle) const {
+        const int margin = 3 * static_cast<int>(std::ceil(scale));
+        const int centre = static_cast<int>(std::floor(item.height())) / 2;
+        const int centreTop = static_cast<int>(std::floor(centre * scale));
+        const int centreBottom = static_cast<int>(std::ceil((centre + 1) * scale));
+        for (int x = 0; x + 1 < after.width(); ++x) {
+            if (std::abs(x - middle) <= margin || std::abs(x + 1 - middle) <= margin) {
+                continue;
+            }
+            for (int y = 0; y < after.height(); ++y) {
+                if (y >= centreTop && y < centreBottom) {
+                    continue;
+                }
+                if (after.pixel(x, y) != before.pixel(x + 1, y)) {
+                    return false;
+                }
+            }
+        }
+        return before != after;
+    }
+};
+
+// An overview that varies along the track, so that a view moved by a
+// pixel differs.
+QByteArray varyingOverview() {
+    QByteArray overview(8192, Qt::Uninitialized);
+    for (int i = 0; i < overview.size(); ++i) {
+        overview[i] = static_cast<char>(128 + 100 * std::sin(i * 0.05));
+    }
+    return overview;
+}
+
+// Detail for a 250 s mono track at 44.1 kHz, 256 frames a point, which a
+// 31.25 s view draws with playback tiles.
+void giveWholeTrackDetail(WaveformEditorItem &item) {
+    QMutexLocker lock(&item.m_stateMutex);
+    auto &detail = item.m_detail;
+    detail.sampleRateHz = 44'100;
+    detail.channelCount = 1;
+    detail.startSeconds = 0.0;
+    detail.framesPerPoint = 256;
+    detail.pointCount = 43'067;
+    detail.endSeconds = detail.pointCount * 256.0 / 44'100.0;
+    detail.extrema.resize(static_cast<std::size_t>(detail.pointCount) * 2);
+    for (int point = 0; point < detail.pointCount; ++point) {
+        const float peak = 0.5F + 0.4F * static_cast<float>(std::sin(point * 0.013));
+        detail.extrema[static_cast<std::size_t>(point) * 2] = -peak;
+        detail.extrema[static_cast<std::size_t>(point) * 2 + 1] = peak * 0.8F;
+    }
+    detail.downmixExtrema = detail.extrema;
+    item.m_channelCount = 1;
+    item.m_sampleRateHz = 44'100;
+}
+} // namespace
+
+void WaveformSmokeTest::waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<bool>("tiles");
+    QTest::newRow("1x overview") << 1.0 << 400 << false;
+    QTest::newRow("1x odd width") << 1.0 << 401 << false;
+    QTest::newRow("1x tiles") << 1.0 << 400 << true;
+    QTest::newRow("1.25x tiles") << 1.25 << 400 << true;
+    QTest::newRow("1.5x overview") << 1.5 << 400 << false;
+    QTest::newRow("1.5x tiles") << 1.5 << 400 << true;
+    QTest::newRow("2x tiles") << 2.0 << 400 << true;
+    // 401 logical pixels end in a fraction of a device pixel at 1.25 and
+    // 1.5: the raster's pixels are still the view's device columns.
+    for (const double oddScale : {1.25, 1.5, 2.0}) {
+        for (const bool oddTiles : {false, true}) {
+            const QByteArray name = QByteArray::number(oddScale) + "x odd width "
+                + (oddTiles ? "tiles" : "overview");
+            QTest::newRow(name.constData()) << oddScale << 401 << oddTiles;
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformEditorFollowingViewDrawsOnlyAtPixelSteps() {
+    // A 250 s track zoomed in 8 times: 31.25 s over the view's device
+    // columns, which follows the playhead from 100 s. It asks for a frame
+    // only when the playhead reaches its next column; each frame moves the
+    // view on by exactly a column, and the playhead stays on the view's
+    // middle column. In between, a frame would be the same.
+    QFETCH(double, scale);
+    QFETCH(int, width);
+    QFETCH(bool, tiles);
+    TestTime time;
+    time.nowNs = time.nowNs / 1'000'000 * 1'000'000;
+    QQuickWindow window;
+    std::unique_ptr<WaveformEditorItem> standalone;
+    if (scale != 1.0) {
+        if (!showOnScreen(window, scale)) {
+            QSKIP("Needs the offscreen platform's HiDPI test screens");
+        }
+    } else {
+        standalone = std::make_unique<WaveformEditorItem>();
+    }
+    WaveformEditorItem &item =
+        standalone ? *standalone : *new WaveformEditorItem(window.contentItem());
+    time.drive(item);
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDurationSeconds(250.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(varyingOverview());
+    item.setZoomLevel(8.0);
+    setTestPosition(item, 100.0);
+    item.setPlaying(true);
+    setTestPosition(item, 100.0);
+    if (tiles) {
+        giveWholeTrackDetail(item);
+    }
+    WaveformFrameLoop loop(item, time);
+    loop.settle();
+    QVERIFY(!loop.runaway);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QCOMPARE(item.playbackTilesEligibleLocked(start, end), tiles);
+    }
+    const double deviceColumns = width * scale;
+    const double column = 31.25 / deviceColumns;
+    const int middle = static_cast<int>(std::floor(deviceColumns / 2.0));
+    PlaybackClock &clock = testClock(item);
+    const auto playheadColumn = [&]() {
+        return static_cast<int>(std::floor(clock.positionAt(time.nowNs) / column + 1e-6));
+    };
+    const int firstColumn = playheadColumn();
+    int frames = 0;
+    const QString error = loop.play(1.0, middle, &frames);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    // 12.8 to 25.6 columns a second: one frame for each.
+    QCOMPARE(frames, playheadColumn() - firstColumn);
+    QVERIFY(frames >= 12);
+
+    // On a column's edge, the view is where one centred on the playhead
+    // is, as before it moved a column at a time.
+    const double onEdge = (std::floor(clock.positionAt(time.nowNs) / column) + 1.0 + 1e-4) * column;
+    setTestPosition(item, onEdge);
+    loop.settle();
+    QMutexLocker lock(&item.m_stateMutex);
+    const double start = item.visibleRangeLocked().first;
+    const double centred = onEdge - 31.25 * (middle / deviceColumns);
+    QVERIFY2(std::abs(start - centred) < column * 1e-3,
+        qPrintable(QStringLiteral("start=%1 centred=%2").arg(start, 0, 'f', 9).arg(centred, 0, 'f', 9)));
+}
+
+void WaveformSmokeTest::waveformEditorFollowingViewShowsJumpsAndPausesAtOnce() {
+    // 31.25 s over 400 pixels: a column every 78.125 ms. A course
+    // correction only moves the next frame; a pause, a resume, a seek and a
+    // track change, gapless or Repeat-One, show at once, and the frames
+    // after them again come a column at a time.
+    TestTime time;
+    time.nowNs = time.nowNs / 1'000'000 * 1'000'000;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDurationSeconds(250.0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(varyingOverview());
+    item.setZoomLevel(8.0);
+    setTestPosition(item, 100.0);
+    item.setPlaying(true);
+    setTestPosition(item, 100.0);
+    WaveformFrameLoop loop(item, time);
+    loop.settle();
+    PlaybackClock &clock = testClock(item);
+    constexpr double kColumn = 31.25 / 400.0;
+    const auto playheadColumn = [&]() {
+        return static_cast<int>(std::floor(clock.positionAt(time.nowNs) / kColumn + 1e-6));
+    };
+    // Plays on, checking that its frames come a column at a time.
+    const auto playColumns = [&](double seconds, int middle) {
+        const int first = playheadColumn();
+        int frames = 0;
+        const QString error = loop.play(seconds, middle, &frames);
+        if (!error.isEmpty()) {
+            return error;
+        }
+        const int columns = playheadColumn() - first;
+        return frames == columns
+            ? QString()
+            : QStringLiteral("%1 frames for %2 columns").arg(frames).arg(columns);
+    };
+    const auto sample = [&](double position, bool advancing, quint64 token = 0) {
+        PlaybackSample s;
+        s.positionSeconds = position;
+        s.sampledAtNs = time.nowNs;
+        s.advancing = advancing;
+        s.trackToken = token != 0 ? token : clock.state().trackToken;
+        return s;
+    };
+    QString error = playColumns(0.3, 200);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A correction of 4 ms: no frame now, the next where the playhead's
+    // column changes on the new course.
+    const quint64 requested = item.m_playbackFrameRequests;
+    clock.applySample(sample(clock.positionAt(time.nowNs) + 0.004, true), false);
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QVERIFY(item.m_frameScheduler->dueNs(&item) >= 0);
+    error = playColumns(0.3, 200);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A pause shows at once, then nothing moves.
+    int frames = loop.frames;
+    item.setPlaying(false);
+    clock.applySample(sample(clock.positionAt(time.nowNs), false), false);
+    loop.settle();
+    QVERIFY(loop.frames > frames);
+    QCOMPARE(item.m_frameScheduler->dueNs(&item), qint64(-1));
+    frames = loop.frames;
+    error = loop.play(0.5, -1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(loop.frames, frames);
+    // A resume too, and playback goes on a column at a time.
+    item.setPlaying(true);
+    clock.applySample(sample(clock.positionAt(time.nowNs), true), false);
+    loop.settle();
+    QVERIFY(loop.frames > frames);
+    error = playColumns(0.3, 200);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A seek.
+    frames = loop.frames;
+    clock.applySample(sample(30.0, true), true);
+    loop.settle();
+    QCOMPARE(loop.frames, frames + 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const double start = item.visibleRangeLocked().first;
+        QVERIFY(std::abs(start - (30.0 - 15.625)) <= kColumn);
+    }
+    error = playColumns(0.3, 200);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A gapless successor: another track, from its start, where the view
+    // holds still and the playhead moves a column at a time.
+    frames = loop.frames;
+    const quint64 nextTrack = clock.state().trackToken + 1;
+    clock.applySample(sample(0.01, true, nextTrack), false);
+    loop.settle();
+    QCOMPARE(loop.frames, frames + 1);
+    error = playColumns(0.3, -1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    // Repeat-One: the same track again, also from its start, here after
+    // it has played on to the middle of the view.
+    clock.applySample(sample(40.0, true), true);
+    loop.settle();
+    error = playColumns(0.2, 200);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    frames = loop.frames;
+    clock.applySample(sample(0.0, true, nextTrack + 1), false);
+    loop.settle();
+    QCOMPARE(loop.frames, frames + 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.visibleRangeLocked().first, 0.0);
+    }
+    error = playColumns(0.3, -1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+}
+
+void WaveformSmokeTest::waveformEditorInteractionDrawsAtOnceWhileFollowing() {
+    // 10000 s over 400 pixels, zoomed in twice and following the playhead:
+    // the next pixel is 25 s away, so any frame in the meantime is one an
+    // interaction asked for. Each draws at once.
+    QQuickWindow window;
+    window.resize(400, 100);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    int frames = 0;
+    connect(&window, &QQuickWindow::frameSwapped, &window, [&frames]() { ++frames; });
+    auto *item = new WaveformEditorItem(window.contentItem());
+    item->setWidth(400);
+    item->setHeight(100);
+    item->setDurationSeconds(20'000.0);
+    item->setOverviewComplete(true);
+    item->setOverviewData(varyingOverview());
+    item->setZoomLevel(2.0);
+    item->setCrosshairEnabled(true);
+    setTestPosition(*item, 10'000.0);
+    item->setPlaying(true);
+    setTestPosition(*item, 10'000.0);
+    const auto settlesWithoutFrames = [&]() {
+        QTest::qWait(200);
+        frames = 0;
+        QTest::qWait(300);
+        return frames == 0;
+    };
+    const auto drawsAtOnce = [&](const std::function<void()> &interact) {
+        QTest::qWait(100);
+        frames = 0;
+        interact();
+        return QTest::qWaitFor([&frames]() { return frames > 0; }, 500);
+    };
+    QVERIFY(settlesWithoutFrames());
+    QVERIFY(item->m_frameScheduler != nullptr);
+    QCOMPARE(item->m_frameScheduler->parent(), &window);
+    QVERIFY(item->m_frameScheduler->dueNs(item) >= 0);
+    QVERIFY(drawsAtOnce([item]() { item->setHoverPosition(120.0, 40.0, true); }));
+    QVERIFY(drawsAtOnce([item]() { item->setHoverPosition(121.0, 41.0, true); }));
+    QVERIFY(drawsAtOnce([item]() { item->setHoverPosition(121.0, 41.0, false); }));
+    QVERIFY(drawsAtOnce([item]() { item->setZoomLevel(4.0); }));
+    QVERIFY(settlesWithoutFrames());
+    QVERIFY(drawsAtOnce([item]() { setTestPositionAgo(*item, 5'000.0, 0.0); }));
+    QVERIFY(drawsAtOnce([item]() { item->setWidth(380); }));
+    QVERIFY(settlesWithoutFrames());
+
+    // In another window, such as the fullscreen viewer, it waits on that
+    // window's schedule.
+    QQuickWindow viewer;
+    viewer.resize(400, 100);
+    viewer.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+    PlaybackFrameScheduler *scheduler = item->m_frameScheduler;
+    item->setParentItem(viewer.contentItem());
+    QCOMPARE(scheduler->dueNs(item), qint64(-1));
+    QTRY_VERIFY(item->m_frameScheduler != nullptr && item->m_frameScheduler->dueNs(item) >= 0);
+    QCOMPARE(item->m_frameScheduler->parent(), &viewer);
+    delete item;
+    QCOMPARE(scheduler->dueNs(item), qint64(-1));
 }
 
 void WaveformSmokeTest::waveformEditorPlaybackBenchmark() {
@@ -12084,7 +12513,7 @@ void SpectrogramSmokeTest::spectrogramDataAheadOfTheShownFrameAsksForNoFrame() {
 void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesDueFramesTogether() {
     // Frames due within the same millisecond come together, from one
     // timer; a later one waits for its own.
-    SpectrogramFrameScheduler scheduler;
+    PlaybackFrameScheduler scheduler;
     SpectrogramItem first;
     SpectrogramItem second;
     SpectrogramItem third;
@@ -12126,7 +12555,7 @@ void SpectrogramSmokeTest::spectrogramFrameSchedulerWakesEveryFrameDueByALateTim
     // Frames due at 100 and 110 ms, and a timer the event loop delivers at
     // 125 ms: both are due, and come in one frame of the window. One due
     // at 140 ms waits for its own, 15 ms from then.
-    SpectrogramFrameScheduler scheduler;
+    PlaybackFrameScheduler scheduler;
     const qint64 startNs = monotonicNowNs() / 1'000'000 * 1'000'000;
     qint64 nowNs = startNs;
     scheduler.m_nowNs = [&nowNs]() { return nowNs; };
@@ -12213,7 +12642,7 @@ void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
     for (SpectrogramItem *pane : panes) {
         pane->handleWindowAfterAnimating();
     }
-    SpectrogramFrameScheduler *scheduler = panes[0]->m_frameScheduler;
+    PlaybackFrameScheduler *scheduler = panes[0]->m_frameScheduler;
     QVERIFY(scheduler != nullptr);
     QCOMPARE(scheduler->parent(), &window);
     QCOMPARE(panes[1]->m_frameScheduler.data(), scheduler);
