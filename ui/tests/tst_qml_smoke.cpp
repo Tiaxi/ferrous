@@ -1219,6 +1219,9 @@ private slots:
     void spectrogramOverlayBenchmark();
     void spectrogramPlaybackBenchmark();
     void spectrogramSampleRateSyncsFromPrecomputedChunks();
+    void spectrogramFrequencyCapEndsTheBandAtTheCap();
+    void spectrogramBandFollowsTheFftSizeOfColumnsWithTheSameBins();
+    void spectrogramGaplessSwitchBetweenCappedAndWholeBandsStartsAFreshRing();
     void spectrogramPreservesNativeRateAcrossModesAndTrackTransitions();
     void spectrogramPlaybackRateSwitchKeepsTheSessionRate();
     void spectrogramSessionRateChangeRemapsTheSpectrogram();
@@ -1779,6 +1782,7 @@ Item {
         property int fftSize: 8192
         property real dbRange: 90
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property bool showFps: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
@@ -1840,6 +1844,7 @@ Item {
         function setFftSize(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
+        function setSpectrogramFrequencyCap(value) {}
         function setShowFps(value) {}
         function setShowSpectrogramCrosshair(value) {}
         function setShowSpectrogramScale(value) {}
@@ -2357,6 +2362,7 @@ Item {
         property int spectrogramDisplayMode: 0
         property real dbRange: 90
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property bool showFps: false
         property int sampleRateHz: 48000
         property bool showSpectrogramCrosshair: true
@@ -2478,6 +2484,7 @@ Window {
         property int spectrogramDisplayMode: 0
         property real dbRange: 90
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property bool showFps: false
         property int sampleRateHz: 48000
         property bool showSpectrogramCrosshair: true
@@ -2587,6 +2594,7 @@ Item {
         property int spectrogramDisplayMode: 0
         property real dbRange: 90
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property bool showFps: false
         property int sampleRateHz: 48000
         property bool showSpectrogramCrosshair: true
@@ -14773,6 +14781,168 @@ void SpectrogramSmokeTest::spectrogramDynamicRangePreservesSilence() {
     }
 }
 
+namespace {
+
+// What a pane shows of its band: the top row's frequency, which the hover
+// readout gives, the rows' bins, and the frequencies of the grid's lines.
+struct SpectrogramBand {
+    double topHz{-1.0};
+    std::vector<int> rowBins;
+    QList<double> lineHz;
+    QStringList labels;
+};
+
+SpectrogramBand spectrogramBand(SpectrogramItem &item, int height) {
+    SpectrogramBand band;
+    // Takes the chunks' band, as a frame does, and maps the rows.
+    band.topHz = item.pixelToFrequencyHz(0, height);
+    QMutexLocker lock(&item.m_stateMutex);
+    band.rowBins = item.m_iToBin;
+    item.updateFreqGridOverlayLocked(200, height);
+    for (const QRect &line : std::as_const(item.m_freqGrid.lines)) {
+        band.lineHz.append(item.pixelToFrequencyHzLocked(line.y(), height));
+    }
+    for (const SpectrogramOverlayImage &image : std::as_const(item.m_freqGrid.images)) {
+        band.labels.append(image.text);
+    }
+    return band;
+}
+
+// A pane of a 96 kHz session whose columns hold `bins` bins of an
+// `fftSize`-point spectrum (0: not given, as before the frequency cap).
+void feedBand(SpectrogramItem &item, int bins, int fftSize, quint64 generation) {
+    const int hop = static_cast<int>(ferrous_ffi_spectrogram_reference_hop(96000));
+    item.feedPrecomputedChunk(QByteArray(bins, '\x80'), bins, 0, 1, 0, 1000, 96000, hop,
+        false, true, generation, true, generation, 0, fftSize);
+}
+
+} // namespace
+
+void SpectrogramSmokeTest::spectrogramFrequencyCapEndsTheBandAtTheCap() {
+    constexpr int kHeight = 400;
+    for (const bool logarithmic : {false, true}) {
+        const auto pane = [logarithmic](SpectrogramItem &item) {
+            item.setWidth(200);
+            item.setHeight(kHeight);
+            item.setSampleRateHz(96000);
+            item.setLogScale(logarithmic);
+            item.setGridEnabled(true);
+        };
+        SpectrogramItem before;
+        SpectrogramItem uncapped;
+        SpectrogramItem capped;
+        pane(before);
+        pane(uncapped);
+        pane(capped);
+        // FFT 2048: bins of 46.875 Hz; with the cap, the 513 up to 24 kHz.
+        feedBand(before, 1025, 0, 1);
+        feedBand(uncapped, 1025, 2048, 1);
+        feedBand(capped, 513, 2048, 1);
+        const SpectrogramBand old = spectrogramBand(before, kHeight);
+        const SpectrogramBand full = spectrogramBand(uncapped, kHeight);
+        const SpectrogramBand band = spectrogramBand(capped, kHeight);
+
+        // Without the cap nothing changes.
+        QCOMPARE(full.topHz, old.topHz);
+        QCOMPARE(full.rowBins, old.rowBins);
+        QCOMPARE(full.lineHz, old.lineHz);
+        QCOMPARE(full.labels, old.labels);
+
+        // The top row is the cap: in linear mode its bin, in log mode the
+        // bin of the top row's frequency, a row's step below it.
+        if (logarithmic) {
+            const double rowStep = std::pow(2.0, std::log2(24000.0 / 25.0) / kHeight);
+            QVERIFY2(band.topHz <= 24000.0 && band.topHz >= 24000.0 / rowStep - 46.875,
+                qPrintable(QString::number(band.topHz)));
+            const double fullStep = std::pow(2.0, std::log2(48000.0 / 25.0) / kHeight);
+            QVERIFY(full.topHz <= 48000.0 && full.topHz >= 48000.0 / fullStep - 46.875);
+        } else {
+            QCOMPARE(band.topHz, 24000.0);
+            QCOMPARE(full.topHz, 48000.0);
+            QCOMPARE(band.rowBins.back(), 512);
+        }
+        QCOMPARE(static_cast<int>(band.rowBins.size()), kHeight);
+        // Every row maps into the band, from the same low end.
+        QCOMPARE(band.rowBins.front(), full.rowBins.front());
+        QVERIFY(*std::max_element(band.rowBins.begin(), band.rowBins.end()) <= 512);
+
+        // The labels stop below the cap, and go on above it without it.
+        QVERIFY(!band.lineHz.isEmpty());
+        QCOMPARE(band.labels.size(), band.lineHz.size());
+        for (const double hz : std::as_const(band.lineHz)) {
+            QVERIFY2(hz >= 0.0 && hz < 24000.0, qPrintable(QString::number(hz)));
+        }
+        if (!logarithmic) {
+            // 5, 10, 15 and 20 kHz, spaced for 60 Hz a pixel.
+            QCOMPARE(band.lineHz.size(), 4);
+            QVERIFY(std::abs(band.lineHz.back() - 20000.0) < 60.0);
+            QVERIFY(*std::max_element(full.lineHz.begin(), full.lineHz.end()) > 24000.0);
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramBandFollowsTheFftSizeOfColumnsWithTheSameBins() {
+    // 1,025 bins are the whole spectrum of FFT 2048, and with the cap the
+    // band up to 24 kHz of FFT 4096: the mapping, grid and readout follow
+    // the FFT size even when the bin count stays.
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setSampleRateHz(96000);
+    item.setGridEnabled(true);
+    feedBand(item, 1025, 2048, 1);
+    const SpectrogramBand full = spectrogramBand(item, 100);
+    QCOMPARE(full.topHz, 48000.0);
+    feedBand(item, 1025, 4096, 2);
+    const SpectrogramBand capped = spectrogramBand(item, 100);
+    QCOMPARE(capped.topHz, 24000.0);
+    QCOMPARE(capped.rowBins, full.rowBins);
+    for (const double hz : std::as_const(capped.lineHz)) {
+        QVERIFY(hz < 24000.0);
+    }
+    QVERIFY(capped.lineHz != full.lineHz);
+    feedBand(item, 1025, 2048, 3);
+    QCOMPARE(spectrogramBand(item, 100).topHz, 48000.0);
+}
+
+void SpectrogramSmokeTest::spectrogramGaplessSwitchBetweenCappedAndWholeBandsStartsAFreshRing() {
+    // A gapless switch from a capped 96 kHz track to a 44.1 kHz one, or
+    // back, changes the rate, so the backend starts a session for it that
+    // keeps the rolling history (no clear). Its columns have another bin
+    // count, which the ring cannot hold beside the old ones: the ring
+    // starts over with the new band rather than draw the old columns on it.
+    struct Track {
+        int rate;
+        int bins;
+        double topHz;
+    };
+    const Track capped96{96000, 513, 24000.0};
+    const Track whole44{44100, 1025, 22050.0};
+    for (const auto &[from, to] : {std::pair{capped96, whole44}, std::pair{whole44, capped96}}) {
+        SpectrogramItem item;
+        item.setWidth(200);
+        item.setHeight(100);
+        item.setDisplayMode(0);
+        const auto feed = [&item](const Track &track, quint64 token, bool clearHistory) {
+            const int hop = static_cast<int>(
+                ferrous_ffi_spectrogram_reference_hop(static_cast<std::uint32_t>(track.rate)));
+            item.feedPrecomputedChunk(QByteArray(track.bins * 10, '\x80'), track.bins, 0, 10, 0,
+                1000, track.rate, hop, false, true, token, clearHistory, token, 0, 2048);
+        };
+        feed(from, 1, true);
+        QCOMPARE(item.m_ring.bins(), from.bins);
+        QCOMPARE(item.pixelToFrequencyHz(0, 100), from.topHz);
+        feed(to, 2, false);
+        QCOMPARE(item.m_ring.bins(), to.bins);
+        QCOMPARE(item.m_ringOldestSeq, qint64(0));
+        QCOMPARE(item.m_ringWriteSeq, qint64(10));
+        for (int slot = 0; slot < 10; ++slot) {
+            QCOMPARE(item.m_ringTrackToken[static_cast<size_t>(slot)], quint64(2));
+        }
+        QCOMPARE(item.pixelToFrequencyHz(0, 100), to.topHz);
+    }
+}
+
 void SpectrogramSmokeTest::spectrogramSampleRateSyncsFromPrecomputedChunks() {
     SpectrogramItem item;
     // Start with default 48 kHz property — simulates QML binding.
@@ -16572,6 +16742,7 @@ Window {
         property int spectrogramDisplayMode: 1
         property real dbRange: 90
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property bool showFps: false
         property int sampleRateHz: 48000
         property bool showSpectrogramCrosshair: false

@@ -60,7 +60,7 @@
 // A draw pass holds its own reference, so later setting changes cannot mutate
 // the inputs used by that pass. The global cache retains only weak references.
 struct SpectrogramProjection {
-    using Key = std::tuple<int, int, int, int, int, bool, double, bool>;
+    using Key = std::tuple<int, int, int, int, int, int, bool, double, bool>;
     Key key;
     std::vector<std::pair<int, int>> binRanges;
     std::array<QRgb, 256> colors;
@@ -2597,7 +2597,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
-    quint64 generation, int sessionWidth) {
+    quint64 generation, int sessionWidth, int fftSize) {
     QMutexLocker lock(&m_stateMutex);
     if (m_storageReleased) {
         // No one sees it: it keeps no columns until it is shown again.
@@ -2861,6 +2861,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetClearHistory = false;
         m_precomputedReady = false;
         m_precomputedBinsPerColumn = bins;
+        m_precomputedFftSize = std::max(0, fftSize);
         if (totalEstimate > 0) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
         }
@@ -3037,6 +3038,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     }
 
     m_precomputedBinsPerColumn = bins;
+    m_precomputedFftSize = bins > 0 ? std::max(0, fftSize) : 0;
     // Accept the latest estimate for the active session.  Same-hop
     // increases are legitimate for raw-surround files: the worker can
     // start with a fallback/header estimate, then raise it once a
@@ -3460,6 +3462,7 @@ SpectrogramItem::ShownDataState SpectrogramItem::shownDataStateLocked() const {
     state.hopSize = m_precomputedHopSize;
     state.sampleRateHz = m_precomputedSampleRateHz;
     state.binsPerColumn = m_precomputedBinsPerColumn;
+    state.fftSize = m_precomputedFftSize;
     state.zoomFillActive = m_zoomFillActive;
     state.awaitingZoomData = m_awaitingZoomData;
     state.resetPending = m_precomputedResetPending;
@@ -3508,6 +3511,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedMaxColumnIndex = -1;
     m_precomputedCommittedToken = 0;
     m_precomputedBinsPerColumn = 0;
+    m_precomputedFftSize = 0;
     // Don't zero m_precomputedTotalColumnsEstimate here — it represents
     // the track length and should persist across resets. Zeroing it
     // creates a window where the worker's doubled estimate bypasses
@@ -3802,6 +3806,8 @@ void SpectrogramItem::appendRows(const QVariantList &rows) {
         }
         if (m_binsPerColumn <= 0) {
             m_binsPerColumn = static_cast<int>(mapped.size());
+            // Rows are whole spectra.
+            m_fftSize = 0;
             invalidateMapping();
         }
         if (static_cast<int>(mapped.size()) != m_binsPerColumn) {
@@ -4011,6 +4017,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             if (m_binsPerColumn != m_precomputedBinsPerColumn) {
                 m_binsPerColumn = m_precomputedBinsPerColumn;
                 needInvalidateMapping = true;
+            }
+            if (m_fftSize != m_precomputedFftSize) {
+                // The same bins can be another band: the grid and the
+                // readout follow the mapping.
+                m_fftSize = m_precomputedFftSize;
+                needInvalidateMapping = true;
+                m_freqGridDirty = true;
+                m_crosshairDirty = true;
             }
             if (m_precomputedSampleRateHz > 0
                 && m_sampleRateHz != m_precomputedSampleRateHz) {
@@ -4727,6 +4741,12 @@ double SpectrogramItem::pixelToFrequencyHz(int pixelY, int viewHeight) const {
         self->m_binsPerColumn = m_precomputedBinsPerColumn;
         needInvalidateMapping = true;
     }
+    if (m_precomputedBinsPerColumn > 0 && m_fftSize != m_precomputedFftSize) {
+        self->m_fftSize = m_precomputedFftSize;
+        self->m_freqGridDirty = true;
+        self->m_crosshairDirty = true;
+        needInvalidateMapping = true;
+    }
     if (m_precomputedSampleRateKnown
         && m_sampleRateHz != m_precomputedSampleRateHz) {
         self->m_sampleRateHz = m_precomputedSampleRateHz;
@@ -4910,10 +4930,16 @@ double SpectrogramItem::pixelToFrequencyHzLocked(int pixelY, int viewHeight) con
         return -1.0;
     }
     const int bin = m_iToBin[static_cast<size_t>(row)];
-    const double freqRes =
-        static_cast<double>(m_sampleRateHz)
-        / (2.0 * static_cast<double>(std::max(1, m_binsPerColumn - 1)));
-    return static_cast<double>(bin) * freqRes;
+    return static_cast<double>(bin) * binHzLocked();
+}
+
+double SpectrogramItem::binHzLocked() const {
+    const int fftSize = m_fftSize > 0 ? m_fftSize : 2 * std::max(1, m_binsPerColumn - 1);
+    return static_cast<double>(m_sampleRateHz) / static_cast<double>(fftSize);
+}
+
+double SpectrogramItem::topFrequencyHzLocked() const {
+    return static_cast<double>(std::max(0, m_binsPerColumn - 1)) * binHzLocked();
 }
 
 int SpectrogramItem::frequencyToPixelYLocked(double freqHz, int viewHeight) const {
@@ -4921,9 +4947,7 @@ int SpectrogramItem::frequencyToPixelYLocked(double freqHz, int viewHeight) cons
         || static_cast<int>(m_iToBin.size()) != viewHeight) {
         return -1;
     }
-    const double freqRes =
-        static_cast<double>(m_sampleRateHz)
-        / (2.0 * static_cast<double>(std::max(1, m_binsPerColumn - 1)));
+    const double freqRes = binHzLocked();
     const int targetBin = std::clamp(
         static_cast<int>(std::round(freqHz / freqRes)), 0, m_binsPerColumn - 1);
     // m_iToBin is non-decreasing: binary search for targetBin.
@@ -5065,12 +5089,13 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     constexpr int pad = kGridLabelPadding;
     constexpr int minPixelSpacing = 50;
 
-    const double nyquist = 0.5 * static_cast<double>(m_sampleRateHz);
+    // Nyquist, or with the frequency cap, the cap.
+    const double topHz = topFrequencyHzLocked();
 
     static constexpr double kFreqCandidates[] = {
         50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000
     };
-    const double hzPerPixel = nyquist / static_cast<double>(logicalHeight);
+    const double hzPerPixel = topHz / static_cast<double>(logicalHeight);
     const double freqInterval = selectGridInterval(
         kFreqCandidates,
         static_cast<int>(std::size(kFreqCandidates)),
@@ -5078,7 +5103,7 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
         minPixelSpacing);
 
     int prevPixelY = -1;
-    for (double freq = freqInterval; freq < nyquist; freq += freqInterval) {
+    for (double freq = freqInterval; freq < topHz; freq += freqInterval) {
         const int pixelY = frequencyToPixelYLocked(freq, height);
         if (pixelY < 0 || pixelY >= height) {
             continue;
@@ -5451,11 +5476,10 @@ void SpectrogramItem::ensureMapping(int height) {
     m_iToBin.resize(static_cast<size_t>(height));
     m_lowResEnd = 0;
     if (m_logScale) {
-        const double nyquist = std::max(0.5 * static_cast<double>(m_sampleRateHz), kMinFreqHz * 1.1);
-        const double logStep = (std::log2(nyquist) - std::log2(kMinFreqHz)) / std::max(1, height);
-        const double freqRes = std::max(
-            1.0,
-            static_cast<double>(m_sampleRateHz) / (2.0 * std::max(1, m_binsPerColumn - 1)));
+        // Up to the top bin: Nyquist, or with the frequency cap, the cap.
+        const double topHz = std::max(topFrequencyHzLocked(), kMinFreqHz * 1.1);
+        const double logStep = (std::log2(topHz) - std::log2(kMinFreqHz)) / std::max(1, height);
+        const double freqRes = std::max(1.0, binHzLocked());
         for (int i = 0; i < height; ++i) {
             const double freq = std::pow(2.0, static_cast<double>(i) * logStep + std::log2(kMinFreqHz));
             const int bin = std::clamp(static_cast<int>(std::lround(freq / freqRes)), 0, m_binsPerColumn - 1);
@@ -5633,7 +5657,7 @@ std::shared_ptr<const SpectrogramProjection> SpectrogramItem::precomputedProject
     }
     const SpectrogramProjection::Key key{
         height, m_mappingHeight, m_binsPerColumn,
-        m_precomputedBinsPerColumn, m_sampleRateHz, m_logScale,
+        m_precomputedBinsPerColumn, m_sampleRateHz, m_fftSize, m_logScale,
         m_dbRange, m_channelMuted};
     if (m_precomputedProjection && m_precomputedProjection->key == key) {
         return m_precomputedProjection;

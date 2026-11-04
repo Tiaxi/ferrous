@@ -100,6 +100,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool showSpectrogramCrosshair READ showSpectrogramCrosshair NOTIFY snapshotChanged)
     Q_PROPERTY(bool showSpectrogramScale READ showSpectrogramScale NOTIFY snapshotChanged)
     Q_PROPERTY(bool spectrogramZoomEnabled READ spectrogramZoomEnabled NOTIFY snapshotChanged)
+    // Whether the spectrogram shows only the audible band of the track's
+    // rate family: up to 22.05 kHz for the 44.1 kHz family, 24 kHz for
+    // other rates, or Nyquist if that is lower.
+    Q_PROPERTY(bool spectrogramFrequencyCap READ spectrogramFrequencyCap NOTIFY snapshotChanged)
     Q_PROPERTY(bool systemMediaControlsEnabled READ systemMediaControlsEnabled NOTIFY snapshotChanged)
     Q_PROPERTY(bool libraryWatchEnabled READ libraryWatchEnabled NOTIFY snapshotChanged)
     // The widths of the queue's columns the user resized, in logical pixels,
@@ -222,6 +226,7 @@ public:
     bool showSpectrogramCrosshair() const;
     bool showSpectrogramScale() const;
     bool spectrogramZoomEnabled() const;
+    bool spectrogramFrequencyCap() const;
     bool systemMediaControlsEnabled() const;
     bool libraryWatchEnabled() const;
     QVariantMap queueColumnWidths() const;
@@ -298,6 +303,7 @@ public:
     Q_INVOKABLE void setShowSpectrogramCrosshair(bool value);
     Q_INVOKABLE void setShowSpectrogramScale(bool value);
     Q_INVOKABLE void setSpectrogramZoomEnabled(bool value);
+    Q_INVOKABLE void setSpectrogramFrequencyCap(bool value);
     Q_INVOKABLE void setSpectrogramZoomLevel(float level);
     Q_INVOKABLE void setSpectrogramWidgetWidth(int width);
     Q_INVOKABLE void registerSpectrogramItem(QObject *item, int channelIndex);
@@ -563,6 +569,9 @@ private:
         quint64 generation{0};
         // The width the session decodes for (0 if unknown).
         int widgetWidth{0};
+        // The FFT size of the columns' spectra (0 if unknown): a bin is
+        // sampleRate / fftSize Hz, whatever the bin count.
+        int fftSize{0};
         qsizetype dataBytes{0};
     };
 
@@ -780,6 +789,7 @@ private:
     bool m_showSpectrogramCrosshair{false};
     bool m_showSpectrogramScale{false};
     bool m_spectrogramZoomEnabled{true};
+    bool m_spectrogramFrequencyCap{false};
     bool m_systemMediaControlsEnabled{true};
     bool m_lastFmScrobblingEnabled{false};
     bool m_lastFmBuildConfigured{false};
