@@ -346,7 +346,8 @@ pub(super) struct SessionHandoff {
 
 /// What the worker tells the analysis thread about its sessions: the
 /// format of each file it opens, read from the decoder rather than probed,
-/// the continuations it cannot make, and the files it cannot read.
+/// the continuations it cannot make, the files it cannot read, and the
+/// sessions that end with no other to follow.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SessionReport {
     /// The session of `generation` opened `path`, for `track_token`.
@@ -383,6 +384,12 @@ pub(super) enum SessionReport {
         path: PathBuf,
         error: String,
     },
+    /// The session of `generation` ended while it was current, with no
+    /// other to follow it: it failed, whether it could open its file or
+    /// not, or playback switched to a continuation it rejected. The worker
+    /// waits for the next session, and takes no seek until then. A session
+    /// that reaches the end of its file parks there instead, taking seeks.
+    Ended { generation: u64 },
 }
 
 impl SessionReport {
@@ -391,7 +398,8 @@ impl SessionReport {
             Self::Opened { generation, .. }
             | Self::Repositioned { generation, .. }
             | Self::ContinuationRejected { generation, .. }
-            | Self::Failed { generation, .. } => *generation,
+            | Self::Failed { generation, .. }
+            | Self::Ended { generation } => *generation,
         }
     }
 }
@@ -805,6 +813,39 @@ pub(super) fn stop_spectrogram_worker_for_test(status: &SpectrogramWorkerStatus)
     assert!(worker.join().is_err(), "the test worker panics");
 }
 
+/// Make a session's decode of a file fail.
+#[cfg(test)]
+pub(crate) mod decode_test_hooks {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// Files whose next session fails to decode, after how many packets.
+    static READ_FAILURES: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
+
+    /// Make the next session of `path` fail to decode once it has read
+    /// `after_packets` packets.
+    pub(crate) fn fail_reads_of(path: &Path, after_packets: usize) {
+        READ_FAILURES
+            .lock()
+            .expect("read failures")
+            .push((path.to_path_buf(), after_packets));
+    }
+
+    /// Whether the read after `packets` packets of `path` fails, which it
+    /// does only once.
+    pub(super) fn take_read_failure(path: &Path, packets: usize) -> bool {
+        let mut failures = READ_FAILURES.lock().expect("read failures");
+        let Some(index) = failures
+            .iter()
+            .position(|(failing, after)| failing == path && packets >= *after)
+        else {
+            return false;
+        };
+        failures.remove(index);
+        true
+    }
+}
+
 /// Make starting the spectrogram decode thread fail.
 #[cfg(test)]
 pub(crate) mod spawn_test_hooks {
@@ -847,7 +888,10 @@ fn spectrogram_worker_loop(
         };
 
         match next.cmd {
-            SpectrogramWorkerCommand::NewTrack { .. } => {
+            SpectrogramWorkerCommand::NewTrack {
+                generation: session_generation,
+                ..
+            } => {
                 next_cmd = run_spectrogram_session(
                     next,
                     cmd_rx,
@@ -857,6 +901,13 @@ fn spectrogram_worker_loop(
                     track_duration_ms_out,
                     reports,
                 );
+                // A superseded session ends for the newer one; any other
+                // end leaves the worker with no session.
+                if next_cmd.is_none() && generation.load(Ordering::Relaxed) == session_generation {
+                    let _ = reports.send(SessionReport::Ended {
+                        generation: session_generation,
+                    });
+                }
             }
             SpectrogramWorkerCommand::ContinueWithFile { path, .. } => {
                 // No session to continue: the analysis thread starts one,
@@ -1788,6 +1839,12 @@ fn session_decode_loop(
                 return None;
             }
             continue;
+        }
+
+        #[cfg(test)]
+        if decode_test_hooks::take_read_failure(&session.path, session.packet_counter) {
+            session.failure = Some("decoding failed (injected)".to_string());
+            return None;
         }
 
         // 4. Decode next batch of audio frames.
@@ -3324,6 +3381,97 @@ mod tests {
             session.columns_produced += 1;
             assert_eq!(throttle_wait(&mut session, start), Some(Duration::MAX));
         }
+    }
+
+    #[test]
+    fn a_session_that_ends_without_a_successor_is_reported_and_one_parked_at_its_end_is_not() {
+        let fixture = include_bytes!("fixtures/seek-tone.mp3");
+        let folder = crate::paths::test_root().join(format!("session-ends-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        let missing = folder.join("missing.mp3");
+        let parked = folder.join("parked.mp3");
+        let failing = folder.join("failing.mp3");
+        std::fs::write(&parked, fixture).expect("fixture");
+        std::fs::write(&failing, fixture).expect("fixture");
+        decode_test_hooks::fail_reads_of(&failing, 2);
+        let new_track = |generation, path: &Path| SpectrogramWorkerCommand::NewTrack {
+            track_token: 1,
+            generation,
+            path: path.to_path_buf(),
+            fft_size: 512,
+            hop_size: 64,
+            zoom_level: 1.0,
+            widget_width: 320,
+            channel_count: 1,
+            start_seconds: 0.0,
+            target_position_seconds: 0.0,
+            emit_initial_reset: true,
+            clear_history_on_reset: true,
+            view_mode: SpectrogramViewMode::Downmix,
+            display_mode: SpectrogramDisplayMode::Rolling,
+            handoff: SessionHandoff::default(),
+        };
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let (report_tx, reports) = unbounded();
+        let generation = Arc::new(AtomicU64::new(1));
+        let worker_generation = Arc::clone(&generation);
+        let worker = std::thread::spawn(move || {
+            spectrogram_worker_loop(
+                &command_rx,
+                &events,
+                &worker_generation,
+                &AtomicU64::new(0),
+                &AtomicU64::new(0),
+                &report_tx,
+            );
+        });
+        let next_report = || reports.recv_timeout(OUTPUT_WAIT).expect("a report");
+
+        // A file that cannot be opened: playback tells the user, and the
+        // worker reports only that the session ended.
+        commands.send(new_track(1, &missing)).expect("send");
+        assert_eq!(next_report(), SessionReport::Ended { generation: 1 });
+
+        // A session at the end of its file parks there, and takes a seek.
+        generation.store(2, Ordering::Relaxed);
+        commands.send(new_track(2, &parked)).expect("send");
+        assert!(matches!(
+            next_report(),
+            SessionReport::Opened { generation: 2, .. }
+        ));
+        wait_for_chunk(&event_rx, |chunk| chunk.generation == 2 && chunk.complete)
+            .expect("the end of the file");
+        commands
+            .send(SpectrogramWorkerCommand::Seek {
+                position_seconds: 0.25,
+            })
+            .expect("send");
+        assert!(matches!(
+            next_report(),
+            SessionReport::Repositioned { generation: 2, .. }
+        ));
+
+        // A session that cannot read its audio reports why, then its end.
+        generation.store(3, Ordering::Relaxed);
+        commands.send(new_track(3, &failing)).expect("send");
+        assert!(matches!(
+            next_report(),
+            SessionReport::Opened { generation: 3, .. }
+        ));
+        assert!(matches!(
+            next_report(),
+            SessionReport::Failed { generation: 3, ref error, .. }
+                if error == "decoding failed (injected)"
+        ));
+        assert_eq!(next_report(), SessionReport::Ended { generation: 3 });
+        drop(commands);
+        worker.join().expect("join worker");
+        assert!(
+            reports.try_iter().all(|report| report.generation() == 3),
+            "nothing about the parked session"
+        );
+        std::fs::remove_dir_all(folder).expect("remove fixtures");
     }
 
     #[test]
