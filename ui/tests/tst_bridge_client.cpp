@@ -230,6 +230,11 @@ private slots:
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void spectrogramActivityStopsForAWindowOffScreen();
+    void spectrogramPanesOnScreenKeepTheirHistoryWhileAnotherWindowIsAway();
+    void spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings_data();
+    void spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings();
+    void spectrogramSessionsBeforeAStopNeverFillReleasedPanes();
+    void spectrogramStopsCountedByTheBackendMatchTheClient();
     void tagJobsKeepUiResponsiveAndDiscardClosedLoads();
     void tagEditorAsyncFileRoundTrip();
     void tagEditorRenamesThroughTheBridgeGate();
@@ -407,6 +412,50 @@ void BridgeClientTest::cleanup() {
     m_userDirectories.reset();
 }
 
+namespace {
+
+// A frame of `columns` columns for `channels` channels from track column
+// `start`: a session's reset when `reset`, which clears the history.
+QByteArray spectrogramFrame(
+    int channels, int columns, int start, quint64 trackToken, quint64 generation, bool reset) {
+    QByteArray frame = makePrecomputedFrame(16, channels, columns, start, 10'000, trackToken, generation);
+    frame[45] = reset ? 1 : 0;
+    frame[46] = reset ? 1 : 0;
+    return frame;
+}
+
+QByteArray spectrogramActiveCommand(bool active) {
+    return BinaryBridgeCodec::encodeCommandU8(BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0);
+}
+
+// What the backend publishes of its spectrogram deactivations, as the test
+// lets them happen.
+struct TestSpectrogramStops {
+    quint64 count{0};
+    quint64 generation{0};
+
+    void attach(BridgeClient &client) {
+        client.m_spectrogramStopsOverride = [this](quint64 &stops, quint64 &stopGeneration) {
+            stops = count;
+            stopGeneration = generation;
+            return true;
+        };
+    }
+};
+
+// The track columns from `first` to `last` of a centered pane, or the ring
+// sequences of a rolling one, all held.
+bool ringHolds(const SpectrogramItem &pane, qint64 first, qint64 last, bool rolling) {
+    for (qint64 index = first; index <= last; ++index) {
+        if (pane.ringColumnLocked(index, rolling) == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 void BridgeClientTest::spectrogramActivityFollowsVisibleItemsAndWindows() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -462,11 +511,17 @@ void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {
     // switch, does not restart it.
     BridgeClient client;
     isolateBridgeClient(client);
+    acceptCommands(client);
     QQuickWindow window;
     SpectrogramItem view(window.contentItem());
+    view.setWidth(320);
+    view.setHeight(100);
     client.registerSpectrogramItem(&view, 0);
     window.show();
     QTRY_VERIFY(client.m_spectrogramActive);
+    QVERIFY(client.parsePrecomputedSpectrogramFrame(spectrogramFrame(1, 40, 0, 1, 1, true)).valid);
+    const qint64 committed = view.m_ring.committedBytes();
+    QVERIFY(committed > 0);
     WindowPresence *presence = WindowPresence::of(&window);
     QVERIFY(presence->shown());
     QSignalSpy shownChanges(presence, &WindowPresence::shownChanged);
@@ -484,6 +539,8 @@ void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {
     QCOMPARE(presence->m_unexposedGrace.interval(), WindowPresence::kUnexposedGraceMs);
     QCoreApplication::processEvents();
     QVERIFY(client.m_spectrogramActive);
+    // Nor does it release the pane's columns.
+    QCOMPARE(view.m_ring.committedBytes(), committed);
     expose(true);
     QVERIFY(!presence->m_unexposedGrace.isActive());
     QCOMPARE(shownChanges.size(), 0);
@@ -492,15 +549,292 @@ void BridgeClientTest::spectrogramActivityStopsForAWindowOffScreen() {
     QTRY_VERIFY_WITH_TIMEOUT(!presence->shown(), WindowPresence::kUnexposedGraceMs * 3);
     QCOMPARE(shownChanges.size(), 1);
     QTRY_VERIFY(!client.m_spectrogramActive);
+    QVERIFY(view.storageReleased());
+    QCOMPARE(view.m_ring.committedBytes(), qint64(0));
+    QVERIFY(view.m_canvas.isNull());
     // Back on screen, at once.
     expose(true);
     QVERIFY(presence->shown());
     QTRY_VERIFY(client.m_spectrogramActive);
+    QVERIFY(!view.storageReleased());
     // Minimized where the platform says so, at once too.
     window.setVisibility(QWindow::Minimized);
     QTRY_VERIFY(!client.m_spectrogramActive);
     QVERIFY(!presence->m_unexposedGrace.isActive());
     client.unregisterSpectrogramItem(&view);
+}
+
+
+void BridgeClientTest::spectrogramPanesOnScreenKeepTheirHistoryWhileAnotherWindowIsAway() {
+    // A window minimized while a pane in another stays on screen keeps
+    // analysis on, so nothing is released or restarted: the pane on screen
+    // keeps the rolling history it shows, the previous track's tail of a
+    // gapless transition included, when the other comes back. Only with no
+    // pane on screen do the panes release their columns.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    TestSpectrogramStops stops;
+    stops.attach(client);
+    QQuickWindow main;
+    QQuickWindow viewer;
+    main.resize(320, 100);
+    viewer.resize(320, 100);
+    SpectrogramItem mainPane(main.contentItem());
+    SpectrogramItem viewerPane(viewer.contentItem());
+    for (SpectrogramItem *pane : {&mainPane, &viewerPane}) {
+        pane->setWidth(320);
+        pane->setHeight(100);
+        pane->setDisplayMode(0);
+    }
+    client.registerSpectrogramItem(&mainPane, 0);
+    client.registerSpectrogramItem(&viewerPane, 1);
+    main.show();
+    viewer.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&main));
+    QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+    QTRY_VERIFY(client.m_spectrogramActive);
+    QCoreApplication::processEvents();
+    sent.clear();
+    const auto feed = [&client](int columns, int start, quint64 token, quint64 generation, bool reset) {
+        QVERIFY(client.parsePrecomputedSpectrogramFrame(
+            spectrogramFrame(2, columns, start, token, generation, reset)).valid);
+    };
+    feed(40, 0, 1, 1, true);
+
+    main.setVisibility(QWindow::Minimized);
+    QTRY_VERIFY(!WindowPresence::of(&main)->shown());
+    QCoreApplication::processEvents();
+    QVERIFY(client.m_spectrogramActive);
+    QVERIFY(!mainPane.storageReleased());
+    QVERIFY(!viewerPane.storageReleased());
+    // The track runs on and into its gapless successor.
+    feed(40, 40, 1, 1, false);
+    feed(40, 0, 2, 1, false);
+    QCOMPARE(viewerPane.m_ringWriteSeq, qint64(120));
+
+    main.showNormal();
+    QVERIFY(QTest::qWaitForWindowExposed(&main));
+    QTRY_VERIFY(WindowPresence::of(&main)->shown());
+    QCoreApplication::processEvents();
+    // Nothing restarted analysis, and the viewer's history is as it was.
+    QVERIFY(sent.isEmpty());
+    QCOMPARE(viewerPane.m_ringOldestSeq, qint64(0));
+    QCOMPARE(viewerPane.m_ringWriteSeq, qint64(120));
+    QVERIFY(ringHolds(viewerPane, 0, 119, true));
+    QCOMPARE(viewerPane.m_ringTrackToken[79], quint64(1));
+    QCOMPARE(viewerPane.m_ringTrackToken[80], quint64(2));
+    QCOMPARE(viewerPane.ringColumnLocked(79, true)[0], quint8(0x77));
+    QVERIFY(ringHolds(mainPane, 0, 119, true));
+
+    // Both away: analysis stops, and both release their columns.
+    main.setVisibility(QWindow::Minimized);
+    viewer.setVisibility(QWindow::Minimized);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    QCOMPARE(sent, QList<QByteArray>{spectrogramActiveCommand(false)});
+    for (SpectrogramItem *pane : {&mainPane, &viewerPane}) {
+        QVERIFY(pane->storageReleased());
+        QCOMPARE(pane->m_ring.committedBytes(), qint64(0));
+        QCOMPARE(pane->m_ringCapacity, 0);
+        QVERIFY(pane->m_canvas.isNull());
+    }
+    client.unregisterSpectrogramItem(&mainPane);
+    client.unregisterSpectrogramItem(&viewerPane);
+}
+
+void BridgeClientTest::spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("rolling") << 0;
+    QTest::newRow("centered") << 1;
+}
+
+void BridgeClientTest::spectrogramTrackChangeWhileNoPaneIsShownAllocatesNoRings() {
+    // Behind the waveform view, no pane takes columns: not those still on
+    // their way when analysis stops, nor a gapless successor's or Repeat-
+    // One's. Shown again, analysis starts a fresh session once, which
+    // fills them.
+    QFETCH(int, mode);
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    TestSpectrogramStops stops;
+    stops.attach(client);
+    QQuickWindow window;
+    window.resize(320, 200);
+    QQuickItem surface(window.contentItem());
+    SpectrogramItem left(&surface);
+    SpectrogramItem right(&surface);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        pane->setWidth(320);
+        pane->setHeight(100);
+        pane->setDisplayMode(mode);
+    }
+    client.registerSpectrogramItem(&left, 0);
+    client.registerSpectrogramItem(&right, 1);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(client.m_spectrogramActive);
+    const auto feed = [&client](int columns, int start, quint64 token, quint64 generation, bool reset) {
+        QVERIFY(client.parsePrecomputedSpectrogramFrame(
+            spectrogramFrame(2, columns, start, token, generation, reset)).valid);
+    };
+    feed(40, 0, 1, 1, true);
+    QVERIFY(left.m_ring.committedBytes() > 0);
+    QVERIFY(right.m_ring.committedBytes() > 0);
+
+    sent.clear();
+    surface.setVisible(false);
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    QCOMPARE(sent, QList<QByteArray>{spectrogramActiveCommand(false)});
+    // The backend turns off, making generation 3.
+    stops = {client.m_spectrogramStopsSent, 3};
+    feed(40, 40, 1, 1, false);
+    feed(40, 0, 2, 1, false);
+    feed(40, 0, 3, 2, true);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        QCOMPARE(pane->m_ring.committedBytes(), qint64(0));
+        QCOMPARE(pane->m_ringCapacity, 0);
+        QVERIFY(pane->m_ringColumnId.empty());
+        QVERIFY(pane->m_canvas.isNull());
+    }
+
+    sent.clear();
+    surface.setVisible(true);
+    QTRY_VERIFY(client.m_spectrogramActive);
+    QCoreApplication::processEvents();
+    QCOMPARE(sent, QList<QByteArray>{spectrogramActiveCommand(true)});
+    feed(40, 200, 3, 4, true);
+    for (SpectrogramItem *pane : {&left, &right}) {
+        QVERIFY(pane->m_ring.committedBytes() > 0);
+        QVERIFY(pane->m_precomputedReady);
+        QCOMPARE(pane->m_precomputedTrackToken, quint64(3));
+    }
+    if (mode == 0) {
+        QCOMPARE(left.m_ringWriteSeq, qint64(40));
+        QCOMPARE(left.ringColumnLocked(0, true)[0], quint8(0x11));
+    } else {
+        QCOMPARE(left.ringColumnLocked(200, false)[0], quint8(0x11));
+        QCOMPARE(right.ringColumnLocked(239, false)[0], quint8(0x77));
+    }
+    client.unregisterSpectrogramItem(&left);
+    client.unregisterSpectrogramItem(&right);
+}
+
+void BridgeClientTest::spectrogramSessionsBeforeAStopNeverFillReleasedPanes() {
+    // Shown again before the frames of the session before are all through,
+    // a pane takes none of them: not a seek's or Repeat-One's reset and the
+    // columns after it, whether they come before or after the backend has
+    // turned off, and not a frame that belongs to no session. Only the
+    // session after the stop fills it, and the gate stays open after it.
+    for (int mode : {0, 1}) {
+        BridgeClient client;
+        isolateBridgeClient(client);
+        acceptCommands(client);
+        TestSpectrogramStops stops;
+        stops.attach(client);
+        QQuickWindow window;
+        window.resize(320, 100);
+        SpectrogramItem pane(window.contentItem());
+        pane.setWidth(320);
+        pane.setHeight(100);
+        pane.setDisplayMode(mode);
+        client.registerSpectrogramItem(&pane, 0);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(client.m_spectrogramActive);
+        QSignalSpy channels(&client, &BridgeClient::precomputedSpectrogramChannelsReady);
+        const auto feed = [&client](int columns, int start, quint64 token, quint64 generation, bool reset) {
+            QVERIFY(client.parsePrecomputedSpectrogramFrame(
+                spectrogramFrame(1, columns, start, token, generation, reset)).valid);
+        };
+        feed(40, 0, 1, 5, true);
+        QVERIFY(pane.m_ring.committedBytes() > 0);
+
+        // Hidden and shown again before the backend turns off.
+        pane.setVisible(false);
+        QTRY_VERIFY(!client.m_spectrogramActive);
+        QVERIFY(pane.storageReleased());
+        pane.setVisible(true);
+        QTRY_VERIFY(client.m_spectrogramActive);
+        QVERIFY(!pane.storageReleased());
+        channels.clear();
+        // A seek's session started just before the stop: its reset and
+        // columns, newer than any the pane has seen.
+        feed(0, 100, 1, 6, true);
+        feed(40, 100, 1, 6, false);
+        QCOMPARE(pane.m_ring.committedBytes(), qint64(0));
+        // The backend turns off, making generation 7; Repeat-One's reset
+        // from before it, and a frame of no session, still arrive.
+        stops = {client.m_spectrogramStopsSent, 7};
+        feed(0, 0, 2, 6, true);
+        feed(40, 0, 2, 6, false);
+        feed(40, 0, 2, 0, true);
+        QCOMPARE(pane.m_ring.committedBytes(), qint64(0));
+        QVERIFY(!pane.m_precomputedReady);
+        QCOMPARE(channels.size(), 0);
+
+        // The session showing it started.
+        feed(0, 300, 2, 8, true);
+        feed(40, 300, 2, 8, false);
+        QCOMPARE(channels.size(), 2);
+        QVERIFY(pane.m_ring.committedBytes() > 0);
+        QCOMPARE(pane.m_precomputedCommittedGeneration, quint64(8));
+        QVERIFY(!client.m_spectrogramStaleGate);
+        if (mode == 0) {
+            QCOMPARE(pane.m_ringWriteSeq, qint64(40));
+        } else {
+            QVERIFY(ringHolds(pane, 300, 339, false));
+            QVERIFY(pane.ringColumnLocked(100, false) == nullptr);
+        }
+        // A seek after it is its own session, newer still.
+        feed(0, 500, 2, 9, true);
+        feed(40, 500, 2, 9, false);
+        QCOMPARE(pane.m_precomputedCommittedGeneration, quint64(9));
+        client.unregisterSpectrogramItem(&pane);
+    }
+}
+
+void BridgeClientTest::spectrogramStopsCountedByTheBackendMatchTheClient() {
+    // The client and the backend count the times analysis turned off alike,
+    // and the client reads the backend's through the bridge: a client
+    // waiting for its stop finds it there.
+    BridgeClient client;
+    QTRY_VERIFY(client.m_connected);
+    // It starts with no pane, and so turns analysis off.
+    QTRY_VERIFY(client.m_spectrogramStopsSent >= 1);
+    quint64 count = 0;
+    quint64 generation = 0;
+    QTRY_VERIFY(client.readSpectrogramStops(count, generation)
+        && count == client.m_spectrogramStopsSent);
+    QQuickWindow window;
+    window.resize(320, 100);
+    SpectrogramItem pane(window.contentItem());
+    client.registerSpectrogramItem(&pane, 0);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(client.m_spectrogramActive);
+    const quint64 before = generation;
+    window.hide();
+    QTRY_VERIFY(!client.m_spectrogramActive);
+    QVERIFY(pane.storageReleased());
+    QVERIFY(client.m_spectrogramStaleGate);
+    QTRY_VERIFY(client.readSpectrogramStops(count, generation)
+        && count == client.m_spectrogramStopsSent);
+    QVERIFY(generation > before);
+    // A frame of the stop's generation is stale; the next is not.
+    QVERIFY(client.staleSpectrogramFrame(generation));
+    QVERIFY(client.m_spectrogramStopKnown);
+    QVERIFY(!client.staleSpectrogramFrame(generation + 1));
+    QVERIFY(!client.m_spectrogramStaleGate);
+    client.unregisterSpectrogramItem(&pane);
 }
 
 void BridgeClientTest::tagJobsKeepUiResponsiveAndDiscardClosedLoads() {

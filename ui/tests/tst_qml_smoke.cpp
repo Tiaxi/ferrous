@@ -1131,6 +1131,7 @@ public:
 
 private slots:
     void hiddenSpectrogramDefersPaintingAndRetainsIncomingData();
+    void releasedSpectrogramFreesItsColumnsAndCanvasUntilRetained();
     void spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints();
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
@@ -17563,6 +17564,103 @@ void SpectrogramSmokeTest::hiddenSpectrogramDefersPaintingAndRetainsIncomingData
         }
         QVERIFY(item.m_canvas != before);
         QVERIFY(!item.m_precomputedCanvasDirty);
+    }
+}
+
+void SpectrogramSmokeTest::releasedSpectrogramFreesItsColumnsAndCanvasUntilRetained() {
+    // Released while analysis is off, as behind the waveform view, a pane
+    // frees its ring and canvas, and takes no columns: not of a gapless
+    // successor, nor of the same track played again. Retained, it takes
+    // none until a session's reset, and fills from that session.
+    for (const int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(100);
+        item.setHeight(10);
+        item.setDisplayMode(mode);
+        constexpr int bins = 4;
+        item.feedPrecomputedChunk(QByteArray(100 * bins, '\x60'), bins, 0, 100,
+            0, 1000, 48000, 1024, false, true, 1, true, 1);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.ensureMapping(10);
+            rebuildCanvasNow(item, 100, 10, 0, 99, mode == 0);
+        }
+        QVERIFY(!item.m_canvas.isNull());
+        QVERIFY(item.m_ring.committedBytes() > 0);
+        QVERIFY(item.m_precomputedReady);
+        QSignalSpy readyChanges(&item, &SpectrogramItem::precomputedReadyChanged);
+
+        item.releaseStorage();
+        QVERIFY(item.storageReleased());
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QCOMPARE(item.m_ring.capacity(), 0);
+        QCOMPARE(item.m_ringCapacity, 0);
+        QCOMPARE(item.m_ringColumnId.capacity(), size_t(0));
+        QCOMPARE(item.m_ringSequenceId.capacity(), size_t(0));
+        QCOMPARE(item.m_ringTrackToken.capacity(), size_t(0));
+        QVERIFY(item.m_trackColumnToSeqByToken.isEmpty());
+        QVERIFY(item.m_canvas.isNull());
+        QVERIFY(item.m_rasterTiles.isEmpty());
+        QVERIFY(!item.m_precomputedReady);
+        QCOMPARE(readyChanges.size(), 1);
+        // A window that still draws it drops its node.
+        QCOMPARE(item.updatePaintNode(nullptr, nullptr), nullptr);
+
+        // Columns go on arriving; a gapless successor's, then the same
+        // track's again, as Repeat-One plays it.
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            100, 1000, 48000, 1024, false, false, 1, false, 1);
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            0, 1000, 48000, 1024, false, false, 2, false, 1);
+        item.feedPrecomputedChunk(QByteArray(), bins, 0, 0,
+            0, 1000, 48000, 1024, false, true, 3, true, 2);
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            0, 1000, 48000, 1024, false, false, 3, false, 2);
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QCOMPARE(item.m_ringCapacity, 0);
+        QVERIFY(item.m_canvas.isNull());
+        // Released again, nothing changes.
+        item.releaseStorage();
+        QCOMPARE(readyChanges.size(), 1);
+
+        item.retainStorage();
+        QVERIFY(!item.storageReleased());
+        // Columns without a reset first: BridgeClient drops a stale
+        // session's resets (see spectrogramSessionsBeforeAStopNeverFillReleasedPanes).
+        item.feedPrecomputedChunk(QByteArray(50 * bins, '\x70'), bins, 0, 50,
+            50, 1000, 48000, 1024, false, false, 3, false, 2);
+        QCOMPARE(item.m_ring.committedBytes(), qint64(0));
+        QVERIFY(!item.m_precomputedReady);
+
+        // The fresh session: its reset, then the playhead's columns.
+        item.feedPrecomputedChunk(QByteArray(), bins, 0, 0,
+            200, 1000, 48000, 1024, false, true, 3, true, 3);
+        item.feedPrecomputedChunk(QByteArray(100 * bins, '\xF0'), bins, 0, 100,
+            200, 1000, 48000, 1024, false, false, 3, false, 3);
+        QVERIFY(item.m_ring.committedBytes() > 0);
+        QVERIFY(item.m_precomputedReady);
+        QCOMPARE(readyChanges.size(), 2);
+        QCOMPARE(item.m_precomputedCommittedGeneration, quint64(3));
+        if (mode == 0) {
+            // Rolling history starts with the fresh session's columns.
+            QCOMPARE(item.m_ringOldestSeq, qint64(0));
+            QCOMPARE(item.m_ringWriteSeq, qint64(100));
+            QCOMPARE(item.ringColumnLocked(0, true)[0], quint8(0xF0));
+        } else {
+            QCOMPARE(item.ringColumnLocked(200, false)[0], quint8(0xF0));
+            QVERIFY(item.ringColumnLocked(199, false) == nullptr);
+        }
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            item.ensureMapping(10);
+            if (mode == 0) {
+                rebuildCanvasNow(item, 100, 10, 0, 99, true);
+            } else {
+                rebuildCanvasNow(item, 100, 10, 200, 299, false);
+            }
+        }
+        QVERIFY(!item.m_canvas.isNull());
+        QVERIFY(item.m_canvas.pixel(50, 5) != qRgb(0, 0, 0));
     }
 }
 

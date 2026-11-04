@@ -2585,6 +2585,10 @@ void SpectrogramItem::feedPrecomputedChunk(
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
     quint64 generation) {
     QMutexLocker lock(&m_stateMutex);
+    if (m_storageReleased) {
+        // No one sees it: it keeps no columns until it is shown again.
+        return;
+    }
 
     FERROUS_SPECTROGRAM_LOGF(stderr,
         "[Qt-feed@%p] chIdx=%d cols=%d start=%d total=%d bins=%d sr=%d hop=%d tok=%llu gen=%llu ready=%d reset=%d clear=%d await=%d complete=%d\n",
@@ -3815,6 +3819,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     const auto paintStart = std::chrono::steady_clock::now();
 #endif
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_storageReleased) {
+            // Not shown, it has nothing to draw: its textures go too.
+            delete oldNode;
+            return nullptr;
+        }
+    }
     const auto renderNow = m_now();
     auto *node = static_cast<SpectrogramSceneNode *>(oldNode);
     QQuickWindow *currentWindow = window();
@@ -6393,6 +6405,95 @@ void SpectrogramItem::windowPresenceChanged() {
     // One frame shows playback as it is now; the frames that follow it
     // ask for their own.
     requestPlaybackFrame();
+}
+
+void SpectrogramItem::releaseStorage() {
+    bool wasReady = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_storageReleased) {
+            return;
+        }
+        wasReady = m_precomputedReady;
+        releaseStorageLocked();
+    }
+    if (wasReady) {
+        emit precomputedReadyChanged();
+    }
+    // A window that still draws, as it does while the waveform view
+    // replaces the spectrogram, drops the pane's textures with its node.
+    update();
+}
+
+void SpectrogramItem::retainStorage() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_storageReleased) {
+            return;
+        }
+        // It still waits for a session's reset.
+        m_storageReleased = false;
+    }
+    update();
+}
+
+bool SpectrogramItem::storageReleased() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_storageReleased;
+}
+
+void SpectrogramItem::releaseStorageLocked() {
+    m_storageReleased = true;
+    // Freeing a ring of a few thousand blocks, and a canvas, takes a few
+    // milliseconds: a worker does it.
+    struct Released {
+        SpectrogramRingStorage ring;
+        std::vector<qint32> columnIds;
+        std::vector<qint64> sequenceIds;
+        std::vector<quint64> trackTokens;
+        QHash<quint64, QHash<qint32, qint64>> columnSequences;
+        std::deque<std::vector<quint8>> rows;
+        QImage canvas;
+        QVector<QImage> tiles;
+    };
+    auto released = std::make_shared<Released>();
+    released->ring = std::exchange(m_ring, {});
+    released->columnIds = std::exchange(m_ringColumnId, {});
+    released->sequenceIds = std::exchange(m_ringSequenceId, {});
+    released->trackTokens = std::exchange(m_ringTrackToken, {});
+    released->columnSequences = std::exchange(m_trackColumnToSeqByToken, {});
+    released->rows = std::exchange(m_columns, {});
+    released->canvas = std::exchange(m_canvas, {});
+    released->tiles = std::exchange(m_rasterTiles, {});
+    spectrogramRasterPool().start([released = std::move(released)]() {});
+
+    // As after a reset that clears the history: a rasterization of the old
+    // columns, still running, installs nothing.
+    ++m_ringGeneration;
+    m_ringCapacity = 0;
+    m_ringWriteSeq = 0;
+    m_ringOldestSeq = 0;
+    m_trackEpochSeq = 0;
+    m_rollingEpoch = 0;
+    m_centeredColumnBase = -1;
+    m_centeredColumnToken = 0;
+    m_precomputedMaxColumnIndex = -1;
+    m_precomputedResetPending = false;
+    m_precomputedPendingResetStartIndex = 0;
+    m_precomputedPendingResetBins = 0;
+    m_precomputedPendingResetTrackToken = 0;
+    m_precomputedPendingResetGeneration = 0;
+    m_precomputedPendingResetClearHistory = false;
+    m_precomputedLastRightCol = -1;
+    m_precomputedLastDisplaySeq = -1;
+    m_zoomFillActive = false;
+    m_seekFillActive = false;
+    m_precomputedReady = false;
+    m_idleView = {};
+    invalidateCanvas();
+    // Once shown, the columns come from a fresh session, which starts with
+    // a reset: columns that arrive before it are from an older one.
+    m_awaitingWorkerReset = true;
 }
 
 void SpectrogramItem::handleWindowAfterAnimating() {

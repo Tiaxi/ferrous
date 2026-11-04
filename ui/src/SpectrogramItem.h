@@ -306,6 +306,16 @@ public:
 
     Q_INVOKABLE double minimumZoomLevel() const;
 
+    // Frees the ring and the canvas, which nothing uses while analysis is
+    // off because no pane is shown, and takes no columns until retained:
+    // showing a view starts a fresh analysis session, which clears them
+    // anyway. BridgeClient, which turns analysis off and on, calls these.
+    void releaseStorage();
+    // Takes columns again from the next session's reset on; nothing older
+    // may reach it (see BridgeClient::staleSpectrogramFrame).
+    void retainStorage();
+    bool storageReleased() const;
+
     static SpectrogramSceneStatistics sceneStatistics(const QSGNode *node);
     // The canvas textures of a scene node, with the canvas column each
     // starts at. For tests.
@@ -552,6 +562,7 @@ private:
     bool showsPlaybackFrames() const;
     // Its window came on screen or left it.
     void windowPresenceChanged();
+    void releaseStorageLocked();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
         int totalColumnsEstimate{0};
@@ -686,6 +697,10 @@ private:
     QMetaObject::Connection m_windowVisibilityConnection;
     QPointer<WindowPresence> m_windowPresence;
     QMetaObject::Connection m_windowPresenceConnection;
+
+    // Its ring and canvas are released while analysis is off, and it takes
+    // no columns then.
+    bool m_storageReleased{false};
 
     // Ring-buffer spectrogram storage.
     SpectrogramRingStorage m_ring;    // capacity columns of bins_per_column bytes

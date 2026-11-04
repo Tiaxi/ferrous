@@ -395,6 +395,8 @@ fn remap_pending_continue(session: &mut SpectrogramSessionState, renames: &PathR
 pub(super) struct SpectrogramWorkerHandles {
     pub(super) cmd_tx: Sender<SpectrogramWorkerCommand>,
     pub(super) decode_generation: Arc<AtomicU64>,
+    /// Where the analysis thread publishes its deactivations.
+    pub(super) stops: Arc<super::SpectrogramStops>,
     pub(super) columns_produced: Arc<AtomicU64>,
     /// Track duration (milliseconds) published by the active worker
     /// session after its file probe.  0 = unknown.  Read by the analysis

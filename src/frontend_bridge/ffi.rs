@@ -24,7 +24,8 @@ use super::{
     ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
-    AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramViewMode,
+    AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramStops,
+    SpectrogramViewMode,
 };
 use crate::library::{track_file_fingerprint, TrackRefresh};
 use crate::panic_guard;
@@ -844,6 +845,7 @@ struct FfiShared {
     stop_requested: AtomicBool,
     spectral_space: Condvar,
     spectral_generation: Arc<AtomicU64>,
+    spectrogram_stops: Arc<SpectrogramStops>,
     /// Dropped to stop the relays, which wakes every receiver of
     /// `stop_rx`, at once and from then on. Nothing is ever sent on it.
     stop_tx: Mutex<Option<crossbeam_channel::Sender<Infallible>>>,
@@ -851,13 +853,18 @@ struct FfiShared {
 }
 
 impl FfiShared {
-    fn new(runtime: FfiRuntime, spectral_generation: Arc<AtomicU64>) -> Self {
+    fn new(
+        runtime: FfiRuntime,
+        spectral_generation: Arc<AtomicU64>,
+        spectrogram_stops: Arc<SpectrogramStops>,
+    ) -> Self {
         let (stop_tx, stop_rx) = crossbeam_channel::bounded(0);
         Self {
             runtime: Mutex::new(runtime),
             stop_requested: AtomicBool::new(false),
             spectral_space: Condvar::new(),
             spectral_generation,
+            spectrogram_stops,
             stop_tx: Mutex::new(Some(stop_tx)),
             stop_rx,
         }
@@ -948,6 +955,7 @@ fn connect_bridge(handle: FrontendBridgeHandle) -> Result<FerrousFfiBridge, Stri
     let shared = Arc::new(FfiShared::new(
         FfiRuntime::new(parts.commands, wake_read_fd, wake_write_fd),
         parts.spectral_generation,
+        parts.spectrogram_stops,
     ));
     let _ = shared
         .lock_runtime()
@@ -1270,6 +1278,45 @@ pub unsafe extern "C" fn ferrous_ffi_bridge_wakeup_fd(handle: *mut FerrousFfiBri
             // SAFETY: The caller guarantees that a non-null `handle` is live.
             unsafe { bridge_ref(handle) }
                 .map_or(-1, |bridge| bridge.shared.lock_runtime().wake_read_fd)
+        },
+    )
+}
+
+#[no_mangle]
+/// Writes how many times the analysis thread has turned the spectrogram
+/// off, and the decode generation the latest time made, to `count_out` and
+/// `generation_out`. A spectral chunk popped after that turn is stale unless
+/// its generation is newer. Returns false, writing nothing, for a null
+/// handle or pointer.
+///
+/// # Safety
+///
+/// `handle` must be null or a valid pointer returned by [`ferrous_ffi_bridge_create`];
+/// `count_out` and `generation_out` must be null or valid for a write.
+pub unsafe extern "C" fn ferrous_ffi_bridge_spectrogram_stops(
+    handle: *mut FerrousFfiBridge,
+    count_out: *mut u64,
+    generation_out: *mut u64,
+) -> bool {
+    ffi_call(
+        "ferrous_ffi_bridge_spectrogram_stops",
+        |_| false,
+        || {
+            if count_out.is_null() || generation_out.is_null() {
+                return false;
+            }
+            // SAFETY: The caller guarantees that a non-null `handle` is live.
+            let Some(bridge) = (unsafe { bridge_ref(handle) }) else {
+                return false;
+            };
+            let (count, generation) = bridge.shared.spectrogram_stops.load();
+            // SAFETY: Both pointers are non-null, and the caller guarantees
+            // that non-null ones are valid for a write.
+            unsafe {
+                count_out.write(count);
+                generation_out.write(generation);
+            }
+            true
         },
     )
 }
@@ -3903,6 +3950,7 @@ mod tests {
         let shared = FfiShared::new(
             FfiRuntime::new(command_tx, -1, -1),
             Arc::new(AtomicU64::new(0)),
+            Arc::default(),
         );
         let mut encoder = FfiEncoder::default();
         let events = std::iter::once_with(|| {
@@ -5480,6 +5528,7 @@ mod tests {
         Arc::new(FfiShared::new(
             FfiRuntime::new(commands, -1, -1),
             Arc::new(AtomicU64::new(1)),
+            Arc::default(),
         ))
     }
 
@@ -5914,6 +5963,7 @@ mod tests {
         let shared = FfiShared::new(
             FfiRuntime::new(command_tx, -1, -1),
             Arc::new(AtomicU64::new(0)),
+            Arc::default(),
         );
         let mut encoder = FfiEncoder::default();
         prepare_and_publish(
@@ -6344,6 +6394,68 @@ mod tests {
         assert!(ffi_send_binary(handle, &encode_command(34, &[])));
         let stopped = ffi_wait_for_mask(handle, SECTION_STOPPED, Duration::from_secs(3));
         assert!(stopped.is_some());
+        // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
+        unsafe { ferrous_ffi_bridge_destroy(handle) };
+    }
+
+    /// The deactivations the bridge's analysis has published, through the
+    /// function the UI reads them with.
+    fn ffi_spectrogram_stops(handle: *mut FerrousFfiBridge) -> (u64, u64) {
+        let (mut count, mut generation) = (u64::MAX, u64::MAX);
+        // SAFETY: `handle` is live and both pointers are to locals.
+        assert!(unsafe {
+            ferrous_ffi_bridge_spectrogram_stops(handle, &mut count, &mut generation)
+        });
+        (count, generation)
+    }
+
+    #[test]
+    fn ffi_bridge_publishes_spectrogram_deactivations_end_to_end() {
+        let mut count = 7;
+        let mut generation = 7;
+        // SAFETY: A null handle or pointer is rejected without a write.
+        unsafe {
+            assert!(!ferrous_ffi_bridge_spectrogram_stops(
+                std::ptr::null_mut(),
+                &mut count,
+                &mut generation
+            ));
+        }
+        assert_eq!((count, generation), (7, 7));
+        let handle = ferrous_ffi_bridge_create();
+        assert!(!handle.is_null());
+        // SAFETY: `handle` is live; the null pointer is rejected.
+        unsafe {
+            assert!(!ferrous_ffi_bridge_spectrogram_stops(
+                handle,
+                std::ptr::null_mut(),
+                &mut generation
+            ));
+        }
+        assert_eq!(ffi_spectrogram_stops(handle), (0, 0));
+        let wait_for = |count: u64| {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            loop {
+                let stops = ffi_spectrogram_stops(handle);
+                if stops.0 == count {
+                    return stops;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no deactivation {count}: {stops:?}"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        // SetSpectrogramActive, off, on and off again.
+        assert!(ffi_send_binary(handle, &encode_command(0x40, &[0])));
+        let (_, first) = wait_for(1);
+        assert!(first > 0);
+        assert!(ffi_send_binary(handle, &encode_command(0x40, &[1])));
+        assert!(ffi_send_binary(handle, &encode_command(0x40, &[0])));
+        let (_, second) = wait_for(2);
+        // Each turn makes a generation of its own.
+        assert!(second > first);
         // SAFETY: `handle` came from `ferrous_ffi_bridge_create` and is not used again.
         unsafe { ferrous_ffi_bridge_destroy(handle) };
     }
@@ -6930,6 +7042,7 @@ mod tests {
         Arc::new(FfiShared::new(
             FfiRuntime::new(command_tx, -1, -1),
             Arc::new(AtomicU64::new(0)),
+            Arc::default(),
         ))
     }
 

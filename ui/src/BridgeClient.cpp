@@ -2589,8 +2589,75 @@ void BridgeClient::updateSpectrogramActivity() {
     });
     if (active == m_spectrogramActive) return;
     m_spectrogramActive = active;
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+    const bool sent = sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramActive, active ? 1 : 0));
+    // No pane is shown while analysis is off, and showing one starts a
+    // fresh session, which clears the columns anyway: they are released
+    // until then. A pane hidden while another keeps analysis on keeps them,
+    // so that turning analysis on again restarts nothing for the panes on
+    // screen.
+    bool released = false;
+    for (const SpectrogramRoute &route : std::as_const(m_spectrogramRoutes)) {
+        auto *pane = qobject_cast<SpectrogramItem *>(route.item.data());
+        if (pane == nullptr) {
+            continue;
+        }
+        if (active) {
+            pane->retainStorage();
+        } else {
+            pane->releaseStorage();
+            released = true;
+        }
+    }
+    if (!active && sent) {
+        ++m_spectrogramStopsSent;
+        if (released) {
+            m_spectrogramStaleGate = true;
+            m_spectrogramStopKnown = false;
+        }
+    }
+}
+
+bool BridgeClient::readSpectrogramStops(quint64 &count, quint64 &generation) const {
+    if (m_spectrogramStopsOverride) {
+        return m_spectrogramStopsOverride(count, generation);
+    }
+    if (m_ffiBridge == nullptr) {
+        return false;
+    }
+    std::uint64_t stops = 0;
+    std::uint64_t stopGeneration = 0;
+    if (!ferrous_ffi_bridge_spectrogram_stops(m_ffiBridge, &stops, &stopGeneration)) {
+        return false;
+    }
+    count = stops;
+    generation = stopGeneration;
+    return true;
+}
+
+bool BridgeClient::staleSpectrogramFrame(quint64 generation) {
+    if (!m_spectrogramStopKnown) {
+        quint64 count = 0;
+        quint64 stopGeneration = 0;
+        if (!readSpectrogramStops(count, stopGeneration)) {
+            // Without a bridge nothing tells: take what comes.
+            m_spectrogramStaleGate = false;
+            return false;
+        }
+        if (count < m_spectrogramStopsSent) {
+            // Analysis has not turned off yet: this is from before.
+            return true;
+        }
+        m_spectrogramStopKnown = true;
+        m_spectrogramStopGeneration = stopGeneration;
+    }
+    // No session starts while analysis is off; the first newer one is the
+    // session showing a view started, and all after it are newer still.
+    if (generation > m_spectrogramStopGeneration) {
+        m_spectrogramStaleGate = false;
+        return false;
+    }
+    return true;
 }
 
 void BridgeClient::setSystemMediaControlsEnabled(bool value) {
@@ -4707,6 +4774,11 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
     const char *data,
     const qsizetype dataSize,
     const PrecomputedDispatchStats &stats) {
+    if (m_spectrogramStaleGate && staleSpectrogramFrame(stats.generation)) {
+        // A session from before analysis turned off: its channels, resets
+        // and columns are no longer anyone's.
+        return;
+    }
     emit precomputedSpectrogramChannelsReady(stats.channelCount, stats.bufferReset);
 
     m_spectrogramRoutes.removeIf([](const SpectrogramRoute &route) {
