@@ -1310,8 +1310,17 @@ impl GstPlaybackRuntime {
         // A state change that fails, such as for a file that is missing,
         // posts the error, which skips the track or stops. Until then
         // playback plays, so the track skipped to plays.
+        // A pipeline that already plays posts no state change for another
+        // request to play, so only a change that follows is timed. A run
+        // still on its way to Playing keeps the time it was asked at, so
+        // pressing Play again does not hide a run that never plays.
+        let already_playing = self.playbin.current_state() == gst::State::Playing
+            && self.playbin.pending_state() == gst::State::VoidPending;
         let _ = self.set_pipeline_state(gst::State::Playing);
-        self.playing_state_requested_at = Some(Instant::now());
+        if !already_playing {
+            self.playing_state_requested_at
+                .get_or_insert_with(Instant::now);
+        }
         if was_stopped {
             // Re-assert mute after state transition to close the race
             // window where new internal elements may not have volume=0.
@@ -11775,6 +11784,68 @@ mod engine_tests {
         let error = &engine.errors[0];
         assert_eq!(error.path.as_deref(), Some(a.as_path()));
         assert_eq!(error.outcome, PlaybackErrorOutcome::Stopped);
+        assert_eq!(error.detail, "playback did not start within 1 s");
+
+        hold.release();
+        wait_until_reader_ends(&a);
+        let (exit, _) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
+    }
+
+    #[test]
+    fn play_pressed_during_playback_keeps_playing() {
+        let fixtures = Fixtures::new("play-while-playing");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_configured(|runtime| {
+            runtime.playing_state_timeout = millis(1_000);
+        });
+        engine.send(PlaybackCommand::LoadQueue(vec![a]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until_row_plays(0);
+        engine.wait_until("the pipeline did not settle in Playing", |engine| {
+            engine.playbin.current_state() == gst::State::Playing
+                && engine.playbin.pending_state() == gst::State::VoidPending
+        });
+
+        // The pipeline already plays, so no state change confirms this.
+        engine.send(PlaybackCommand::Play);
+        let pressed_at = engine.snapshot.position;
+        // Well past the time playback may take to start.
+        engine.wait_until("playback did not go on past the timeout", |engine| {
+            !engine.errors.is_empty() || engine.snapshot.position >= pressed_at + millis(1_800)
+        });
+        assert!(engine.errors.is_empty(), "{:?}", engine.errors);
+        assert_eq!(engine.snapshot.state, PlaybackState::Playing);
+        assert_eq!(engine.snapshot.current_queue_index, Some(0));
+        let (exit, _) = engine.quit();
+        assert_eq!(exit, EngineExit::default());
+    }
+
+    #[test]
+    fn a_run_that_never_plays_is_reported_however_often_play_is_pressed() {
+        let fixtures = Fixtures::new("play-stalled");
+        let a = fixtures.wav("a.wav", 20_000);
+        let mut engine = Engine::start_configured(|runtime| {
+            runtime.playing_state_timeout = millis(1_000);
+        });
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        // The first read of the run does not return, so it never plays.
+        let hold = hold_reads(&a);
+        engine.send(PlaybackCommand::Play);
+        engine.listen_until("no read of the run was held", |_| hold.holds_a_read());
+        // Pressing Play again and again, more often than the timeout, does
+        // not put off the report.
+        let mut pressed_at = Instant::now();
+        engine.listen_until("the stalled run was not reported", |engine| {
+            if engine.errors.is_empty() && pressed_at.elapsed() >= millis(300) {
+                engine.send(PlaybackCommand::Play);
+                pressed_at = Instant::now();
+            }
+            !engine.errors.is_empty()
+        });
+        assert_eq!(engine.errors.len(), 1, "{:?}", engine.errors);
+        let error = &engine.errors[0];
+        assert_eq!(error.path.as_deref(), Some(a.as_path()));
         assert_eq!(error.detail, "playback did not start within 1 s");
 
         hold.release();
