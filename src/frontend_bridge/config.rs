@@ -580,6 +580,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             "spectrogram_zoom_enabled" => {
                 parse_flag(value, &mut settings.display.spectrogram_zoom_enabled);
             }
+            "spectrogram_frequency_cap" => {
+                parse_flag(value, &mut settings.display.spectrogram_frequency_cap);
+            }
             "system_media_controls_enabled" => parse_flag(
                 value,
                 &mut settings.integrations.system_media_controls_enabled,
@@ -665,7 +668,7 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
     let mut text = format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlibrary_watch_enabled={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlibrary_watch_enabled={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -681,6 +684,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.display.show_spectrogram_scale),
         settings.display.channel_buttons_visibility,
         i32::from(settings.display.spectrogram_zoom_enabled),
+        i32::from(settings.display.spectrogram_frequency_cap),
         i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
@@ -740,6 +744,7 @@ mod tests {
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
+                spectrogram_frequency_cap: true,
             },
             library_sort_mode: LibrarySortMode::Title,
             library_watch_enabled: false,
@@ -772,11 +777,33 @@ mod tests {
         assert!(parsed.display.show_spectrogram_crosshair);
         assert!(parsed.display.show_spectrogram_scale);
         assert!(parsed.display.spectrogram_zoom_enabled);
+        assert!(parsed.display.spectrogram_frequency_cap);
         assert!(!parsed.integrations.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
         assert_eq!(parsed.integrations.lastfm_username, "tester");
         assert!(!parsed.library_watch_enabled);
+    }
+
+    #[test]
+    fn frequency_cap_defaults_off_and_roundtrips_both_values() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\nfft_size=2048\n");
+        assert!(
+            !settings.display.spectrogram_frequency_cap,
+            "off in older settings files"
+        );
+        for enabled in [false, true] {
+            settings.display.spectrogram_frequency_cap = enabled;
+            let text = format_settings_text(&settings);
+            assert!(text.contains(&format!(
+                "spectrogram_frequency_cap={}\n",
+                i32::from(enabled)
+            )));
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &text);
+            assert_eq!(parsed.display.spectrogram_frequency_cap, enabled);
+        }
     }
 
     #[test]
@@ -986,6 +1013,7 @@ mod tests {
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
+                spectrogram_frequency_cap: false,
             },
             ..BridgeSettings::default()
         };

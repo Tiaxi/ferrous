@@ -2408,6 +2408,7 @@ fn parse_settings_command(
             widths: read_queue_column_widths(reader)?,
             generation: reader.read_u32()?,
         },
+        73 => BridgeSettingsCommand::SetSpectrogramFrequencyCap(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3065,6 +3066,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     // The widths, then the generation of the latest request the bridge took.
     push_queue_column_widths(&mut out, &snapshot.settings.queue_columns.widths);
     push_u32(&mut out, snapshot.queue_column_widths_generation);
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.spectrogram_frequency_cap),
+    );
     out
 }
 
@@ -3293,10 +3298,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [43]     u8   buffer_reset (0 or 1)
 /// [44]     u8   clear_history (0 or 1)
 /// [45..49] u32  widget_width (the session's, in logical pixels; 0 = unknown)
-/// [49..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [49..53] u32  fft_size (a bin is sample_rate_hz / fft_size Hz; 0 = unknown)
+/// [53..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 49;
+    let header_len = 53;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -3318,6 +3324,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.push(u8::from(chunk.buffer_reset));
     out.push(u8::from(chunk.clear_history));
     out.extend_from_slice(&chunk.widget_width.to_le_bytes());
+    out.extend_from_slice(&chunk.fft_size.to_le_bytes());
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -3547,6 +3554,7 @@ mod tests {
                     show_spectrogram_scale: false,
                     channel_buttons_visibility: 1,
                     spectrogram_zoom_enabled: true,
+                    spectrogram_frequency_cap: false,
                 },
                 library_sort_mode: LibrarySortMode::Year,
                 library_watch_enabled: true,
@@ -5229,7 +5237,7 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by library watching and the queue's column widths.
             assert_eq!(
-                settings[settings.len() - 2 - SETTINGS_QUEUE_COLUMNS_BYTES],
+                settings[settings.len() - 2 - SETTINGS_TAIL_BYTES],
                 u8::from(enabled)
             );
         }
@@ -5249,18 +5257,41 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.library_watch_enabled = enabled;
             let settings = encode_settings_section(&snapshot);
-            // Followed by the queue's column widths.
+            // Followed by the queue's column widths and the frequency cap.
             assert_eq!(
-                settings[settings.len() - 1 - SETTINGS_QUEUE_COLUMNS_BYTES],
+                settings[settings.len() - 1 - SETTINGS_TAIL_BYTES],
                 u8::from(enabled)
             );
         }
         assert!(parse_binary_command(&encode_command(67, &[])).is_err());
     }
 
-    /// The bytes that end the settings section: the queue's column widths
-    /// and the generation of the latest ones the UI sent.
+    /// The bytes of the queue's column widths and the generation of the
+    /// latest ones the UI sent.
     const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
+
+    /// The bytes that end the settings section: the queue's column widths
+    /// and their generation, then the spectrogram's frequency cap.
+    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 1;
+
+    #[test]
+    fn frequency_cap_setting_command_and_snapshot_share_protocol() {
+        for enabled in [false, true] {
+            let cmd = parse_binary_command(&encode_command(73, &[u8::from(enabled)]))
+                .expect("parse frequency cap setting")
+                .expect("frequency cap setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramFrequencyCap(value))
+                if value == enabled));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.display.spectrogram_frequency_cap = enabled;
+            let settings = encode_settings_section(&snapshot);
+            // The last byte of the section.
+            assert_eq!(settings[settings.len() - 1], u8::from(enabled));
+        }
+        assert!(parse_binary_command(&encode_command(73, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(73, &[1, 0])).is_err());
+    }
 
     /// The widths, then the generation: command 72's payload, and the end
     /// of the settings section.
@@ -5319,7 +5350,7 @@ mod tests {
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES..];
+        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 1];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
@@ -5408,8 +5439,8 @@ mod tests {
         let settings = &packet[offset..offset + settings_len];
         // Settings tail: system media controls, fullscreen mode, display mode,
         // crosshair, scale, channel buttons, zoom, display sleep, level meter,
-        // library watching, then the queue's column widths.
-        let flags = &settings[..settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES];
+        // library watching, then the queue's column widths and the frequency cap.
+        let flags = &settings[..settings.len() - SETTINGS_TAIL_BYTES];
         assert_eq!(&flags[flags.len() - 10..], &[0, 1, 0, 0, 0, 1, 1, 0, 1, 1]);
     }
 
@@ -5431,8 +5462,8 @@ mod tests {
         let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
         let settings = &packet[offset..offset + settings_len];
         // Crosshair, scale, channel buttons, zoom, display sleep, level meter,
-        // library watching, then the queue's column widths.
-        let flags = &settings[..settings.len() - SETTINGS_QUEUE_COLUMNS_BYTES];
+        // library watching, then the queue's column widths and the frequency cap.
+        let flags = &settings[..settings.len() - SETTINGS_TAIL_BYTES];
         assert_eq!(&flags[flags.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
     }
 
@@ -5494,6 +5525,9 @@ mod tests {
             // 384 kHz zoomed out all the way: more than 16 bits.
             sample_rate_hz: 384_000,
             hop_size: 163_840,
+            // Capped: 2 bins of an 8192-point spectrum, which its bin count
+            // does not tell.
+            fft_size: 8_192,
             coverage_seconds: 0.25,
             complete: false,
             buffer_reset: true,
@@ -5503,7 +5537,7 @@ mod tests {
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
         let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
-        assert_eq!(payload_len, 49 + 4);
+        assert_eq!(payload_len, 53 + 4);
 
         let mut offset = 4usize;
         assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
@@ -5524,6 +5558,8 @@ mod tests {
         assert_eq!(frame[offset + 2], 1);
         offset += 3;
         assert_eq!(read_u32(&frame, &mut offset), 3_440);
+        assert_eq!(read_u32(&frame, &mut offset), 8_192);
+        assert_eq!(offset, 4 + 53);
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
     }
 
@@ -5542,6 +5578,7 @@ mod tests {
             total_columns_estimate: 512,
             sample_rate_hz: 48_000,
             hop_size: 1_024,
+            fft_size: 0,
             coverage_seconds: f32::from(u16::try_from(start_column_index).unwrap_or(u16::MAX)),
             complete: false,
             buffer_reset: start_column_index == 0,
@@ -5585,6 +5622,7 @@ mod tests {
             total_columns_estimate: 20_000,
             sample_rate_hz: 48_000,
             hop_size: 1_024,
+            fft_size: 2048,
             coverage_seconds: 1.0,
             complete: false,
             buffer_reset: start == 0,
@@ -5606,7 +5644,7 @@ mod tests {
             }
             done_tx.send(()).unwrap();
         });
-        let frame_size = 47 + 64 * 1_025 * 2;
+        let frame_size = 4 + 53 + 64 * 1_025 * 2;
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             let bytes = shared.runtime.lock().unwrap().pending_spectrogram_bytes;

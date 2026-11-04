@@ -1000,6 +1000,7 @@ mod tests {
             total_columns_estimate: 32,
             sample_rate_hz: 44_100,
             hop_size: 1_024,
+            fft_size: 8192,
             coverage_seconds: 1.0,
             complete: true,
             buffer_reset: false,

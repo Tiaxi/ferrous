@@ -168,6 +168,9 @@ fn apply_analysis_spectrogram_settings(state: &mut BridgeState, analysis: &Analy
     analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
         state.settings.spectrogram_display_mode,
     ));
+    analysis.command(AnalysisCommand::SetSpectrogramFrequencyCap(
+        state.settings.display.spectrogram_frequency_cap,
+    ));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     analysis.command(AnalysisCommand::SetSpectrogramViewMode(
         state.settings.spectrogram_view_mode,
@@ -276,6 +279,13 @@ fn handle_settings_bridge_command(
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetFftSize(size) => set_fft_size(state, context, *size),
+        BridgeSettingsCommand::SetSpectrogramFrequencyCap(enabled) => {
+            state.settings.display.spectrogram_frequency_cap = *enabled;
+            context
+                .analysis
+                .command(AnalysisCommand::SetSpectrogramFrequencyCap(*enabled));
+            *context.settings_dirty = true;
+        }
         BridgeSettingsCommand::SetSpectrogramViewMode(view_mode) => {
             state.settings.spectrogram_view_mode = *view_mode;
             context
