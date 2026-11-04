@@ -3017,27 +3017,39 @@ mod tests {
         );
     }
 
-    /// Columns a second of a WAV at 8 kHz, at zoom 1.
+    /// The zoom of the stop tests: a sixth, at which the columns of a WAV
+    /// at 8 kHz are 1024 frames apart, which keeps them few.
+    const STOP_ZOOM: f32 = 171.0 / 1024.0;
+    /// Columns a second of a WAV at 8 kHz, at [`STOP_ZOOM`].
     const STOP_COLUMNS_PER_SECOND: f64 = 8_000.0 / 1_024.0;
-    /// The seconds a 1,165-pixel view shows of it at zoom 1.
+    /// The seconds a 1,165-pixel view shows of it at [`STOP_ZOOM`].
     const STOP_WINDOW_SECONDS: f64 = 1_165.0 / STOP_COLUMNS_PER_SECOND;
+
+    #[test]
+    fn the_stop_tests_have_long_columns() {
+        assert_eq!(column_hop::column_hop(8_000, STOP_ZOOM), 1024);
+        let window = centered_view::window_seconds(1_165, STOP_ZOOM, 8_000);
+        assert!((window - STOP_WINDOW_SECONDS).abs() < 0.05, "{window}");
+    }
 
     fn stop_column(seconds: f64) -> u64 {
         f64_to_u64_saturating(seconds * STOP_COLUMNS_PER_SECOND)
     }
 
     /// An engine showing a `seconds` long track centered in a 1,165-pixel
-    /// view at zoom 1, with the ring its output fills.
+    /// view at [`STOP_ZOOM`], with the ring its output fills.
     fn centered_engine_on_wave(seconds: u32) -> (AnalysisEngine, Receiver<AnalysisEvent>, PathBuf) {
         let path = write_engine_test_wave(seconds, 8_000);
         let (engine, events) = centered_engine_on(&path);
         (engine, events, path)
     }
 
-    /// An engine showing `path` centered in a 1,165-pixel view at zoom 1.
+    /// An engine showing `path` centered in a 1,165-pixel view at
+    /// [`STOP_ZOOM`].
     fn centered_engine_on(path: &Path) -> (AnalysisEngine, Receiver<AnalysisEvent>) {
         let (engine, events) = AnalysisEngine::new();
         engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        engine.command(AnalysisCommand::SetSpectrogramZoomLevel(STOP_ZOOM));
         engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
             SpectrogramDisplayMode::Centered,
         ));
