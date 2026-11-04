@@ -938,6 +938,7 @@ impl AnalysisRuntimeState {
             &mut self.active_track_path,
             &mut self.staged_continuation_path,
             &mut self.staged_centered_path,
+            &mut self.provisional_continuation,
         ]
         .into_iter()
         .flatten()
@@ -945,6 +946,11 @@ impl AnalysisRuntimeState {
             remap_path(path, &renames);
         }
         if let Some((_, path)) = self.pending_candidate.as_mut() {
+            remap_path(path, &renames);
+        }
+        // A start the worker reported stays with its file, which the switch
+        // names by its new path.
+        if let Some((path, _)) = self.staged_continuation_start.as_mut() {
             remap_path(path, &renames);
         }
         self.formats.remap(&renames);
@@ -5685,6 +5691,68 @@ mod tests {
                     &ctx,
                 );
                 assert_eq!(channels.opened_paths(), vec![successor_new.to_path_buf()]);
+            }
+        }
+
+        // Where the worker went on with a rolling successor stays known
+        // across a rename: reported before it, or after it for a switch
+        // made before it, at the path the worker opened.
+        let format = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        for (successor, successor_new) in [(b, b_new), (a, a_new)] {
+            for reported_first in [true, false] {
+                let case = format!("{} reported_first={reported_first}", successor.display());
+                let channels = TestChannels::new();
+                let ctx = channels.ctx();
+                let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+                state.last_spectrogram_position = 200.0;
+                stage_successor(&mut state, successor);
+                let generation = channels.generation.load(Ordering::Relaxed);
+                let opened = |path: &Path| SessionReport::Opened {
+                    generation,
+                    track_token: 1,
+                    path: path.to_path_buf(),
+                    stamp: None,
+                    format,
+                    continued_at: Some(200.4),
+                };
+                let set_track = |path: &Path| AnalysisCommand::SetTrack {
+                    path: path.to_path_buf(),
+                    reset_spectrogram: false,
+                    track_token: 2,
+                    gapless: true,
+                };
+                if reported_first {
+                    state.handle_session_report(opened(successor), &ctx);
+                    state.handle_command(remap(&[(a, a_new), (b, b_new)]), &ctx);
+                    state.handle_command(set_track(successor_new), &ctx);
+                } else {
+                    // The switch is made before the worker opens the file,
+                    // which it does at the new path.
+                    state.handle_command(set_track(successor), &ctx);
+                    assert!(
+                        (state.spectrogram_position_offset - 200.0).abs() < 1e-9,
+                        "{case}"
+                    );
+                    state.handle_command(remap(&[(a, a_new), (b, b_new)]), &ctx);
+                    state.handle_session_report(opened(successor_new), &ctx);
+                }
+                assert!(
+                    (state.spectrogram_position_offset - 200.4).abs() < 1e-9,
+                    "{case}: {}",
+                    state.spectrogram_position_offset
+                );
+                assert!(state.provisional_continuation.is_none(), "{case}");
+                // The worker decodes the playing file, so a seek reaches it.
+                channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+                state.handle_command(AnalysisCommand::SeekPosition(5.0), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
+                    "{case}: {commands:?}"
+                );
             }
         }
     }
