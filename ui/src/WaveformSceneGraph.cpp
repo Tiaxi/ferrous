@@ -153,7 +153,7 @@ public:
         // A cache can be three viewports wide, exceeding common GPU limits.
         // Upload only intersecting, bounded tiles and retain them by image
         // revision and tile origin; scrolling within a tile changes UVs only.
-        const int tileSize = software ? std::max(image.width(), image.height()) : 2048;
+        const int tileSize = software ? std::max(image.width(), image.height()) : WaveformSceneGraph::kTextureSize;
         const QRectF clipped = source.intersected(image.rect());
         if (clipped.isEmpty()) return;
         const double scaleX = target.width() / source.width();
@@ -190,10 +190,19 @@ public:
         for (int i = 0; i < count; ++i) { const QRectF rect(rects[i]); drawRects(&rect, 1); }
     }
     void drawRects(const QRectF *rects, int count) override {
+        // A batch of filled rectangles, such as the columns of a waveform,
+        // is one geometry rather than a node each.
+        const bool batch = count > 1 && !software;
         for (int i = 0; i < count; ++i) {
             const QPen pen = painter()->pen();
             const QBrush brush = painter()->brush();
-            if (pen.style() == Qt::NoPen && brush.style() == Qt::SolidPattern) {
+            if (pen.style() == Qt::NoPen && brush.style() == Qt::SolidPattern && batch) {
+                const QRectF rect = painter()->transform().mapRect(rects[i]);
+                const QColor color = brush.color();
+                if (rect.isEmpty() || color.alpha() == 0) continue;
+                quad(geometry(), vertex(rect.topLeft(), color), vertex(rect.topRight(), color),
+                    vertex(rect.bottomLeft(), color), vertex(rect.bottomRight(), color));
+            } else if (pen.style() == Qt::NoPen && brush.style() == Qt::SolidPattern) {
                 rectangle(rects[i], brush.color());
             } else if (!software && pen.style() == Qt::SolidLine
                 && brush.style() == Qt::SolidPattern && brush.color() == pen.color()

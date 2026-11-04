@@ -13,6 +13,9 @@ class QSGNode;
 // Images stay resident, lines/curves become geometry, and only small labels
 // are rasterized. Resources belong to the returned node, never the GUI item.
 namespace WaveformSceneGraph {
+// The largest image, in device pixels each way, that becomes a texture of
+// its own; a larger one is copied into textures of this size.
+inline constexpr int kTextureSize = 2048;
 // Per-frame texture creation requests and retained image payload sizes. These
 // exclude GPU submission, atlas allocation and driver overhead.
 struct Statistics {

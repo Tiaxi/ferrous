@@ -16,6 +16,7 @@
 #include <QPointer>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
 
@@ -52,6 +53,8 @@ constexpr int kPlaybackTileWidth = 64;
 // The tiles a paint makes ahead of the view, besides those it shows.
 constexpr int kPlaybackTilesPerPaint = 2;
 constexpr int kPlaybackTilePrefetch = 2;
+// How far ahead of the view, in playback, workers make playback tiles.
+constexpr double kPlaybackTileLookaheadSeconds = 0.05;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
 constexpr QColor kBackground(5, 9, 7);
 constexpr QColor kWaveform(54, 225, 161);
@@ -69,6 +72,14 @@ QFont fpsCounterFont() {
     font.setPixelSize(10);
     return font;
 }
+
+// The workers that make playback tiles: half the processors, so that they
+// leave room for decoding and the render thread. At exit, it waits for the
+// tiles it is making.
+struct PlaybackTilePool : QThreadPool {
+    PlaybackTilePool() { setMaxThreadCount(std::max(2, QThread::idealThreadCount() / 2)); }
+};
+Q_GLOBAL_STATIC(PlaybackTilePool, playbackTilePool)
 
 QString fpsCounterText(int fps) {
     static const QString format = i18nc("@item:intext frames per second", "%1 fps");
@@ -204,6 +215,7 @@ bool shouldLogProfileSpike(
 
 WaveformEditorItem::WaveformEditorItem(QQuickItem *parent)
     : QQuickItem(parent) {
+    m_playbackTileWorkers->item = this;
     setFlag(ItemHasContents, true);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
@@ -233,6 +245,12 @@ WaveformEditorItem::~WaveformEditorItem() {
     disconnect(m_windowPresenceConnection);
     cancelPlaybackFrame();
     if (m_decodeCancelled) m_decodeCancelled->store(true);
+    {
+        // A worker that has made a tile hands it over under this lock.
+        QMutexLocker lock(&m_playbackTileWorkers->mutex);
+        m_playbackTileWorkers->item = nullptr;
+        m_playbackTileWorkers->generation.fetch_add(1);
+    }
 }
 
 void WaveformEditorItem::invalidateDetailRequestLocked() {
@@ -1203,13 +1221,18 @@ bool WaveformEditorItem::clampZoomToMaximumLocked() {
     return targetChanged;
 }
 
-double WaveformEditorItem::sampleSpacingPixelsLocked(
-    int pixelWidth, double visibleStart, double visibleEnd) const {
-    if (m_detail.framesPerPoint != 1 || m_detail.pointCount <= 1) return 0.0;
+double WaveformEditorItem::sampleSpacingPixels(
+    const DetailWindow &detail, int pixelWidth, double visibleStart, double visibleEnd) {
+    if (detail.framesPerPoint != 1 || detail.pointCount <= 1) return 0.0;
     const double visiblePoints = (visibleEnd - visibleStart)
-        * static_cast<double>(std::max(1, m_detail.sampleRateHz));
+        * static_cast<double>(std::max(1, detail.sampleRateHz));
     return static_cast<double>(std::max(1, pixelWidth))
         / std::max(1.0, visiblePoints);
+}
+
+double WaveformEditorItem::sampleSpacingPixelsLocked(
+    int pixelWidth, double visibleStart, double visibleEnd) const {
+    return sampleSpacingPixels(m_detail, pixelWidth, visibleStart, visibleEnd);
 }
 
 double WaveformEditorItem::sampleSpacingPixelsLocked() const {
@@ -1264,36 +1287,71 @@ bool WaveformEditorItem::detailResultRequiresImmediateCacheRefreshLocked(
         || preciseDetailReplacesOverview;
 }
 
-double WaveformEditorItem::detailPointTimeLocked(int point) const {
-    if (m_detail.sampleRateHz <= 0 || m_detail.framesPerPoint == 0) {
-        return m_detail.startSeconds;
+double WaveformEditorItem::detailPointTime(const DetailWindow &detail, int point) {
+    if (detail.sampleRateHz <= 0 || detail.framesPerPoint == 0) {
+        return detail.startSeconds;
     }
-    const double framesPerPoint = static_cast<double>(m_detail.framesPerPoint);
+    const double framesPerPoint = static_cast<double>(detail.framesPerPoint);
     const double centerFrame = static_cast<double>(point) * framesPerPoint
         + (framesPerPoint - 1.0) * 0.5;
-    return m_detail.startSeconds
-        + centerFrame / static_cast<double>(m_detail.sampleRateHz);
+    return detail.startSeconds
+        + centerFrame / static_cast<double>(detail.sampleRateHz);
 }
 
-std::pair<int, int> WaveformEditorItem::detailPointRangeLocked(
-    double visibleStart, double visibleEnd) const {
-    if (m_detail.pointCount <= 0
-        || m_detail.sampleRateHz <= 0
-        || m_detail.framesPerPoint == 0
+double WaveformEditorItem::detailPointTimeLocked(int point) const {
+    return detailPointTime(m_detail, point);
+}
+
+std::pair<int, int> WaveformEditorItem::detailPointRange(
+    const DetailWindow &detail, double visibleStart, double visibleEnd) {
+    if (detail.pointCount <= 0
+        || detail.sampleRateHz <= 0
+        || detail.framesPerPoint == 0
         || visibleEnd < visibleStart) {
         return {0, 0};
     }
-    const double step = static_cast<double>(m_detail.framesPerPoint)
-        / static_cast<double>(m_detail.sampleRateHz);
-    const double firstPointTime = detailPointTimeLocked(0);
+    const double step = static_cast<double>(detail.framesPerPoint)
+        / static_cast<double>(detail.sampleRateHz);
+    const double firstPointTime = detailPointTime(detail, 0);
     const double first = (visibleStart - firstPointTime) / step;
     const double last = (visibleEnd - firstPointTime) / step;
     return {
         std::clamp(
-            static_cast<int>(std::floor(first)), 0, m_detail.pointCount),
+            static_cast<int>(std::floor(first)), 0, detail.pointCount),
         std::clamp(
-            static_cast<int>(std::ceil(last)) + 1, 0, m_detail.pointCount),
+            static_cast<int>(std::ceil(last)) + 1, 0, detail.pointCount),
     };
+}
+
+std::pair<int, int> WaveformEditorItem::detailPointRangeLocked(
+    double visibleStart, double visibleEnd) const {
+    return detailPointRange(m_detail, visibleStart, visibleEnd);
+}
+
+std::shared_ptr<const WaveformEditorItem::DetailWindow>
+WaveformEditorItem::detailSnapshotLocked(double startSeconds, double endSeconds) const {
+    auto snapshot = std::make_shared<DetailWindow>();
+    const auto [first, last] = detailPointRangeLocked(startSeconds, endSeconds);
+    if (last <= first || m_detail.sampleRateHz <= 0) return snapshot;
+    const auto channels = static_cast<std::size_t>(m_detail.channelCount);
+    const double secondsPerPoint = static_cast<double>(m_detail.framesPerPoint)
+        / static_cast<double>(m_detail.sampleRateHz);
+    snapshot->sampleRateHz = m_detail.sampleRateHz;
+    snapshot->channelCount = m_detail.channelCount;
+    snapshot->framesPerPoint = m_detail.framesPerPoint;
+    snapshot->pointCount = last - first;
+    // The same points at the same times: see detailPointTime.
+    snapshot->startSeconds = m_detail.startSeconds + first * secondsPerPoint;
+    snapshot->endSeconds = snapshot->startSeconds + snapshot->pointCount * secondsPerPoint;
+    snapshot->extrema.assign(
+        m_detail.extrema.begin() + static_cast<std::ptrdiff_t>(first * channels * 2),
+        m_detail.extrema.begin() + static_cast<std::ptrdiff_t>(last * channels * 2));
+    if (!m_detail.downmixExtrema.empty()) {
+        snapshot->downmixExtrema.assign(
+            m_detail.downmixExtrema.begin() + static_cast<std::ptrdiff_t>(first) * 2,
+            m_detail.downmixExtrema.begin() + static_cast<std::ptrdiff_t>(last) * 2);
+    }
+    return snapshot;
 }
 
 void WaveformEditorItem::updateFpsEstimateLocked() {
@@ -1745,11 +1803,19 @@ int WaveformEditorItem::displayedChannelCountLocked() const {
     const int sourceChannels = m_channelCount > 0 ? m_channelCount : m_channelCountHint;
     return m_viewMode == 0 ? 1 : std::max(1, sourceChannels);
 }
-bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
-    if (m_viewMode == 0 || channel >= 64) return false;
+bool WaveformEditorItem::LaneStyle::muted(int channel) const {
+    if (viewMode == 0 || channel >= 64) return false;
     const qulonglong bit = qulonglong{1} << channel;
-    return (m_mutedChannelsMask & bit) != 0
-        || (m_soloedChannelsMask != 0 && (m_soloedChannelsMask & bit) == 0);
+    return (mutedMask & bit) != 0
+        || (soloedMask != 0 && (soloedMask & bit) == 0);
+}
+
+WaveformEditorItem::LaneStyle WaveformEditorItem::laneStyleLocked() const {
+    return {m_viewMode, m_mutedChannelsMask, m_soloedChannelsMask};
+}
+
+bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
+    return laneStyleLocked().muted(channel);
 }
 
 QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
@@ -1764,7 +1830,11 @@ QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeDa
     if (window() && window()->rendererInterface()->graphicsApi() == QSGRendererInterface::Software) {
         QMutexLocker lock(&m_stateMutex);
         const auto [start, end] = visibleRangeLocked();
-        rasterize = renderDetailDirectlyLocked(start, end);
+        // The software renderer draws no geometry: samples drawn directly,
+        // and the envelope that stands in for playback tiles still being
+        // made, go into one raster.
+        rasterize = renderDetailDirectlyLocked(start, end)
+            || playbackTilesEligibleLocked(start, end);
     }
     return WaveformSceneGraph::render(oldNode, window(),
         QSize(std::max(1, static_cast<int>(std::floor(width()))),
@@ -1801,8 +1871,10 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool showFps = false;
     QSizeF reservedCorner;
     bool directDetail = false;
+    bool tiledPlayback = false;
     bool playbackTilesComplete = false;
     int playbackTilesRendered = 0;
+    std::vector<std::pair<int, int>> playbackTileGaps;
     std::vector<PlaybackTilePaint> playbackTilePaints;
     bool presentationCommitted = false;
     bool stagingContinues = false;
@@ -1843,7 +1915,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 *painter, canvasWidth, canvasHeight,
                 visibleStart, visibleEnd, displayedChannelCountLocked(), 1.0);
         } else {
-            const bool tiledPlayback = playbackTilesEligibleLocked(
+            tiledPlayback = playbackTilesEligibleLocked(
                 visibleStart, visibleEnd);
             const bool currentDetailReady =
                 detailCoversRangeLocked(visibleStart, visibleEnd)
@@ -1857,15 +1929,21 @@ void WaveformEditorItem::paint(QPainter *painter) {
                     visibleEnd,
                     renderPixelHeightLocked(),
                     playbackTileRenderBudgetLocked(
-                        visibleStart, visibleEnd));
+                        visibleStart, visibleEnd)
+                        + playbackTilesAheadLocked(visibleStart, visibleEnd));
             }
             if (tiledPlayback) {
                 playbackTilesComplete = playbackTilesCoverLocked(
                     visibleStart, visibleEnd);
                 playbackTilePaints = playbackTilePaintsLocked(
                     visibleStart, visibleEnd, canvasWidth, canvasHeight);
-            }
-            if (!playbackTilesComplete) {
+                // Tiles still being made show as the detail's envelope
+                // until they come, rather than a cache drawn now for them.
+                if (!playbackTilesComplete) {
+                    playbackTileGaps = playbackTileGapsLocked(
+                        visibleStart, visibleEnd, canvasWidth);
+                }
+            } else {
                 rebuildCacheLocked(
                     renderPixelWidthLocked(), renderPixelHeightLocked(),
                     visibleStart, visibleEnd);
@@ -1877,9 +1955,10 @@ void WaveformEditorItem::paint(QPainter *painter) {
         crosshair = m_crosshairEnabled;
         scale = renderScaleLocked();
         position = displayedPositionSecondsLocked(frameNs);
-        // Playback tiles the view still lacks, where its detail has not
-        // arrived, come in the next frames.
-        const bool tilesContinue = playbackTilesRendered > 0 && !playbackTilesComplete;
+        // Tiles made here, a few at a time, come in the next frames; tiles
+        // from the workers ask for their own frame.
+        const bool tilesContinue = m_playbackTilesInline
+            && playbackTilesRendered > 0 && !playbackTilesComplete;
         m_paintedFrameChangeSeconds = tilesContinue
             ? std::numeric_limits<double>::quiet_NaN()
             : frameChangeSecondsLocked(visibleStart, visibleEnd, position, canvasWidth);
@@ -1896,7 +1975,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     if (!directDetail) {
         bool cachePaintCoversCanvas = false;
         bool cachePainted = false;
-        if (playbackTilesComplete) {
+        if (tiledPlayback) {
             painter->fillRect(
                 QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             cachePaintCoversCanvas = true;
@@ -1947,6 +2026,13 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
         for (const PlaybackTilePaint &tile : playbackTilePaints) {
             painter->drawImage(tile.target, tile.image, tile.source);
+        }
+        if (!playbackTileGaps.empty()) {
+            QMutexLocker lock(&m_stateMutex);
+            for (const auto &[from, to] : playbackTileGaps) {
+                drawDetailEnvelope(*painter, m_detail, laneStyleLocked(), canvasWidth,
+                    canvasHeight, visibleStart, visibleEnd, channels, from, to);
+            }
         }
     }
     painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
@@ -2164,6 +2250,10 @@ bool WaveformEditorItem::playbackTilesEligibleLocked(
 
 void WaveformEditorItem::clearPlaybackTilesLocked() {
     m_playbackTiles.clear();
+    // Tiles workers are making for these are not taken.
+    ++m_playbackTileGeneration;
+    m_playbackTileWorkers->generation.store(m_playbackTileGeneration);
+    m_playbackTilesPending.clear();
     m_playbackTileSecondsPerPixel = 0.0;
     m_playbackTileHeight = 0;
     m_playbackTileFramesPerPoint = 0;
@@ -2192,6 +2282,43 @@ void WaveformEditorItem::preparePlaybackTilesLocked(
     }
 }
 
+QThreadPool *WaveformEditorItem::playbackTileThreadPool() {
+    return playbackTilePool();
+}
+
+WaveformEditorItem::PlaybackTile WaveformEditorItem::renderPlaybackTile(
+    const DetailWindow &detail, const LaneStyle &style, int height, double tileStart,
+    double tileEnd, int channels, int firstX, int lastX, double pixelScale) {
+    // Drawn strip by strip, so that the scene graph takes each as a texture
+    // as it is, rather than copying a taller one into textures in the frame.
+    PlaybackTile tile;
+    for (int top = 0; top < height; top += WaveformSceneGraph::kTextureSize) {
+        QImage strip(kPlaybackTileWidth, std::min(WaveformSceneGraph::kTextureSize, height - top),
+            QImage::Format_RGB32);
+        strip.fill(kBackground);
+        QPainter painter(&strip);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.translate(0, -top);
+        drawDetailSlice(painter, detail, style, kPlaybackTileWidth, height,
+            tileStart, tileEnd, channels, firstX, lastX, pixelScale);
+        painter.end();
+        tile.strips.push_back(std::move(strip));
+    }
+    return tile;
+}
+
+int WaveformEditorItem::playbackTilesAheadLocked(
+    double visibleStart, double visibleEnd) const {
+    if (!m_playing || m_playbackTileSecondsPerPixel <= 0.0) return 0;
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    // Where playback takes the view while the workers make its tiles, up
+    // to a view's width.
+    const double visibleTiles = std::ceil((visibleEnd - visibleStart) / tileDuration);
+    return static_cast<int>(std::min(
+        visibleTiles, std::ceil(kPlaybackTileLookaheadSeconds / tileDuration)));
+}
+
 int WaveformEditorItem::renderMissingPlaybackTilesLocked(
     double visibleStart, double visibleEnd, int height, int tileBudget) {
     if (tileBudget <= 0 || m_playbackTileSecondsPerPixel <= 0.0) {
@@ -2205,8 +2332,9 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
         visibleStart / tileDuration + kGridAlignmentEpsilon));
     const qint64 lastVisible = static_cast<qint64>(std::floor(
         std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    const int ahead = playbackTilesAheadLocked(visibleStart, visibleEnd);
     const qint64 firstWanted = firstVisible - kPlaybackTilePrefetch;
-    const qint64 lastWanted = lastVisible + kPlaybackTilePrefetch;
+    const qint64 lastWanted = lastVisible + std::max(ahead, kPlaybackTilePrefetch);
 
     for (auto iterator = m_playbackTiles.begin();
          iterator != m_playbackTiles.end();) {
@@ -2217,22 +2345,38 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
             ++iterator;
         }
     }
+    // Workers skip the tiles the view has left before they start them.
+    m_playbackTileWorkers->firstWanted.store(firstWanted - kPlaybackTilePrefetch);
+    m_playbackTileWorkers->lastWanted.store(lastWanted + kPlaybackTilePrefetch);
 
+    // The view's tiles first, then those playback reaches next, then the
+    // rest of the margins.
     std::vector<qint64> candidates;
     candidates.reserve(static_cast<std::size_t>(
         std::max<qint64>(0, lastWanted - firstWanted + 1)));
     for (qint64 tile = firstVisible; tile <= lastVisible; ++tile) {
         candidates.push_back(tile);
     }
-    for (int margin = 1; margin <= kPlaybackTilePrefetch; ++margin) {
-        candidates.push_back(firstVisible - margin);
+    for (int margin = 1; margin <= ahead; ++margin) {
         candidates.push_back(lastVisible + margin);
     }
+    for (int margin = 1; margin <= kPlaybackTilePrefetch; ++margin) {
+        candidates.push_back(firstVisible - margin);
+        if (margin > ahead) candidates.push_back(lastVisible + margin);
+    }
 
-    int rendered = 0;
+    struct Job {
+        qint64 index;
+        double start;
+        double end;
+        int firstX;
+        int lastX;
+    };
+    std::vector<Job> jobs;
     for (const qint64 tileIndex : candidates) {
-        if (rendered >= tileBudget
-            || m_playbackTiles.contains(tileIndex)) {
+        if (static_cast<int>(jobs.size()) >= tileBudget) break;
+        if (m_playbackTiles.contains(tileIndex)
+            || m_playbackTilesPending.contains(tileIndex)) {
             continue;
         }
         const double tileStart = static_cast<double>(tileIndex) * tileDuration;
@@ -2261,41 +2405,120 @@ int WaveformEditorItem::renderMissingPlaybackTilesLocked(
                 contentStart, contentEnd, contentPixelWidth)) {
             continue;
         }
+        jobs.push_back({tileIndex, tileStart, tileEnd, firstX, lastX});
+    }
+    if (jobs.empty()) return 0;
 
-#if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
-        const auto tileStarted = std::chrono::steady_clock::now();
-#endif
-        QImage tileImage(
-            kPlaybackTileWidth, height, QImage::Format_RGB32);
-        tileImage.fill(kBackground);
-        QPainter tilePainter(&tileImage);
-        tilePainter.setRenderHint(QPainter::Antialiasing, false);
-        drawDetailSliceLocked(
-            tilePainter,
-            kPlaybackTileWidth,
-            height,
-            tileStart,
-            tileEnd,
-            m_playbackTileDisplayedChannels,
-            firstX,
-            lastX,
-            renderScaleLocked());
-        tilePainter.end();
-        m_playbackTiles.emplace(
-            tileIndex, PlaybackTile{std::move(tileImage)});
-        ++rendered;
+    const LaneStyle style = laneStyleLocked();
+    const int channels = m_playbackTileDisplayedChannels;
+    const double scale = renderScaleLocked();
+    if (m_playbackTilesInline) {
+        for (const Job &job : jobs) {
+            m_playbackTiles.emplace(job.index, renderPlaybackTile(
+                m_detail, style, height, job.start, job.end, channels,
+                job.firstX, job.lastX, scale));
+        }
+        return static_cast<int>(jobs.size());
+    }
+
+    // The workers draw from a copy of the points the tiles show, with the
+    // margin a sample curve draws past a tile's edges.
+    double first = jobs.front().start;
+    double last = jobs.front().end;
+    for (const Job &job : jobs) {
+        first = std::min(first, job.start);
+        last = std::max(last, job.end);
+    }
+    const double margin = (kSampleCurveBoundaryMarginPixels + 2) * m_playbackTileSecondsPerPixel;
+    const std::shared_ptr<const DetailWindow> detail = detailSnapshotLocked(
+        first - margin, last + margin);
+    const quint64 generation = m_playbackTileGeneration;
+    const std::shared_ptr<PlaybackTileWorkers> workers = m_playbackTileWorkers;
+    for (const Job &job : jobs) {
+        m_playbackTilesPending.insert(job.index);
+        playbackTilePool()->start([workers, generation, detail, style, height, job,
+                                   channels, scale]() {
+            PlaybackTile tile;
+            const auto started = std::chrono::steady_clock::now();
+            // A tile of tiles since dropped, or one the view has left, is
+            // not made; its request still ends.
+            if (workers->generation.load() == generation
+                && job.index >= workers->firstWanted.load()
+                && job.index <= workers->lastWanted.load()) {
+                tile = renderPlaybackTile(*detail, style, height, job.start, job.end,
+                    channels, job.firstX, job.lastX, scale);
+            }
+            const double renderMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count();
+            QMutexLocker lock(&workers->mutex);
+            if (workers->item != nullptr) {
+                workers->item->deliverPlaybackTile(
+                    generation, job.index, std::move(tile), renderMs);
+            }
+        });
+    }
+    return static_cast<int>(jobs.size());
+}
+
+void WaveformEditorItem::deliverPlaybackTile(
+    quint64 generation, qint64 index, PlaybackTile tile, double renderMs) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (generation != m_playbackTileGeneration) return;
+        m_playbackTilesPending.erase(index);
+        if (tile.strips.empty()) return;
+        m_playbackTiles.insert_or_assign(index, std::move(tile));
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         if (m_profile.enabled) {
-            const double tileMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - tileStarted).count();
             ++m_profile.tileRenders;
-            m_profile.tileRenderMs += tileMs;
-            m_profile.maximumTileRenderMs = std::max(
-                m_profile.maximumTileRenderMs, tileMs);
+            m_profile.tileRenderMs += renderMs;
+            m_profile.maximumTileRenderMs = std::max(m_profile.maximumTileRenderMs, renderMs);
         }
+#else
+        Q_UNUSED(renderMs);
 #endif
     }
-    return rendered;
+    // On the item's thread: the tile shows in the next frame. Called while
+    // the workers' lock keeps the item alive.
+    if (!m_playbackTileWorkers->updateQueued.exchange(true)) {
+        QMetaObject::invokeMethod(this, [this]() {
+            m_playbackTileWorkers->updateQueued.store(false);
+            update();
+        }, Qt::QueuedConnection);
+    }
+}
+
+std::vector<std::pair<int, int>> WaveformEditorItem::playbackTileGapsLocked(
+    double visibleStart, double visibleEnd, int canvasWidth) const {
+    std::vector<std::pair<int, int>> gaps;
+    if (m_playbackTileSecondsPerPixel <= 0.0 || visibleEnd <= visibleStart) {
+        gaps.emplace_back(0, canvasWidth);
+        return gaps;
+    }
+    const double tileDuration = m_playbackTileSecondsPerPixel
+        * static_cast<double>(kPlaybackTileWidth);
+    const qint64 first = static_cast<qint64>(std::floor(
+        visibleStart / tileDuration + kGridAlignmentEpsilon));
+    const qint64 last = static_cast<qint64>(std::floor(
+        std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    const double pixelsPerSecond = static_cast<double>(canvasWidth) / (visibleEnd - visibleStart);
+    for (qint64 tile = first; tile <= last; ++tile) {
+        if (m_playbackTiles.contains(tile)) continue;
+        // Whole canvas pixels around the tile, which its neighbours cover
+        // again where they are there.
+        const double start = static_cast<double>(tile) * tileDuration;
+        const int from = std::max(0, static_cast<int>(std::floor(
+            (start - visibleStart) * pixelsPerSecond)));
+        const int to = std::min(canvasWidth, static_cast<int>(std::ceil(
+            (start + tileDuration - visibleStart) * pixelsPerSecond)));
+        if (to <= from) continue;
+        if (!gaps.empty() && gaps.back().second >= from) {
+            gaps.back().second = std::max(gaps.back().second, to);
+        } else {
+            gaps.emplace_back(from, to);
+        }
+    }
+    return gaps;
 }
 
 int WaveformEditorItem::playbackTileRenderBudgetLocked(
@@ -2360,7 +2583,6 @@ WaveformEditorItem::playbackTilePaintsLocked(
         const auto iterator = m_playbackTiles.find(tileIndex);
         if (iterator == m_playbackTiles.end()) continue;
         const double tileStart = static_cast<double>(tileIndex) * tileDuration;
-        const QImage &image = iterator->second.image;
         // Tiles and a view that follows the playhead are on the track's
         // grid of device columns: a tile starts on a column of the view,
         // short of which rounding can place it, leaving that column empty.
@@ -2375,16 +2597,25 @@ WaveformEditorItem::playbackTilePaintsLocked(
         const QRectF shown = target.intersected(
             QRectF(0.0, 0.0, canvasWidth, canvasHeight));
         if (shown.isEmpty()) continue;
-        const double pixelsPerUnit = static_cast<double>(image.width()) / target.width();
-        paints.push_back(PlaybackTilePaint{
-            image,
-            shown,
-            QRectF(
-                (shown.left() - target.left()) * pixelsPerUnit,
-                0.0,
-                shown.width() * pixelsPerUnit,
-                static_cast<double>(image.height())),
-        });
+        const double pixelsPerUnit = static_cast<double>(kPlaybackTileWidth) / target.width();
+        // Each strip over its rows of the canvas.
+        const std::vector<QImage> &strips = iterator->second.strips;
+        int tileHeight = 0;
+        for (const QImage &strip : strips) tileHeight += strip.height();
+        const double rowsPerUnit = static_cast<double>(std::max(1, tileHeight)) / canvasHeight;
+        int top = 0;
+        for (const QImage &strip : strips) {
+            paints.push_back(PlaybackTilePaint{
+                strip,
+                QRectF(shown.left(), top / rowsPerUnit, shown.width(), strip.height() / rowsPerUnit),
+                QRectF(
+                    (shown.left() - target.left()) * pixelsPerUnit,
+                    0.0,
+                    shown.width() * pixelsPerUnit,
+                    static_cast<double>(strip.height())),
+            });
+            top += strip.height();
+        }
     }
     return paints;
 }
@@ -2660,16 +2891,27 @@ void WaveformEditorItem::drawDetailSliceLocked(
     QPainter &painter, int width, int height,
     double visibleStart, double visibleEnd, int channels,
     int firstX, int lastX, double pixelScale) const {
-    const double detailSpan = m_detail.endSeconds - m_detail.startSeconds;
+    drawDetailSlice(painter, m_detail, laneStyleLocked(), width, height,
+        visibleStart, visibleEnd, channels, firstX, lastX, pixelScale);
+}
+
+void WaveformEditorItem::drawDetailSlice(
+    QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
+    int width, int height, double visibleStart, double visibleEnd, int channels,
+    int firstX, int lastX, double pixelScale) {
+    const double detailSpan = detail.endSeconds - detail.startSeconds;
     const double visibleSpan = visibleEnd - visibleStart;
     firstX = std::clamp(firstX, 0, width);
     lastX = std::clamp(lastX, firstX, width);
     if (detailSpan <= 0.0 || visibleSpan <= 0.0 || firstX >= lastX) return;
-    const double sampleSpacing = sampleSpacingPixelsLocked(
-        width, visibleStart, visibleEnd);
+    const double sampleSpacing = sampleSpacingPixels(
+        detail, width, visibleStart, visibleEnd);
     const bool sampleCurve = sampleSpacing + kGridAlignmentEpsilon
         >= kSampleCurvePixelsPerSample;
-    const bool sampleMarkers = sampleSpacing + kGridAlignmentEpsilon
+    // Markers follow the spacing in logical pixels, whatever the painter's
+    // scale, as drawing samples directly does: a cache or a playback tile
+    // in device pixels draws none where the view is not drawn directly.
+    const bool sampleMarkers = sampleSpacing / pixelScale + kGridAlignmentEpsilon
         >= kSampleMarkerPixelsPerSample;
     const double sampleMarkerSize = std::clamp(
         sampleSpacing * 0.75,
@@ -2684,7 +2926,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
         + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel;
     const double sliceEnd = visibleStart
         + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel;
-    const auto [firstPoint, lastPoint] = detailPointRangeLocked(
+    const auto [firstPoint, lastPoint] = detailPointRange(detail,
         sliceStart, sliceEnd);
     const int sliceWidth = lastX - firstX;
     for (int displayChannel = 0; displayChannel < channels; ++displayChannel) {
@@ -2692,7 +2934,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
         const double bottom = static_cast<double>(displayChannel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
         const double half = (bottom - top) * 0.5 - pixelScale;
-        const QColor color = channelIsMutedLocked(displayChannel) ? kMutedWaveform : kWaveform;
+        const QColor color = style.muted(displayChannel) ? kMutedWaveform : kWaveform;
         // Columns are a pixel wide; curves keep their logical width.
         painter.setPen(QPen(color, sampleCurve ? (sampleMarkers ? 1.2 : 1.0) * pixelScale : 1.0));
         QPolygonF polyline;
@@ -2707,7 +2949,7 @@ void WaveformEditorItem::drawDetailSliceLocked(
             pixelSeen.assign(static_cast<std::size_t>(sliceWidth), false);
         }
         for (int point = firstPoint; point < lastPoint; ++point) {
-            const double time = detailPointTimeLocked(point);
+            const double time = detailPointTime(detail, point);
             if (!sampleCurve
                 && (time < visibleStart || time >= visibleEnd)) {
                 continue;
@@ -2733,17 +2975,17 @@ void WaveformEditorItem::drawDetailSliceLocked(
             }
             float minimum = 1.0F;
             float maximum = -1.0F;
-            const int firstChannel = m_viewMode == 0 ? 0 : displayChannel;
-            const int lastChannel = m_viewMode == 0 ? m_detail.channelCount : displayChannel + 1;
+            const int firstChannel = style.viewMode == 0 ? 0 : displayChannel;
+            const int lastChannel = style.viewMode == 0 ? detail.channelCount : displayChannel + 1;
             for (int sourceChannel = firstChannel; sourceChannel < lastChannel; ++sourceChannel) {
-                const std::size_t index = (static_cast<std::size_t>(point) * m_detail.channelCount + sourceChannel) * 2U;
-                minimum = std::min(minimum, m_detail.extrema[index]);
-                maximum = std::max(maximum, m_detail.extrema[index + 1]);
+                const std::size_t index = (static_cast<std::size_t>(point) * detail.channelCount + sourceChannel) * 2U;
+                minimum = std::min(minimum, detail.extrema[index]);
+                maximum = std::max(maximum, detail.extrema[index + 1]);
             }
-            if (m_viewMode == 0 && !m_detail.downmixExtrema.empty()) {
+            if (style.viewMode == 0 && !detail.downmixExtrema.empty()) {
                 const auto index = static_cast<std::size_t>(point) * 2U;
-                minimum = m_detail.downmixExtrema[index];
-                maximum = m_detail.downmixExtrema[index + 1];
+                minimum = detail.downmixExtrema[index];
+                maximum = detail.downmixExtrema[index + 1];
             }
             if (sampleCurve) {
                 polyline.append(QPointF(
@@ -2792,6 +3034,89 @@ void WaveformEditorItem::drawDetailSliceLocked(
             painter.restore();
         }
     }
+}
+
+void WaveformEditorItem::drawDetailEnvelope(
+    QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
+    int width, int height, double visibleStart, double visibleEnd, int channels,
+    int firstX, int lastX) {
+    const double visibleSpan = visibleEnd - visibleStart;
+    firstX = std::clamp(firstX, 0, width);
+    lastX = std::clamp(lastX, firstX, width);
+    if (detail.pointCount <= 0 || visibleSpan <= 0.0 || firstX >= lastX) return;
+    const double secondsPerPixel = visibleSpan / static_cast<double>(std::max(1, width));
+    // A point either side, so that the lines into the slice's edges show.
+    const auto [firstPoint, lastPoint] = detailPointRange(
+        detail,
+        visibleStart + static_cast<double>(firstX - 1) * secondsPerPixel,
+        visibleStart + static_cast<double>(lastX + 1) * secondsPerPixel);
+    const int sliceWidth = lastX - firstX;
+    std::vector<float> minima(static_cast<std::size_t>(sliceWidth));
+    std::vector<float> maxima(static_cast<std::size_t>(sliceWidth));
+    QList<QRectF> columns;
+    columns.reserve(sliceWidth);
+    for (int displayChannel = 0; displayChannel < channels; ++displayChannel) {
+        const double top = static_cast<double>(displayChannel) * height / channels;
+        const double bottom = static_cast<double>(displayChannel + 1) * height / channels;
+        const double center = (top + bottom) * 0.5;
+        const double half = (bottom - top) * 0.5 - 1.0;
+        std::fill(minima.begin(), minima.end(), std::numeric_limits<float>::max());
+        std::fill(maxima.begin(), maxima.end(), std::numeric_limits<float>::lowest());
+        const int firstChannel = style.viewMode == 0 ? 0 : displayChannel;
+        const int lastChannel = style.viewMode == 0 ? detail.channelCount : displayChannel + 1;
+        bool previous = false;
+        double previousX = 0.0;
+        float previousMinimum = 0.0F;
+        float previousMaximum = 0.0F;
+        for (int point = firstPoint; point < lastPoint; ++point) {
+            float minimum = 1.0F;
+            float maximum = -1.0F;
+            if (style.viewMode == 0 && !detail.downmixExtrema.empty()) {
+                minimum = detail.downmixExtrema[static_cast<std::size_t>(point) * 2U];
+                maximum = detail.downmixExtrema[static_cast<std::size_t>(point) * 2U + 1U];
+            } else {
+                for (int channel = firstChannel; channel < lastChannel; ++channel) {
+                    const std::size_t index = (static_cast<std::size_t>(point) * detail.channelCount
+                        + static_cast<std::size_t>(channel)) * 2U;
+                    minimum = std::min(minimum, detail.extrema[index]);
+                    maximum = std::max(maximum, detail.extrema[index + 1]);
+                }
+            }
+            const double x = (detailPointTime(detail, point) - visibleStart) / secondsPerPixel;
+            // The columns from the previous point to this one hold the line
+            // between them, so that the envelope has no gaps.
+            const int from = static_cast<int>(std::floor(previous ? previousX : x));
+            const int to = static_cast<int>(std::floor(x));
+            const float low = previous ? std::min(minimum, previousMinimum) : minimum;
+            const float high = previous ? std::max(maximum, previousMaximum) : maximum;
+            for (int column = std::max(from, firstX); column <= std::min(to, lastX - 1); ++column) {
+                const auto pixel = static_cast<std::size_t>(column - firstX);
+                minima[pixel] = std::min(minima[pixel], low);
+                maxima[pixel] = std::max(maxima[pixel], high);
+            }
+            previous = true;
+            previousX = x;
+            previousMinimum = minimum;
+            previousMaximum = maximum;
+        }
+        columns.clear();
+        for (int x = firstX; x < lastX; ++x) {
+            const auto pixel = static_cast<std::size_t>(x - firstX);
+            if (minima[pixel] > maxima[pixel]) continue;
+            // The whole column, at any scale, from the top of its highest
+            // pixel to the bottom of its lowest.
+            const double top = std::round(center - static_cast<double>(maxima[pixel]) * half);
+            const double bottom = std::round(center - static_cast<double>(minima[pixel]) * half);
+            columns.append(QRectF(x, top, 1.0, bottom - top + 1.0));
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(style.muted(displayChannel) ? kMutedWaveform : kWaveform);
+        // One call: the scene graph makes one geometry of a batch of them.
+        if (!columns.isEmpty()) {
+            painter.drawRects(columns.constData(), static_cast<int>(columns.size()));
+        }
+    }
+    painter.setBrush(Qt::NoBrush);
 }
 
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
