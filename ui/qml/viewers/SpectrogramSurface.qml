@@ -44,8 +44,8 @@ Item {
         }
     }
 
-    // The backend sizes its decode lookahead from the widest width it has
-    // seen, and a wider one can restart its decoding, so a splitter drag
+    // The backend sizes the lookahead of its next session from this width,
+    // and a wider one can restart its decoding, so a splitter drag
     // must not send it every pixel. While the width changes, it gets the
     // latest width every 100 ms (enough for a lookahead of seconds), and
     // the final one at most 100 ms after the change stops.

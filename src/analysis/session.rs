@@ -459,6 +459,7 @@ impl StagingChunkState {
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            widget_width: 0,
         })
     }
 }
@@ -543,6 +544,7 @@ fn staging_drain_stft_rows(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                widget_width: 0,
             };
             if tx.send(chunk).is_err() {
                 return false; // receiver dropped
@@ -1317,6 +1319,7 @@ fn run_spectrogram_session(
             complete: false,
             buffer_reset: emit_initial_reset,
             clear_history: emit_initial_reset && clear_history_on_reset,
+            widget_width: session.widget_width,
         },
     ));
 
@@ -1536,6 +1539,7 @@ fn fail_session(
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            widget_width: 0,
         },
     ));
     if let Some(error) = error {
@@ -2225,6 +2229,7 @@ fn handle_session_seek(
             complete: false,
             buffer_reset: true,
             clear_history: false,
+            widget_width: session.widget_width,
         },
     ));
     let _ = reports.send(SessionReport::Repositioned {
@@ -2726,6 +2731,7 @@ fn session_send_full_chunk(
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            widget_width: session.widget_width,
         },
     ));
     session.chunk_start_index = session.columns_produced;
@@ -2930,6 +2936,7 @@ fn session_emit_pending_chunk(
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                widget_width: session.widget_width,
             },
         ));
         session.chunk_columns = 0;
@@ -2970,6 +2977,7 @@ fn session_flush_token(
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            widget_width: session.widget_width,
         },
     ));
 }
@@ -3011,6 +3019,7 @@ fn session_emit_finalize_chunk(
             complete: true,
             buffer_reset: false,
             clear_history: false,
+            widget_width: session.widget_width,
         },
     ));
 }
@@ -5823,6 +5832,7 @@ mod tests {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            widget_width: 0,
         };
         if let SpectrogramWorkerCommand::NewTrack {
             emit_initial_reset,
@@ -6177,6 +6187,76 @@ mod tests {
         ]);
         worker
             .chunks_until(|chunk| chunk.start_column_index + u32::from(chunk.column_count) >= 190);
+        worker.finish();
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn every_chunk_carries_the_width_its_columns_were_decoded_for() {
+        // The UI sizes its ring for the width a chunk carries, so a column
+        // decoded ahead for a wider view must come in a chunk that says so,
+        // and a later session for a narrower view carries that view's
+        // width. At zoom 64 a 1920-pixel centered view
+        // parks 138 columns ahead, and a 3840-pixel one 198.
+        let path = write_tone_fixture("chunk-width", 30, 8_000);
+        let end = |chunk: &PrecomputedSpectrogramChunk| {
+            chunk.start_column_index + u32::from(chunk.column_count)
+        };
+        let worker = QueuedWorker::start(vec![with_new_track(
+            session_on(&path, 1, 1),
+            |zoom, width, mode| {
+                *zoom = 64.0;
+                *width = 1_920;
+                *mode = SpectrogramDisplayMode::Centered;
+            },
+        )]);
+        let narrow = worker.chunks_until(|chunk| end(chunk) >= 130);
+        assert!(narrow.iter().all(|chunk| chunk.widget_width == 1_920));
+
+        worker
+            .commands
+            .send(SpectrogramWorkerCommand::UpdateWidgetWidth {
+                widget_width: 3_840,
+            })
+            .unwrap();
+        let wide = worker.chunks_until(|chunk| end(chunk) >= 190);
+        assert!(
+            wide.windows(2)
+                .all(|pair| pair[0].widget_width <= pair[1].widget_width),
+            "the width of a session only grows"
+        );
+        for chunk in &wide {
+            assert!(
+                matches!(chunk.widget_width, 1_920 | 3_840),
+                "{}",
+                chunk.widget_width
+            );
+            if end(chunk) > 138 {
+                assert_eq!(
+                    chunk.widget_width, 3_840,
+                    "columns past the narrow lookahead"
+                );
+            }
+        }
+
+        // The next session is for a narrower view again. (The worker's
+        // generation counter stays at 1 here, so the track token tells the
+        // sessions apart.)
+        worker
+            .commands
+            .send(with_new_track(
+                session_on(&path, 2, 1),
+                |zoom, width, mode| {
+                    *zoom = 64.0;
+                    *width = 1_920;
+                    *mode = SpectrogramDisplayMode::Centered;
+                },
+            ))
+            .unwrap();
+        let next = worker.chunks_until(|chunk| chunk.track_token == 2 && end(chunk) >= 130);
+        let next: Vec<_> = next.iter().filter(|chunk| chunk.track_token == 2).collect();
+        assert!(!next.is_empty());
+        assert!(next.iter().all(|chunk| chunk.widget_width == 1_920));
         worker.finish();
         std::fs::remove_file(path).expect("remove fixture");
     }
@@ -8083,7 +8163,7 @@ mod tests {
         state.fft_size = 2_048;
         state.hop_size = 256;
         state.spectrogram_widget_width = BACKFILL_WIDTH;
-        state.spectrogram_max_widget_width = BACKFILL_WIDTH;
+        state.spectrogram_session_widget_width = BACKFILL_WIDTH;
 
         let (command_tx, command_rx) = unbounded();
         let (events, event_rx) = unbounded();

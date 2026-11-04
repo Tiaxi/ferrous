@@ -561,6 +561,8 @@ private:
         bool clearHistory{false};
         quint64 trackToken{0};
         quint64 generation{0};
+        // The width the session decodes for (0 if unknown).
+        int widgetWidth{0};
         qsizetype dataBytes{0};
     };
 

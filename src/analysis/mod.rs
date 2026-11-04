@@ -230,6 +230,10 @@ pub struct PrecomputedSpectrogramChunk {
     /// When true, the UI should discard previous-track history instead of
     /// preserving rolling continuity across the reset handoff.
     pub clear_history: bool,
+    /// The widget width the session decodes for, in logical pixels (0 if
+    /// unknown). The UI sizes its ring for at least this width, so the ring
+    /// holds the session's lookahead even in a narrower view.
+    pub widget_width: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -367,13 +371,13 @@ struct AnalysisRuntimeState {
     /// the decode margin and lookahead dynamically.  Updated from the
     /// frontend on resize.
     spectrogram_widget_width: u32,
-    /// Maximum widget width observed so far.  The lookahead park
-    /// threshold is sized against this rather than the current width so
-    /// a fullscreen toggle that skips the session restart (because the
-    /// zoom level hasn't changed) still has enough decoded columns to
-    /// fill the larger display.  Cheap memory trade: at max zoom a 4K
-    /// lookahead costs ~12 MB extra vs a 1080p lookahead.
-    spectrogram_max_widget_width: u32,
+    /// The width the live worker session decodes for: the widget width
+    /// when it started, raised while it runs when the widget grows, as a
+    /// fullscreen toggle that keeps the zoom level does without a restart.
+    /// It sizes the session's lookahead, and every chunk of the session
+    /// carries it, so the UI's ring holds what the session sends. A
+    /// narrower widget gets a narrower lookahead from its next session.
+    spectrogram_session_widget_width: u32,
     spectrogram_view_mode: SpectrogramViewMode,
     spectrogram_active: bool,
     /// Where deactivations are published for the frontend.
@@ -681,7 +685,7 @@ impl AnalysisRuntimeState {
             hop_size: 1024,
             zoom_level: 1.0,
             spectrogram_widget_width: 1920,
-            spectrogram_max_widget_width: 1920,
+            spectrogram_session_widget_width: 1920,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             spectrogram_active: true,
             spectrogram_stops: Arc::default(),
@@ -769,8 +773,7 @@ impl AnalysisRuntimeState {
                 let retained_start = self.centered_retained_start_seconds(ctx);
                 let w = width.max(320);
                 self.spectrogram_widget_width = w;
-                if w > self.spectrogram_max_widget_width {
-                    self.spectrogram_max_widget_width = w;
+                if w > self.spectrogram_session_widget_width {
                     let target = self.last_spectrogram_position;
                     let visible_left = Self::centered_visible_left_edge_seconds(
                         target,
@@ -791,6 +794,12 @@ impl AnalysisRuntimeState {
                     } else {
                         // Existing history covers the left edge; let the worker
                         // extend its lookahead without clearing the Qt ring.
+                        // The session now decodes for the wider view, and
+                        // its window reaches as far.
+                        self.spectrogram_session_widget_width = w;
+                        self.spectrogram_session_margin = self
+                            .spectrogram_session_margin
+                            .max(self.centered_margin_seconds());
                         let _ = ctx
                             .spectrogram_cmd_tx
                             .send(SpectrogramWorkerCommand::UpdateWidgetWidth { widget_width: w });
@@ -1672,6 +1681,7 @@ impl AnalysisRuntimeState {
         self.spectrogram_position_offset = 0.0;
         self.unconfirmed_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
+        self.spectrogram_session_widget_width = self.spectrogram_widget_width;
         self.spectrogram_session_margin = self.centered_margin_seconds();
         let generation = ctx.spectrogram_decode_generation.load(Ordering::Relaxed);
         // Generation 0 belongs to no session, so a first session always
@@ -1686,6 +1696,7 @@ impl AnalysisRuntimeState {
         let mut handoff = start.handoff;
         for chunk in &mut handoff.prelude {
             chunk.generation = generation;
+            chunk.widget_width = self.spectrogram_session_widget_width;
         }
         let _ = ctx
             .spectrogram_cmd_tx
@@ -1696,9 +1707,7 @@ impl AnalysisRuntimeState {
                 fft_size: self.fft_size,
                 hop_size: self.hop_size,
                 zoom_level: self.zoom_level,
-                widget_width: self
-                    .spectrogram_widget_width
-                    .max(self.spectrogram_max_widget_width),
+                widget_width: self.spectrogram_session_widget_width,
                 channel_count: self.active_session_channel_count.max(1),
                 start_seconds: start.start_seconds,
                 target_position_seconds: start.target_position_seconds,
@@ -1815,9 +1824,7 @@ impl AnalysisRuntimeState {
     fn centered_ring_capacity_columns(&self) -> Option<u64> {
         self.current_centered_cols_per_second()?;
         let config = retention::SpectrogramBufferConfig {
-            width: self
-                .spectrogram_widget_width
-                .max(self.spectrogram_max_widget_width),
+            width: self.spectrogram_session_widget_width,
             sample_rate: if self.active_session_effective_rate > 0 {
                 self.active_session_effective_rate
             } else {
@@ -1861,14 +1868,10 @@ impl AnalysisRuntimeState {
         ) {
             // effective_hop and REFERENCE_HOP are hop sizes (small usize);
             // precision loss from usize→f64 is negligible for these values.
-            // Keep the seek-window math aligned with the live worker session:
-            // both the worker lookahead and the Qt ring are sized from the
-            // largest width seen so far, so using only the current width here
-            // can misclassify in-window seeks as restart-worthy after a
-            // narrow-pane layout change.
-            let width = self
-                .spectrogram_widget_width
-                .max(self.spectrogram_max_widget_width);
+            // The view as wide as it is now. A seek judges the live
+            // session's window by the larger of this and the margin the
+            // session decodes for (`spectrogram_session_margin`).
+            let width = self.spectrogram_widget_width;
             // Full screen width in seconds plus 2 s for STFT warmup.
             // A full width (not half) is needed because near the end of
             // a track the playhead detaches from center and moves right,
@@ -1996,6 +1999,7 @@ impl AnalysisRuntimeState {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            widget_width: 0,
         };
         let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
         self.start_session(
@@ -3545,7 +3549,7 @@ mod tests {
         state.hop_size = 64;
         state.zoom_level = 16.0;
         state.spectrogram_widget_width = 1_183;
-        state.spectrogram_max_widget_width = 1_183;
+        state.spectrogram_session_widget_width = 1_183;
         state.spectrogram_session_start = 0.0;
         state.spectrogram_session_margin = state.centered_margin_seconds();
 
@@ -3600,7 +3604,7 @@ mod tests {
         state.hop_size = 64;
         state.zoom_level = 16.0;
         state.spectrogram_widget_width = 3_440;
-        state.spectrogram_max_widget_width = 3_440;
+        state.spectrogram_session_widget_width = 3_440;
         state.spectrogram_session_start = 0.0;
         state.spectrogram_session_margin = state.centered_margin_seconds();
 
@@ -3659,7 +3663,7 @@ mod tests {
         state.hop_size = 256;
         state.zoom_level = 1.0;
         state.spectrogram_widget_width = 1_920;
-        state.spectrogram_max_widget_width = 1_920;
+        state.spectrogram_session_widget_width = 1_920;
 
         let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -3726,7 +3730,7 @@ mod tests {
         state.hop_size = 1024;
         state.zoom_level = 0.1;
         state.spectrogram_widget_width = widget_width;
-        state.spectrogram_max_widget_width = widget_width;
+        state.spectrogram_session_widget_width = widget_width;
         state
     }
 
@@ -3971,21 +3975,23 @@ mod tests {
     }
 
     #[test]
-    fn centered_seek_uses_max_widget_width_for_zoomed_out_window() {
+    fn centered_seek_uses_session_width_for_zoomed_out_window() {
         // Regression for 6ch AC3 max-zoom-out seeks: the worker session
-        // and Qt ring are sized from the largest seen width, but the
-        // seek-window check used only the current pane width. On a narrow
-        // pane this misclassified an in-window seek as "outside" and
-        // restarted decoding from the tail, smearing the display.
+        // and Qt ring are sized for the width the session started at, but
+        // the seek-window check used only the current pane width. On a
+        // pane narrowed since, this misclassified an in-window seek as
+        // "outside" and restarted decoding from the tail, smearing the
+        // display.
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.ac3"));
         state.active_session_effective_rate = 48_000;
         state.zoom_level = 1024.0 / 14_088.0;
-        state.spectrogram_widget_width = 120;
-        state.spectrogram_max_widget_width = 1_920;
+        state.spectrogram_widget_width = 1_920;
+        state.spectrogram_session_widget_width = 1_920;
         state.spectrogram_session_start = 0.0;
         state.spectrogram_session_margin = state.centered_margin_seconds();
+        state.spectrogram_widget_width = 120;
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -4009,7 +4015,7 @@ mod tests {
         let cmd = spectrogram_cmd_rx.try_recv().unwrap();
         assert!(
             matches!(cmd, SpectrogramWorkerCommand::Seek { .. }),
-            "seek within the max-width window should go to the running session, got {cmd:?}"
+            "seek within the session's window should go to the running session, got {cmd:?}"
         );
         assert_eq!(state.spectrogram_position_offset, 0.0);
     }
@@ -4027,10 +4033,11 @@ mod tests {
         state.snapshot.sample_rate_hz = 48_000;
         state.zoom_level = 1024.0 / 14_088.0;
         state.hop_size = 14_088;
-        state.spectrogram_widget_width = 1_200;
-        state.spectrogram_max_widget_width = 1_920;
+        state.spectrogram_widget_width = 1_920;
+        state.spectrogram_session_widget_width = 1_920;
         state.spectrogram_session_start = 0.0;
         state.spectrogram_session_margin = state.centered_margin_seconds();
+        state.spectrogram_widget_width = 1_200;
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -4737,6 +4744,7 @@ mod tests {
                         complete: false,
                         buffer_reset: false,
                         clear_history: false,
+                        widget_width: 0,
                     });
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -4759,6 +4767,7 @@ mod tests {
                     complete: false,
                     buffer_reset: false,
                     clear_history: false,
+                    widget_width: 0,
                 });
             })
             .unwrap();
@@ -4795,6 +4804,7 @@ mod tests {
                 complete: false,
                 buffer_reset: false,
                 clear_history: false,
+                widget_width: 0,
             });
         }
         drop(tx);
@@ -4923,8 +4933,9 @@ mod tests {
                 if chunk.buffer_reset && chunk.clear_history && chunk.column_count == 0
             )));
 
-            // The fullscreen width survives pane shrink and later tracks.
-            // Reopening at the same zoom must reuse the replenishing window.
+            // The session keeps decoding for the fullscreen width while the
+            // pane shrinks. Reopening at the same zoom must reuse the
+            // replenishing window.
             state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1_200), &ctx);
             state.handle_command(
                 AnalysisCommand::SetSpectrogramWidgetWidth(fullscreen_width),
@@ -4940,7 +4951,7 @@ mod tests {
             state.active_track_token = 2;
             state.spectrogram_session_start = 0.0;
             state.spectrogram_widget_width = 1_920;
-            state.spectrogram_max_widget_width = 1_920;
+            state.spectrogram_session_widget_width = 1_920;
             let old_capacity = state.centered_ring_capacity_columns().unwrap();
             let oldest_column = if zoom > 1.0 { 88_900 } else { 4_300 };
             spectrogram_decode_columns_produced
@@ -4957,6 +4968,111 @@ mod tests {
                 "fullscreen must also recover evicted history"
             );
         }
+    }
+
+    #[test]
+    fn a_session_after_the_viewer_closed_decodes_for_the_pane_not_the_viewer() {
+        // The fullscreen viewer used to leave a process-wide maximum that
+        // sized every later session's lookahead, and the UI's rings with
+        // it, for the viewer. The session running while the viewer closes
+        // keeps its width; the next one decodes for the pane.
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(PathBuf::from("unused-test-track.flac"));
+        state.active_track_token = 1;
+        state.active_session_effective_rate = 96_000;
+        state.active_session_channel_count = 6;
+        state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
+        state.fft_size = 2_048;
+        state.hop_size = zoom_hop_size(state.fft_size, 1.0);
+
+        let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
+        let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
+        let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
+        let waveform_decode_active_token = AtomicU64::new(0);
+        let spectrogram_decode_generation = AtomicU64::new(0);
+        let spectrogram_track_duration_ms = AtomicU64::new(300_000);
+        let spectrogram_decode_columns_produced = AtomicU64::new(0);
+        let ctx = AnalysisContext {
+            event_tx: &event_tx,
+            waveform_job_tx: &waveform_job_tx,
+            waveform_decode_active_token: &waveform_decode_active_token,
+            spectrogram_cmd_tx: &spectrogram_cmd_tx,
+            spectrogram_decode_generation: &spectrogram_decode_generation,
+            spectrogram_decode_columns_produced: &spectrogram_decode_columns_produced,
+            spectrogram_track_duration_ms: &spectrogram_track_duration_ms,
+        };
+        let capacity_for = |width: u32| {
+            retention::SpectrogramBufferConfig {
+                width,
+                sample_rate: 96_000,
+                hop: 1_024,
+                bins: 1_025,
+                channels: 6,
+                zoom: 1.0,
+                centered: true,
+            }
+            .limits(retention::lookahead_seconds())
+            .capacity
+        };
+        let new_track_width = |commands: &[SpectrogramWorkerCommand]| {
+            commands.iter().find_map(|cmd| match cmd {
+                SpectrogramWorkerCommand::NewTrack {
+                    widget_width,
+                    handoff,
+                    ..
+                } => {
+                    assert!(
+                        handoff
+                            .prelude
+                            .iter()
+                            .all(|chunk| chunk.widget_width == *widget_width),
+                        "the chunks a session starts with carry its width"
+                    );
+                    Some(*widget_width)
+                }
+                _ => None,
+            })
+        };
+
+        // The main window's pane, and a session for it.
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(2_545), &ctx);
+        state.seek_spectrogram_position(120.0, &ctx);
+        let commands: Vec<_> = spectrogram_cmd_rx.try_iter().collect();
+        assert_eq!(new_track_width(&commands), Some(2_545), "{commands:?}");
+        assert_eq!(
+            state.centered_ring_capacity_columns(),
+            Some(capacity_for(2_545))
+        );
+
+        // The viewer opens: the running session grows for it.
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(3_440), &ctx);
+        spectrogram_cmd_rx.try_iter().for_each(drop);
+        assert_eq!(state.spectrogram_session_widget_width, 3_440);
+        assert_eq!(
+            state.centered_ring_capacity_columns(),
+            Some(capacity_for(3_440))
+        );
+
+        // It closes: the session decodes on for the viewer's width, which
+        // the UI's ring keeps holding until the session ends.
+        state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(2_545), &ctx);
+        assert!(spectrogram_cmd_rx.try_recv().is_err());
+        assert_eq!(state.spectrogram_session_widget_width, 3_440);
+
+        // The next session, here a seek out of the window, is for the pane.
+        state.seek_spectrogram_position(250.0, &ctx);
+        let commands: Vec<_> = spectrogram_cmd_rx.try_iter().collect();
+        assert_eq!(new_track_width(&commands), Some(2_545), "{commands:?}");
+        assert_eq!(state.spectrogram_session_widget_width, 2_545);
+        assert_eq!(
+            state.centered_ring_capacity_columns(),
+            Some(capacity_for(2_545))
+        );
+        // The columns per pane of the 2545 and 3440 pixel views of a 24/96
+        // 5.1 track at FFT 2048.
+        assert_eq!(capacity_for(2_545), 8_572);
+        assert_eq!(capacity_for(3_440), 11_257);
     }
 
     #[test]
@@ -4996,20 +5112,21 @@ mod tests {
 
             // Default starts at 1920; first shrink to 1000 simulates the
             // windowed layout.  No UpdateWidgetWidth should flow because the
-            // max has not grown.
+            // session's width has not grown.
             state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1000), &ctx);
             assert_eq!(state.spectrogram_widget_width, 1000);
-            assert_eq!(state.spectrogram_max_widget_width, 1920);
+            assert_eq!(state.spectrogram_session_widget_width, 1920);
             assert!(
                 spectrogram_cmd_rx.try_recv().is_err(),
                 "shrinking the widget must not refresh the worker's lookahead"
             );
 
-            // Growing past the previous max (fullscreen on a wider display)
-            // must dispatch an UpdateWidgetWidth carrying the new value.
+            // Growing past the session's width (fullscreen on a wider
+            // display) must dispatch an UpdateWidgetWidth carrying the new
+            // value.
             state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(3840), &ctx);
             assert_eq!(state.spectrogram_widget_width, 3840);
-            assert_eq!(state.spectrogram_max_widget_width, 3840);
+            assert_eq!(state.spectrogram_session_widget_width, 3840);
             let cmd = spectrogram_cmd_rx
                 .recv_timeout(Duration::from_millis(50))
                 .expect("widget-width growth must send a worker command");
@@ -5023,7 +5140,7 @@ mod tests {
             // Shrinking back does not refresh again (would just waste work).
             state.handle_command(AnalysisCommand::SetSpectrogramWidgetWidth(1200), &ctx);
             assert_eq!(state.spectrogram_widget_width, 1200);
-            assert_eq!(state.spectrogram_max_widget_width, 3840);
+            assert_eq!(state.spectrogram_session_widget_width, 3840);
             assert!(spectrogram_cmd_rx.try_recv().is_err());
         }
     }
@@ -5405,6 +5522,7 @@ mod tests {
             complete: false,
             buffer_reset: false,
             clear_history: false,
+            widget_width: 0,
         }
     }
 

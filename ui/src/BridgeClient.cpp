@@ -4689,8 +4689,9 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [44]     u8   complete
     // [45]     u8   buffer_reset
     // [46]     u8   clear_history
-    // [47..]   column_data
-    constexpr int kHeaderLen = 47;
+    // [47..51] u32  widget_width (the session's; 0 = unknown)
+    // [51..]   column_data
+    constexpr int kHeaderLen = 51;
     if (raw.size() < kHeaderLen) {
         return stats;
     }
@@ -4735,6 +4736,8 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const bool complete = d[base + 40] != 0;
     const bool bufferReset = d[base + 41] != 0;
     const bool clearHistory = d[base + 42] != 0;
+    const int widgetWidth = static_cast<int>(
+        std::min<quint32>(readU32(base + 43), std::numeric_limits<int>::max()));
 
     const int dataOffset = kHeaderLen;
     const qint64 expectedDataLen =
@@ -4757,6 +4760,7 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     stats.clearHistory = clearHistory;
     stats.trackToken = trackToken;
     stats.generation = generation;
+    stats.widgetWidth = widgetWidth;
     stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
 
     QElapsedTimer dispatchTimer;
@@ -4820,7 +4824,8 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
             stats.bufferReset,
             stats.trackToken,
             stats.clearHistory,
-            stats.generation);
+            stats.generation,
+            stats.widgetWidth);
     }
 }
 

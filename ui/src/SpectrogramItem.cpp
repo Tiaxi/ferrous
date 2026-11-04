@@ -1520,7 +1520,6 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     return view;
 }
 
-int SpectrogramItem::s_maxWidgetWidthSeen = 0;
 
 void SpectrogramCanvasDamage::reset(int width) {
     m_columns.assign(static_cast<size_t>(std::max(0, width)), 0);
@@ -2583,7 +2582,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
-    quint64 generation) {
+    quint64 generation, int sessionWidth) {
     QMutexLocker lock(&m_stateMutex);
     if (m_storageReleased) {
         // No one sees it: it keeps no columns until it is shown again.
@@ -3113,16 +3112,16 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     // Dynamically size the ring buffer based on widget width and display mode.
     if (columns > 0 && bins > 0) {
-        // Track the max widget width so the ring can hold enough cols
-        // to cover the Rust decoder's lookahead even after a session
-        // reset that shrinks the current widget.  Static so the floor
-        // survives instance tear-downs (channel-count changes destroy
-        // and recreate the widgets) — matches the singleton tracker on
-        // the Rust side in AnalysisRuntimeState.
-        const int currentWidth = static_cast<int>(width());
-        s_maxWidgetWidthSeen = std::max(s_maxWidgetWidthSeen, currentWidth);
+        // The ring holds this view, and what the session decodes ahead,
+        // for the width it decodes for, which each chunk carries: the
+        // width the session started at, or a wider one it grew to while
+        // it ran. After a view shrinks, as when the fullscreen viewer
+        // closes, the session can still be decoding for the wider view,
+        // and a reset within it (a seek) must not leave a ring narrower
+        // than that. The ring grows as either does, and its next reset
+        // sizes it for the session then.
         const int screenWidth = std::max(
-            {currentWidth, 1920, s_maxWidgetWidthSeen});
+            {static_cast<int>(width()), 1920, sessionWidth});
         const int neededCapacity = static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
             static_cast<std::uint32_t>(screenWidth),
             static_cast<std::uint32_t>(m_precomputedSampleRateHz),
@@ -4701,11 +4700,6 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
     const int newWidth = static_cast<int>(newGeometry.width());
     const int oldWidth = static_cast<int>(oldGeometry.width());
     if (newWidth != oldWidth && newWidth > 0) {
-        // Keep the ring's width floor in sync with the Rust worker as soon
-        // as geometry changes. The centered decoder can be parked while the
-        // item is fullscreen, so waiting for the next data chunk may miss
-        // the wide geometry entirely if the viewer is closed first.
-        s_maxWidgetWidthSeen = std::max(s_maxWidgetWidthSeen, newWidth);
         emit spectrogramWidthChanged(newWidth);
     }
     update();

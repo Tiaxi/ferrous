@@ -291,13 +291,16 @@ public:
 
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
+    // `sessionWidth` is the width the chunk's session decodes for (0 if
+    // unknown); the ring holds at least what that width needs.
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
         int sampleRate, int hopSize, bool complete,
         bool bufferReset, quint64 trackToken = 0,
         bool clearHistoryOnReset = false,
-        quint64 generation = 0);
+        quint64 generation = 0,
+        int sessionWidth = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -717,17 +720,6 @@ private:
     qint64 m_centeredColumnBase{-1};
     quint64 m_centeredColumnToken{0};
     int m_ringCapacity{0};            // number of column slots
-    // Max widget width ever observed ACROSS ALL SpectrogramItem
-    // instances (static).  The Rust-side max-widget-width tracker that
-    // sizes the decoder lookahead is a singleton in AnalysisRuntimeState
-    // and persists across instance tear-downs (e.g. when the channel
-    // count changes — 6ch PerChannel → 2ch PerChannel destroys the
-    // prior widgets and creates fresh ones).  A per-instance tracker
-    // would reset to 0 on each new widget, under-sizing the ring
-    // relative to the still-large Rust lookahead and letting the
-    // decoder lap the ring, evicting left-margin cols and smearing the
-    // previous canvas through the blanked region.
-    static int s_maxWidgetWidthSeen;
     qint64 m_ringWriteSeq{0};         // next write-order sequence number
     qint64 m_ringOldestSeq{0};        // oldest write-order sequence still retained
     qint64 m_trackEpochSeq{0};        // legacy reset bookkeeping
