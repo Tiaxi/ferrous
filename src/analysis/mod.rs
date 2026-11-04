@@ -243,6 +243,34 @@ pub enum AnalysisEvent {
 pub(crate) struct SpectrogramOutputRoute {
     pub sender: Sender<AnalysisEvent>,
     pub generation: Arc<AtomicU64>,
+    pub stops: Arc<SpectrogramStops>,
+}
+
+/// The spectrogram deactivations the analysis thread has carried out, and
+/// the decode generation the latest one made. A spectral chunk that reaches
+/// the frontend after the deactivation and is not newer than that
+/// generation is from before it; showing a view again starts a newer one.
+/// The frontend reads this to tell the two apart without a field in the
+/// chunks.
+#[derive(Debug, Default)]
+pub struct SpectrogramStops {
+    count: AtomicU64,
+    generation: AtomicU64,
+}
+
+impl SpectrogramStops {
+    fn record(&self, generation: u64) {
+        self.generation.store(generation, Ordering::Relaxed);
+        // Publishes the generation with the count.
+        self.count.fetch_add(1, Ordering::Release);
+    }
+
+    /// How many deactivations there have been, and the generation the
+    /// latest made.
+    pub fn load(&self) -> (u64, u64) {
+        let count = self.count.load(Ordering::Acquire);
+        (count, self.generation.load(Ordering::Relaxed))
+    }
 }
 
 pub struct AnalysisEngine {
@@ -348,6 +376,8 @@ struct AnalysisRuntimeState {
     spectrogram_max_widget_width: u32,
     spectrogram_view_mode: SpectrogramViewMode,
     spectrogram_active: bool,
+    /// Where deactivations are published for the frontend.
+    spectrogram_stops: Arc<SpectrogramStops>,
     active_track_token: u64,
     active_track_path: Option<PathBuf>,
     /// Display mode (Rolling/Centered) — forwarded to decode worker for rate throttle.
@@ -480,8 +510,10 @@ impl AnalysisEngine {
         let route = spectral_route.unwrap_or_else(|| SpectrogramOutputRoute {
             sender: event_tx.clone(),
             generation: Arc::new(AtomicU64::new(0)),
+            stops: Arc::default(),
         });
         let spectrogram_decode_generation = route.generation;
+        let spectrogram_stops = route.stops;
         let pending_resets = Arc::new(AtomicUsize::new(0));
         let event_tx = AnalysisOutputs {
             spectra: route.sender,
@@ -516,6 +548,7 @@ impl AnalysisEngine {
             SpectrogramWorkerHandles {
                 cmd_tx: spectrogram_cmd_tx,
                 decode_generation: Arc::clone(&spectrogram_decode_generation),
+                stops: spectrogram_stops,
                 columns_produced: worker_columns_produced,
                 track_duration_ms: worker_track_duration_ms,
                 status: spectrogram_status,
@@ -651,6 +684,7 @@ impl AnalysisRuntimeState {
             spectrogram_max_widget_width: 1920,
             spectrogram_view_mode: SpectrogramViewMode::Downmix,
             spectrogram_active: true,
+            spectrogram_stops: Arc::default(),
             active_track_token: 0,
             active_track_path: None,
             display_mode: SpectrogramDisplayMode::Rolling,
@@ -921,8 +955,13 @@ impl AnalysisRuntimeState {
             };
             self.start_spectrogram_session_with_target(start, target, true, true, ctx);
         } else {
-            ctx.spectrogram_decode_generation
-                .fetch_add(1, Ordering::Relaxed);
+            let generation = ctx
+                .spectrogram_decode_generation
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            // No session starts while inactive, so every chunk from now on
+            // that is not newer is stale.
+            self.spectrogram_stops.record(generation);
             self.clear_early_continuation(ctx);
             self.cancel_centered_staging();
             let _ = ctx
@@ -2158,6 +2197,7 @@ fn spawn_analysis_worker(
 ) -> Option<JoinableThread> {
     crate::worker_thread::spawn_worker("ferrous-analysis", move || {
         let mut state = AnalysisRuntimeState::with_track_io(track_io.requests);
+        state.spectrogram_stops = Arc::clone(&spectrogram.stops);
         let mut track_io_replies = track_io.replies;
         let mut session_reports = spectrogram.reports;
         let mut spectrogram_loss_reported = false;
@@ -2755,6 +2795,7 @@ mod tests {
             AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
                 sender: spectral_tx,
                 generation: Arc::new(AtomicU64::new(0)),
+                stops: Arc::default(),
             }));
         engine.command(AnalysisCommand::SetTrack {
             path: path.clone(),
@@ -2934,6 +2975,78 @@ mod tests {
     }
 
     #[test]
+    fn a_deactivation_publishes_the_generation_its_stale_chunks_stay_within() {
+        // The frontend frees the panes it hides and, once shown again, must
+        // take only the session that showing them starts: every chunk that
+        // reaches it after the deactivation is published is no newer than
+        // its generation, and the session after reactivation is newer.
+        let path = write_engine_test_wave(4, 48_000);
+        let generation = Arc::new(AtomicU64::new(0));
+        let stops = Arc::new(SpectrogramStops::default());
+        let (spectral_tx, spectral_rx) = crossbeam_channel::unbounded();
+        let (engine, _) =
+            AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
+                sender: spectral_tx,
+                generation: Arc::clone(&generation),
+                stops: Arc::clone(&stops),
+            }));
+        let next_chunk = || match spectral_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => chunk,
+            other => panic!("expected a spectral chunk, got {other:?}"),
+        };
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        let first = next_chunk();
+        assert!(first.generation > 0);
+        assert_eq!(stops.load(), (0, 0));
+
+        // A seek just before it, as Repeat-One or a click would make.
+        engine.command(AnalysisCommand::SeekPosition(2.0));
+        engine.command(AnalysisCommand::SetSpectrogramActive(false));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while stops.load().0 == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "deactivation not published"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (count, stop_generation) = stops.load();
+        assert_eq!(count, 1);
+        assert!(stop_generation > first.generation);
+        std::thread::sleep(Duration::from_millis(100));
+        while let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) = spectral_rx.try_recv() {
+            assert!(
+                chunk.generation < stop_generation,
+                "chunk after the stop is not stale"
+            );
+        }
+
+        engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        let fresh = next_chunk();
+        assert!(fresh.generation > stop_generation);
+        assert!(fresh.buffer_reset);
+        assert_eq!(stops.load(), (1, stop_generation));
+
+        engine.command(AnalysisCommand::SetSpectrogramActive(false));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while stops.load().0 == 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second deactivation not published"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(stops.load().1 > fresh.generation);
+        drop(engine);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn seek_and_stop_restart_a_backpressured_spectral_stream() {
         let path = write_engine_test_wave(2, 48_000);
         let generation = Arc::new(AtomicU64::new(0));
@@ -2942,6 +3055,7 @@ mod tests {
             AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
                 sender: spectral_tx,
                 generation: Arc::clone(&generation),
+                stops: Arc::default(),
             }));
         engine.command(AnalysisCommand::SetTrack {
             path: path.clone(),
@@ -3146,6 +3260,7 @@ mod tests {
                 AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
                     sender: tx,
                     generation: Arc::new(AtomicU64::new(0)),
+                    stops: Arc::default(),
                 }));
             engine.command(AnalysisCommand::SetSpectrogramDisplayMode(mode));
             let mut previous_generation = 0;
@@ -5228,6 +5343,7 @@ mod tests {
                 AnalysisEngine::new_with_spectrogram_output(Some(SpectrogramOutputRoute {
                     sender: spectral_tx,
                     generation: Arc::clone(&generation),
+                    stops: Arc::default(),
                 }));
             let wait_for_columns = |after_generation: u64| {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);

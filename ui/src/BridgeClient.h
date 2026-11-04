@@ -570,12 +570,15 @@ private:
         QMetaObject::Connection visibilityConnection{};
         QMetaObject::Connection windowConnection{};
         QMetaObject::Connection destructionConnection{};
-        QMetaObject::Connection columnsConnection{};
     };
 
     void scheduleSpectrogramActivityUpdate();
     void updateSpectrogramActivity();
     void observeSpectrogramWindow(QQuickWindow *window);
+    bool readSpectrogramStops(quint64 &count, quint64 &generation) const;
+    // Whether a frame of `generation` is from a session before analysis
+    // last turned off.
+    bool staleSpectrogramFrame(quint64 generation);
     bool startInProcessBridge();
     void startSearchApplyWorker();
     void stopSearchApplyWorker();
@@ -911,9 +914,17 @@ private:
     QSet<QQuickWindow *> m_spectrogramWindows;
     bool m_spectrogramActivityPending{false};
     bool m_spectrogramActive{true};
-    // A pane shown again after it released its columns waits for a fresh
-    // analysis session; see updateSpectrogramActivity.
-    bool m_spectrogramColumnsNeeded{false};
+    // Turning analysis off releases the panes' columns. Spectral frames of
+    // the sessions before still on their way are dropped from then until
+    // one of a newer session arrives: analysis counts the times it turned
+    // off, and publishes the generation the latest made (see
+    // staleSpectrogramFrame).
+    quint64 m_spectrogramStopsSent{0};
+    bool m_spectrogramStaleGate{false};
+    bool m_spectrogramStopKnown{false};
+    quint64 m_spectrogramStopGeneration{0};
+    // Stands in for the bridge's count and generation in tests.
+    std::function<bool(quint64 &count, quint64 &generation)> m_spectrogramStopsOverride;
     std::thread m_searchApplyThread;
     mutable std::mutex m_searchApplyMutex;
     std::condition_variable m_searchApplyCv;

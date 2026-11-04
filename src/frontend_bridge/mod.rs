@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::analysis::SpectrogramOutputRoute;
+use crate::analysis::{SpectrogramOutputRoute, SpectrogramStops};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -821,6 +821,7 @@ pub struct FrontendBridgeHandle {
     rx: Receiver<BridgeEvent>,
     spectral_rx: Receiver<AnalysisEvent>,
     spectral_generation: Arc<AtomicU64>,
+    spectrogram_stops: Arc<SpectrogramStops>,
     import_gate: Arc<imports::ImportGate>,
     thread: BridgeThread,
 }
@@ -849,6 +850,7 @@ pub(crate) struct BridgeParts {
     pub(crate) events: Receiver<BridgeEvent>,
     pub(crate) spectra: Receiver<AnalysisEvent>,
     pub(crate) spectral_generation: Arc<AtomicU64>,
+    pub(crate) spectrogram_stops: Arc<SpectrogramStops>,
     pub(crate) thread: BridgeThread,
 }
 
@@ -909,9 +911,11 @@ impl FrontendBridgeHandle {
         let (event_tx, event_rx) = event_channel();
         let (spectral_tx, spectral_rx) = bounded::<AnalysisEvent>(4);
         let spectral_generation = Arc::new(AtomicU64::new(0));
+        let spectrogram_stops = Arc::new(SpectrogramStops::default());
         let spectral_route = SpectrogramOutputRoute {
             sender: spectral_tx,
             generation: Arc::clone(&spectral_generation),
+            stops: Arc::clone(&spectrogram_stops),
         };
 
         // Cover art goes to the cache directory of the user this bridge
@@ -938,6 +942,7 @@ impl FrontendBridgeHandle {
             rx: event_rx,
             spectral_rx,
             spectral_generation,
+            spectrogram_stops,
             import_gate,
             thread,
         })
@@ -997,6 +1002,7 @@ impl FrontendBridgeHandle {
             events: self.rx,
             spectra: self.spectral_rx,
             spectral_generation: self.spectral_generation,
+            spectrogram_stops: self.spectrogram_stops,
             thread: self.thread,
         }
     }
@@ -3093,6 +3099,7 @@ mod tests {
         let route = SpectrogramOutputRoute {
             sender: spectral_tx,
             generation: Arc::new(AtomicU64::new(0)),
+            stops: Arc::default(),
         };
         cmd_tx.send(BridgeCommand::RequestSnapshot).unwrap();
         crate::panic_guard::test_hooks::panic_at("bridge_command");

@@ -306,6 +306,16 @@ public:
 
     Q_INVOKABLE double minimumZoomLevel() const;
 
+    // Frees the ring and the canvas, which nothing uses while analysis is
+    // off because no pane is shown, and takes no columns until retained:
+    // showing a view starts a fresh analysis session, which clears them
+    // anyway. BridgeClient, which turns analysis off and on, calls these.
+    void releaseStorage();
+    // Takes columns again from the next session's reset on; nothing older
+    // may reach it (see BridgeClient::staleSpectrogramFrame).
+    void retainStorage();
+    bool storageReleased() const;
+
     static SpectrogramSceneStatistics sceneStatistics(const QSGNode *node);
     // The canvas textures of a scene node, with the canvas column each
     // starts at. For tests.
@@ -336,9 +346,6 @@ signals:
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
     void spectrogramWidthChanged(int width);
-    // Shown again after it released its columns: it shows nothing until a
-    // fresh analysis session sends them again (see releaseStorageLocked).
-    void columnsNeeded();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -555,13 +562,6 @@ private:
     bool showsPlaybackFrames() const;
     // Its window came on screen or left it.
     void windowPresenceChanged();
-    // Releases its columns and canvas when it stops being shown, and asks
-    // for them again when it is shown again.
-    void updateStorageRetention();
-    // Frees the ring and the canvas: nothing can use them while no one sees
-    // the pane, and showing it again starts a fresh analysis session, which
-    // clears them anyway. Until a reset of that session arrives, it takes
-    // no columns.
     void releaseStorageLocked();
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
@@ -698,8 +698,8 @@ private:
     QPointer<WindowPresence> m_windowPresence;
     QMetaObject::Connection m_windowPresenceConnection;
 
-    // Its ring and canvas are released while it is not shown, and it
-    // takes no columns then.
+    // Its ring and canvas are released while analysis is off, and it takes
+    // no columns then.
     bool m_storageReleased{false};
 
     // Ring-buffer spectrogram storage.

@@ -31,6 +31,13 @@ int ferrous_ffi_bridge_wakeup_fd(FerrousFfiBridge *handle);
 // Call after draining the queues: the wake fd is ready again at once if
 // anything is still queued.
 void ferrous_ffi_bridge_ack_wakeup(FerrousFfiBridge *handle);
+// How many times analysis has turned the spectrogram off, and the decode
+// generation the latest time made: a spectral chunk popped after it that is
+// not newer is stale. False, writing nothing, for a null argument.
+bool ferrous_ffi_bridge_spectrogram_stops(
+    FerrousFfiBridge *handle,
+    std::uint64_t *count_out,
+    std::uint64_t *generation_out);
 std::uint8_t *ferrous_ffi_bridge_pop_binary_event(FerrousFfiBridge *handle, std::size_t *len_out);
 void ferrous_ffi_bridge_free_binary_event(std::uint8_t *ptr, std::size_t len);
 std::uint8_t *ferrous_ffi_bridge_pop_analysis_frame(FerrousFfiBridge *handle, std::size_t *len_out);

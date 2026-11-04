@@ -1639,7 +1639,6 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
 #endif
     rebuildPalette();
     connect(this, &QQuickItem::visibleChanged, this, [this]() {
-        updateStorageRetention();
         if (!isVisible()) {
             // A hidden pane asks for no frames until it is shown again.
             cancelPlaybackFrame();
@@ -6351,7 +6350,6 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     }
 
     if (window == nullptr) {
-        updateStorageRetention();
         update();
         return;
     }
@@ -6387,8 +6385,6 @@ void SpectrogramItem::bindWindowFpsTracking(QQuickWindow *window) {
     m_windowPresenceConnection = connect(
         m_windowPresence, &WindowPresence::shownChanged,
         this, &SpectrogramItem::windowPresenceChanged);
-    // A window off screen does not show it.
-    updateStorageRetention();
     update();
 }
 
@@ -6397,7 +6393,6 @@ bool SpectrogramItem::showsPlaybackFrames() const {
 }
 
 void SpectrogramItem::windowPresenceChanged() {
-    updateStorageRetention();
     if (!showsPlaybackFrames()) {
         // Nothing would see them: no frames until the window is back.
         cancelPlaybackFrame();
@@ -6412,26 +6407,15 @@ void SpectrogramItem::windowPresenceChanged() {
     requestPlaybackFrame();
 }
 
-void SpectrogramItem::updateStorageRetention() {
-    // Its window's presence keeps a window that is briefly unexposed shown,
-    // so that releases nothing.
-    const bool shown = showsPlaybackFrames();
+void SpectrogramItem::releaseStorage() {
     bool wasReady = false;
     {
         QMutexLocker lock(&m_stateMutex);
-        if (shown != m_storageReleased) {
+        if (m_storageReleased) {
             return;
         }
-        if (shown) {
-            m_storageReleased = false;
-        } else {
-            wasReady = m_precomputedReady;
-            releaseStorageLocked();
-        }
-    }
-    if (shown) {
-        emit columnsNeeded();
-        return;
+        wasReady = m_precomputedReady;
+        releaseStorageLocked();
     }
     if (wasReady) {
         emit precomputedReadyChanged();
@@ -6439,6 +6423,23 @@ void SpectrogramItem::updateStorageRetention() {
     // A window that still draws, as it does while the waveform view
     // replaces the spectrogram, drops the pane's textures with its node.
     update();
+}
+
+void SpectrogramItem::retainStorage() {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_storageReleased) {
+            return;
+        }
+        // It still waits for a session's reset.
+        m_storageReleased = false;
+    }
+    update();
+}
+
+bool SpectrogramItem::storageReleased() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_storageReleased;
 }
 
 void SpectrogramItem::releaseStorageLocked() {
