@@ -1,4 +1,4 @@
-%{!?ferrous_version:%global ferrous_version 0.2.2}
+%{!?ferrous_version:%global ferrous_version 0.3.0}
 %{!?ferrous_release:%global ferrous_release 0.local%{?dist}}
 %{!?ferrous_license:%global ferrous_license GPL-3.0-or-later}
 # scripts/build-rpm.sh passes the date of the packaged commit.
