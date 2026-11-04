@@ -6756,6 +6756,82 @@ mod tests {
     }
 
     #[test]
+    fn sessions_of_every_rate_of_a_family_make_columns_at_its_pace() {
+        // Two seconds of each rate, at zoom 1 and zoomed in four times. The
+        // windows are a number of samples, which is a shorter time at a
+        // higher rate; a short window keeps the columns its end loses to
+        // under one at every rate.
+        for (rates, pace) in [
+            (&[44_100, 88_200, 176_400][..], 44_100.0 / 1024.0),
+            (&[48_000, 96_000, 192_000][..], 46.875),
+        ] {
+            for zoom in [1.0_f32, 4.0] {
+                let mut counts = Vec::new();
+                for &rate in rates {
+                    let path = write_tone_fixture(&format!("pace-{rate}-{zoom}"), 2, rate);
+                    let columns = columns_until_eof(vec![timing_session(
+                        &path,
+                        512,
+                        zoom,
+                        SpectrogramDisplayMode::Rolling,
+                        0.0,
+                    )]);
+                    std::fs::remove_file(path).expect("remove fixture");
+                    let count = columns.keys().next_back().map_or(0, |last| last + 1);
+                    assert_eq!(usize::try_from(count).unwrap(), columns.len(), "{rate} Hz");
+                    counts.push(count);
+                }
+                // A column for each hop of the two seconds, give or take
+                // the window at the end of the file.
+                let expected = 2.0 * pace * f64::from(zoom);
+                for (&rate, &count) in rates.iter().zip(&counts) {
+                    assert!(
+                        (f64::from(count) - expected).abs() <= 2.0,
+                        "{rate} Hz at zoom {zoom}: {count} columns, {expected:.1} expected"
+                    );
+                }
+                assert!(
+                    counts.iter().max().unwrap() - counts.iter().min().unwrap() <= 1,
+                    "zoom {zoom}: {counts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_seek_grid_puts_a_time_in_one_column_at_every_rate_of_a_family() {
+        for fft in [512, 8_192] {
+            for zoom in [1.0_f32, 4.0, 0.25] {
+                for seconds in [0.0, 1.0, 12.34, 300.0] {
+                    let grid = |rate: u32| {
+                        let hops = column_hops(fft, zoom, rate);
+                        let (column, frame) =
+                            stft_seek_grid(seconds, rate, hops.stft_hop, hops.effective_hop);
+                        #[allow(clippy::cast_precision_loss)]
+                        let (frame_seconds, stft_hop_seconds) = (
+                            frame as f64 / f64::from(rate),
+                            hops.stft_hop as f64 / f64::from(rate),
+                        );
+                        (column, frame_seconds, stft_hop_seconds)
+                    };
+                    let (column, frame_seconds, _) = grid(48_000);
+                    for rate in [96_000, 192_000, 384_000] {
+                        let (other, other_seconds, stft_hop_seconds) = grid(rate);
+                        assert_eq!(other, column, "{rate} Hz, {seconds} s at zoom {zoom}");
+                        // The first window of the column starts at the same
+                        // time, to within an STFT hop of either rate.
+                        assert!(
+                            (other_seconds - frame_seconds).abs()
+                                <= stft_hop_seconds.max(grid(48_000).2),
+                            "{rate} Hz, {seconds} s at zoom {zoom}: {other_seconds} s"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_click_shows_in_the_column_of_the_time_it_plays() {
         // 22.05 kHz clicks, each in the middle of a 1024-frame column at
         // zoom 0.5 and on a 64-frame column at zoom 8, all after the half
