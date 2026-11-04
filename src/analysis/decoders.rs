@@ -30,7 +30,8 @@ use crate::raw_audio::{
 use gstreamer_app as gst_app;
 
 use super::{
-    f64_to_u64_saturating, usize_to_f32_approx, usize_to_u64, SpectrogramViewMode, REFERENCE_HOP,
+    f64_to_u64_saturating, usize_to_f32_approx, usize_to_u64, SpectrogramViewMode,
+    ESTIMATE_COLUMN_FRAMES,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -86,8 +87,9 @@ pub(super) struct TrackLength {
 
 impl TrackLength {
     fn of_frames(frames: Option<u64>, sample_rate: u64) -> Self {
-        let columns =
-            (frames.unwrap_or(sample_rate * UNKNOWN_LENGTH_SECONDS) / (REFERENCE_HOP as u64)) + 64;
+        let columns = (frames.unwrap_or(sample_rate * UNKNOWN_LENGTH_SECONDS)
+            / (ESTIMATE_COLUMN_FRAMES as u64))
+            + 64;
         Self {
             columns: u32::try_from(columns).unwrap_or(u32::MAX),
             known: frames.is_some(),

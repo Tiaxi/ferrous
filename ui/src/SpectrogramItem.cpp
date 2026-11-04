@@ -90,8 +90,16 @@ struct SpectrogramRasterMailbox {
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
-constexpr double kReferenceHopSamples = 1024.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
+
+// The column hop of a session of audio at sampleRate at zoom 1, which zoom
+// levels are relative to: 1024 samples at 44.1 or 48 kHz, as many more as
+// the rate is higher, so a column is as long at every rate of a family
+// (src/analysis/column_hop.rs).
+double referenceHopSamples(int sampleRate) {
+    return static_cast<double>(ferrous_ffi_spectrogram_reference_hop(
+        static_cast<std::uint32_t>(std::max(0, sampleRate))));
+}
 // Last-resort fallback only: the hold is normally released by
 // applyPrecomputedResetLocked() when the reset data arrives (~200–400 ms
 // after a seek or track change).  The timeout must be long enough that the
@@ -2196,7 +2204,18 @@ double SpectrogramItem::effectiveZoomLocked() const {
         return m_renderZoomLevel;
     }
     return m_renderZoomLevel * static_cast<double>(m_precomputedHopSize)
-           / kReferenceHopSamples;
+           / referenceHopLocked();
+}
+
+double SpectrogramItem::referenceHopLocked() const {
+    return referenceHopSamples(m_precomputedSampleRateHz);
+}
+
+double SpectrogramItem::currentPixelsPerSecondLocked() const {
+    return m_precomputedSampleRateHz > 0
+        ? m_renderZoomLevel * static_cast<double>(m_precomputedSampleRateHz)
+            / referenceHopLocked()
+        : 0.0;
 }
 
 double SpectrogramItem::canvasZoomLocked() const {
@@ -2262,7 +2281,7 @@ double SpectrogramItem::minimumZoomLevelLocked() const {
     // track's sample count and stays constant across zoom levels.
     const qint64 referenceCols = m_precomputedHopSize > 0
         ? totalCols * static_cast<qint64>(m_precomputedHopSize)
-              / static_cast<qint64>(kReferenceHopSamples)
+              / static_cast<qint64>(referenceHopLocked())
         : totalCols;
     if (referenceCols <= static_cast<qint64>(w)) {
         return 1.0;
@@ -2293,22 +2312,21 @@ double SpectrogramItem::backendZoomForRequestLocked() const {
 }
 
 int SpectrogramItem::columnHopForZoomLocked(double zoom) const {
-    // bins = fft / 2 + 1.
-    const int fftSize = m_precomputedBinsPerColumn > 1
-        ? (m_precomputedBinsPerColumn - 1) * 2
-        : 8192;
     return static_cast<int>(ferrous_ffi_spectrogram_column_hop(
-        static_cast<std::uint32_t>(fftSize), static_cast<float>(zoom)));
+        static_cast<std::uint32_t>(std::max(0, m_precomputedSampleRateHz)),
+        static_cast<float>(zoom)));
 }
 
 double SpectrogramItem::renderZoomForZoomLocked(double zoom) const {
     // Data at a hop other than the reference one is drawn one column per
     // pixel; see the snap in feedPrecomputedChunk.
-    const int hop = columnHopForZoomLocked(zoom);
-    if (hop > 0 && hop != static_cast<int>(kReferenceHopSamples)) {
-        return kReferenceHopSamples / static_cast<double>(hop);
-    }
-    return zoom;
+    return renderZoomForHopLocked(columnHopForZoomLocked(zoom), zoom);
+}
+
+double SpectrogramItem::renderZoomForHopLocked(int hop, double zoom) const {
+    return ferrous_ffi_spectrogram_render_zoom(
+        static_cast<std::uint32_t>(std::max(0, m_precomputedSampleRateHz)),
+        static_cast<std::uint32_t>(std::max(0, hop)), zoom);
 }
 
 SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
@@ -2322,7 +2340,7 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
     SpectrogramZoomPreview preview;
     const double targetZoom = renderZoomForZoomLocked(backendZoomForRequestLocked());
     const double targetPixelsPerSecond = targetZoom * m_canvasScale
-        * static_cast<double>(m_precomputedSampleRateHz) / kReferenceHopSamples;
+        * static_cast<double>(m_precomputedSampleRateHz) / referenceHopLocked();
     const double scale = targetPixelsPerSecond
         / (m_precomputedCanvasPixelsPerSecond * m_precomputedCanvasScale);
     if (!std::isfinite(scale) || scale <= 0.0 || std::abs(scale - 1.0) <= 1e-3) {
@@ -2347,7 +2365,7 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
         const double targetColumnsPerSecond =
             static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(targetHop);
         const double targetEffectiveZoom = m_canvasScale
-            * targetZoom * static_cast<double>(targetHop) / kReferenceHopSamples;
+            * targetZoom * static_cast<double>(targetHop) / referenceHopLocked();
         const double toTargetColumns = targetColumnsPerSecond / columnsPerSecond;
         const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
             ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
@@ -2451,10 +2469,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         // to cover the display.  Elsewhere the new data fills in as it
         // arrives, which beats a preview held until almost the whole
         // zoomed-out track has decoded.
-        const double currentPixelsPerSecond = m_precomputedSampleRateHz > 0
-            ? m_renderZoomLevel * static_cast<double>(m_precomputedSampleRateHz)
-                / kReferenceHopSamples
-            : 0.0;
+        const double currentPixelsPerSecond = currentPixelsPerSecondLocked();
         const bool zoomChanged = m_precomputedCanvasPixelsPerSecond > 0.0
             && std::abs(currentPixelsPerSecond / m_precomputedCanvasPixelsPerSecond - 1.0)
                 > 1e-3;
@@ -2828,8 +2843,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         const bool wasReady = m_precomputedReady;
         const bool qtRenderNotAtDefault =
             std::abs(m_renderZoomLevel - 1.0) > 0.001;
-        const bool backendNotAtReferenceHop =
-            hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
+        const bool backendNotAtReferenceHop = hopSize > 0
+            && hopSize != static_cast<int>(referenceHopSamples(
+                sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz));
         const bool needsZoomReset =
             qtRenderNotAtDefault || backendNotAtReferenceHop;
 
@@ -3067,14 +3083,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             // effectiveZoom=0.998) causes the advance path to fail,
             // forcing 42ms full rebuilds every frame.  Data for another
             // zoom is drawn at its own zoom, so the preview can scale it.
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize
-                    != static_cast<int>(kReferenceHopSamples)) {
-                m_renderZoomLevel = kReferenceHopSamples
-                    / static_cast<double>(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = dataIsForZoom ? m_zoomLevel : 1.0;
-            }
+            m_renderZoomLevel = renderZoomForHopLocked(
+                m_precomputedHopSize, dataIsForZoom ? m_zoomLevel : 1.0);
             m_crosshairDirty = true;
         }
         if (appliedReset) {
@@ -3354,8 +3364,9 @@ void SpectrogramItem::feedPrecomputedChunk(
     // previous canvas smears through the gap.
     const bool qtRenderNotAtDefault =
         std::abs(m_renderZoomLevel - 1.0) > 0.001;
-    const bool backendNotAtReferenceHop =
-        hopSize > 0 && hopSize != static_cast<int>(kReferenceHopSamples);
+    const bool backendNotAtReferenceHop = hopSize > 0
+        && hopSize != static_cast<int>(referenceHopSamples(
+            sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz));
     const bool preserveRollingGaplessZoom =
         m_displayMode == 0 && isGaplessTrackChange;
     const bool resetForTrackTransition =
@@ -3515,7 +3526,9 @@ void SpectrogramItem::clearPrecomputed() {
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
     m_seekFillActive = false;
-    m_renderZoomLevel = m_zoomLevel;
+    // The zoom data for the zoom on screen is drawn at, as the backend
+    // reckons it (ferrous_ffi_spectrogram_render_zoom).
+    m_renderZoomLevel = renderZoomForZoomLocked(m_zoomLevel);
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_positionJumpHoldActive = false;
@@ -6257,7 +6270,8 @@ bool SpectrogramItem::advancePrecomputedCanvasLocked(
 
 double SpectrogramItem::targetRowsPerSecondLocked() const {
     if (m_sampleRateHz > 0) {
-        const double stableRate = static_cast<double>(m_sampleRateHz) / kReferenceHopSamples;
+        const double stableRate =
+            static_cast<double>(m_sampleRateHz) / referenceHopSamples(m_sampleRateHz);
         return std::clamp(stableRate, 1.0, 400.0);
     }
     return 0.0;

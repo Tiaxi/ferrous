@@ -1163,15 +1163,50 @@ pub extern "C" fn ferrous_ffi_spectrogram_ring_capacity(
     )
 }
 
-/// The column hop of spectrogram data for `fft_size` at `zoom`.
+/// The column hop of spectrogram data of audio at `sample_rate` at `zoom`.
 #[no_mangle]
-pub extern "C" fn ferrous_ffi_spectrogram_column_hop(fft_size: u32, zoom: f32) -> u32 {
+pub extern "C" fn ferrous_ffi_spectrogram_column_hop(sample_rate: u32, zoom: f32) -> u32 {
     ffi_call(
         "ferrous_ffi_spectrogram_column_hop",
         |_| 0,
         || {
-            let fft_size = usize::try_from(fft_size).unwrap_or(usize::MAX);
-            u32::try_from(crate::analysis::spectrogram_column_hop(fft_size, zoom))
+            u32::try_from(crate::analysis::spectrogram_column_hop(sample_rate, zoom))
+                .unwrap_or(u32::MAX)
+        },
+    )
+}
+
+/// The zoom Qt draws spectrogram data of audio at `sample_rate` whose
+/// columns are `hop` samples apart at, when `zoom` was asked for: a column
+/// a pixel unless the hop is the reference hop.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_render_zoom(
+    sample_rate: u32,
+    hop: u32,
+    zoom: f64,
+) -> f64 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_render_zoom",
+        |_| zoom,
+        || {
+            crate::analysis::spectrogram_render_zoom(
+                sample_rate,
+                usize::try_from(hop).unwrap_or(usize::MAX),
+                zoom,
+            )
+        },
+    )
+}
+
+/// The column hop of spectrogram data of audio at `sample_rate` at zoom
+/// 1, which zoom levels are relative to.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_reference_hop(sample_rate: u32) -> u32 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_reference_hop",
+        |_| 1024,
+        || {
+            u32::try_from(crate::analysis::spectrogram_reference_hop(sample_rate))
                 .unwrap_or(u32::MAX)
         },
     )
@@ -3252,16 +3287,16 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [22..26] u32  start_column_index
 /// [26..30] u32  total_columns_estimate
 /// [30..34] u32  sample_rate_hz
-/// [34..36] u16  hop_size
-/// [36..40] f32  coverage_seconds
-/// [40]     u8   complete (0 or 1)
-/// [41]     u8   buffer_reset (0 or 1)
-/// [42]     u8   clear_history (0 or 1)
-/// [43..47] u32  widget_width (the session's, in logical pixels; 0 = unknown)
-/// [47..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [34..38] u32  hop_size
+/// [38..42] f32  coverage_seconds
+/// [42]     u8   complete (0 or 1)
+/// [43]     u8   buffer_reset (0 or 1)
+/// [44]     u8   clear_history (0 or 1)
+/// [45..49] u32  widget_width (the session's, in logical pixels; 0 = unknown)
+/// [49..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 47;
+    let header_len = 49;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -5456,8 +5491,9 @@ mod tests {
             channel_count: 1,
             start_column_index: 9,
             total_columns_estimate: 12,
-            sample_rate_hz: 48_000,
-            hop_size: 5_120,
+            // 384 kHz zoomed out all the way: more than 16 bits.
+            sample_rate_hz: 384_000,
+            hop_size: 163_840,
             coverage_seconds: 0.25,
             complete: false,
             buffer_reset: true,
@@ -5467,7 +5503,7 @@ mod tests {
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
         let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
-        assert_eq!(payload_len, 47 + 4);
+        assert_eq!(payload_len, 49 + 4);
 
         let mut offset = 4usize;
         assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
@@ -5480,8 +5516,8 @@ mod tests {
         offset += 1;
         assert_eq!(read_u32(&frame, &mut offset), 9);
         assert_eq!(read_u32(&frame, &mut offset), 12);
-        assert_eq!(read_u32(&frame, &mut offset), 48_000);
-        assert_eq!(read_u16(&frame, &mut offset), 5_120);
+        assert_eq!(read_u32(&frame, &mut offset), 384_000);
+        assert_eq!(read_u32(&frame, &mut offset), 163_840);
         assert!((read_f32(&frame, &mut offset) - 0.25).abs() < f32::EPSILON);
         assert_eq!(frame[offset], 0);
         assert_eq!(frame[offset + 1], 1);

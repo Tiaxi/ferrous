@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use super::column_hop::pixels_per_column;
 use super::f64_to_u64_saturating;
 
 // Budget speculative decode across every channel. The visible viewport is a
@@ -37,7 +38,13 @@ impl SpectrogramBufferConfig {
         } else {
             1.0
         };
-        let effective_zoom = (zoom * f64::from(hop) / 1024.0).max(0.001);
+        // As wide as the view draws the columns.
+        let effective_zoom = pixels_per_column(
+            self.sample_rate,
+            usize::try_from(hop).unwrap_or(usize::MAX),
+            zoom,
+        )
+        .max(0.001);
         let visible =
             f64_to_u64_saturating((f64::from(self.width.max(1920)) / effective_zoom).ceil()).max(1);
         let desired = f64_to_u64_saturating(seconds * f64::from(self.sample_rate) / f64::from(hop))
@@ -71,7 +78,8 @@ mod tests {
             let config = SpectrogramBufferConfig {
                 width: 1920,
                 sample_rate: 384_000,
-                hop: 64,
+                // Zoomed in all the way.
+                hop: 512,
                 bins: 4_097,
                 channels: 8,
                 zoom: 16.0,
@@ -85,12 +93,78 @@ mod tests {
         }
     }
 
+    fn capacity(sample_rate: u32, zoom: f64, centered: bool) -> u64 {
+        let hop = super::super::column_hop::column_hop(sample_rate, zoom as f32);
+        SpectrogramBufferConfig {
+            width: 1920,
+            sample_rate,
+            hop: u32::try_from(hop).unwrap(),
+            bins: 4_097,
+            channels: 2,
+            zoom,
+            centered,
+        }
+        .limits(10.0)
+        .capacity
+    }
+
+    #[test]
+    fn every_rate_of_a_family_gets_the_same_ring() {
+        for centered in [false, true] {
+            for zoom in [1.0, 4.0, 0.25] {
+                for family in [
+                    [44_100, 88_200, 176_400, 352_800],
+                    [48_000, 96_000, 192_000, 384_000],
+                ] {
+                    let first = capacity(family[0], zoom, centered);
+                    for rate in family {
+                        assert_eq!(capacity(rate, zoom, centered), first, "{rate} at {zoom}");
+                    }
+                }
+            }
+        }
+        // A view and 10 s of lookahead: two views of history when rolling,
+        // one when centered, which looks ahead a view more besides.
+        assert_eq!(capacity(96_000, 1.0, false), 3_840 + 468);
+        assert_eq!(capacity(96_000, 1.0, true), 1_920 + 468 + 3_840);
+        assert_eq!(capacity(88_200, 1.0, false), 3_840 + 430);
+        // Zoomed in four times, the 10 s are four times the columns.
+        assert_eq!(capacity(96_000, 4.0, false), 3_840 + 1_875);
+    }
+
+    #[test]
+    fn retention_holds_the_view_qt_draws_at_a_snapped_zoom() {
+        // 8 kHz at 16x: 16 samples a column, which Qt draws a pixel each,
+        // so a 3440 pixel view is 3440 columns, not the 2299 that 16x of
+        // 171 samples would make it.
+        for (rate, zoom, hop) in [(8_000, 16.0, 16), (32_000, 4.0, 171)] {
+            assert_eq!(
+                super::super::column_hop::column_hop(rate, zoom as f32),
+                usize::try_from(hop).unwrap()
+            );
+            let config = SpectrogramBufferConfig {
+                width: 3440,
+                sample_rate: rate,
+                hop,
+                bins: 257,
+                channels: 1,
+                zoom,
+                centered: true,
+            };
+            let limits = config.limits(10.0);
+            assert!(limits.lookahead >= 3440, "{rate}: {}", limits.lookahead);
+            // A view of history, the lookahead and two views ahead.
+            let ahead = 10 * u64::from(rate) / u64::from(hop);
+            assert_eq!(limits.capacity, 3440 + ahead + 2 * 3440, "{rate}");
+        }
+    }
+
     #[test]
     fn full_viewport_is_preserved_when_its_data_exceeds_speculative_budget() {
         let config = SpectrogramBufferConfig {
             width: 7680,
             sample_rate: 384_000,
-            hop: 64,
+            hop: 512,
             bins: 4_097,
             channels: 8,
             zoom: 16.0,
