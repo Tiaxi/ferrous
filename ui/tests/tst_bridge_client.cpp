@@ -85,8 +85,9 @@ QByteArray makePrecomputedFrame(
     const int startIndex,
     const int totalEstimate,
     const quint64 trackToken,
-    const quint64 generation) {
-    constexpr int headerLen = 47;
+    const quint64 generation,
+    const quint32 widgetWidth = 0) {
+    constexpr int headerLen = 51;
     QByteArray raw(headerLen + bins * channelCount * columns, '\0');
     auto *d = reinterpret_cast<quint8 *>(raw.data());
 
@@ -112,6 +113,7 @@ QByteArray makePrecomputedFrame(
     memcpy(d + base + 34, &hopSize, sizeof(hopSize));
     memcpy(d + base + 36, &coverage, sizeof(coverage));
     d[base + 41] = 1;
+    memcpy(d + base + 43, &widgetWidth, sizeof(widgetWidth));
 
     for (int col = 0; col < columns; ++col) {
         for (int ch = 0; ch < channelCount; ++ch) {
@@ -304,6 +306,7 @@ private slots:
     void scheduleBridgePollDisablesWakeNotifierAndPrefersSoonerRearm();
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
+    void spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor();
     void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void diagnosticsWritesBatchOffHotPath();
@@ -4265,6 +4268,44 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QCOMPARE(right.m_ringCapacity > 0, true);
     QCOMPARE(left.m_ring.column(0)[0], static_cast<quint8>(0x11));
     QCOMPARE(right.m_ring.column(0)[0], static_cast<quint8>(0x77));
+}
+
+void BridgeClientTest::spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor() {
+    // Each frame carries the width its session decodes for. A pane that is
+    // narrower, as the main window's is right after the fullscreen viewer
+    // closes, holds what that session sends; the next session, for the
+    // pane, sizes the ring for the pane.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    SpectrogramItem pane;
+    pane.setWidth(2545);
+    pane.setDisplayMode(1);
+    client.registerSpectrogramItem(&pane, 0);
+    const auto capacity = [](std::uint32_t width) {
+        return static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
+            width, 48000, 1024, 4, 1, 1.0, true));
+    };
+    QVERIFY(capacity(3440) > capacity(2545));
+
+    const auto feed = [&client](quint64 generation, int start, quint32 width, bool reset) {
+        QByteArray frame = makePrecomputedFrame(4, 1, 3, start, 20'000, 42, generation, width);
+        frame[45] = reset ? 1 : 0;
+        frame[46] = reset ? 1 : 0;
+        return client.parsePrecomputedSpectrogramFrame(frame);
+    };
+    const BridgeClient::PrecomputedDispatchStats viewerSession = feed(7, 0, 3440, true);
+    QVERIFY(viewerSession.valid);
+    QCOMPARE(viewerSession.widgetWidth, 3440);
+    QCOMPARE(pane.m_ringCapacity, capacity(3440));
+    // The session goes on for the viewer's width, and seeks within it.
+    QVERIFY(feed(7, 3, 3440, false).valid);
+    QVERIFY(feed(7, 100, 3440, true).valid);
+    QCOMPARE(pane.m_ringCapacity, capacity(3440));
+
+    QVERIFY(feed(8, 0, 2545, true).valid);
+    QCOMPARE(pane.m_ringCapacity, capacity(2545));
+    QCOMPARE(pane.m_ring.byteSize(), qint64(capacity(2545)) * 4);
+    QCOMPARE(pane.m_ring.committedBytes(), qint64(64) * 4);
 }
 
 void BridgeClientTest::delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration() {

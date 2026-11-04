@@ -3257,10 +3257,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [40]     u8   complete (0 or 1)
 /// [41]     u8   buffer_reset (0 or 1)
 /// [42]     u8   clear_history (0 or 1)
-/// [43..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [43..47] u32  widget_width (the session's, in logical pixels; 0 = unknown)
+/// [47..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 43;
+    let header_len = 47;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -3281,6 +3282,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.push(u8::from(chunk.complete));
     out.push(u8::from(chunk.buffer_reset));
     out.push(u8::from(chunk.clear_history));
+    out.extend_from_slice(&chunk.widget_width.to_le_bytes());
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -5460,11 +5462,12 @@ mod tests {
             complete: false,
             buffer_reset: true,
             clear_history: true,
+            widget_width: 3_440,
         };
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
         let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
-        assert_eq!(payload_len, 43 + 4);
+        assert_eq!(payload_len, 47 + 4);
 
         let mut offset = 4usize;
         assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
@@ -5484,6 +5487,7 @@ mod tests {
         assert_eq!(frame[offset + 1], 1);
         assert_eq!(frame[offset + 2], 1);
         offset += 3;
+        assert_eq!(read_u32(&frame, &mut offset), 3_440);
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
     }
 
@@ -5506,6 +5510,7 @@ mod tests {
             complete: false,
             buffer_reset: start_column_index == 0,
             clear_history: start_column_index == 0,
+            widget_width: 0,
         }
     }
 
@@ -5548,6 +5553,7 @@ mod tests {
             complete: false,
             buffer_reset: start == 0,
             clear_history: start == 0,
+            widget_width: 0,
         })
     }
 
