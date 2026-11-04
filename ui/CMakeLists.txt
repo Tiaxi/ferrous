@@ -503,6 +503,7 @@ if(BUILD_TESTING)
     set(FERROUS_QML_SMOKE_AREAS
         spectrogram 180
         waveform 120
+        waveform_coverage 120
         library_queue 120
         transport_input 90
         window 120

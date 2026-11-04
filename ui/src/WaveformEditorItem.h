@@ -25,6 +25,7 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "PlaybackClock.h"
@@ -33,6 +34,7 @@
 #include "WindowPresence.h"
 
 class QHoverEvent;
+class QThreadPool;
 class QMouseEvent;
 class QPainter;
 class QQuickWindow;
@@ -205,6 +207,13 @@ private:
         std::vector<float> downmixExtrema;
     };
 
+    // A detail window as a worker decoded and parsed it.
+    struct DecodedWindow {
+        DetailWindow window;
+        bool parsed{false};
+        qsizetype bytes{0};
+    };
+
     struct CacheGrid {
         double startSeconds{0.0};
         double endSeconds{0.0};
@@ -212,13 +221,39 @@ private:
         int width{0};
     };
 
+    // A playback tile, in strips of rows that each become a texture of
+    // their own: see WaveformSceneGraph::kTextureSize.
     struct PlaybackTile {
-        QImage image;
+        std::vector<QImage> strips;
     };
 
+    // How lanes are drawn: the channels mixed in one, or one each, and
+    // which channels are not heard.
+    struct LaneStyle {
+        int viewMode{0};
+        qulonglong mutedMask{0};
+        qulonglong soloedMask{0};
+        bool muted(int channel) const;
+    };
+
+    // What the workers that make playback tiles share with the item: they
+    // hand a tile over only while the item lives, and only for the tiles
+    // of its current generation.
+    struct PlaybackTileWorkers {
+        QMutex mutex;
+        WaveformEditorItem *item{nullptr};
+        std::atomic<quint64> generation{0};
+        // The tiles still wanted, as the last paint left them.
+        std::atomic<qint64> firstWanted{0};
+        std::atomic<qint64> lastWanted{-1};
+        std::atomic_bool updateQueued{false};
+    };
+
+    // The part of a playback tile on the canvas, and where it goes.
     struct PlaybackTilePaint {
         QImage image;
         QRectF target;
+        QRectF source;
     };
 
     static QByteArray decodeWindow(
@@ -255,7 +290,11 @@ private:
     std::pair<double, double> requestRangeLocked(
         double visibleStart, double visibleEnd) const;
     double requiredVisibleDetailPointsLocked(double visibleSpan) const;
+    // A request's margin on each side of the view.
     double detailRequestMarginLocked(double visibleSpan) const;
+    // The margins of a request behind the view and ahead of it: equal, or
+    // mostly ahead while playing.
+    std::pair<double, double> detailRequestMarginsLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     // Device pixels to a logical pixel, and the caches' size in them.
     double renderScaleLocked() const;
@@ -328,8 +367,25 @@ private:
     void clearPlaybackTilesLocked();
     void preparePlaybackTilesLocked(
         double visibleStart, double visibleEnd, int height);
+    // Makes the tiles the view lacks, up to tileBudget: on the workers, or
+    // at once with m_playbackTilesInline. Returns how many it started.
     int renderMissingPlaybackTilesLocked(
         double visibleStart, double visibleEnd, int height, int tileBudget);
+    // How many tiles ahead of the view playback reaches soon.
+    int playbackTilesAheadLocked(double visibleStart, double visibleEnd) const;
+    // The workers that make playback tiles, which all items share.
+    static QThreadPool *playbackTileThreadPool();
+    static PlaybackTile renderPlaybackTile(
+        const DetailWindow &detail, const LaneStyle &style, int height, double tileStart,
+        double tileEnd, int channels, int firstX, int lastX, double pixelScale);
+    // A worker's tile of `generation`; one with no strips only ends its
+    // request.
+    // renderMs is how long the worker took, for the profile logs.
+    void deliverPlaybackTile(
+        quint64 generation, qint64 index, PlaybackTile tile, double renderMs = 0.0);
+    // The view's parts, in the canvas's x, that no playback tile covers.
+    std::vector<std::pair<int, int>> playbackTileGapsLocked(
+        double visibleStart, double visibleEnd, int canvasWidth) const;
     int playbackTileRenderBudgetLocked(
         double visibleStart, double visibleEnd) const;
     bool playbackTilesCoverLocked(
@@ -359,6 +415,26 @@ private:
     void drawDetailSliceLocked(QPainter &painter, int width, int height,
                                double visibleStart, double visibleEnd, int channels,
                                int firstX, int lastX, double pixelScale = 1.0) const;
+    static void drawDetailSlice(
+        QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
+        int width, int height, double visibleStart, double visibleEnd, int channels,
+        int firstX, int lastX, double pixelScale);
+    // The lowest and highest value of each column between firstX and
+    // lastX, joined to the next point's: a coarse, cheap stand-in for the
+    // waveform where its playback tiles are still being made.
+    static void drawDetailEnvelope(
+        QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
+        int width, int height, double visibleStart, double visibleEnd, int channels,
+        int firstX, int lastX);
+    static double sampleSpacingPixels(
+        const DetailWindow &detail, int pixelWidth, double visibleStart, double visibleEnd);
+    static double detailPointTime(const DetailWindow &detail, int point);
+    static std::pair<int, int> detailPointRange(
+        const DetailWindow &detail, double visibleStart, double visibleEnd);
+    // The detail's points between two times, for a worker.
+    std::shared_ptr<const DetailWindow> detailSnapshotLocked(
+        double startSeconds, double endSeconds) const;
+    LaneStyle laneStyleLocked() const;
     void drawCrosshair(QPainter &painter, int width, int height,
                        double visibleStart, double visibleEnd) const;
     static void drawFpsOverlay(
@@ -424,6 +500,15 @@ private:
     int m_playbackTileHeight{0};
     quint32 m_playbackTileFramesPerPoint{0};
     int m_playbackTileDisplayedChannels{0};
+    // Changes whenever the tiles are dropped, so that the tiles of workers
+    // still making them for the old ones are not taken.
+    quint64 m_playbackTileGeneration{0};
+    // The tiles workers are making.
+    std::set<qint64> m_playbackTilesPending;
+    std::shared_ptr<PlaybackTileWorkers> m_playbackTileWorkers{
+        std::make_shared<PlaybackTileWorkers>()};
+    // Tests make tiles at once, on the calling thread.
+    bool m_playbackTilesInline{false};
     void invalidateDetailRequestLocked();
     std::shared_ptr<std::atomic_bool> m_decodeCancelled;
     bool m_decodeActive{false};
