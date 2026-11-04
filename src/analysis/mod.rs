@@ -415,6 +415,13 @@ struct AnalysisRuntimeState {
     /// (which resets to 0) into the worker's continuous coordinate
     /// space so `PositionUpdate(0.0)` doesn't trigger a backward seek.
     spectrogram_position_offset: f64,
+    /// Where the worker's timeline reaches the staged rolling continuation,
+    /// in seconds, when the worker opened it before the track switch.
+    staged_continuation_start: Option<(PathBuf, f64)>,
+    /// A rolling switch to a continuation the worker had not opened yet.
+    /// Until it reports where the file starts on its timeline, the position
+    /// offset counts the outgoing track as ending at its last position.
+    provisional_continuation: Option<PathBuf>,
     /// Last raw position forwarded to the spectrogram worker, used to
     /// compute the offset at gapless transitions.
     last_spectrogram_position: f64,
@@ -703,6 +710,8 @@ impl AnalysisRuntimeState {
             pending_candidate: None,
             next_candidate_request: 0,
             spectrogram_position_offset: 0.0,
+            staged_continuation_start: None,
+            provisional_continuation: None,
             last_spectrogram_position: 0.0,
             spectrogram_session_start: 0.0,
             spectrogram_session_margin: 30.0,
@@ -886,13 +895,14 @@ impl AnalysisRuntimeState {
             }
             AnalysisCommand::CancelStagedContinuation => {
                 self.cancel_centered_staging();
+                self.staged_continuation_start = None;
                 if self.staged_continuation_path.take().is_some() {
                     let _ = ctx
                         .spectrogram_cmd_tx
                         .send(SpectrogramWorkerCommand::CancelPendingContinue);
                     // Restart — the worker may have consumed the
                     // continuation and be decoding the wrong file.
-                    self.spectrogram_position_offset = 0.0;
+                    self.reset_position_offset();
                     let target = self.last_spectrogram_position;
                     self.start_spectrogram_session_with_target(
                         target, target, true,  // emit_initial_reset — triggers UI truncation
@@ -928,6 +938,7 @@ impl AnalysisRuntimeState {
             &mut self.active_track_path,
             &mut self.staged_continuation_path,
             &mut self.staged_centered_path,
+            &mut self.provisional_continuation,
         ]
         .into_iter()
         .flatten()
@@ -935,6 +946,11 @@ impl AnalysisRuntimeState {
             remap_path(path, &renames);
         }
         if let Some((_, path)) = self.pending_candidate.as_mut() {
+            remap_path(path, &renames);
+        }
+        // A start the worker reported stays with its file, which the switch
+        // names by its new path.
+        if let Some((path, _)) = self.staged_continuation_start.as_mut() {
             remap_path(path, &renames);
         }
         self.formats.remap(&renames);
@@ -1138,10 +1154,18 @@ impl AnalysisRuntimeState {
         self.staged_centered_path = Some(path);
     }
 
+    /// Positions are the playing file's from now on, as the worker's
+    /// timeline is: no continuation's start is added to them.
+    fn reset_position_offset(&mut self) {
+        self.spectrogram_position_offset = 0.0;
+        self.provisional_continuation = None;
+    }
+
     /// Clear any early continuation, sending `CancelPendingContinue` to
     /// the worker if one was in flight.  Does NOT restart the session.
     fn clear_early_continuation(&mut self, ctx: &AnalysisContext<'_>) {
         self.pending_candidate = None;
+        self.staged_continuation_start = None;
         if self.staged_continuation_path.take().is_some() {
             let _ = ctx
                 .spectrogram_cmd_tx
@@ -1208,12 +1232,24 @@ impl AnalysisRuntimeState {
         ctx: &AnalysisContext<'_>,
     ) {
         if format_compatible {
-            // Accumulate position offset: GStreamer's position resets to 0
-            // for the new track, but the worker's coordinate space is
-            // continuous.
-            self.spectrogram_position_offset += self.last_spectrogram_position;
+            // GStreamer's position resets to 0 for the new track, but the
+            // worker's timeline is continuous: the file starts where the
+            // worker went on with it, which it reports when it opens it.
+            let matched = self.staged_continuation_path.take().as_deref() == Some(path);
+            let opened_at = self
+                .staged_continuation_start
+                .take()
+                .filter(|(staged, _)| matched && staged == path);
+            if let Some((_, start)) = opened_at {
+                self.spectrogram_position_offset = start;
+                self.provisional_continuation = None;
+            } else {
+                // Until it does, the outgoing track ends at its last position.
+                self.spectrogram_position_offset += self.last_spectrogram_position;
+                self.provisional_continuation = Some(path.to_path_buf());
+            }
 
-            if self.staged_continuation_path.take() == Some(path.to_path_buf()) {
+            if matched {
                 profile_eprintln!(
                     "[analysis] handle_track_change: UpdateTrackToken (early continue matched) offset={:.2}",
                     self.spectrogram_position_offset,
@@ -1240,7 +1276,7 @@ impl AnalysisRuntimeState {
             // sending the worker insane position updates past EOF.  Reset
             // and start fresh; the reset keeps the history on screen.
             self.clear_early_continuation(ctx);
-            self.spectrogram_position_offset = 0.0;
+            self.reset_position_offset();
             profile_eprintln!(
                 "[analysis] handle_track_change: rolling gapless format mismatch → fresh NewTrack",
             );
@@ -1320,7 +1356,7 @@ impl AnalysisRuntimeState {
 
         if !self.spectrogram_active {
             self.last_spectrogram_position = 0.0;
-            self.spectrogram_position_offset = 0.0;
+            self.reset_position_offset();
         } else if gapless
             && !reset_spectrogram
             && self.display_mode == SpectrogramDisplayMode::Rolling
@@ -1338,7 +1374,7 @@ impl AnalysisRuntimeState {
             self.cancel_centered_staging();
             // Non-gapless: reset the offset since a new session starts
             // with fresh coordinates.
-            self.spectrogram_position_offset = 0.0;
+            self.reset_position_offset();
             // Start a fresh precomputed session. Emit a reset marker for
             // every non-gapless transition so the UI can distinguish a
             // true reset from a gapless handoff. Manual track changes clear
@@ -1379,7 +1415,7 @@ impl AnalysisRuntimeState {
         ctx: &AnalysisContext<'_>,
     ) {
         self.clear_early_continuation(ctx);
-        self.spectrogram_position_offset = 0.0;
+        self.reset_position_offset();
 
         let staged = if self.staged_centered_path.as_deref() == Some(path) {
             self.take_staged_centered_chunks(track_token)
@@ -1552,9 +1588,25 @@ impl AnalysisRuntimeState {
     /// the offset; its reset keeps the history shown.
     fn restart_changed_format(&mut self, ctx: &AnalysisContext<'_>) {
         self.clear_early_continuation(ctx);
-        self.spectrogram_position_offset = 0.0;
+        self.reset_position_offset();
         let position = self.last_spectrogram_position;
         self.start_spectrogram_session(position, true, false, ctx);
+    }
+
+    /// The worker went on with `path` at `start` seconds of its timeline:
+    /// position 0 of the file is there. A track switch to it, before or
+    /// after, offsets the file's positions by that.
+    fn continuation_opened(&mut self, path: &Path, start: f64) {
+        if self.provisional_continuation.as_deref() == Some(path) {
+            profile_eprintln!(
+                "[analysis] continuation opened at {start:.2}, offset was {:.2}",
+                self.spectrogram_position_offset,
+            );
+            self.provisional_continuation = None;
+            self.spectrogram_position_offset = start;
+        } else if self.staged_continuation_path.as_deref() == Some(path) {
+            self.staged_continuation_start = Some((path.to_path_buf(), start));
+        }
     }
 
     fn handle_session_report(&mut self, report: SessionReport, ctx: &AnalysisContext<'_>) {
@@ -1568,8 +1620,12 @@ impl AnalysisRuntimeState {
                 path,
                 stamp,
                 format,
+                continued_at,
                 ..
             } => {
+                if let Some(start) = continued_at {
+                    self.continuation_opened(&path, start);
+                }
                 let active = track_token == self.active_track_token
                     && self.active_track_path.as_deref() == Some(path.as_path());
                 self.formats.insert(path, format, stamp);
@@ -1597,6 +1653,7 @@ impl AnalysisRuntimeState {
                     // Rejected before the switch, which judges the format
                     // again.
                     self.staged_continuation_path = None;
+                    self.staged_continuation_start = None;
                 } else if self.active_track_path.as_deref() == Some(path.as_path())
                     && self.display_mode == SpectrogramDisplayMode::Rolling
                 {
@@ -1678,7 +1735,7 @@ impl AnalysisRuntimeState {
         // offset must be cleared first, otherwise the next PositionUpdate is
         // re-adjusted into the old continuous coordinate space and the worker
         // seeks far forward immediately after the restart.
-        self.spectrogram_position_offset = 0.0;
+        self.reset_position_offset();
         self.unconfirmed_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
         self.spectrogram_session_widget_width = self.spectrogram_widget_width;
@@ -1903,7 +1960,13 @@ impl AnalysisRuntimeState {
     }
 
     fn seek_spectrogram_position(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
-        self.spectrogram_position_offset = 0.0;
+        // The worker may decode a file other than the one the seek is in:
+        // the staged successor, which it goes on with before the switch, or
+        // the outgoing track, before it reaches the successor playback has
+        // switched to.
+        let continuation_unsettled =
+            self.staged_continuation_path.is_some() || self.provisional_continuation.is_some();
+        self.reset_position_offset();
         self.unconfirmed_continuation = None;
         self.last_spectrogram_position = position_seconds;
         if !self.spectrogram_active {
@@ -1962,12 +2025,13 @@ impl AnalysisRuntimeState {
                 // new playhead position.
                 self.refill_centered_spectrogram(position_seconds, ctx);
             }
-        } else if ctx.event_tx.spectral_backpressured() {
+        } else if ctx.event_tx.spectral_backpressured() || continuation_unsettled {
             // The worker is waiting to hand over columns decoded before the
             // seek, so a Seek would reach it, and its reset the UI, only
             // after they drain.  A new session at the target makes them
-            // stale instead.  Like the Seek's reset, its reset keeps the
-            // history on screen: rolling history is what has played.
+            // stale instead, and opens the file the seek is in.  Like the
+            // Seek's reset, its reset keeps the history on screen: rolling
+            // history is what has played.
             self.clear_early_continuation(ctx);
             self.start_spectrogram_session(position_seconds, true, false, ctx);
         } else {
@@ -5629,6 +5693,68 @@ mod tests {
                 assert_eq!(channels.opened_paths(), vec![successor_new.to_path_buf()]);
             }
         }
+
+        // Where the worker went on with a rolling successor stays known
+        // across a rename: reported before it, or after it for a switch
+        // made before it, at the path the worker opened.
+        let format = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        for (successor, successor_new) in [(b, b_new), (a, a_new)] {
+            for reported_first in [true, false] {
+                let case = format!("{} reported_first={reported_first}", successor.display());
+                let channels = TestChannels::new();
+                let ctx = channels.ctx();
+                let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+                state.last_spectrogram_position = 200.0;
+                stage_successor(&mut state, successor);
+                let generation = channels.generation.load(Ordering::Relaxed);
+                let opened = |path: &Path| SessionReport::Opened {
+                    generation,
+                    track_token: 1,
+                    path: path.to_path_buf(),
+                    stamp: None,
+                    format,
+                    continued_at: Some(200.4),
+                };
+                let set_track = |path: &Path| AnalysisCommand::SetTrack {
+                    path: path.to_path_buf(),
+                    reset_spectrogram: false,
+                    track_token: 2,
+                    gapless: true,
+                };
+                if reported_first {
+                    state.handle_session_report(opened(successor), &ctx);
+                    state.handle_command(remap(&[(a, a_new), (b, b_new)]), &ctx);
+                    state.handle_command(set_track(successor_new), &ctx);
+                } else {
+                    // The switch is made before the worker opens the file,
+                    // which it does at the new path.
+                    state.handle_command(set_track(successor), &ctx);
+                    assert!(
+                        (state.spectrogram_position_offset - 200.0).abs() < 1e-9,
+                        "{case}"
+                    );
+                    state.handle_command(remap(&[(a, a_new), (b, b_new)]), &ctx);
+                    state.handle_session_report(opened(successor_new), &ctx);
+                }
+                assert!(
+                    (state.spectrogram_position_offset - 200.4).abs() < 1e-9,
+                    "{case}: {}",
+                    state.spectrogram_position_offset
+                );
+                assert!(state.provisional_continuation.is_none(), "{case}");
+                // The worker decodes the playing file, so a seek reaches it.
+                channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+                state.handle_command(AnalysisCommand::SeekPosition(5.0), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
+                    "{case}: {commands:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7174,6 +7300,7 @@ mod tests {
             path: path.to_path_buf(),
             stamp: None,
             format,
+            continued_at: None,
         }
     }
 
@@ -7326,6 +7453,221 @@ mod tests {
             state.handle_session_report(rejected(generation, b), &ctx);
             assert!(channels.spectrogram_cmd_rx.try_recv().is_err());
         }
+    }
+
+    #[test]
+    fn a_rolling_continuation_offsets_positions_to_where_the_worker_went_on() {
+        // Playback's last position before a gapless switch falls short of
+        // the end of the outgoing track, which is where the worker goes on
+        // with the next file: position 0 of the file is there.
+        let a = Path::new("/music/a.flac");
+        let format = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let (last_position, continued_at) = (1_257.23, 1_257.45);
+        let opened = |generation, track_token, path: &Path| SessionReport::Opened {
+            generation,
+            track_token,
+            path: path.to_path_buf(),
+            stamp: None,
+            format,
+            continued_at: Some(continued_at),
+        };
+        let forwarded = |channels: &TestChannels| -> Vec<f64> {
+            channels
+                .spectrogram_cmd_rx
+                .try_iter()
+                .filter_map(|command| match command {
+                    SpectrogramWorkerCommand::PositionUpdate { position_seconds } => {
+                        Some(position_seconds)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Repeat-One, and another track; staged early or continued at the
+        // switch; opened by the worker before the switch or after it.
+        for next in [a, Path::new("/music/b.flac")] {
+            for (staged, opened_first) in [(true, true), (true, false), (false, false)] {
+                let case = format!(
+                    "{} staged={staged} opened_first={opened_first}",
+                    next.display()
+                );
+                let channels = TestChannels::new();
+                let ctx = channels.ctx();
+                let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+                state.formats.insert(next.to_path_buf(), format, None);
+                state.last_spectrogram_position = last_position;
+                let generation = channels.generation.load(Ordering::Relaxed);
+                if staged {
+                    state.handle_prepare_gapless_continuation(next.to_path_buf(), &ctx);
+                    assert!(
+                        matches!(
+                            channels.spectrogram_cmd_rx.try_recv(),
+                            Ok(SpectrogramWorkerCommand::ContinueWithFile { track_token: 1, .. })
+                        ),
+                        "{case}"
+                    );
+                }
+                if opened_first {
+                    // The worker reached the end of the outgoing track first.
+                    state.handle_session_report(opened(generation, 1, next), &ctx);
+                }
+                state.handle_track_change(next.to_path_buf(), false, true, 2, &ctx);
+                let switch = channels.spectrogram_cmd_rx.try_recv();
+                if staged {
+                    assert!(
+                        matches!(
+                            switch,
+                            Ok(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 })
+                        ),
+                        "{case}: {switch:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            switch,
+                            Ok(SpectrogramWorkerCommand::ContinueWithFile { track_token: 2, .. })
+                        ),
+                        "{case}: {switch:?}"
+                    );
+                }
+                if !opened_first {
+                    // Until the worker reports where it went on, the
+                    // outgoing track ends at its last position.
+                    assert!(
+                        (state.spectrogram_position_offset - last_position).abs() < 1e-9,
+                        "{case}"
+                    );
+                    state.handle_command(AnalysisCommand::PositionUpdate(0.1), &ctx);
+                    assert_eq!(forwarded(&channels), [last_position + 0.1], "{case}");
+                    let token = if staged { 1 } else { 2 };
+                    state.handle_session_report(opened(generation, token, next), &ctx);
+                }
+                assert!(
+                    (state.spectrogram_position_offset - continued_at).abs() < 1e-9,
+                    "{case}"
+                );
+                // Positions that step back after the switch stay in the
+                // file, at or after its start.
+                for position in [0.0, 0.23, 0.09] {
+                    state.handle_command(AnalysisCommand::PositionUpdate(position), &ctx);
+                }
+                assert_eq!(
+                    forwarded(&channels),
+                    [continued_at, continued_at + 0.23, continued_at + 0.09],
+                    "{case}"
+                );
+                // A later report of the same file, such as a stale one,
+                // does not move the offset.
+                state.handle_session_report(opened(generation, 2, next), &ctx);
+                assert!(
+                    (state.spectrogram_position_offset - continued_at).abs() < 1e-9,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_seek_before_the_worker_reaches_the_continuation_restarts_the_session() {
+        // Playback switched to a continuation the worker has not opened yet,
+        // or the worker may decode a staged successor: a Seek would move
+        // the file it decodes, which the seek is not in.
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let format = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        for switched in [true, false] {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+            state.formats.insert(b.to_path_buf(), format, None);
+            state.last_spectrogram_position = 200.0;
+            state.handle_prepare_gapless_continuation(b.to_path_buf(), &ctx);
+            if switched {
+                state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+            }
+            let generation = channels.generation.load(Ordering::Relaxed);
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+            state.handle_command(AnalysisCommand::SeekPosition(5.0), &ctx);
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            // A staged continuation is cancelled; the new session drops one
+            // the switch made.
+            let commands = if switched {
+                commands.as_slice()
+            } else {
+                assert!(
+                    matches!(
+                        commands.first(),
+                        Some(SpectrogramWorkerCommand::CancelPendingContinue)
+                    ),
+                    "{commands:?}"
+                );
+                &commands[1..]
+            };
+            let token = if switched { 2 } else { 1 };
+            assert!(
+                matches!(commands, [
+                    SpectrogramWorkerCommand::NewTrack {
+                        track_token, start_seconds, emit_initial_reset: true,
+                        clear_history_on_reset: false, generation: g, ..
+                    },
+                ] if *track_token == token && (*start_seconds - 5.0).abs() < 1e-9 && *g > generation),
+                "switched={switched}: {commands:?}"
+            );
+            assert_eq!(state.spectrogram_position_offset, 0.0);
+            // What the superseded session reports changes nothing.
+            state.handle_session_report(
+                SessionReport::Opened {
+                    generation,
+                    track_token: 2,
+                    path: b.to_path_buf(),
+                    stamp: None,
+                    format,
+                    continued_at: Some(200.4),
+                },
+                &ctx,
+            );
+            assert_eq!(state.spectrogram_position_offset, 0.0);
+            state.handle_command(AnalysisCommand::PositionUpdate(5.1), &ctx);
+            assert!(matches!(
+                channels.spectrogram_cmd_rx.try_recv(),
+                Ok(SpectrogramWorkerCommand::PositionUpdate { position_seconds }) if position_seconds == 5.1
+            ));
+        }
+
+        // Once the worker has opened the file playback switched to, a seek
+        // reaches the session.
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+        state.formats.insert(b.to_path_buf(), format, None);
+        state.last_spectrogram_position = 200.0;
+        state.handle_track_change(b.to_path_buf(), false, true, 2, &ctx);
+        let generation = channels.generation.load(Ordering::Relaxed);
+        state.handle_session_report(
+            SessionReport::Opened {
+                generation,
+                track_token: 2,
+                path: b.to_path_buf(),
+                stamp: None,
+                format,
+                continued_at: Some(200.4),
+            },
+            &ctx,
+        );
+        channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+        state.handle_command(AnalysisCommand::SeekPosition(5.0), &ctx);
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        assert!(
+            matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { position_seconds }]
+                if (*position_seconds - 5.0).abs() < 1e-9),
+            "{commands:?}"
+        );
     }
 
     #[test]

@@ -1149,6 +1149,7 @@ private slots:
     void spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds_data();
     void spectrogramRollingGaplessContinuesWhereThePreviousTrackEnds();
     void spectrogramGaplessTrackChangePreservesRollingHistory();
+    void spectrogramRollingRepeatOneDrawsTheReplay();
     void spectrogramNaturalTrackResetPreservesRollingHistory();
     void spectrogramManualTrackResetClearsRollingHistory();
     void spectrogramRollingZoomResetAnchorsEpochToResetStart();
@@ -6780,6 +6781,99 @@ void SpectrogramSmokeTest::spectrogramRollingGaplessContinuesWhereThePreviousTra
     QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 100'000'000)) - 3.9) < 1e-6);
     QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 199'000'000)) - 3.999) < 1e-6);
     QVERIFY(std::abs(item.currentRenderPositionSecondsLocked(at(now + 300'000'000)) - 4.1) < 1e-6);
+}
+
+void SpectrogramSmokeTest::spectrogramRollingRepeatOneDrawsTheReplay() {
+    // Repeat-One in a rolling pane: the worker goes on with the same file
+    // after the end of its first play, on the session's continuous
+    // timeline, and playback switches to the replay with a new token. The
+    // replay's columns come after the first play's, and the pane draws them
+    // as the replay plays.
+    TestTime time;
+    SpectrogramItem item;
+    time.drive(item);
+    item.setWidth(320);
+    item.setHeight(100);
+    item.setDisplayMode(0); // Rolling
+    item.setPlaying(true);
+    constexpr int bins = 8;
+    constexpr int rate = 48'000;
+    constexpr int hop = 1'024;
+    constexpr double columnsPerSecond = static_cast<double>(rate) / hop;
+    constexpr int fileColumns = 768;
+    constexpr double duration = fileColumns / columnsPerSecond;
+    constexpr int aheadColumns = 64;
+    const auto columns = [](int count, char value) { return QByteArray(count * bins, value); };
+
+    // The first play.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, fileColumns, rate, hop, false, true, 1, true, 1);
+    item.feedPrecomputedChunk(columns(fileColumns, '\x30'), bins, 0, fileColumns, 0, fileColumns,
+        rate, hop, false, false, 1, false, 1);
+    item.m_precomputedReady = true;
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample first;
+    first.positionSeconds = duration - 0.3;
+    first.sampledAtNs = time.nowNs;
+    first.advancing = true;
+    first.durationSeconds = duration;
+    first.trackToken = 1;
+    clock.applySample(first, true);
+    // At its end the worker goes on with the file, decoding the replay's
+    // first columns ahead of playback with the outgoing token.
+    item.feedPrecomputedChunk(columns(aheadColumns, '\x60'), bins, 0, aheadColumns, fileColumns,
+        2 * fileColumns, rate, hop, false, false, 1, false, 1);
+    // Playback switches to the replay, stamped with the end of the first
+    // play; the worker's token chunk and the rest of the replay follow.
+    const qint64 replayStartNs = time.nowNs + 300'000'000;
+    PlaybackSample replay = first;
+    replay.positionSeconds = 0.0;
+    replay.sampledAtNs = replayStartNs;
+    replay.trackToken = 2;
+    clock.applySample(replay, false);
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, fileColumns + aheadColumns,
+        2 * fileColumns, rate, hop, false, false, 2, false, 1);
+    item.feedPrecomputedChunk(columns(fileColumns - aheadColumns, '\x60'), bins, 0,
+        fileColumns - aheadColumns, fileColumns + aheadColumns, 2 * fileColumns, rate, hop,
+        true, false, 2, false, 1);
+    QVERIFY(!item.m_gaplessContinuationPending);
+    QCOMPARE(item.m_gaplessPositionOffset, duration);
+
+    QSGNode *node = nullptr;
+    for (const double into : {3.0, 8.0, 14.0}) {
+        time.nowNs = replayStartNs + static_cast<qint64>(into * 1e9);
+        qint64 shownSeq = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const double position = item.currentRenderPositionSecondsLocked(item.m_now());
+            QVERIFY2(std::abs(position - (duration + into)) < 1e-6, qPrintable(QString::number(position)));
+            // The playhead's column is the replay's, `into` into the file.
+            shownSeq = item.m_rollingEpoch
+                + static_cast<qint64>(std::floor(position * columnsPerSecond));
+            QVERIFY(shownSeq < item.m_ringWriteSeq);
+            QVERIFY(shownSeq >= item.m_ringOldestSeq);
+            const int slot = static_cast<int>(shownSeq % item.m_ringCapacity);
+            QCOMPARE(item.m_ringSequenceId[slot], shownSeq);
+            QCOMPARE(item.m_ringColumnId[slot],
+                fileColumns + static_cast<int>(std::floor(into * columnsPerSecond)));
+            QCOMPARE(item.m_ringTrackToken[slot], 2ULL);
+        }
+        // And the pane draws it, at its right edge, as the replay's.
+        node = paintSettled(item, node);
+        const QImage shown = canvasInViewOrder(item);
+        QCOMPARE(shown.width(), 320);
+        const QRgb replayColor = shown.pixel(shown.width() - 1, shown.height() / 2);
+        QVERIFY(replayColor != qRgb(0, 0, 0));
+        const QRgb leftColor = shown.pixel(0, shown.height() / 2);
+        // Further back than the pane's width, the first play is gone from
+        // view by 14 s; before that its end shows on the left.
+        if (into * columnsPerSecond < 320.0) {
+            QVERIFY(leftColor != replayColor);
+        } else {
+            QCOMPARE(leftColor, replayColor);
+        }
+    }
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramGaplessTrackChangePreservesRollingHistory() {

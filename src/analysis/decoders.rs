@@ -186,6 +186,12 @@ impl AudioTimeline {
         }
     }
 
+    /// The frame of the file the next frames read start at; after the
+    /// last, the end of the file.
+    pub(super) fn next_frame(&self) -> u64 {
+        self.next_frame
+    }
+
     pub(super) fn read(
         &mut self,
         next: impl FnOnce() -> anyhow::Result<AudioRead>,
