@@ -2320,12 +2320,13 @@ int SpectrogramItem::columnHopForZoomLocked(double zoom) const {
 double SpectrogramItem::renderZoomForZoomLocked(double zoom) const {
     // Data at a hop other than the reference one is drawn one column per
     // pixel; see the snap in feedPrecomputedChunk.
-    const int hop = columnHopForZoomLocked(zoom);
-    const double referenceHop = referenceHopLocked();
-    if (hop > 0 && hop != static_cast<int>(referenceHop)) {
-        return referenceHop / static_cast<double>(hop);
-    }
-    return zoom;
+    return renderZoomForHopLocked(columnHopForZoomLocked(zoom), zoom);
+}
+
+double SpectrogramItem::renderZoomForHopLocked(int hop, double zoom) const {
+    return ferrous_ffi_spectrogram_render_zoom(
+        static_cast<std::uint32_t>(std::max(0, m_precomputedSampleRateHz)),
+        static_cast<std::uint32_t>(std::max(0, hop)), zoom);
 }
 
 SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
@@ -3082,14 +3083,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             // effectiveZoom=0.998) causes the advance path to fail,
             // forcing 42ms full rebuilds every frame.  Data for another
             // zoom is drawn at its own zoom, so the preview can scale it.
-            const double referenceHop = referenceHopLocked();
-            if (m_precomputedHopSize > 0
-                && m_precomputedHopSize != static_cast<int>(referenceHop)) {
-                m_renderZoomLevel = referenceHop
-                    / static_cast<double>(m_precomputedHopSize);
-            } else {
-                m_renderZoomLevel = dataIsForZoom ? m_zoomLevel : 1.0;
-            }
+            m_renderZoomLevel = renderZoomForHopLocked(
+                m_precomputedHopSize, dataIsForZoom ? m_zoomLevel : 1.0);
             m_crosshairDirty = true;
         }
         if (appliedReset) {
@@ -3531,7 +3526,9 @@ void SpectrogramItem::clearPrecomputed() {
     m_awaitingZoomData = false;
     m_zoomFillActive = false;
     m_seekFillActive = false;
-    m_renderZoomLevel = m_zoomLevel;
+    // The zoom data for the zoom on screen is drawn at, as the backend
+    // reckons it (ferrous_ffi_spectrogram_render_zoom).
+    m_renderZoomLevel = renderZoomForZoomLocked(m_zoomLevel);
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_positionJumpHoldActive = false;

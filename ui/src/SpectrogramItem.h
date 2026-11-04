@@ -548,6 +548,9 @@ private:
     double backendZoomForRequestLocked() const;
     int columnHopForZoomLocked(double zoom) const;
     double renderZoomForZoomLocked(double zoom) const;
+    // The zoom data hop samples apart is drawn at when zoom was asked for
+    // (ferrous_ffi_spectrogram_render_zoom).
+    double renderZoomForHopLocked(int hop, double zoom) const;
     bool zoomPreviewWantedLocked() const;
     SpectrogramZoomPreview zoomPreviewLocked(
         int width,

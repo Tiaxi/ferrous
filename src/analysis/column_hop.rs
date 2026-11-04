@@ -72,6 +72,38 @@ pub fn column_hop(sample_rate: u32, zoom: f32) -> usize {
     hop_from_f64(reference / zoom)
 }
 
+/// The zoom a view draws data whose columns are `hop` samples apart at,
+/// for audio at `sample_rate`, when `zoom` was asked for: one column a
+/// pixel wherever the hop is not the reference hop, which is the zoom the
+/// hop stands for after its rounding, the zoom clamp and the
+/// [`MIN_COLUMN_HOP`] floor; `zoom` itself at the reference hop. Qt draws
+/// at this zoom, and the centered window and retention reckon with it.
+#[must_use]
+pub fn render_zoom(sample_rate: u32, hop: usize, zoom: f64) -> f64 {
+    let reference = reference_hop(sample_rate);
+    if hop > 0 && hop != reference {
+        // Hops are at most a few hundred thousand samples.
+        #[allow(clippy::cast_precision_loss)]
+        let snapped = reference as f64 / hop as f64;
+        snapped
+    } else {
+        zoom
+    }
+}
+
+/// The pixels a column of data `hop` samples apart takes at
+/// [`render_zoom`]: 1 wherever the hop is not the reference hop.
+#[must_use]
+pub fn pixels_per_column(sample_rate: u32, hop: usize, zoom: f64) -> f64 {
+    if hop > 0 && hop != reference_hop(sample_rate) {
+        // Exactly, rather than the rounding of `reference / hop × hop /
+        // reference`.
+        1.0
+    } else {
+        zoom
+    }
+}
+
 /// The STFT hop and output decimation of a session.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ColumnHops {
@@ -220,6 +252,32 @@ mod tests {
         // 384 kHz zoomed out all the way is more than 16 bits.
         assert_eq!(column_hop(384_000, 0.001), 163_840);
         assert_eq!(column_hop(48_000, f32::NAN), 1024);
+    }
+
+    #[test]
+    fn views_draw_a_column_a_pixel_at_hops_other_than_the_reference() {
+        // 8 kHz at 16x is floored at 16 samples, which stands for 10.7x.
+        let hop = column_hop(8_000, 16.0);
+        assert_eq!(hop, MIN_COLUMN_HOP);
+        assert!((render_zoom(8_000, hop, 16.0) - 171.0 / 16.0).abs() < 1e-12);
+        assert!((pixels_per_column(8_000, hop, 16.0) - 1.0).abs() < 1e-12);
+        // 32 kHz at 4x: 683 / 4 rounds to 171, which stands for 3.994x.
+        let hop = column_hop(32_000, 4.0);
+        assert_eq!(hop, 171);
+        assert!((render_zoom(32_000, hop, 4.0) - 683.0 / 171.0).abs() < 1e-12);
+        assert!((pixels_per_column(32_000, hop, 4.0) - 1.0).abs() < 1e-12);
+        // At the reference hop the zoom asked for is drawn.
+        assert!((render_zoom(48_000, 1024, 1.0002) - 1.0002).abs() < 1e-12);
+        assert!((pixels_per_column(48_000, 1024, 1.0002) - 1.0002).abs() < 1e-12);
+        for rate in [8_000, 22_050, 32_000, 44_100, 96_000, 384_000] {
+            for zoom in [0.05, 0.3, 2.5, 3.815, 16.0] {
+                let hop = column_hop(rate, zoom);
+                assert!(
+                    (pixels_per_column(rate, hop, f64::from(zoom)) - 1.0).abs() < 1e-12,
+                    "{rate} at {zoom}"
+                );
+            }
+        }
     }
 
     #[test]

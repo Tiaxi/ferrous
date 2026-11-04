@@ -1309,6 +1309,8 @@ private slots:
     void spectrogramSecondsAreAsWideAtEveryRateOfAFamily();
     void spectrogramZoomSnapsToTheScaledHopOfAHighRate();
     void spectrogramTrackChangeToAHighRateKeepsZoomAtItsReferenceHop();
+    void spectrogramFlooredHopShowsAColumnAPixelToTheEnd();
+    void spectrogramOddReferenceHopSnapsZoomedIn();
     void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
     void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
@@ -19262,6 +19264,78 @@ void SpectrogramSmokeTest::spectrogramZoomSnapsToTheScaledHopOfAHighRate() {
         QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
     }
     delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramFlooredHopShowsAColumnAPixelToTheEnd() {
+    // 8 kHz at 16x is 16 samples a column, the floor, which stands for
+    // 171 / 16 = 10.7x: a 3440 pixel view shows 3440 columns, which is
+    // what the backend decodes for (window_seconds) and the ring holds.
+    QQuickWindow window;
+    window.resize(3460, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    constexpr int width = 3440;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int rate = 8000;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 400, '\x40'), bins, 0, 400, 0, 5700, rate, 171,
+        false, true, 1, true, 1);
+    item.setZoomLevel(16.0);
+    QVERIFY(sendPendingBackendZoom(item));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.columnHopForZoomLocked(16.0), 16);
+    }
+    // The session for 16x near the end: the view of the end and the
+    // warm-up before it, to the last column.
+    constexpr int end = 60000;
+    constexpr int first = end - width - 2 * rate / 16;
+    setTestPosition(item, 119.0);
+    item.feedPrecomputedChunk(
+        QByteArray(bins * (end - first), '\x60'), bins, 0, end - first, first, end,
+        rate, 16, false, true, 1, true, 2);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(node != nullptr);
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.m_renderZoomLevel, ferrous_ffi_spectrogram_render_zoom(rate, 16, 16.0));
+    QCOMPARE(item.m_renderZoomLevel, 171.0 / 16.0);
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+    QCOMPARE(item.m_precomputedCanvasDisplayRight, static_cast<qint64>(end - 1));
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, static_cast<qint64>(end - width));
+    QVERIFY(item.ringHoldsColumnsLocked(end - width, end - 1));
+    QVERIFY(item.m_ringCapacity >= end - first);
+    // A view of history, two ahead and 10 s of lookahead, in the columns
+    // the view draws: 2299 columns a view at 16x of the reference hop.
+    QCOMPARE(item.m_ringCapacity, 3 * width + 10 * rate / 16);
+    QCOMPARE(item.m_ringCapacity,
+             static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
+                 width, rate, 16, bins, 1, 16.0, true)));
+    lock.unlock();
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramOddReferenceHopSnapsZoomedIn() {
+    // 32 kHz has a reference hop of 683; at 4x its columns are 171
+    // samples apart, which stands for 3.994x, a column a pixel.
+    SpectrogramItem item;
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    feedReferenceSession(item, 32000, 683);
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.referenceHopLocked(), 683.0);
+    QCOMPARE(item.columnHopForZoomLocked(4.0), 171);
+    QCOMPARE(item.renderZoomForZoomLocked(4.0), 683.0 / 171.0);
+    QCOMPARE(item.renderZoomForZoomLocked(4.0),
+             ferrous_ffi_spectrogram_render_zoom(32000, 171, 4.0));
+    item.m_renderZoomLevel = item.renderZoomForZoomLocked(4.0);
+    item.m_precomputedHopSize = 171;
+    QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-12);
 }
 
 void SpectrogramSmokeTest::spectrogramTrackChangeToAHighRateKeepsZoomAtItsReferenceHop() {

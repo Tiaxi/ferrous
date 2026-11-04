@@ -300,6 +300,7 @@ pub(crate) const ANALYSIS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const ESTIMATE_COLUMN_FRAMES: usize = 1024;
 
 pub use column_hop::reference_hop as spectrogram_reference_hop;
+pub use column_hop::render_zoom as spectrogram_render_zoom;
 
 /// The column hop that spectrogram sessions report at `zoom_level` for
 /// audio at `sample_rate`, which tells Qt whether data is for the zoom it
@@ -3034,6 +3035,77 @@ mod tests {
 
     fn stop_column(seconds: f64) -> u64 {
         f64_to_u64_saturating(seconds * STOP_COLUMNS_PER_SECOND)
+    }
+
+    /// 8 kHz zoomed in 16 times is 16 samples a column, at the floor,
+    /// which Qt draws a pixel each: a 3440 pixel view shows 3440 columns,
+    /// 6.88 s. Once the session has decoded the end of the file, a seek near
+    /// it judges the view that ends there, as Qt shows it, and decodes every
+    /// column of it; they fit the ring the pane sizes for the session. At
+    /// 16x of the 171-sample reference hop the view would be 4.6 s, which
+    /// the columns decoded for the first seek cover, and its left 1.3 s
+    /// would stay black.
+    #[test]
+    fn a_centered_seek_near_the_end_at_a_floored_hop_decodes_the_whole_view() {
+        const WIDTH: u32 = 3_440;
+        let path = write_engine_test_wave(120, 8_000);
+        let (engine, events) = AnalysisEngine::new();
+        engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        engine.command(AnalysisCommand::SetFftSize(512));
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ));
+        engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(WIDTH));
+        engine.command(AnalysisCommand::SetSpectrogramZoomLevel(16.0));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        engine.command(AnalysisCommand::PositionUpdate(0.0));
+        let mut ring = ModelRing::default();
+        fill_ring_until(&events, &mut ring, "the track did not start", |ring| {
+            ring.first().is_some()
+        });
+        let generation = ring.generation;
+        engine.command(AnalysisCommand::SeekPosition(119.0));
+        engine.command(AnalysisCommand::PositionUpdate(119.0));
+        fill_ring_until(&events, &mut ring, "the end was not decoded", |ring| {
+            ring.generation > generation && ring.complete
+        });
+        let end = ring.columns.last().unwrap().1;
+        // The end of the audio, 60,000 columns in.
+        assert!(end.abs_diff(120 * 8_000 / 16) <= 32, "{:?}", ring.columns);
+        // Qt's view of the end: a column a pixel, its last column the last.
+        let view_left = end - u64::from(WIDTH);
+
+        engine.command(AnalysisCommand::SeekPosition(119.0));
+        engine.command(AnalysisCommand::PositionUpdate(119.0));
+        fill_ring_until(
+            &events,
+            &mut ring,
+            "the view of the end was not decoded",
+            |ring| ring.complete && ring.covers(view_left, end - 1),
+        );
+        drop(engine);
+        std::fs::remove_file(path).expect("remove fixture");
+
+        let hop = column_hop::column_hop(8_000, 16.0);
+        assert_eq!(hop, column_hop::MIN_COLUMN_HOP);
+        let first = ring.first().unwrap();
+        let capacity = retention::SpectrogramBufferConfig {
+            width: WIDTH,
+            sample_rate: 8_000,
+            hop: u32::try_from(hop).unwrap(),
+            bins: 257,
+            channels: 1,
+            zoom: 16.0,
+            centered: true,
+        }
+        .limits(retention::lookahead_seconds())
+        .capacity;
+        assert!(capacity >= end - first, "{capacity} for {first}..{end}");
     }
 
     /// An engine showing a `seconds` long track centered in a 1,165-pixel

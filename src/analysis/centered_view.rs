@@ -4,7 +4,7 @@
 //! `ui/src/SpectrogramItem.cpp`), which decode windows must cover. Both are
 //! tested against the cases in `fixtures/centered-view.txt`.
 
-use super::column_hop::{column_hop, reference_hop};
+use super::column_hop::{column_hop, pixels_per_column};
 
 /// The view shows the whole track once its window covers this share of it.
 const WHOLE_TRACK_SHARE: f64 = 0.9;
@@ -14,19 +14,17 @@ const WHOLE_TRACK_SHARE: f64 = 0.9;
 pub(super) const WARMUP_SECONDS: f64 = 2.0;
 
 /// How many seconds a view of `width` pixels shows at `zoom`, of a
-/// session of audio at `sample_rate`: its columns, `zoom` pixels a
-/// reference hop apart.
+/// session of audio at `sample_rate`: its columns, as wide as the view
+/// draws them ([`pixels_per_column`]), which is a pixel wherever the hop is
+/// not the reference hop.
 pub(super) fn window_seconds(width: u32, zoom: f32, sample_rate: u32) -> f64 {
     let sample_rate = sample_rate.max(1);
-    // Hop sizes are small; precision loss from usize→f64 is negligible.
+    let hop = column_hop(sample_rate, zoom);
+    let pixels_per_column = pixels_per_column(sample_rate, hop, f64::from(zoom));
+    // Hops are small; precision loss from usize→f64 is negligible.
     #[allow(clippy::cast_precision_loss)]
-    let (hop, reference) = (
-        column_hop(sample_rate, zoom) as f64,
-        reference_hop(sample_rate) as f64,
-    );
-    let effective_zoom = f64::from(zoom) * hop / reference;
-    let columns_per_second = f64::from(sample_rate) / hop;
-    f64::from(width) / effective_zoom.max(0.01) / columns_per_second
+    let column_seconds = hop as f64 / f64::from(sample_rate);
+    f64::from(width) / pixels_per_column.max(0.01) * column_seconds
 }
 
 /// The left edge, in seconds, of a centered view `window_seconds` wide with
@@ -91,6 +89,19 @@ mod tests {
             let seconds = window_seconds(1920, 2.0, rate);
             assert!((seconds - 20.48).abs() < 1e-9, "{rate}: {seconds}");
         }
+        // 8 kHz at 16x is floored at 16 samples a column, a pixel each, as
+        // Qt draws them: 3440 columns of 2 ms.
+        let seconds = window_seconds(3440, 16.0, 8_000);
+        assert!(
+            (seconds - 3440.0 * 16.0 / 8_000.0).abs() < 1e-9,
+            "{seconds}"
+        );
+        // 32 kHz at 4x: 171 samples a column, a pixel each.
+        let seconds = window_seconds(1920, 4.0, 32_000);
+        assert!(
+            (seconds - 1920.0 * 171.0 / 32_000.0).abs() < 1e-9,
+            "{seconds}"
+        );
         // The 44.1 kHz family, at 43.07 columns a second.
         for rate in [44_100, 88_200, 176_400] {
             let seconds = window_seconds(1920, 1.0, rate);

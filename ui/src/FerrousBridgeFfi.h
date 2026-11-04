@@ -18,6 +18,12 @@ std::uint32_t ferrous_ffi_spectrogram_column_hop(std::uint32_t sampleRate, float
 // The column hop of spectrogram data of audio at sampleRate at zoom 1,
 // which zoom levels are relative to.
 std::uint32_t ferrous_ffi_spectrogram_reference_hop(std::uint32_t sampleRate);
+// The zoom to draw spectrogram data of audio at sampleRate whose columns
+// are hop samples apart at, when zoom was asked for: a column a pixel
+// unless the hop is the reference hop. The centered window and the ring
+// capacity reckon with the same zoom.
+double ferrous_ffi_spectrogram_render_zoom(
+    std::uint32_t sampleRate, std::uint32_t hop, double zoom);
 // The zoom the spectrogram moves to when requested is asked of it at
 // current; current if it keeps its zoom.
 float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);

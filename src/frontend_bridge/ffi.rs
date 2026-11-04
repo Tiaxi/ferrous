@@ -1176,6 +1176,28 @@ pub extern "C" fn ferrous_ffi_spectrogram_column_hop(sample_rate: u32, zoom: f32
     )
 }
 
+/// The zoom Qt draws spectrogram data of audio at `sample_rate` whose
+/// columns are `hop` samples apart at, when `zoom` was asked for: a column
+/// a pixel unless the hop is the reference hop.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_render_zoom(
+    sample_rate: u32,
+    hop: u32,
+    zoom: f64,
+) -> f64 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_render_zoom",
+        |_| zoom,
+        || {
+            crate::analysis::spectrogram_render_zoom(
+                sample_rate,
+                usize::try_from(hop).unwrap_or(usize::MAX),
+                zoom,
+            )
+        },
+    )
+}
+
 /// The column hop of spectrogram data of audio at `sample_rate` at zoom
 /// 1, which zoom levels are relative to.
 #[no_mangle]
