@@ -39,6 +39,7 @@
 #include <QMutexLocker>
 #include <QScopedPointer>
 #include <QSemaphore>
+#include <QDir>
 #include <QTemporaryFile>
 #include <QFutureWatcher>
 #include <atomic>
@@ -1403,6 +1404,12 @@ private slots:
     void waveformEditorHiddenDrawsNothing();
     void waveformEditorMadeInAWindowSchedulesPlaybackFrames();
     void waveformEditorParentedByQmlBindsItsWindowOnce();
+    void waveformEditorDrawsEveryLaneAcrossTheView_data();
+    void waveformEditorDrawsEveryLaneAcrossTheView();
+    void waveformSceneGraphKeepsGeometryNodesWithinShortIndices();
+    void waveformSceneGraphDrawsEveryLaneAtDeepZoom();
+    void waveformEditorDetailStaysAheadOfSamplePlayback_data();
+    void waveformEditorDetailStaysAheadOfSamplePlayback();
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
@@ -8008,18 +8015,22 @@ void WaveformSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
         QVERIFY2(edgeOccupied, "connected sample tiles must meet at both edges");
     }
 
-    // Match the fullscreen handoff edge: samples separated by roughly 3.6
-    // pixels should have compact point markers without forcing an expensive
-    // direct repaint on every frame.
-    item.setZoomLevel(9.0);
-    QVERIFY(item.samplePointsVisibleLocked());
-    const auto [markerStart, markerEnd] = item.visibleRangeLocked();
-    QVERIFY(!item.renderDetailDirectlyLocked(markerStart, markerEnd));
+    // Samples without markers, about 1.9 pixels apart, are drawn into the
+    // cache and playback tiles.
+    item.setZoomLevel(4.8);
+    QVERIFY(!item.samplePointsVisibleLocked());
+    const auto [curveStart, curveEnd] = item.visibleRangeLocked();
+    QVERIFY(!item.renderDetailDirectlyLocked(curveStart, curveEnd));
 
-    item.setZoomLevel(10.0);
-    QVERIFY(item.samplePointsVisibleLocked());
-    const auto [directStart, directEnd] = item.visibleRangeLocked();
-    QVERIFY(item.renderDetailDirectlyLocked(directStart, directEnd));
+    // Samples with markers, from 2 pixels apart, are drawn directly:
+    // playing, such a view moves on by most of its width a frame, and
+    // rasterizing its markers again each frame costs more than geometry.
+    for (const double zoom : {5.2, 9.0, 10.0}) {
+        item.setZoomLevel(zoom);
+        QVERIFY(item.samplePointsVisibleLocked());
+        const auto [markerStart, markerEnd] = item.visibleRangeLocked();
+        QVERIFY(item.renderDetailDirectlyLocked(markerStart, markerEnd));
+    }
 }
 
 void WaveformSmokeTest::waveformEditorScrollsInsideCachedDetailWithoutRebuild() {
@@ -8936,12 +8947,18 @@ void WaveformSmokeTest::waveformEditorBuildsPlaybackTilesWithinFrameBudget() {
         QCOMPARE(paint.image.height(), 180);
     }
 
+    // A view that moved on by more than its width, as one does in a frame
+    // at a deep zoom, makes all of its tiles in one paint, however many.
     const double shiftedStart = visibleStart + 6.0 * tileDuration;
     const double shiftedEnd = visibleEnd + 6.0 * tileDuration;
+    const qint64 firstShifted = static_cast<qint64>(std::floor(shiftedStart / tileDuration + 1.0e-9));
+    const qint64 lastShifted = static_cast<qint64>(std::floor((shiftedEnd - 1.0e-12) / tileDuration));
+    for (qint64 tile = firstShifted; tile <= lastShifted; ++tile) {
+        QVERIFY(!item.m_playbackTiles.contains(tile));
+    }
     const int catchUpBudget = item.playbackTileRenderBudgetLocked(
         shiftedStart, shiftedEnd);
-    QVERIFY(catchUpBudget > 2);
-    QVERIFY(catchUpBudget <= 8);
+    QCOMPARE(catchUpBudget, static_cast<int>(lastShifted - firstShifted + 1));
     QCOMPARE(item.renderMissingPlaybackTilesLocked(
         shiftedStart, shiftedEnd, 180, catchUpBudget), catchUpBudget);
     QVERIFY(item.playbackTilesCoverLocked(shiftedStart, shiftedEnd));
@@ -9943,6 +9960,373 @@ void WaveformSmokeTest::waveformEditorParentedByQmlBindsItsWindowOnce() {
     root.reset();
     QCOMPARE(window.frameSwappedListeners(), frameListeners);
     QCOMPARE(window.visibleChangedListeners(), visibilityListeners);
+}
+
+namespace {
+// Gives `item` raw samples of `channels` channels at `rate` from `start` to
+// `end` seconds, a sine of its own in each channel, as a detail window at
+// sample resolution.
+void giveSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end) {
+    const qint64 firstFrame = std::llround(start * rate);
+    const int points = static_cast<int>(std::llround((end - start) * rate));
+    item.m_sampleRateHz = rate;
+    item.m_channelCount = channels;
+    auto &detail = item.m_detail;
+    detail = {};
+    detail.sampleRateHz = rate;
+    detail.channelCount = channels;
+    detail.startSeconds = static_cast<double>(firstFrame) / rate;
+    detail.endSeconds = static_cast<double>(firstFrame + points) / rate;
+    detail.framesPerPoint = 1;
+    detail.pointCount = points;
+    detail.extrema.resize(static_cast<std::size_t>(points) * channels * 2);
+    for (int point = 0; point < points; ++point) {
+        const double frame = static_cast<double>(firstFrame + point);
+        for (int channel = 0; channel < channels; ++channel) {
+            // Off the lane's center line, which is drawn over the waveform.
+            const auto value = static_cast<float>(
+                0.5 + 0.35 * std::sin(frame * 0.05 * (1.0 + 0.2 * channel) + channel));
+            const std::size_t index = (static_cast<std::size_t>(point) * channels + channel) * 2;
+            detail.extrema[index] = value;
+            detail.extrema[index + 1] = value;
+        }
+    }
+}
+
+// A detail window as the decoder sends one: `channels` channels at `rate`
+// over [start, end], raw samples when `maxPoints` holds them all.
+QByteArray sampleDetailWindow(int rate, int channels, double start, double end, int maxPoints) {
+    // As src/analysis/waveform_window.rs takes frames of the times.
+    const qint64 firstFrame = static_cast<qint64>(std::floor(start * rate));
+    const qint64 frames = std::max<qint64>(1, static_cast<qint64>(std::floor(end * rate)) - firstFrame);
+    quint32 framesPerPoint = 1;
+    while (frames > static_cast<qint64>(framesPerPoint) * maxPoints) framesPerPoint *= 2;
+    const auto points = static_cast<quint32>((frames + framesPerPoint - 1) / framesPerPoint);
+    QByteArray bytes("WVF2", 4);
+    appendLe<quint32>(bytes, static_cast<quint32>(rate));
+    appendLe<quint16>(bytes, static_cast<quint16>(channels));
+    appendLe<quint16>(bytes, 0);
+    const double windowStart = static_cast<double>(firstFrame) / rate;
+    const double windowEnd = static_cast<double>(firstFrame + qint64{points} * framesPerPoint) / rate;
+    for (const double seconds : {windowStart, windowEnd}) {
+        quint64 bits = 0;
+        std::memcpy(&bits, &seconds, sizeof(bits));
+        appendLe<quint64>(bytes, bits);
+    }
+    appendLe<quint32>(bytes, framesPerPoint);
+    appendLe<quint32>(bytes, points);
+    const auto appendFloat = [&bytes](float value) {
+        quint32 bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendLe<quint32>(bytes, bits);
+    };
+    for (quint32 point = 0; point < points; ++point) {
+        const double frame = static_cast<double>(firstFrame + qint64{point} * framesPerPoint);
+        for (int channel = 0; channel < channels; ++channel) {
+            const auto value = static_cast<float>(0.8 * std::sin(frame * 0.05 + channel));
+            appendFloat(value);
+            appendFloat(value);
+        }
+    }
+    for (quint32 point = 0; point < points; ++point) {
+        appendFloat(-0.5F);
+        appendFloat(0.5F);
+    }
+    return bytes;
+}
+
+// Whether a pixel shows the waveform: its color, or an edge of it.
+bool isWaveformPixel(QRgb pixel) {
+    return qGreen(pixel) >= 70 && qGreen(pixel) >= qRed(pixel) + 40;
+}
+
+// The columns of each of `lanes` lanes of `image` with no waveform pixel,
+// as "lane L: N empty from X" for each lane that has any, but the columns
+// `skipFirst` to `skipLast`, which the playhead covers.
+QString lanesWithEmptyColumns(const QImage &image, int lanes, int skipFirst = -1, int skipLast = -2) {
+    const QImage pixels = image.convertToFormat(QImage::Format_RGB32);
+    QString result;
+    for (int lane = 0; lane < lanes; ++lane) {
+        const int top = lane * pixels.height() / lanes + 1;
+        const int bottom = (lane + 1) * pixels.height() / lanes - 1;
+        std::vector<bool> drawn(static_cast<std::size_t>(pixels.width()), false);
+        for (int y = top; y < bottom; ++y) {
+            const auto *row = reinterpret_cast<const QRgb *>(pixels.constScanLine(y));
+            for (int x = 0; x < pixels.width(); ++x) {
+                if (isWaveformPixel(row[x])) drawn[static_cast<std::size_t>(x)] = true;
+            }
+        }
+        int empty = 0;
+        int first = -1;
+        for (int x = 0; x < pixels.width(); ++x) {
+            if (drawn[static_cast<std::size_t>(x)] || (x >= skipFirst && x <= skipLast)) continue;
+            if (first < 0) first = x;
+            ++empty;
+        }
+        if (empty > 0) {
+            result += QStringLiteral("lane %1: %2 of %3 columns empty from %4; ")
+                .arg(lane).arg(empty).arg(pixels.width()).arg(first);
+        }
+    }
+    return result;
+}
+} // namespace
+
+void WaveformSmokeTest::waveformEditorDrawsEveryLaneAcrossTheView_data() {
+    QTest::addColumn<QSize>("size");
+    QTest::addColumn<int>("channels");
+    QTest::addColumn<int>("rate");
+    QTest::addColumn<int>("stepsOut");
+    QTest::addColumn<bool>("playing");
+    QTest::addColumn<bool>("split");
+    // The main window's pane and the fullscreen viewer's.
+    const std::pair<const char *, QSize> sizes[] = {
+        {"pane", QSize(1720, 300)}, {"viewer", QSize(2000, 837)}, {"wide-viewer", QSize(3440, 1412)}};
+    for (const auto &[name, size] : sizes) {
+        for (const int channels : {2, 6}) {
+            for (const int rate : {48'000, 96'000}) {
+                for (const int stepsOut : {0, 3, 5, 8, 12}) {
+                    for (const bool playing : {false, true}) {
+                        QTest::addRow("%s-%dch-%dk-%dout-%s", name, channels, rate / 1000, stepsOut,
+                            playing ? "playing" : "paused")
+                            << size << channels << rate << stepsOut << playing << true;
+                    }
+                }
+            }
+        }
+        // The channels mixed in one lane.
+        for (const int stepsOut : {0, 5, 8}) {
+            QTest::addRow("%s-mixed-%dout-playing", name, stepsOut)
+                << size << 6 << 96'000 << stepsOut << true << false;
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformEditorDrawsEveryLaneAcrossTheView() {
+    QFETCH(QSize, size);
+    QFETCH(int, channels);
+    QFETCH(int, rate);
+    QFETCH(int, stepsOut);
+    QFETCH(bool, playing);
+    QFETCH(bool, split);
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(split ? 1 : 0);
+    item.setChannelCountHint(channels);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(40)));
+    giveSampleDetail(item, rate, channels, 29.0, 31.5);
+    // The deepest zoom, and steps of the wheel out from it.
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    setTestPosition(item, 30.0);
+    item.setPlaying(playing);
+    setTestPosition(item, 30.0);
+    QImage image(size, QImage::Format_RGB32);
+    // A second of playback at 60 frames a second, each frame drawn.
+    const int frames = playing ? 60 : 2;
+    for (int frame = 0; frame < frames; ++frame) {
+        if (frame > 0 && playing) time.advance(1.0 / 60.0);
+        image.fill(Qt::black);
+        QPainter painter(&image);
+        item.paint(&painter);
+        painter.end();
+        // As the window does once the frame is on screen.
+        item.handleWindowFrameSwapped();
+        double playheadX = -10.0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto [start, end] = item.visibleRangeLocked();
+            playheadX = (item.displayedPositionSecondsLocked() - start) / (end - start) * size.width();
+        }
+        const QString empty = lanesWithEmptyColumns(
+            image, split ? channels : 1, static_cast<int>(std::floor(playheadX)) - 1,
+            static_cast<int>(std::floor(playheadX)) + 1);
+        if (!empty.isEmpty()) {
+            image.save(QStringLiteral("%1/waveform-lanes-%2.png")
+                .arg(QDir::tempPath(), QString::fromLatin1(QTest::currentDataTag())));
+        }
+        QVERIFY2(empty.isEmpty(), qPrintable(QStringLiteral("frame %1: %2").arg(frame).arg(empty)));
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphKeepsGeometryNodesWithinShortIndices() {
+    QQuickWindow window;
+    window.resize(64, 64);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    // The fullscreen viewer at its deepest zoom: six lanes of sample curves
+    // and markers, far more vertices than 16-bit indices reach.
+    WaveformEditorItem item;
+    item.setWidth(3440);
+    item.setHeight(1412);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(6);
+    giveSampleDetail(item, 96'000, 6, 29.5, 30.5);
+    item.setZoomLevel(item.maximumZoomLevel());
+    setTestPosition(item, 30.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.renderDetailDirectlyLocked(start, end));
+    }
+    QSGNode *node = WaveformSceneGraph::render(nullptr, &window, QSize(3440, 1412),
+        [&](QPainter *painter) { item.paint(painter); }, false,
+        WaveformSceneGraph::Primitives::Geometry);
+    QVERIFY(node != nullptr);
+    const auto stats = WaveformSceneGraph::statistics(node);
+    // Qt's renderer merges such nodes with 16-bit indices, which start over
+    // past 65,535 vertices: the vertices after them are not drawn.
+    QVERIFY2(stats.geometryVertices > 65'535, qPrintable(QString::number(stats.geometryVertices)));
+    QVERIFY2(stats.largestGeometryVertices <= 65'534,
+        qPrintable(QString::number(stats.largestGeometryVertices)));
+    QVERIFY(stats.largestGeometryVertices > 0);
+    QCOMPARE(stats.largestGeometryVertices % 3, 0);
+    // A frame with fewer vertices keeps the nodes it needs and drops the rest.
+    item.setZoomLevel(item.maximumZoomLevel() / 1.25);
+    node = WaveformSceneGraph::render(node, &window, QSize(3440, 1412),
+        [&](QPainter *painter) { item.paint(painter); }, false,
+        WaveformSceneGraph::Primitives::Geometry);
+    QVERIFY(WaveformSceneGraph::statistics(node).largestGeometryVertices <= 65'534);
+    delete node;
+}
+
+void WaveformSmokeTest::waveformSceneGraphDrawsEveryLaneAtDeepZoom() {
+    // CI runs this with a native renderer too, where the scene's geometry
+    // is drawn by the GPU; offscreen, the software renderer draws it.
+    QQuickWindow window;
+    QSize size(3440, 1412);
+    size.setWidth(std::min(size.width(), window.screen()->availableGeometry().width()));
+    size.setHeight(std::min(size.height(), window.screen()->availableGeometry().height()));
+    window.resize(size);
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(6);
+    giveSampleDetail(item, 96'000, 6, 29.5, 30.5);
+    // Five steps out from the deepest zoom, where samples are still drawn
+    // directly, and the most of them are.
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, 5));
+    setTestPosition(item, 30.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.renderDetailDirectlyLocked(start, end));
+    }
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    const QImage grab = window.grabWindow();
+    QVERIFY(!grab.isNull());
+    const qreal scale = window.effectiveDevicePixelRatio();
+    const int playheadX = static_cast<int>(std::floor(size.width() * scale / 2.0));
+    const QString empty = lanesWithEmptyColumns(
+        grab, 6, playheadX - static_cast<int>(std::ceil(scale)) - 1,
+        playheadX + static_cast<int>(std::ceil(scale)) + 1);
+    if (!empty.isEmpty()) grab.save(QDir::tempPath() + QStringLiteral("/waveform-deep-zoom-grab.png"));
+    QVERIFY2(empty.isEmpty(), qPrintable(empty));
+}
+
+void WaveformSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback_data() {
+    QTest::addColumn<int>("rate");
+    QTest::addColumn<int>("stepsOut");
+    QTest::addColumn<int>("replyMs");
+    // How long a detail window takes to arrive: longer than the frames
+    // between requests, as a 6-channel window of a compressed surround
+    // file can, and more at 48 kHz, whose windows span twice as long.
+    for (const int stepsOut : {0, 6}) {
+        QTest::addRow("96k-%dout", stepsOut) << 96'000 << stepsOut << 250;
+        QTest::addRow("48k-%dout", stepsOut) << 48'000 << stepsOut << 450;
+    }
+}
+
+void WaveformSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback() {
+    QFETCH(int, rate);
+    QFETCH(int, stepsOut);
+    QFETCH(int, replyMs);
+    constexpr int kChannels = 6;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(2000);
+    item.setHeight(400);
+    item.setDurationSeconds(120.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kChannels);
+    auto gate = std::make_shared<QSemaphore>();
+    // Windows arrive at once until playback starts.
+    auto held = std::make_shared<std::atomic_bool>(false);
+    item.m_decodeWindow = [gate, held, rate](const QString &, double start, double end, int points,
+                                             const std::shared_ptr<std::atomic_bool> &) {
+        if (held->load()) gate->tryAcquire(1, 5000);
+        return sampleDetailWindow(rate, kChannels, start, end, points);
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/surround.dts"));
+    // The first window tells the sample rate; the zoom then asks for samples.
+    QTRY_COMPARE(item.sampleRateHz(), rate);
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    const auto viewHasSamples = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
+            && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
+    };
+    QTRY_VERIFY(viewHasSamples());
+    held->store(true);
+
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    // Four seconds of playback at 60 frames a second, with a seek back
+    // halfway. Each window arrives replyMs after it is asked for, as the
+    // frames go on.
+    const qint64 replyNs = qint64{replyMs} * 1'000'000;
+    constexpr int kSeekFrame = 120;
+    // After the seek, the window in flight for the old position arrives,
+    // then the one for the new position.
+    const int seekFrames = static_cast<int>(std::ceil(2.0 * replyMs / (1000.0 / 60.0))) + 2;
+    qint64 askedAtNs = -1;
+    int requests = 0;
+    QStringList uncovered;
+    for (int frame = 0; frame < 240; ++frame) {
+        time.advance(1.0 / 60.0);
+        if (frame == kSeekFrame) setTestPosition(item, 25.0);
+        item.handleWindowFrameSwapped();
+        // The request it asks for at once, if it does.
+        QCoreApplication::processEvents();
+        if (item.m_decodeActive && askedAtNs < 0) {
+            askedAtNs = time.nowNs;
+            ++requests;
+        }
+        if (askedAtNs >= 0 && time.nowNs - askedAtNs >= replyNs) {
+            gate->release();
+            QTRY_VERIFY(!item.m_decodeActive);
+            askedAtNs = -1;
+        }
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        if (frame == kSeekFrame) QVERIFY(start < 25.1);
+        const bool seeking = frame >= kSeekFrame && frame < kSeekFrame + seekFrames;
+        if (!seeking && (!item.detailCoversRangeLocked(start, end)
+            || !item.detailResolutionCoversLocked(start, end))) {
+            uncovered << QStringLiteral("%1 (view %2..%3, detail %4..%5 at %6 frames a point)")
+                .arg(frame).arg(start, 0, 'f', 3).arg(end, 0, 'f', 3)
+                .arg(item.m_detail.startSeconds, 0, 'f', 3).arg(item.m_detail.endSeconds, 0, 'f', 3)
+                .arg(item.m_detail.framesPerPoint);
+        }
+    }
+    QVERIFY(requests >= 2);
+    QVERIFY2(uncovered.isEmpty(), qPrintable(QStringLiteral("frames without detail: ")
+        + uncovered.mid(0, 6).join(QStringLiteral(", "))));
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY(!item.m_decodeActive);
 }
 
 void WaveformSmokeTest::waveformSceneGraphMatchesRaster_data() {

@@ -277,8 +277,10 @@ jobs:
           done
           export DISPLAY=:99 QT_QPA_PLATFORM=xcb QT_QUICK_BACKEND=rhi
           export QSG_RHI_BACKEND=opengl QSG_RENDER_LOOP=basic LIBGL_ALWAYS_SOFTWARE=1
-          ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster waveformSceneGraphReusesTextures
-          QT_SCALE_FACTOR=2 ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster
+          ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster waveformSceneGraphReusesTextures \
+            waveformSceneGraphDrawsEveryLaneAtDeepZoom
+          QT_SCALE_FACTOR=2 ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster \
+            waveformSceneGraphDrawsEveryLaneAtDeepZoom
           QSG_RENDER_LOOP=threaded ./ui/build/ferrous_qml_smoke_tests waveformSceneGraphMatchesRaster
           # The spectrogram's canvas textures, updated in place, against the
           # canvas: each scale's rows run where the window has that scale.

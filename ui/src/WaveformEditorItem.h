@@ -205,6 +205,13 @@ private:
         std::vector<float> downmixExtrema;
     };
 
+    // A detail window as a worker decoded and parsed it.
+    struct DecodedWindow {
+        DetailWindow window;
+        bool parsed{false};
+        qsizetype bytes{0};
+    };
+
     struct CacheGrid {
         double startSeconds{0.0};
         double endSeconds{0.0};
@@ -216,9 +223,11 @@ private:
         QImage image;
     };
 
+    // The part of a playback tile on the canvas, and where it goes.
     struct PlaybackTilePaint {
         QImage image;
         QRectF target;
+        QRectF source;
     };
 
     static QByteArray decodeWindow(
@@ -255,7 +264,11 @@ private:
     std::pair<double, double> requestRangeLocked(
         double visibleStart, double visibleEnd) const;
     double requiredVisibleDetailPointsLocked(double visibleSpan) const;
+    // A request's margin on each side of the view.
     double detailRequestMarginLocked(double visibleSpan) const;
+    // The margins of a request behind the view and ahead of it: equal, or
+    // mostly ahead while playing.
+    std::pair<double, double> detailRequestMarginsLocked(double visibleSpan) const;
     int detailRequestPointCountLocked(double requestStart, double requestEnd) const;
     // Device pixels to a logical pixel, and the caches' size in them.
     double renderScaleLocked() const;

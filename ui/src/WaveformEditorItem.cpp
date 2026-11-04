@@ -33,16 +33,24 @@ constexpr double kZoomStep = 1.25;
 constexpr double kDetailPointsPerPixel = 4.0;
 constexpr double kSampleCurvePixelsPerSample = 0.055;
 constexpr double kSampleMarkerPixelsPerSample = 2.0;
-constexpr double kDirectSamplePixelsPerSample = 4.0;
+// Samples with markers are drawn directly, as geometry: playing, a view
+// of them moves on by most of its width a frame, and rasterizing its
+// markers into playback tiles again each frame costs several times as much.
+constexpr double kDirectSamplePixelsPerSample = kSampleMarkerPixelsPerSample;
 constexpr double kMinimumSampleMarkerSize = 1.5;
 constexpr double kMaximumSampleMarkerSize = 3.0;
 constexpr double kSampleCurveSubpixelScale = 256.0;
 constexpr int kSampleCurveBoundaryMarginPixels = 8;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
+// While playing, the share of a detail request's margins that lies behind
+// the view: the view moves on into the rest, ahead of it.
+constexpr double kPlaybackDetailMarginBehind = 0.1;
+// How much of a margin may be used up before more detail is asked for.
+constexpr double kDetailMarginSafety = 0.6;
 constexpr int kStagedCacheColumnsPerPaint = 128;
 constexpr int kPlaybackTileWidth = 64;
+// The tiles a paint makes ahead of the view, besides those it shows.
 constexpr int kPlaybackTilesPerPaint = 2;
-constexpr int kMaximumPlaybackTilesPerPaint = 8;
 constexpr int kPlaybackTilePrefetch = 2;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
 constexpr QColor kBackground(5, 9, 7);
@@ -735,8 +743,9 @@ void WaveformEditorItem::requestDetailWindow() {
             profileHeight);
     }
 #endif
-    auto *watcher = new QFutureWatcher<QByteArray>(this);
-    connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [
+    using Watcher = QFutureWatcher<std::shared_ptr<DecodedWindow>>;
+    auto *watcher = new Watcher(this);
+    connect(watcher, &Watcher::finished, this, [
         this, watcher, generation
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         , profileRequestStarted
@@ -753,9 +762,11 @@ void WaveformEditorItem::requestDetailWindow() {
                 return;
             }
         }
-        const QByteArray bytes = watcher->result();
-        DetailWindow next;
-        const bool parsed = parseWindow(bytes, &next);
+        // Parsed on the worker: a window of samples of a surround track
+        // holds megabytes of them.
+        const std::shared_ptr<DecodedWindow> decoded = watcher->result();
+        DetailWindow next = std::move(decoded->window);
+        const bool parsed = decoded->parsed;
         bool channelsChanged = false;
         bool rateChanged = false;
         bool pointsChanged = false;
@@ -863,7 +874,7 @@ void WaveformEditorItem::requestDetailWindow() {
                 static_cast<unsigned long long>(generation),
                 status,
                 profileDecodeMs,
-                static_cast<long long>(bytes.size()),
+                static_cast<long long>(decoded->bytes),
                 profileReturnedStart,
                 profileReturnedEnd,
                 profileReturnedPoints,
@@ -885,7 +896,14 @@ void WaveformEditorItem::requestDetailWindow() {
         if (requestFollowup) scheduleDetailRequest();
         update();
     });
-    watcher->setFuture(QtConcurrent::run(m_decodeWindow, path, requestStart, requestEnd, points, cancelled));
+    watcher->setFuture(QtConcurrent::run(
+        [decode = m_decodeWindow, path, requestStart, requestEnd, points, cancelled]() {
+            auto decoded = std::make_shared<DecodedWindow>();
+            const QByteArray bytes = decode(path, requestStart, requestEnd, points, cancelled);
+            decoded->bytes = bytes.size();
+            decoded->parsed = parseWindow(bytes, &decoded->window);
+            return decoded;
+        }));
 }
 
 void WaveformEditorItem::clearDetailLocked() {
@@ -913,10 +931,9 @@ double WaveformEditorItem::displayedPositionSecondsLocked() const {
 bool WaveformEditorItem::detailOrPendingRequestCoversLocked(
     double startSeconds, double endSeconds) const {
     const double visibleSpan = std::max(0.0, endSeconds - startSeconds);
-    const double requestMargin = detailRequestMarginLocked(visibleSpan);
-    const double safetyMargin = requestMargin * 0.6;
-    const double coveredStart = std::max(0.0, startSeconds - safetyMargin);
-    const double coveredEnd = std::min(m_durationSeconds, endSeconds + safetyMargin);
+    const auto [behind, ahead] = detailRequestMarginsLocked(visibleSpan);
+    const double coveredStart = std::max(0.0, startSeconds - behind * kDetailMarginSafety);
+    const double coveredEnd = std::min(m_durationSeconds, endSeconds + ahead * kDetailMarginSafety);
     const bool detailCovers = detailCoversRangeLocked(coveredStart, coveredEnd)
         && detailResolutionCoversLocked(startSeconds, endSeconds);
     const bool pendingCovers = m_requestInFlight
@@ -1012,10 +1029,24 @@ std::pair<double, double> WaveformEditorItem::detailRequestVisibleRangeLocked() 
 std::pair<double, double> WaveformEditorItem::requestRangeLocked(
     double visibleStart, double visibleEnd) const {
     const double visibleSpan = std::max(0.0, visibleEnd - visibleStart);
-    const double margin = detailRequestMarginLocked(visibleSpan);
+    const auto [behind, ahead] = detailRequestMarginsLocked(visibleSpan);
     return {
-        std::max(0.0, visibleStart - margin),
-        std::min(m_durationSeconds, visibleEnd + margin),
+        std::max(0.0, visibleStart - behind),
+        std::min(m_durationSeconds, visibleEnd + ahead),
+    };
+}
+
+std::pair<double, double> WaveformEditorItem::detailRequestMarginsLocked(
+    double visibleSpan) const {
+    const double margin = detailRequestMarginLocked(visibleSpan);
+    if (!m_playing) return {margin, margin};
+    // Playback uses up the margin ahead of the view, and the next window
+    // must arrive before it has. At sample resolution a window spans at
+    // most 65,534 frames, 0.68 s at 96 kHz: split evenly, a reply would
+    // have about 0.2 s.
+    return {
+        2.0 * margin * kPlaybackDetailMarginBehind,
+        2.0 * margin * (1.0 - kPlaybackDetailMarginBehind),
     };
 }
 
@@ -1846,8 +1877,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
         crosshair = m_crosshairEnabled;
         scale = renderScaleLocked();
         position = displayedPositionSecondsLocked(frameNs);
-        // Playback tiles still to draw for the view come in the next
-        // frames, a few at a time.
+        // Playback tiles the view still lacks, where its detail has not
+        // arrived, come in the next frames.
         const bool tilesContinue = playbackTilesRendered > 0 && !playbackTilesComplete;
         m_paintedFrameChangeSeconds = tilesContinue
             ? std::numeric_limits<double>::quiet_NaN()
@@ -1915,7 +1946,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 QRect(0, 0, canvasWidth, canvasHeight), kBackground);
         }
         for (const PlaybackTilePaint &tile : playbackTilePaints) {
-            painter->drawImage(tile.target, tile.image);
+            painter->drawImage(tile.target, tile.image, tile.source);
         }
     }
     painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
@@ -2278,12 +2309,15 @@ int WaveformEditorItem::playbackTileRenderBudgetLocked(
         visibleStart / tileDuration + kGridAlignmentEpsilon));
     const qint64 last = static_cast<qint64>(std::floor(
         std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
+    // Every tile the view shows: at a deep zoom, playback moves the view
+    // on by more than its width a frame, and a tile it does not make now
+    // would leave its part of the view empty. Tiles shown before cost
+    // nothing; the rest of the budget makes tiles ahead of the view.
     int missing = 0;
     for (qint64 tile = first; tile <= last; ++tile) {
         if (!m_playbackTiles.contains(tile)) ++missing;
     }
-    return std::clamp(
-        missing, kPlaybackTilesPerPaint, kMaximumPlaybackTilesPerPaint);
+    return std::max(missing, kPlaybackTilesPerPaint);
 }
 
 bool WaveformEditorItem::playbackTilesCoverLocked(
@@ -2319,19 +2353,37 @@ WaveformEditorItem::playbackTilePaintsLocked(
     const qint64 last = static_cast<qint64>(std::floor(
         std::max(visibleStart, visibleEnd - 1.0e-12) / tileDuration));
     paints.reserve(static_cast<std::size_t>(std::max<qint64>(0, last - first + 1)));
+    // Logical pixels to a tile's pixel, a device column of the view.
+    const double pixelsPerColumn = m_playbackTileSecondsPerPixel / visibleSpan
+        * static_cast<double>(canvasWidth);
     for (qint64 tileIndex = first; tileIndex <= last; ++tileIndex) {
         const auto iterator = m_playbackTiles.find(tileIndex);
         if (iterator == m_playbackTiles.end()) continue;
         const double tileStart = static_cast<double>(tileIndex) * tileDuration;
+        const QImage &image = iterator->second.image;
+        // Tiles and a view that follows the playhead are on the track's
+        // grid of device columns: a tile starts on a column of the view,
+        // short of which rounding can place it, leaving that column empty.
+        double column = (tileStart - visibleStart) / m_playbackTileSecondsPerPixel;
+        if (std::abs(column - std::round(column)) < kColumnEpsilon) column = std::round(column);
+        const QRectF target(
+            column * pixelsPerColumn,
+            0.0,
+            static_cast<double>(kPlaybackTileWidth) * pixelsPerColumn,
+            static_cast<double>(canvasHeight));
+        // Only the part on the canvas.
+        const QRectF shown = target.intersected(
+            QRectF(0.0, 0.0, canvasWidth, canvasHeight));
+        if (shown.isEmpty()) continue;
+        const double pixelsPerUnit = static_cast<double>(image.width()) / target.width();
         paints.push_back(PlaybackTilePaint{
-            iterator->second.image,
+            image,
+            shown,
             QRectF(
-                (tileStart - visibleStart) / visibleSpan
-                    * static_cast<double>(canvasWidth),
+                (shown.left() - target.left()) * pixelsPerUnit,
                 0.0,
-                tileDuration / visibleSpan
-                    * static_cast<double>(canvasWidth),
-                static_cast<double>(canvasHeight)),
+                shown.width() * pixelsPerUnit,
+                static_cast<double>(image.height())),
         });
     }
     return paints;

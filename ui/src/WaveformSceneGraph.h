@@ -21,10 +21,17 @@ struct Statistics {
     quint64 residentBytes{0};
     int commands{0};
     int geometryVertices{0};
+    // The most vertices one geometry node holds.
+    int largestGeometryVertices{0};
     // Labels laid out and rasterized because no earlier frame drew them.
     int labelRasters{0};
 };
+// What lines and curves become: what the window's renderer draws, or, for
+// tests, geometry as for a native renderer under any renderer, which builds
+// the nodes without drawing them.
+enum class Primitives { ForWindow, Geometry };
 QSGNode *render(QSGNode *previous, QQuickWindow *window, QSize size,
-    const std::function<void(QPainter *)> &paint, bool rasterize = false);
+    const std::function<void(QPainter *)> &paint, bool rasterize = false,
+    Primitives primitives = Primitives::ForWindow);
 Statistics statistics(const QSGNode *node);
 }

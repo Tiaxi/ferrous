@@ -92,6 +92,39 @@ Vertex vertex(QPointF point, QColor color, double coverage = 1.0) {
         static_cast<uchar>(std::round(255 * alpha)));
     return result;
 }
+// The most vertices a geometry node holds. Qt's renderer merges nodes of
+// vertex-colored triangles into batches indexed with 16 bits, starting a
+// new draw only between nodes; the vertices of one node past 65,535 would
+// be drawn as the first ones again, and the lanes they belong to not at
+// all. A multiple of 6, a quad's triangles, below 0xffff, which some APIs
+// take for a primitive restart.
+constexpr std::size_t kMaximumGeometryVertices = 65'532;
+
+// A node of the scene: a command, or for geometry, a part of its vertices
+// that one node holds.
+struct Piece {
+    const Command *command{nullptr};
+    std::size_t firstVertex{0};
+    std::size_t vertexCount{0};
+};
+
+std::vector<Piece> pieces(const std::vector<Command> &commands) {
+    std::vector<Piece> result;
+    result.reserve(commands.size());
+    for (const Command &command : commands) {
+        if (command.kind != Command::Geometry) {
+            result.push_back({&command, 0, 0});
+            continue;
+        }
+        for (std::size_t first = 0; first < command.vertices.size();
+             first += kMaximumGeometryVertices) {
+            result.push_back({&command, first,
+                std::min(kMaximumGeometryVertices, command.vertices.size() - first)});
+        }
+    }
+    return result;
+}
+
 void quad(std::vector<Vertex> &vertices, Vertex a, Vertex b, Vertex c, Vertex d) {
     vertices.insert(vertices.end(), {a, b, c, c, b, d});
 }
@@ -355,7 +388,7 @@ private:
 }
 
 QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSize size,
-    const std::function<void(QPainter *)> &paint, bool rasterize) {
+    const std::function<void(QPainter *)> &paint, bool rasterize, Primitives primitives) {
     if (!window || size.isEmpty()) { delete previous; return nullptr; }
     auto *scene = static_cast<Scene *>(previous);
     if (!scene) scene = new Scene;
@@ -365,7 +398,8 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
         QSGGeometry::updateRectGeometry(scene->geometry(), bounds);
         scene->markDirty(QSGNode::DirtyGeometry);
     }
-    const bool software = window->rendererInterface()->graphicsApi() == QSGRendererInterface::Software;
+    const bool software = primitives == Primitives::ForWindow
+        && window->rendererInterface()->graphicsApi() == QSGRendererInterface::Software;
     scene->scale = window->effectiveDevicePixelRatio();
     Device device(*scene, size, software);
     QPainter painter(&device);
@@ -392,7 +426,8 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
     QSGNode *node = scene->firstChild();
     std::vector<Command::Kind> kinds;
     kinds.reserve(device.engine.commands.size());
-    for (const Command &command : device.engine.commands) {
+    for (const Piece &piece : pieces(device.engine.commands)) {
+        const Command &command = *piece.command;
         const std::size_t index = kinds.size();
         const bool matching = node && index < scene->kinds.size() && scene->kinds[index] == command.kind;
         if (node && !matching) {
@@ -439,10 +474,14 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
             rectangle->setRect(command.target); rectangle->setColor(command.color);
         } else {
             auto *geometry = static_cast<QSGGeometryNode *>(current);
-            geometry->geometry()->allocate(static_cast<int>(command.vertices.size()));
-            std::copy(command.vertices.begin(), command.vertices.end(), geometry->geometry()->vertexDataAsColoredPoint2D());
+            const auto first = command.vertices.begin() + static_cast<std::ptrdiff_t>(piece.firstVertex);
+            const int count = static_cast<int>(piece.vertexCount);
+            geometry->geometry()->allocate(count);
+            std::copy(first, first + count, geometry->geometry()->vertexDataAsColoredPoint2D());
             geometry->markDirty(QSGNode::DirtyGeometry);
-            scene->stats.geometryVertices += static_cast<int>(command.vertices.size());
+            scene->stats.geometryVertices += count;
+            scene->stats.largestGeometryVertices = std::max(
+                scene->stats.largestGeometryVertices, count);
         }
         if (!matching) {
             if (node) scene->insertChildNodeBefore(current, node); else scene->appendChildNode(current);
