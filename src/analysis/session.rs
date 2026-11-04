@@ -158,6 +158,19 @@ fn centred_window_start(grid_frame: u64, fft_size: usize) -> (u64, usize) {
     (start, usize::try_from(silence).unwrap_or(0))
 }
 
+/// [`centred_window_start`] in a file that starts at `file_start_frame` of
+/// the column grid: the frame of the file to read from, and the frames of
+/// silence before it. The windows of a continued timeline that reach back
+/// into the earlier file read silence there.
+fn file_window_start(grid_frame: u64, fft_size: usize, file_start_frame: u64) -> (u64, usize) {
+    let (start, silence) = centred_window_start(grid_frame, fft_size);
+    if let Some(frame) = start.checked_sub(file_start_frame) {
+        return (frame, silence);
+    }
+    let before = usize::try_from(file_start_frame - start).unwrap_or(usize::MAX);
+    (0, silence.saturating_add(before))
+}
+
 /// Feed `frames` of silence to each STFT before its audio; see
 /// [`centred_window_start`].
 fn enqueue_leading_silence(stfts: &mut [StftComputer], frames: usize) {
@@ -343,6 +356,11 @@ pub(super) enum SessionReport {
         path: PathBuf,
         stamp: Option<WaveformSourceStamp>,
         format: TrackFormat,
+        /// For a gapless continuation, where the file starts on the
+        /// session's timeline, in seconds: the time its first column shows.
+        /// `None` for the file a session starts with, which is on its own
+        /// timeline.
+        continued_at: Option<f64>,
     },
     /// The session of `generation` seeked, and decodes from `start_seconds`
     /// on: what it decoded before is gone from the UI.
@@ -982,12 +1000,6 @@ struct SpectrogramSessionState {
 
     // Position tracking
     target_position_seconds: f64,
-    /// Suppresses backward-seek detection for one command cycle after a
-    /// `ContinueWithFile` file switch.  The offset-adjusted position
-    /// can be a few columns behind the reset `session_start_column`
-    /// due to timing discrepancy between the last position update and
-    /// the decoder's actual position.
-    suppress_backward_seek: bool,
     /// Whose timeline the session's columns are on.
     timeline_of: ColumnTimeline,
     /// Absolute column index of the next column to be produced (monotonic within session).
@@ -1055,10 +1067,38 @@ struct SpectrogramSessionState {
 enum ColumnTimeline {
     /// The playing file's: a position in it is the column's time.
     PlayingFile,
-    /// An earlier file's, which a gapless continuation went on from:
-    /// positions in the playing file do not match the columns until a seek
-    /// puts the session on its timeline.
-    EarlierFile,
+    /// An earlier file's, which a gapless continuation went on from. The
+    /// file the session decodes starts at `file_start_frame` of the column
+    /// grid, and the analysis thread adds its start to the positions in it.
+    /// A seek, which is in the playing file, puts the session on that file's
+    /// timeline.
+    EarlierFile { file_start_frame: u64 },
+}
+
+impl ColumnTimeline {
+    /// The frame of the column grid where the file the session decodes
+    /// starts.
+    fn file_start_frame(self) -> u64 {
+        match self {
+            Self::PlayingFile => 0,
+            Self::EarlierFile { file_start_frame } => file_start_frame,
+        }
+    }
+}
+
+/// Where the file a session decodes starts on its timeline, in seconds.
+fn file_start_seconds(session: &SpectrogramSessionState) -> f64 {
+    frames_to_seconds(
+        session.timeline_of.file_start_frame(),
+        session.effective_rate,
+    )
+}
+
+fn frames_to_seconds(frames: u64, rate: u32) -> f64 {
+    // Frame counts are far below f64's exact-integer range.
+    #[allow(clippy::cast_precision_loss)]
+    let frames = frames as f64;
+    frames / f64::from(rate.max(1))
 }
 
 /// Action returned by command processing in the session loop.
@@ -1175,6 +1215,7 @@ fn run_spectrogram_session(
             sample_rate: effective_rate,
             channels: native_channels,
         },
+        continued_at: None,
     });
 
     let actual_channel_count = match view_mode {
@@ -1261,7 +1302,6 @@ fn run_spectrogram_session(
         effective_rate,
         cols_per_second,
         target_position_seconds,
-        suppress_backward_seek: false,
         timeline_of: ColumnTimeline::PlayingFile,
         columns_produced: first_column,
         session_start_column: start_column,
@@ -1401,12 +1441,20 @@ fn run_spectrogram_session(
                     session.rejected_continuation = Some(path);
                     continue;
                 };
+                // The file follows the outgoing one on the session's
+                // timeline: its first frame comes after that file's last.
+                let file_start_frame = session
+                    .timeline_of
+                    .file_start_frame()
+                    .saturating_add(session.timeline.next_frame());
+                session.timeline_of = ColumnTimeline::EarlierFile { file_start_frame };
                 let _ = reports.send(SessionReport::Opened {
                     generation: session.gen,
                     track_token,
                     path: path.clone(),
                     stamp,
                     format,
+                    continued_at: Some(file_start_seconds(&session)),
                 });
                 source = new_source;
                 session.source_reached_eof = false;
@@ -1434,10 +1482,9 @@ fn run_spectrogram_session(
                 session.session_start_column = session.columns_produced;
                 session.post_reset_unthrottled_columns =
                     post_reset_unthrottled_columns(session.display_mode);
-                session.suppress_backward_seek = true;
-                session.timeline_of = ColumnTimeline::EarlierFile;
                 profile_eprintln!(
-                    "[spect-worker] file switch OK, continuing session unthrottled_cols={}",
+                    "[spect-worker] file switch OK, continuing session at {:.2}s unthrottled_cols={}",
+                    file_start_seconds(&session),
                     session.post_reset_unthrottled_columns,
                 );
             }
@@ -2007,10 +2054,15 @@ fn view_duration_seconds(session: &SpectrogramSessionState) -> f64 {
 /// is only if the columns it decoded cover the view, and otherwise seeks
 /// where the view starts, to decode the playhead's columns first rather
 /// than every column up to them.
+///
+/// The analysis thread seeks in the playing file, which the session decodes,
+/// and adds no continuation's start to the position: from the seek on, the
+/// columns are on that file's timeline.
 fn apply_seek(session: &mut SpectrogramSessionState, position_seconds: f64) -> SessionAction {
     if decoded_columns_cover_view(session, position_seconds) {
         return apply_position(session, position_seconds).unwrap_or(SessionAction::Continue);
     }
+    session.timeline_of = ColumnTimeline::PlayingFile;
     session.target_position_seconds = position_seconds;
     SessionAction::SeekRequired { position_seconds }
 }
@@ -2071,26 +2123,32 @@ fn decoded_columns_cover_view(session: &SpectrogramSessionState, position_second
 const SEEK_DECODE_THROUGH_COLUMNS: u64 = MIN_BACKFILL_COLUMNS;
 
 /// Take a new playback position. Returns the seek it needs, if the decoder
-/// has to leave the columns it is decoding: a position before them, or a
-/// position that lies further ahead than the session would decode. Playback
-/// moves the position on a little at a time, so a session that is decoding
-/// columns ahead of it goes on with them.
+/// has to leave the columns it is decoding: a position in its file before
+/// them, or a position that lies further ahead than the session would
+/// decode. Playback moves the position on a little at a time, so a session
+/// that is decoding columns ahead of it goes on with them.
+///
+/// On a continued timeline, a position before the file the session decodes
+/// is in an earlier file, which the session decoded before it went on: the
+/// outgoing track, still playing while the session decodes its successor.
+/// Seeking the file it decodes cannot reach it, so it needs no seek. Nor
+/// does a position in a successor that playback has switched to before the
+/// session reached it: the session decodes the rest of its file first.
 fn apply_position(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
 ) -> Option<SessionAction> {
     session.target_position_seconds = position_seconds;
+    if position_seconds < file_start_seconds(session) {
+        return None;
+    }
     let target_col = f64_to_u64_saturating(position_seconds * session.cols_per_second);
-    if session.suppress_backward_seek {
-        // Keep suppressing until a position update lands at or past
-        // session_start_column.  The offset-adjusted position can
-        // lag a few columns behind for multiple heartbeats.
-        if target_col >= session.session_start_column {
-            session.suppress_backward_seek = false;
-        }
-    } else if target_col < session.session_start_column {
+    if target_col < session.session_start_column {
         // Backward seek needed.
         return Some(SessionAction::SeekRequired { position_seconds });
+    }
+    if playing_pending_continuation(session) {
+        return None;
     }
     let start_col = f64_to_u64_saturating(
         session_seek_start_seconds(session, position_seconds) * session.cols_per_second,
@@ -2098,6 +2156,16 @@ fn apply_position(
     // Far forward seek needed.
     (start_col.saturating_sub(decoded_frontier(session)) > session.lookahead_columns)
         .then_some(SessionAction::SeekRequired { position_seconds })
+}
+
+/// Whether playback has switched to the continuation the session goes on
+/// with once its file ends. The analysis thread stages a continuation with
+/// the outgoing track's token and gives it the successor's at the switch.
+fn playing_pending_continuation(session: &SpectrogramSessionState) -> bool {
+    session
+        .pending_continue
+        .as_ref()
+        .is_some_and(|(_, token)| *token != session.track_token)
 }
 
 fn handle_single_command(
@@ -2169,7 +2237,10 @@ fn update_track_token(session: &mut SpectrogramSessionState, track_token: u64) -
 // ---------------------------------------------------------------------------
 
 /// Handles a seek within the current session by resetting STFT state and
-/// repositioning the file reader.
+/// repositioning the file reader. `position_seconds` is on the session's
+/// timeline: a seek the analysis thread sent has put the session on the
+/// playing file's (see [`apply_seek`]), and one that a position needs on a
+/// continued timeline stays on it, in the file the session decodes.
 fn handle_session_seek(
     session: &mut SpectrogramSessionState,
     position_seconds: f64,
@@ -2177,8 +2248,13 @@ fn handle_session_seek(
     event_tx: &dyn AnalysisEventOutput,
     reports: &Sender<SessionReport>,
 ) -> anyhow::Result<()> {
-    let start_seconds = session_seek_start_seconds(session, position_seconds);
-    profile_eprintln!("[spect-worker] SEEK to {start_seconds:.2}s for {position_seconds:.2}s");
+    // The columns before the file are an earlier file's.
+    let start_seconds =
+        session_seek_start_seconds(session, position_seconds).max(file_start_seconds(session));
+    profile_eprintln!(
+        "[spect-worker] SEEK to {start_seconds:.2}s for {position_seconds:.2}s file_start={:.2}s",
+        file_start_seconds(session),
+    );
 
     // Drop any partially accumulated pre-seek chunk. Emitting it after a seek
     // makes the UI paint old-timeline columns just before the reset arrives.
@@ -2205,8 +2281,6 @@ fn handle_session_seek(
     )?;
     session.backfill = backfill;
     session.session_start_column = new_column;
-    // The columns are on the playing file's timeline from here on.
-    session.timeline_of = ColumnTimeline::PlayingFile;
     session.target_chunk_columns = 1; // Fast first-pixel after seek
     session.throttle_origin = None;
     session.post_reset_unthrottled_columns = post_reset_unthrottled_columns(session.display_mode);
@@ -2344,7 +2418,11 @@ fn reposition_decoder(
     column: u64,
 ) -> anyhow::Result<()> {
     let grid_frame = column_grid_frame(column, session.hop_size, session.effective_hop);
-    let (frame, leading_silence) = centred_window_start(grid_frame, session.fft_size);
+    let (frame, leading_silence) = file_window_start(
+        grid_frame,
+        session.fft_size,
+        session.timeline_of.file_start_frame(),
+    );
     source.seek_to_frame(frame, session.effective_rate)?;
     session.source_reached_eof = false;
     session.timeline = AudioTimeline::new(frame);
@@ -3739,7 +3817,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 256,
             session_start_column: 0,
@@ -3855,7 +3932,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 400,
             session_start_column: 400,
@@ -3914,7 +3990,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -3981,7 +4056,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -4040,7 +4114,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 320,
             session_start_column: 0,
@@ -4130,7 +4203,6 @@ mod tests {
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
-            suppress_backward_seek: false,
             timeline_of: ColumnTimeline::PlayingFile,
             columns_produced: 256,
             session_start_column: 0,
@@ -6108,6 +6180,103 @@ mod tests {
         std::fs::remove_file(path).expect("remove fixture");
     }
 
+    /// The chunks' columns follow each other without a gap or a reset; the
+    /// column after the last.
+    fn assert_contiguous(chunks: &[PrecomputedSpectrogramChunk], case: &str) -> u64 {
+        let mut next: Option<u64> = None;
+        for chunk in chunks {
+            assert!(
+                !chunk.buffer_reset || next.is_none(),
+                "{case}: reset {chunk:?}"
+            );
+            let start = u64::from(chunk.start_column_index);
+            if let Some(next) = next {
+                assert_eq!(start, next, "{case}: {chunk:?}");
+            }
+            next = Some(start + u64::from(chunk.column_count));
+        }
+        next.unwrap_or(0)
+    }
+
+    #[test]
+    fn positions_that_step_back_after_a_continuation_keep_it_decoding_its_file() {
+        // Repeat-One, and another track. The worker reaches the end of the
+        // outgoing track first and goes on with the next file; the playback
+        // positions after the switch step back below where it went on.
+        let first = write_tone_fixture("continued-outgoing", 2, 16_000);
+        let other = write_tone_fixture("continued-other", 1, 16_000);
+        for next in [first.clone(), other.clone()] {
+            let case = next.file_name().unwrap().to_string_lossy().into_owned();
+            let worker = QueuedWorker::start(vec![
+                fast_session(&first, SpectrogramDisplayMode::Rolling),
+                SpectrogramWorkerCommand::ContinueWithFile {
+                    path: next.clone(),
+                    track_token: 1,
+                },
+            ]);
+            let start = loop {
+                match worker.reports.recv_timeout(Duration::from_secs(10)) {
+                    Ok(SessionReport::Opened {
+                        continued_at: Some(start),
+                        path,
+                        ..
+                    }) if path == next => break start,
+                    Ok(_) => {}
+                    Err(error) => panic!("{case}: no continuation: {error}"),
+                }
+            };
+            // Where the outgoing file ends.
+            assert!((start - 2.0).abs() < 1e-9, "{case}: {start}");
+            // Both files decoded; the session parks at the end of the next.
+            let mut completed = 0;
+            let decoded = worker.chunks_until(|chunk| {
+                completed += usize::from(chunk.complete);
+                completed == 2
+            });
+            let end = assert_contiguous(&decoded, &case);
+            let file_columns = if next == first { 500 } else { 250 };
+            assert!(end.abs_diff(500 + file_columns) <= 4, "{case}: {end}");
+
+            // The outgoing track plays on, then playback switches to the
+            // next file, with positions as the analysis thread sent them
+            // when it counted the outgoing track as ending at its last
+            // position: they reach the start, then step back below it.
+            let send = |command| worker.commands.send(command).unwrap();
+            send(SpectrogramWorkerCommand::PositionUpdate {
+                position_seconds: 1.9,
+            });
+            send(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 2 });
+            for position in [0.0, 0.0, 0.04, 0.23, 0.09, 0.19] {
+                send(SpectrogramWorkerCommand::PositionUpdate {
+                    position_seconds: start - 0.22 + position,
+                });
+            }
+            for position in [0.3, 0.6, 0.95] {
+                send(SpectrogramWorkerCommand::PositionUpdate {
+                    position_seconds: start + position,
+                });
+            }
+            // A token that shows the session handled them all.
+            send(SpectrogramWorkerCommand::UpdateTrackToken { track_token: 3 });
+            let after = worker.chunks_until(|chunk| chunk.track_token == 3);
+            assert!(
+                after
+                    .iter()
+                    .all(|chunk| !chunk.buffer_reset && chunk.column_count == 0),
+                "{case}: {after:?}"
+            );
+            let reports = worker.finish();
+            assert!(
+                reports
+                    .iter()
+                    .all(|report| !matches!(report, SessionReport::Failed { .. })),
+                "{case}: {reports:?}"
+            );
+        }
+        std::fs::remove_file(first).expect("remove fixture");
+        std::fs::remove_file(other).expect("remove fixture");
+    }
+
     #[test]
     fn a_continuation_queued_behind_a_new_track_takes_effect() {
         let first = write_tone_fixture("queued-continue-first", 1, 8_000);
@@ -8080,8 +8249,94 @@ mod tests {
         assert!(seeks(&apply_seek(&mut session, 540.0), 540.0));
         // A continued timeline is not the playing file's.
         let mut session = centered_session_decoded(start, column_at(600.0), 530.0);
-        session.timeline_of = ColumnTimeline::EarlierFile;
+        session.timeline_of = ColumnTimeline::EarlierFile {
+            file_start_frame: u64::from(session.effective_rate) * 500,
+        };
         assert!(seeks(&apply_seek(&mut session, 540.0), 540.0));
+    }
+
+    #[test]
+    fn a_position_before_a_continued_file_needs_no_seek() {
+        // The outgoing track ended 2 s into the session's timeline, where it
+        // went on with the next file.
+        let mut session = make_test_session();
+        session.timeline_of = ColumnTimeline::EarlierFile {
+            file_start_frame: 96_000,
+        };
+        session.session_start_column = column_at(1.98);
+        session.columns_produced = column_at(2.0) + 100;
+        // The outgoing track still plays; then the next file, with a clock
+        // correction back below its start after reaching it.
+        for position in [1.5, 1.95, 2.0, 2.01, 1.92, 2.1] {
+            assert!(
+                apply_position(&mut session, position).is_none(),
+                "{position}"
+            );
+        }
+        // Playback switched to a continuation the session has not reached:
+        // the session decodes the rest of its file first.
+        let mut session = make_test_session();
+        session.columns_produced = column_at(100.0);
+        session.pending_continue = Some((PathBuf::from("/music/next.flac"), 2));
+        assert!(apply_position(&mut session, 200.0).is_none());
+        session.pending_continue = Some((PathBuf::from("/music/next.flac"), 1));
+        assert!(seeks(&apply_position(&mut session, 200.0).unwrap(), 200.0));
+    }
+
+    #[test]
+    fn a_seek_on_a_continued_timeline_reads_the_playing_file_at_its_own_time() {
+        // The outgoing track ended 2 s into the session's timeline, and the
+        // playing file goes on from there: the same file played again, and
+        // a shorter one.
+        let file_start_frame = 96_000;
+        for file_seconds in [2, 1] {
+            let path = super::super::waveform_window::tests::write_test_wave(
+                &vec![0; 48_000 * file_seconds],
+                48_000,
+                1,
+            );
+            let (mut source, ..) = open_audio_file(&path).expect("open the fixture");
+            let mut session = make_test_session();
+            session.timeline_of = ColumnTimeline::EarlierFile { file_start_frame };
+            // Decoding from 0.8 s into the file on, after a seek.
+            session.session_start_column = column_at(2.8);
+            session.columns_produced = column_at(2.9);
+            // Playback 0.5 s into the file needs the columns before.
+            let action = apply_position(&mut session, 2.5).expect("a seek");
+            assert!(seeks(&action, 2.5), "{file_seconds} s");
+            let (events, event_rx) = unbounded();
+            let (reports, _report_rx) = unbounded();
+            handle_session_seek(&mut session, 2.5, &mut source, &events, &reports)
+                .expect("the seek applies");
+            // The file reads from 0.5 s on, less half an FFT before the
+            // column, and its columns stay on the session's timeline.
+            let grid_frame = column_grid_frame(column_at(2.5), 256, 1_024);
+            assert_eq!(
+                session.timeline.next_frame(),
+                grid_frame - 1_024 - file_start_frame,
+                "{file_seconds} s"
+            );
+            let Ok(AnalysisEvent::PrecomputedSpectrogramChunk(reset)) = event_rx.try_recv() else {
+                panic!("no reset");
+            };
+            assert!(reset.buffer_reset);
+            assert_eq!(u64::from(reset.start_column_index), column_at(2.5));
+            assert_eq!(
+                session.timeline_of,
+                ColumnTimeline::EarlierFile { file_start_frame }
+            );
+
+            // A seek the analysis thread sends is in the playing file, and
+            // puts the session on its timeline.
+            assert!(seeks(&apply_seek(&mut session, 0.25), 0.25));
+            assert_eq!(session.timeline_of, ColumnTimeline::PlayingFile);
+            handle_session_seek(&mut session, 0.25, &mut source, &events, &reports)
+                .expect("the seek applies");
+            let grid_frame = column_grid_frame(column_at(0.25), 256, 1_024);
+            assert_eq!(session.timeline.next_frame(), grid_frame - 1_024);
+            drop(source);
+            std::fs::remove_file(path).expect("remove fixture");
+        }
     }
 
     #[test]
