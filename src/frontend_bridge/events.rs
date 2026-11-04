@@ -348,16 +348,16 @@ fn process_playback_snapshot_event(
             // Stop resets the transport to the beginning (the backend
             // always reports position 0 once stopped), and the Qt side
             // re-anchors the centered spectrogram viewport to column 0 on
-            // the same transition.  The centered ring only retains a
-            // window around the playhead, so the start of the track has
-            // usually been evicted by then — restart the decode session
-            // at 0 so the snapped viewport shows content instead of
-            // vacated slots.  Rolling mode is skipped: its write-order
-            // history stays parked while stopped and the next play
-            // restarts its session anyway.
+            // the same transition.  A centered session takes that as a
+            // seek to 0: it keeps its columns if the ring still covers the
+            // stopped view, as it does for the whole track at full
+            // zoom-out, and refills the view from the track start
+            // otherwise.  Rolling mode is skipped: its write-order history
+            // stays parked while stopped and the next play restarts its
+            // session anyway.
             if state.analysis_track_token != 0 {
                 if let Some(cmd) =
-                    stopped_track_spectrogram_restart(state.settings.spectrogram_display_mode)
+                    stopped_track_spectrogram_command(state.settings.spectrogram_display_mode)
                 {
                     analysis.command(cmd);
                 }
@@ -399,13 +399,14 @@ fn process_playback_snapshot_event(
     if replayed_same_track_from_stop {
         let pos_seconds = state.playback.position.as_secs_f64();
         profile_eprintln!(
-            "[bridge] stopped->playing replay → RestartCurrentTrack token={}",
+            "[bridge] stopped->playing replay token={} mode={:?}",
             state.analysis_track_token,
+            state.settings.spectrogram_display_mode,
         );
-        analysis.command(AnalysisCommand::RestartCurrentTrack {
-            position_seconds: pos_seconds,
-            clear_history: true,
-        });
+        analysis.command(replayed_track_spectrogram_command(
+            state.settings.spectrogram_display_mode,
+            pos_seconds,
+        ));
     }
     // Forward current playback position so the spectrogram decode worker
     // knows how far playback has progressed and can keep its lookahead
@@ -438,19 +439,31 @@ fn process_playback_snapshot_event(
     urgency
 }
 
-/// Command (if any) that re-decodes the spectrogram when the transport
-/// transitions into Stopped.  See the call site in
-/// `process_playback_snapshot_event` for the full rationale.
-fn stopped_track_spectrogram_restart(
+/// Command (if any) that moves the spectrogram to the stopped transport's
+/// position 0.  See the call site in `process_playback_snapshot_event` for
+/// the full rationale.
+fn stopped_track_spectrogram_command(
     display_mode: SpectrogramDisplayMode,
 ) -> Option<AnalysisCommand> {
-    if display_mode != SpectrogramDisplayMode::Centered {
-        return None;
+    (display_mode == SpectrogramDisplayMode::Centered).then_some(AnalysisCommand::SeekPosition(0.0))
+}
+
+/// Command that resumes the spectrogram when the stopped track plays again
+/// from `position_seconds`.  A centered view shows the columns around the
+/// playhead, which the stop kept or refilled, so it seeks there and keeps
+/// them while they cover the view.  A rolling view shows what has played,
+/// which starts again: its session restarts and clears the history.
+fn replayed_track_spectrogram_command(
+    display_mode: SpectrogramDisplayMode,
+    position_seconds: f64,
+) -> AnalysisCommand {
+    match display_mode {
+        SpectrogramDisplayMode::Centered => AnalysisCommand::SeekPosition(position_seconds),
+        SpectrogramDisplayMode::Rolling => AnalysisCommand::RestartCurrentTrack {
+            position_seconds,
+            clear_history: true,
+        },
     }
-    Some(AnalysisCommand::RestartCurrentTrack {
-        position_seconds: 0.0,
-        clear_history: true,
-    })
 }
 
 pub(super) fn drain_playback_events(
@@ -1146,13 +1159,14 @@ mod tests {
         display_mode: SpectrogramDisplayMode,
     ) -> (
         AnalysisEngine,
-        Receiver<AnalysisEvent>,
+        Receiver<AnalysisCommand>,
         crossbeam_channel::Sender<PlaybackEvent>,
         Receiver<PlaybackEvent>,
         MetadataService,
         BridgeState,
     ) {
-        let (analysis, analysis_rx) = AnalysisEngine::new();
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let analysis = AnalysisEngine::from_command_sender(command_tx);
         let (metadata, _metadata_rx) = MetadataService::new();
         let (playback_tx, playback_rx) = crossbeam_channel::unbounded::<PlaybackEvent>();
         let mut state = BridgeState::default();
@@ -1162,7 +1176,7 @@ mod tests {
         state.playback.state = PlaybackState::Playing;
         (
             analysis,
-            analysis_rx,
+            command_rx,
             playback_tx,
             playback_rx,
             metadata,
@@ -1170,88 +1184,198 @@ mod tests {
         )
     }
 
-    #[test]
-    fn stopped_transition_restarts_centered_spectrogram_session() {
-        let (analysis, analysis_rx, playback_tx, playback_rx, metadata, mut state) =
-            playback_harness(SpectrogramDisplayMode::Centered);
+    /// Send `snapshot` through the bridge and return the analysis commands
+    /// it sent.
+    fn snapshot_commands(
+        snapshot: PlaybackSnapshot,
+        harness: (
+            &AnalysisEngine,
+            &Receiver<AnalysisCommand>,
+            &crossbeam_channel::Sender<PlaybackEvent>,
+            &Receiver<PlaybackEvent>,
+            &MetadataService,
+        ),
+        state: &mut BridgeState,
+    ) -> Vec<AnalysisCommand> {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata) = harness;
+        playback_tx
+            .send(PlaybackEvent::Snapshot(snapshot))
+            .expect("send snapshot");
+        pump_playback_events(playback_rx, analysis, metadata, state);
+        command_rx.try_iter().collect()
+    }
 
-        // Heartbeat while playing must not restart the session.
+    fn is_seek_to(command: &AnalysisCommand, seconds: f64) -> bool {
+        matches!(command, AnalysisCommand::SeekPosition(position) if (position - seconds).abs() < 1e-9)
+    }
+
+    #[test]
+    fn stopped_transition_seeks_a_centered_spectrogram_to_the_start() {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
+
+        // Heartbeat while playing only moves the playhead.
         let mut playing_snapshot = state.playback.clone();
         playing_snapshot.position = Duration::from_secs(170);
-        playback_tx
-            .send(PlaybackEvent::Snapshot(playing_snapshot))
-            .expect("send playing snapshot");
-        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        let commands = snapshot_commands(playing_snapshot, harness, &mut state);
+        assert!(
+            matches!(commands.as_slice(), [AnalysisCommand::PositionUpdate(_)]),
+            "{commands:?}"
+        );
 
-        // Stop transition: the centered session must restart at 0 so the
-        // re-anchored viewport shows decoded content again instead of
-        // vacated ring slots.
+        // Stop transition: the re-anchored viewport shows the start, which
+        // the session takes as a seek there. It keeps its columns if they
+        // cover that view, so nothing restarts the session or clears the
+        // ring here.
         let mut stopped_snapshot = state.playback.clone();
         stopped_snapshot.state = PlaybackState::Stopped;
         stopped_snapshot.position = Duration::ZERO;
-        playback_tx
-            .send(PlaybackEvent::Snapshot(stopped_snapshot))
-            .expect("send stopped snapshot");
-        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-
-        let event = analysis_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("stop transition should restart the centered spectrogram session");
-        assert!(matches!(event, AnalysisEvent::Snapshot(_)));
+        let commands = snapshot_commands(stopped_snapshot, harness, &mut state);
+        assert!(
+            matches!(commands.as_slice(), [command] if is_seek_to(command, 0.0)),
+            "{commands:?}"
+        );
     }
 
     #[test]
     fn stopped_transition_keeps_rolling_spectrogram_parked() {
-        let (analysis, analysis_rx, playback_tx, playback_rx, metadata, mut state) =
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
             playback_harness(SpectrogramDisplayMode::Rolling);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
 
         let mut stopped_snapshot = state.playback.clone();
         stopped_snapshot.state = PlaybackState::Stopped;
         stopped_snapshot.position = Duration::ZERO;
-        playback_tx
-            .send(PlaybackEvent::Snapshot(stopped_snapshot))
-            .expect("send stopped snapshot");
-        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+        let commands = snapshot_commands(stopped_snapshot, harness, &mut state);
 
         // Rolling rings are write-order history; the stop transition must
         // not restart (and thereby clear) the rolling session.
-        assert!(analysis_rx
-            .recv_timeout(Duration::from_millis(300))
-            .is_err());
+        assert!(commands.is_empty(), "{commands:?}");
     }
 
     #[test]
-    fn heartbeat_while_stopped_does_not_restart_spectrogram_session() {
-        let (analysis, analysis_rx, playback_tx, playback_rx, metadata, mut state) =
+    fn heartbeat_while_stopped_does_not_move_the_spectrogram() {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
             playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
 
         let mut stopped_snapshot = state.playback.clone();
         stopped_snapshot.state = PlaybackState::Stopped;
         stopped_snapshot.position = Duration::ZERO;
+        let commands = snapshot_commands(stopped_snapshot.clone(), harness, &mut state);
+        assert!(
+            matches!(commands.as_slice(), [command] if is_seek_to(command, 0.0)),
+            "the stop transition seeks to the start: {commands:?}"
+        );
+
+        // Stopped heartbeats repeat every ~100 ms; only the transition
+        // moves the spectrogram.
+        let commands = snapshot_commands(stopped_snapshot, harness, &mut state);
+        assert!(commands.is_empty(), "{commands:?}");
+    }
+
+    #[test]
+    fn playing_the_stopped_track_again_seeks_a_centered_spectrogram_and_restarts_a_rolling_one() {
+        for mode in [
+            SpectrogramDisplayMode::Centered,
+            SpectrogramDisplayMode::Rolling,
+        ] {
+            let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+                playback_harness(mode);
+            let harness = (
+                &analysis,
+                &command_rx,
+                &playback_tx,
+                &playback_rx,
+                &metadata,
+            );
+            state.playback.state = PlaybackState::Stopped;
+
+            let mut playing_snapshot = state.playback.clone();
+            playing_snapshot.state = PlaybackState::Playing;
+            playing_snapshot.position = Duration::from_millis(40);
+            let commands = snapshot_commands(playing_snapshot, harness, &mut state);
+            match mode {
+                // The stop kept, or refilled, the columns of the view at the
+                // start: the session keeps them while they cover the view.
+                SpectrogramDisplayMode::Centered => assert!(
+                    matches!(commands.as_slice(), [command] if is_seek_to(command, 0.04)),
+                    "{mode:?}: {commands:?}"
+                ),
+                // What has played starts again.
+                SpectrogramDisplayMode::Rolling => assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [AnalysisCommand::RestartCurrentTrack {
+                            position_seconds,
+                            clear_history: true,
+                        }] if (position_seconds - 0.04).abs() < 1e-9
+                    ),
+                    "{mode:?}: {commands:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn playing_another_track_after_a_stop_starts_its_own_session() {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
+        state.playback.state = PlaybackState::Stopped;
+
+        // The track changes while stopped, and then plays.
         playback_tx
-            .send(PlaybackEvent::Snapshot(stopped_snapshot))
-            .expect("send stopped snapshot");
-        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-
-        let event = analysis_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("first stop transition should restart the session");
-        assert!(matches!(event, AnalysisEvent::Snapshot(_)));
-        while analysis_rx.try_recv().is_ok() {}
-
-        // Stopped heartbeats repeat every ~100 ms; only the transition may
-        // restart the session.
-        let mut repeat_snapshot = state.playback.clone();
-        repeat_snapshot.state = PlaybackState::Stopped;
-        repeat_snapshot.position = Duration::ZERO;
-        playback_tx
-            .send(PlaybackEvent::Snapshot(repeat_snapshot))
-            .expect("send repeat stopped snapshot");
-        pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
-
-        assert!(analysis_rx
-            .recv_timeout(Duration::from_millis(300))
-            .is_err());
+            .send(PlaybackEvent::TrackChanged {
+                path: p("/music/other.flac"),
+                queue_index: 1,
+                kind: TrackChangeKind::Manual,
+                track_token: 8,
+            })
+            .expect("send track change");
+        let mut playing_snapshot = state.playback.clone();
+        playing_snapshot.state = PlaybackState::Playing;
+        playing_snapshot.current = Some(p("/music/other.flac"));
+        let commands = snapshot_commands(playing_snapshot, harness, &mut state);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [
+                    AnalysisCommand::SetTrack {
+                        track_token: 8,
+                        reset_spectrogram: true,
+                        ..
+                    },
+                    AnalysisCommand::PositionUpdate(_)
+                ]
+            ),
+            "{commands:?}"
+        );
     }
 
     /// A playing 240 s track (scrobble threshold 120 s) with its metadata.

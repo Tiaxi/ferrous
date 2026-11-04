@@ -320,6 +320,7 @@ private slots:
     void stopSnapshotReanchorsCenteredSpectrogramsToBeginning();
     void stopSnapshotLeavesRollingSpectrogramsParked();
     void stopSnapshotClearsPendingSeekWindow();
+    void aCenteredRingShowingTheWholeTrackSurvivesStopAndPlay();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void asyncImageFileDetailsAcceptsImageProviderUrl();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
@@ -4699,6 +4700,85 @@ void BridgeClientTest::stopSnapshotClearsPendingSeekWindow() {
     QVERIFY(!client.m_pendingSeek);
     QCOMPARE(clockPosition(client), 0.0);
     QCOMPARE(item.m_positionSeconds, 0.0);
+}
+
+void BridgeClientTest::aCenteredRingShowingTheWholeTrackSurvivesStopAndPlay() {
+    // A centered view that shows the whole track, as it does fully zoomed
+    // out, has every column of it. The backend keeps them when playback
+    // stops and plays again, sending no reset, and the pane keeps them
+    // too: nothing on the client's side of a stop or a replay clears its
+    // ring, so the stopped view and the replay draw at once.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    acceptCommands(client);
+    TestSpectrogramStops stops;
+    stops.attach(client);
+    const QString path = QStringLiteral("/music/track.flac");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 4.0, 1)));
+
+    QQuickWindow window;
+    window.resize(320, 100);
+    SpectrogramItem pane(window.contentItem());
+    pane.setWidth(320);
+    pane.setHeight(100);
+    pane.setDisplayMode(1); // Centered
+    pane.setPlaying(true);
+    pane.setClock(client.playbackClock());
+    client.registerSpectrogramItem(&pane, 0);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QTRY_VERIFY(client.m_spectrogramActive);
+
+    // The whole track: 300 columns, which the 320-pixel view shows at once.
+    constexpr int trackColumns = 300;
+    const auto feed = [&client](int columns, int start, bool reset) {
+        QByteArray frame = makePrecomputedFrame(16, 1, columns, start, trackColumns, 1, 5);
+        frame[45] = reset ? 1 : 0;
+        frame[46] = reset ? 1 : 0;
+        QVERIFY(client.parsePrecomputedSpectrogramFrame(frame).valid);
+    };
+    feed(0, 0, true);
+    for (int start = 0; start < trackColumns; start += 50) {
+        feed(50, start, false);
+    }
+    QVERIFY(ringHolds(pane, 0, trackColumns - 1, false));
+    const qint64 committed = pane.m_ring.committedBytes();
+    // Nothing waits for data: the view draws from the ring as it is.
+    const auto drawsFromTheRing = [&pane]() {
+        return pane.m_precomputedReady && !pane.m_awaitingWorkerReset
+            && !pane.m_precomputedResetPending && !pane.m_seekFillActive
+            && !pane.m_zoomFillActive;
+    };
+    QVERIFY(drawsFromTheRing());
+
+    // Stop, as the backend reports it and the QML controller halts the
+    // pane: the view goes back to the start.
+    auto stopped = playbackSnapshot(path, 0.0, 1);
+    stopped.playback.state = 0; // Stopped
+    stopped.playback.positionAdvancing = false;
+    QVERIFY(client.processBinarySnapshot(stopped));
+    pane.setPlaying(false);
+    pane.halt();
+    QCoreApplication::processEvents();
+    QCOMPARE(pane.m_positionSeconds, 0.0);
+    QVERIFY(!pane.storageReleased());
+    QVERIFY(ringHolds(pane, 0, trackColumns - 1, false));
+    QCOMPARE(pane.m_ring.committedBytes(), committed);
+    QCOMPARE(pane.m_precomputedCommittedGeneration, quint64(5));
+    QVERIFY(drawsFromTheRing());
+
+    // Play the track again from the start.
+    pane.setPlaying(true);
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 0.04, 1)));
+    QCoreApplication::processEvents();
+    QVERIFY(!pane.m_positionJumpHoldActive);
+    QVERIFY(pane.m_positionSeconds < 1.0);
+    QVERIFY(ringHolds(pane, 0, trackColumns - 1, false));
+    QCOMPARE(pane.m_ring.committedBytes(), committed);
+    QCOMPARE(pane.m_precomputedCommittedGeneration, quint64(5));
+    QVERIFY(drawsFromTheRing());
+    QVERIFY(client.m_spectrogramActive);
+    client.unregisterSpectrogramItem(&pane);
 }
 
 void BridgeClientTest::asyncImageFileDetailsRequestCachesAndSignals() {

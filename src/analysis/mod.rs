@@ -859,11 +859,11 @@ impl AnalysisRuntimeState {
                 profile_eprintln!(
                     "[analysis] RestartCurrentTrack pos={position_seconds:.2} clear_history={clear_history}"
                 );
-                // RestartCurrentTrack is also the authoritative transport
-                // re-anchor used when playback stops.  Keep the canonical
-                // position in sync so a following zoom/view restart does not
-                // resurrect the pre-stop playhead and decode an unrelated
-                // window near EOF while Qt is rendering position 0.
+                // The restart re-anchors the transport, as a rolling replay
+                // after a stop does.  Keep the canonical position in sync so
+                // a following zoom/view restart does not resurrect an older
+                // playhead and decode a window Qt is not rendering.  A
+                // centered stop seeks to 0 instead, which sets it as well.
                 self.last_spectrogram_position = position_seconds;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
@@ -2006,7 +2006,13 @@ impl AnalysisRuntimeState {
             let visible_left =
                 Self::centered_visible_left_edge_seconds(position_seconds, margin, ctx);
             let retained_window_start = self.centered_retained_start_seconds(ctx);
-            if visible_left >= retained_window_start && position_seconds <= window_end {
+            // A worker that may still decode another file, as after a
+            // rolling switch the view left for centered before the worker
+            // reached the successor, would seek in that file.
+            if !continuation_unsettled
+                && visible_left >= retained_window_start
+                && position_seconds <= window_end
+            {
                 // A seek, not a position: a position the session has not
                 // decoded up to yet would have it decode every column
                 // before the playhead's.
@@ -2023,6 +2029,7 @@ impl AnalysisRuntimeState {
                 // property jumping and the worker's reset chunk arriving,
                 // during which old ring data can be briefly visible at the
                 // new playhead position.
+                self.clear_early_continuation(ctx);
                 self.refill_centered_spectrogram(position_seconds, ctx);
             }
         } else if ctx.event_tx.spectral_backpressured() || continuation_unsettled {
@@ -2955,7 +2962,7 @@ mod tests {
     #[test]
     fn stopped_zoom_reset_pipeline_covers_stopped_viewport() {
         // Long enough that the default-zoom viewport does not cover the
-        // whole track.  If RestartCurrentTrack(0) leaves the old 315 s
+        // whole track.  If the stop's seek to 0 leaves the old 315 s
         // position cached, the following zoom restart begins around 80 s
         // and still emits plenty of data -- just none for viewport column 0.
         let path = write_engine_test_wave(320, 8_000);
@@ -2975,11 +2982,9 @@ mod tests {
         engine.command(AnalysisCommand::PositionUpdate(315.0));
         let _ = drain_events(&event_rx, Duration::from_millis(600));
 
-        eprintln!("=== STOP (RestartCurrentTrack at 0) ===");
-        engine.command(AnalysisCommand::RestartCurrentTrack {
-            position_seconds: 0.0,
-            clear_history: true,
-        });
+        // What the bridge sends when a centered view stops.
+        eprintln!("=== STOP (SeekPosition 0) ===");
+        engine.command(AnalysisCommand::SeekPosition(0.0));
         let stop_events = drain_events(&event_rx, Duration::from_millis(600));
         eprintln!("after stop:\n{}", summarize(&stop_events));
 
@@ -3012,6 +3017,155 @@ mod tests {
             "zoom reset while stopped must decode column 0, got:\n{}",
             summarize(&reset_events),
         );
+    }
+
+    /// Columns a second of a WAV at 8 kHz, at zoom 1.
+    const STOP_COLUMNS_PER_SECOND: f64 = 8_000.0 / 1_024.0;
+    /// The seconds a 1,165-pixel view shows of it at zoom 1.
+    const STOP_WINDOW_SECONDS: f64 = 1_165.0 / STOP_COLUMNS_PER_SECOND;
+
+    fn stop_column(seconds: f64) -> u64 {
+        f64_to_u64_saturating(seconds * STOP_COLUMNS_PER_SECOND)
+    }
+
+    /// An engine showing a `seconds` long track centered in a 1,165-pixel
+    /// view at zoom 1, with the ring its output fills.
+    fn centered_engine_on_wave(seconds: u32) -> (AnalysisEngine, Receiver<AnalysisEvent>, PathBuf) {
+        let path = write_engine_test_wave(seconds, 8_000);
+        let (engine, events) = AnalysisEngine::new();
+        engine.command(AnalysisCommand::SetSpectrogramActive(true));
+        engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
+            SpectrogramDisplayMode::Centered,
+        ));
+        engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(1_165));
+        engine.command(AnalysisCommand::SetTrack {
+            path: path.clone(),
+            reset_spectrogram: true,
+            track_token: 1,
+            gapless: false,
+        });
+        engine.command(AnalysisCommand::PositionUpdate(0.0));
+        (engine, events, path)
+    }
+
+    /// Take what the engine sends over `duration` into `ring`.
+    fn take_for(events: &Receiver<AnalysisEvent>, ring: &mut ModelRing, duration: Duration) {
+        for event in drain_events(events, duration) {
+            match event {
+                AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => ring.take(&chunk),
+                AnalysisEvent::WorkerFailed(error) => panic!("{error}"),
+                AnalysisEvent::Snapshot(_) => {}
+            }
+        }
+    }
+
+    /// A centered stop is a seek to the start. When the ring still holds
+    /// the view there, as it holds the whole track when the view shows all
+    /// of it, or the start of a longer one that played for a while, the
+    /// session keeps its columns: nothing restarts, resets or is decoded
+    /// again, and playing the track again keeps them as well.
+    #[test]
+    fn a_centered_stop_keeps_the_columns_that_cover_the_view_of_the_start() {
+        // The whole track in view; a longer track whose start the ring
+        // still holds, after a minute of playback.
+        for (seconds, played) in [(30, 20.0), (320, 60.0)] {
+            let (engine, events, path) = centered_engine_on_wave(seconds);
+            engine.command(AnalysisCommand::PositionUpdate(played));
+            let mut ring = ModelRing::default();
+            fill_ring_until(&events, &mut ring, "the track was not decoded", |ring| {
+                ring.complete && ring.columns.len() == 1 && ring.first() == Some(0)
+            });
+            // The last column, a little before the end of the audio.
+            let end = ring.columns[0].1 - 1;
+            assert!(
+                end + 8 > stop_column(f64::from(seconds)),
+                "{:?}",
+                ring.columns
+            );
+            let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+            let (resets, columns) = (ring.resets, ring.columns_taken);
+
+            // Stop, then play again from the start, as the bridge sends.
+            engine.command(AnalysisCommand::SeekPosition(0.0));
+            take_for(&events, &mut ring, Duration::from_millis(400));
+            engine.command(AnalysisCommand::SeekPosition(0.04));
+            engine.command(AnalysisCommand::PositionUpdate(0.08));
+            take_for(&events, &mut ring, Duration::from_millis(400));
+
+            let case = format!("{seconds} s played to {played} s");
+            assert_eq!(
+                engine.spectrogram_decode_generation.load(Ordering::Relaxed),
+                generation,
+                "{case}: no session restarted"
+            );
+            assert_eq!(ring.resets, resets, "{case}: nothing reset the ring");
+            assert_eq!(ring.columns_taken, columns, "{case}: nothing decoded again");
+            assert!(ring.covers(0, end), "{case}: {:?}", ring.columns);
+            drop(engine);
+            std::fs::remove_file(path).expect("remove fixture");
+        }
+    }
+
+    /// A centered stop whose view at the start the ring no longer holds,
+    /// after a seek near the end or while a far region still decodes,
+    /// refills it from the start with a clearing reset, and a stale
+    /// session's columns do not land in it. Playing again then keeps the
+    /// refilled columns.
+    #[test]
+    fn a_centered_stop_refills_the_view_of_the_start_the_ring_no_longer_holds() {
+        for wait_for_the_far_region in [true, false] {
+            let (engine, events, path) = centered_engine_on_wave(400);
+            let mut ring = ModelRing::default();
+            fill_ring_until(&events, &mut ring, "the track did not start", |ring| {
+                ring.first().is_some()
+            });
+            // Far outside what the first session decodes: a new session
+            // decodes the view there.
+            let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+            engine.command(AnalysisCommand::SeekPosition(380.0));
+            engine.command(AnalysisCommand::PositionUpdate(380.0));
+            if wait_for_the_far_region {
+                // The session decodes to the end of the file and parks.
+                fill_ring_until(&events, &mut ring, "the end was not decoded", |ring| {
+                    ring.generation > generation
+                        && ring.complete
+                        && ring.first().is_some_and(|first| first > stop_column(200.0))
+                });
+            }
+            let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+            let resets = ring.resets;
+
+            engine.command(AnalysisCommand::SeekPosition(0.0));
+            let case = format!("waited for the far region: {wait_for_the_far_region}");
+            let what = format!("{case}: the view of the start was not refilled");
+            let view_end = stop_column(STOP_WINDOW_SECONDS);
+            fill_ring_until(&events, &mut ring, &what, |ring| {
+                ring.generation > generation && ring.covers(0, view_end)
+            });
+            assert!(ring.resets > resets, "{case}: the refill reset the ring");
+            // No column of the far session lands after the refill's reset.
+            assert_eq!(ring.first(), Some(0), "{case}: {:?}", ring.columns);
+            assert_eq!(ring.columns.len(), 1, "{case}: {:?}", ring.columns);
+
+            // The refilled columns cover the view when playback resumes.
+            fill_ring_until(&events, &mut ring, "the refill did not park", |ring| {
+                ring.covers(0, stop_column(STOP_WINDOW_SECONDS + 10.0))
+            });
+            let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+            let resets = ring.resets;
+            engine.command(AnalysisCommand::SeekPosition(0.04));
+            engine.command(AnalysisCommand::PositionUpdate(0.08));
+            take_for(&events, &mut ring, Duration::from_millis(400));
+            assert_eq!(
+                engine.spectrogram_decode_generation.load(Ordering::Relaxed),
+                generation,
+                "{case}"
+            );
+            assert_eq!(ring.resets, resets, "{case}");
+            assert_eq!(ring.first(), Some(0), "{case}: {:?}", ring.columns);
+            drop(engine);
+            std::fs::remove_file(path).expect("remove fixture");
+        }
     }
 
     #[test]
@@ -5758,6 +5912,51 @@ mod tests {
     }
 
     #[test]
+    fn a_centered_seek_before_the_worker_reaches_a_rolling_successor_restarts_the_session() {
+        // A rolling switch to B before the worker reached it, after which
+        // the view becomes centered: the worker still decodes A, so a seek
+        // in B, such as a stop's, must not reach it as a seek.
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+        state.last_spectrogram_position = 200.0;
+        stage_successor(&mut state, b);
+        state.handle_command(
+            AnalysisCommand::SetTrack {
+                path: b.to_path_buf(),
+                reset_spectrogram: false,
+                track_token: 2,
+                gapless: true,
+            },
+            &ctx,
+        );
+        assert!(state.provisional_continuation.is_some());
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &ctx,
+        );
+        channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+        state.handle_command(AnalysisCommand::SeekPosition(0.0), &ctx);
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [SpectrogramWorkerCommand::NewTrack {
+                    path,
+                    target_position_seconds,
+                    clear_history_on_reset: true,
+                    ..
+                }] if path == b && target_position_seconds.abs() < 1e-9
+            ),
+            "{commands:?}"
+        );
+        assert!(state.provisional_continuation.is_none());
+        assert!(state.spectrogram_position_offset.abs() < 1e-9);
+    }
+
+    #[test]
     fn a_swap_keeps_each_file_with_its_own_analysis() {
         let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
         for mode in MODES {
@@ -5833,8 +6032,8 @@ mod tests {
 
     /// The columns the UI holds of the last session: its ring, as far as
     /// the chunks tell. A centered session sends the left of its view after
-    /// the columns at its playhead.
-    #[cfg(feature = "gst")]
+    /// the columns at its playhead. Like the UI, it drops the chunks of a
+    /// session older than the newest it has taken.
     #[derive(Default)]
     struct ModelRing {
         /// The spans of columns since the last reset, in order and merged.
@@ -5842,11 +6041,23 @@ mod tests {
         reset_pending: bool,
         /// Whether the session behind the columns reached the end.
         complete: bool,
+        /// The newest session's generation.
+        generation: u64,
+        /// Every reset taken, the ring clears of the immediate refills
+        /// included.
+        resets: usize,
+        /// Every column taken.
+        columns_taken: u64,
     }
 
-    #[cfg(feature = "gst")]
     impl ModelRing {
         fn take(&mut self, chunk: &PrecomputedSpectrogramChunk) {
+            if chunk.generation < self.generation {
+                return;
+            }
+            self.generation = chunk.generation;
+            self.resets += usize::from(chunk.buffer_reset);
+            self.columns_taken += u64::from(chunk.column_count);
             if chunk.buffer_reset && chunk.bins_per_column > 0 {
                 self.reset_pending = true;
                 self.complete = false;
@@ -5886,7 +6097,6 @@ mod tests {
     }
 
     /// Wait until `done` holds of the ring fed by `engine`'s output.
-    #[cfg(feature = "gst")]
     #[track_caller]
     fn fill_ring_until(
         events: &Receiver<AnalysisEvent>,
