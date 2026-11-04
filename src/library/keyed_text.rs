@@ -45,11 +45,29 @@ struct Entry {
     end: u32,
 }
 
+/// The number of `key` in [`KNOWN_KEYS`]. Search looks fields up by key for
+/// every hit, so this is a match rather than a search of the table.
 fn known_key(key: &str) -> Option<u8> {
-    KNOWN_KEYS
-        .binary_search(&key)
-        .ok()
-        .and_then(|index| u8::try_from(index).ok())
+    Some(match key {
+        "album" => 0,
+        "albumartist" => 1,
+        "artist" => 2,
+        "comment" => 3,
+        "composer" => 4,
+        "conductor" => 5,
+        "date" => 6,
+        "disc" => 7,
+        "genre" => 8,
+        "label" => 9,
+        "lyrics" => 10,
+        "path" => 11,
+        "performer" => 12,
+        "root" => 13,
+        "title" => 14,
+        "track" => 15,
+        "year" => 16,
+        _ => return None,
+    })
 }
 
 /// `(key, value)` pairs, sorted by key, with the values of a key in the
@@ -66,22 +84,18 @@ impl KeyedText {
     /// key is neither known nor shorter than 64 KiB.
     pub(crate) fn from_pairs<K: AsRef<str>, V: AsRef<str>>(mut pairs: Vec<(K, V)>) -> Self {
         pairs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-        let keys: Vec<Option<u8>> = pairs
-            .iter()
-            .map(|(key, _)| known_key(key.as_ref()))
-            .collect();
         let text_len: usize = pairs
             .iter()
-            .zip(&keys)
-            .map(|((key, value), known)| {
-                value.as_ref().len() + known.map_or(key.as_ref().len(), |_| 0)
+            .map(|(key, value)| {
+                let key = key.as_ref();
+                value.as_ref().len() + known_key(key).map_or(key.len(), |_| 0)
             })
             .sum();
         let mut text = String::with_capacity(text_len);
         let mut entries = Vec::with_capacity(pairs.len());
-        for ((key, value), known) in pairs.iter().zip(keys) {
+        for (key, value) in &pairs {
             let (key, value) = (key.as_ref(), value.as_ref());
-            let (code, key_text) = match known {
+            let (code, key_text) = match known_key(key) {
                 Some(code) => (code, ""),
                 None => (OTHER_KEY, key),
             };
@@ -186,6 +200,10 @@ mod tests {
     #[test]
     fn known_keys_are_sorted_and_fit_a_byte() {
         assert!(KNOWN_KEYS.windows(2).all(|pair| pair[0] < pair[1]));
+        for (index, key) in KNOWN_KEYS.iter().enumerate() {
+            assert_eq!(known_key(key).map(usize::from), Some(index), "{key}");
+        }
+        assert_eq!(known_key("Title"), None);
         assert!(KNOWN_KEYS.len() < usize::from(OTHER_KEY));
         assert_eq!(std::mem::size_of::<Entry>(), 8);
     }
