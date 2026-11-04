@@ -276,6 +276,7 @@ private slots:
     void sameFileReplayReanchorsByTrackToken_data();
     void sameFileReplayReanchorsByTrackToken();
     void noOpNextPreservesPosition();
+    void playWhilePlayingSendsOnePlayCommandAndNoError();
     void queueSnapshotKeepsRawCoverPathsInRows();
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
@@ -2323,6 +2324,37 @@ void BridgeClientTest::noOpNextPreservesPosition() {
     QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 120.1, 3)));
     QVERIFY(std::abs(clockPosition(client) - 120.1) < 0.2);
     QCOMPARE(client.playbackClock()->state().epoch, epoch);
+}
+
+void BridgeClientTest::playWhilePlayingSendsOnePlayCommandAndNoError() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &command) {
+        sent.push_back(command);
+        return true;
+    };
+    const QString path = QStringLiteral("/fixture/playing.wav");
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 4.0, 1)));
+    QCOMPARE(client.playbackState(), QStringLiteral("Playing"));
+    QSignalSpy errorSpy(&client, &BridgeClient::bridgeError);
+    const QByteArray play = BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdPlay);
+
+    // Play during playback is a valid command: the transport bar and MPRIS
+    // each pass it on once, and the backend keeps playing.
+    client.play();
+    QCOMPARE(sent, QList<QByteArray>{play});
+    MprisController controller(&client);
+    controller.play();
+    QCOMPARE(sent, (QList<QByteArray>{play, play}));
+    QVERIFY(client.processBinarySnapshot(playbackSnapshot(path, 10.0, 1)));
+    QCoreApplication::processEvents();
+    QCOMPARE(client.playbackState(), QStringLiteral("Playing"));
+    QVERIFY(std::abs(clockPosition(client) - 10.0) < 0.2);
+    QCOMPARE(errorSpy.count(), 0);
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
 }
 
 void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
