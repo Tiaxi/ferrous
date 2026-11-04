@@ -4349,18 +4349,7 @@ pub(crate) fn is_supported_audio(path: &Path) -> bool {
     )
 }
 
-fn add_search_tag(tags: &mut super::SearchTags, key: &str, value: &str) {
-    let value = value.trim();
-    if value.is_empty() {
-        return;
-    }
-    let values = tags.entry(key.to_string()).or_default();
-    if !values.iter().any(|existing| existing == value) {
-        values.push(value.to_string());
-    }
-}
-
-fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
+fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTagsBuilder) {
     for (key, item) in [
         ("title", ItemKey::TrackTitle),
         ("artist", ItemKey::TrackArtist),
@@ -4382,7 +4371,7 @@ fn collect_search_tags(tag: &lofty::tag::Tag, tags: &mut super::SearchTags) {
         ("disc", ItemKey::DiscNumber),
     ] {
         for value in tag.get_strings(item) {
-            add_search_tag(tags, key, value);
+            tags.add(key, value);
         }
     }
 }
@@ -4591,9 +4580,10 @@ fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCa
         Ok(read) => (read.ok(), None),
         Err(failure) => (None, Some(failure)),
     };
+    let mut search_tags = super::SearchTagsBuilder::default();
     if let Some(tagged) = &tagged {
         for tag in tagged.tags() {
-            collect_search_tags(tag, &mut out.search_tags);
+            collect_search_tags(tag, &mut search_tags);
         }
         if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
             if let Some(title) = tag.title() {
@@ -4621,11 +4611,11 @@ fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCa
                 ("comment", tagged.comment.as_deref()),
             ] {
                 if let Some(value) = value {
-                    add_search_tag(&mut out.search_tags, key, value);
+                    search_tags.add(key, value);
                 }
             }
             if let Some(disc) = tagged.disc_no {
-                add_search_tag(&mut out.search_tags, "disc", &disc.to_string());
+                search_tags.add("disc", &disc.to_string());
             }
             if let Some(title) = tagged.title {
                 out.title = title;
@@ -4654,6 +4644,7 @@ fn read_track_info_with_cover_cache(path: &Path, covers: Option<&EmbeddedCoverCa
             );
         }
     }
+    out.search_tags = search_tags.build();
 
     out.cover_read_at = CoverReadAt::now();
     (out.cover_path, out.cover_stamp) = folder_cover_for_track(path);
@@ -7195,11 +7186,11 @@ mod tests {
         ] {
             tag.push_unchecked(TagItem::new(key, ItemValue::Text(value.into())));
         }
-        let mut tags = super::super::SearchTags::default();
+        let mut tags = super::super::SearchTagsBuilder::default();
         collect_search_tags(&tag, &mut tags);
         collect_search_tags(&tag, &mut tags);
-        assert_eq!(tags["artist"], ["First", "Second"]);
-        assert_eq!(tags["genre"], ["Rock", "Ambient"]);
+        assert_eq!(tags.values("artist"), ["First", "Second"]);
+        assert_eq!(tags.values("genre"), ["Rock", "Ambient"]);
         for key in [
             "composer",
             "conductor",
@@ -7209,7 +7200,7 @@ mod tests {
             "comment",
             "lyrics",
         ] {
-            assert_eq!(tags[key].len(), 1, "{key}");
+            assert_eq!(tags.values(key).len(), 1, "{key}");
         }
     }
 
@@ -7255,9 +7246,15 @@ mod tests {
         let mut snapshot = LibrarySnapshot::default();
         load_snapshot(&conn, &mut snapshot);
         let tags = snapshot.tracks[0].search_tags.clone();
-        assert_eq!(tags["albumartist"], ["Orchestra"]);
-        assert_eq!(tags["comment"], ["Anniversary remaster"]);
-        assert!(tags["artist"].iter().any(|value| value.contains("Second")));
+        assert_eq!(
+            tags.values("albumartist").collect::<Vec<_>>(),
+            ["Orchestra"]
+        );
+        assert_eq!(
+            tags.values("comment").collect::<Vec<_>>(),
+            ["Anniversary remaster"]
+        );
+        assert!(tags.values("artist").any(|value| value.contains("Second")));
         let indexed = read_track_info(&path);
         let fingerprint = track_file_fingerprint(&path).expect("fingerprint");
         store_external_track_cache_in_conn(&conn, &path, fingerprint, &indexed).expect("cache");
@@ -7280,6 +7277,60 @@ mod tests {
         scan_root(&conn, &root, &mut |_| {}, &mut |_, _| updates += 1).expect("unchanged rescan");
         assert_eq!(updates, 0);
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn stored_search_tags_load_unchanged_with_free_form_keys() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        // Keys sorted, as the JSON of the tags is; one is not a key the
+        // scanner writes, and one repeats values in an order of their own.
+        let json = r#"{"albumartist":["Orchestra"],"artist":["Second","First","Ünïcode"],"comment":["remaster \"quoted\""],"mood":["calm","warm"],"title":["Song"]}"#;
+        for (path, tags) in [
+            ("/fixture/tagged.flac", Some(json)),
+            ("/fixture/broken.flac", Some("{not json")),
+            ("/fixture/legacy.flac", None),
+        ] {
+            conn.execute(
+                "INSERT INTO tracks(path,root_path,title,artist,album,mtime_ns,size_bytes,indexed_at,search_tags) VALUES (?1,'/fixture','Song','Artist','Album',0,0,0,?2)",
+                params![path, tags],
+            )
+            .expect("row");
+        }
+        let mut snapshot = LibrarySnapshot::default();
+        load_snapshot(&conn, &mut snapshot);
+        let tags_of = |path: &str| {
+            snapshot
+                .tracks
+                .iter()
+                .find(|track| track.path == Path::new(path))
+                .expect("track")
+                .search_tags
+                .clone()
+        };
+        let tags = tags_of("/fixture/tagged.flac");
+        assert_eq!(
+            tags.values("artist").collect::<Vec<_>>(),
+            ["Second", "First", "Ünïcode"]
+        );
+        assert_eq!(tags.values("mood").collect::<Vec<_>>(), ["calm", "warm"]);
+        assert_eq!(
+            tags.values("comment").collect::<Vec<_>>(),
+            ["remaster \"quoted\""]
+        );
+        // Written back, the tags are the JSON they were read from.
+        assert_eq!(serde_json::to_string(&tags).expect("json"), json);
+        assert!(tags_of("/fixture/broken.flac").is_empty());
+        assert!(tags_of("/fixture/legacy.flac").is_empty());
+
+        // The library and external-track rows read tags the same way.
+        let row = library_row(&conn, "/fixture/tagged.flac")
+            .expect("query")
+            .expect("row");
+        assert_eq!(row.search_tags, tags);
+        let mut track = (*snapshot.tracks[0]).clone();
+        track.search_tags = tags.clone();
+        assert_eq!(IndexedTrack::from(&track).search_tags, tags);
     }
 
     #[test]

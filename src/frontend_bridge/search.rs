@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,10 +10,10 @@ use std::time::Instant;
 use crossbeam_channel::{Receiver, Sender};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::library::{LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack};
+use crate::library::{KeyedText, LibraryRoot, LibrarySearchTrack, LibrarySnapshot, LibraryTrack};
 
 use super::library_tree::{album_row_key, artist_row_key, section_row_key, track_row_key};
-use super::search_query::SearchQuery;
+use super::search_query::{SearchFields, SearchQuery};
 
 use super::{
     BridgeSearchResultRow, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeState,
@@ -109,7 +109,7 @@ impl SearchRowAccumulator {
         &mut self,
         hit: &LibrarySearchTrack,
         query: &SearchQuery,
-        fields: &BTreeMap<String, String>,
+        fields: &SearchFields,
     ) -> Option<BridgeSearchResultRow> {
         let context = derive_hit_context(hit, &self.roots, &self.roots_by_path)?;
 
@@ -128,9 +128,9 @@ impl SearchRowAccumulator {
             hit.album.trim().to_string()
         };
         let album_key = context.album_key.clone();
-        let artist_fields = BTreeMap::from([
-            ("artist".into(), normalize_for_search(&context.artist_name)),
-            ("root".into(), normalize_for_search(&context.root_label)),
+        let artist_fields = KeyedText::from_pairs(vec![
+            ("artist", normalize_for_search(&context.artist_name)),
+            ("root", normalize_for_search(&context.root_label)),
         ]);
         if query.allows_type("artist") && query.matches(&artist_fields) {
             let score = entity_score(query, "artist", &context.artist_name, &artist_fields);
@@ -185,7 +185,7 @@ impl SearchRowAccumulator {
         hit_artist: &str,
         hit_album: &str,
         query: &SearchQuery,
-        fields: &BTreeMap<String, String>,
+        fields: &SearchFields,
     ) {
         // Match the main-album queue: bonus folders remain searchable as tracks.
         if !query.allows_type("album")
@@ -261,25 +261,9 @@ impl SearchRowAccumulator {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PreparedSearchTrack {
-    path: PathBuf,
-    root_path: PathBuf,
-    title: String,
-    artist: String,
-    album: String,
-    cover_path: String,
-    cover_stamp: u64,
-    genre: String,
-    year: Option<i32>,
-    track_no: Option<u32>,
-    duration_secs: Option<f32>,
-    fields: BTreeMap<String, String>,
-}
-
 #[derive(Debug, Clone, Default)]
 struct PreparedSearchLibrary {
-    tracks: Vec<Arc<PreparedSearchTrack>>,
+    tracks: Vec<Arc<PreparedTrackEntry>>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
     artist_album_counts: HashMap<String, u32>,
 }
@@ -292,10 +276,14 @@ struct AlbumMembership {
     in_main_album: bool,
 }
 
-/// One track as the search index has it.
+/// One track as the search index has it. The index is kept for every
+/// track of the library, so it shares the track's details with the library
+/// rather than copying them.
 #[derive(Debug)]
 struct PreparedTrackEntry {
-    track: Arc<PreparedSearchTrack>,
+    track: Arc<LibraryTrack>,
+    /// The normalized text of each field a query matches, by key.
+    fields: SearchFields,
     album: Option<AlbumMembership>,
 }
 
@@ -305,7 +293,7 @@ struct PreparedTrackEntry {
 #[derive(Debug, Default)]
 struct SearchTrackMemo {
     roots: Vec<LibraryRoot>,
-    entries: HashMap<usize, (Arc<LibraryTrack>, Arc<PreparedTrackEntry>)>,
+    entries: HashMap<usize, Arc<PreparedTrackEntry>>,
 }
 
 /// How many tracks a preparation reads between checks for a newer query.
@@ -1064,20 +1052,20 @@ fn prepare_search_library_with(
         }
         let address = Arc::as_ptr(track) as usize;
         let entry = match memo.entries.get(&address) {
-            Some((source, entry)) if Arc::ptr_eq(source, track) => Arc::clone(entry),
+            Some(entry) if Arc::ptr_eq(&entry.track, track) => Arc::clone(entry),
             _ => {
                 prepared_count += 1;
                 Arc::new(prepare_search_track(track, &roots_by_path))
             }
         };
-        entries.insert(address, (Arc::clone(track), entry));
+        entries.insert(address, entry);
     }
 
     let mut tracks = Vec::with_capacity(library.tracks.len());
     let mut album_inventory: HashMap<String, AlbumInventoryAcc> = HashMap::new();
     let mut artist_album_counts: HashMap<String, u32> = HashMap::new();
     for track in &library.tracks {
-        let (_, entry) = &entries[&(Arc::as_ptr(track) as usize)];
+        let entry = &entries[&(Arc::as_ptr(track) as usize)];
         if let Some(album) = &entry.album {
             let inventory = album_inventory
                 .entry(album.album_key.clone())
@@ -1099,7 +1087,7 @@ fn prepare_search_library_with(
                 }
             }
         }
-        tracks.push(Arc::clone(&entry.track));
+        tracks.push(Arc::clone(entry));
     }
     memo.entries = entries;
 
@@ -1114,7 +1102,7 @@ fn prepare_search_library_with(
 }
 
 fn prepare_search_track(
-    track: &LibraryTrack,
+    track: &Arc<LibraryTrack>,
     roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
 ) -> PreparedTrackEntry {
     // Within its root, so the folders above the root, such as `home` and
@@ -1128,44 +1116,37 @@ fn prepare_search_track(
         })
         .unwrap_or(&track.path);
     let path_string = relative_path.to_string_lossy();
-    let title = track.title.trim().to_string();
-    let artist = track.artist.trim().to_string();
-    let album = track.album.trim().to_string();
-    let genre = track.genre.trim().to_string();
-    let title_l = normalize_for_search(&title);
-    let artist_l = normalize_for_search(&artist);
-    let album_l = normalize_for_search(&album);
-    let genre_l = normalize_for_search(&genre);
-    let path_n = normalize_for_search(&path_string);
-    let mut fields: BTreeMap<String, String> = track
+    let artist = track.artist.trim();
+    // A tag's values, joined, then the track's own details.
+    let mut fields: Vec<(&str, String)> = track
         .search_tags
         .iter()
-        .map(|(key, values)| (key.clone(), normalize_for_search(&values.join(" "))))
+        .map(|(key, values)| (key, normalize_for_search(&join_values(values))))
         .collect();
     for (key, value) in [
-        ("title", &title_l),
-        ("artist", &artist_l),
-        ("album", &album_l),
-        ("genre", &genre_l),
-        ("path", &path_n),
+        ("title", track.title.trim()),
+        ("artist", artist),
+        ("album", track.album.trim()),
+        ("genre", track.genre.trim()),
+        ("path", &path_string),
     ] {
-        let field = fields.entry(key.into()).or_default();
+        let field = field_mut(&mut fields, key);
         field.push(' ');
-        field.push_str(value);
+        field.push_str(&normalize_for_search(value));
     }
     if let Some(year) = track.year {
-        fields.insert("year".into(), year.to_string());
+        *field_mut(&mut fields, "year") = year.to_string();
     }
     if let Some(number) = track.track_no {
-        fields.insert("track".into(), number.to_string());
+        *field_mut(&mut fields, "track") = number.to_string();
     }
     let root = roots_by_path.get(&track.root_path);
     if let Some(root) = root {
-        fields.insert("root".into(), normalize_for_search(&root.root_label));
+        *field_mut(&mut fields, "root") = normalize_for_search(&root.root_label);
     }
 
     let album_membership = root
-        .and_then(|root| derive_tree_path_context_for_root(&track.path, root, &artist))
+        .and_then(|root| derive_tree_path_context_for_root(&track.path, root, artist))
         .and_then(|context| {
             let in_main_album =
                 context.is_main_level_album_track || context.is_disc_section_album_track;
@@ -1177,22 +1158,34 @@ fn prepare_search_track(
         });
 
     PreparedTrackEntry {
-        track: Arc::new(PreparedSearchTrack {
-            path: track.path.clone(),
-            root_path: track.root_path.clone(),
-            title,
-            artist,
-            album,
-            cover_path: track.cover_path.clone(),
-            cover_stamp: track.cover_stamp,
-            genre,
-            year: track.year,
-            track_no: track.track_no,
-            duration_secs: track.duration_secs,
-            fields,
-        }),
+        track: Arc::clone(track),
+        fields: KeyedText::from_pairs(fields),
         album: album_membership,
     }
+}
+
+/// `values`, separated by spaces.
+fn join_values<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut joined = String::new();
+    for (index, value) in values.enumerate() {
+        if index > 0 {
+            joined.push(' ');
+        }
+        joined.push_str(value);
+    }
+    joined
+}
+
+/// The text of field `key` in `fields`, added empty if it has none.
+fn field_mut<'f>(fields: &'f mut Vec<(&str, String)>, key: &'static str) -> &'f mut String {
+    let index = fields
+        .iter()
+        .position(|(other, _)| *other == key)
+        .unwrap_or_else(|| {
+            fields.push((key, String::new()));
+            fields.len() - 1
+        });
+    &mut fields[index].1
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,12 +1245,7 @@ fn name_score(terms: &[String], name: &str) -> f32 {
     5.0
 }
 
-fn entity_score(
-    query: &SearchQuery,
-    primary: &str,
-    name: &str,
-    fields: &BTreeMap<String, String>,
-) -> f32 {
+fn entity_score(query: &SearchQuery, primary: &str, name: &str, fields: &SearchFields) -> f32 {
     let folded = normalize_for_search(name);
     let terms: Vec<_> = query
         .terms
@@ -1272,10 +1260,9 @@ fn entity_score(
                 && !folded.contains(&term.value)
                 && ((term.value.len() == 4
                     && term.value.chars().all(|ch| ch.is_ascii_digit())
-                    && fields.get("year").is_some_and(|year| year == &term.value))
+                    && fields.get("year").is_some_and(|year| year == term.value))
                     || fields.get("root").is_some_and(|root| {
-                        root == &term.value
-                            || root.split_whitespace().any(|word| word == term.value)
+                        root == term.value || root.split_whitespace().any(|word| word == term.value)
                     }));
             !context
         })
@@ -1309,11 +1296,7 @@ fn entity_score(
     tier + partial / 10.0 + spelling_penalty
 }
 
-fn metadata_score(
-    query: &SearchQuery,
-    fields: &BTreeMap<String, String>,
-    include_title: bool,
-) -> f32 {
+fn metadata_score(query: &SearchQuery, fields: &SearchFields, include_title: bool) -> f32 {
     if query.matches_with(
         fields,
         |key| {
@@ -1336,7 +1319,7 @@ fn metadata_score(
 
 fn hidden_match_detail(
     query: &SearchQuery,
-    fields: &BTreeMap<String, String>,
+    fields: &SearchFields,
     visible: &[(&str, &str)],
 ) -> String {
     let mut reasons = Vec::new();
@@ -1371,7 +1354,7 @@ fn hidden_match_detail(
         ];
         if let Some(field) = priority.iter().find(|field| {
             fields
-                .get(**field)
+                .get(field)
                 .is_some_and(|value| term.matches(field, value))
         }) {
             let label = match *field {
@@ -1417,25 +1400,27 @@ fn search_tracks_prepared(
     let mut accumulator = SearchRowAccumulator::new(roots.to_vec());
     let mut ranked = std::collections::BinaryHeap::<RankedSearchRow>::new();
     let cancel_poll_rows = search_cancel_poll_rows();
-    for (index, track) in prepared.tracks.iter().enumerate() {
+    for (index, entry) in prepared.tracks.iter().enumerate() {
         if index % cancel_poll_rows == 0 {
             if let Some(next) = poll_latest_search_query(query_rx) {
                 return PreparedSearchOutcome::Cancelled(next);
             }
         }
-        if !query.matches(&track.fields) {
+        if !query.matches(&entry.fields) {
             continue;
         }
-        let score = entity_score(&query, "title", &track.title, &track.fields);
+        let track = &entry.track;
+        let title = track.title.trim();
+        let score = entity_score(&query, "title", title, &entry.fields);
         let hit = LibrarySearchTrack {
             path: track.path.clone(),
             root_path: track.root_path.clone(),
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-            album: track.album.clone(),
+            title: title.to_string(),
+            artist: track.artist.trim().to_string(),
+            album: track.album.trim().to_string(),
             cover_path: track.cover_path.clone(),
             cover_stamp: track.cover_stamp,
-            genre: track.genre.clone(),
+            genre: track.genre.trim().to_string(),
             year: track.year,
             track_no: track.track_no,
             duration_secs: track.duration_secs,
@@ -1443,10 +1428,10 @@ fn search_tracks_prepared(
         };
         // Collect every matching group before bounding track rows: one large
         // album must not consume the candidate budget for all other albums.
-        if let Some(mut row) = accumulator.push_hit(&hit, &query, &track.fields) {
+        if let Some(mut row) = accumulator.push_hit(&hit, &query, &entry.fields) {
             row.match_detail = hidden_match_detail(
                 &query,
-                &track.fields,
+                &entry.fields,
                 &[
                     ("root", &row.root_label),
                     ("title", &hit.title),
@@ -2291,17 +2276,11 @@ mod tests {
         let mut prefix = fixture_track("Blue Skies", "Example", "Songs", "02");
         prefix.genre = "Jazz".into();
         let mut comment = fixture_track("Blue", "Example", "Other", "03");
-        comment
-            .search_tags
-            .insert("comment".into(), vec!["jazz".into()]);
+        comment.search_tags.insert("comment", ["jazz"]);
         let mut comment_prefix = fixture_track("Blue Skies", "Example", "Other", "04");
-        comment_prefix
-            .search_tags
-            .insert("comment".into(), vec!["jazz".into()]);
+        comment_prefix.search_tags.insert("comment", ["jazz"]);
         let mut comment_only = fixture_track("Another Song", "Example", "Other", "05");
-        comment_only
-            .search_tags
-            .insert("comment".into(), vec!["blue jazz".into()]);
+        comment_only.search_tags.insert("comment", ["blue jazz"]);
         let path = fixture_track("Blue", "Example", "Other", "jazz");
         let rows = fixture_search(
             "jazz blue",
@@ -2442,9 +2421,7 @@ mod tests {
     #[test]
     fn lyric_matches_return_tracks_without_promoting_the_parent_album() {
         let mut track = fixture_track("Song", "Artist", "From the North", "01");
-        track
-            .search_tags
-            .insert("lyrics".into(), vec!["you lose".into()]);
+        track.search_tags.insert("lyrics", ["you lose"]);
         for query in ["you lose", "lyrics:lose"] {
             let rows = fixture_search(query, vec![track.clone()], 20);
             assert_eq!(rows.len(), 1);
@@ -2635,7 +2612,7 @@ mod tests {
             extra.path = p(&format!("/music/Artist/Album/{section}/02.flac"));
             extra
                 .search_tags
-                .insert("comment".into(), vec!["Anniversary remaster".into()]);
+                .insert("comment", ["Anniversary remaster"]);
             let rows = fixture_search("comment:remaster", vec![main, extra], 20);
             assert!(rows.iter().any(|row| {
                 row.row_type == BridgeSearchResultRowType::Track && row.label == "Extra"
@@ -2654,11 +2631,9 @@ mod tests {
         let mut comment = fixture_track("Intro", "A", "A", "01");
         comment
             .search_tags
-            .insert("comment".into(), vec!["blue ".repeat(1000)]);
+            .insert("comment", ["blue ".repeat(1000)]);
         let mut lyrics = fixture_track("Another Song", "B", "B", "01");
-        lyrics
-            .search_tags
-            .insert("lyrics".into(), vec!["blue ".repeat(1000)]);
+        lyrics.search_tags.insert("lyrics", ["blue ".repeat(1000)]);
         let rows = fixture_search(
             "blue",
             vec![comment, lyrics, fixture_track("Blue", "C", "C", "01")],
@@ -2743,5 +2718,268 @@ mod tests {
             panic!("warmup cancelled query")
         };
         assert_eq!(rows.track_count, 1);
+    }
+
+    /// The normalized fields of `track` as the index built them in a map
+    /// of its own, before it kept them compactly.
+    fn fields_as_a_map(
+        track: &LibraryTrack,
+        roots_by_path: &HashMap<PathBuf, PreparedSearchRoot>,
+    ) -> std::collections::BTreeMap<String, String> {
+        let relative_path = track
+            .path
+            .strip_prefix(&track.root_path)
+            .ok()
+            .filter(|relative| {
+                !track.root_path.as_os_str().is_empty() && !relative.as_os_str().is_empty()
+            })
+            .unwrap_or(&track.path);
+        let path_n = normalize_for_search(&relative_path.to_string_lossy());
+        let mut fields: std::collections::BTreeMap<String, String> = track
+            .search_tags
+            .iter()
+            .map(|(key, values)| {
+                let values: Vec<_> = values.collect();
+                (key.to_string(), normalize_for_search(&values.join(" ")))
+            })
+            .collect();
+        for (key, value) in [
+            ("title", normalize_for_search(track.title.trim())),
+            ("artist", normalize_for_search(track.artist.trim())),
+            ("album", normalize_for_search(track.album.trim())),
+            ("genre", normalize_for_search(track.genre.trim())),
+            ("path", path_n),
+        ] {
+            let field = fields.entry(key.into()).or_default();
+            field.push(' ');
+            field.push_str(&value);
+        }
+        if let Some(year) = track.year {
+            fields.insert("year".into(), year.to_string());
+        }
+        if let Some(number) = track.track_no {
+            fields.insert("track".into(), number.to_string());
+        }
+        if let Some(root) = roots_by_path.get(&track.root_path) {
+            fields.insert("root".into(), normalize_for_search(&root.root_label));
+        }
+        fields
+    }
+
+    #[test]
+    fn prepared_fields_are_the_normalized_fields_of_the_track_and_its_tags() {
+        let roots = vec![LibraryRoot {
+            path: p("/music"),
+            name: "Main Library".into(),
+        }];
+        let roots_by_path = roots_by_path_for_search(&roots);
+        let mut plain = fixture_track(" Blue  Sky ", "Ártist", "Album", "01 Blue");
+        plain.genre = "Post-Rock".into();
+        let mut tagged = fixture_track("Song", "Artist", "Album", "02 Song");
+        tagged.year = Some(1997);
+        tagged.track_no = Some(2);
+        tagged.search_tags = crate::library::SearchTags::from([
+            // Known keys, repeated values, and keys the track also has.
+            ("artist".into(), vec!["Second".into(), "First".into()]),
+            ("title".into(), vec!["Sóng (Live)".into()]),
+            ("comment".into(), vec!["Remaster".into(), String::new()]),
+            // Tags with the keys of fields the index sets itself.
+            ("year".into(), vec!["1996".into()]),
+            ("root".into(), vec!["elsewhere".into()]),
+            // Free-form keys, including the case of a known one.
+            ("mood".into(), vec!["Calm".into()]),
+            ("Title".into(), vec!["Other".into()]),
+            (String::new(), vec!["no key".into()]),
+        ]);
+        let mut outside = fixture_track("Lost", "Artist", "Album", "03 Lost");
+        outside.root_path = p("/elsewhere");
+        outside.path = p("/elsewhere/03 Lost.flac");
+        outside.search_tags = crate::library::SearchTags::from([
+            ("year".into(), vec!["2001".into()]),
+            ("track".into(), vec!["7".into()]),
+        ]);
+        let mut rootless = fixture_track("Loose", "", "", "04 Loose");
+        rootless.root_path = PathBuf::new();
+        for track in [plain, tagged, outside, rootless] {
+            let track = Arc::new(track);
+            let entry = prepare_search_track(&track, &roots_by_path);
+            let fields: std::collections::BTreeMap<String, String> = entry
+                .fields
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect();
+            let expected = fields_as_a_map(&track, &roots_by_path);
+            assert_eq!(fields, expected, "{}", track.path.display());
+            assert_eq!(entry.fields.len(), expected.len());
+            for (key, value) in &expected {
+                assert_eq!(entry.fields.get(key), Some(value.as_str()), "{key}");
+            }
+            assert!(Arc::ptr_eq(&entry.track, &track));
+        }
+    }
+
+    /// `count` tracks with the tags a typical library has.
+    fn typical_tracks(count: usize) -> Vec<Arc<LibraryTrack>> {
+        (0..count)
+            .map(|index| {
+                let artist = format!("Artist {}", index % 50);
+                let album = format!("Album {}", index % 200);
+                let title = format!("Song {index}");
+                let mut tags = vec![
+                    ("album".to_string(), vec![album.clone()]),
+                    ("albumartist".to_string(), vec![artist.clone()]),
+                    ("artist".to_string(), vec![artist.clone()]),
+                    ("date".to_string(), vec![(1970 + index % 50).to_string()]),
+                    ("disc".to_string(), vec!["1".to_string()]),
+                    ("genre".to_string(), vec!["Rock".to_string()]),
+                    ("title".to_string(), vec![title.clone()]),
+                ];
+                if index % 4 == 0 {
+                    tags.push(("comment".to_string(), vec!["Remastered 2011".to_string()]));
+                }
+                Arc::new(LibraryTrack {
+                    search_tags: crate::library::SearchTags::from(
+                        tags.into_iter()
+                            .collect::<std::collections::BTreeMap<_, _>>(),
+                    ),
+                    path: p(&format!(
+                        "/music/{artist}/{album}/{:02} {title}.flac",
+                        index % 12
+                    )),
+                    root_path: p("/music"),
+                    cover_path: format!("/music/{artist}/{album}/cover.jpg"),
+                    genre: "Rock".into(),
+                    year: Some(1970 + i32::try_from(index % 50).expect("year")),
+                    track_no: Some(u32::try_from(index % 12).expect("track")),
+                    duration_secs: Some(200.0),
+                    title,
+                    artist,
+                    album,
+                    ..LibraryTrack::default()
+                })
+            })
+            .collect()
+    }
+
+    /// What `build` returns, with the bytes and allocations it holds on the
+    /// heap.
+    fn held<T>(build: impl FnOnce() -> T) -> (T, isize, isize) {
+        let (bytes, allocations) = (
+            crate::test_alloc::live_bytes(),
+            crate::test_alloc::live_allocations(),
+        );
+        let value = build();
+        (
+            value,
+            crate::test_alloc::live_bytes() - bytes,
+            crate::test_alloc::live_allocations() - allocations,
+        )
+    }
+
+    /// The index entry as it was before the index kept its fields compactly
+    /// and shared the track's details: a copy of the details with a map of
+    /// fields, in an `Arc` of its own.
+    type EntryAsBefore = Arc<(
+        Arc<(
+            (PathBuf, PathBuf, String, String, String, String, String),
+            (u64, Option<i32>, Option<u32>, Option<f32>),
+            std::collections::BTreeMap<String, String>,
+        )>,
+        Option<AlbumMembership>,
+    )>;
+
+    #[test]
+    fn tags_and_index_entries_hold_a_fraction_of_the_heap_of_maps_and_copies() {
+        const TRACKS: usize = 2_000;
+        let tracks = typical_tracks(TRACKS);
+        let roots_by_path = roots_by_path_for_search(&[library_root(&p("/music"))]);
+
+        let (maps, map_bytes, map_allocations) = held(|| {
+            tracks
+                .iter()
+                .map(|track| {
+                    track
+                        .search_tags
+                        .iter()
+                        .map(|(key, values)| (key.to_string(), values.map(String::from).collect()))
+                        .collect::<std::collections::BTreeMap<String, Vec<String>>>()
+                })
+                .collect::<Vec<_>>()
+        });
+        let (tags, tag_bytes, tag_allocations) = held(|| {
+            tracks
+                .iter()
+                .map(|track| track.search_tags.clone())
+                .collect::<Vec<_>>()
+        });
+        assert!(tags
+            .iter()
+            .zip(&maps)
+            .all(|(tags, map)| *tags == map.clone().into()));
+        let tag_heap: usize = tags
+            .iter()
+            .map(crate::library::SearchTags::heap_bytes)
+            .sum();
+        let tag_inline = TRACKS * std::mem::size_of::<crate::library::SearchTags>();
+        assert_eq!(
+            usize::try_from(tag_bytes).expect("bytes"),
+            tag_heap + tag_inline
+        );
+
+        let (entries, entry_bytes, entry_allocations) = held(|| {
+            tracks
+                .iter()
+                .map(|track| Arc::new(prepare_search_track(track, &roots_by_path)))
+                .collect::<Vec<_>>()
+        });
+        let (before, before_bytes, before_allocations) = held(|| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let track = &entry.track;
+                    let fields = entry
+                        .fields
+                        .iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect();
+                    Arc::new((
+                        Arc::new((
+                            (
+                                track.path.clone(),
+                                track.root_path.clone(),
+                                track.title.trim().to_string(),
+                                track.artist.trim().to_string(),
+                                track.album.trim().to_string(),
+                                track.cover_path.clone(),
+                                track.genre.trim().to_string(),
+                            ),
+                            (
+                                track.cover_stamp,
+                                track.year,
+                                track.track_no,
+                                track.duration_secs,
+                            ),
+                            fields,
+                        )),
+                        entry.album.clone(),
+                    ))
+                })
+                .collect::<Vec<EntryAsBefore>>()
+        });
+        assert_eq!(before.len(), entries.len());
+
+        eprintln!(
+            "{TRACKS} tracks: tags {map_bytes} B in {map_allocations} allocations as maps, \
+             {tag_bytes} B in {tag_allocations} compact; index entries {before_bytes} B in \
+             {before_allocations} allocations as copies with maps, {entry_bytes} B in \
+             {entry_allocations} compact and shared"
+        );
+        assert!(tag_bytes * 3 < map_bytes, "{tag_bytes} against {map_bytes}");
+        assert!(tag_allocations * 5 < map_allocations);
+        assert!(
+            entry_bytes * 2 < before_bytes,
+            "{entry_bytes} against {before_bytes}"
+        );
+        assert!(entry_allocations * 3 < before_allocations);
     }
 }
