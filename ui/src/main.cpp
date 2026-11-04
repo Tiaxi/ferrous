@@ -9,6 +9,7 @@
 #include <QWindow>
 
 #include <cstdio>
+#include <cstdlib>
 
 #if defined(Q_OS_UNIX)
 #include <unistd.h>
@@ -20,12 +21,15 @@
 #include "CoverImageProvider.h"
 #include "DiagnosticsLog.h"
 #include "DisplaySleepInhibitor.h"
+#include "HeapAllocator.h"
+#include "HeapTrimmer.h"
 #include "LibraryTreeModel.h"
 #include "Localization.h"
 #include "MprisController.h"
 #include "QmlTypes.h"
 #include "TagEditorController.h"
 #include "WindowActivation.h"
+#include "WindowPresence.h"
 
 namespace {
 
@@ -40,6 +44,8 @@ bool hasInstalledDesktopEntry(const QString &desktopFileName) {
 } // namespace
 
 int main(int argc, char *argv[]) {
+    // Before Qt, GStreamer or the Rust library start a thread.
+    FerrousHeap::configureAllocator(std::getenv("GLIBC_TUNABLES"));
     QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
     QApplication app(argc, argv);
     FerrousLocalization::setUpApplicationDomain();
@@ -74,6 +80,12 @@ int main(int argc, char *argv[]) {
     instanceController.setOpenHandler([&bridge](const QStringList &paths) {
         bridge.replaceWithPaths(paths);
     });
+    // Trims after the releases that leave much free memory in the arenas.
+    HeapTrimmer heapTrimmer;
+    QObject::connect(&bridge, &BridgeClient::trackIdentityChanged,
+        &heapTrimmer, &HeapTrimmer::requestTrim);
+    QObject::connect(&bridge, &BridgeClient::snapshotChanged, &heapTrimmer,
+        [&heapTrimmer, &bridge]() { heapTrimmer.setQueueLength(bridge.queueLength()); });
     MprisController mpris(&bridge);
     DisplaySleepInhibitor displaySleepInhibitor;
     LibraryTreeModel libraryModel;
@@ -99,7 +111,14 @@ int main(int argc, char *argv[]) {
 
     engine.loadFromModule("FerrousUi", "Main");
     if (!engine.rootObjects().isEmpty()) {
-        setMainActivationWindow(qobject_cast<QWindow *>(engine.rootObjects().constFirst()));
+        auto *mainWindow = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
+        setMainActivationWindow(mainWindow);
+        if (mainWindow != nullptr) {
+            WindowPresence *presence = WindowPresence::of(mainWindow);
+            QObject::connect(presence, &WindowPresence::shownChanged, &heapTrimmer,
+                [&heapTrimmer, presence]() { heapTrimmer.setWindowShown(presence->shown()); });
+            heapTrimmer.setWindowShown(presence->shown());
+        }
     }
     return app.exec();
 }
