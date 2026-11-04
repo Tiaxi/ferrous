@@ -1988,6 +1988,10 @@ bool BridgeClient::spectrogramZoomEnabled() const {
     return m_spectrogramZoomEnabled;
 }
 
+bool BridgeClient::spectrogramFrequencyCap() const {
+    return m_spectrogramFrequencyCap;
+}
+
 bool BridgeClient::systemMediaControlsEnabled() const {
     return m_systemMediaControlsEnabled;
 }
@@ -2501,6 +2505,16 @@ void BridgeClient::setSpectrogramZoomEnabled(bool value) {
     }
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
         BinaryBridgeCodec::CmdSetSpectrogramZoomEnabled,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setSpectrogramFrequencyCap(bool value) {
+    if (m_spectrogramFrequencyCap != value) {
+        m_spectrogramFrequencyCap = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetSpectrogramFrequencyCap,
         static_cast<quint8>(value ? 1 : 0)));
 }
 
@@ -4690,8 +4704,9 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [47]     u8   buffer_reset
     // [48]     u8   clear_history
     // [49..53] u32  widget_width (the session's; 0 = unknown)
-    // [53..]   column_data
-    constexpr int kHeaderLen = 53;
+    // [53..57] u32  fft_size (a bin is sample_rate / fft_size Hz; 0 = unknown)
+    // [57..]   column_data
+    constexpr int kHeaderLen = 57;
     if (raw.size() < kHeaderLen) {
         return stats;
     }
@@ -4739,6 +4754,8 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const bool clearHistory = d[base + 44] != 0;
     const int widgetWidth = static_cast<int>(
         std::min<quint32>(readU32(base + 45), std::numeric_limits<int>::max()));
+    const int fftSize = static_cast<int>(
+        std::min<quint32>(readU32(base + 49), std::numeric_limits<int>::max()));
 
     const int dataOffset = kHeaderLen;
     const qint64 expectedDataLen =
@@ -4762,6 +4779,7 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     stats.trackToken = trackToken;
     stats.generation = generation;
     stats.widgetWidth = widgetWidth;
+    stats.fftSize = fftSize;
     stats.dataBytes = static_cast<qsizetype>(expectedDataLen);
 
     QElapsedTimer dispatchTimer;
@@ -4826,7 +4844,8 @@ void BridgeClient::routePrecomputedSpectrogramFrame(
             stats.trackToken,
             stats.clearHistory,
             stats.generation,
-            stats.widgetWidth);
+            stats.widgetWidth,
+            stats.fftSize);
     }
 }
 
@@ -5804,6 +5823,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : m_spectrogramZoomEnabled;
     if (m_spectrogramZoomEnabled != spectrogramZoomEnabled) {
         m_spectrogramZoomEnabled = spectrogramZoomEnabled;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool spectrogramFrequencyCap = snapshot.settings.present
+        ? snapshot.settings.spectrogramFrequencyCap
+        : m_spectrogramFrequencyCap;
+    if (m_spectrogramFrequencyCap != spectrogramFrequencyCap) {
+        m_spectrogramFrequencyCap = spectrogramFrequencyCap;
         changed = true;
         snapshotSignalChanged = true;
     }

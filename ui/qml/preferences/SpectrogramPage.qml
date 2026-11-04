@@ -153,6 +153,22 @@ ScrollView {
                 }
 
                 CheckBox {
+                    objectName: "spectrogramFrequencyCapCheckBox"
+                    text: I18n.i18nc("@option:check", "Limit to 22.05/24 kHz")
+                    checked: root.uiBridge.spectrogramFrequencyCap
+                    onToggled: root.uiBridge.setSpectrogramFrequencyCap(checked)
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 32
+                    wrapMode: Text.Wrap
+                    color: Kirigami.Theme.disabledTextColor
+                    font: Kirigami.Theme.smallFont
+                    text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz family and 24 kHz for others, instead of up to half their sample rate.")
+                }
+
+                CheckBox {
                     text: I18n.i18nc("@option:check", "Show Visualization FPS Overlay")
                     checked: root.uiBridge.showFps
                     onToggled: root.uiBridge.setShowFps(checked)

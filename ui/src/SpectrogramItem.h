@@ -292,7 +292,11 @@ public:
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
     // `sessionWidth` is the width the chunk's session decodes for (0 if
-    // unknown); the ring holds at least what that width needs.
+    // unknown); the ring holds at least what that width needs. `fftSize` is
+    // the FFT size of the columns' spectra (0 if unknown, for bins of the
+    // whole spectrum up to Nyquist): a session with the frequency cap on
+    // sends fewer bins than `fftSize / 2 + 1`, each still
+    // `sampleRate / fftSize` Hz wide.
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
@@ -300,7 +304,8 @@ public:
         bool bufferReset, quint64 trackToken = 0,
         bool clearHistoryOnReset = false,
         quint64 generation = 0,
-        int sessionWidth = 0);
+        int sessionWidth = 0,
+        int fftSize = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -560,6 +565,14 @@ private:
         double columnsPerSecond) const;
     double pixelToFrequencyHzLocked(int pixelY, int viewHeight) const;
     int frequencyToPixelYLocked(double freqHz, int viewHeight) const;
+    // The width of a bin, in Hz, of the columns the mapping is for.
+    double binHzLocked() const;
+    // The frequency of the top bin those columns hold: Nyquist, or with the
+    // frequency cap, the cap.
+    double topFrequencyHzLocked() const;
+    // Whether the ring's columns have the bin count the projection reads:
+    // the rasterizers draw ring columns only then.
+    bool ringMatchesProjectionLocked() const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
@@ -587,6 +600,7 @@ private:
         int hopSize{0};
         int sampleRateHz{0};
         int binsPerColumn{0};
+        int fftSize{0};
         bool zoomFillActive{false};
         bool awaitingZoomData{false};
         bool resetPending{false};
@@ -635,6 +649,9 @@ private:
     int m_playbackSampleRateHz{48000};
     int m_maxColumns{640};
     int m_binsPerColumn{0};
+    // The FFT size of the columns the mapping is for, or 0 when their bins
+    // are the whole spectrum of a (m_binsPerColumn - 1) × 2 point FFT.
+    int m_fftSize{0};
 
     std::array<QRgb, kGradientTableSize> m_palette32{};
     std::array<QRgb, kGradientTableSize> m_palette32Gray{};
@@ -736,6 +753,8 @@ private:
     qint32 m_precomputedMaxColumnIndex{-1}; // highest column for current token
     bool m_awaitingWorkerReset{false};    // block data until worker's proper reset
     int m_precomputedBinsPerColumn{0};
+    // The FFT size of the analysis columns (0 if unknown).
+    int m_precomputedFftSize{0};
     int m_precomputedTotalColumnsEstimate{0};
     int m_precomputedSampleRateHz{44100};
     // Whether an analysis chunk has set m_precomputedSampleRateHz.

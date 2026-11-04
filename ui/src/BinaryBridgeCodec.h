@@ -154,6 +154,9 @@ enum CommandId : quint16 {
     // The queue's resized column widths and the generation of the request,
     // which SectionSettings echoes; see encodeCommandQueueColumnWidths.
     CmdSetQueueColumnWidths = 72,
+    // Whether the spectrogram shows only the audible band of the track's
+    // rate family (u8); changing it restarts the analysis session.
+    CmdSetSpectrogramFrequencyCap = 73,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -379,6 +382,7 @@ struct DecodedSettings {
     int channelButtonsVisibility{1};
     bool spectrogramZoomEnabled{true};
     bool libraryWatchEnabled{true};
+    bool spectrogramFrequencyCap{false};
     // Whether the section ended with the queue's column widths, which
     // older backends do not send, and the generation of the latest widths
     // the UI sent that the backend had taken.

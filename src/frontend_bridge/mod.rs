@@ -311,6 +311,9 @@ pub enum BridgeSettingsCommand {
     SaveToDisk,
     SetVolume(f32),
     SetFftSize(usize),
+    /// Whether the spectrogram shows only the audible band of the track's
+    /// rate family, up to 22.05 or 24 kHz, instead of up to Nyquist.
+    SetSpectrogramFrequencyCap(bool),
     SetSpectrogramViewMode(SpectrogramViewMode),
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     SetViewerFullscreenMode(ViewerFullscreenMode),
@@ -541,6 +544,9 @@ pub struct BridgeDisplaySettings {
     pub show_spectrogram_scale: bool,
     pub channel_buttons_visibility: u8,
     pub spectrogram_zoom_enabled: bool,
+    /// Whether the spectrogram shows only the audible band of the track's
+    /// rate family (22.05 kHz for the 44.1 kHz family, 24 kHz otherwise).
+    pub spectrogram_frequency_cap: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -596,6 +602,7 @@ impl Default for BridgeSettings {
                 show_spectrogram_scale: false,
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
+                spectrogram_frequency_cap: false,
             },
             library_sort_mode: LibrarySortMode::Year,
             library_watch_enabled: true,
@@ -2683,6 +2690,9 @@ fn restore_initial_bridge_state(
     analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
         state.settings.spectrogram_display_mode,
     ));
+    analysis.command(AnalysisCommand::SetSpectrogramFrequencyCap(
+        state.settings.display.spectrogram_frequency_cap,
+    ));
     analysis.command(AnalysisCommand::SetFftSize(state.settings.fft_size));
     analysis.command(AnalysisCommand::SetSpectrogramViewMode(
         state.settings.spectrogram_view_mode,
@@ -3530,6 +3540,26 @@ mod tests {
                 &event_tx,
             );
             assert_eq!(runtime.state.settings.display.show_level_meter, enabled);
+            assert!(runtime.flags.settings_dirty);
+        }
+    }
+
+    #[test]
+    fn frequency_cap_command_updates_setting_and_marks_it_for_persistence() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        assert!(!runtime.state.settings.display.spectrogram_frequency_cap);
+        for enabled in [true, false] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetSpectrogramFrequencyCap(enabled)),
+                &event_tx,
+            );
+            assert_eq!(
+                runtime.state.settings.display.spectrogram_frequency_cap,
+                enabled
+            );
             assert!(runtime.flags.settings_dirty);
         }
     }
@@ -6589,6 +6619,7 @@ mod tests {
             total_columns_estimate: 4,
             sample_rate_hz: 44_100,
             hop_size: 1_024,
+            fft_size: 0,
             coverage_seconds: 0.05,
             complete: false,
             buffer_reset: false,
@@ -6606,6 +6637,7 @@ mod tests {
             total_columns_estimate: 4,
             sample_rate_hz: 44_100,
             hop_size: 1_024,
+            fft_size: 0,
             coverage_seconds: 0.10,
             complete: false,
             buffer_reset: false,

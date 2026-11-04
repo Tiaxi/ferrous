@@ -18,6 +18,7 @@ use super::decoders::{
     AudioTimeline, TrackLength,
 };
 use super::fft::{PeakHoldResampler, StftComputer};
+use super::frequency_cap::shown_bins;
 use super::output::{AnalysisEventOutput, AnalysisOutputs};
 use super::quantize::append_quantized_row;
 use super::retention::{lookahead_seconds, SpectrogramBufferConfig, SpectrogramBufferLimits};
@@ -232,6 +233,9 @@ pub(super) enum SpectrogramWorkerCommand {
         generation: u64,
         path: PathBuf,
         fft_size: usize,
+        /// Whether the session sends only the bins up to its rate family's
+        /// frequency cap.
+        frequency_cap: bool,
         zoom_level: f32,
         widget_width: u32,
         channel_count: usize,
@@ -436,6 +440,7 @@ impl StagingChunkState {
             total_columns_estimate: self.total_columns_estimate,
             sample_rate_hz: self.effective_rate,
             hop_size: u32::try_from(self.effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(self.fft_size).unwrap_or(u32::MAX),
             coverage_seconds: coverage,
             complete: false,
             buffer_reset: false,
@@ -521,6 +526,7 @@ fn staging_drain_stft_rows(
                 total_columns_estimate: state.total_columns_estimate,
                 sample_rate_hz: state.effective_rate,
                 hop_size: u32::try_from(state.effective_hop).unwrap_or(u32::MAX),
+                fft_size: u32::try_from(state.fft_size).unwrap_or(u32::MAX),
                 coverage_seconds: coverage,
                 complete: false,
                 buffer_reset: false,
@@ -549,6 +555,7 @@ fn staging_drain_stft_rows(
 fn centered_staging_decode(
     path: &Path,
     fft_size: usize,
+    frequency_cap: bool,
     zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: &AtomicBool,
@@ -568,7 +575,7 @@ fn centered_staging_decode(
         SpectrogramViewMode::Downmix => 1,
         SpectrogramViewMode::PerChannel => native_channels,
     };
-    let bins_per_column = (fft_size / 2) + 1;
+    let bins_per_column = shown_bins(fft_size, effective_rate, frequency_cap);
     let ColumnHops {
         stft_hop: hop_size,
         output_interval,
@@ -663,6 +670,7 @@ fn centered_staging_decode(
 pub(super) fn spawn_centered_staging_worker(
     path: PathBuf,
     fft_size: usize,
+    frequency_cap: bool,
     zoom_level: f32,
     view_mode: SpectrogramViewMode,
     stop: Arc<AtomicBool>,
@@ -674,7 +682,15 @@ pub(super) fn spawn_centered_staging_worker(
         if let Some(gate) = open_gate {
             let _ = gate.recv();
         }
-        centered_staging_decode(&path, fft_size, zoom_level, view_mode, &stop, &tx);
+        centered_staging_decode(
+            &path,
+            fft_size,
+            frequency_cap,
+            zoom_level,
+            view_mode,
+            &stop,
+            &tx,
+        );
     })?;
     Some((rx, thread))
 }
@@ -1160,6 +1176,7 @@ fn run_spectrogram_session(
         generation: gen,
         ref path,
         fft_size,
+        frequency_cap,
         zoom_level,
         widget_width,
         channel_count: requested_channel_count,
@@ -1182,7 +1199,6 @@ fn run_spectrogram_session(
         path.file_name().unwrap_or_default().to_string_lossy(),
     );
 
-    let bins_per_column = (fft_size / 2) + 1;
     let Some((mut source, native_sample_rate, native_channels, length)) = open_audio_file(path)
     else {
         let cause = match std::fs::File::open(path) {
@@ -1210,6 +1226,7 @@ fn run_spectrogram_session(
     );
 
     let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
+    let bins_per_column = shown_bins(fft_size, effective_rate, frequency_cap);
 
     publish_track_length(length, effective_rate, track_duration_ms_out);
     let _ = reports.send(SessionReport::Opened {
@@ -1364,6 +1381,7 @@ fn run_spectrogram_session(
             total_columns_estimate,
             sample_rate_hz: effective_rate,
             hop_size: u32::try_from(effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(fft_size).unwrap_or(u32::MAX),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: emit_initial_reset,
@@ -1591,6 +1609,7 @@ fn fail_session(
             total_columns_estimate: 0,
             sample_rate_hz: 0,
             hop_size: 0,
+            fft_size: 0,
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
@@ -2312,6 +2331,7 @@ fn handle_session_seek(
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
             hop_size: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(session.fft_size).unwrap_or(u32::MAX),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
@@ -2817,6 +2837,7 @@ fn session_send_full_chunk(
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
             hop_size: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(session.fft_size).unwrap_or(u32::MAX),
             coverage_seconds: coverage,
             complete: false,
             buffer_reset: false,
@@ -3023,6 +3044,7 @@ fn session_emit_pending_chunk(
                 total_columns_estimate: session.total_columns_estimate,
                 sample_rate_hz: session.effective_rate,
                 hop_size: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+                fft_size: u32::try_from(session.fft_size).unwrap_or(u32::MAX),
                 coverage_seconds: coverage,
                 complete: false,
                 buffer_reset: false,
@@ -3064,6 +3086,7 @@ fn session_flush_token(
             total_columns_estimate: session.total_columns_estimate,
             sample_rate_hz: session.effective_rate,
             hop_size: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(session.fft_size).unwrap_or(u32::MAX),
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: false,
@@ -3106,6 +3129,7 @@ fn session_emit_finalize_chunk(
             total_columns_estimate: final_cols,
             sample_rate_hz: session.effective_rate,
             hop_size: u32::try_from(session.effective_hop).unwrap_or(u32::MAX),
+            fft_size: u32::try_from(session.fft_size).unwrap_or(u32::MAX),
             coverage_seconds: 0.0,
             complete: true,
             buffer_reset: false,
@@ -3182,6 +3206,7 @@ mod tests {
                         generation: 1,
                         path: path.clone(),
                         fft_size: 512,
+                        frequency_cap: false,
                         zoom_level: 1.0,
                         widget_width: 320,
                         channel_count: 1,
@@ -3354,6 +3379,7 @@ mod tests {
             generation,
             path: path.to_path_buf(),
             fft_size: 512,
+            frequency_cap: false,
             zoom_level: 1.0,
             widget_width: 320,
             channel_count: 1,
@@ -3446,6 +3472,7 @@ mod tests {
                     generation: 1,
                     path: file,
                     fft_size: 512,
+                    frequency_cap: false,
                     zoom_level: 1.0,
                     widget_width: 320,
                     channel_count: 1,
@@ -3599,6 +3626,7 @@ mod tests {
                     generation: 1,
                     path: path.clone(),
                     fft_size: fft,
+                    frequency_cap: false,
                     zoom_level: zoom,
                     widget_width: 320,
                     channel_count: 2,
@@ -3785,6 +3813,7 @@ mod tests {
             generation: 1,
             path: path.clone(),
             fft_size: fft,
+            frequency_cap: false,
             zoom_level: zoom,
             widget_width: 320,
             channel_count: 1,
@@ -4547,6 +4576,7 @@ mod tests {
             generation: 2,
             path: PathBuf::from("/tmp/manual.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 1.0,
             widget_width: 1920,
             channel_count: 1,
@@ -4575,6 +4605,7 @@ mod tests {
             generation: 2,
             path: PathBuf::from("/tmp/intermediate.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 0.5,
             widget_width: 1920,
             channel_count: 1,
@@ -4592,6 +4623,7 @@ mod tests {
             generation: 3,
             path: PathBuf::from("/tmp/final.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 0.1,
             widget_width: 1920,
             channel_count: 1,
@@ -4636,6 +4668,7 @@ mod tests {
             generation: 2,
             path: PathBuf::from("/tmp/intermediate.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 0.5,
             widget_width: 1920,
             channel_count: 1,
@@ -4652,6 +4685,7 @@ mod tests {
             generation: 3,
             path: PathBuf::from("/tmp/final.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 0.1,
             widget_width: 1920,
             channel_count: 1,
@@ -4689,6 +4723,7 @@ mod tests {
             generation: 2,
             path: PathBuf::from("/tmp/intermediate.flac"),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 0.5,
             widget_width: 1920,
             channel_count: 1,
@@ -4981,6 +5016,7 @@ mod tests {
             generation,
             path: PathBuf::from(path),
             fft_size: 2_048,
+            frequency_cap: false,
             zoom_level: 1.0,
             widget_width: 1920,
             channel_count: 1,
@@ -5998,6 +6034,7 @@ mod tests {
             total_columns_estimate: 300,
             sample_rate_hz: 8_000,
             hop_size: 1024,
+            fft_size: 512,
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
@@ -6889,6 +6926,7 @@ mod tests {
         centered_staging_decode(
             &path,
             512,
+            false,
             8.0,
             SpectrogramViewMode::Downmix,
             &AtomicBool::new(false),
@@ -6909,6 +6947,108 @@ mod tests {
             assert_eq!(loudest_column(&columns, click / 64, 32), click / 64);
         }
         std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    /// The columns of `chunks`, by absolute column, after checking that
+    /// each chunk with columns has `bins` bins of a `fft_size` spectrum for
+    /// `channels` channels.
+    fn columns_of_shape(
+        chunks: &[PrecomputedSpectrogramChunk],
+        bins: usize,
+        fft_size: u32,
+        channels: usize,
+    ) -> std::collections::BTreeMap<u32, Vec<u8>> {
+        let mut columns = std::collections::BTreeMap::new();
+        for chunk in chunks.iter().filter(|chunk| chunk.bins_per_column > 0) {
+            assert_eq!(usize::from(chunk.bins_per_column), bins);
+            assert_eq!(chunk.fft_size, fft_size);
+            assert_eq!(usize::from(chunk.channel_count), channels);
+            let width = bins * channels;
+            assert_eq!(
+                chunk.columns_u8.len(),
+                usize::from(chunk.column_count) * width
+            );
+            for (offset, column) in chunk.columns_u8.chunks_exact(width).enumerate() {
+                columns.insert(
+                    chunk.start_column_index + u32::try_from(offset).unwrap(),
+                    column.to_vec(),
+                );
+            }
+        }
+        columns
+    }
+
+    #[test]
+    fn a_capped_session_sends_the_bins_up_to_its_rate_familys_cap() {
+        // (rate, bins of a 512-point spectrum with the cap): a bin is
+        // rate / 512 Hz, so 96 kHz stops at bin 128 (24 kHz) and 192 kHz
+        // at bin 64; 44.1 kHz is below its cap and keeps all 257.
+        for (rate, capped_bins) in [(96_000, 129), (192_000, 65), (44_100, 257)] {
+            let path = write_surround_fixture(1, rate, 6);
+            for view_mode in [
+                SpectrogramViewMode::PerChannel,
+                SpectrogramViewMode::Downmix,
+            ] {
+                let channels = if view_mode == SpectrogramViewMode::PerChannel {
+                    6
+                } else {
+                    1
+                };
+                let run = |frequency_cap: bool| {
+                    let mut command = session_on(&path, 1, 1);
+                    if let SpectrogramWorkerCommand::NewTrack {
+                        frequency_cap: cap,
+                        view_mode: mode,
+                        channel_count,
+                        ..
+                    } = &mut command
+                    {
+                        *cap = frequency_cap;
+                        *mode = view_mode;
+                        *channel_count = channels;
+                    }
+                    let worker = QueuedWorker::start(vec![command]);
+                    let chunks = worker.chunks_until(|chunk| chunk.complete);
+                    worker.finish();
+                    chunks
+                };
+                let full = columns_of_shape(&run(false), 257, 512, channels);
+                let capped = columns_of_shape(&run(true), capped_bins, 512, channels);
+                assert!(!full.is_empty());
+                assert_eq!(
+                    full.keys().collect::<Vec<_>>(),
+                    capped.keys().collect::<Vec<_>>(),
+                    "{rate} Hz {view_mode:?}"
+                );
+                // The same spectra, each channel's cut at the cap.
+                for (column, bytes) in &full {
+                    let expected: Vec<u8> = bytes
+                        .chunks_exact(257)
+                        .flat_map(|channel| channel[..capped_bins].iter().copied())
+                        .collect();
+                    assert_eq!(
+                        capped[column], expected,
+                        "{rate} Hz {view_mode:?} column {column}"
+                    );
+                }
+            }
+
+            // A centered gapless successor's staged columns are cut too.
+            let (tx, rx) = unbounded();
+            centered_staging_decode(
+                &path,
+                512,
+                true,
+                1.0,
+                SpectrogramViewMode::PerChannel,
+                &AtomicBool::new(false),
+                &tx,
+            );
+            drop(tx);
+            let staged: Vec<_> = rx.try_iter().collect();
+            assert!(!columns_of_shape(&staged, capped_bins, 512, 6).is_empty());
+            std::fs::remove_file(path).expect("remove fixture");
+        }
     }
 
     #[test]

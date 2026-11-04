@@ -7,6 +7,7 @@ mod column_hop;
 pub(crate) use channel_layout::probe_source_channel_labels;
 mod decoders;
 mod fft;
+mod frequency_cap;
 mod output;
 mod quantize;
 pub(crate) mod retention;
@@ -124,6 +125,9 @@ pub enum AnalysisCommand {
     ResetSpectrogram,
     SetSampleRate(u32),
     SetFftSize(usize),
+    /// Whether sessions send only the bins up to their rate family's
+    /// frequency cap (see `frequency_cap`). A change restarts the session.
+    SetSpectrogramFrequencyCap(bool),
     SetSpectrogramZoomLevel(f32),
     SetSpectrogramWidgetWidth(u32),
     SetSpectrogramActive(bool),
@@ -223,6 +227,11 @@ pub struct PrecomputedSpectrogramChunk {
     pub total_columns_estimate: u32,
     pub sample_rate_hz: u32,
     pub hop_size: u32,
+    /// The FFT size of the columns' spectra (0 if unknown). A bin is
+    /// `sample_rate_hz / fft_size` Hz wide: with the frequency cap on, a
+    /// column holds fewer than `fft_size / 2 + 1` bins, so its bin count no
+    /// longer tells the frequency of its bins.
+    pub fft_size: u32,
     pub coverage_seconds: f32,
     pub complete: bool,
     /// When true, the C++ ring buffer should be cleared and the epoch reset.
@@ -346,6 +355,8 @@ struct AnalysisRuntimeState {
     waveform_dirty: bool,
     last_emit: std::time::Instant,
     fft_size: usize,
+    /// Whether sessions send only the bins up to the frequency cap.
+    frequency_cap: bool,
     zoom_level: f32,
     /// Actual pixel width of the spectrogram widget, used to compute
     /// the decode margin and lookahead dynamically.  Updated from the
@@ -677,6 +688,7 @@ impl AnalysisRuntimeState {
             waveform_dirty: false,
             last_emit: std::time::Instant::now(),
             fft_size: 8192,
+            frequency_cap: false,
             zoom_level: 1.0,
             spectrogram_widget_width: 1920,
             spectrogram_session_widget_width: 1920,
@@ -755,6 +767,22 @@ impl AnalysisRuntimeState {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 self.fft_size = size.clamp(512, 8192).next_power_of_two();
+                self.reset_spectrogram_state();
+                self.emit_snapshot(ctx.event_tx, true);
+                let target = self.last_spectrogram_position;
+                let start = self.spectrogram_restart_start_seconds(target, ctx);
+                self.start_spectrogram_session_with_target(start, target, true, true, ctx);
+            }
+            AnalysisCommand::SetSpectrogramFrequencyCap(capped) => {
+                if capped == self.frequency_cap {
+                    return;
+                }
+                // The columns of the band shown so far have another bin
+                // count: a session for the new band replaces them, as one
+                // for another FFT size does.
+                self.clear_early_continuation(ctx);
+                self.cancel_centered_staging();
+                self.frequency_cap = capped;
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
@@ -1128,6 +1156,7 @@ impl AnalysisRuntimeState {
         let Some((rx, thread)) = spawn_centered_staging_worker(
             path.clone(),
             self.fft_size,
+            self.frequency_cap,
             self.zoom_level,
             self.spectrogram_view_mode,
             Arc::clone(&stop),
@@ -1771,6 +1800,7 @@ impl AnalysisRuntimeState {
                 generation,
                 path,
                 fft_size: self.fft_size,
+                frequency_cap: self.frequency_cap,
                 zoom_level: self.zoom_level,
                 widget_width: self.spectrogram_session_widget_width,
                 channel_count: self.active_session_channel_count.max(1),
@@ -1875,7 +1905,12 @@ impl AnalysisRuntimeState {
             width: self.spectrogram_session_widget_width,
             sample_rate: self.current_session_rate(),
             hop: u32::try_from(self.effective_hop_for_current_zoom()?).ok()?,
-            bins: u32::try_from(self.fft_size / 2 + 1).ok()?,
+            bins: u32::try_from(frequency_cap::shown_bins(
+                self.fft_size,
+                self.current_session_rate(),
+                self.frequency_cap,
+            ))
+            .ok()?,
             channels: u32::try_from(self.active_session_channel_count.max(1)).ok()?,
             zoom: f64::from(self.zoom_level),
             centered: true,
@@ -2065,6 +2100,7 @@ impl AnalysisRuntimeState {
             total_columns_estimate: 0,
             sample_rate_hz: 0,
             hop_size: 0,
+            fft_size: 0,
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: true,
@@ -5106,6 +5142,7 @@ mod tests {
                         total_columns_estimate: 100,
                         sample_rate_hz: 48_000,
                         hop_size: 1024,
+                        fft_size: 6,
                         coverage_seconds: 0.0,
                         complete: false,
                         buffer_reset: false,
@@ -5129,6 +5166,7 @@ mod tests {
                     total_columns_estimate: 100,
                     sample_rate_hz: 48_000,
                     hop_size: 1024,
+                    fft_size: 6,
                     coverage_seconds: 0.0,
                     complete: false,
                     buffer_reset: false,
@@ -5166,6 +5204,7 @@ mod tests {
                 total_columns_estimate: 1000,
                 sample_rate_hz: 48_000,
                 hop_size: 1024,
+                fft_size: 6,
                 coverage_seconds: 0.0,
                 complete: false,
                 buffer_reset: false,
@@ -5762,6 +5801,78 @@ mod tests {
         state
     }
 
+    #[test]
+    fn toggling_the_frequency_cap_restarts_the_session_at_the_playhead() {
+        let path = PathBuf::from("/music/96k.flac");
+        for mode in MODES {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(mode, &path);
+            state.active_session_effective_rate = 96_000;
+            state.fft_size = 2_048;
+            state.last_spectrogram_position = 4.0;
+            // Off already: nothing to restart.
+            state.handle_command(AnalysisCommand::SetSpectrogramFrequencyCap(false), &ctx);
+            assert!(channels.spectrogram_cmd_rx.try_recv().is_err(), "{mode:?}");
+            assert_eq!(channels.generation.load(Ordering::Relaxed), 0);
+
+            for (capped, generation) in [(true, 1), (false, 2)] {
+                state.handle_command(AnalysisCommand::SetSpectrogramFrequencyCap(capped), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [SpectrogramWorkerCommand::NewTrack {
+                            frequency_cap,
+                            generation: session_generation,
+                            fft_size: 2_048,
+                            target_position_seconds,
+                            emit_initial_reset: true,
+                            clear_history_on_reset: true,
+                            ..
+                        }] if *frequency_cap == capped
+                            && *session_generation == generation
+                            && (*target_position_seconds - 4.0).abs() < 1e-9
+                    ),
+                    "{mode:?}: {commands:?}"
+                );
+                // The same value again keeps the session.
+                state.handle_command(AnalysisCommand::SetSpectrogramFrequencyCap(capped), &ctx);
+                assert!(channels.spectrogram_cmd_rx.try_recv().is_err(), "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capped_centered_ring_counts_the_bins_it_is_sent() {
+        let mut state = playing_state(SpectrogramDisplayMode::Centered, Path::new("/a.flac"));
+        state.fft_size = 8_192;
+        state.active_session_channel_count = 6;
+        state.spectrogram_session_widget_width = 1920;
+        for rate in [96_000, 192_000] {
+            state.active_session_effective_rate = rate;
+            state.frequency_cap = false;
+            let full = state.centered_ring_capacity_columns().expect("capacity");
+            state.frequency_cap = true;
+            let capped = state.centered_ring_capacity_columns().expect("capacity");
+            let bins = frequency_cap::shown_bins(8_192, rate, true);
+            let config = |bins: usize| retention::SpectrogramBufferConfig {
+                width: 1920,
+                sample_rate: rate,
+                hop: u32::try_from(column_hop::column_hop(rate, 1.0)).unwrap(),
+                bins: u32::try_from(bins).unwrap(),
+                channels: 6,
+                zoom: 1.0,
+                centered: true,
+            };
+            let lookahead = retention::lookahead_seconds();
+            assert_eq!(full, config(4_097).limits(lookahead).capacity);
+            assert_eq!(capped, config(bins).limits(lookahead).capacity);
+            // The byte budget holds more of the narrower columns.
+            assert!(capped > full, "{rate} Hz: {capped} <= {full}");
+        }
+    }
+
     fn remap(pairs: &[(&Path, &Path)]) -> AnalysisCommand {
         AnalysisCommand::RemapPaths(Arc::new(
             pairs
@@ -5889,6 +6000,7 @@ mod tests {
             total_columns_estimate: 100,
             sample_rate_hz: 48_000,
             hop_size: 1024,
+            fft_size: 6,
             coverage_seconds: 0.0,
             complete: false,
             buffer_reset: false,

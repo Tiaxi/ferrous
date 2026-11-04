@@ -74,6 +74,7 @@ pub(super) fn resets_spectral_stream(command: &AnalysisCommand) -> bool {
         AnalysisCommand::RestartCurrentTrack { .. }
             | AnalysisCommand::SetTrack { gapless: false, .. }
             | AnalysisCommand::SetFftSize(_)
+            | AnalysisCommand::SetSpectrogramFrequencyCap(_)
             | AnalysisCommand::SetSpectrogramActive(false)
     )
 }
@@ -123,6 +124,16 @@ mod tests {
         assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 0);
         outputs.begin_command(&AnalysisCommand::SetFftSize(512));
         assert_eq!(outputs.pending_resets.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_frequency_cap_change_resets_the_stream() {
+        assert!(resets_spectral_stream(
+            &AnalysisCommand::SetSpectrogramFrequencyCap(true)
+        ));
+        assert!(resets_spectral_stream(
+            &AnalysisCommand::SetSpectrogramFrequencyCap(false)
+        ));
     }
 
     #[test]

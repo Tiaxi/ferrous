@@ -265,6 +265,7 @@ ApplicationWindow {
         property int viewerFullscreenMode: 0
         property bool preventDisplaySleepInFullscreen: true
         property bool logScale: false
+        property bool spectrogramFrequencyCap: false
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property bool showFps: false
@@ -364,6 +365,7 @@ ApplicationWindow {
         function setPreventDisplaySleepInFullscreen(value) {}
         function setDbRange(value) {}
         function setLogScale(value) {}
+        function setSpectrogramFrequencyCap(value) {}
         function setRepeatMode(mode) {}
         function setShuffleEnabled(value) {}
         function setShowFps(value) {}

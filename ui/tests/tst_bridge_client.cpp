@@ -23,11 +23,13 @@
 #include <QSocketNotifier>
 #include <QFutureWatcher>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -88,8 +90,9 @@ QByteArray makePrecomputedFrame(
     const quint64 generation,
     const quint32 widgetWidth = 0,
     const quint32 hopSize = 1024,
-    const quint32 sampleRate = 48000) {
-    constexpr int headerLen = 53;
+    const quint32 sampleRate = 48000,
+    const quint32 fftSize = 0) {
+    constexpr int headerLen = 57;
     QByteArray raw(headerLen + bins * channelCount * columns, '\0');
     auto *d = reinterpret_cast<quint8 *>(raw.data());
 
@@ -114,6 +117,7 @@ QByteArray makePrecomputedFrame(
     memcpy(d + base + 38, &coverage, sizeof(coverage));
     d[base + 43] = 1;
     memcpy(d + base + 45, &widgetWidth, sizeof(widgetWidth));
+    memcpy(d + base + 49, &fftSize, sizeof(fftSize));
 
     for (int col = 0; col < columns; ++col) {
         for (int ch = 0; ch < channelCount; ++ch) {
@@ -229,6 +233,7 @@ private slots:
     void savedWindowLayoutIsDecodedAndFittedToTheScreens();
     void queueColumnWidthsAreSentAsTheBackendReadsThem();
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
+    void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void spectrogramActivityStopsForAWindowOffScreen();
@@ -308,6 +313,7 @@ private slots:
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor();
+    void cappedSpectrogramFramesShrinkEachPanesRingColumns();
     void spectrogramFramesCarryHopsOfMoreThanSixteenBits();
     void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
@@ -1791,6 +1797,57 @@ void BridgeClientTest::queueColumnWidthsAreSentAsTheBackendReadsThem() {
     QCOMPARE(sentColumnWidths(sent[0]).generation, quint32(1));
     QCOMPARE(sentColumnWidths(sent[1]).generation, quint32(2));
     QCOMPARE(sentColumnWidths(sent[2]).generation, quint32(3));
+}
+
+void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt() {
+    // The settings section ends with the cap, after the queue's column
+    // widths; older backends end it before.
+    for (const bool capped : {false, true}) {
+        QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+        payload.append(static_cast<char>(capped ? 1 : 0));
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString error;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload), &decoded,
+                     &error),
+                 qPrintable(error));
+        QCOMPARE(decoded.settings.spectrogramFrequencyCap, capped);
+        QCOMPARE(decoded.settings.queueColumnWidthsGeneration, quint32(12));
+        // Nothing may follow it.
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            &decoded, &error));
+    }
+    BinaryBridgeCodec::DecodedSnapshot older;
+    QString error;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionSettings,
+                          settingsSectionPayload({300, 190, 0}, 12)),
+        &older, &error));
+    QVERIFY(!older.settings.spectrogramFrequencyCap);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QVERIFY(!client.spectrogramFrequencyCap());
+    client.setSpectrogramFrequencyCap(true);
+    QVERIFY(client.spectrogramFrequencyCap());
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0].size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()),
+             quint16(BinaryBridgeCodec::CmdSetSpectrogramFrequencyCap));
+    QCOMPARE(sent[0].at(BinaryBridgeCodec::kCommandHeaderBytes), char(1));
+
+    // The backend's value wins.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.spectrogramFrequencyCap = false;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(!client.spectrogramFrequencyCap());
 }
 
 void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout() {
@@ -4321,6 +4378,55 @@ void BridgeClientTest::spectrogramFramesCarryHopsOfMoreThanSixteenBits() {
     QCOMPARE(stats.widgetWidth, 1920);
     QCOMPARE(pane.m_precomputedHopSize, 163840);
     QCOMPARE(pane.m_precomputedSampleRateHz, 384000);
+}
+
+void BridgeClientTest::cappedSpectrogramFramesShrinkEachPanesRingColumns() {
+    // A 5.1 track's six per-channel panes. With the frequency cap a frame
+    // carries only the bins up to the cap, and its FFT size, which the
+    // panes' bands follow; each pane's ring holds a column in that many
+    // bytes. At FFT 2048: 1,025 bins at Nyquist, 513 up to 24 kHz of a
+    // 96 kHz track, 257 of a 192 kHz one.
+    for (int mode : {0, 1}) {
+        BridgeClient client;
+        isolateBridgeClient(client);
+        std::array<SpectrogramItem, 6> panes;
+        for (int channel = 0; channel < 6; ++channel) {
+            panes[static_cast<size_t>(channel)].setWidth(1920);
+            panes[static_cast<size_t>(channel)].setDisplayMode(mode);
+            client.registerSpectrogramItem(&panes[static_cast<size_t>(channel)], channel);
+        }
+        quint64 generation = 0;
+        // (rate, bins, top of the band)
+        for (const auto &[rate, bins, topHz] : {
+                 std::tuple{96000, 1025, 48000.0},
+                 std::tuple{96000, 513, 24000.0},
+                 std::tuple{192000, 257, 24000.0},
+                 std::tuple{192000, 1025, 96000.0}}) {
+            ++generation;
+            const auto hop = ferrous_ffi_spectrogram_reference_hop(static_cast<std::uint32_t>(rate));
+            QByteArray frame = makePrecomputedFrame(
+                bins, 6, 3, 0, 20'000, 42, generation, 1920, hop,
+                static_cast<quint32>(rate), 2048);
+            frame[47] = 1;
+            frame[48] = 1;
+            const BridgeClient::PrecomputedDispatchStats stats =
+                client.parsePrecomputedSpectrogramFrame(frame);
+            QVERIFY(stats.valid);
+            QCOMPARE(stats.fftSize, 2048);
+            QCOMPARE(stats.dataBytes, qsizetype(3) * 6 * bins);
+            const int capacity = static_cast<int>(ferrous_ffi_spectrogram_ring_capacity(
+                1920, static_cast<std::uint32_t>(rate), hop,
+                static_cast<std::uint32_t>(bins), 6, 1.0, mode == 1));
+            for (SpectrogramItem &pane : panes) {
+                QCOMPARE(pane.m_ring.bins(), bins);
+                QCOMPARE(pane.m_ringCapacity, capacity);
+                QCOMPARE(pane.m_ring.byteSize(), qint64(capacity) * bins);
+                QCOMPARE(pane.m_ring.committedBytes(), qint64(64) * bins);
+                QCOMPARE(pane.m_precomputedFftSize, 2048);
+                QCOMPARE(pane.pixelToFrequencyHz(0, 100), topHz);
+            }
+        }
+    }
 }
 
 void BridgeClientTest::spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor() {

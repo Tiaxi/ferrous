@@ -33,7 +33,7 @@ pub(super) const MIN_ZOOM: f32 = 0.05;
 pub(super) const MAX_ZOOM: f32 = 16.0;
 
 /// The base rate of the family `sample_rate` belongs to.
-fn family_base_rate(sample_rate: u32) -> u32 {
+pub(super) fn family_base_rate(sample_rate: u32) -> u32 {
     if sample_rate.is_multiple_of(11_025) {
         44_100
     } else {

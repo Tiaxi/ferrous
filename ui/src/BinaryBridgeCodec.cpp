@@ -617,6 +617,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
             || !reader.readU32(&out->queueColumnWidthsGeneration))) {
         return false;
     }
+    quint8 spectrogramFrequencyCap = 0;
+    if (!reader.atEnd() && !reader.readU8(&spectrogramFrequencyCap)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -636,6 +640,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->spectrogramZoomEnabled = spectrogramZoomEnabled != 0;
     out->preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen != 0;
     out->libraryWatchEnabled = libraryWatchEnabled != 0;
+    out->spectrogramFrequencyCap = spectrogramFrequencyCap != 0;
     return true;
 }
 
