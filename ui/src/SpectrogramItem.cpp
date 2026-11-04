@@ -3037,8 +3037,15 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedTrackToken = trackToken;
     }
 
-    m_precomputedBinsPerColumn = bins;
-    m_precomputedFftSize = bins > 0 ? std::max(0, fftSize) : 0;
+    // The bin count and FFT size describe the ring's columns, which the
+    // projection reads. A reset still waiting for its data leaves the ring
+    // as it is, so they stay the ring's until the reset is applied; the
+    // reset's own bin count waits with it.
+    const bool resetAwaitsData = bufferReset && columns <= 0 && m_precomputedResetPending;
+    if (!resetAwaitsData || m_ringCapacity == 0) {
+        m_precomputedBinsPerColumn = bins;
+        m_precomputedFftSize = bins > 0 ? std::max(0, fftSize) : 0;
+    }
     // Accept the latest estimate for the active session.  Same-hop
     // increases are legitimate for raw-surround files: the worker can
     // start with a fallback/header estimate, then raise it once a
@@ -3143,9 +3150,10 @@ void SpectrogramItem::feedPrecomputedChunk(
             static_cast<double>(static_cast<float>(m_zoomLevel)), m_displayMode == 1));
 
         // Check if we need to (re)allocate: either more columns, or
-        // more bins_per_column (e.g. FFT size switch).
+        // columns of another bin count (an FFT size or band switch), which
+        // the ring's columns cannot hold side by side.
         const bool mustRealloc =
-            bins > m_ring.bins()
+            bins != m_ring.bins()
             || neededCapacity > m_ringCapacity;
 
         if (mustRealloc) {
@@ -3572,12 +3580,13 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     }
     // A rasterization of the columns before the reset is obsolete.
     cancelPendingRasterLocked();
+    // Only columns of the ring's own bin count can go on after its history.
     const bool preserveRollingHistory =
         !clearHistoryOnReset &&
         m_displayMode == 0
         && m_ringCapacity > 0
-        && m_precomputedBinsPerColumn > 0
-        && bins == m_precomputedBinsPerColumn;
+        && m_ring.bins() > 0
+        && bins == m_ring.bins();
     if (!preserveRollingHistory) {
         ++m_ringGeneration;
     }
@@ -5713,12 +5722,19 @@ const quint8 *SpectrogramItem::ringColumnLocked(qint64 displayIndex, bool rollin
     return slot >= 0 ? m_ring.column(slot) : nullptr;
 }
 
+bool SpectrogramItem::ringMatchesProjectionLocked() const {
+    // The projection reads bins up to m_precomputedBinsPerColumn - 1 of each
+    // ring column, so a ring holding columns must hold that many bins.
+    return m_precomputedBinsPerColumn > 0
+        && (m_ringCapacity == 0 || m_ring.bins() == m_precomputedBinsPerColumn);
+}
+
 void SpectrogramItem::drawPrecomputedColumnAtLocked(
     int x,
     qint64 displayIndex,
     bool rollingMode,
     const SpectrogramProjection &projection) {
-    if (!canvasColumnDrawable(m_canvas, x, projection) || m_precomputedBinsPerColumn <= 0) {
+    if (!canvasColumnDrawable(m_canvas, x, projection) || !ringMatchesProjectionLocked()) {
         return;
     }
     markCanvasColumnDirtyLocked(x);
@@ -5776,7 +5792,7 @@ void SpectrogramItem::drawPrecomputedPixelsLocked(
     double canvasZoom,
     const SpectrogramProjection &projection) {
     if (!canvasColumnDrawable(m_canvas, 0, projection)
-        || m_precomputedBinsPerColumn <= 0
+        || !ringMatchesProjectionLocked()
         || canvasZoom <= 0.0
         || displayRight < displayLeft
         || endPixel <= firstPixel) {
@@ -5802,7 +5818,7 @@ std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
     qint64 displayRight,
     bool rollingMode) {
     if (width <= 0 || height <= 0 || displayRight < displayLeft
-        || m_precomputedBinsPerColumn <= 0) {
+        || !ringMatchesProjectionLocked()) {
         return {};
     }
     ensureMapping(height);

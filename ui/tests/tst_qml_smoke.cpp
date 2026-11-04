@@ -14906,40 +14906,63 @@ void SpectrogramSmokeTest::spectrogramBandFollowsTheFftSizeOfColumnsWithTheSameB
 }
 
 void SpectrogramSmokeTest::spectrogramGaplessSwitchBetweenCappedAndWholeBandsStartsAFreshRing() {
-    // A gapless switch from a capped 96 kHz track to a 44.1 kHz one, or
-    // back, changes the rate, so the backend starts a session for it that
-    // keeps the rolling history (no clear). Its columns have another bin
-    // count, which the ring cannot hold beside the old ones: the ring
+    // A gapless switch between a capped 96 kHz track and a 48 or 44.1 kHz
+    // one, either way, changes the rate, so the backend starts a session for
+    // it that keeps the rolling history (no clear). Its columns have another
+    // bin count, which the ring cannot hold beside the old ones: the ring
     // starts over with the new band rather than draw the old columns on it.
+    // The worker sends the session's reset without columns first, then its
+    // data; the ring keeps describing its own columns until the data comes.
     struct Track {
         int rate;
         int bins;
         double topHz;
     };
     const Track capped96{96000, 513, 24000.0};
+    const Track whole48{48000, 1025, 24000.0};
     const Track whole44{44100, 1025, 22050.0};
-    for (const auto &[from, to] : {std::pair{capped96, whole44}, std::pair{whole44, capped96}}) {
-        SpectrogramItem item;
-        item.setWidth(200);
-        item.setHeight(100);
-        item.setDisplayMode(0);
-        const auto feed = [&item](const Track &track, quint64 token, bool clearHistory) {
-            const int hop = static_cast<int>(
-                ferrous_ffi_spectrogram_reference_hop(static_cast<std::uint32_t>(track.rate)));
-            item.feedPrecomputedChunk(QByteArray(track.bins * 10, '\x80'), track.bins, 0, 10, 0,
-                1000, track.rate, hop, false, true, token, clearHistory, token, 0, 2048);
-        };
-        feed(from, 1, true);
-        QCOMPARE(item.m_ring.bins(), from.bins);
-        QCOMPARE(item.pixelToFrequencyHz(0, 100), from.topHz);
-        feed(to, 2, false);
-        QCOMPARE(item.m_ring.bins(), to.bins);
-        QCOMPARE(item.m_ringOldestSeq, qint64(0));
-        QCOMPARE(item.m_ringWriteSeq, qint64(10));
-        for (int slot = 0; slot < 10; ++slot) {
-            QCOMPARE(item.m_ringTrackToken[static_cast<size_t>(slot)], quint64(2));
+    for (const bool split : {false, true}) {
+        for (const auto &[from, to] : {std::pair{whole48, capped96}, std::pair{capped96, whole48},
+                 std::pair{capped96, whole44}, std::pair{whole44, capped96}}) {
+            const QString what = QStringLiteral("%1 -> %2 Hz%3")
+                .arg(from.rate).arg(to.rate).arg(split ? QStringLiteral(", reset first") : QString());
+            SpectrogramItem item;
+            item.setWidth(200);
+            item.setHeight(100);
+            item.setDisplayMode(0);
+            const auto feed = [&item](const Track &track, quint64 token, int columns, bool reset,
+                                  bool clearHistory) {
+                const int hop = static_cast<int>(
+                    ferrous_ffi_spectrogram_reference_hop(static_cast<std::uint32_t>(track.rate)));
+                item.feedPrecomputedChunk(QByteArray(track.bins * columns, '\x80'), track.bins, 0,
+                    columns, 0, 1000, track.rate, hop, false, reset, token, clearHistory, token, 0,
+                    2048);
+            };
+            feed(from, 1, 10, true, true);
+            QCOMPARE(item.m_ring.bins(), from.bins);
+            QCOMPARE(item.pixelToFrequencyHz(0, 100), from.topHz);
+            if (split) {
+                feed(to, 2, 0, true, false);
+                // Until the data comes, the ring is the old track's, and so
+                // is the band its columns are drawn in.
+                QVERIFY2(item.m_precomputedResetPending, qPrintable(what));
+                QCOMPARE(item.m_ring.bins(), from.bins);
+                QCOMPARE(item.m_precomputedBinsPerColumn, from.bins);
+                QVERIFY(item.ringMatchesProjectionLocked());
+                feed(to, 2, 10, false, false);
+            } else {
+                feed(to, 2, 10, true, false);
+            }
+            QVERIFY2(!item.m_precomputedResetPending, qPrintable(what));
+            QCOMPARE(item.m_ring.bins(), to.bins);
+            QCOMPARE(item.m_precomputedBinsPerColumn, to.bins);
+            QCOMPARE(item.m_ringOldestSeq, qint64(0));
+            QVERIFY2(item.m_ringWriteSeq == 10, qPrintable(what));
+            for (int slot = 0; slot < 10; ++slot) {
+                QCOMPARE(item.m_ringTrackToken[static_cast<size_t>(slot)], quint64(2));
+            }
+            QCOMPARE(item.pixelToFrequencyHz(0, 100), to.topHz);
         }
-        QCOMPARE(item.pixelToFrequencyHz(0, 100), to.topHz);
     }
 }
 

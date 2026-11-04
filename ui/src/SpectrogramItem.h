@@ -570,6 +570,9 @@ private:
     // The frequency of the top bin those columns hold: Nyquist, or with the
     // frequency cap, the cap.
     double topFrequencyHzLocked() const;
+    // Whether the ring's columns have the bin count the projection reads:
+    // the rasterizers draw ring columns only then.
+    bool ringMatchesProjectionLocked() const;
     std::vector<quint8> rowToIntensity(const QVariantList &row) const;
     void bindWindowFpsTracking(QQuickWindow *window);
     void handleWindowAfterAnimating();
