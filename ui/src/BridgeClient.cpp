@@ -4684,14 +4684,14 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     // [26..30] u32  start_column_index
     // [30..34] u32  total_columns_estimate
     // [34..38] u32  sample_rate_hz
-    // [38..40] u16  hop_size
-    // [40..44] f32  coverage_seconds
-    // [44]     u8   complete
-    // [45]     u8   buffer_reset
-    // [46]     u8   clear_history
-    // [47..51] u32  widget_width (the session's; 0 = unknown)
-    // [51..]   column_data
-    constexpr int kHeaderLen = 51;
+    // [38..42] u32  hop_size
+    // [42..46] f32  coverage_seconds
+    // [46]     u8   complete
+    // [47]     u8   buffer_reset
+    // [48]     u8   clear_history
+    // [49..53] u32  widget_width (the session's; 0 = unknown)
+    // [53..]   column_data
+    constexpr int kHeaderLen = 53;
     if (raw.size() < kHeaderLen) {
         return stats;
     }
@@ -4731,13 +4731,14 @@ BridgeClient::parsePrecomputedSpectrogramFrame(const QByteArray &raw) {
     const int startIndex = static_cast<int>(readU32(base + 22));
     const int totalEstimate = static_cast<int>(readU32(base + 26));
     const int sampleRate = static_cast<int>(readU32(base + 30));
-    const int hopSize = readU16(base + 34);
-    const float coverage = readF32(base + 36);
-    const bool complete = d[base + 40] != 0;
-    const bool bufferReset = d[base + 41] != 0;
-    const bool clearHistory = d[base + 42] != 0;
+    const int hopSize = static_cast<int>(
+        std::min<quint32>(readU32(base + 34), std::numeric_limits<int>::max()));
+    const float coverage = readF32(base + 38);
+    const bool complete = d[base + 42] != 0;
+    const bool bufferReset = d[base + 43] != 0;
+    const bool clearHistory = d[base + 44] != 0;
     const int widgetWidth = static_cast<int>(
-        std::min<quint32>(readU32(base + 43), std::numeric_limits<int>::max()));
+        std::min<quint32>(readU32(base + 45), std::numeric_limits<int>::max()));
 
     const int dataOffset = kHeaderLen;
     const qint64 expectedDataLen =

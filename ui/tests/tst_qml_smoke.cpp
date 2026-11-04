@@ -233,8 +233,10 @@ void prepareFullscreenForwardSeek(SpectrogramItem &item) {
     setTestPosition(item, 30.0);
 }
 
-// A pane playing back at 384 kHz and 16x zoom: 6000 columns a second, one
-// a pixel, with 12000 columns decoded and the playhead at 0.5 s.
+// A pane playing back 384 kHz columns 64 samples apart: 6000 columns a
+// second, one a pixel, with 12000 columns decoded and the playhead at
+// 0.5 s. That is eight times the columns of the deepest zoom, 750 a
+// second at every rate, as a margin.
 void prepareHighRatePlayback(SpectrogramItem &item, int width, int height, int bins, bool rolling) {
     item.setWidth(width);
     item.setHeight(height);
@@ -247,7 +249,7 @@ void prepareHighRatePlayback(SpectrogramItem &item, int width, int height, int b
         0, 200'000, 384'000, hop, false, true, 1, true, 1);
     {
         QMutexLocker lock(&item.m_stateMutex);
-        item.m_renderZoomLevel = 1024.0 / hop;
+        item.m_renderZoomLevel = item.referenceHopLocked() / hop;
     }
     setTestPosition(item, 0.5);
 }
@@ -1304,6 +1306,9 @@ private slots:
     void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
     void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
     void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spectrogramSecondsAreAsWideAtEveryRateOfAFamily();
+    void spectrogramZoomSnapsToTheScaledHopOfAHighRate();
+    void spectrogramTrackChangeToAHighRateKeepsZoomAtItsReferenceHop();
     void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
     void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
@@ -14407,7 +14412,7 @@ void SpectrogramSmokeTest::spectrogramRebuildBenchmark() {
                     }
                     qInfo("forward_seek_frame_ms=%.3f", seekNs / (iterations * 1e6));
 
-                    // Playback at 384 kHz and 16x zoom, painted at 30 fps:
+                    // Playback of 6000 columns a second, painted at 30 fps:
                     // each frame draws the 200 columns playback moved on.
                     // The item's own repaint loop is cut off, so that only
                     // these frames move its canvas.
@@ -14798,14 +14803,16 @@ void SpectrogramSmokeTest::spectrogramPreservesNativeRateAcrossModesAndTrackTran
         const QByteArray data(bins, '\x80');
         quint64 generation = 1;
         for (int rate : {96000, 192000, 44100}) {
-            item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, rate, 1024,
+            const int hop = static_cast<int>(
+                ferrous_ffi_spectrogram_reference_hop(static_cast<std::uint32_t>(rate)));
+            item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, rate, hop,
                 false, true, generation, true, generation);
             const double nyquist = item.pixelToFrequencyHz(0, 100);
             QVERIFY(std::abs(nyquist - rate / 2.0) < rate * 0.02);
             QCOMPARE(item.m_precomputedSampleRateHz, rate);
             ++generation;
         }
-        item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, 96000, 1024,
+        item.feedPrecomputedChunk(data, bins, 0, 1, 0, 1000, 96000, 2048,
             false, true, 1, true, 1);
         QCOMPARE(item.m_precomputedSampleRateHz, 44100);
     }
@@ -14903,9 +14910,9 @@ void SpectrogramSmokeTest::spectrogramSessionRateChangeRemapsTheSpectrogram() {
     constexpr int bins = 64;
     constexpr int columns = 380;
     item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
-        0, 10'000, 96'000, 1024, false, true, 2, true, 2);
+        0, 10'000, 96'000, 2048, false, true, 2, true, 2);
     item.feedPrecomputedChunk(QByteArray(bins * columns, '\x60'), bins, 0, columns,
-        columns, 10'000, 96'000, 1024, false, false, 2, true, 2);
+        columns, 10'000, 96'000, 2048, false, false, 2, true, 2);
     node = paintSettled(item, node);
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -16824,12 +16831,13 @@ void SpectrogramSmokeTest::spectrogramHighRateRetentionPreservesViewportWithinBu
         item.setDisplayMode(mode);
         constexpr int bins = 4097;
         QByteArray column(bins * 8, '\x40');
+        // 384 kHz at its reference hop, then zoomed in all the way.
         item.feedPrecomputedChunk(column, bins, 0, 1, 0, 1'000'000,
-            384'000, 1024, false, true, 100, true, 1);
+            384'000, 8192, false, true, 100, true, 1);
         item.setZoomLevel(16.0);
         item.m_zoomDebounceTimer->stop();
         item.feedPrecomputedChunk(column, bins, 0, 1, 0, 1'000'000,
-            384'000, 64, false, true, 100, true, 2);
+            384'000, 512, false, true, 100, true, 2);
         const int width = 1920;
         const int visibleColumns = static_cast<int>(std::ceil(width / item.effectiveZoomLocked()));
         QVERIFY(item.m_ringCapacity >= visibleColumns * 2);
@@ -19144,6 +19152,145 @@ void SpectrogramSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayTo
     QCOMPARE(item.m_renderZoomLevel, 2.0);
 
     delete node;
+}
+
+namespace {
+// A rolling pane at zoom 1 with a session of `rate` audio at its
+// reference hop, `hop`.
+void feedReferenceSession(SpectrogramItem &item, int rate, int hop) {
+    constexpr int bins = 8;
+    constexpr int columns = 400;
+    item.feedPrecomputedChunk(
+        QByteArray(bins * columns, '\x40'), bins, 0, columns,
+        0, columns, rate, hop, false, true, 1, true, 1);
+}
+} // namespace
+
+void SpectrogramSmokeTest::spectrogramSecondsAreAsWideAtEveryRateOfAFamily() {
+    // A column is as long at 96 kHz as at 48 kHz, 2048 samples to 1024,
+    // so a second of audio is as wide, and scrolls as fast.
+    for (const double zoom : {1.0, 2.0, 0.5}) {
+        double pace = 0.0;
+        for (const int rate : {48000, 96000, 192000}) {
+            SpectrogramItem item;
+            item.setWidth(200);
+            item.setHeight(100);
+            item.setDisplayMode(0);
+            const int referenceHop = static_cast<int>(1024LL * rate / 48000);
+            QCOMPARE(static_cast<int>(ferrous_ffi_spectrogram_reference_hop(
+                         static_cast<std::uint32_t>(rate))),
+                     referenceHop);
+            feedReferenceSession(item, rate, referenceHop);
+            QMutexLocker lock(&item.m_stateMutex);
+            QCOMPARE(item.referenceHopLocked(), static_cast<double>(referenceHop));
+            const int hop = item.columnHopForZoomLocked(zoom);
+            QCOMPARE(hop, static_cast<int>(std::lround(referenceHop / zoom)));
+            item.m_renderZoomLevel = item.renderZoomForZoomLocked(zoom);
+            item.m_precomputedHopSize = hop;
+            QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+            const double pixelsPerSecond = item.currentPixelsPerSecondLocked();
+            QVERIFY(std::abs(pixelsPerSecond - zoom * 46.875) < 1e-9);
+            if (pace > 0.0) {
+                QCOMPARE(pixelsPerSecond, pace);
+            }
+            pace = pixelsPerSecond;
+        }
+    }
+    // The 44.1 kHz family has a pace of its own, 9% slower.
+    SpectrogramItem item;
+    feedReferenceSession(item, 88200, 2048);
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY(std::abs(item.currentPixelsPerSecondLocked() - 44100.0 / 1024.0) < 1e-9);
+}
+
+void SpectrogramSmokeTest::spectrogramZoomSnapsToTheScaledHopOfAHighRate() {
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(0);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr int rate = 96000;
+    feedReferenceSession(item, rate, 2048);
+    setTestPosition(item, 5.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(node != nullptr);
+
+    // Zoomed in twice, the session's columns are 1024 samples apart, which
+    // is the reference hop of 48 kHz but not of 96 kHz.
+    item.setZoomLevel(2.0);
+    QVERIFY(item.m_awaitingZoomData);
+    QVERIFY(sendPendingBackendZoom(item));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.columnHopForZoomLocked(2.0), 1024);
+    }
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 300, '\x70'), bins, 0, 300,
+        static_cast<int>(5.0 * rate / 1024), 4000, rate, 1024,
+        false, true, 1, true, 2);
+    node = paintSettled(item, node);
+    QVERIFY(!item.m_awaitingZoomData);
+    QCOMPARE(item.m_renderZoomLevel, 2.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+        QVERIFY(std::abs(item.currentPixelsPerSecondLocked() - 93.75) < 1e-9);
+    }
+
+    // A zoom whose hop rounds snaps to it, a column a pixel.
+    item.setZoomLevel(3.815);
+    QVERIFY(sendPendingBackendZoom(item));
+    const int hop = static_cast<int>(std::lround(2048.0 / 3.815));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.columnHopForZoomLocked(3.815), hop);
+    }
+    item.feedPrecomputedChunk(
+        QByteArray(bins * 300, '\x50'), bins, 0, 300,
+        static_cast<int>(5.0 * rate / hop), 8000, rate, hop,
+        false, true, 1, true, 3);
+    node = paintSettled(item, node);
+    QVERIFY(!item.m_awaitingZoomData);
+    QCOMPARE(item.m_renderZoomLevel, 2048.0 / hop);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+    }
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramTrackChangeToAHighRateKeepsZoomAtItsReferenceHop() {
+    // A 96 kHz track at zoom 1 is 2048 samples a column: its reference
+    // hop, so a track change to it is no reason to reset the zoom.
+    for (const int displayMode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(1200);
+        item.setHeight(200);
+        item.setDisplayMode(displayMode);
+        QSignalSpy backendZoomSpy(&item, &SpectrogramItem::backendZoomRequested);
+        QSignalSpy zoomResetSpy(&item, &SpectrogramItem::zoomResetRequested);
+        constexpr int bins = 4;
+        item.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, 0, 10064, 48000, 1024, false, true, 3);
+        item.feedPrecomputedChunk(
+            QByteArray(4 * bins, '\x10'), bins, 0, 4, 0, 10064,
+            48000, 1024, false, false, 3);
+        item.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, 0, 10064, 96000, 2048, false, true, 7);
+        item.feedPrecomputedChunk(
+            QByteArray(16 * bins, '\x40'), bins, 0, 16, 0, 10064,
+            96000, 2048, false, false, 7);
+        QCOMPARE(backendZoomSpy.count(), 0);
+        QCOMPARE(zoomResetSpy.count(), 0);
+        QCOMPARE(item.m_renderZoomLevel, 1.0);
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
+    }
 }
 
 void TransportInputSmokeTest::spaceTogglesPlaybackWhenTheLibraryHasFocus() {

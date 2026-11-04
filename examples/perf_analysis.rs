@@ -413,7 +413,7 @@ struct AnalysisTally {
     columns: u64,
     chunks: u64,
     chunk_bytes: u64,
-    hop: u16,
+    hop: u32,
     rate: u32,
     channels: u8,
     bins: u16,

@@ -3,6 +3,7 @@
 mod cache;
 mod centered_view;
 mod channel_layout;
+mod column_hop;
 pub(crate) use channel_layout::probe_source_channel_labels;
 mod decoders;
 mod fft;
@@ -221,7 +222,7 @@ pub struct PrecomputedSpectrogramChunk {
     pub start_column_index: u32,
     pub total_columns_estimate: u32,
     pub sample_rate_hz: u32,
-    pub hop_size: u16,
+    pub hop_size: u32,
     pub coverage_seconds: f32,
     pub complete: bool,
     /// When true, the C++ ring buffer should be cleared and the epoch reset.
@@ -293,40 +294,19 @@ pub struct AnalysisEngine {
 /// covers closing a `GStreamer` pipeline and the waveform database.
 pub(crate) const ANALYSIS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
-const REFERENCE_HOP: usize = 1024;
+/// The unit the track-length estimates count columns in: frames / 1024.
+/// It is a number of samples, whatever the rate; sessions scale it to
+/// their own column hop.
+const ESTIMATE_COLUMN_FRAMES: usize = 1024;
 
-/// Compute the STFT hop size for a given zoom level.
-/// Zoom > 1.0: smaller hop (finer temporal resolution).
-/// Zoom <= 1.0: FFT-derived hop (normal resolution).
-///
-/// The zoom hop is derived from `REFERENCE_HOP` (not `fft_size/8`) because
-/// zoom is relative to the *output* column rate, which is always
-/// normalized to `REFERENCE_HOP` by the decimation system.  At zoom=2x
-/// we need `effective_hop = REFERENCE_HOP/2`, so with decimation bypassed
-/// the STFT hop must equal `REFERENCE_HOP/2`.  The STFT hop may be larger
-/// than the unzoomed `fft_size/8` hop -- this is correct because the
-/// unzoomed path decimates many overlapping STFT rows into one output
-/// column, while the zoomed path keeps every STFT row individually.
-fn zoom_hop_size(fft_size: usize, zoom_level: f32) -> usize {
-    if zoom_level > 1.0 {
-        // REFERENCE_HOP is 1024, well within f64 precision.
-        #[allow(clippy::cast_precision_loss)]
-        let hop_f64 = REFERENCE_HOP as f64;
-        // Result is clamped to [64, 1024] below, so truncation and sign loss are safe.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let raw = (hop_f64 / f64::from(zoom_level)).round() as usize;
-        raw.clamp(64, REFERENCE_HOP)
-    } else {
-        (fft_size / 8).max(64)
-    }
-}
+pub use column_hop::reference_hop as spectrogram_reference_hop;
 
-/// The column hop that spectrogram sessions report at `zoom_level`, which
-/// tells Qt whether data is for the zoom it asked for.
+/// The column hop that spectrogram sessions report at `zoom_level` for
+/// audio at `sample_rate`, which tells Qt whether data is for the zoom it
+/// asked for.
 #[must_use]
-pub fn spectrogram_column_hop(fft_size: usize, zoom_level: f32) -> usize {
-    let zoom_level = zoom_level.clamp(0.05, 16.0);
-    session::effective_hop_for_zoom(zoom_hop_size(fft_size, zoom_level), zoom_level)
+pub fn spectrogram_column_hop(sample_rate: u32, zoom_level: f32) -> usize {
+    column_hop::column_hop(sample_rate, zoom_level)
 }
 
 /// The zoom the spectrogram moves to when `requested` is asked of it at
@@ -334,7 +314,7 @@ pub fn spectrogram_column_hop(fft_size: usize, zoom_level: f32) -> usize {
 /// the FFI to know which data to wait for.
 #[must_use]
 pub fn accepted_spectrogram_zoom(current: f32, requested: f32) -> Option<f32> {
-    let requested = requested.clamp(0.05, 16.0);
+    let requested = requested.clamp(column_hop::MIN_ZOOM, column_hop::MAX_ZOOM);
     // Qt re-sends the zoom on width changes too (via the widthSettleTimer
     // after a fullscreen toggle) with the unchanged zoom.  Restarting the
     // session in that case wipes the ring and flashes black for ~100 ms
@@ -365,7 +345,6 @@ struct AnalysisRuntimeState {
     waveform_dirty: bool,
     last_emit: std::time::Instant,
     fft_size: usize,
-    hop_size: usize,
     zoom_level: f32,
     /// Actual pixel width of the spectrogram widget, used to compute
     /// the decode margin and lookahead dynamically.  Updated from the
@@ -697,7 +676,6 @@ impl AnalysisRuntimeState {
             waveform_dirty: false,
             last_emit: std::time::Instant::now(),
             fft_size: 8192,
-            hop_size: 1024,
             zoom_level: 1.0,
             spectrogram_widget_width: 1920,
             spectrogram_session_widget_width: 1920,
@@ -775,10 +753,7 @@ impl AnalysisRuntimeState {
             AnalysisCommand::SetFftSize(size) => {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
-                let fft = size.clamp(512, 8192).next_power_of_two();
-                let hop = zoom_hop_size(fft, self.zoom_level);
-                self.fft_size = fft;
-                self.hop_size = hop;
+                self.fft_size = size.clamp(512, 8192).next_power_of_two();
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
@@ -833,7 +808,6 @@ impl AnalysisRuntimeState {
                 self.clear_early_continuation(ctx);
                 self.cancel_centered_staging();
                 self.zoom_level = level;
-                self.hop_size = zoom_hop_size(self.fft_size, self.zoom_level);
                 self.reset_spectrogram_state();
                 self.emit_snapshot(ctx.event_tx, true);
                 let target = self.last_spectrogram_position;
@@ -1153,7 +1127,6 @@ impl AnalysisRuntimeState {
         let Some((rx, thread)) = spawn_centered_staging_worker(
             path.clone(),
             self.fft_size,
-            self.hop_size,
             self.zoom_level,
             self.spectrogram_view_mode,
             Arc::clone(&stop),
@@ -1797,7 +1770,6 @@ impl AnalysisRuntimeState {
                 generation,
                 path,
                 fft_size: self.fft_size,
-                hop_size: self.hop_size,
                 zoom_level: self.zoom_level,
                 widget_width: self.spectrogram_session_widget_width,
                 channel_count: self.active_session_channel_count.max(1),
@@ -1874,42 +1846,25 @@ impl AnalysisRuntimeState {
             .max(0.0)
     }
 
+    /// The rate of the session's audio: the live session's, or playback's
+    /// until a session has reported one; 0 if neither is known.
+    fn current_session_rate(&self) -> u32 {
+        if self.active_session_effective_rate > 0 {
+            self.active_session_effective_rate
+        } else {
+            self.snapshot.sample_rate_hz
+        }
+    }
+
     fn effective_hop_for_current_zoom(&self) -> Option<usize> {
-        if self.hop_size == 0 {
-            return None;
-        }
-        if self.zoom_level > 1.0 {
-            return Some(self.hop_size);
-        }
-        let base_hop = (self.fft_size / 8).max(64);
-        let zoom = f64::from(self.zoom_level.max(0.001));
-        #[allow(clippy::cast_precision_loss)]
-        let target_effective = REFERENCE_HOP as f64 / zoom;
-        #[allow(clippy::cast_precision_loss)]
-        let interval = (target_effective / base_hop as f64).max(1.0);
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let hop = (base_hop as f64 * interval).round() as usize;
-        Some(hop)
+        let rate = self.current_session_rate();
+        (rate > 0).then(|| column_hop::column_hop(rate, self.zoom_level))
     }
 
     fn current_centered_cols_per_second(&self) -> Option<f64> {
         let effective_hop = self.effective_hop_for_current_zoom()?;
-        let rate = if self.active_session_effective_rate > 0 {
-            self.active_session_effective_rate
-        } else if self.snapshot.sample_rate_hz > 0 {
-            self.snapshot.sample_rate_hz
-        } else {
-            0
-        };
-        if rate == 0 || effective_hop == 0 {
-            return None;
-        }
         #[allow(clippy::cast_precision_loss)]
-        let cols_per_second = f64::from(rate) / effective_hop as f64;
+        let cols_per_second = f64::from(self.current_session_rate()) / effective_hop as f64;
         Some(cols_per_second)
     }
 
@@ -1917,11 +1872,7 @@ impl AnalysisRuntimeState {
         self.current_centered_cols_per_second()?;
         let config = retention::SpectrogramBufferConfig {
             width: self.spectrogram_session_widget_width,
-            sample_rate: if self.active_session_effective_rate > 0 {
-                self.active_session_effective_rate
-            } else {
-                self.snapshot.sample_rate_hz
-            },
+            sample_rate: self.current_session_rate(),
             hop: u32::try_from(self.effective_hop_for_current_zoom()?).ok()?,
             bins: u32::try_from(self.fft_size / 2 + 1).ok()?,
             channels: u32::try_from(self.active_session_channel_count.max(1)).ok()?,
@@ -1954,12 +1905,8 @@ impl AnalysisRuntimeState {
     /// before the playhead to start decoding.  Based on the actual widget
     /// width, sample rate, zoom level, plus a small buffer.
     fn centered_margin_seconds(&self) -> f64 {
-        if let (Some(effective_hop), Some(cols_per_second)) = (
-            self.effective_hop_for_current_zoom(),
-            self.current_centered_cols_per_second(),
-        ) {
-            // effective_hop and REFERENCE_HOP are hop sizes (small usize);
-            // precision loss from usize→f64 is negligible for these values.
+        let rate = self.current_session_rate();
+        if rate > 0 {
             // The view as wide as it is now. A seek judges the live
             // session's window by the larger of this and the margin the
             // session decodes for (`spectrogram_session_margin`).
@@ -1969,7 +1916,7 @@ impl AnalysisRuntimeState {
             // a track the playhead detaches from center and moves right,
             // making the visible left edge up to one full screen width
             // behind the playhead position.
-            centered_view::window_seconds(width, self.zoom_level, effective_hop, cols_per_second)
+            centered_view::window_seconds(width, self.zoom_level, rate)
                 + centered_view::WARMUP_SECONDS
         } else {
             // No rate info yet (first track load) — use generous fallback.
@@ -3051,7 +2998,7 @@ mod tests {
                     e,
                     AnalysisEvent::PrecomputedSpectrogramChunk(c)
                         if c.column_count > 0
-                            && usize::from(c.hop_size) == REFERENCE_HOP
+                            && usize::try_from(c.hop_size).ok() == Some(column_hop::reference_hop(8_000))
                 )
             })
             .collect::<Vec<_>>();
@@ -3876,7 +3823,6 @@ mod tests {
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
         state.active_session_effective_rate = 44_100;
-        state.hop_size = 64;
         state.zoom_level = 16.0;
         state.spectrogram_widget_width = 1_183;
         state.spectrogram_session_widget_width = 1_183;
@@ -3931,7 +3877,6 @@ mod tests {
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
         state.active_session_effective_rate = 48_000;
         state.fft_size = 2_048;
-        state.hop_size = 64;
         state.zoom_level = 16.0;
         state.spectrogram_widget_width = 3_440;
         state.spectrogram_session_widget_width = 3_440;
@@ -3992,7 +3937,6 @@ mod tests {
         state.worker_file = state.active_track_path.clone();
         state.active_session_effective_rate = 48_000;
         state.fft_size = 2_048;
-        state.hop_size = 256;
         state.zoom_level = 1.0;
         state.spectrogram_widget_width = 1_920;
         state.spectrogram_session_widget_width = 1_920;
@@ -4061,7 +4005,6 @@ mod tests {
         state.worker_file = state.active_track_path.clone();
         state.active_session_effective_rate = 48_000;
         state.fft_size = 2_048;
-        state.hop_size = 1024;
         state.zoom_level = 0.1;
         state.spectrogram_widget_width = widget_width;
         state.spectrogram_session_widget_width = widget_width;
@@ -4370,7 +4313,6 @@ mod tests {
         state.worker_file = state.active_track_path.clone();
         state.snapshot.sample_rate_hz = 48_000;
         state.zoom_level = 1024.0 / 14_088.0;
-        state.hop_size = 14_088;
         state.spectrogram_widget_width = 1_920;
         state.spectrogram_session_widget_width = 1_920;
         state.spectrogram_session_start = 0.0;
@@ -5186,26 +5128,30 @@ mod tests {
 
     #[test]
     fn spectrogram_column_hop_matches_the_session_hops() {
-        assert_eq!(spectrogram_column_hop(8192, 1.0), 1024);
-        assert_eq!(spectrogram_column_hop(2048, 1.0), 1024);
-        assert_eq!(spectrogram_column_hop(8192, 4.0), 256);
-        assert_eq!(spectrogram_column_hop(2048, 3.815), 268);
-        assert_eq!(spectrogram_column_hop(8192, 0.5), 2048);
-        assert_eq!(spectrogram_column_hop(512, 0.1), 10240);
+        for fft in [512, 2048, 8192] {
+            for (rate, zoom) in [
+                (48_000, 1.0),
+                (48_000, 4.0),
+                (48_000, 3.815),
+                (44_100, 0.5),
+                (96_000, 1.0),
+                (96_000, 2.5),
+                (192_000, 0.1),
+                (22_050, 16.0),
+            ] {
+                assert_eq!(
+                    spectrogram_column_hop(rate, zoom),
+                    column_hop::column_hops(fft, zoom, rate).effective_hop,
+                );
+            }
+        }
+        assert_eq!(spectrogram_column_hop(48_000, 1.0), 1024);
+        assert_eq!(spectrogram_column_hop(48_000, 3.815), 268);
+        assert_eq!(spectrogram_column_hop(96_000, 1.0), 2048);
+        assert_eq!(spectrogram_column_hop(44_100, 0.1), 10240);
         // The backend's clamp applies.
-        assert_eq!(spectrogram_column_hop(8192, 64.0), 64);
-        assert_eq!(spectrogram_column_hop(8192, 0.001), 20480);
-    }
-
-    #[test]
-    fn zoom_hop_size_computation() {
-        assert_eq!(zoom_hop_size(8192, 1.0), 1024);
-        assert_eq!(zoom_hop_size(2048, 1.0), 256);
-        assert_eq!(zoom_hop_size(8192, 2.0), 512);
-        assert_eq!(zoom_hop_size(8192, 4.0), 256);
-        assert_eq!(zoom_hop_size(8192, 16.0), 64);
-        assert_eq!(zoom_hop_size(8192, 32.0), 64);
-        assert_eq!(zoom_hop_size(8192, 0.5), 1024);
+        assert_eq!(spectrogram_column_hop(48_000, 64.0), 64);
+        assert_eq!(spectrogram_column_hop(48_000, 0.001), 20480);
     }
 
     #[test]
@@ -5221,7 +5167,6 @@ mod tests {
             state.active_track_token = 1;
             state.active_session_effective_rate = 48_000;
             state.zoom_level = zoom;
-            state.hop_size = zoom_hop_size(state.fft_size, zoom);
 
             let (event_tx, event_rx) = unbounded::<AnalysisEvent>();
             let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
@@ -5324,7 +5269,6 @@ mod tests {
         state.active_session_channel_count = 6;
         state.spectrogram_view_mode = SpectrogramViewMode::PerChannel;
         state.fft_size = 2_048;
-        state.hop_size = zoom_hop_size(state.fft_size, 1.0);
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (waveform_job_tx, _waveform_job_rx) = unbounded::<WaveformDecodeJob>();
@@ -5346,7 +5290,7 @@ mod tests {
             retention::SpectrogramBufferConfig {
                 width,
                 sample_rate: 96_000,
-                hop: 1_024,
+                hop: 2_048,
                 bins: 1_025,
                 channels: 6,
                 zoom: 1.0,
@@ -5410,9 +5354,10 @@ mod tests {
             Some(capacity_for(2_545))
         );
         // The columns per pane of the 2545 and 3440 pixel views of a 24/96
-        // 5.1 track at FFT 2048.
-        assert_eq!(capacity_for(2_545), 8_572);
-        assert_eq!(capacity_for(3_440), 11_257);
+        // 5.1 track at FFT 2048: a view and the lookahead, 10 s at the pace
+        // of 48 kHz (8,572 and 11,257 when 96 kHz columns were 1024 frames).
+        assert_eq!(capacity_for(2_545), 8_103);
+        assert_eq!(capacity_for(3_440), 10_788);
     }
 
     #[test]
@@ -7862,8 +7807,9 @@ mod tests {
                 Some(hi_res)
             );
             let cols_per_second = state.current_centered_cols_per_second().expect("rate");
+            // Columns of 96 kHz come at the pace of 48 kHz.
             assert!(
-                (cols_per_second - 96_000.0 / 1024.0).abs() < 0.001,
+                (cols_per_second - 96_000.0 / 2048.0).abs() < 0.001,
                 "{mode:?}"
             );
 

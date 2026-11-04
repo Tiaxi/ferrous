@@ -4,7 +4,7 @@
 //! `ui/src/SpectrogramItem.cpp`), which decode windows must cover. Both are
 //! tested against the cases in `fixtures/centered-view.txt`.
 
-use super::REFERENCE_HOP;
+use super::column_hop::{column_hop, reference_hop};
 
 /// The view shows the whole track once its window covers this share of it.
 const WHOLE_TRACK_SHARE: f64 = 0.9;
@@ -13,17 +13,19 @@ const WHOLE_TRACK_SHARE: f64 = 0.9;
 /// STFT to warm up.
 pub(super) const WARMUP_SECONDS: f64 = 2.0;
 
-/// How many seconds a view of `width` pixels shows, of a session whose
-/// columns are `effective_hop` samples apart, `columns_per_second` a second.
-pub(super) fn window_seconds(
-    width: u32,
-    zoom: f32,
-    effective_hop: usize,
-    columns_per_second: f64,
-) -> f64 {
+/// How many seconds a view of `width` pixels shows at `zoom`, of a
+/// session of audio at `sample_rate`: its columns, `zoom` pixels a
+/// reference hop apart.
+pub(super) fn window_seconds(width: u32, zoom: f32, sample_rate: u32) -> f64 {
+    let sample_rate = sample_rate.max(1);
     // Hop sizes are small; precision loss from usize→f64 is negligible.
     #[allow(clippy::cast_precision_loss)]
-    let effective_zoom = f64::from(zoom) * effective_hop as f64 / REFERENCE_HOP as f64;
+    let (hop, reference) = (
+        column_hop(sample_rate, zoom) as f64,
+        reference_hop(sample_rate) as f64,
+    );
+    let effective_zoom = f64::from(zoom) * hop / reference;
+    let columns_per_second = f64::from(sample_rate) / hop;
     f64::from(width) / effective_zoom.max(0.01) / columns_per_second
 }
 
@@ -80,12 +82,23 @@ mod tests {
 
     #[test]
     fn a_window_is_as_wide_as_the_columns_the_view_shows() {
-        // 1920 pixels of a column each, at 46.875 columns a second.
-        let seconds = window_seconds(1920, 1.0, 1024, 46.875);
-        assert!((seconds - 40.96).abs() < 1e-9, "{seconds}");
-        // Zoomed in twice, on columns half as far apart: a pixel a column.
-        let seconds = window_seconds(1920, 2.0, 512, 93.75);
-        assert!((seconds - 20.48).abs() < 1e-9, "{seconds}");
+        // 1920 pixels of a column each, at 46.875 columns a second, at
+        // every rate of the 48 kHz family.
+        for rate in [48_000, 96_000, 192_000, 384_000] {
+            let seconds = window_seconds(1920, 1.0, rate);
+            assert!((seconds - 40.96).abs() < 1e-9, "{rate}: {seconds}");
+            // Zoomed in twice, on columns half as far apart: a pixel a column.
+            let seconds = window_seconds(1920, 2.0, rate);
+            assert!((seconds - 20.48).abs() < 1e-9, "{rate}: {seconds}");
+        }
+        // The 44.1 kHz family, at 43.07 columns a second.
+        for rate in [44_100, 88_200, 176_400] {
+            let seconds = window_seconds(1920, 1.0, rate);
+            assert!(
+                (seconds - 1920.0 * 1024.0 / 44_100.0).abs() < 1e-9,
+                "{rate}: {seconds}"
+            );
+        }
     }
 
     #[test]

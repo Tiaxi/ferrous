@@ -12,8 +12,12 @@ struct FerrousFfiRenameGate;
 std::uint64_t ferrous_ffi_spectrogram_ring_capacity(
     std::uint32_t width, std::uint32_t sampleRate, std::uint32_t hop,
     std::uint32_t bins, std::uint32_t channels, double zoom, bool centered);
-// The column hop of spectrogram data for fftSize at zoom; 0 on failure.
-std::uint32_t ferrous_ffi_spectrogram_column_hop(std::uint32_t fftSize, float zoom);
+// The column hop of spectrogram data of audio at sampleRate at zoom; 0 on
+// failure.
+std::uint32_t ferrous_ffi_spectrogram_column_hop(std::uint32_t sampleRate, float zoom);
+// The column hop of spectrogram data of audio at sampleRate at zoom 1,
+// which zoom levels are relative to.
+std::uint32_t ferrous_ffi_spectrogram_reference_hop(std::uint32_t sampleRate);
 // The zoom the spectrogram moves to when requested is asked of it at
 // current; current if it keeps its zoom.
 float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);

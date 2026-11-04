@@ -531,6 +531,12 @@ private:
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
     double effectiveZoomLocked() const;
+    // The session's column hop at zoom 1, in samples: what zoom levels
+    // are relative to, for the rate of the session's data.
+    double referenceHopLocked() const;
+    // Logical pixels a second of audio is wide at the render zoom; 0 until
+    // a rate is known.
+    double currentPixelsPerSecondLocked() const;
     // Canvas pixels per display column.
     double canvasZoomLocked() const;
     int canvasWidthLocked() const;

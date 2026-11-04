@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use super::column_hop::reference_hop;
 use super::f64_to_u64_saturating;
 
 // Budget speculative decode across every channel. The visible viewport is a
@@ -37,7 +38,11 @@ impl SpectrogramBufferConfig {
         } else {
             1.0
         };
-        let effective_zoom = (zoom * f64::from(hop) / 1024.0).max(0.001);
+        // Columns `hop` apart are `zoom` pixels a reference hop apart.
+        // Reference hops are at most a few thousand samples.
+        #[allow(clippy::cast_precision_loss)]
+        let reference = reference_hop(self.sample_rate) as f64;
+        let effective_zoom = (zoom * f64::from(hop) / reference).max(0.001);
         let visible =
             f64_to_u64_saturating((f64::from(self.width.max(1920)) / effective_zoom).ceil()).max(1);
         let desired = f64_to_u64_saturating(seconds * f64::from(self.sample_rate) / f64::from(hop))
@@ -71,7 +76,8 @@ mod tests {
             let config = SpectrogramBufferConfig {
                 width: 1920,
                 sample_rate: 384_000,
-                hop: 64,
+                // Zoomed in all the way.
+                hop: 512,
                 bins: 4_097,
                 channels: 8,
                 zoom: 16.0,
@@ -85,12 +91,51 @@ mod tests {
         }
     }
 
+    fn capacity(sample_rate: u32, zoom: f64, centered: bool) -> u64 {
+        let hop = super::super::column_hop::column_hop(sample_rate, zoom as f32);
+        SpectrogramBufferConfig {
+            width: 1920,
+            sample_rate,
+            hop: u32::try_from(hop).unwrap(),
+            bins: 4_097,
+            channels: 2,
+            zoom,
+            centered,
+        }
+        .limits(10.0)
+        .capacity
+    }
+
+    #[test]
+    fn every_rate_of_a_family_gets_the_same_ring() {
+        for centered in [false, true] {
+            for zoom in [1.0, 4.0, 0.25] {
+                for family in [
+                    [44_100, 88_200, 176_400, 352_800],
+                    [48_000, 96_000, 192_000, 384_000],
+                ] {
+                    let first = capacity(family[0], zoom, centered);
+                    for rate in family {
+                        assert_eq!(capacity(rate, zoom, centered), first, "{rate} at {zoom}");
+                    }
+                }
+            }
+        }
+        // A view and 10 s of lookahead: two views of history when rolling,
+        // one when centered, which looks ahead a view more besides.
+        assert_eq!(capacity(96_000, 1.0, false), 3_840 + 468);
+        assert_eq!(capacity(96_000, 1.0, true), 1_920 + 468 + 3_840);
+        assert_eq!(capacity(88_200, 1.0, false), 3_840 + 430);
+        // Zoomed in four times, the 10 s are four times the columns.
+        assert_eq!(capacity(96_000, 4.0, false), 3_840 + 1_875);
+    }
+
     #[test]
     fn full_viewport_is_preserved_when_its_data_exceeds_speculative_budget() {
         let config = SpectrogramBufferConfig {
             width: 7680,
             sample_rate: 384_000,
-            hop: 64,
+            hop: 512,
             bins: 4_097,
             channels: 8,
             zoom: 16.0,

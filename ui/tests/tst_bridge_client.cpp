@@ -86,8 +86,10 @@ QByteArray makePrecomputedFrame(
     const int totalEstimate,
     const quint64 trackToken,
     const quint64 generation,
-    const quint32 widgetWidth = 0) {
-    constexpr int headerLen = 51;
+    const quint32 widgetWidth = 0,
+    const quint32 hopSize = 1024,
+    const quint32 sampleRate = 48000) {
+    constexpr int headerLen = 53;
     QByteArray raw(headerLen + bins * channelCount * columns, '\0');
     auto *d = reinterpret_cast<quint8 *>(raw.data());
 
@@ -104,16 +106,14 @@ QByteArray makePrecomputedFrame(
     d[base + 21] = static_cast<quint8>(channelCount);
     const quint32 encodedStart = static_cast<quint32>(startIndex);
     const quint32 encodedTotal = static_cast<quint32>(totalEstimate);
-    const quint32 sampleRate = 48000;
-    const quint16 hopSize = 1024;
     const float coverage = 1.0f;
     memcpy(d + base + 22, &encodedStart, sizeof(encodedStart));
     memcpy(d + base + 26, &encodedTotal, sizeof(encodedTotal));
     memcpy(d + base + 30, &sampleRate, sizeof(sampleRate));
     memcpy(d + base + 34, &hopSize, sizeof(hopSize));
-    memcpy(d + base + 36, &coverage, sizeof(coverage));
-    d[base + 41] = 1;
-    memcpy(d + base + 43, &widgetWidth, sizeof(widgetWidth));
+    memcpy(d + base + 38, &coverage, sizeof(coverage));
+    d[base + 43] = 1;
+    memcpy(d + base + 45, &widgetWidth, sizeof(widgetWidth));
 
     for (int col = 0; col < columns; ++col) {
         for (int ch = 0; ch < channelCount; ++ch) {
@@ -307,6 +307,7 @@ private slots:
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor();
+    void spectrogramFramesCarryHopsOfMoreThanSixteenBits();
     void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
     void spectrogramDetailedTraceLoggingRequiresExplicitOptIn();
     void diagnosticsWritesBatchOffHotPath();
@@ -423,8 +424,8 @@ namespace {
 QByteArray spectrogramFrame(
     int channels, int columns, int start, quint64 trackToken, quint64 generation, bool reset) {
     QByteArray frame = makePrecomputedFrame(16, channels, columns, start, 10'000, trackToken, generation);
-    frame[45] = reset ? 1 : 0;
-    frame[46] = reset ? 1 : 0;
+    frame[47] = reset ? 1 : 0;
+    frame[48] = reset ? 1 : 0;
     return frame;
 }
 
@@ -4271,6 +4272,25 @@ void BridgeClientTest::precomputedSpectrogramChunksRouteDirectlyToRegisteredItem
     QCOMPARE(right.m_ring.column(0)[0], static_cast<quint8>(0x77));
 }
 
+void BridgeClientTest::spectrogramFramesCarryHopsOfMoreThanSixteenBits() {
+    // 384 kHz zoomed out all the way: columns 163,840 samples apart.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    SpectrogramItem pane;
+    pane.setWidth(1920);
+    client.registerSpectrogramItem(&pane, 0);
+    const QByteArray frame =
+        makePrecomputedFrame(4, 1, 3, 0, 20'000, 42, 1, 1920, 163'840, 384'000);
+    const BridgeClient::PrecomputedDispatchStats stats =
+        client.parsePrecomputedSpectrogramFrame(frame);
+    QVERIFY(stats.valid);
+    QCOMPARE(stats.sampleRate, 384000);
+    QCOMPARE(stats.hopSize, 163840);
+    QCOMPARE(stats.widgetWidth, 1920);
+    QCOMPARE(pane.m_precomputedHopSize, 163840);
+    QCOMPARE(pane.m_precomputedSampleRateHz, 384000);
+}
+
 void BridgeClientTest::spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor() {
     // Each frame carries the width its session decodes for. A pane that is
     // narrower, as the main window's is right after the fullscreen viewer
@@ -4290,8 +4310,8 @@ void BridgeClientTest::spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecode
 
     const auto feed = [&client](quint64 generation, int start, quint32 width, bool reset) {
         QByteArray frame = makePrecomputedFrame(4, 1, 3, start, 20'000, 42, generation, width);
-        frame[45] = reset ? 1 : 0;
-        frame[46] = reset ? 1 : 0;
+        frame[47] = reset ? 1 : 0;
+        frame[48] = reset ? 1 : 0;
         return client.parsePrecomputedSpectrogramFrame(frame);
     };
     const BridgeClient::PrecomputedDispatchStats viewerSession = feed(7, 0, 3440, true);
@@ -4319,8 +4339,8 @@ void BridgeClientTest::delayedSpectrogramBatchesPreserveColumnsAndRejectOldGener
         client.registerSpectrogramItem(&item, 0);
         for (int column = 0; column < 200; ++column) {
             auto frame = makePrecomputedFrame(4, 1, 1, column, 200, 42, 7);
-            frame[45] = column == 0 ? 1 : 0;
-            frame[46] = column == 0 ? 1 : 0;
+            frame[47] = column == 0 ? 1 : 0;
+            frame[48] = column == 0 ? 1 : 0;
             QVERIFY(client.parsePrecomputedSpectrogramFrame(frame).valid);
             if (column % 20 == 0) {
                 QCoreApplication::processEvents();
@@ -4733,8 +4753,8 @@ void BridgeClientTest::aCenteredRingShowingTheWholeTrackSurvivesStopAndPlay() {
     constexpr int trackColumns = 300;
     const auto feed = [&client](int columns, int start, bool reset) {
         QByteArray frame = makePrecomputedFrame(16, 1, columns, start, trackColumns, 1, 5);
-        frame[45] = reset ? 1 : 0;
-        frame[46] = reset ? 1 : 0;
+        frame[47] = reset ? 1 : 0;
+        frame[48] = reset ? 1 : 0;
         QVERIFY(client.parsePrecomputedSpectrogramFrame(frame).valid);
     };
     feed(0, 0, true);
