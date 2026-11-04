@@ -422,6 +422,14 @@ struct AnalysisRuntimeState {
     /// Until it reports where the file starts on its timeline, the position
     /// offset counts the outgoing track as ending at its last position.
     provisional_continuation: Option<PathBuf>,
+    /// The file the worker's session decodes, as far as this thread knows:
+    /// the one its last session opened, or the continuation it reported it
+    /// went on with since.
+    worker_file: Option<PathBuf>,
+    /// A continuation handed to the worker that it may have gone on with
+    /// without reporting it yet. Cancelling one cannot undo it once the
+    /// worker has taken it, so only a report or a new session clears this.
+    worker_continuation: Option<PathBuf>,
     /// Last raw position forwarded to the spectrogram worker, used to
     /// compute the offset at gapless transitions.
     last_spectrogram_position: f64,
@@ -712,6 +720,8 @@ impl AnalysisRuntimeState {
             spectrogram_position_offset: 0.0,
             staged_continuation_start: None,
             provisional_continuation: None,
+            worker_file: None,
+            worker_continuation: None,
             last_spectrogram_position: 0.0,
             spectrogram_session_start: 0.0,
             spectrogram_session_margin: 30.0,
@@ -939,6 +949,8 @@ impl AnalysisRuntimeState {
             &mut self.staged_continuation_path,
             &mut self.staged_centered_path,
             &mut self.provisional_continuation,
+            &mut self.worker_file,
+            &mut self.worker_continuation,
         ]
         .into_iter()
         .flatten()
@@ -1122,6 +1134,7 @@ impl AnalysisRuntimeState {
                     path: path.clone(),
                     track_token: self.active_track_token,
                 });
+            self.worker_continuation = Some(path.clone());
             self.staged_continuation_path = Some(path);
             return;
         }
@@ -1268,6 +1281,7 @@ impl AnalysisRuntimeState {
                         path: path.to_path_buf(),
                         track_token,
                     });
+                self.worker_continuation = Some(path.to_path_buf());
             }
         } else {
             // Format changed, or not known yet — ContinueWithFile would be
@@ -1626,6 +1640,10 @@ impl AnalysisRuntimeState {
                 if let Some(start) = continued_at {
                     self.continuation_opened(&path, start);
                 }
+                if self.worker_continuation.as_ref() == Some(&path) {
+                    self.worker_continuation = None;
+                }
+                self.worker_file = Some(path.clone());
                 let active = track_token == self.active_track_token
                     && self.active_track_path.as_deref() == Some(path.as_path());
                 self.formats.insert(path, format, stamp);
@@ -1648,6 +1666,10 @@ impl AnalysisRuntimeState {
             } => {
                 if let Some(format) = format {
                     self.formats.insert(path.clone(), format, stamp);
+                }
+                // The worker stays with the file it decodes.
+                if self.worker_continuation.as_ref() == Some(&path) {
+                    self.worker_continuation = None;
                 }
                 if self.staged_continuation_path.as_deref() == Some(path.as_path()) {
                     // Rejected before the switch, which judges the format
@@ -1737,6 +1759,10 @@ impl AnalysisRuntimeState {
         // seeks far forward immediately after the restart.
         self.reset_position_offset();
         self.unconfirmed_continuation = None;
+        // The worker takes the session's commands in order: from here on
+        // they reach a session of the active track.
+        self.worker_file = Some(path.clone());
+        self.worker_continuation = None;
         self.spectrogram_session_start = start.start_seconds;
         self.spectrogram_session_widget_width = self.spectrogram_widget_width;
         self.spectrogram_session_margin = self.centered_margin_seconds();
@@ -1964,8 +1990,9 @@ impl AnalysisRuntimeState {
         // the staged successor, which it goes on with before the switch, or
         // the outgoing track, before it reaches the successor playback has
         // switched to.
-        let continuation_unsettled =
-            self.staged_continuation_path.is_some() || self.provisional_continuation.is_some();
+        let continuation_unsettled = self.staged_continuation_path.is_some()
+            || self.provisional_continuation.is_some()
+            || self.worker_may_decode_another_file();
         self.reset_position_offset();
         self.unconfirmed_continuation = None;
         self.last_spectrogram_position = position_seconds;
@@ -2006,9 +2033,11 @@ impl AnalysisRuntimeState {
             let visible_left =
                 Self::centered_visible_left_edge_seconds(position_seconds, margin, ctx);
             let retained_window_start = self.centered_retained_start_seconds(ctx);
-            // A worker that may still decode another file, as after a
-            // rolling switch the view left for centered before the worker
-            // reached the successor, would seek in that file.
+            // A worker that may still decode another file would seek in
+            // it: after a rolling switch the view left for centered before
+            // the worker reached the successor, or after a continuation
+            // the worker went on with before playback dropped it, as a stop
+            // near the end of a track does.
             if !continuation_unsettled
                 && visible_left >= retained_window_start
                 && position_seconds <= window_end
@@ -2048,6 +2077,18 @@ impl AnalysisRuntimeState {
                 .spectrogram_cmd_tx
                 .send(SpectrogramWorkerCommand::Seek { position_seconds });
         }
+    }
+
+    /// Whether the worker may decode a file other than the active track: one
+    /// it reported it went on with, or a continuation it was handed and may
+    /// have taken. A seek in the active track cannot reach it there.
+    fn worker_may_decode_another_file(&self) -> bool {
+        let active = self.active_track_path.as_ref();
+        self.worker_file.as_ref() != active
+            || self
+                .worker_continuation
+                .as_ref()
+                .is_some_and(|path| Some(path) != active)
     }
 
     fn refill_centered_spectrogram(&mut self, position_seconds: f64, ctx: &AnalysisContext<'_>) {
@@ -3724,6 +3765,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
         state.spectrogram_session_start = 0.0;
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
@@ -3876,6 +3919,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
         state.active_session_effective_rate = 48_000;
         state.fft_size = 2_048;
         state.hop_size = 256;
@@ -3943,6 +3988,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
         state.active_session_effective_rate = 48_000;
         state.fft_size = 2_048;
         state.hop_size = 1024;
@@ -4203,6 +4250,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.ac3"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
         state.active_session_effective_rate = 48_000;
         state.zoom_level = 1024.0 / 14_088.0;
         state.spectrogram_widget_width = 1_920;
@@ -4248,6 +4297,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Centered;
         state.active_track_path = Some(PathBuf::from("/tmp/track.ac3"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
         state.snapshot.sample_rate_hz = 48_000;
         state.zoom_level = 1024.0 / 14_088.0;
         state.hop_size = 14_088;
@@ -4335,6 +4386,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = SpectrogramDisplayMode::Rolling;
         state.active_track_path = Some(PathBuf::from("/tmp/track.flac"));
+        // Its session decodes it.
+        state.worker_file = state.active_track_path.clone();
 
         let (event_tx, _event_rx) = unbounded::<AnalysisEvent>();
         let (spectrogram_cmd_tx, spectrogram_cmd_rx) = unbounded::<SpectrogramWorkerCommand>();
@@ -5601,6 +5654,8 @@ mod tests {
         let mut state = AnalysisRuntimeState::new();
         state.display_mode = mode;
         state.active_track_path = Some(path.to_path_buf());
+        // Its session decodes it.
+        state.worker_file = Some(path.to_path_buf());
         state.active_track_token = 1;
         state.active_session_effective_rate = 48_000;
         state.active_session_channel_count = 1;
@@ -5909,6 +5964,140 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_seek_after_a_continuation_the_worker_took_reopens_the_active_track() {
+        // Rolling, the worker goes on with B, handed to it early, before
+        // playback switches; then playback stops on A, and its stop drops
+        // the staged B, which cannot take back a continuation the worker
+        // took. The view becomes centered, before the stop or after it,
+        // and the stop or a replay of A seeks to its start: the worker
+        // still decodes B, so the seek must open A afresh, whether or not
+        // the worker has reported B yet.
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let format = TrackFormat::Known {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        for reported in [true, false] {
+            for centered_before_the_stop in [true, false] {
+                let case =
+                    format!("reported={reported} centered_before={centered_before_the_stop}");
+                let channels = TestChannels::new();
+                let ctx = channels.ctx();
+                let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+                state.last_spectrogram_position = 200.0;
+                state.formats.insert(b.to_path_buf(), format, None);
+                state.handle_command(
+                    AnalysisCommand::PrepareGaplessContinuation {
+                        path: b.to_path_buf(),
+                    },
+                    &ctx,
+                );
+                assert!(
+                    channels.spectrogram_cmd_rx.try_iter().any(|cmd| matches!(
+                        cmd,
+                        SpectrogramWorkerCommand::ContinueWithFile { .. }
+                    )),
+                    "{case}: the worker was handed B"
+                );
+                if reported {
+                    state.handle_session_report(
+                        SessionReport::Opened {
+                            generation: channels.generation.load(Ordering::Relaxed),
+                            track_token: 1,
+                            path: b.to_path_buf(),
+                            stamp: None,
+                            format,
+                            continued_at: Some(200.4),
+                        },
+                        &ctx,
+                    );
+                }
+                let centered =
+                    AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered);
+                if centered_before_the_stop {
+                    state.handle_command(centered.clone(), &ctx);
+                }
+                // What GStreamer's stop sends.
+                state.handle_command(AnalysisCommand::ClearStagedContinuation, &ctx);
+                assert!(state.staged_continuation_path.is_none(), "{case}");
+                if !centered_before_the_stop {
+                    state.handle_command(centered, &ctx);
+                }
+                channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+                state.handle_command(AnalysisCommand::SeekPosition(0.0), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [SpectrogramWorkerCommand::NewTrack {
+                            path,
+                            target_position_seconds,
+                            clear_history_on_reset: true,
+                            ..
+                        }] if path == a && target_position_seconds.abs() < 1e-9
+                    ),
+                    "{case}: {commands:?}"
+                );
+
+                // The new session decodes A: a seek reaches it as a seek.
+                state.handle_command(AnalysisCommand::SeekPosition(0.04), &ctx);
+                let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
+                    "{case}: {commands:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_seek_after_the_worker_rejected_a_continuation_stays_with_its_session() {
+        // The worker stays with A when it rejects B, so a seek in A after
+        // the stop reaches its session.
+        let (a, b) = (Path::new("/music/a.flac"), Path::new("/music/b.flac"));
+        let channels = TestChannels::new();
+        let ctx = channels.ctx();
+        let mut state = playing_state(SpectrogramDisplayMode::Rolling, a);
+        state.formats.insert(
+            b.to_path_buf(),
+            TrackFormat::Known {
+                sample_rate: 48_000,
+                channels: 1,
+            },
+            None,
+        );
+        state.handle_command(
+            AnalysisCommand::PrepareGaplessContinuation {
+                path: b.to_path_buf(),
+            },
+            &ctx,
+        );
+        state.handle_session_report(
+            SessionReport::ContinuationRejected {
+                generation: channels.generation.load(Ordering::Relaxed),
+                path: b.to_path_buf(),
+                stamp: None,
+                format: None,
+            },
+            &ctx,
+        );
+        state.handle_command(AnalysisCommand::ClearStagedContinuation, &ctx);
+        state.handle_command(
+            AnalysisCommand::SetSpectrogramDisplayMode(SpectrogramDisplayMode::Centered),
+            &ctx,
+        );
+        channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+        state.handle_command(AnalysisCommand::SeekPosition(0.0), &ctx);
+        let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+        assert!(
+            matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
+            "{commands:?}"
+        );
     }
 
     #[test]
