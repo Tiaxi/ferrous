@@ -1486,6 +1486,8 @@ private slots:
     void playbackControllerReadsTheBridgeClock();
     void mainWindowStopsPositionFramesWhileHidden();
     void albumArtZoomFollowsTheWheelDelta();
+    void albumArtZoomKeepsTheImagePointUnderThePointer_data();
+    void albumArtZoomKeepsTheImagePointUnderThePointer();
     void albumArtSmallerThanTheRequestIsShownScaledUp();
     void albumArtViewerShowsThePreloadedCover_data();
     void albumArtViewerShowsThePreloadedCover();
@@ -18545,6 +18547,216 @@ Window {
     QVERIFY(std::abs(zoom() - expected) < 1e-9);
     QVERIFY(sendWheel(window, center, QPoint(), QPoint(0, -1200)));
     QCOMPARE(zoom(), 1.0);
+}
+
+void TransportInputSmokeTest::albumArtZoomKeepsTheImagePointUnderThePointer_data() {
+    QTest::addColumn<int>("viewportWidth");
+    // The square cover fills a square viewer, so zooming at any point on it
+    // keeps that point under the pointer.
+    QTest::newRow("cover fills the viewer") << 400;
+    // In a wider viewer the cover leaves bands at its sides, and the pan
+    // limits stop it short of keeping points near its sides in place.
+    QTest::newRow("cover narrower than the viewer") << 600;
+}
+
+void TransportInputSmokeTest::albumArtZoomKeepsTheImagePointUnderThePointer() {
+    QFETCH(int, viewportWidth);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(400, 400, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+
+    QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("covers"), new CoverImageProvider);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("testCoverUrl"), CoverImageProvider::urlForPath(coverPath));
+    engine.rootContext()->setContextProperty(QStringLiteral("testViewportWidth"), viewportWidth);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "viewers" as Viewers
+
+Window {
+    width: testViewportWidth
+    height: 400
+    visible: true
+    property alias surface: surface
+    property int closeCount: 0
+
+    Action { id: replaceFromItunesAction }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: testCoverUrl
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 400
+        viewerDecodeHeight: 400
+        infoOverlayText: ""
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() { closeCount += 1 }
+        toggleInfoVisible: function() {}
+        focusFullscreen: function() {}
+        comparisonLabel: ""
+        comparisonModeAvailable: false
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    QList<QQuickItem *> items;
+    collectQuickItems(surface, &items);
+    QQuickItem *image = nullptr;
+    for (QQuickItem *each : items) {
+        if (each->inherits("QQuickImage")) {
+            image = each;
+            break;
+        }
+    }
+    QVERIFY(image != nullptr);
+    // Image.Ready is 1.
+    QTRY_COMPARE_WITH_TIMEOUT(image->property("status").toInt(), 1, 5000);
+    // The image fills the item that is panned and zoomed, inside the viewport.
+    QQuickItem *transform = image->parentItem();
+    QVERIFY(transform != nullptr);
+    QQuickItem *viewport = transform->parentItem();
+    QVERIFY(viewport != nullptr);
+    QCOMPARE(viewport->size(), QSizeF(viewportWidth, 400));
+    QCOMPARE(transform->size(), QSizeF(400, 400));
+
+    const auto zoom = [surface]() { return surface->property("zoom").toDouble(); };
+    const auto pan = [surface]() {
+        return QPointF(surface->property("panX").toDouble(), surface->property("panY").toDouble());
+    };
+    const QPointF viewportCenter(viewport->width() / 2, viewport->height() / 2);
+    const QPointF imageCenter(image->width() / 2, image->height() / 2);
+    const auto verifyFitted = [&]() -> QString {
+        const QPointF shownCenter = image->mapToItem(viewport, imageCenter);
+        if (zoom() != 1.0 || pan() != QPointF() || shownCenter != viewportCenter) {
+            return QStringLiteral("not fitted: zoom %1, pan %2,%3, centre at %4,%5")
+                .arg(zoom())
+                .arg(pan().x())
+                .arg(pan().y())
+                .arg(shownCenter.x())
+                .arg(shownCenter.y());
+        }
+        return {};
+    };
+
+    int keptAxes = 0;
+    int clampedAxes = 0;
+    // One axis of a zoom at `pointer`: the image point that was under the
+    // pointer now shows at `shown`, with the pan at `panNow` (`panBefore`
+    // before the zoom) and limited to +-`limit`.
+    const auto verifyAxis = [&](char axis, double pointer, double shown, double panNow,
+                                double panBefore, double limit) -> QString {
+        const double drift = shown - pointer;
+        // Panning moves the image one to one, so this pan would bring the
+        // point back under the pointer.
+        const double needed = panNow - drift;
+        if (std::abs(needed) <= limit + 0.5) {
+            ++keptAxes;
+            if (std::abs(drift) > 0.5) {
+                return QStringLiteral("%1 drifted %2 px from the pointer at zoom %3")
+                    .arg(axis)
+                    .arg(drift)
+                    .arg(zoom());
+            }
+            return {};
+        }
+        // The pan limits stop the point short of the pointer: the image
+        // still moves as far toward it as they allow.
+        ++clampedAxes;
+        if (std::abs(std::abs(panNow) - limit) > 1e-6 || panNow * needed < 0) {
+            return QStringLiteral("%1 pan %2 is not at the limit %3 toward the pointer (needs %4)")
+                .arg(axis)
+                .arg(panNow)
+                .arg(limit)
+                .arg(needed);
+        }
+        const double driftUnpanned = drift - (panNow - std::clamp(panBefore, -limit, limit));
+        if (std::abs(drift) > std::abs(driftUnpanned) + 1e-6) {
+            return QStringLiteral("%1 moved away from the pointer: drift %2, %3 without panning")
+                .arg(axis)
+                .arg(drift)
+                .arg(driftUnpanned);
+        }
+        return {};
+    };
+    const auto verifyZoom = [&](QPointF pointer, QPointF imagePoint, QPointF panBefore) -> QString {
+        const QPointF shown = image->mapToItem(viewport, imagePoint);
+        const QPointF panNow = pan();
+        const double limitX = std::max(0.0, (transform->width() * zoom() - viewport->width()) / 2);
+        const double limitY = std::max(0.0, (transform->height() * zoom() - viewport->height()) / 2);
+        QString failure = verifyAxis('x', pointer.x(), shown.x(), panNow.x(), panBefore.x(), limitX);
+        if (failure.isEmpty()) {
+            failure = verifyAxis('y', pointer.y(), shown.y(), panNow.y(), panBefore.y(), limitY);
+        }
+        if (!failure.isEmpty()) {
+            failure += QStringLiteral(" (pointer %1,%2)").arg(pointer.x()).arg(pointer.y());
+        }
+        return failure;
+    };
+
+    // Near each corner of the cover, and at its centre.
+    const QRectF coverRect = transform->mapRectToItem(viewport, QRectF(QPointF(), transform->size()));
+    const QRectF inset = coverRect.adjusted(10, 10, -10, -10);
+    const QList<QPointF> pointers{
+        inset.topLeft(), inset.topRight(), inset.bottomLeft(), inset.bottomRight(), inset.center()};
+    QVERIFY2(verifyFitted().isEmpty(), qPrintable(verifyFitted()));
+
+    for (const QPointF &pointer : pointers) {
+        const QPointF scenePointer = viewport->mapToItem(window->contentItem(), pointer);
+        // Zoom in a notch at a time, then back out to the fitted view.
+        for (const int delta : {120, -120}) {
+            for (int step = 0; step < 12 && (delta > 0 || zoom() > 1.0); ++step) {
+                const QPointF imagePoint = image->mapFromItem(viewport, pointer);
+                const QPointF panBefore = pan();
+                const double zoomBefore = zoom();
+                QVERIFY(sendWheel(window, scenePointer, QPoint(), QPoint(0, delta)));
+                QVERIFY(delta > 0 ? zoom() > zoomBefore : zoom() < zoomBefore);
+                const QString failure = verifyZoom(pointer, imagePoint, panBefore);
+                QVERIFY2(failure.isEmpty(), qPrintable(failure));
+            }
+        }
+        QVERIFY2(verifyFitted().isEmpty(), qPrintable(verifyFitted()));
+    }
+
+    for (const QPointF &pointer : pointers) {
+        const QPoint scenePointer = viewport->mapToItem(window->contentItem(), pointer).toPoint();
+        // A double-click zooms to twice the fitted size at the pointer.
+        const QPointF imagePoint = image->mapFromItem(viewport, pointer);
+        const QPointF panBefore = pan();
+        QTest::mouseMove(window, scenePointer);
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, scenePointer);
+        QCOMPARE(zoom(), 2.0);
+        const QString failure = verifyZoom(pointer, imagePoint, panBefore);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
+        // Another fits the cover again.
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, scenePointer);
+        QVERIFY2(verifyFitted().isEmpty(), qPrintable(verifyFitted()));
+    }
+    QCOMPARE(root->property("closeCount").toInt(), 0);
+
+    QVERIFY(keptAxes > 0);
+    if (viewportWidth == 400) {
+        QCOMPARE(clampedAxes, 0);
+    } else {
+        QVERIFY(clampedAxes > 0);
+    }
 }
 
 void TransportInputSmokeTest::albumArtSmallerThanTheRequestIsShownScaledUp() {
