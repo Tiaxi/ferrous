@@ -55,6 +55,21 @@ Item {
         root.panY = Math.max(-limitY, Math.min(limitY, root.panY))
     }
 
+    // Zooms to `nextZoom` keeping the image point at (`x`, `y`) in the
+    // viewport under that point, as far as the pan limits allow. The image
+    // is centred in the viewport, offset by the pan and scaled about its
+    // centre, so the point at `pivot = (x, y) - viewport centre` shows the
+    // image point `(pivot - pan) / zoom` from the image's centre.
+    function zoomAbout(x, y, nextZoom) {
+        const pivotX = x - albumArtViewport.width / 2
+        const pivotY = y - albumArtViewport.height / 2
+        const ratio = nextZoom / root.zoom
+        root.zoom = nextZoom
+        root.panX = pivotX - (pivotX - root.panX) * ratio
+        root.panY = pivotY - (pivotY - root.panY) * ratio
+        root.clampPan()
+    }
+
     function isPointOnImage(item, x, y) {
         const p = albumArtImageFull.mapFromItem(item, x, y)
         const xOff = (albumArtImageFull.width - albumArtImageFull.paintedWidth) / 2
@@ -184,8 +199,7 @@ Item {
                     root.panX = 0.0
                     root.panY = 0.0
                 } else {
-                    root.zoom = 2.0
-                    root.clampPan()
+                    root.zoomAbout(mouse.x, mouse.y, 2.0)
                 }
             }
 
@@ -196,19 +210,18 @@ Item {
                     return
                 }
                 const oldZoom = root.zoom
-                const nextZoom = Math.max(1.0, Math.min(
+                let nextZoom = Math.max(1.0, Math.min(
                     6.0, oldZoom * Math.pow(root.zoomPerNotch, notches)))
-                if (Math.abs(nextZoom - oldZoom) < 0.0001) {
+                // Rounding leaves zooming in and back out a hair above the
+                // fitted size; land on it, so the view is fitted again.
+                if (nextZoom - 1.0 < 0.0001) {
+                    nextZoom = 1.0
+                }
+                if (nextZoom === oldZoom) {
                     wheel.accepted = true
                     return
                 }
-                const pivotX = wheel.x - albumArtViewport.width / 2
-                const pivotY = wheel.y - albumArtViewport.height / 2
-                const ratio = nextZoom / oldZoom
-                root.zoom = nextZoom
-                root.panX = (root.panX + pivotX) * ratio - pivotX
-                root.panY = (root.panY + pivotY) * ratio - pivotY
-                root.clampPan()
+                root.zoomAbout(wheel.x, wheel.y, nextZoom)
                 wheel.accepted = true
             }
         }
