@@ -1658,6 +1658,11 @@ impl AnalysisRuntimeState {
             SessionReport::Repositioned { start_seconds, .. } => {
                 self.spectrogram_session_start = start_seconds;
             }
+            SessionReport::Ended { .. } => {
+                // No session decodes anything now, so a seek starts one.
+                self.worker_file = None;
+                self.worker_continuation = None;
+            }
             SessionReport::ContinuationRejected {
                 path,
                 stamp,
@@ -1692,6 +1697,10 @@ impl AnalysisRuntimeState {
                 error,
                 ..
             } => {
+                // The session ended; `Ended` follows, and the user may see
+                // the error first.
+                self.worker_file = None;
+                self.worker_continuation = None;
                 if track_token != self.active_track_token {
                     return;
                 }
@@ -2079,9 +2088,10 @@ impl AnalysisRuntimeState {
         }
     }
 
-    /// Whether the worker may decode a file other than the active track: one
-    /// it reported it went on with, or a continuation it was handed and may
-    /// have taken. A seek in the active track cannot reach it there.
+    /// Whether the worker may decode a file other than the active track, or
+    /// nothing: one it reported it went on with, a continuation it was
+    /// handed and may have taken, or no file once its session ended. A seek
+    /// in the active track cannot reach it there.
     fn worker_may_decode_another_file(&self) -> bool {
         let active = self.active_track_path.as_ref();
         self.worker_file.as_ref() != active
@@ -3073,6 +3083,12 @@ mod tests {
     /// view at zoom 1, with the ring its output fills.
     fn centered_engine_on_wave(seconds: u32) -> (AnalysisEngine, Receiver<AnalysisEvent>, PathBuf) {
         let path = write_engine_test_wave(seconds, 8_000);
+        let (engine, events) = centered_engine_on(&path);
+        (engine, events, path)
+    }
+
+    /// An engine showing `path` centered in a 1,165-pixel view at zoom 1.
+    fn centered_engine_on(path: &Path) -> (AnalysisEngine, Receiver<AnalysisEvent>) {
         let (engine, events) = AnalysisEngine::new();
         engine.command(AnalysisCommand::SetSpectrogramActive(true));
         engine.command(AnalysisCommand::SetSpectrogramDisplayMode(
@@ -3080,13 +3096,13 @@ mod tests {
         ));
         engine.command(AnalysisCommand::SetSpectrogramWidgetWidth(1_165));
         engine.command(AnalysisCommand::SetTrack {
-            path: path.clone(),
+            path: path.to_path_buf(),
             reset_spectrogram: true,
             track_token: 1,
             gapless: false,
         });
         engine.command(AnalysisCommand::PositionUpdate(0.0));
-        (engine, events, path)
+        (engine, events)
     }
 
     /// Take what the engine sends over `duration` into `ring`.
@@ -3207,6 +3223,59 @@ mod tests {
             drop(engine);
             std::fs::remove_file(path).expect("remove fixture");
         }
+    }
+
+    /// A session that fails while it decodes ahead clears the view and
+    /// ends. A centered stop then starts a fresh session, which fills the
+    /// view, and a replay keeps it.
+    #[test]
+    fn a_centered_stop_after_a_failed_session_starts_a_fresh_one() {
+        let path = write_engine_test_wave(30, 8_000);
+        session::decode_test_hooks::fail_reads_of(&path, 20);
+        let (engine, events) = centered_engine_on(&path);
+        let mut ring = ModelRing::default();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match events.recv_timeout(left) {
+                Ok(AnalysisEvent::PrecomputedSpectrogramChunk(chunk)) => ring.take(&chunk),
+                Ok(AnalysisEvent::WorkerFailed(message)) => {
+                    assert!(message.contains("decoding failed (injected)"), "{message}");
+                    break;
+                }
+                Ok(AnalysisEvent::Snapshot(_)) => {}
+                Err(error) => panic!("the session did not fail: {error}"),
+            }
+        }
+        assert!(!ring.complete);
+        let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+
+        engine.command(AnalysisCommand::SeekPosition(0.0));
+        fill_ring_until(
+            &events,
+            &mut ring,
+            "no fresh session after the stop",
+            |ring| {
+                ring.generation > generation
+                    && ring.complete
+                    && ring.columns.len() == 1
+                    && ring.first() == Some(0)
+            },
+        );
+        let generation = engine.spectrogram_decode_generation.load(Ordering::Relaxed);
+        let resets = ring.resets;
+
+        // The replay finds the columns of its view decoded.
+        engine.command(AnalysisCommand::SeekPosition(0.04));
+        engine.command(AnalysisCommand::PositionUpdate(0.08));
+        take_for(&events, &mut ring, Duration::from_millis(400));
+        assert_eq!(
+            engine.spectrogram_decode_generation.load(Ordering::Relaxed),
+            generation
+        );
+        assert_eq!(ring.resets, resets);
+        drop(engine);
+        std::fs::remove_file(path).expect("remove fixture");
     }
 
     #[test]
@@ -6046,6 +6115,51 @@ mod tests {
                 // The new session decodes A: a seek reaches it as a seek.
                 state.handle_command(AnalysisCommand::SeekPosition(0.04), &ctx);
                 let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+                assert!(
+                    matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
+                    "{case}: {commands:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_seek_after_the_session_ended_starts_a_new_one() {
+        // A session that ended, failing to open or read its file, takes no
+        // seek: a stop's or replay's seek starts a new session instead.
+        // The report of a session since superseded changes nothing.
+        let a = Path::new("/music/a.flac");
+        let failed = SessionReport::Failed {
+            generation: 4,
+            track_token: 1,
+            path: a.to_path_buf(),
+            error: "decoding failed (bad data)".to_string(),
+        };
+        for (report, current) in [
+            (SessionReport::Ended { generation: 4 }, true),
+            (failed, true),
+            (SessionReport::Ended { generation: 3 }, false),
+        ] {
+            let channels = TestChannels::new();
+            let ctx = channels.ctx();
+            let mut state = playing_state(SpectrogramDisplayMode::Centered, a);
+            channels.generation.store(4, Ordering::Relaxed);
+            let case = format!("{report:?}");
+            state.handle_session_report(report, &ctx);
+            channels.spectrogram_cmd_rx.try_iter().for_each(drop);
+
+            state.handle_command(AnalysisCommand::SeekPosition(0.0), &ctx);
+            let commands: Vec<_> = channels.spectrogram_cmd_rx.try_iter().collect();
+            if current {
+                assert!(
+                    matches!(
+                        commands.as_slice(),
+                        [SpectrogramWorkerCommand::NewTrack { path, generation: 5, .. }]
+                            if path == a
+                    ),
+                    "{case}: {commands:?}"
+                );
+            } else {
                 assert!(
                     matches!(commands.as_slice(), [SpectrogramWorkerCommand::Seek { .. }]),
                     "{case}: {commands:?}"
