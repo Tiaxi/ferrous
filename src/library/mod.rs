@@ -3,9 +3,11 @@
 mod cover_cache;
 mod db;
 mod file_id;
+mod keyed_text;
 mod publish;
 mod scan;
 mod schema;
+mod search_tags;
 #[cfg(test)]
 mod test_fixtures;
 mod watch;
@@ -21,6 +23,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::worker_thread::JoinableThread;
 
 pub(crate) use file_id::{file_id_columns, file_id_from_columns, identity_changed};
+pub(crate) use keyed_text::KeyedText;
 #[cfg(test)]
 pub(crate) use publish::LibraryMirror;
 pub(crate) use publish::{AppliedChanges, LibraryChanges};
@@ -35,6 +38,8 @@ pub(crate) use scan::{
     TrackRefresh,
 };
 pub(crate) use scan::{read_library_snapshot_from_db, ExternalReadFailures, ExternalTrackCache};
+pub use search_tags::SearchTags;
+pub(crate) use search_tags::SearchTagsBuilder;
 
 /// Opens the library database, which also holds the analysis worker's
 /// waveform cache, and prepares it as every connection does: brings its
@@ -63,9 +68,6 @@ fn open_library_database_at(
 pub(crate) fn init_library_schema(conn: &rusqlite::Connection) -> anyhow::Result<()> {
     schema::init_schema(conn)
 }
-
-/// Additional, potentially repeated text tags collected during library scans.
-pub type SearchTags = std::collections::BTreeMap<String, Vec<String>>;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LibraryTrack {

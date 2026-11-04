@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::BTreeMap;
-
 use super::search::normalize_for_search;
+use crate::library::KeyedText;
 use unicode_normalization::UnicodeNormalization;
+
+/// The normalized text of each field of a track, artist or album a query
+/// can match, by key.
+pub(super) type SearchFields = KeyedText;
 
 #[derive(Debug)]
 pub(super) struct SearchTerm {
@@ -82,13 +85,13 @@ impl SearchQuery {
         Self { terms }
     }
 
-    pub(super) fn matches(&self, fields: &BTreeMap<String, String>) -> bool {
+    pub(super) fn matches(&self, fields: &SearchFields) -> bool {
         self.matches_with(fields, |_| true, &[])
     }
 
     pub(super) fn matches_with(
         &self,
-        fields: &BTreeMap<String, String>,
+        fields: &SearchFields,
         include: impl Fn(&str) -> bool,
         extra: &[(&str, &str)],
     ) -> bool {
@@ -135,11 +138,11 @@ mod tests {
 
     #[test]
     fn parses_fields_and_quoted_phrases_without_interpreting_unknown_prefixes() {
-        let fields = BTreeMap::from([
-            ("albumartist".into(), "sigur ros".into()),
-            ("year".into(), "1997".into()),
-            ("comment".into(), "anniversary remaster".into()),
-            ("path".into(), "/music/live:oslo.flac".into()),
+        let fields = SearchFields::from_pairs(vec![
+            ("albumartist", "sigur ros"),
+            ("year", "1997"),
+            ("comment", "anniversary remaster"),
+            ("path", "/music/live:oslo.flac"),
         ]);
         assert!(
             SearchQuery::parse("album_artist:\"Sigur Rós\" year:1997 comment:remaster")
