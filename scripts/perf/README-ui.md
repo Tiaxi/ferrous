@@ -9,6 +9,13 @@ harness measures any commit. Every run gets its own `HOME`, `XDG_*_HOME` and
 the real Ferrous config, data or cache. A window opens on the desktop and
 audio plays.
 
+The app runs on the real session bus, which the scripts use for MPRIS. Ferrous
+is single-instance there, so a Ferrous already running in the session takes
+over the start and the new process quits. `ui_driver.App` then fails, and
+`App.mpris()` calls only a Ferrous MPRIS name owned by the process it started,
+so a run never controls another instance. Close any other Ferrous, or run the
+scripts under their own session bus (`dbus-run-session`), before measuring.
+
 Bring your own audio files; none are included. Name them `<ID>.<ext>` in one
 directory; the scenarios use `S01` (stereo 44.1 kHz) and `S05` (5.1 96 kHz),
 and `ui_stalls.py` queues `S01`–`S06`. `ui_stalls.py` and `ui_startup.py`
