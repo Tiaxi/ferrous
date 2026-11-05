@@ -1174,6 +1174,8 @@ private slots:
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
     void spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate_data();
     void spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate();
+    void spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns_data();
+    void spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns();
     void spectrogramEndSeekReleasesCanvasOnFinalize();
     void spectrogramSeekFreezeEndsWithTheSession();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
@@ -12414,7 +12416,9 @@ void SpectrogramSmokeTest::spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstim
 
 void SpectrogramSmokeTest::spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate() {
     // The decoder places a centered view, its seeks and restarts, by the
-    // track's real length (issue 421). The view here keeps bounding itself
+    // columns a session decodes of the track (issue 421), not by its
+    // column estimate, which runs past the end. The view here keeps
+    // bounding itself
     // by the estimate until the session has decoded the end, and then
     // shows the whole track once its window covers 90% of the columns
     // decoded, and ends where the decode did, a window before it, once the
@@ -12490,19 +12494,64 @@ void SpectrogramSmokeTest::spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstim
     QCOMPARE(wideAtEnd.right, qint64(decodedEnd - 1));
     QCOMPARE(wideAtEnd.left, qint64(decodedEnd - wideWindow));
 
-    // A decode for a view starts 2 s before its left edge by the real
-    // length, of which the decoded end falls short by half an FFT window:
-    // every column the view shows is decoded. By the estimate, which runs
-    // 8.2 s past the end, the decode started right of the view's left edge
-    // and did not show the whole track.
+    // The decoder reckons the view by the same end, the same window, and
+    // the same whole columns: near the end its left edge is the view's, and
+    // mid-track it shows the whole track as the view does. By the
+    // estimate, which runs 8.2 s past the end, a decode started right of
+    // the view's left edge, 2 s of warm-up and all, and did not show the
+    // whole track.
+    QCOMPARE(qint64(decodedEnd - narrowWindow), narrow.left);
+    QVERIFY(static_cast<qint64>(wideWindow) * 100 / decodedEnd >= 90);
     constexpr double warmUp = 2.0;
-    const double realLeft = 120.0 - narrowWindow / columnsPerSecond;
-    QVERIFY(column(realLeft - warmUp) <= narrow.left);
     const double estimatedEnd = 120.0 + 65'536.0 / rate;
     QVERIFY(column(estimatedEnd - narrowWindow / columnsPerSecond - warmUp) > narrow.left);
-    QVERIFY(wideWindow / columnsPerSecond >= 0.9 * 120.0);
     QVERIFY(wideWindow / columnsPerSecond < 0.9 * estimatedEnd);
     QVERIFY(column(midTrack - wideWindow / columnsPerSecond / 2.0 - warmUp) > wide.left);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns_data() {
+    // A 40 s file at 8 kHz decodes to 1866 columns of 171 frames with
+    // 2048-sample windows. 1680 of them are 90.03%: the view shows the
+    // whole track, though they are 35.91 s, less than 90% of the 40 s.
+    QTest::addColumn<int>("window");
+    QTest::addColumn<qint64>("left");
+    // Centered on column 1024, the playhead at 21.9 s.
+    QTest::newRow("89.98%") << 1'679 << qint64(1'024 - 1'679 / 2);
+    QTest::newRow("90.03%") << 1'680 << qint64(0);
+    QTest::newRow("90.08%") << 1'681 << qint64(0);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns() {
+    // The decoder starts a seek's decode at the view's left edge by the
+    // same columns and the same integer share (src/analysis/
+    // centered_view.rs, issue 421): placed by seconds, the 90.03% view
+    // started its decode at 1.95 s and left columns 0 to 89 black.
+    QFETCH(int, window);
+    QFETCH(qint64, left);
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int hop = 171;
+    constexpr double columnsPerSecond = static_cast<double>(rate) / hop;
+    constexpr int decodedEnd = 1'866;
+    // The column estimate: 40 s in columns of 1024 frames, and 64 more.
+    const int estimate = static_cast<int>(std::ceil((40 * rate / 1024 + 64) * 1024.0 / hop));
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estimate, rate, hop, false, true, 1);
+    item.feedPrecomputedChunk(
+        QByteArray(decodedEnd * bins, '\x40'), bins, 0, decodedEnd, 0, estimate,
+        rate, hop, false, false, 1);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, decodedEnd, decodedEnd, rate, hop,
+        /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false);
+    QMutexLocker lock(&item.m_stateMutex);
+    const SpectrogramItem::CenteredView view =
+        item.centeredViewLocked(21.9, window, 100, 1.0, columnsPerSecond);
+    QCOMPARE(view.left, left);
+    QCOMPARE(view.right, left == 0 ? qint64(decodedEnd - 1) : left + window - 1);
 }
 
 void SpectrogramSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {
