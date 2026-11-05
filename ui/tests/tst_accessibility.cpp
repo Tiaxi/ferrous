@@ -294,6 +294,12 @@ private slots:
     void seekBarStepsByTheWindowsDevicePixels();
     void seekBarPlayheadIsOneOutlinedLine();
     void seekBarPlayheadStaysOnTheBarAtEitherEnd();
+    void seekHoverShowsTheTimeUnderThePointer();
+    void seekHoverShowsTheTimeAClickSeeksTo();
+    void seekHoverFollowsTheWindowsDevicePixels();
+    void seekGesturesShowTheTimeBesideThePlayhead();
+    void seekHoverShowsNothingWithoutATrack();
+    void seekTouchShowsNoHoverTime();
     void seekBarPlayheadContrastsWithTheBar_data();
     void seekBarPlayheadContrastsWithTheBar();
     void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
@@ -1581,6 +1587,397 @@ void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
         QVERIFY2(barWidths.size() >= 6 && oddBars >= 3,
                  qPrintable(QStringLiteral("at %1: %2 bar widths, %3 odd").arg(dpr).arg(barWidths.size()).arg(oddBars)));
     }
+}
+
+namespace {
+
+// The seek bar's time box and its text.
+struct SeekTimeBox {
+    QQuickItem *box = nullptr;
+    QQuickItem *text = nullptr;
+
+    bool find(QQuickItem *root) {
+        box = itemsNamed(root, QStringLiteral("seekTimeBox")).value(0);
+        text = itemsNamed(root, QStringLiteral("seekDragTime")).value(0);
+        return box != nullptr && text != nullptr;
+    }
+    // The time it shows, or an empty text when it is hidden.
+    QString shown() const {
+        return box->isVisible() ? text->property("text").toString() : QString();
+    }
+};
+
+// Why `box` is not beside `anchorX`, in the slider's coordinates, as the
+// time box is: 8 pixels to its left or, without room there, 8 to its right,
+// to within the device pixel it is rounded to, and inside the bar; or an
+// empty text.
+QString timeBoxPlacementError(QQuickItem *seek, QQuickItem *box, qreal anchorX, qreal dpr) {
+    const qreal left = box->mapToItem(seek, QPointF()).x();
+    const qreal right = left + box->width();
+    const qreal slack = 0.5 / dpr + 1e-6;
+    const bool roomOnTheLeft = anchorX - 8 - box->width() >= 2;
+    QStringList errors;
+    if (left < 0 || right > seek->width()) {
+        errors.push_back(QStringLiteral("box from %1 to %2 off the bar of %3").arg(left).arg(right).arg(seek->width()));
+    }
+    if (roomOnTheLeft && std::abs(right - (anchorX - 8)) > slack) {
+        errors.push_back(QStringLiteral("box ends at %1, not 8 left of %2").arg(right).arg(anchorX));
+    }
+    if (!roomOnTheLeft && std::abs(left - (anchorX + 8)) > slack) {
+        errors.push_back(QStringLiteral("box starts at %1, not 8 right of %2").arg(left).arg(anchorX));
+    }
+    return errors.join(QStringLiteral("; "));
+}
+
+// Sends a mouse event at `scene`, as the window system does; a move with
+// no button held hovers.
+void sendMouse(QQuickWindow *window, QEvent::Type type, QPointF scene, Qt::MouseButton button,
+               Qt::MouseButtons buttons) {
+    QMouseEvent event(type, scene, scene, window->mapToGlobal(scene), button, buttons, Qt::NoModifier,
+                      QPointingDevice::primaryPointingDevice());
+    QSpontaneKeyEvent::setSpontaneous(&event);
+    QCoreApplication::sendEvent(window, &event);
+}
+
+} // namespace
+
+void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    const qreal dpr = window->effectiveDevicePixelRatio();
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && progress != nullptr && timeBox.find(window->contentItem()));
+    QCOMPARE(timeBox.shown(), QString());
+    const qreal playedWidth = progress->width();
+    const qreal y = seek->height() / 2;
+    const std::optional<SeekPoint> between = pointBetweenSteps(seek, 0.45);
+    QVERIFY(between.has_value());
+
+    // Across the bar and at either end, the box shows the second under the
+    // pointer beside it; the left end's time has no room on the left.
+    struct Expected {
+        qreal x;
+        QString time;
+    };
+    const qreal betweenX = seek->mapFromScene(QPointF(between->scene)).x();
+    for (const Expected &expected : {Expected{0, QStringLiteral("00:00")}, Expected{1, QString()},
+                                     Expected{3, QString()}, Expected{betweenX, QString()},
+                                     Expected{seek->width() * 0.8, QString()},
+                                     Expected{seek->width() - 1, QStringLiteral("03:20")}}) {
+        const QPoint scene = seek->mapToScene(QPointF(expected.x, y)).toPoint();
+        const qreal x = seek->mapFromScene(QPointF(scene)).x();
+        QTest::mouseMove(window, scene);
+        const QString time = minutesAndSeconds(secondsAtX(seek, x));
+        QVERIFY2(timeBox.shown() == time, qPrintable(QStringLiteral("at %1: %2, not %3")
+                                                         .arg(x).arg(timeBox.shown(), time)));
+        if (!expected.time.isEmpty()) {
+            QCOMPARE(time, expected.time);
+        }
+        const QString placementError = timeBoxPlacementError(seek, timeBox.box, x, dpr);
+        QVERIFY2(placementError.isEmpty(), qPrintable(QStringLiteral("at %1: %2").arg(x).arg(placementError)));
+        if (x < 10) {
+            QVERIFY2(timeBox.box->x() > x, qPrintable(QString::number(timeBox.box->x())));
+        } else if (x > 200) {
+            QVERIFY2(timeBox.box->x() + timeBox.box->width() < x, qPrintable(QString::number(timeBox.box->x())));
+        }
+    }
+
+    // Hovering moves neither the slider nor the playhead, and seeks nothing.
+    QCOMPARE(seek->property("value").toDouble(), 50.0);
+    QCOMPARE(progress->width(), playedWidth);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QVERIFY2(recordedValues(root.data(), "seeks").isEmpty(),
+             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+
+    // Leaving the bar hides the box; coming back shows it again.
+    QTest::mouseMove(window, centerOf(qvariant_cast<QQuickItem *>(root->property("startButton"))));
+    QCOMPARE(timeBox.shown(), QString());
+    QCOMPARE(timeBox.text->property("text").toString(), QString());
+    QTest::mouseMove(window, between->scene);
+    QCOMPARE(timeBox.shown(), minutesAndSeconds(between->seconds));
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() + 4, y)).toPoint());
+    QCOMPARE(timeBox.shown(), QString());
+    QVERIFY(recordedValues(root.data(), "seeks").isEmpty());
+}
+
+void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && timeBox.find(window->contentItem()));
+    const qreal y = seek->height() / 2;
+
+    qsizetype clicks = 0;
+    for (const qreal fraction : {0.0, 0.17, 0.5, 0.731, 1.0}) {
+        const qreal x = std::min(seek->width() * fraction, seek->width() - 1);
+        const QPoint scene = seek->mapToScene(QPointF(x, y)).toPoint();
+        QTest::mouseMove(window, scene);
+        const QString hovered = timeBox.shown();
+        QVERIFY(!hovered.isEmpty());
+        QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
+
+        // A click there seeks to the time the box showed, and the box,
+        // under the pointer still, shows it again.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, scene);
+        ++clicks;
+        const QList<double> seeks = recordedValues(root.data(), "seeks");
+        QCOMPARE(seeks.size(), clicks);
+        QVERIFY2(minutesAndSeconds(seeks.constLast()) == hovered,
+                 qPrintable(QStringLiteral("at %1: seeks to %2, shows %3")
+                                .arg(x).arg(seeks.constLast()).arg(hovered)));
+        QCOMPARE(timeBox.shown(), hovered);
+    }
+}
+
+void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
+    // The transport harness as an item of a window drawn at fractional and
+    // whole device pixel ratios, as in seekBarStepsByTheWindowsDevicePixels.
+    QQuickRenderControl control;
+    QQuickWindow window(&control);
+    // Big enough to hold the harness, which hover is delivered within.
+    window.resize(1000, 200);
+    QImage canvas(16, 16, QImage::Format_ARGB32_Premultiplied);
+    QQuickRenderTarget renderTarget = QQuickRenderTarget::fromPaintDevice(&canvas);
+    renderTarget.setDevicePixelRatio(1.25);
+    window.setRenderTarget(renderTarget);
+    QQmlEngine engine;
+    QString errorText;
+    QByteArray source = transportHarnessQml();
+    QVERIFY(source.contains("ApplicationWindow {"));
+    source.replace("ApplicationWindow {", "Control {");
+    QScopedPointer<QObject> root(createQml(engine, source, &errorText));
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+    harness->setParentItem(window.contentItem());
+    control.polishItems();
+    QQuickItem *seek = itemsNamed(harness, QStringLiteral("seekSlider")).value(0);
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && timeBox.find(harness) && seek->width() > 500);
+    const qreal y = seek->height() / 2;
+    const auto hover = [&](qreal x) {
+        sendMouse(&window, QEvent::MouseMove, seek->mapToScene(QPointF(x, y)), Qt::NoButton, Qt::NoButton);
+    };
+
+    qsizetype clicks = 0;
+    for (const qreal dpr : {1.25, 2.0}) {
+        renderTarget.setDevicePixelRatio(dpr);
+        window.setRenderTarget(renderTarget);
+        QEvent changed(QEvent::DevicePixelRatioChange);
+        QCoreApplication::sendEvent(&window, &changed);
+        QCOMPARE(window.effectiveDevicePixelRatio(), dpr);
+        const qreal width = seek->width();
+
+        // At fractional pointer positions, and at either end, the box shows
+        // the time a click there seeks to, beside the pointer.
+        for (const qreal x : {0.0, 0.4, 3.3, width * 0.37 + 0.6, width * 0.62 + 0.15, width - 0.2}) {
+            hover(x);
+            const QString time = minutesAndSeconds(secondsAtX(seek, x));
+            QVERIFY2(timeBox.shown() == time, qPrintable(QStringLiteral("at %1, %2: %3, not %4")
+                                                             .arg(dpr).arg(x).arg(timeBox.shown(), time)));
+            if (x < 1) {
+                QCOMPARE(time, QStringLiteral("00:00"));
+            } else if (x > width - 1) {
+                QCOMPARE(time, QStringLiteral("03:20"));
+            }
+            const QString placementError = timeBoxPlacementError(seek, timeBox.box, x, dpr);
+            QVERIFY2(placementError.isEmpty(),
+                     qPrintable(QStringLiteral("at %1, %2: %3").arg(dpr).arg(x).arg(placementError)));
+            QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
+
+            // A click there seeks to that time.
+            const QPointF scene = seek->mapToScene(QPointF(x, y));
+            sendMouse(&window, QEvent::MouseButtonPress, scene, Qt::LeftButton, Qt::LeftButton);
+            sendMouse(&window, QEvent::MouseButtonRelease, scene, Qt::LeftButton, Qt::NoButton);
+            const QList<double> seeks = recordedValues(root.data(), "seeks").mid(clicks);
+            QVERIFY2(seeks.size() == 1 && minutesAndSeconds(seeks.constFirst()) == time,
+                     qPrintable(QStringLiteral("at %1, %2: shows %3, seeks %4")
+                                    .arg(dpr).arg(x).arg(time, describeValues(seeks))));
+            ++clicks;
+        }
+
+        // A pointer's moves within a device pixel move the box by none, and
+        // its text changes only with the second it shows.
+        hover(width * 0.5);
+        QSignalSpy moves(timeBox.box, SIGNAL(xChanged()));
+        QSignalSpy texts(timeBox.text, SIGNAL(textChanged(QString)));
+        QSet<QString> times{timeBox.shown()};
+        constexpr int kSteps = 100;
+        constexpr qreal kStep = 0.05;
+        for (int step = 1; step <= kSteps; ++step) {
+            const qreal x = width * 0.5 + step * kStep;
+            hover(x);
+            times.insert(minutesAndSeconds(secondsAtX(seek, x)));
+            QCOMPARE(timeBox.shown(), minutesAndSeconds(secondsAtX(seek, x)));
+        }
+        // A new text can change the box's width, and so its position.
+        const int devicePixels = static_cast<int>(std::ceil(kSteps * kStep * dpr));
+        QVERIFY2(moves.size() >= devicePixels - 1 && moves.size() <= devicePixels + 1 + texts.size(),
+                 qPrintable(QStringLiteral("at %1: %2 moves over %3 device pixels")
+                                .arg(dpr).arg(moves.size()).arg(devicePixels)));
+        QCOMPARE(texts.size(), times.size() - 1);
+
+        // The pointer leaves the bar.
+        hover(width + 5);
+        QCOMPARE(timeBox.shown(), QString());
+    }
+}
+
+void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    const qreal dpr = window->effectiveDevicePixelRatio();
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && line != nullptr && timeBox.find(window->contentItem()));
+    const qreal y = seek->height() / 2;
+    const auto lineCentre = [&]() { return line->mapToItem(seek, QPointF(line->width() / 2, 0)).x(); };
+
+    // A drag past the bar's end shows the time beside the playhead, at the
+    // end, not beside the pointer.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
+                      seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint());
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.7, y)).toPoint());
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() + 30, y)).toPoint());
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(timeBox.shown(), QStringLiteral("03:20"));
+    QString placementError = timeBoxPlacementError(seek, timeBox.box, lineCentre(), dpr);
+    QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier,
+                        seek->mapToScene(QPointF(seek->width() + 30, y)).toPoint());
+    QVERIFY2(sameValues(recordedValues(root.data(), "seeks"), {200.0}),
+             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+    // Qt delivers no hover during the drag, and brings it up to date at the
+    // next frame, before drawing it.
+    QTRY_COMPARE(timeBox.shown(), QString());
+
+    // After a drag that ends on the bar, the box shows the time under the
+    // pointer where the drag ended, not where it began.
+    const QPoint dragEnd = seek->mapToScene(QPointF(seek->width() * 0.7, y)).toPoint();
+    const qreal dragEndX = seek->mapFromScene(QPointF(dragEnd)).x();
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
+                      seek->mapToScene(QPointF(seek->width() * 0.3, y)).toPoint());
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint());
+    QTest::mouseMove(window, dragEnd);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd);
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
+    const QString dragEndTime = minutesAndSeconds(secondsAtX(seek, dragEndX));
+    QCOMPARE(minutesAndSeconds(recordedValues(root.data(), "seeks").constLast()), dragEndTime);
+    QTRY_COMPARE(timeBox.shown(), dragEndTime);
+    placementError = timeBoxPlacementError(seek, timeBox.box, dragEndX, dpr);
+    QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
+
+    // Held arrow keys show their time beside the playhead while the mouse
+    // hovers elsewhere on the bar; the hover's returns when they end.
+    QVERIFY(tabTo(window, seek));
+    const QPoint hovered = seek->mapToScene(QPointF(seek->width() * 0.8, y)).toPoint();
+    QTest::mouseMove(window, hovered);
+    const QString hoverTime = minutesAndSeconds(secondsAtX(seek, seek->mapFromScene(QPointF(hovered)).x()));
+    QCOMPARE(timeBox.shown(), hoverTime);
+    sendKey(window, QEvent::KeyPress, Qt::Key_Right, false);
+    QVERIFY(seek->property("adjusting").toBool());
+    QCOMPARE(timeBox.shown(), QStringLiteral("00:55"));
+    placementError = timeBoxPlacementError(seek, timeBox.box, lineCentre(), dpr);
+    QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
+    sendKey(window, QEvent::KeyRelease, Qt::Key_Right, false);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QVERIFY2(sameValues(recordedValues(root.data(), "seeks").mid(2), {55.0}),
+             qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
+    QCOMPARE(timeBox.shown(), hoverTime);
+}
+
+void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && bridge != nullptr && timeBox.find(window->contentItem()));
+    const qreal y = seek->height() / 2;
+    const QPoint middle = seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint();
+    const QPoint later = seek->mapToScene(QPointF(seek->width() * 0.6, y)).toPoint();
+    const QPoint away = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
+
+    // No known duration.
+    bridge->setProperty("durationSeconds", 0.0);
+    QTest::mouseMove(window, middle);
+    QTest::mouseMove(window, later);
+    QCOMPARE(timeBox.shown(), QString());
+    QCOMPARE(timeBox.text->property("text").toString(), QString());
+    QTest::mouseMove(window, away);
+    bridge->setProperty("durationSeconds", 200.0);
+    QTest::mouseMove(window, middle);
+    QVERIFY(!timeBox.shown().isEmpty());
+
+    // Stopping hides it, a stopped track's duration shows nothing, and the
+    // hover that ended while stopped does not come back with playback.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::mouseMove(window, later);
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::mouseMove(window, away);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::mouseMove(window, later);
+    QVERIFY(!timeBox.shown().isEmpty());
+    QVERIFY(recordedValues(root.data(), "seeks").isEmpty());
+}
+
+void AccessibilityTest::seekTouchShowsNoHoverTime() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && timeBox.find(window->contentItem()));
+    QObject *hover = seek->findChild<QObject *>(QStringLiteral("seekHover"));
+    QVERIFY(hover != nullptr);
+    QPointingDevice *touchScreen = QTest::createTouchDevice();
+    const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.75, seek->height() / 2)).toPoint();
+
+    // A touch's drag shows the box as a mouse's does, and its end leaves
+    // none, as a touch has no hover; Qt would otherwise give a touch's
+    // point to a hover handler.
+    QTest::touchEvent(window, touchScreen).press(0, touched, window);
+    QVERIFY(seek->property("adjusting").toBool());
+    QVERIFY(!timeBox.shown().isEmpty());
+    QVERIFY(!hover->property("hovered").toBool());
+    QTest::touchEvent(window, touchScreen).release(0, touched, window);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::qWait(50);
+    QCOMPARE(timeBox.shown(), QString());
+
+    // A touch that begins off the bar and moves over it shows nothing.
+    const QPoint start = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
+    QTest::touchEvent(window, touchScreen).press(0, start, window);
+    QTest::touchEvent(window, touchScreen).move(0, (start + touched) / 2, window);
+    QTest::touchEvent(window, touchScreen).move(0, touched, window);
+    QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(5, 0), window);
+    QVERIFY(!seek->property("adjusting").toBool());
+    QCOMPARE(timeBox.shown(), QString());
+    QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(5, 0), window);
+    QTest::qWait(50);
+    QCOMPARE(timeBox.shown(), QString());
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
 }
 
 namespace {

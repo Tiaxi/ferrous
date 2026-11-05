@@ -340,23 +340,53 @@ ToolBar {
                 implicitHeight: root.uiPalette.rowHeight - 4
             }
 
+            // The mouse's hover; a touch has none. It only shows the time
+            // under the pointer, and never moves the slider or seeks.
+            HoverHandler {
+                id: seekHover
+                objectName: "seekHover"
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+            }
+
+            // The time under the hovering pointer, shown while no gesture
+            // shows its own.
+            readonly property bool hoverTimeShown: seekHover.hovered && !adjusting && seekAllowed
+            // Where the hovering pointer is, in the slider's coordinates;
+            // unchanging while hidden, so the hidden box does not move. Qt
+            // sends no hover during a drag, and brings the point up to date
+            // at the frame after it, before that frame draws.
+            readonly property real hoverX: hoverTimeShown ? seekHover.point.position.x : 0
+            // The second a click at the pointer would seek to, as a drag
+            // there shows it.
+            readonly property int hoverSecond: hoverTimeShown ? Math.floor(secondsAtX(hoverX)) : 0
+
+            // The time box: beside the playhead while a gesture moves it,
+            // otherwise beside the hovering pointer.
             Item {
-                id: seekDragOverlay
-                visible: seekSlider.adjusting && seekSlider.seekAllowed
+                id: seekTimeBox
+                objectName: "seekTimeBox"
+                visible: (seekSlider.adjusting || seekSlider.hoverTimeShown) && seekSlider.seekAllowed
                 z: 20
-                property real playheadX: seekSlider.playheadX + seekSlider.playheadLineWidth / 2
-                property real leftCandidateX: playheadX - width - 8
-                property real rightCandidateX: playheadX + 8
+                // The point the box is beside; unchanging while hidden, so
+                // playback moves no hidden box.
+                property real anchorX: seekSlider.adjusting
+                    ? seekSlider.playheadX + seekSlider.playheadLineWidth / 2
+                    : seekSlider.hoverX
+                property real leftCandidateX: anchorX - width - 8
+                property real rightCandidateX: anchorX + 8
                 width: dragTimeLabel.implicitWidth + 14
                 height: Math.max(dragTimeLabel.implicitHeight, seekSlider.availableHeight - 4)
                 y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
+                // On whole device pixels, so a pointer's move within one
+                // moves the box by none and draws no frame.
                 x: {
                     const minX = 2
                     const maxX = seekSlider.width - width - 2
-                    if (leftCandidateX >= minX) {
-                        return Math.min(maxX, leftCandidateX)
-                    }
-                    return Math.max(minX, Math.min(maxX, rightCandidateX))
+                    const boxX = leftCandidateX >= minX
+                        ? Math.min(maxX, leftCandidateX)
+                        : Math.max(minX, Math.min(maxX, rightCandidateX))
+                    const ratio = seekSlider.windowDevicePixelRatio
+                    return Math.round(boxX * ratio) / ratio
                 }
 
                 Rectangle {
@@ -371,9 +401,10 @@ ToolBar {
                         anchors.centerIn: parent
                         // Only while it is shown, so that playback's seconds
                         // change no hidden text, which would draw frames.
-                        text: seekDragOverlay.visible
-                            ? FormatUtils.formatSeekTime(seekSlider.valueSecond)
-                            : ""
+                        text: !seekTimeBox.visible ? ""
+                            : FormatUtils.formatSeekTime(seekSlider.adjusting
+                                ? seekSlider.valueSecond
+                                : seekSlider.hoverSecond)
                         color: root.uiPalette.uiAccentTextColor
                     }
                 }
