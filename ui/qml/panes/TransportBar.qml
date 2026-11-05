@@ -160,8 +160,10 @@ ToolBar {
                 && Window.window.devicePixelRatio !== undefined
                 ? Window.window.devicePixelRatio
                 : Screen.devicePixelRatio
-            // The bar's width in device pixels.
-            readonly property real barDevicePixels: Math.max(1, Math.round(width * windowDevicePixelRatio))
+            // The whole device pixels the bar holds. Rounded down, so the
+            // playhead, which they place, never reaches past the bar's end.
+            readonly property real barDevicePixels:
+                Math.max(1, Math.floor(width * windowDevicePixelRatio + 1e-6))
             // The playhead is one line, two logical pixels wide, with an
             // outline of one on each side; each is a whole number of device
             // pixels, so the line keeps its width and brightness as it moves.

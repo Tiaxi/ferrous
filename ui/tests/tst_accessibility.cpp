@@ -293,6 +293,7 @@ private slots:
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
     void seekBarPlayheadIsOneOutlinedLine();
+    void seekBarPlayheadStaysOnTheBarAtEitherEnd();
     void seekBarPlayheadContrastsWithTheBar_data();
     void seekBarPlayheadContrastsWithTheBar();
     void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
@@ -1341,7 +1342,7 @@ namespace {
 // to a logical one, or nothing. Its line is two logical pixels wide and its
 // outline one on each side where the bar has room, each a whole number of
 // device pixels; the line's left edge is on a whole device pixel of the bar,
-// and the played fill ends there.
+// and the played fill ends there. The line and its outline are on the bar.
 QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr) {
     QQuickItem *outline = line->parentItem();
     QQuickItem *bar = progress->parentItem();
@@ -1367,6 +1368,16 @@ QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr)
     }
     if (!fuzzyEqual(line->height(), bar->height()) || !fuzzyEqual(outline->height(), bar->height())) {
         errors.push_back(QStringLiteral("not the bar's height"));
+    }
+    constexpr qreal kTolerance = 1e-6;
+    const qreal lineRight = lineX + line->width();
+    if (lineX < -kTolerance || lineRight > bar->width() + kTolerance) {
+        errors.push_back(QStringLiteral("line from %1 to %2 off the bar of %3")
+                             .arg(lineX).arg(lineRight).arg(bar->width()));
+    }
+    if (outline->x() < -kTolerance || outline->x() + outline->width() > bar->width() + kTolerance) {
+        errors.push_back(QStringLiteral("outline from %1 to %2 off the bar of %3")
+                             .arg(outline->x()).arg(outline->x() + outline->width()).arg(bar->width()));
     }
     return errors.join(QStringLiteral("; "));
 }
@@ -1508,6 +1519,68 @@ void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
     QVERIFY2(std::abs(lineRight - bar->width()) <= 0.5 && outline->x() + outline->width() <= bar->width(),
              qPrintable(QStringLiteral("%1 of %2").arg(lineRight).arg(bar->width())));
     QCOMPARE(grab->mapToItem(seek, QPointF(grab->width() / 2, 0)).x(), lineCentre());
+}
+
+void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
+    // The transport harness as an item of a window drawn at fractional and
+    // whole device pixel ratios, as in seekBarStepsByTheWindowsDevicePixels.
+    QQuickRenderControl control;
+    QQuickWindow window(&control);
+    QImage canvas(16, 16, QImage::Format_ARGB32_Premultiplied);
+    QQuickRenderTarget renderTarget = QQuickRenderTarget::fromPaintDevice(&canvas);
+    renderTarget.setDevicePixelRatio(1.25);
+    window.setRenderTarget(renderTarget);
+    QQmlEngine engine;
+    QString errorText;
+    QByteArray source = transportHarnessQml();
+    QVERIFY(source.contains("ApplicationWindow {"));
+    source.replace("ApplicationWindow {", "Control {");
+    QScopedPointer<QObject> root(createQml(engine, source, &errorText));
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+    harness->setParentItem(window.contentItem());
+    control.polishItems();
+    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
+    QQuickItem *line = itemsNamed(harness, QStringLiteral("seekPlayheadLine")).value(0);
+    QVERIFY(progress != nullptr && line != nullptr);
+    QQuickItem *bar = progress->parentItem();
+
+    for (const qreal dpr : {1.25, 1.5, 2.0}) {
+        renderTarget.setDevicePixelRatio(dpr);
+        window.setRenderTarget(renderTarget);
+        QEvent changed(QEvent::DevicePixelRatioChange);
+        QCoreApplication::sendEvent(&window, &changed);
+        QCOMPARE(window.effectiveDevicePixelRatio(), dpr);
+        QSet<qint64> barWidths;
+        int oddBars = 0;
+        // Harness widths, some fractional, that give the bar even and odd
+        // widths; the layout gives it whole logical pixels.
+        for (const qreal width : {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0}) {
+            harness->setWidth(width);
+            control.polishItems();
+            const qreal barWidth = bar->width();
+            const auto wholeWidth = static_cast<qint64>(std::round(barWidth));
+            if (!barWidths.contains(wholeWidth) && fuzzyEqual(barWidth, static_cast<qreal>(wholeWidth))) {
+                oddBars += wholeWidth % 2 == 1 ? 1 : 0;
+            }
+            barWidths.insert(wholeWidth);
+            for (const double seconds : {0.0, 200.0}) {
+                root->setProperty("positionSeconds", seconds);
+                const QString geometryError = playheadGeometryError(line, progress, dpr);
+                QVERIFY2(geometryError.isEmpty(),
+                         qPrintable(QStringLiteral("at %1, bar %2, %3 s: %4")
+                                        .arg(dpr).arg(barWidth).arg(seconds).arg(geometryError)));
+            }
+            // At the end, the line's right edge is within a device pixel of
+            // the bar's end.
+            const qreal lineRight = line->mapToItem(bar, QPointF(line->width(), 0)).x();
+            QVERIFY2(barWidth - lineRight < 1.0 / dpr - 1e-6,
+                     qPrintable(QStringLiteral("at %1, bar %2: line ends at %3")
+                                    .arg(dpr).arg(barWidth).arg(lineRight)));
+        }
+        QVERIFY2(barWidths.size() >= 6 && oddBars >= 3,
+                 qPrintable(QStringLiteral("at %1: %2 bar widths, %3 odd").arg(dpr).arg(barWidths.size()).arg(oddBars)));
+    }
 }
 
 namespace {
