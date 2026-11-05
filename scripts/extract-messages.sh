@@ -40,7 +40,21 @@ for prefix in i18n ki18n xi18n kxi18n; do
     )
 done
 
-XGETTEXT="xgettext --from-code=UTF-8 --kde --add-comments=i18n: --package-name=ferrous \
+# Since gettext 0.25, xgettext runs git on its input files when they are in a
+# git checkout, to date the template (POT-Creation-Date) by their newest
+# commit. The RPM builds from the source tarball, but scripts/build-rpm.sh
+# unpacks it in dist/rpm of a checkout, where the sources are untracked, and
+# gettext 1.0 warns there for every input file ("vc-mtime: ..."), as it does in
+# a checkout of the sources themselves. With --no-git the template is dated by
+# the time of extraction, as without a checkout. Older versions do not know
+# the option.
+no_git=""
+xgettext_help="$(xgettext --help 2>/dev/null || true)"
+if [[ "${xgettext_help}" == *"--no-git"* ]]; then
+    no_git="--no-git "
+fi
+
+XGETTEXT="xgettext ${no_git}--from-code=UTF-8 --kde --add-comments=i18n: --package-name=ferrous \
 --msgid-bugs-address=https://github.com/Tiaxi/ferrous/issues ${keywords[*]}"
 export XGETTEXT
 export podir="${out_dir}"
