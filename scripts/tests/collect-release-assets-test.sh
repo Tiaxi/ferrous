@@ -137,6 +137,16 @@ fi
 expect_failure "${case_dir}" "No fc45 package to release"
 [[ -f "${case_dir}/packages/x86_64/${fc44_rpm}" ]] || fail "a failed collection moved packages"
 
+# Both builds are required and only Fedora 45 built: each --require-dist
+# adds to the requirements, so the missing Fedora 44 package still fails.
+case_dir="${WORK_DIR}/first-required-missing"
+fake_rpm "${case_dir}/packages/x86_64/${fc45_rpm}"
+if collect "${case_dir}" --require-dist fc44 --require-dist fc45 "${case_dir}/packages" "${case_dir}/assets"; then
+    fail "a release without the required fc44 package was collected"
+fi
+expect_failure "${case_dir}" "No fc44 package to release"
+[[ -f "${case_dir}/packages/x86_64/${fc45_rpm}" ]] || fail "a failed collection moved packages"
+
 # Only the other build's package: the required build is missing.
 case_dir="${WORK_DIR}/required-missing"
 fake_rpm "${case_dir}/packages/x86_64/${fc45_rpm}"
