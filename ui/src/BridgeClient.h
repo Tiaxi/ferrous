@@ -116,6 +116,19 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int lastFmAuthState READ lastFmAuthState NOTIFY snapshotChanged)
     Q_PROPERTY(int lastFmPendingScrobbleCount READ lastFmPendingScrobbleCount NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmStatusText READ lastFmStatusText NOTIFY snapshotChanged)
+    // Whether the status bar shows the scrobble progress indicator.
+    Q_PROPERTY(bool lastFmShowScrobbleProgress READ lastFmShowScrobbleProgress NOTIFY snapshotChanged)
+    // Whether scrobbling is paused until the app quits.
+    Q_PROPERTY(bool lastFmScrobblingPaused READ lastFmScrobblingPaused NOTIFY lastFmScrobbleChanged)
+    // The current play's scrobble progress, as the scrobbler counts it: a
+    // BinaryBridgeCodec::ScrobbleState and ScrobbleIneligibility, the time
+    // listened and the scrobble point (0 while unknown), and why the
+    // scrobble waits or failed.
+    Q_PROPERTY(int lastFmScrobbleState READ lastFmScrobbleState NOTIFY lastFmScrobbleChanged)
+    Q_PROPERTY(int lastFmScrobbleIneligibility READ lastFmScrobbleIneligibility NOTIFY lastFmScrobbleChanged)
+    Q_PROPERTY(int lastFmScrobbleListenedMs READ lastFmScrobbleListenedMs NOTIFY lastFmScrobbleChanged)
+    Q_PROPERTY(int lastFmScrobbleThresholdMs READ lastFmScrobbleThresholdMs NOTIFY lastFmScrobbleChanged)
+    Q_PROPERTY(QString lastFmScrobbleMessage READ lastFmScrobbleMessage NOTIFY lastFmScrobbleChanged)
     Q_PROPERTY(QStringList libraryAlbums READ libraryAlbums NOTIFY libraryChanged)
     Q_PROPERTY(QByteArray libraryTreeBinary READ libraryTreeBinary NOTIFY libraryChanged)
     Q_PROPERTY(int libraryVersion READ libraryVersion NOTIFY libraryChanged)
@@ -236,6 +249,13 @@ public:
     int lastFmAuthState() const;
     int lastFmPendingScrobbleCount() const;
     QString lastFmStatusText() const;
+    bool lastFmShowScrobbleProgress() const;
+    bool lastFmScrobblingPaused() const;
+    int lastFmScrobbleState() const;
+    int lastFmScrobbleIneligibility() const;
+    int lastFmScrobbleListenedMs() const;
+    int lastFmScrobbleThresholdMs() const;
+    QString lastFmScrobbleMessage() const;
     QStringList libraryAlbums() const;
     QByteArray libraryTreeBinary() const;
     int libraryVersion() const;
@@ -343,6 +363,8 @@ public:
     Q_INVOKABLE void beginLastFmAuth();
     Q_INVOKABLE void completeLastFmAuth();
     Q_INVOKABLE void disconnectLastFm();
+    Q_INVOKABLE void setLastFmScrobblingPaused(bool value);
+    Q_INVOKABLE void setLastFmShowScrobbleProgress(bool value);
     Q_INVOKABLE void playAt(int index);
     Q_INVOKABLE void selectQueueIndex(int index);
     Q_INVOKABLE void removeAt(int index);
@@ -435,6 +457,9 @@ signals:
     void libraryChanged();
     // A scan's progress changed; it changes many times a second.
     void libraryScanChanged();
+    // The scrobble progress or the scrobbling pause changed; the progress
+    // changes with each snapshot while a track plays.
+    void lastFmScrobbleChanged();
     void analysisChanged();
     void precomputedSpectrogramChunkReady(
         const QByteArray &data, int bins, int channelCount, int columns,
@@ -676,6 +701,7 @@ private:
     void scheduleSnapshotChanged();
     void scheduleLibraryChanged();
     void scheduleLibraryScanChanged();
+    void scheduleLastFmScrobbleChanged();
     void scheduleAnalysisChanged();
     void shutdownBridgeGracefully();
     void setBackendFailure(const QString &message);
@@ -798,6 +824,13 @@ private:
     int m_lastFmPendingScrobbleCount{0};
     QString m_lastFmStatusText;
     QString m_lastFmAuthUrl;
+    bool m_lastFmShowScrobbleProgress{true};
+    bool m_lastFmScrobblingPaused{false};
+    int m_lastFmScrobbleState{0};
+    int m_lastFmScrobbleIneligibility{0};
+    int m_lastFmScrobbleListenedMs{0};
+    int m_lastFmScrobbleThresholdMs{0};
+    QString m_lastFmScrobbleMessage;
     QString m_lastOpenedExternalUrl;
     QStringList m_libraryAlbums;
     QByteArray m_libraryTreeBinary;
@@ -893,6 +926,7 @@ private:
     bool m_snapshotChangedPending{false};
     bool m_libraryChangedPending{false};
     bool m_libraryScanChangedPending{false};
+    bool m_lastFmScrobbleChangedPending{false};
     bool m_analysisChangedPending{false};
     bool m_pollPlaybackChanged{false};
     bool m_pollTrackIdentityChanged{false};
@@ -900,6 +934,7 @@ private:
     bool m_pollSnapshotChanged{false};
     bool m_pollLibraryChanged{false};
     bool m_pollLibraryScanChanged{false};
+    bool m_pollLastFmScrobbleChanged{false};
     // The playback clock holds the target of the seek with serial
     // m_pendingSeekSerial until the engine is done with that seek, and
     // ignores the samples from before it. The engine numbers seeks in the

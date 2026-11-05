@@ -2409,6 +2409,8 @@ fn parse_settings_command(
             generation: reader.read_u32()?,
         },
         73 => BridgeSettingsCommand::SetSpectrogramFrequencyCap(reader.read_u8()? != 0),
+        74 => BridgeSettingsCommand::SetLastFmScrobblingPaused(reader.read_u8()? != 0),
+        75 => BridgeSettingsCommand::SetLastFmShowScrobbleProgress(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3070,6 +3072,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.spectrogram_frequency_cap),
     );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.integrations.lastfm_show_scrobble_progress),
+    );
     out
 }
 
@@ -3089,6 +3095,14 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_string(&mut out, &snapshot.lastfm.username);
     push_string(&mut out, &snapshot.lastfm.status_text);
     push_string(&mut out, &snapshot.lastfm.auth_url);
+    // Scrobbling paused, then the scrobble progress indicator.
+    push_u8(&mut out, u8::from(snapshot.lastfm_scrobbling_paused));
+    let indicator = &snapshot.scrobble_indicator;
+    push_u8(&mut out, indicator.state.code());
+    push_u8(&mut out, indicator.ineligibility.code());
+    push_u32(&mut out, indicator.listened_ms);
+    push_u32(&mut out, indicator.threshold_ms);
+    push_string(&mut out, &indicator.message);
     out
 }
 
@@ -3562,6 +3576,7 @@ mod tests {
                     system_media_controls_enabled: true,
                     lastfm_scrobbling_enabled: true,
                     lastfm_username: "tester".to_string(),
+                    lastfm_show_scrobble_progress: true,
                 },
                 window: WindowLayout::default(),
                 queue_columns: super::super::QueueColumnSettings::default(),
@@ -3578,6 +3593,8 @@ mod tests {
                 auth_url: String::new(),
                 ..crate::lastfm::RuntimeState::default()
             },
+            lastfm_scrobbling_paused: false,
+            scrobble_indicator: super::super::ScrobbleIndicator::default(),
         }
     }
 
@@ -5271,8 +5288,9 @@ mod tests {
     const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
 
     /// The bytes that end the settings section: the queue's column widths
-    /// and their generation, then the spectrogram's frequency cap.
-    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 1;
+    /// and their generation, then the spectrogram's frequency cap and
+    /// whether the scrobble progress indicator is shown.
+    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 2;
 
     #[test]
     fn frequency_cap_setting_command_and_snapshot_share_protocol() {
@@ -5286,11 +5304,44 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.spectrogram_frequency_cap = enabled;
             let settings = encode_settings_section(&snapshot);
-            // The last byte of the section.
-            assert_eq!(settings[settings.len() - 1], u8::from(enabled));
+            // Followed by the scrobble progress indicator's setting.
+            assert_eq!(settings[settings.len() - 2], u8::from(enabled));
         }
         assert!(parse_binary_command(&encode_command(73, &[])).is_err());
         assert!(parse_binary_command(&encode_command(73, &[1, 0])).is_err());
+    }
+
+    #[test]
+    fn scrobble_progress_setting_command_and_snapshot_share_protocol() {
+        for show in [false, true] {
+            let cmd = parse_binary_command(&encode_command(75, &[u8::from(show)]))
+                .expect("parse scrobble progress setting")
+                .expect("scrobble progress setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmShowScrobbleProgress(value))
+                if value == show));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.integrations.lastfm_show_scrobble_progress = show;
+            let settings = encode_settings_section(&snapshot);
+            // The last byte of the section.
+            assert_eq!(settings[settings.len() - 1], u8::from(show));
+        }
+        assert!(parse_binary_command(&encode_command(75, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(75, &[1, 0])).is_err());
+    }
+
+    #[test]
+    fn scrobbling_pause_command_carries_its_flag() {
+        for paused in [false, true] {
+            let cmd = parse_binary_command(&encode_command(74, &[u8::from(paused)]))
+                .expect("parse scrobbling pause")
+                .expect("scrobbling pause command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingPaused(value))
+                if value == paused));
+        }
+        assert!(parse_binary_command(&encode_command(74, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(74, &[1, 0])).is_err());
     }
 
     /// The widths, then the generation: command 72's payload, and the end
@@ -5350,7 +5401,7 @@ mod tests {
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 1];
+        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 2];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
@@ -5467,23 +5518,16 @@ mod tests {
         assert_eq!(&flags[flags.len() - 7..], &[1, 1, 1, 1, 1, 1, 1]);
     }
 
+    /// The Last.fm section of `snapshot`'s packet.
+    fn lastfm_section_of(snapshot: &BridgeSnapshot) -> Vec<u8> {
+        let packet = encode_binary_snapshot(snapshot, Some(full_queue_section(snapshot)));
+        section(&packet, SECTION_LASTFM).expect("the Last.fm section")
+    }
+
     #[test]
     fn lastfm_section_encodes_runtime_state() {
         let snapshot = sample_snapshot();
-        let packet = encode_binary_snapshot(&snapshot, Some(full_queue_section(&snapshot)));
-        let mut offset = 12usize;
-        let playback_len = usize_from_u32(read_u32(&packet, &mut offset));
-        offset += playback_len;
-        let queue_len = usize_from_u32(read_u32(&packet, &mut offset));
-        offset += queue_len;
-        let library_len = usize_from_u32(read_u32(&packet, &mut offset));
-        offset += library_len;
-        let metadata_len = usize_from_u32(read_u32(&packet, &mut offset));
-        offset += metadata_len;
-        let settings_len = usize_from_u32(read_u32(&packet, &mut offset));
-        offset += settings_len;
-        let lastfm_len = usize_from_u32(read_u32(&packet, &mut offset));
-        let lastfm = &packet[offset..offset + lastfm_len];
+        let lastfm = lastfm_section_of(&snapshot);
         let mut lastfm_offset = 0usize;
         assert_eq!(lastfm[lastfm_offset], 1);
         lastfm_offset += 1;
@@ -5491,11 +5535,106 @@ mod tests {
         lastfm_offset += 1;
         assert_eq!(lastfm[lastfm_offset], 2);
         lastfm_offset += 1;
-        assert_eq!(read_u32(lastfm, &mut lastfm_offset), 2);
-        assert_eq!(read_string(lastfm, &mut lastfm_offset), "tester");
-        assert_eq!(read_string(lastfm, &mut lastfm_offset), "Connected");
-        assert_eq!(read_string(lastfm, &mut lastfm_offset), "");
+        assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 2);
+        assert_eq!(read_string(&lastfm, &mut lastfm_offset), "tester");
+        assert_eq!(read_string(&lastfm, &mut lastfm_offset), "Connected");
+        assert_eq!(read_string(&lastfm, &mut lastfm_offset), "");
+        // Not paused, and nothing playing.
+        assert_eq!(&lastfm[lastfm_offset..lastfm_offset + 3], &[0, 0, 0]);
+        lastfm_offset += 3;
+        assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 0);
+        assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 0);
+        assert_eq!(read_string(&lastfm, &mut lastfm_offset), "");
         assert_eq!(lastfm_offset, lastfm.len());
+    }
+
+    #[test]
+    fn lastfm_section_ends_with_the_pause_and_the_scrobble_indicator() {
+        use super::super::{ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility};
+        let cases = [
+            (
+                ScrobbleIndicatorState::Idle,
+                ScrobbleIneligibility::None,
+                0u8,
+                0u8,
+            ),
+            (
+                ScrobbleIndicatorState::Listening,
+                ScrobbleIneligibility::None,
+                1,
+                0,
+            ),
+            (
+                ScrobbleIndicatorState::Sending,
+                ScrobbleIneligibility::None,
+                2,
+                0,
+            ),
+            (
+                ScrobbleIndicatorState::Accepted,
+                ScrobbleIneligibility::None,
+                3,
+                0,
+            ),
+            (
+                ScrobbleIndicatorState::Failed,
+                ScrobbleIneligibility::None,
+                4,
+                0,
+            ),
+            (
+                ScrobbleIndicatorState::Waiting,
+                ScrobbleIneligibility::None,
+                5,
+                0,
+            ),
+            (
+                ScrobbleIndicatorState::Ineligible,
+                ScrobbleIneligibility::TooShort,
+                6,
+                1,
+            ),
+            (
+                ScrobbleIndicatorState::Ineligible,
+                ScrobbleIneligibility::MissingTags,
+                6,
+                2,
+            ),
+            (
+                ScrobbleIndicatorState::Skipped,
+                ScrobbleIneligibility::None,
+                7,
+                0,
+            ),
+        ];
+        for (index, (state, ineligibility, state_code, reason_code)) in
+            cases.into_iter().enumerate()
+        {
+            let mut snapshot = sample_snapshot();
+            snapshot.lastfm_scrobbling_paused = index % 2 == 1;
+            snapshot.scrobble_indicator = ScrobbleIndicator {
+                state,
+                ineligibility,
+                listened_ms: 61_250 + u32::try_from(index).expect("small"),
+                threshold_ms: 120_000,
+                message: format!("message {index}"),
+            };
+            let lastfm = lastfm_section_of(&snapshot);
+            let message = format!("message {index}");
+            let tail_len = 1 + 1 + 1 + 4 + 4 + 4 + message.len();
+            let mut offset = lastfm.len() - tail_len;
+            assert_eq!(lastfm[offset], u8::from(index % 2 == 1), "{state:?}");
+            assert_eq!(lastfm[offset + 1], state_code, "{state:?}");
+            assert_eq!(lastfm[offset + 2], reason_code, "{state:?}");
+            offset += 3;
+            assert_eq!(
+                read_u32(&lastfm, &mut offset),
+                61_250 + u32::try_from(index).expect("small")
+            );
+            assert_eq!(read_u32(&lastfm, &mut offset), 120_000);
+            assert_eq!(read_string(&lastfm, &mut offset), message);
+            assert_eq!(offset, lastfm.len());
+        }
     }
 
     #[test]

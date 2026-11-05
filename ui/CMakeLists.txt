@@ -164,6 +164,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/KeyScrollView.qml
         qml/components/MetadataMarqueeRow.qml
         qml/components/PopupTransition.qml
+        qml/components/ScrobbleIndicator.qml
         qml/components/SurfaceCard.qml
         qml/components/TrackMetadataCard.qml
         qml/components/UiPalette.qml
@@ -510,6 +511,7 @@ if(BUILD_TESTING)
         preferences 60
         errors 120
         tag_editor 180
+        scrobble 60
     )
     set(ferrous_smoke_area_names "")
     list(LENGTH FERROUS_QML_SMOKE_AREAS ferrous_smoke_area_values)

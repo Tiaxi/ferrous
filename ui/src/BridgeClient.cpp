@@ -678,6 +678,10 @@ BridgeClient::BridgeClient(QObject *parent)
             m_libraryScanChangedPending = false;
             emit libraryScanChanged();
         }
+        if (m_lastFmScrobbleChangedPending) {
+            m_lastFmScrobbleChangedPending = false;
+            emit lastFmScrobbleChanged();
+        }
         if (m_snapshotChangedPending) {
             m_snapshotChangedPending = false;
             emit snapshotChanged();
@@ -1640,6 +1644,7 @@ void BridgeClient::resetPollChanges() {
     m_pollSnapshotChanged = false;
     m_pollLibraryChanged = false;
     m_pollLibraryScanChanged = false;
+    m_pollLastFmScrobbleChanged = false;
 }
 
 void BridgeClient::schedulePollChanges() {
@@ -1660,6 +1665,9 @@ void BridgeClient::schedulePollChanges() {
     }
     if (m_pollLibraryScanChanged) {
         scheduleLibraryScanChanged();
+    }
+    if (m_pollLastFmScrobbleChanged) {
+        scheduleLastFmScrobbleChanged();
     }
 }
 
@@ -2035,6 +2043,34 @@ int BridgeClient::lastFmPendingScrobbleCount() const {
 
 QString BridgeClient::lastFmStatusText() const {
     return m_lastFmStatusText;
+}
+
+bool BridgeClient::lastFmShowScrobbleProgress() const {
+    return m_lastFmShowScrobbleProgress;
+}
+
+bool BridgeClient::lastFmScrobblingPaused() const {
+    return m_lastFmScrobblingPaused;
+}
+
+int BridgeClient::lastFmScrobbleState() const {
+    return m_lastFmScrobbleState;
+}
+
+int BridgeClient::lastFmScrobbleIneligibility() const {
+    return m_lastFmScrobbleIneligibility;
+}
+
+int BridgeClient::lastFmScrobbleListenedMs() const {
+    return m_lastFmScrobbleListenedMs;
+}
+
+int BridgeClient::lastFmScrobbleThresholdMs() const {
+    return m_lastFmScrobbleThresholdMs;
+}
+
+QString BridgeClient::lastFmScrobbleMessage() const {
+    return m_lastFmScrobbleMessage;
 }
 
 QStringList BridgeClient::libraryAlbums() const {
@@ -2865,6 +2901,26 @@ void BridgeClient::completeLastFmAuth() {
 void BridgeClient::disconnectLastFm() {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(
         BinaryBridgeCodec::CmdDisconnectLastFm));
+}
+
+void BridgeClient::setLastFmScrobblingPaused(bool value) {
+    if (m_lastFmScrobblingPaused != value) {
+        m_lastFmScrobblingPaused = value;
+        scheduleLastFmScrobbleChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetLastFmScrobblingPaused,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
+void BridgeClient::setLastFmShowScrobbleProgress(bool value) {
+    if (m_lastFmShowScrobbleProgress != value) {
+        m_lastFmShowScrobbleProgress = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetLastFmShowScrobbleProgress,
+        static_cast<quint8>(value ? 1 : 0)));
 }
 
 void BridgeClient::playAt(int index) {
@@ -4938,6 +4994,13 @@ void BridgeClient::scheduleLibraryScanChanged() {
     }
 }
 
+void BridgeClient::scheduleLastFmScrobbleChanged() {
+    m_lastFmScrobbleChangedPending = true;
+    if (!m_snapshotNotifyTimer.isActive()) {
+        m_snapshotNotifyTimer.start();
+    }
+}
+
 void BridgeClient::schedulePlaybackChanged() {
     if (m_playbackChangedPending) {
         return;
@@ -5836,6 +5899,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         snapshotSignalChanged = true;
     }
 
+    const bool lastFmShowScrobbleProgress = snapshot.settings.present
+        ? snapshot.settings.lastFmShowScrobbleProgress
+        : m_lastFmShowScrobbleProgress;
+    if (m_lastFmShowScrobbleProgress != lastFmShowScrobbleProgress) {
+        m_lastFmShowScrobbleProgress = lastFmShowScrobbleProgress;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
     const bool systemMediaControlsEnabled = snapshot.settings.present
         ? snapshot.settings.systemMediaControlsEnabled
         : m_systemMediaControlsEnabled;
@@ -5917,6 +5989,29 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_lastFmAuthUrl.trimmed().isEmpty()) {
         m_lastOpenedExternalUrl.clear();
+    }
+
+    if (snapshot.lastfm.present) {
+        const auto clampMs = [](quint32 ms) {
+            return static_cast<int>(std::min<quint32>(ms, std::numeric_limits<int>::max()));
+        };
+        const int listenedMs = clampMs(snapshot.lastfm.scrobbleListenedMs);
+        const int thresholdMs = clampMs(snapshot.lastfm.scrobbleThresholdMs);
+        if (m_lastFmScrobblingPaused != snapshot.lastfm.scrobblingPaused
+            || m_lastFmScrobbleState != snapshot.lastfm.scrobbleState
+            || m_lastFmScrobbleIneligibility != snapshot.lastfm.scrobbleIneligibility
+            || m_lastFmScrobbleListenedMs != listenedMs
+            || m_lastFmScrobbleThresholdMs != thresholdMs
+            || m_lastFmScrobbleMessage != snapshot.lastfm.scrobbleMessage) {
+            m_lastFmScrobblingPaused = snapshot.lastfm.scrobblingPaused;
+            m_lastFmScrobbleState = snapshot.lastfm.scrobbleState;
+            m_lastFmScrobbleIneligibility = snapshot.lastfm.scrobbleIneligibility;
+            m_lastFmScrobbleListenedMs = listenedMs;
+            m_lastFmScrobbleThresholdMs = thresholdMs;
+            m_lastFmScrobbleMessage = snapshot.lastfm.scrobbleMessage;
+            changed = true;
+            m_pollLastFmScrobbleChanged = true;
+        }
     }
     finishSnapshotSection(snapshotLastFmMs);
 

@@ -285,6 +285,13 @@ ApplicationWindow {
         property int lastFmAuthState: 0
         property int lastFmPendingScrobbleCount: 0
         property string lastFmStatusText: ""
+        property bool lastFmShowScrobbleProgress: true
+        property bool lastFmScrobblingPaused: false
+        property int lastFmScrobbleState: 0
+        property int lastFmScrobbleIneligibility: 0
+        property int lastFmScrobbleListenedMs: 0
+        property int lastFmScrobbleThresholdMs: 0
+        property string lastFmScrobbleMessage: ""
         property int sampleRateHz: 48000
         property var libraryAlbums: []
         property var libraryTreeBinary: ""
@@ -383,6 +390,8 @@ ApplicationWindow {
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}
         function disconnectLastFm() {}
+        function setLastFmScrobblingPaused(value) { lastFmScrobblingPaused = value }
+        function setLastFmShowScrobbleProgress(value) { lastFmShowScrobbleProgress = value }
         function playAt(index) {}
         function selectQueueIndex(index) {}
         // The queue edits asked for, for tests.
@@ -824,6 +833,17 @@ ApplicationWindow {
         checked: uiBridge.shuffleEnabled
         onTriggered: uiBridge.setShuffleEnabled(checked)
     }
+    // Pauses scrobbling until the app quits, as the scrobble progress
+    // indicator does.
+    Action {
+        id: pauseScrobblingAction
+        objectName: "pauseScrobblingAction"
+        text: I18n.i18nc("@action:inmenu", "Pause Scrobbl&ing")
+        checkable: true
+        checked: uiBridge.lastFmScrobblingPaused
+        enabled: uiBridge.lastFmScrobblingEnabled && uiBridge.lastFmAuthState === 2
+        onTriggered: uiBridge.setLastFmScrobblingPaused(checked)
+    }
     Action {
         id: repeatOffAction
         text: I18n.i18nc("@action:inmenu", "Repeat O&ff")
@@ -1091,6 +1111,7 @@ ApplicationWindow {
                 { label: repeatOffAction.text, shortcut: String(repeatOffAction.shortcut || "") },
                 { label: repeatOneAction.text, shortcut: String(repeatOneAction.shortcut || "") },
                 { label: repeatAllAction.text, shortcut: String(repeatAllAction.shortcut || "") },
+                { label: pauseScrobblingAction.text, shortcut: "" },
                 { label: clearPlaylistAction.text, shortcut: String(clearPlaylistAction.shortcut || "") }
             ])
             enter: Transition {
@@ -1115,6 +1136,11 @@ ApplicationWindow {
             MenuItem { action: repeatOffAction }
             MenuItem { action: repeatOneAction }
             MenuItem { action: repeatAllAction }
+            MenuSeparator {}
+            MenuItem {
+                objectName: "pauseScrobblingMenuItem"
+                action: pauseScrobblingAction
+            }
             MenuSeparator {}
             MenuItem { action: clearPlaylistAction }
         }
@@ -1238,6 +1264,7 @@ ApplicationWindow {
         themeIsDark: root.themeIsDark
         errorController: errorController
         positionText: playbackController.positionText
+        onLastFmSettingsRequested: preferencesDialog.openLastFmPage()
     }
 
     ColumnLayout {

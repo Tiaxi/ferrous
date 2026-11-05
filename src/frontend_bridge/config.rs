@@ -595,6 +595,10 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             "lastfm_scrobbling_enabled" => {
                 parse_flag(value, &mut settings.integrations.lastfm_scrobbling_enabled);
             }
+            "lastfm_show_scrobble_progress" => parse_flag(
+                value,
+                &mut settings.integrations.lastfm_show_scrobble_progress,
+            ),
             "lastfm_username" => {
                 settings.integrations.lastfm_username = value.to_string();
             }
@@ -668,7 +672,7 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
     let mut text = format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlibrary_watch_enabled={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -689,6 +693,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
         settings.integrations.lastfm_username,
+        i32::from(settings.integrations.lastfm_show_scrobble_progress),
         i32::from(settings.library_watch_enabled),
     );
     super::window_layout::format_settings(&settings.window, &mut text);
@@ -752,6 +757,7 @@ mod tests {
                 system_media_controls_enabled: false,
                 lastfm_scrobbling_enabled: true,
                 lastfm_username: "tester".to_string(),
+                lastfm_show_scrobble_progress: false,
             },
             window: WindowLayout::default(),
             queue_columns: QueueColumnSettings::default(),
@@ -782,7 +788,29 @@ mod tests {
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
         assert_eq!(parsed.integrations.lastfm_username, "tester");
+        assert!(!parsed.integrations.lastfm_show_scrobble_progress);
         assert!(!parsed.library_watch_enabled);
+    }
+
+    #[test]
+    fn scrobble_progress_indicator_defaults_on_and_roundtrips_both_values() {
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\nlastfm_scrobbling_enabled=1\n");
+        assert!(
+            settings.integrations.lastfm_show_scrobble_progress,
+            "on in older settings files"
+        );
+        for show in [false, true] {
+            settings.integrations.lastfm_show_scrobble_progress = show;
+            let text = format_settings_text(&settings);
+            assert!(text.contains(&format!(
+                "lastfm_show_scrobble_progress={}\n",
+                i32::from(show)
+            )));
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &text);
+            assert_eq!(parsed.integrations.lastfm_show_scrobble_progress, show);
+        }
     }
 
     #[test]

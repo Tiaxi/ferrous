@@ -157,6 +157,10 @@ enum CommandId : quint16 {
     // Whether the spectrogram shows only the audible band of the track's
     // rate family (u8); changing it restarts the analysis session.
     CmdSetSpectrogramFrequencyCap = 73,
+    // Pause (1) or resume (0) Last.fm scrobbling until the app quits (u8).
+    CmdSetLastFmScrobblingPaused = 74,
+    // Whether the status bar shows the scrobble progress indicator (u8).
+    CmdSetLastFmShowScrobbleProgress = 75,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -383,12 +387,46 @@ struct DecodedSettings {
     bool spectrogramZoomEnabled{true};
     bool libraryWatchEnabled{true};
     bool spectrogramFrequencyCap{false};
+    bool lastFmShowScrobbleProgress{true};
     // Whether the section ended with the queue's column widths, which
     // older backends do not send, and the generation of the latest widths
     // the UI sent that the backend had taken.
     bool hasQueueColumnWidths{false};
     QueueColumnWidths queueColumnWidths;
     quint32 queueColumnWidthsGeneration{0};
+};
+
+// What the scrobble progress indicator shows. Mirrors ScrobbleIndicatorState
+// in src/frontend_bridge/mod.rs; the decoder refuses a state past
+// ScrobbleStateLast.
+enum ScrobbleState : quint8 {
+    // Nothing is playing.
+    ScrobbleStateIdle = 0,
+    // Listening towards the scrobble point.
+    ScrobbleStateListening = 1,
+    // At the scrobble point; Last.fm has not answered yet.
+    ScrobbleStateSending = 2,
+    ScrobbleStateAccepted = 3,
+    // Last.fm ignored the scrobble, or refused the request.
+    ScrobbleStateFailed = 4,
+    // Last.fm could not be reached; the scrobble is queued.
+    ScrobbleStateWaiting = 5,
+    // The play cannot be scrobbled; see ScrobbleIneligibility.
+    ScrobbleStateIneligible = 6,
+    // Scrobbling was paused while the play played: it is never scrobbled.
+    ScrobbleStateSkipped = 7,
+    ScrobbleStateLast = ScrobbleStateSkipped,
+};
+
+// Why a play cannot be scrobbled. Mirrors ScrobbleIneligibility in
+// src/frontend_bridge/mod.rs.
+enum ScrobbleIneligibility : quint8 {
+    ScrobbleIneligibilityNone = 0,
+    // 30 seconds or shorter.
+    ScrobbleIneligibilityTooShort = 1,
+    // Without an artist or a title.
+    ScrobbleIneligibilityMissingTags = 2,
+    ScrobbleIneligibilityLast = ScrobbleIneligibilityMissingTags,
 };
 
 struct DecodedLastFm {
@@ -400,6 +438,17 @@ struct DecodedLastFm {
     QString username;
     QString statusText;
     QString authUrl;
+    // Whether scrobbling is paused for this run of the app.
+    bool scrobblingPaused{false};
+    // The scrobble progress of the current play, as the scrobbler counts
+    // it; see ScrobbleState.
+    int scrobbleState{ScrobbleStateIdle};
+    int scrobbleIneligibility{ScrobbleIneligibilityNone};
+    quint32 scrobbleListenedMs{0};
+    // The scrobble point; 0 while the track's length is unknown.
+    quint32 scrobbleThresholdMs{0};
+    // Why the scrobble is waiting or failed.
+    QString scrobbleMessage;
 };
 
 // Mirrors QueueUndoKind in src/frontend_bridge/queue_undo.rs, whose tests

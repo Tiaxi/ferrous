@@ -60,7 +60,8 @@ use events::{
     apply_library_events, drain_analysis_events, drain_apply_album_art_events,
     drain_metadata_events, drain_playback_events, finalize_lastfm_track,
     note_precomputed_spectrogram_chunk, process_analysis_event, process_apply_album_art_event,
-    process_lastfm_state, process_metadata_event, process_playback_event, tick_lastfm_playback,
+    process_lastfm_state, process_metadata_event, process_playback_event, scrobble_indicator,
+    tick_lastfm_playback,
 };
 pub use queue_columns::{QueueColumnSettings, QueueColumnWidths};
 pub use queue_sync::{QueueEdit, QueueUpdate};
@@ -342,6 +343,11 @@ pub enum BridgeSettingsCommand {
     BeginLastFmAuth,
     CompleteLastFmAuth,
     DisconnectLastFm,
+    /// Pause or resume scrobbling until the app quits. A play that is
+    /// playing at any point while paused is never scrobbled.
+    SetLastFmScrobblingPaused(bool),
+    /// Whether the status bar shows the scrobble progress indicator.
+    SetLastFmShowScrobbleProgress(bool),
 }
 
 impl SpectrogramViewMode {
@@ -530,6 +536,93 @@ pub struct BridgeSnapshot {
     /// [`BridgeSettingsCommand::SetQueueColumnWidths`].
     pub queue_column_widths_generation: u32,
     pub lastfm: LastFmRuntimeState,
+    /// Whether scrobbling is paused for this run of the app.
+    pub lastfm_scrobbling_paused: bool,
+    pub scrobble_indicator: ScrobbleIndicator,
+}
+
+/// What the scrobble progress indicator shows for the current play.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrobbleIndicatorState {
+    /// Nothing is playing.
+    #[default]
+    Idle,
+    /// Listening towards the scrobble point.
+    Listening,
+    /// The play reached the scrobble point; Last.fm has not answered yet.
+    Sending,
+    Accepted,
+    /// Last.fm ignored the scrobble, or refused the request.
+    Failed,
+    /// Last.fm could not be reached; the scrobble is queued.
+    Waiting,
+    /// The play cannot be scrobbled; see [`ScrobbleIneligibility`].
+    Ineligible,
+    /// Scrobbling was paused while the play was playing, so it is never
+    /// scrobbled.
+    Skipped,
+}
+
+impl ScrobbleIndicatorState {
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Listening => 1,
+            Self::Sending => 2,
+            Self::Accepted => 3,
+            Self::Failed => 4,
+            Self::Waiting => 5,
+            Self::Ineligible => 6,
+            Self::Skipped => 7,
+        }
+    }
+}
+
+/// Why a play cannot be scrobbled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrobbleIneligibility {
+    #[default]
+    None,
+    /// 30 seconds or shorter.
+    TooShort,
+    /// Without an artist or a title.
+    MissingTags,
+}
+
+impl ScrobbleIneligibility {
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::TooShort => 1,
+            Self::MissingTags => 2,
+        }
+    }
+}
+
+/// The scrobble progress of the current play, as the scrobbler counts it:
+/// time listened, which seeks do not advance and pauses hold.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScrobbleIndicator {
+    pub state: ScrobbleIndicatorState,
+    pub ineligibility: ScrobbleIneligibility,
+    pub listened_ms: u32,
+    /// The scrobble point; 0 while the track's length is unknown.
+    pub threshold_ms: u32,
+    /// Why the scrobble is waiting or failed, for the user.
+    pub message: String,
+}
+
+impl ScrobbleIndicator {
+    /// Whether `other` shows the same, but for the listened time, which
+    /// heartbeat snapshots carry.
+    fn same_but_listened(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.ineligibility == other.ineligibility
+            && self.threshold_ms == other.threshold_ms
+            && self.message == other.message
+    }
 }
 
 // Settings struct with individual toggle fields — not a state machine.
@@ -554,6 +647,8 @@ pub struct BridgeIntegrationSettings {
     pub system_media_controls_enabled: bool,
     pub lastfm_scrobbling_enabled: bool,
     pub lastfm_username: String,
+    /// Whether the status bar shows the scrobble progress indicator.
+    pub lastfm_show_scrobble_progress: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -610,6 +705,7 @@ impl Default for BridgeSettings {
                 system_media_controls_enabled: true,
                 lastfm_scrobbling_enabled: false,
                 lastfm_username: String::new(),
+                lastfm_show_scrobble_progress: true,
             },
             window: WindowLayout::default(),
             queue_columns: QueueColumnSettings::default(),
@@ -656,6 +752,9 @@ pub(super) struct BridgeState {
     /// See [`BridgeSnapshot::queue_column_widths_generation`].
     queue_column_widths_generation: u32,
     lastfm: LastFmRuntimeState,
+    /// Whether scrobbling is paused. Never saved: a restart resumes it.
+    lastfm_scrobbling_paused: bool,
+    scrobble_indicator: ScrobbleIndicator,
     pending_search_results: Option<BridgeSearchResultsFrame>,
     pending_waveform_track: Option<PendingWaveformTrack>,
     analysis_track_token: u64,
@@ -693,7 +792,29 @@ struct LastFmPlaybackTracker {
     listened_duration: Duration,
     last_listen_tick: Option<Instant>,
     now_playing_sent: bool,
-    scrobble_queued: bool,
+    scrobble: PlayScrobble,
+    /// Whether the current track's metadata has been read.
+    metadata_seen: bool,
+}
+
+impl LastFmPlaybackTracker {
+    fn scrobble_queued(&self) -> bool {
+        matches!(self.scrobble, PlayScrobble::Queued(_))
+    }
+}
+
+/// What became of a play's scrobble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PlayScrobble {
+    /// Counting the time listened towards the scrobble point.
+    #[default]
+    Counting,
+    /// Sent to Last.fm, with its ordinal from [`LastFmHandle::queue_scrobble`]
+    /// unless the service had stopped.
+    Queued(Option<u64>),
+    /// The play played while scrobbling was paused, so it is never
+    /// scrobbled.
+    Skipped,
 }
 
 #[derive(Debug, Clone)]
@@ -792,6 +913,8 @@ impl BridgeState {
             settings: self.settings.clone(),
             queue_column_widths_generation: self.queue_column_widths_generation,
             lastfm: self.lastfm.clone(),
+            lastfm_scrobbling_paused: self.lastfm_scrobbling_paused,
+            scrobble_indicator: self.scrobble_indicator.clone(),
         }
     }
 }
@@ -2240,6 +2363,11 @@ impl BridgeLoopRuntime {
         }
         drain_search_results(&self.search_results_rx, &mut self.state);
         tick_lastfm_playback(&self.state, &self.lastfm, &mut self.lastfm_tracker);
+        let indicator = scrobble_indicator(&self.state, &self.lastfm_tracker);
+        if !indicator.same_but_listened(&self.state.scrobble_indicator) {
+            lastfm_urgency = SnapshotUrgency::Immediate;
+        }
+        self.state.scrobble_indicator = indicator;
         if self.state.queue_detail_validation_requested {
             self.state.queue_detail_validation_requested = false;
             self.queue_validator.request(&self.state);
@@ -3562,6 +3690,112 @@ mod tests {
             );
             assert!(runtime.flags.settings_dirty);
         }
+    }
+
+    #[test]
+    fn pausing_scrobbling_reaches_lastfm_and_is_not_saved() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (lastfm, commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        assert!(!runtime.state.lastfm_scrobbling_paused);
+        for paused in [true, false, true] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmScrobblingPaused(paused)),
+                &event_tx,
+            );
+            assert_eq!(runtime.state.lastfm_scrobbling_paused, paused);
+            assert_eq!(
+                runtime.state.snapshot(false).lastfm_scrobbling_paused,
+                paused
+            );
+            assert!(!runtime.flags.settings_dirty, "not a setting");
+            assert!(commands.try_iter().any(
+                |command| matches!(command, LastFmCommand::SetPaused(value) if value == paused)
+            ));
+        }
+        assert!(!config::format_settings_text(&runtime.state.settings).contains("paused"));
+        drop(runtime);
+
+        // A restart scrobbles again.
+        let restarted = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        assert!(!restarted.state.lastfm_scrobbling_paused);
+    }
+
+    #[test]
+    fn scrobble_progress_setting_updates_and_marks_it_for_persistence() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        assert!(
+            runtime
+                .state
+                .settings
+                .integrations
+                .lastfm_show_scrobble_progress
+        );
+        for show in [false, true] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetLastFmShowScrobbleProgress(show)),
+                &event_tx,
+            );
+            assert_eq!(
+                runtime
+                    .state
+                    .settings
+                    .integrations
+                    .lastfm_show_scrobble_progress,
+                show
+            );
+            assert!(runtime.flags.settings_dirty);
+        }
+    }
+
+    #[test]
+    fn a_new_scrobble_indicator_state_is_sent_at_once_but_listened_time_waits_for_heartbeats() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (lastfm, _commands) = crate::lastfm::test_support::command_handle();
+        runtime.lastfm = lastfm;
+        let (event_tx, event_rx) = event_channel();
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let track = p("/fixtures/indicator-urgency.flac");
+        runtime.state.lastfm.enabled = true;
+        runtime.state.lastfm.auth_state = crate::lastfm::AuthState::Connected;
+        runtime.state.playback.current = Some(track.clone());
+        runtime.state.playback.state = PlaybackState::Playing;
+        runtime.state.playback.duration = Duration::from_secs(240);
+
+        assert_eq!(
+            runtime.pump_bridge_events(&event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(
+            runtime.state.scrobble_indicator.state,
+            ScrobbleIndicatorState::Listening
+        );
+        assert_eq!(runtime.state.scrobble_indicator.threshold_ms, 120_000);
+
+        // Listening on changes only the listened time.
+        std::thread::sleep(Duration::from_millis(5));
+        let before = runtime.state.scrobble_indicator.clone();
+        assert_eq!(runtime.pump_bridge_events(&event_tx), SnapshotUrgency::None);
+        assert!(runtime.state.scrobble_indicator.listened_ms >= before.listened_ms);
+        assert!(runtime.state.scrobble_indicator.same_but_listened(&before));
+
+        // Pausing scrobbling skips the play: a new state.
+        runtime.state.lastfm_scrobbling_paused = true;
+        assert_eq!(
+            runtime.pump_bridge_events(&event_tx),
+            SnapshotUrgency::Immediate
+        );
+        assert_eq!(
+            runtime.state.scrobble_indicator.state,
+            ScrobbleIndicatorState::Skipped
+        );
     }
 
     #[test]

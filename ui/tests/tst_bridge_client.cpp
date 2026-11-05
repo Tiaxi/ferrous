@@ -234,6 +234,9 @@ private slots:
     void queueColumnWidthsAreSentAsTheBackendReadsThem();
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
     void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
+    void scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt();
+    void lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt();
+    void lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
     void spectrogramActivityFollowsVisibleItemsAndWindows();
     void spectrogramActivityStopsForAWindowOffScreen();
@@ -1813,9 +1816,9 @@ void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt(
                  qPrintable(error));
         QCOMPARE(decoded.settings.spectrogramFrequencyCap, capped);
         QCOMPARE(decoded.settings.queueColumnWidthsGeneration, quint32(12));
-        // Nothing may follow it.
+        // Only the scrobble progress setting may follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(2, '\0')),
             &decoded, &error));
     }
     BinaryBridgeCodec::DecodedSnapshot older;
@@ -1848,6 +1851,207 @@ void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt(
     snapshot.settings.spectrogramFrequencyCap = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
     QVERIFY(!client.spectrogramFrequencyCap());
+}
+
+void BridgeClientTest::scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt() {
+    // The settings section ends with it, after the frequency cap; older
+    // backends end it before, and the indicator shows.
+    for (const bool show : {false, true}) {
+        QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+        payload.append('\0');
+        payload.append(static_cast<char>(show ? 1 : 0));
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString error;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload), &decoded,
+                     &error),
+                 qPrintable(error));
+        QCOMPARE(decoded.settings.lastFmShowScrobbleProgress, show);
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            &decoded, &error));
+    }
+    QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
+    older.append('\0');
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionSettings, older), &decoded, &error));
+    QVERIFY(decoded.settings.lastFmShowScrobbleProgress);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QVERIFY(client.lastFmShowScrobbleProgress());
+    client.setLastFmShowScrobbleProgress(false);
+    QVERIFY(!client.lastFmShowScrobbleProgress());
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0].size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(75));
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetLastFmShowScrobbleProgress), quint16(75));
+    QCOMPARE(sent[0].at(BinaryBridgeCodec::kCommandHeaderBytes), char(0));
+
+    // The backend's value wins.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.lastFmShowScrobbleProgress = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.lastFmShowScrobbleProgress());
+}
+
+namespace {
+
+// The Last.fm section as the backend lays it out; without `indicator`, as
+// older backends send it.
+QByteArray lastFmSectionPayload(bool indicator, quint8 paused, quint8 state, quint8 ineligibility,
+                                quint32 listenedMs, quint32 thresholdMs, const QByteArray &message) {
+    QByteArray payload;
+    QDataStream out(&payload, QIODevice::WriteOnly);
+    out.setByteOrder(QDataStream::LittleEndian);
+    const auto string = [&out](const QByteArray &text) {
+        out << quint32(text.size());
+        out.writeRawData(text.constData(), static_cast<int>(text.size()));
+    };
+    out << quint8(1) << quint8(1) << quint8(2) << quint32(3);
+    string("tester");
+    string("Connected");
+    string("");
+    if (indicator) {
+        out << paused << state << ineligibility << listenedMs << thresholdMs;
+        string(message);
+    }
+    return payload;
+}
+
+} // namespace
+
+void BridgeClientTest::lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt() {
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                 packetWithSection(BinaryBridgeCodec::SectionLastFm,
+                                   lastFmSectionPayload(true, 1, 5, 0, 61250, 120000,
+                                                        "offline for testing")),
+                 &decoded, &error),
+             qPrintable(error));
+    QVERIFY(decoded.lastfm.present);
+    QCOMPARE(decoded.lastfm.username, QStringLiteral("tester"));
+    QCOMPARE(decoded.lastfm.pendingScrobbleCount, 3);
+    QVERIFY(decoded.lastfm.scrobblingPaused);
+    QCOMPARE(decoded.lastfm.scrobbleState, int(BinaryBridgeCodec::ScrobbleStateWaiting));
+    QCOMPARE(decoded.lastfm.scrobbleIneligibility, int(BinaryBridgeCodec::ScrobbleIneligibilityNone));
+    QCOMPARE(decoded.lastfm.scrobbleListenedMs, quint32(61250));
+    QCOMPARE(decoded.lastfm.scrobbleThresholdMs, quint32(120000));
+    QCOMPARE(decoded.lastfm.scrobbleMessage, QStringLiteral("offline for testing"));
+
+    // Every state and reason the backend has; nothing past them.
+    for (quint8 state = 0; state <= BinaryBridgeCodec::ScrobbleStateLast; ++state) {
+        QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionLastFm,
+                              lastFmSectionPayload(true, 0, state, 2, 0, 0, "")),
+            &decoded, &error));
+        QCOMPARE(decoded.lastfm.scrobbleState, int(state));
+        QCOMPARE(decoded.lastfm.scrobbleIneligibility,
+                 int(BinaryBridgeCodec::ScrobbleIneligibilityMissingTags));
+    }
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionLastFm,
+                          lastFmSectionPayload(true, 0, BinaryBridgeCodec::ScrobbleStateLast + 1, 0,
+                                               0, 0, "")),
+        &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionLastFm,
+                          lastFmSectionPayload(true, 0, 1,
+                                               BinaryBridgeCodec::ScrobbleIneligibilityLast + 1,
+                                               0, 0, "")),
+        &decoded, &error));
+    // Truncated, or with more after it.
+    const QByteArray whole = lastFmSectionPayload(true, 0, 1, 0, 10, 20, "abc");
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionLastFm, whole.left(whole.size() - 1)),
+        &decoded, &error));
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionLastFm, whole + QByteArray(1, '\0')),
+        &decoded, &error));
+
+    // Older backends end the section before it: nothing playing, not paused.
+    BinaryBridgeCodec::DecodedSnapshot older;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionLastFm,
+                          lastFmSectionPayload(false, 0, 0, 0, 0, 0, "")),
+        &older, &error));
+    QVERIFY(older.lastfm.present);
+    QVERIFY(!older.lastfm.scrobblingPaused);
+    QCOMPARE(older.lastfm.scrobbleState, int(BinaryBridgeCodec::ScrobbleStateIdle));
+}
+
+void BridgeClientTest::lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy changes(&client, &BridgeClient::lastFmScrobbleChanged);
+    QVERIFY(!client.lastFmScrobblingPaused());
+    QCOMPARE(client.lastFmScrobbleState(), 0);
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.lastfm.present = true;
+    snapshot.lastfm.authState = 2;
+    snapshot.lastfm.scrobbleState = BinaryBridgeCodec::ScrobbleStateListening;
+    snapshot.lastfm.scrobbleListenedMs = 30000;
+    snapshot.lastfm.scrobbleThresholdMs = 120000;
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.schedulePollChanges();
+    QCOMPARE(client.lastFmScrobbleState(), int(BinaryBridgeCodec::ScrobbleStateListening));
+    QCOMPARE(client.lastFmScrobbleListenedMs(), 30000);
+    QCOMPARE(client.lastFmScrobbleThresholdMs(), 120000);
+    QTRY_COMPARE(changes.count(), 1);
+
+    // A snapshot with the same scrobble progress tells nothing new.
+    client.resetPollChanges();
+    client.processBinarySnapshot(snapshot);
+    client.schedulePollChanges();
+    QTest::qWait(80);
+    QCOMPARE(changes.count(), 1);
+
+    snapshot.lastfm.scrobbleState = BinaryBridgeCodec::ScrobbleStateFailed;
+    snapshot.lastfm.scrobbleMessage = QStringLiteral("refused for testing");
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    client.schedulePollChanges();
+    QTRY_COMPARE(changes.count(), 2);
+    QCOMPARE(client.lastFmScrobbleMessage(), QStringLiteral("refused for testing"));
+
+    // Pausing is sent at once, and the backend confirms it.
+    client.setLastFmScrobblingPaused(true);
+    QVERIFY(client.lastFmScrobblingPaused());
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0].size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(74));
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetLastFmScrobblingPaused), quint16(74));
+    QCOMPARE(sent[0].at(BinaryBridgeCodec::kCommandHeaderBytes), char(1));
+    QTRY_COMPARE(changes.count(), 3);
+    snapshot.lastfm.scrobblingPaused = true;
+    client.processBinarySnapshot(snapshot);
+    QVERIFY(client.lastFmScrobblingPaused());
+    client.setLastFmScrobblingPaused(false);
+    QCOMPARE(sent.size(), 2);
+    QCOMPARE(sent[1].at(BinaryBridgeCodec::kCommandHeaderBytes), char(0));
+    QVERIFY(!client.lastFmScrobblingPaused());
+
+    // A snapshot without the section leaves it as it was.
+    BinaryBridgeCodec::DecodedSnapshot playbackOnly;
+    playbackOnly.playback.present = true;
+    client.processBinarySnapshot(playbackOnly);
+    QCOMPARE(client.lastFmScrobbleState(), int(BinaryBridgeCodec::ScrobbleStateFailed));
 }
 
 void BridgeClientTest::queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout() {

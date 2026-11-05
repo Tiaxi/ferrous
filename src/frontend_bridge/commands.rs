@@ -359,7 +359,9 @@ fn handle_settings_bridge_command(
         BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
         | BridgeSettingsCommand::BeginLastFmAuth
         | BridgeSettingsCommand::CompleteLastFmAuth
-        | BridgeSettingsCommand::DisconnectLastFm => {
+        | BridgeSettingsCommand::DisconnectLastFm
+        | BridgeSettingsCommand::SetLastFmScrobblingPaused(_)
+        | BridgeSettingsCommand::SetLastFmShowScrobbleProgress(_) => {
             handle_lastfm_settings_command(cmd, state, context);
         }
     }
@@ -392,6 +394,15 @@ fn handle_lastfm_settings_command(
             context
                 .lastfm
                 .command(LastFmCommand::Disconnect { clear_queue: true });
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLastFmScrobblingPaused(paused) => {
+            // Not a setting: a restart resumes scrobbling.
+            state.lastfm_scrobbling_paused = *paused;
+            context.lastfm.command(LastFmCommand::SetPaused(*paused));
+        }
+        BridgeSettingsCommand::SetLastFmShowScrobbleProgress(show) => {
+            state.settings.integrations.lastfm_show_scrobble_progress = *show;
             *context.settings_dirty = true;
         }
         _ => {}
