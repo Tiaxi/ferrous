@@ -103,7 +103,7 @@ struct Layer final : QSGNode {
         if (scene.layer == this) scene.layer = nullptr;
     }
     struct Chunk {
-        quint64 stamp{0};
+        WaveformSceneGraph::Chunks::Stamp stamp{};
         // None for a chunk with no geometry.
         Slot *slot{nullptr};
     };
@@ -460,7 +460,7 @@ public:
             it = layer.chunks.erase(it);
         }
         for (qint64 index = chunks.first; index <= chunks.last; ++index) {
-            const quint64 stamp = chunks.stamp(index);
+            const WaveformSceneGraph::Chunks::Stamp stamp = chunks.stamp(index);
             auto [it, added] = layer.chunks.try_emplace(index);
             Layer::Chunk &chunk = it->second;
             if (added || chunk.stamp != stamp) {
@@ -702,9 +702,11 @@ std::vector<Vertex> Engine::chunkGeometry(const WaveformSceneGraph::Chunks &chun
     chunks.paint(painter, index);
     painter.end();
     std::vector<Vertex> vertices;
-    for (const Command &command : device.engine.commands) {
+    for (Command &command : device.engine.commands) {
         if (command.kind == Command::Geometry) {
-            vertices.insert(vertices.end(), command.vertices.begin(), command.vertices.end());
+            // Moved, not copied, where it is the first: usually the only one.
+            if (vertices.empty()) vertices = std::move(command.vertices);
+            else vertices.insert(vertices.end(), command.vertices.begin(), command.vertices.end());
         } else if (command.kind == Command::Rectangle) {
             // A lone marker: its quad, as a batch of them makes it.
             const QRectF &rect = command.target;

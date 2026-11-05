@@ -1440,6 +1440,8 @@ private slots:
     void waveformSceneGraphRebuildsSampleChunksOnChange();
     void waveformSceneGraphKeepsSampleChunksAcrossDetailWindows();
     void waveformSceneGraphSplitsLargeSampleChunks();
+    void waveformSceneGraphClipsSampleChunksToFastViews_data();
+    void waveformSceneGraphClipsSampleChunksToFastViews();
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
     void waveformSceneGraphMatchesRaster_data();
@@ -11209,15 +11211,16 @@ QHash<const QSGNode *, SampleChunkNode> sampleChunkNodes(const QSGNode *scene) {
 // `item`'s samples, drawn as the scene graph draws a frame of them: in
 // chunks, kept in `node` from frame to frame, or, with `chunked` false,
 // the whole frame drawn again into a new scene.
-QSGNode *renderSamples(WaveformEditorItem &item, QQuickWindow &window, QSGNode *node, bool chunked) {
+QSGNode *renderSamples(WaveformEditorItem &item, QQuickWindow &window, QSGNode *node, bool chunked,
+    bool clipToView = false) {
     const QSize size(static_cast<int>(item.width()), static_cast<int>(item.height()));
-    return WaveformSceneGraph::render(node, &window, size, [&item, size, chunked](QPainter *painter) {
+    return WaveformSceneGraph::render(node, &window, size, [&item, size, chunked, clipToView](QPainter *painter) {
         QMutexLocker lock(&item.m_stateMutex);
         const auto [start, end] = item.visibleRangeLocked();
         const int lanes = item.displayedChannelCountLocked();
         painter->fillRect(QRect(QPoint(), size), QColor(5, 9, 7));
         const auto chunks = chunked
-            ? item.sampleChunksLocked(start, size.width(), size.height(), lanes)
+            ? item.sampleChunksLocked(start, size.width(), size.height(), lanes, clipToView)
             : std::optional<WaveformSceneGraph::Chunks>();
         if (!chunks || !WaveformSceneGraph::drawChunks(*painter, *chunks)) {
             item.drawDetailLocked(*painter, size.width(), size.height(), start, end, lanes, 1.0,
@@ -11243,11 +11246,12 @@ struct SampleFrames {
     int largestStroke{0};
 };
 
-SampleFrames compareSampleFrames(WaveformEditorItem &item, QQuickWindow &window, QSGNode *&chunks) {
+SampleFrames compareSampleFrames(WaveformEditorItem &item, QQuickWindow &window, QSGNode *&chunks,
+    bool clipToView = false) {
     SampleFrames frames;
     const QSize size(static_cast<int>(item.width()), static_cast<int>(item.height()));
     const double scale = window.effectiveDevicePixelRatio();
-    chunks = renderSamples(item, window, chunks, true);
+    chunks = renderSamples(item, window, chunks, true, clipToView);
     QSGNode *whole = renderSamples(item, window, nullptr, false);
     if (chunks == nullptr || whole == nullptr) {
         delete whole;
@@ -11597,7 +11601,7 @@ void WaveformSmokeTest::waveformSceneGraphRebuildsSampleChunksOnChange() {
         QMutexLocker lock(&item.m_stateMutex);
         const auto [start, end] = item.visibleRangeLocked();
         const auto layout = item.sampleChunksLocked(start, 1720, 240, 3);
-        for (qint64 index = layout->first; index <= layout->last; ++index) partial += layout->stamp(index) != 0;
+        for (qint64 index = layout->first; index <= layout->last; ++index) partial += std::get<0>(layout->stamp(index)) != 0;
     }
     if (change == QLatin1String("zoom")) {
         item.setZoomLevel(item.maximumZoomLevel() / 1.25);
@@ -11750,6 +11754,87 @@ void WaveformSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetailWindows()
     item.setSourcePath(QString());
     gate->release(4);
     QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSmokeTest::waveformSceneGraphClipsSampleChunksToFastViews_data() {
+    QTest::addColumn<double>("scale");
+    for (const double scale : {1.0, 2.0}) QTest::addRow("%.0fx", scale) << scale;
+}
+
+void WaveformSmokeTest::waveformSceneGraphClipsSampleChunksToFastViews() {
+    // Frames slower than the view can be followed in, as at the deepest
+    // zoom of a 96 kHz track: a frame that moved on by the view's width or
+    // more since the last builds its chunks for the samples the view shows
+    // alone, no more geometry than the frame drawn whole, as no later
+    // frame shows them. The next frame that moves on by less builds them
+    // whole again, and the frames look as drawn whole throughout.
+    QFETCH(double, scale);
+    QQuickWindow window;
+    if (!showSampleWindow(window, scale)) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    const QSize size(1720, 300);
+    TestTime time;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    time.drive(item);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(6);
+    giveSampleDetail(item, 96'000, 6, 29.5, 30.5);
+    item.setZoomLevel(item.maximumZoomLevel());
+    setTestPosition(item, 30.0);
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    // 1/120 s moves the view by 6400 px a frame, 1/1200 s by 640.
+    const double steps[] = {0.0, 1.0 / 120, 1.0 / 120, 1.0 / 1200, 1.0 / 1200, 1.0 / 120, 1.0 / 1200};
+    QSGNode *painted = nullptr;
+    QSGNode *chunks = nullptr;
+    bool previousClipped = false;
+    int clippedFrames = 0;
+    for (const double step : steps) {
+        time.advance(step);
+        bool clip = false;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto [start, end] = item.visibleRangeLocked();
+            QVERIFY(item.renderDetailDirectlyLocked(start, end));
+            clip = std::abs(item.sampleChunkColumnLocked(start) - item.m_lastSampleChunkColumn)
+                >= item.deviceColumnsLocked();
+        }
+        QCOMPARE(clip, step > 1.0 / 360);
+        // As the window draws it.
+        painted = WaveformSceneGraph::render(painted, &window, size,
+            [&item](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        QVERIFY(painted != nullptr);
+        const auto stats = WaveformSceneGraph::statistics(painted);
+        QSGNode *whole = renderSamples(item, window, nullptr, false);
+        QVERIFY(whole != nullptr);
+        const int wholeVertices = WaveformSceneGraph::statistics(whole).geometryVertices;
+        delete whole;
+        if (clip) {
+            ++clippedFrames;
+            QCOMPARE(stats.chunksBuilt, stats.chunks);
+            QVERIFY2(stats.uploadedVertices <= wholeVertices, qPrintable(QStringLiteral("%1 vertices, %2 whole")
+                .arg(stats.uploadedVertices).arg(wholeVertices)));
+        } else if (previousClipped) {
+            // The chunks the last view's edges cut are built whole; those
+            // it showed whole own the same frames, and are kept.
+            QVERIFY(stats.chunksBuilt > 0 && stats.chunksBuilt <= stats.chunks);
+        }
+        // The same frame's chunks, drawn the same way, look as drawn whole.
+        const SampleFrames frames = compareSampleFrames(item, window, chunks, clip);
+        QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+        const QString unmarked = samplesWithoutOneMarker(
+            frames.squares, visibleSamplePositions(item, size.width()), size, 6, scale);
+        QVERIFY2(unmarked.isEmpty(), qPrintable(unmarked));
+        previousClipped = clip;
+    }
+    QCOMPARE(clippedFrames, 3);
+    delete painted;
+    delete chunks;
 }
 
 void WaveformSmokeTest::waveformSceneGraphSplitsLargeSampleChunks() {

@@ -459,9 +459,15 @@ private:
         const SampleOwnership *ownership = nullptr);
     // The chunks a frame drawn directly shows its samples in, the view
     // starting at visibleStart, with `channels` lanes; see
-    // kSampleChunkColumns.
+    // kSampleChunkColumns. With `clipToView`, each is built for the
+    // samples the view shows of it alone: for a frame that moved on by the
+    // view's width or more since the last, whose chunks no later frame
+    // shows, so that it builds no more than the view.
     std::optional<WaveformSceneGraph::Chunks> sampleChunksLocked(
-        double visibleStart, int width, int height, int channels) const;
+        double visibleStart, int width, int height, int channels, bool clipToView = false) const;
+    // The device column of the track's grid the view starts on (see
+    // sampleChunksLocked), or NaN.
+    double sampleChunkColumnLocked(double visibleStart) const;
     static quint64 nextDetailGeneration();
     // A sample's marker: a square of `size` centred on `point`, snapped to
     // whole device pixels.
@@ -523,6 +529,9 @@ private:
     // such as another file's: a sample chunk built from one window holds
     // for the next only while it is the same.
     quint64 m_detailSourceEpoch{0};
+    // The column the last frame drawn in chunks started on; NaN after one
+    // that was not.
+    double m_lastSampleChunkColumn{std::numeric_limits<double>::quiet_NaN()};
     bool m_zoomFallbackToOverview{false};
     // The cache, the staged cache and the playback tiles are in device
     // pixels.

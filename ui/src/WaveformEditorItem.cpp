@@ -1837,8 +1837,17 @@ bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
     return laneStyleLocked().muted(channel);
 }
 
+double WaveformEditorItem::sampleChunkColumnLocked(double visibleStart) const {
+    const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+    const double columns = deviceColumnsLocked();
+    if (span <= 0.0 || columns <= 0.0) return std::numeric_limits<double>::quiet_NaN();
+    const double viewColumn = visibleStart / (span / columns);
+    const double nearest = std::round(viewColumn);
+    return std::abs(viewColumn - nearest) < 1e-6 ? nearest : std::floor(viewColumn);
+}
+
 std::optional<WaveformSceneGraph::Chunks> WaveformEditorItem::sampleChunksLocked(
-    double visibleStart, int width, int height, int channels) const {
+    double visibleStart, int width, int height, int channels, bool clipToView) const {
     // The span the zoom gives, not the view's end less its start, which
     // differs by a rounding from frame to frame.
     const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
@@ -1883,31 +1892,48 @@ std::optional<WaveformSceneGraph::Chunks> WaveformEditorItem::sampleChunksLocked
     const auto origin = [column, phase, chunkColumns](qint64 index) {
         return (static_cast<double>(index) * chunkColumns + phase) * column;
     };
-    const auto boundary = [origin, rate](qint64 index) {
-        return static_cast<qint64>(std::ceil(origin(index) * rate - 1e-6));
+    // The first frame at or after a column of the grid.
+    const auto frameAt = [column, phase, rate](double gridColumn) {
+        return static_cast<qint64>(std::ceil((gridColumn + phase) * column * rate - 1e-6));
+    };
+    const auto boundary = [frameAt, chunkColumns](qint64 index) {
+        return frameAt(static_cast<double>(index) * chunkColumns);
+    };
+    // The frames whose samples the view shows, as the chunks are chosen.
+    const qint64 viewFirst = clipToView ? frameAt(firstColumn - before)
+                                        : std::numeric_limits<qint64>::min();
+    const qint64 viewEnd = clipToView
+        ? frameAt(firstColumn + std::ceil(columns - kColumnEpsilon) + after)
+        : std::numeric_limits<qint64>::max();
+    // The frames a chunk owns, those of them the view shows.
+    const auto owned = [boundary, viewFirst, viewEnd](qint64 index) {
+        const qint64 first = std::max(boundary(index), viewFirst);
+        return SampleOwnership{first, std::max(first, std::min(boundary(index + 1), viewEnd))};
     };
     chunks.offset = [firstColumn, scale, chunkColumns](qint64 index) {
         return (static_cast<double>(index) * chunkColumns - firstColumn) / scale;
     };
     // A chunk holds for the next detail window while this one holds every
     // sample it takes shape from; one at an edge of the window holds only
-    // for the window.
-    chunks.stamp = [this, boundary, rate](qint64 index) -> quint64 {
+    // for the window. The frames it owns tell one built whole from one
+    // built for a view.
+    chunks.stamp = [this, owned, rate](qint64 index) -> WaveformSceneGraph::Chunks::Stamp {
+        const SampleOwnership frames = owned(index);
         const qint64 detailFirst = std::llround(m_detail.startSeconds * rate);
         const qint64 detailEnd = detailFirst + m_detail.pointCount;
         const bool fromStart = detailFirst <= 0
-            || boundary(index) - kSampleCurveContextSamples >= detailFirst;
-        const bool toEnd = boundary(index + 1) + kSampleCurveContextSamples <= detailEnd
+            || frames.firstFrame - kSampleCurveContextSamples >= detailFirst;
+        const bool toEnd = frames.endFrame + kSampleCurveContextSamples <= detailEnd
             || m_detail.endSeconds + 2.0 / rate >= m_durationSeconds;
-        return fromStart && toEnd ? 0 : m_detail.generation;
+        return {fromStart && toEnd ? 0 : m_detail.generation, frames.firstFrame, frames.endFrame};
     };
-    chunks.paint = [this, origin, boundary, span, width, height, channels, scale, style](
+    chunks.paint = [this, origin, owned, span, width, height, channels, scale, style](
                        QPainter &painter, qint64 index) {
         // A view of the same span and width starting where the chunk does.
         const double start = origin(index);
-        const SampleOwnership owned{boundary(index), boundary(index + 1)};
+        const SampleOwnership frames = owned(index);
         drawDetailSlice(painter, m_detail, style, width, height, start, start + span, channels,
-            0, width, 1.0, scale, &owned);
+            0, width, 1.0, scale, &frames);
     };
     return chunks;
 }
@@ -2003,13 +2029,22 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 || m_cachedViewportWidth != renderPixelWidthLocked()
                 || m_cachedViewportHeight != renderPixelHeightLocked());
 #endif
+        if (!directDetail) m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
         if (directDetail) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             // The scene graph keeps the samples' geometry, in chunks; any
             // other painter draws them.
             const int lanes = displayedChannelCountLocked();
-            const auto chunks = sampleChunksLocked(visibleStart, canvasWidth, canvasHeight, lanes);
-            if (!chunks || !WaveformSceneGraph::drawChunks(*painter, *chunks)) {
+            // A frame that moved on by the view's width or more shows none
+            // of the last frame's chunks, nor will the next frame its own.
+            const double column = sampleChunkColumnLocked(visibleStart);
+            const bool clipToView = std::abs(column - m_lastSampleChunkColumn) >= deviceColumnsLocked();
+            const auto chunks = sampleChunksLocked(
+                visibleStart, canvasWidth, canvasHeight, lanes, clipToView);
+            if (chunks && WaveformSceneGraph::drawChunks(*painter, *chunks)) {
+                m_lastSampleChunkColumn = column;
+            } else {
+                m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
                 drawDetailLocked(
                     *painter, canvasWidth, canvasHeight,
                     visibleStart, visibleEnd, lanes, 1.0,

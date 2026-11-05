@@ -5,6 +5,7 @@
 #include <QSize>
 #include <QtGlobal>
 #include <functional>
+#include <tuple>
 
 class QPainter;
 class QQuickWindow;
@@ -62,9 +63,11 @@ struct Chunks {
     // Where a chunk's origin is in the view, in logical pixels: a whole
     // number of device pixels, so that it is drawn as it was built.
     std::function<double(qint64)> offset;
-    // What a chunk was built from: a kept chunk whose stamp changes, such
-    // as one that new data covers further, is built again.
-    std::function<quint64(qint64)> stamp;
+    // What a chunk was built from, beyond the key: a kept chunk whose
+    // stamp changes, such as one that new data covers further or one built
+    // for only part of its samples, is built again.
+    using Stamp = std::tuple<quint64, qint64, qint64>;
+    std::function<Stamp(qint64)> stamp;
     // Draws a chunk in its own coordinates: lines, curves and filled
     // rectangles, which become geometry. Images are not kept.
     std::function<void(QPainter &, qint64)> paint;
