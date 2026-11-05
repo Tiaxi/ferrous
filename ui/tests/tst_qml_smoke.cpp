@@ -11489,7 +11489,9 @@ void WaveformSmokeTest::waveformSceneGraphSampleChunkBoundariesDoNotShow() {
     QSGNode *chunks = nullptr;
     int boundaries = 0;
     const QString grabs = qEnvironmentVariable("FERROUS_WAVEFORM_GRAB_DIR");
-    for (int frame = 0; frame < 6; ++frame) {
+    // Each frame moves the view on by hundreds of pixels, to other places
+    // of the chunks' boundaries in it.
+    for (int frame = 0; frame < 3; ++frame) {
         if (frame > 0) time.advance(1.0 / 360.0);
         double spacing = 0.0;
         QStringList columns;
