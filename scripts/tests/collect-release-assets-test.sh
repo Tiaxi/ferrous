@@ -64,8 +64,9 @@ expect_assets() {
         || fail "${assets}/SHA256SUMS does not match the packages"
 }
 
-# The v0.3.0 release: the non-blocking Fedora 45 build failed, and
-# download-artifact extracted the only artifact straight into packages/.
+# The v0.3.0 release, when Fedora 45 was not yet required: its build
+# failed, and download-artifact extracted the only artifact straight into
+# packages/.
 case_dir="${WORK_DIR}/lone-artifact"
 fake_rpm "${case_dir}/packages/x86_64/${fc44_rpm}"
 collect "${case_dir}" --require-dist fc44 "${case_dir}/packages" "${case_dir}/assets" \
@@ -78,7 +79,7 @@ grep -qF "${fc44_rpm}" "${case_dir}/out" || fail "the checksums were not printed
 case_dir="${WORK_DIR}/per-artifact"
 fake_rpm "${case_dir}/packages/rpm-package-fc44/x86_64/${fc44_rpm}"
 fake_rpm "${case_dir}/packages/rpm-package-fc45/x86_64/${fc45_rpm}"
-collect "${case_dir}" --require-dist fc44 "${case_dir}/packages" "${case_dir}/assets" \
+collect "${case_dir}" --require-dist fc44 --require-dist fc45 "${case_dir}/packages" "${case_dir}/assets" \
     || fail "per-artifact directories were not collected: $(cat "${case_dir}/err")"
 expect_assets "${case_dir}/assets" "${fc44_rpm}" "${fc45_rpm}"
 
@@ -126,7 +127,17 @@ if collect "${case_dir}" "${case_dir}/packages" "${case_dir}/assets"; then
 fi
 expect_failure "${case_dir}" "is not a directory"
 
-# Only the non-blocking build's package: the required build is missing.
+# Both builds are required and only Fedora 44 built: the lone artifact sits
+# straight in packages/, and the missing Fedora 45 package fails the release.
+case_dir="${WORK_DIR}/second-required-missing"
+fake_rpm "${case_dir}/packages/x86_64/${fc44_rpm}"
+if collect "${case_dir}" --require-dist fc44 --require-dist fc45 "${case_dir}/packages" "${case_dir}/assets"; then
+    fail "a release without the required fc45 package was collected"
+fi
+expect_failure "${case_dir}" "No fc45 package to release"
+[[ -f "${case_dir}/packages/x86_64/${fc44_rpm}" ]] || fail "a failed collection moved packages"
+
+# Only the other build's package: the required build is missing.
 case_dir="${WORK_DIR}/required-missing"
 fake_rpm "${case_dir}/packages/x86_64/${fc45_rpm}"
 if collect "${case_dir}" --require-dist fc44 "${case_dir}/packages" "${case_dir}/assets"; then
