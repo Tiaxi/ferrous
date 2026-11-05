@@ -308,6 +308,15 @@ public:
     }
     void drawPolygon(const QPointF *points, int count, PolygonDrawMode mode) override {
         if (count == 0) return;
+        const QPen pen = painter()->pen();
+        if (mode == PolylineMode && !software && pen.style() == Qt::SolidLine) {
+            // Samples joined by straight segments: stroked as they are,
+            // without a path to build and flatten.
+            QPolygonF polyline(count);
+            for (int i = 0; i < count; ++i) polyline[i] = painter()->transform().map(points[i]);
+            appendStroke(geometry(), polyline, pen, 0.5 / scene.scale);
+            return;
+        }
         QPainterPath path; path.moveTo(points[0]);
         for (int i = 1; i < count; ++i) path.lineTo(points[i]);
         if (mode != PolylineMode) path.closeSubpath();

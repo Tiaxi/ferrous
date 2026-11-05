@@ -21,6 +21,8 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QStyleHints>
+#include <QSGImageNode>
+#include <QSGRectangleNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGRendererInterface>
@@ -1420,6 +1422,10 @@ private slots:
     void waveformEditorDrawsMarkersByLogicalSpacing();
     void waveformEditorMakesPlaybackTilesOnWorkers();
     void waveformSceneGraphKeepsGeometryNodesWithinShortIndices();
+    void waveformSceneGraphDrawsCloseSamplesWithFewerVertices_data();
+    void waveformSceneGraphDrawsCloseSamplesWithFewerVertices();
+    void waveformSceneGraphCloseSamplesLookAsBefore_data();
+    void waveformSceneGraphCloseSamplesLookAsBefore();
     void waveformSceneGraphDrawsEveryLaneAtDeepZoom();
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
@@ -10156,6 +10162,185 @@ QString lanesWithEmptyColumns(const QImage &image, int lanes, int skipFirst = -1
     }
     return result;
 }
+
+// Gives `item` raw samples as giveSampleDetail does, of a signal with more
+// in it than one sine: a slow wave with quicker, quieter ones on it, as
+// music has, whose curve between samples differs from straight segments.
+void giveRichSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end) {
+    giveSampleDetail(item, rate, channels, start, end);
+    auto &detail = item.m_detail;
+    const qint64 firstFrame = std::llround(start * rate);
+    for (int point = 0; point < detail.pointCount; ++point) {
+        const double frame = static_cast<double>(firstFrame + point);
+        for (int channel = 0; channel < channels; ++channel) {
+            // Off the lane's center line, which is drawn over the waveform.
+            const auto value = static_cast<float>(0.5 + 0.25 * std::sin(frame * 0.05 + channel)
+                + 0.12 * std::sin(frame * 0.31 + 2.0 * channel) + 0.05 * std::sin(frame * 1.3 + channel));
+            const std::size_t index = (static_cast<std::size_t>(point) * channels + channel) * 2;
+            detail.extrema[index] = value;
+            detail.extrema[index + 1] = value;
+        }
+    }
+}
+
+// The scene's vertex-colored geometry and rectangles drawn as a GPU draws
+// them without multisampling: a pixel takes a triangle's color, interpolated
+// across it, where its center is inside, blended premultiplied over what is
+// there. Offscreen, no renderer draws the geometry a native one would.
+QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QColor background) {
+    QImage image((QSizeF(size) * scale).toSize(), QImage::Format_ARGB32_Premultiplied);
+    image.fill(background);
+    const int width = image.width();
+    const int height = image.height();
+    const auto blend = [&image](int x, int y, double r, double g, double b, double a) {
+        auto *pixel = reinterpret_cast<QRgb *>(image.scanLine(y)) + x;
+        const double keep = 1.0 - a;
+        *pixel = qRgba(static_cast<int>(std::lround(r + qRed(*pixel) * keep)),
+            static_cast<int>(std::lround(g + qGreen(*pixel) * keep)),
+            static_cast<int>(std::lround(b + qBlue(*pixel) * keep)),
+            static_cast<int>(std::lround(a * 255.0 + qAlpha(*pixel) * keep)));
+    };
+    for (const QSGNode *child = scene->firstChild(); child; child = child->nextSibling()) {
+        if (const auto *rectangle = dynamic_cast<const QSGRectangleNode *>(child)) {
+            const QRectF rect = rectangle->rect();
+            const QColor color = rectangle->color();
+            const double alpha = color.alphaF();
+            for (int y = std::max(0, static_cast<int>(std::lround(rect.top() * scale)));
+                 y < std::min(height, static_cast<int>(std::lround(rect.bottom() * scale))); ++y) {
+                for (int x = std::max(0, static_cast<int>(std::lround(rect.left() * scale)));
+                     x < std::min(width, static_cast<int>(std::lround(rect.right() * scale))); ++x) {
+                    blend(x, y, color.red() * alpha, color.green() * alpha, color.blue() * alpha, alpha);
+                }
+            }
+            continue;
+        }
+        // Images, labels and the playhead, are left out.
+        if (child->type() != QSGNode::GeometryNodeType || dynamic_cast<const QSGImageNode *>(child)) {
+            continue;
+        }
+        const QSGGeometry *geometry = static_cast<const QSGGeometryNode *>(child)->geometry();
+        if (geometry == nullptr
+            || geometry->sizeOfVertex() != static_cast<int>(sizeof(QSGGeometry::ColoredPoint2D))
+            || geometry->drawingMode() != QSGGeometry::DrawTriangles) {
+            continue;
+        }
+        const auto *vertices = geometry->vertexDataAsColoredPoint2D();
+        for (int first = 0; first + 2 < geometry->vertexCount(); first += 3) {
+            const QSGGeometry::ColoredPoint2D *corner[3] = {
+                &vertices[first], &vertices[first + 1], &vertices[first + 2]};
+            double px[3];
+            double py[3];
+            for (int i = 0; i < 3; ++i) { px[i] = corner[i]->x * scale; py[i] = corner[i]->y * scale; }
+            const double area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+            if (area == 0.0) continue;
+            const double sign = area > 0 ? 1.0 : -1.0;
+            // Whether edge i (from corner i+1 to corner i+2) owns centers on
+            // it: its top or left edges, as GPUs rasterize.
+            bool owns[3];
+            for (int i = 0; i < 3; ++i) {
+                const double dx = (px[(i + 2) % 3] - px[(i + 1) % 3]) * sign;
+                const double dy = (py[(i + 2) % 3] - py[(i + 1) % 3]) * sign;
+                owns[i] = dy > 0 || (dy == 0 && dx < 0);
+            }
+            const int left = std::max(0, static_cast<int>(std::floor(std::min({px[0], px[1], px[2]}))));
+            const int right = std::min(width - 1, static_cast<int>(std::ceil(std::max({px[0], px[1], px[2]}))));
+            const int top = std::max(0, static_cast<int>(std::floor(std::min({py[0], py[1], py[2]}))));
+            const int bottom = std::min(height - 1, static_cast<int>(std::ceil(std::max({py[0], py[1], py[2]}))));
+            for (int y = top; y <= bottom; ++y) {
+                const double cy = y + 0.5;
+                for (int x = left; x <= right; ++x) {
+                    const double cx = x + 0.5;
+                    double weight[3];
+                    bool inside = true;
+                    for (int i = 0; i < 3 && inside; ++i) {
+                        const int a = (i + 1) % 3;
+                        const int b = (i + 2) % 3;
+                        weight[i] = ((px[b] - px[a]) * (cy - py[a]) - (py[b] - py[a]) * (cx - px[a])) * sign;
+                        inside = weight[i] > 0 || (weight[i] == 0 && owns[i]);
+                    }
+                    if (!inside) continue;
+                    const double total = weight[0] + weight[1] + weight[2];
+                    double rgba[4] = {0, 0, 0, 0};
+                    for (int i = 0; i < 3; ++i) {
+                        const double w = weight[i] / total;
+                        rgba[0] += corner[i]->r * w;
+                        rgba[1] += corner[i]->g * w;
+                        rgba[2] += corner[i]->b * w;
+                        rgba[3] += corner[i]->a * w;
+                    }
+                    blend(x, y, rgba[0], rgba[1], rgba[2], rgba[3] / 255.0);
+                }
+            }
+        }
+    }
+    return image.convertToFormat(QImage::Format_RGB32);
+}
+
+// The pixels of two images of a size that differ by more than `threshold`
+// (the sum over red, green and blue), and their mean difference a channel.
+std::pair<int, double> imageDifference(const QImage &a, const QImage &b, int threshold) {
+    int different = 0;
+    quint64 error = 0;
+    for (int y = 0; y < a.height(); ++y) {
+        const auto *rowA = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+        const auto *rowB = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+        for (int x = 0; x < a.width(); ++x) {
+            const int delta = std::abs(qRed(rowA[x]) - qRed(rowB[x]))
+                + std::abs(qGreen(rowA[x]) - qGreen(rowB[x])) + std::abs(qBlue(rowA[x]) - qBlue(rowB[x]));
+            error += static_cast<quint64>(delta);
+            if (delta > threshold) ++different;
+        }
+    }
+    return {different, static_cast<double>(error) / (3.0 * a.width() * a.height())};
+}
+
+// The green of each pixel of `image`, averaged over the (2 radius + 1)
+// pixels square around it: the detail an eye resolves from further away.
+std::vector<int> blurredGreen(const QImage &image, int radius) {
+    const int width = image.width();
+    const int height = image.height();
+    std::vector<int> rows(static_cast<std::size_t>(width) * height);
+    for (int y = 0; y < height; ++y) {
+        const auto *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+        for (int x = 0; x < width; ++x) {
+            int sum = 0;
+            int count = 0;
+            for (int i = std::max(0, x - radius); i <= std::min(width - 1, x + radius); ++i) {
+                sum += qGreen(line[i]);
+                ++count;
+            }
+            rows[static_cast<std::size_t>(y) * width + x] = sum / count;
+        }
+    }
+    std::vector<int> result(rows.size());
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int sum = 0;
+            int count = 0;
+            for (int i = std::max(0, y - radius); i <= std::min(height - 1, y + radius); ++i) {
+                sum += rows[static_cast<std::size_t>(i) * width + x];
+                ++count;
+            }
+            result[static_cast<std::size_t>(y) * width + x] = sum / count;
+        }
+    }
+    return result;
+}
+
+// The visible samples' positions, in logical pixels, that a lane of `item`
+// draws: those within the margin drawDetailSlice draws curves into.
+QList<double> visibleSamplePositions(WaveformEditorItem &item, int width) {
+    QMutexLocker lock(&item.m_stateMutex);
+    const auto [start, end] = item.visibleRangeLocked();
+    const double secondsPerPixel = (end - start) / width;
+    QList<double> positions;
+    for (int point = 0; point < item.m_detail.pointCount; ++point) {
+        const double time = WaveformEditorItem::detailPointTime(item.m_detail, point);
+        const double position = std::round((time / secondsPerPixel - start / secondsPerPixel) * 256.0) / 256.0;
+        if (position >= -8.0 && position < width + 8.0) positions.push_back(position);
+    }
+    return positions;
+}
 } // namespace
 
 void WaveformCoverageSmokeTest::waveformEditorDrawsEveryLaneAcrossTheView_data() {
@@ -10504,7 +10689,261 @@ void WaveformSmokeTest::waveformSceneGraphKeepsGeometryNodesWithinShortIndices()
         [&](QPainter *painter) { item.paint(painter); }, false,
         WaveformSceneGraph::Primitives::Geometry);
     QVERIFY(WaveformSceneGraph::statistics(node).largestGeometryVertices <= 65'534);
+    // Closer samples, joined by straight segments with a quad a marker, are
+    // still more than one node holds, and split the same way: whole quads,
+    // within 65,532 vertices a node.
+    for (const int stepsOut : {3, 4, 5, 6}) {
+        item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+        QVERIFY(item.sampleSpacingPixelsLocked() < WaveformEditorItem::kStraightSamplePixelsPerSample);
+        node = WaveformSceneGraph::render(node, &window, QSize(3440, 1412),
+            [&](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        const auto close = WaveformSceneGraph::statistics(node);
+        QVERIFY2(close.geometryVertices > 65'535, qPrintable(QString::number(close.geometryVertices)));
+        QVERIFY2(close.largestGeometryVertices <= 65'532,
+            qPrintable(QString::number(close.largestGeometryVertices)));
+        QCOMPARE(close.largestGeometryVertices % 6, 0);
+    }
     delete node;
+}
+
+namespace {
+// The opaque, axis-aligned squares of the scene's geometry, in logical
+// pixels: the markers of samples, or for antialiased ones their insides.
+// Every primitive of the waveform is whole quads, (a, b, c, c, b, d).
+QList<QRectF> sceneSquares(const QSGNode *scene, QColor color) {
+    QList<QRectF> squares;
+    for (const QSGNode *child = scene->firstChild(); child; child = child->nextSibling()) {
+        // The software renderer's image and rectangle nodes hold no real
+        // geometry.
+        if (child->type() != QSGNode::GeometryNodeType || dynamic_cast<const QSGImageNode *>(child)
+            || dynamic_cast<const QSGRectangleNode *>(child)) {
+            continue;
+        }
+        const QSGGeometry *geometry = static_cast<const QSGGeometryNode *>(child)->geometry();
+        if (geometry == nullptr
+            || geometry->sizeOfVertex() != static_cast<int>(sizeof(QSGGeometry::ColoredPoint2D))) {
+            continue;
+        }
+        const auto *v = geometry->vertexDataAsColoredPoint2D();
+        for (int first = 0; first + 5 < geometry->vertexCount(); first += 6) {
+            const auto *q = v + first;
+            bool solid = true;
+            for (int i = 0; i < 6 && solid; ++i) {
+                solid = q[i].a == 255 && q[i].r == color.red() && q[i].g == color.green()
+                    && q[i].b == color.blue();
+            }
+            const QRectF rect(QPointF(q[0].x, q[0].y), QPointF(q[5].x, q[5].y));
+            if (!solid || q[0].y != q[1].y || q[0].x != q[2].x || q[1].x != q[5].x
+                || q[2].y != q[5].y || rect.width() <= 0.5
+                || std::abs(rect.width() - rect.height()) > 1e-3) {
+                continue;
+            }
+            squares.push_back(rect);
+        }
+    }
+    return squares;
+}
+} // namespace
+
+void WaveformSmokeTest::waveformSceneGraphDrawsCloseSamplesWithFewerVertices_data() {
+    QTest::addColumn<double>("spacing");
+    QTest::addColumn<double>("scale");
+    for (const double scale : {1.0, 2.0}) {
+        for (const double spacing : {2.0, 3.0, 4.199, 4.2, 4.201, 5.0, 8.0}) {
+            QTest::addRow("%.3fpx-%.0fx", spacing, scale) << spacing << scale;
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphDrawsCloseSamplesWithFewerVertices() {
+    // Samples closer than 4.2 logical pixels are joined by straight segments,
+    // 18 vertices each, and their markers are a quad each, 6 vertices,
+    // rather than flattened curves and antialiased squares of 30.
+    QFETCH(double, spacing);
+    QFETCH(double, scale);
+    QQuickWindow window;
+    if (scale != 1.0) {
+        if (!showOnScreen(window, scale)) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    } else {
+        window.resize(64, 64);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+    }
+    constexpr int kWidth = 400;
+    constexpr int kHeight = 200;
+    constexpr int kLanes = 2;
+    constexpr int kRate = 1'000;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    item.setWidth(kWidth);
+    item.setHeight(kHeight);
+    item.setDurationSeconds(10.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kLanes);
+    giveSampleDetail(item, kRate, kLanes, 4.0, 6.0);
+    item.setZoomLevel(spacing * 10.0 * kRate / kWidth);
+    setTestPosition(item, 5.0);
+    QVERIFY(qFuzzyCompare(item.sampleSpacingPixelsLocked(), spacing));
+    const auto samples = static_cast<int>(visibleSamplePositions(item, kWidth).size());
+    QVERIFY(samples > 40);
+    QSGNode *node = WaveformSceneGraph::render(nullptr, &window, QSize(kWidth, kHeight),
+        [&item](QPainter *painter) {
+            const auto [start, end] = item.visibleRangeLocked();
+            item.drawDetailLocked(*painter, kWidth, kHeight, start, end, kLanes, 1.0,
+                item.renderScaleLocked());
+        }, false, WaveformSceneGraph::Primitives::Geometry);
+    QVERIFY(node != nullptr);
+    const int vertices = WaveformSceneGraph::statistics(node).geometryVertices;
+    const QList<QRectF> squares = sceneSquares(node, QColor(54, 225, 161));
+    delete node;
+    // A square a sample in each lane: the marker, or an antialiased one's
+    // inside.
+    QCOMPARE(squares.size(), samples * kLanes);
+    for (int lane = 0; lane < kLanes; ++lane) {
+        const auto inLane = std::count_if(squares.begin(), squares.end(), [lane](const QRectF &square) {
+            return static_cast<int>(square.center().y() / (kHeight / kLanes)) == lane;
+        });
+        QCOMPARE(static_cast<int>(inLane), samples);
+    }
+    const int segments = samples - 1;
+    if (spacing < WaveformEditorItem::kStraightSamplePixelsPerSample) {
+        // Each lane: a straight segment between each two samples, and a
+        // quad a marker, as large as the pen and fill of an antialiased
+        // one in whole device pixels.
+        QCOMPARE(vertices, kLanes * (18 * segments + 6 * samples));
+        const double size = std::round((std::clamp(spacing * 0.75, 1.5, 3.0) + 1.2) * scale) / scale;
+        for (const QRectF &square : squares) {
+            QCOMPARE(square.width(), size);
+            QCOMPARE(square.left() * scale, std::round(square.left() * scale));
+            QCOMPARE(square.top() * scale, std::round(square.top() * scale));
+        }
+    } else {
+        // As before: flattened curves, 18 vertices a part, and antialiased
+        // markers of 30.
+        const int curves = vertices - kLanes * 30 * samples;
+        QVERIFY2(curves >= kLanes * 18 * segments, qPrintable(QString::number(vertices)));
+        QCOMPARE(curves % 18, 0);
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphCloseSamplesLookAsBefore_data() {
+    QTest::addColumn<int>("stepsOut");
+    QTest::addColumn<double>("scale");
+    // The deepest zoom, 8 logical pixels a sample, and steps out to 2.1:
+    // 5.12 and 4.10 either side of the threshold.
+    for (const double scale : {1.0, 2.0}) {
+        for (const int stepsOut : {0, 2, 3, 4, 5, 6}) {
+            QTest::addRow("%dout-%.0fx", stepsOut, scale) << stepsOut << scale;
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphCloseSamplesLookAsBefore() {
+    // The scene's geometry drawn as a GPU would: the same picture as with
+    // curves and antialiased markers from 4.2 logical pixels a sample, and
+    // closer, the same seen from a normal distance, at which a logical
+    // pixel's detail blurs: markers move by up to half a device pixel and
+    // lose their soft edges. Every lane is drawn across the view, with a
+    // marker at each sample. With FERROUS_WAVEFORM_GRAB_DIR set, the
+    // pictures are saved there.
+    QFETCH(int, stepsOut);
+    QFETCH(double, scale);
+    QQuickWindow window;
+    if (scale != 1.0) {
+        if (!showOnScreen(window, scale)) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    } else {
+        window.resize(64, 64);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+    }
+    // The main window's pane, with six lanes.
+    const QSize size(1720, 600);
+    constexpr int kLanes = 6;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kLanes);
+    giveRichSampleDetail(item, 96'000, kLanes, 29.5, 30.5);
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    setTestPosition(item, 30.0);
+    const double spacing = item.sampleSpacingPixelsLocked();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.renderDetailDirectlyLocked(start, end));
+    }
+    const auto draw = [&](double straightBelow, QList<QRectF> *squares) {
+        item.m_straightSamplePixelsPerSample = straightBelow;
+        QSGNode *node = WaveformSceneGraph::render(nullptr, &window, size,
+            [&item](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        if (node == nullptr) return QImage();
+        *squares = sceneSquares(node, QColor(54, 225, 161));
+        QImage image = rasterizeSceneGeometry(node, size, scale, QColor(5, 9, 7));
+        delete node;
+        return image;
+    };
+    QList<QRectF> beforeSquares;
+    QList<QRectF> afterSquares;
+    const QImage before = draw(0.0, &beforeSquares);
+    const QImage after = draw(WaveformEditorItem::kStraightSamplePixelsPerSample, &afterSquares);
+    QVERIFY(!before.isNull() && !after.isNull());
+    if (const QString dir = qEnvironmentVariable("FERROUS_WAVEFORM_GRAB_DIR"); !dir.isEmpty()) {
+        const QString name = QStringLiteral("%1/%2x-%3out-%4px-").arg(dir).arg(scale)
+            .arg(stepsOut).arg(spacing, 0, 'f', 2);
+        before.save(name + QStringLiteral("before.png"));
+        after.save(name + QStringLiteral("after.png"));
+    }
+    // But for the playhead's columns.
+    const int playheadX = static_cast<int>(std::floor(size.width() * scale / 2.0));
+    const int playheadMargin = static_cast<int>(std::ceil(scale)) + 1;
+    const QString empty = lanesWithEmptyColumns(
+        after, kLanes, playheadX - playheadMargin, playheadX + playheadMargin);
+    QVERIFY2(empty.isEmpty(), qPrintable(empty));
+    // A marker at each sample of every lane.
+    const auto samples = static_cast<int>(visibleSamplePositions(item, size.width()).size());
+    QCOMPARE(afterSquares.size(), beforeSquares.size());
+    for (int lane = 0; lane < kLanes; ++lane) {
+        const auto inLane = std::count_if(afterSquares.begin(), afterSquares.end(),
+            [lane, &size](const QRectF &square) {
+                return static_cast<int>(square.center().y() / (size.height() / kLanes)) == lane;
+            });
+        QCOMPARE(static_cast<int>(inLane), samples);
+    }
+    const auto [different, mean] = imageDifference(before, after, 45);
+    const int pixels = after.width() * after.height();
+    const auto radius = static_cast<int>(std::lround(scale));
+    const std::vector<int> blurredBefore = blurredGreen(before, radius);
+    const std::vector<int> blurredAfter = blurredGreen(after, radius);
+    int blurredDifferent = 0;
+    qint64 inkBefore = 0;
+    qint64 inkAfter = 0;
+    for (std::size_t i = 0; i < blurredAfter.size(); ++i) {
+        blurredDifferent += std::abs(blurredAfter[i] - blurredBefore[i]) > 45;
+        inkBefore += blurredBefore[i] - 9;
+        inkAfter += blurredAfter[i] - 9;
+    }
+    const double ink = static_cast<double>(inkAfter) / static_cast<double>(inkBefore);
+    qInfo("%.0fx %d steps out, %.2f px a sample: %d of %d pixels differ, mean %.3f; "
+          "blurred, %d differ; ink %.3f",
+        scale, stepsOut, spacing, different, pixels, mean, blurredDifferent, ink);
+    if (spacing >= WaveformEditorItem::kStraightSamplePixelsPerSample) {
+        QCOMPARE(different, 0);
+        QCOMPARE(mean, 0.0);
+    } else {
+        QVERIFY2(different > 0, "closer samples are drawn with other primitives");
+        // Blurred over a logical pixel, the pictures differ in few places,
+        // and hold about as much of the waveform's color.
+        QVERIFY2(mean < 1.5 && blurredDifferent < pixels / 200 && ink > 0.85 && ink < 1.15,
+            qPrintable(QStringLiteral("mean %1, %2 differ blurred, ink %3")
+                .arg(mean).arg(blurredDifferent).arg(ink)));
+    }
 }
 
 void WaveformSmokeTest::waveformSceneGraphDrawsEveryLaneAtDeepZoom() {
@@ -10651,7 +11090,7 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
     QQuickWindow window;
     if (!showOnScreen(window, 2.0)) QSKIP("Needs the offscreen platform's HiDPI test screens");
     const QSize size(3440, 1412);
-    for (const int stepsOut : {5, 6, 7, 8, 10, 12}) {
+    for (const int stepsOut : {0, 3, 4, 5, 6, 7, 8, 10, 12}) {
         TestTime time;
         WaveformEditorItem item;
         item.setParentItem(window.contentItem());
@@ -10671,6 +11110,8 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
         QSGNode *node = nullptr;
         std::vector<double> frameMs;
         int complete = 0;
+        double vertices = 0.0;
+        double uploadedBytes = 0.0;
         constexpr int frames = 120;
         for (int frame = 0; frame < frames; ++frame) {
             QElapsedTimer pace;
@@ -10682,6 +11123,11 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
                 [&item](QPainter *painter) { item.paint(painter); }, false,
                 WaveformSceneGraph::Primitives::Geometry);
             frameMs.push_back(timer.nsecsElapsed() / 1.0e6);
+            // Geometry is made again each frame, and uploaded whole.
+            const auto stats = WaveformSceneGraph::statistics(node);
+            vertices += stats.geometryVertices;
+            uploadedBytes += static_cast<double>(stats.uploadedBytes)
+                + static_cast<double>(stats.geometryVertices) * sizeof(QSGGeometry::ColoredPoint2D);
             {
                 QMutexLocker lock(&item.m_stateMutex);
                 const auto [start, end] = item.visibleRangeLocked();
@@ -10705,10 +11151,11 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
             direct = item.renderDetailDirectlyLocked(start, end);
         }
         const auto slowest = std::max_element(frameMs.begin(), frameMs.end()) - frameMs.begin();
-        qInfo("deep-zoom 2x %dx%d steps=%d px/sample=%.2f direct=%d first_ms=%.2f mean_ms=%.2f p95_ms=%.2f max_ms=%.2f (frame %d) complete_frames=%d/%d",
+        qInfo("deep-zoom 2x %dx%d steps=%d px/sample=%.2f direct=%d first_ms=%.2f mean_ms=%.2f p95_ms=%.2f max_ms=%.2f (frame %d) complete_frames=%d/%d vertices_per_frame=%.0f upload_kib_per_frame=%.0f",
             size.width(), size.height(), stepsOut, 8.0 / std::pow(1.25, stepsOut), direct ? 1 : 0,
             frameMs.front(), mean, sorted[sorted.size() * 95 / 100], sorted.back(),
-            static_cast<int>(slowest), complete, frames);
+            static_cast<int>(slowest), complete, frames, vertices / frames,
+            uploadedBytes / frames / 1024.0);
         delete node;
         item.setParentItem(nullptr);
     }
@@ -10718,18 +11165,23 @@ void WaveformSmokeTest::waveformSceneGraphMatchesRaster_data() {
     QTest::addColumn<bool>("samples");
     QTest::addColumn<bool>("splitChannels");
     QTest::addColumn<QSize>("size");
-    QTest::newRow("overview") << false << false << QSize(640, 240);
-    QTest::newRow("channel-rulers") << false << true << QSize(640, 240);
-    QTest::newRow("sample-curves") << true << false << QSize(640, 240);
-    QTest::newRow("muted-sample-curves") << true << true << QSize(640, 240);
-    QTest::newRow("wide-overview") << false << true << QSize(3440, 360);
-    QTest::newRow("wide-samples") << true << true << QSize(3440, 360);
+    // The zoom of sample rows: 100 is 6.4 logical pixels a sample at 640
+    // wide, 47 is 3.0, joined by straight segments with a quad a marker.
+    QTest::addColumn<double>("sampleZoom");
+    QTest::newRow("overview") << false << false << QSize(640, 240) << 100.0;
+    QTest::newRow("channel-rulers") << false << true << QSize(640, 240) << 100.0;
+    QTest::newRow("sample-curves") << true << false << QSize(640, 240) << 100.0;
+    QTest::newRow("muted-sample-curves") << true << true << QSize(640, 240) << 100.0;
+    QTest::newRow("close-samples") << true << true << QSize(640, 240) << 47.0;
+    QTest::newRow("wide-overview") << false << true << QSize(3440, 360) << 100.0;
+    QTest::newRow("wide-samples") << true << true << QSize(3440, 360) << 100.0;
 }
 
 void WaveformSmokeTest::waveformSceneGraphMatchesRaster() {
     QFETCH(bool, samples);
     QFETCH(bool, splitChannels);
     QFETCH(QSize, size);
+    QFETCH(double, sampleZoom);
     QQuickWindow window;
     // Window managers may clamp a 3440-logical-pixel window at 2x scale.
     // Fit the desktop while keeping the source cache wider than the pane.
@@ -10767,7 +11219,7 @@ void WaveformSmokeTest::waveformSceneGraphMatchesRaster() {
                 item.m_detail.extrema[index + 1] = value;
             }
         }
-        item.setZoomLevel(100.0);
+        item.setZoomLevel(sampleZoom);
     }
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));

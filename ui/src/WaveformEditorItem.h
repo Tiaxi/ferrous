@@ -227,12 +227,24 @@ private:
         std::vector<QImage> strips;
     };
 
+    // Below this logical spacing, samples are joined by straight segments
+    // rather than curves, and their markers are squares in whole device
+    // pixels, a quad each with no antialiased edges, rather than
+    // antialiased squares of 30 vertices. Up to here a marker, at most 3 px
+    // and its 1.2-px pen, is as wide as the interval between two samples:
+    // the curve between them shows only where it is steep, and there it is
+    // close to its chord. Further apart, its bends show.
+    static constexpr double kStraightSamplePixelsPerSample = 4.2;
+
     // How lanes are drawn: the channels mixed in one, or one each, and
     // which channels are not heard.
     struct LaneStyle {
         int viewMode{0};
         qulonglong mutedMask{0};
         qulonglong soloedMask{0};
+        // Logical spacing below which samples are joined by straight
+        // segments and their markers are whole device pixels.
+        double straightSamplePixelsPerSample{kStraightSamplePixelsPerSample};
         bool muted(int channel) const;
     };
 
@@ -405,20 +417,25 @@ private:
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight,
         const QSizeF &reservedCorner = QSizeF());
-    // These draw in the painter's pixels, pixelScale to a logical pixel.
+    // These draw in the painter's pixels, pixelScale to a logical pixel
+    // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,
                             double visibleStart, double visibleEnd, int channels,
                             double pixelScale = 1.0) const;
     void drawDetailLocked(QPainter &painter, int width, int height,
                           double visibleStart, double visibleEnd, int channels,
-                          double pixelScale = 1.0) const;
+                          double pixelScale = 1.0, double deviceScale = 1.0) const;
     void drawDetailSliceLocked(QPainter &painter, int width, int height,
                                double visibleStart, double visibleEnd, int channels,
-                               int firstX, int lastX, double pixelScale = 1.0) const;
+                               int firstX, int lastX, double pixelScale = 1.0,
+                               double deviceScale = 1.0) const;
     static void drawDetailSlice(
         QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
         int width, int height, double visibleStart, double visibleEnd, int channels,
-        int firstX, int lastX, double pixelScale);
+        int firstX, int lastX, double pixelScale, double deviceScale = 1.0);
+    // A sample's marker: a square of `size` centred on `point`, snapped to
+    // whole device pixels.
+    static QRectF sampleDot(QPointF point, double size, double deviceScale);
     // The lowest and highest value of each column between firstX and
     // lastX, joined to the next point's: a coarse, cheap stand-in for the
     // waveform where its playback tiles are still being made.
@@ -509,6 +526,9 @@ private:
         std::make_shared<PlaybackTileWorkers>()};
     // Tests make tiles at once, on the calling thread.
     bool m_playbackTilesInline{false};
+    // Tests set 0 to draw samples at any spacing as the curves and
+    // antialiased markers drawn from kStraightSamplePixelsPerSample.
+    double m_straightSamplePixelsPerSample{kStraightSamplePixelsPerSample};
     void invalidateDetailRequestLocked();
     std::shared_ptr<std::atomic_bool> m_decodeCancelled;
     bool m_decodeActive{false};
