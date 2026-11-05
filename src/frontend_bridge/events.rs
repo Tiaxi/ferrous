@@ -28,7 +28,8 @@ use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
     try_send_event, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
-    ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack, SettingsSaveTiming,
+    ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack, PlayScrobble,
+    ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility, SettingsSaveTiming,
     SnapshotUrgency,
 };
 
@@ -687,7 +688,7 @@ pub(super) fn tick_lastfm_playback_at(
 
     // Playback may correct the duration during the play. Follow it until the
     // play qualifies, so the threshold matches the track.
-    if !tracker.scrobble_queued {
+    if !tracker.scrobble_queued() {
         if let Ok(value @ 1..) = u32::try_from(state.playback.duration.as_secs()) {
             tracker.duration_seconds = Some(value);
         }
@@ -707,9 +708,15 @@ pub(super) fn tick_lastfm_playback_at(
         tracker.artist = state.metadata.artist.trim().to_string();
         tracker.track = state.metadata.title.trim().to_string();
         tracker.album = state.metadata.album.trim().to_string();
+        tracker.metadata_seen = true;
     }
 
     if state.playback.state == PlaybackState::Playing {
+        // Before the play can qualify below: a play that plays while
+        // scrobbling is paused is never scrobbled, even after resuming.
+        if state.lastfm_scrobbling_paused && tracker.scrobble == PlayScrobble::Counting {
+            tracker.scrobble = PlayScrobble::Skipped;
+        }
         if tracker.started_at_utc.is_none() {
             tracker.started_at_utc = Some(now_utc);
         }
@@ -723,6 +730,8 @@ pub(super) fn tick_lastfm_playback_at(
     queue_lastfm_scrobble_if_ready(state, lastfm_handle, tracker);
 
     if state.lastfm.enabled
+        && !state.lastfm_scrobbling_paused
+        && tracker.scrobble != PlayScrobble::Skipped
         && !tracker.now_playing_sent
         && state.playback.state == PlaybackState::Playing
         && tracker.started_at_utc.is_some()
@@ -765,7 +774,11 @@ fn queue_lastfm_scrobble_if_ready(
     lastfm_handle: &LastFmHandle,
     tracker: &mut LastFmPlaybackTracker,
 ) {
-    if !state.lastfm.enabled || tracker.scrobble_queued || tracker.started_at_utc.is_none() {
+    if !state.lastfm.enabled
+        || state.lastfm_scrobbling_paused
+        || tracker.scrobble != PlayScrobble::Counting
+        || tracker.started_at_utc.is_none()
+    {
         return;
     }
     let Some(duration_seconds) = tracker.duration_seconds else {
@@ -780,15 +793,66 @@ fn queue_lastfm_scrobble_if_ready(
     if tracker.artist.is_empty() || tracker.track.is_empty() {
         return;
     }
-    lastfm_handle.command(LastFmCommand::QueueScrobble(LastFmScrobbleEntry {
+    let ordinal = lastfm_handle.queue_scrobble(LastFmScrobbleEntry {
         artist: tracker.artist.clone(),
         track: tracker.track.clone(),
         album: lastfm::normalize_album_for_submission(&tracker.album),
         track_number: tracker.track_number,
         duration_seconds: tracker.duration_seconds,
         timestamp_utc: tracker.started_at_utc.unwrap_or_else(unix_timestamp_now),
-    }));
-    tracker.scrobble_queued = true;
+    });
+    tracker.scrobble = PlayScrobble::Queued(ordinal);
+}
+
+/// What the scrobble progress indicator shows for the play `tracker`
+/// follows, from the scrobbler's own count and what Last.fm did with its
+/// scrobble.
+pub(super) fn scrobble_indicator(
+    state: &BridgeState,
+    tracker: &LastFmPlaybackTracker,
+) -> ScrobbleIndicator {
+    // Only a connected account that scrobbles shows the indicator.
+    if !state.lastfm.enabled
+        || state.lastfm.auth_state != lastfm::AuthState::Connected
+        || tracker.active_path.is_none()
+        || state.playback.state == PlaybackState::Stopped
+    {
+        return ScrobbleIndicator::default();
+    }
+    let threshold_seconds = tracker
+        .duration_seconds
+        .and_then(lastfm::scrobble_threshold_seconds);
+    let mut indicator = ScrobbleIndicator {
+        state: ScrobbleIndicatorState::Listening,
+        listened_ms: u32::try_from(tracker.listened_duration.as_millis()).unwrap_or(u32::MAX),
+        threshold_ms: threshold_seconds.map_or(0, |seconds| seconds.saturating_mul(1000)),
+        ..ScrobbleIndicator::default()
+    };
+    if let PlayScrobble::Queued(ordinal) = tracker.scrobble {
+        let latest = state
+            .lastfm
+            .latest_scrobble
+            .as_ref()
+            .filter(|latest| ordinal == Some(latest.ordinal));
+        indicator.state = match latest.map(|latest| latest.delivery) {
+            None | Some(lastfm::ScrobbleDelivery::Pending) => ScrobbleIndicatorState::Sending,
+            Some(lastfm::ScrobbleDelivery::Waiting) => ScrobbleIndicatorState::Waiting,
+            Some(lastfm::ScrobbleDelivery::Accepted) => ScrobbleIndicatorState::Accepted,
+            Some(lastfm::ScrobbleDelivery::Failed) => ScrobbleIndicatorState::Failed,
+        };
+        if let Some(latest) = latest {
+            indicator.message.clone_from(&latest.message);
+        }
+    } else if tracker.scrobble == PlayScrobble::Skipped {
+        indicator.state = ScrobbleIndicatorState::Skipped;
+    } else if tracker.duration_seconds.is_some() && threshold_seconds.is_none() {
+        indicator.state = ScrobbleIndicatorState::Ineligible;
+        indicator.ineligibility = ScrobbleIneligibility::TooShort;
+    } else if tracker.metadata_seen && (tracker.artist.is_empty() || tracker.track.is_empty()) {
+        indicator.state = ScrobbleIndicatorState::Ineligible;
+        indicator.ineligibility = ScrobbleIneligibility::MissingTags;
+    }
+    indicator
 }
 
 /// The current track's number, from its queue details or its library track.
@@ -1383,6 +1447,7 @@ mod tests {
     fn lastfm_playing_state(track_path: &Path) -> BridgeState {
         let mut state = BridgeState::default();
         state.lastfm.enabled = true;
+        state.lastfm.auth_state = lastfm::AuthState::Connected;
         state.playback.current = Some(track_path.to_path_buf());
         state.playback.state = PlaybackState::Playing;
         state.playback.duration = Duration::from_secs(240);
@@ -1514,7 +1579,7 @@ mod tests {
             start + Duration::from_secs(119),
             1_700_000_119,
         );
-        assert!(!tracker.scrobble_queued);
+        assert!(!tracker.scrobble_queued());
         assert!(queued_scrobbles(&commands.try_iter().collect::<Vec<_>>()).is_empty());
 
         tick_lastfm_playback_at(
@@ -1524,7 +1589,7 @@ mod tests {
             start + Duration::from_secs(120),
             1_700_000_120,
         );
-        assert!(tracker.scrobble_queued);
+        assert!(tracker.scrobble_queued());
         let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].artist, "Artist");
@@ -1608,7 +1673,7 @@ mod tests {
             start + Duration::from_secs(152),
         );
 
-        assert!(!tracker.scrobble_queued);
+        assert!(!tracker.scrobble_queued());
         assert!(commands.try_iter().next().is_none());
     }
 
@@ -2183,5 +2248,298 @@ mod tests {
         assert_eq!(applied.rows_changed, 0);
         assert!(applied.status_changed);
         assert!(Arc::ptr_eq(&library, &state.library));
+    }
+
+    /// Ticks the tracker `seconds` after `start`, and returns what the
+    /// scrobble indicator shows then.
+    fn tick_at(
+        state: &BridgeState,
+        handle: &LastFmHandle,
+        tracker: &mut LastFmPlaybackTracker,
+        start: Instant,
+        seconds: u64,
+    ) -> ScrobbleIndicator {
+        tick_lastfm_playback_at(
+            state,
+            handle,
+            tracker,
+            start + Duration::from_secs(seconds),
+            1_700_000_000 + i64::try_from(seconds).unwrap_or(0),
+        );
+        scrobble_indicator(state, tracker)
+    }
+
+    fn sent(commands: &Receiver<LastFmCommand>) -> Vec<LastFmCommand> {
+        commands.try_iter().collect()
+    }
+
+    #[test]
+    fn scrobble_indicator_follows_listened_time_through_seeks_and_pauses() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/indicator.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!((shown.listened_ms, shown.threshold_ms), (0, 120_000));
+        let shown = tick_at(&state, &handle, &mut tracker, start, 30);
+        assert_eq!(shown.listened_ms, 30_000);
+
+        // A seek moves the playhead, not the count.
+        state.playback.position = Duration::from_secs(200);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 31);
+        assert_eq!(shown.listened_ms, 31_000);
+
+        // A pause holds it.
+        state.playback.state = PlaybackState::Paused;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 90);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.listened_ms, 31_000);
+        state.playback.state = PlaybackState::Playing;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 100);
+        assert_eq!(shown.listened_ms, 31_000);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 188);
+        assert_eq!(shown.listened_ms, 119_000);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+
+        // At the scrobble point it is sent, and waits for Last.fm's answer.
+        let shown = tick_at(&state, &handle, &mut tracker, start, 189);
+        assert_eq!(queued_scrobbles(&sent(&commands)).len(), 1);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Sending);
+        assert_eq!(tracker.scrobble, PlayScrobble::Queued(Some(1)));
+
+        state.lastfm.latest_scrobble = Some(lastfm::LatestScrobble {
+            ordinal: 1,
+            delivery: lastfm::ScrobbleDelivery::Accepted,
+            message: String::new(),
+        });
+        let shown = tick_at(&state, &handle, &mut tracker, start, 190);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Accepted);
+
+        // Stopping clears it.
+        state.playback.state = PlaybackState::Stopped;
+        assert_eq!(
+            tick_at(&state, &handle, &mut tracker, start, 191),
+            ScrobbleIndicator::default()
+        );
+    }
+
+    #[test]
+    fn scrobble_indicator_shows_what_last_fm_did_with_this_play_only() {
+        let (handle, _commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/delivery.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        tick_at(&state, &handle, &mut tracker, start, 120);
+        let PlayScrobble::Queued(Some(ordinal)) = tracker.scrobble else {
+            panic!("queued: {:?}", tracker.scrobble);
+        };
+
+        let cases = [
+            (
+                lastfm::ScrobbleDelivery::Pending,
+                ScrobbleIndicatorState::Sending,
+            ),
+            (
+                lastfm::ScrobbleDelivery::Waiting,
+                ScrobbleIndicatorState::Waiting,
+            ),
+            (
+                lastfm::ScrobbleDelivery::Accepted,
+                ScrobbleIndicatorState::Accepted,
+            ),
+            (
+                lastfm::ScrobbleDelivery::Failed,
+                ScrobbleIndicatorState::Failed,
+            ),
+        ];
+        for (delivery, expected) in cases {
+            state.lastfm.latest_scrobble = Some(lastfm::LatestScrobble {
+                ordinal,
+                delivery,
+                message: format!("{delivery:?}"),
+            });
+            let shown = scrobble_indicator(&state, &tracker);
+            assert_eq!(shown.state, expected);
+            assert_eq!(shown.message, format!("{delivery:?}"));
+        }
+
+        // Another play's scrobble says nothing about this one.
+        state.lastfm.latest_scrobble = Some(lastfm::LatestScrobble {
+            ordinal: ordinal + 1,
+            delivery: lastfm::ScrobbleDelivery::Failed,
+            message: "other".to_string(),
+        });
+        let shown = scrobble_indicator(&state, &tracker);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Sending);
+        assert!(shown.message.is_empty());
+    }
+
+    #[test]
+    fn scrobble_indicator_shows_plays_that_cannot_be_scrobbled() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/short.flac");
+        let start = Instant::now();
+
+        // 30 seconds is too short; 31 is not.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.duration = Duration::from_secs(30);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::TooShort);
+        assert_eq!(shown.threshold_ms, 0);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 30);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::TooShort);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+
+        state.playback.duration = Duration::from_secs(31);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.threshold_ms, 15_000);
+
+        // Without the track's metadata yet, it may still be scrobbled.
+        let mut state = lastfm_playing_state(&track_path);
+        state.metadata.source_path = None;
+        let mut tracker = LastFmPlaybackTracker::default();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        // With metadata that lacks a title, it cannot.
+        state.metadata.source_path = Some(track_path.to_string_lossy().into_owned());
+        state.metadata.title = String::new();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 1);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::MissingTags);
+
+        // Until playback knows the length, the scrobble point is unknown.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.duration = Duration::ZERO;
+        let mut tracker = LastFmPlaybackTracker::default();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.threshold_ms, 0);
+    }
+
+    #[test]
+    fn scrobble_indicator_is_idle_unless_a_connected_account_scrobbles() {
+        let (handle, _commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/not-connected.flac");
+        let start = Instant::now();
+        for (enabled, auth_state) in [
+            (false, lastfm::AuthState::Connected),
+            (true, lastfm::AuthState::Disconnected),
+            (true, lastfm::AuthState::ReauthRequired),
+        ] {
+            let mut state = lastfm_playing_state(&track_path);
+            state.lastfm.enabled = enabled;
+            state.lastfm.auth_state = auth_state;
+            let mut tracker = LastFmPlaybackTracker::default();
+            tick_at(&state, &handle, &mut tracker, start, 0);
+            assert_eq!(
+                tick_at(&state, &handle, &mut tracker, start, 30),
+                ScrobbleIndicator::default(),
+                "{enabled} {auth_state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_play_that_plays_while_scrobbling_is_paused_is_never_scrobbled() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/paused-midway.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        tick_at(&state, &handle, &mut tracker, start, 10);
+        assert_eq!(now_playing_tracks(&sent(&commands)).len(), 1);
+
+        state.lastfm_scrobbling_paused = true;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 11);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Skipped);
+
+        // Resumed before the scrobble point, the play still is not sent.
+        state.lastfm_scrobbling_paused = false;
+        for seconds in [12, 120, 200, 239] {
+            let shown = tick_at(&state, &handle, &mut tracker, start, seconds);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Skipped);
+        }
+        // Nor when it ends.
+        finalize_lastfm_track(
+            &state,
+            &handle,
+            &mut tracker,
+            start + Duration::from_secs(240),
+        );
+        assert!(sent(&commands).is_empty());
+
+        // Scrobbling resumes with the next track.
+        let next_path = p("/fixtures/next.flac");
+        state.playback.current = Some(next_path.clone());
+        state.metadata.source_path = Some(next_path.to_string_lossy().into_owned());
+        let shown = tick_at(&state, &handle, &mut tracker, start, 241);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        tick_at(&state, &handle, &mut tracker, start, 361);
+        let commands = sent(&commands);
+        assert_eq!(now_playing_tracks(&commands).len(), 1);
+        assert_eq!(queued_scrobbles(&commands).len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_sent_for_a_play_while_scrobbling_is_paused() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/paused-throughout.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        state.lastfm_scrobbling_paused = true;
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        for seconds in [0, 60, 121, 239] {
+            let shown = tick_at(&state, &handle, &mut tracker, start, seconds);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Skipped);
+        }
+        assert!(sent(&commands).is_empty());
+    }
+
+    /// A play that reached its scrobble point before the pause counts as
+    /// scrobbled, as it would once sent: its scrobble is kept, also while
+    /// it waits in the offline queue, and Last.fm gets it on resuming.
+    #[test]
+    fn a_play_that_reached_its_scrobble_point_before_the_pause_counts_as_scrobbled() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/paused-after.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        tick_at(&state, &handle, &mut tracker, start, 121);
+        assert_eq!(queued_scrobbles(&sent(&commands)).len(), 1);
+
+        state.lastfm_scrobbling_paused = true;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 122);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Sending);
+    }
+
+    #[test]
+    fn pausing_scrobbling_only_while_playback_is_paused_skips_nothing() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/paused-both.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        state.playback.state = PlaybackState::Paused;
+        state.lastfm_scrobbling_paused = true;
+        tick_at(&state, &handle, &mut tracker, start, 5);
+        state.lastfm_scrobbling_paused = false;
+        state.playback.state = PlaybackState::Playing;
+        tick_at(&state, &handle, &mut tracker, start, 6);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 126);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Sending);
+        assert_eq!(queued_scrobbles(&sent(&commands)).len(), 1);
     }
 }

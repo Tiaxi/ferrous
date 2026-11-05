@@ -8,6 +8,7 @@ import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../components" as Components
 
 ToolBar {
     id: root
@@ -20,6 +21,9 @@ ToolBar {
     // keeps, and stands out until the user has seen the newest.
     property var errorController: null
     property string positionText: "00:00"
+
+    // The scrobble progress indicator asked for the Last.fm preferences.
+    signal lastFmSettingsRequested()
 
     implicitHeight: Math.max(contentItem.implicitHeight, 20) + topPadding + bottomPadding
     leftPadding: 14
@@ -192,6 +196,13 @@ ToolBar {
         Item {
             visible: !root.showTrackSections
             Layout.fillWidth: true
+        }
+
+        Components.ScrobbleIndicator {
+            uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
+            Layout.preferredHeight: 20
+            onSettingsRequested: root.lastFmSettingsRequested()
         }
 
         // Opens the recent errors. With none there is nothing to show.

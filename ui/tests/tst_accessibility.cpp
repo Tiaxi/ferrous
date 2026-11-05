@@ -277,6 +277,7 @@ private slots:
     void everyPreferencesPageIsReachableByTab();
     void libraryAndQueueRowsHaveAccessibleNames();
     void slidersAndIconButtonsHaveNamesAndTooltips();
+    void scrobbleIndicatorIsNamedAndWorksByKeyboard();
     void keyboardMovesOfTheSeekSliderSeek();
     void arrowKeysStepTheVolumeFromItsValue();
     void bridgeEchoesWaitForTheVolumeGesture();
@@ -468,6 +469,42 @@ void AccessibilityTest::libraryAndQueueRowsHaveAccessibleNames() {
         QCOMPARE(accessibleText(libraryRows[i], QAccessible::Description), kinds[i]);
     }
     QVERIFY(QAccessible::queryAccessibleInterface(libraryRows[0])->state().selectable);
+}
+
+void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    bridge->setProperty("lastFmScrobblingEnabled", true);
+    bridge->setProperty("lastFmAuthState", 2);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+
+    QQuickItem *indicator = nullptr;
+    QTRY_VERIFY((indicator = visibleItemNamed(window, QStringLiteral("scrobbleIndicator"))) != nullptr);
+    QCOMPARE(accessibleRole(indicator), QAccessible::Button);
+    QCOMPARE(accessibleText(indicator, QAccessible::Name),
+             QStringLiteral("Last.fm scrobble progress"));
+    QCOMPARE(accessibleText(indicator, QAccessible::Description),
+             QStringLiteral("Listening towards the scrobble point. Press to pause scrobbling."));
+    // Tab reaches it, its tooltip tells the time left, and Space pauses
+    // scrobbling rather than playback.
+    QVERIFY(indicator->activeFocusOnTab());
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(playPause != nullptr);
+    QSignalSpy playPauseTriggered(playPause, SIGNAL(triggered(QObject*)));
+    indicator->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_COMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
+                 QStringLiteral("Scrobbles to Last.fm in 01:30.\nClick to pause scrobbling."));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QCOMPARE(playPauseTriggered.count(), 0);
+    QTRY_COMPARE(accessibleText(indicator, QAccessible::Description),
+                 QStringLiteral("Scrobbling is paused. This track won't be scrobbled. "
+                                "Press to resume scrobbling."));
 }
 
 void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {

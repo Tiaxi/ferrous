@@ -621,6 +621,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&spectrogramFrequencyCap)) {
         return false;
     }
+    quint8 lastFmShowScrobbleProgress = 1;
+    if (!reader.atEnd() && !reader.readU8(&lastFmShowScrobbleProgress)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -641,6 +645,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen != 0;
     out->libraryWatchEnabled = libraryWatchEnabled != 0;
     out->spectrogramFrequencyCap = spectrogramFrequencyCap != 0;
+    out->lastFmShowScrobbleProgress = lastFmShowScrobbleProgress != 0;
     return true;
 }
 
@@ -659,10 +664,30 @@ bool decodeLastFmSection(const QByteArray &payload, DecodedLastFm *out) {
         || !reader.readU32(&pendingScrobbleCount)
         || !reader.readUtf8(&out->username)
         || !reader.readUtf8(&out->statusText)
-        || !reader.readUtf8(&out->authUrl)
-        || !reader.atEnd()) {
+        || !reader.readUtf8(&out->authUrl)) {
         return false;
     }
+    // Older backends end the section here.
+    quint8 scrobblingPaused = 0;
+    quint8 scrobbleState = ScrobbleStateIdle;
+    quint8 scrobbleIneligibility = ScrobbleIneligibilityNone;
+    if (!reader.atEnd()
+        && (!reader.readU8(&scrobblingPaused)
+            || !reader.readU8(&scrobbleState)
+            || !reader.readU8(&scrobbleIneligibility)
+            || !reader.readU32(&out->scrobbleListenedMs)
+            || !reader.readU32(&out->scrobbleThresholdMs)
+            || !reader.readUtf8(&out->scrobbleMessage)
+            || scrobbleState > ScrobbleStateLast
+            || scrobbleIneligibility > ScrobbleIneligibilityLast)) {
+        return false;
+    }
+    if (!reader.atEnd()) {
+        return false;
+    }
+    out->scrobblingPaused = scrobblingPaused != 0;
+    out->scrobbleState = static_cast<int>(scrobbleState);
+    out->scrobbleIneligibility = static_cast<int>(scrobbleIneligibility);
     out->present = true;
     out->enabled = enabled != 0;
     out->buildConfigured = buildConfigured != 0;

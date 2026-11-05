@@ -46,6 +46,15 @@ ScrollView {
                     onToggled: root.uiBridge.setLastFmScrobblingEnabled(checked)
                 }
 
+                CheckBox {
+                    objectName: "lastFmShowScrobbleProgressCheckBox"
+                    // Only a connected account has scrobbles to show.
+                    visible: root.uiBridge.lastFmAuthState === 2
+                    text: I18n.i18nc("@option:check", "Show scrobble progress")
+                    checked: root.uiBridge.lastFmShowScrobbleProgress
+                    onToggled: root.uiBridge.setLastFmShowScrobbleProgress(checked)
+                }
+
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap

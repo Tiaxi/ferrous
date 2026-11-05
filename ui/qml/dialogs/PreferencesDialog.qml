@@ -30,6 +30,15 @@ Dialog {
         I18n.i18nc("@title:tab", "System Media")
     ]
 
+    // The index of the Last.fm page in pageTitles.
+    readonly property int lastFmPageIndex: 3
+
+    // Opens the dialog on the Last.fm page.
+    function openLastFmPage() {
+        root.pageIndex = root.lastFmPageIndex
+        root.open()
+    }
+
     // Moves `step` pages on, wrapping around, and focuses the page's tab.
     function stepPage(step) {
         const count = root.pageTitles.length

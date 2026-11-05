@@ -1605,6 +1605,22 @@ private slots:
     void failedSaveAfterMprisQuitShowsTheDialogOverAMinimizedWindow();
 };
 
+// The Last.fm scrobble progress indicator and pausing scrobbling.
+class ScrobbleSmokeTest : public QmlSmokeTest {
+    Q_OBJECT
+
+public:
+    using QmlSmokeTest::QmlSmokeTest;
+
+private slots:
+    void scrobbleIndicatorShowsEveryState();
+    void scrobbleIndicatorRedrawsOnlyWhenTheRingChangesVisibly();
+    void scrobbleIndicatorClickAndMenuPauseScrobbling();
+    void scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff();
+    void lastFmPageShowsTheScrobbleProgressSettingWhileConnected();
+    void playbackMenuPausesScrobbling();
+};
+
 // The tag editor, renaming, and quitting with tag edits.
 class TagEditorSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -1834,6 +1850,14 @@ Item {
         property string lastFmStatusText: ""
         property int lastFmPendingScrobbleCount: 0
         property string lastFmUsername: ""
+        property int lastFmAuthState: 0
+        property bool lastFmShowScrobbleProgress: true
+        property bool lastFmScrobblingPaused: false
+        property int lastFmScrobbleState: 0
+        property int lastFmScrobbleIneligibility: 0
+        property int lastFmScrobbleListenedMs: 0
+        property int lastFmScrobbleThresholdMs: 0
+        property string lastFmScrobbleMessage: ""
         property bool systemMediaControlsEnabled: true
         property bool libraryWatchEnabled: true
         property var mutedChannelsMask: 0
@@ -1882,6 +1906,8 @@ Item {
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}
         function disconnectLastFm() {}
+        function setLastFmScrobblingPaused(value) {}
+        function setLastFmShowScrobbleProgress(value) {}
         function setSystemMediaControlsEnabled(value) {}
         function setLibraryWatchEnabled(value) { libraryWatchEnabled = value }
         function openContainingFolder(path) {}
@@ -24960,6 +24986,502 @@ void WindowSmokeTest::drawingWritesNoShaderCache() {
 
 namespace {
 
+// A status bar with a stand-in bridge whose Last.fm account is connected,
+// and two errors, so the error indicator shows too.
+const QByteArray kScrobbleStatusBarQml = QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
+import "components" as Components
+import "panes" as Panes
+
+ApplicationWindow {
+    id: harness
+    width: 900
+    height: 120
+    visible: true
+
+    property int settingsRequests: 0
+    readonly property color accentColor: Kirigami.Theme.highlightColor
+    readonly property color positiveColor: Kirigami.Theme.positiveTextColor
+    readonly property color warningColor: Kirigami.Theme.neutralTextColor
+    readonly property color mutedColor: palette.uiMutedTextColor
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property bool connected: true
+        property string backendFailure: ""
+        property string playbackState: "Playing"
+        property string durationText: "04:00"
+        property int queueLength: 1
+        property string queueDurationText: "04:00"
+        property string currentTrackChannelLayoutText: ""
+        property string currentTrackChannelLayoutIconKey: ""
+        property string currentTrackFormatLabel: ""
+        property int currentTrackBitDepth: 0
+        property int currentTrackSampleRateHz: 0
+        property int currentTrackCurrentBitrateKbps: 0
+        property bool lastFmShowScrobbleProgress: true
+        property bool lastFmScrobblingEnabled: true
+        property int lastFmAuthState: 2
+        property bool lastFmScrobblingPaused: false
+        property int lastFmScrobbleState: 1
+        property int lastFmScrobbleIneligibility: 0
+        property int lastFmScrobbleListenedMs: 0
+        property int lastFmScrobbleThresholdMs: 120000
+        property string lastFmScrobbleMessage: ""
+        property int pauseRequests: 0
+        function setLastFmScrobblingPaused(value) {
+            lastFmScrobblingPaused = value
+            pauseRequests += 1
+        }
+    }
+
+    QtObject {
+        id: errors
+        property int count: 2
+        property bool latestUnseen: false
+        property var latest: null
+        signal historyRequested()
+    }
+
+    Components.UiPalette {
+        id: palette
+        windowRoot: harness
+    }
+
+    footer: Panes.StatusBar {
+        objectName: "statusBar"
+        uiBridge: bridge
+        uiPalette: palette
+        channelStatusIconSource: function(key) { return "" }
+        themeIsDark: palette.themeIsDark
+        errorController: errors
+        onLastFmSettingsRequested: harness.settingsRequests += 1
+    }
+}
+)QML");
+
+struct ScrobbleHarness {
+    QQmlApplicationEngine engine;
+    QScopedPointer<QObject> root;
+    QQuickWindow *window{nullptr};
+    QObject *bridge{nullptr};
+    QQuickItem *indicator{nullptr};
+};
+
+// Makes the harness of kScrobbleStatusBarQml; `error` says what failed.
+bool makeScrobbleHarness(ScrobbleHarness &harness, QString *error) {
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    harness.root.reset(createQmlObjectFromSource(harness.engine, kScrobbleStatusBarQml, baseUrl, error));
+    harness.window = qobject_cast<QQuickWindow *>(harness.root.data());
+    if (harness.window == nullptr || !QTest::qWaitForWindowExposed(harness.window)) {
+        return false;
+    }
+    harness.bridge = harness.root->findChild<QObject *>(QStringLiteral("bridge"));
+    harness.indicator = harness.root->findChild<QQuickItem *>(QStringLiteral("scrobbleIndicator"));
+    return harness.bridge != nullptr && harness.indicator != nullptr;
+}
+
+// The device pixels of `image`, grabbed from `window`, a logical one;
+// grabs do not always say.
+qreal grabRatio(const QImage &image, const QQuickWindow *window) {
+    return static_cast<qreal>(image.width()) / window->width();
+}
+
+// The colour of `image` at `point` of the window, in logical pixels.
+QColor pixelAt(const QImage &image, qreal ratio, QPointF point) {
+    return image.pixelColor(
+        QPoint(qRound(point.x() * ratio - 0.5), qRound(point.y() * ratio - 0.5)));
+}
+
+int colorDistance(const QColor &a, const QColor &b) {
+    return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green())
+        + std::abs(a.blue() - b.blue());
+}
+
+// Whether `pixel` is nearer `expected` than `other`.
+bool nearer(const QColor &pixel, const QColor &expected, const QColor &other) {
+    return colorDistance(pixel, expected) < colorDistance(pixel, other);
+}
+
+// Saves the indicator, enlarged, to $FERROUS_SCROBBLE_SCREENSHOT_DIR, if set.
+void saveIndicatorScreenshot(const QImage &image, qreal ratio, QQuickItem *indicator,
+                             const QString &name) {
+    const QString dir = qEnvironmentVariable("FERROUS_SCROBBLE_SCREENSHOT_DIR");
+    if (dir.isEmpty()) {
+        return;
+    }
+    const QRectF rect = indicator->mapRectToScene(
+        QRectF(-4, -2, indicator->width() + 8, indicator->height() + 4));
+    const QImage crop = image.copy(QRect(
+        qFloor(rect.x() * ratio), qFloor(rect.y() * ratio),
+        qCeil(rect.width() * ratio), qCeil(rect.height() * ratio)));
+    crop.scaled(crop.size() * 6, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+        .save(QDir(dir).filePath(name + QStringLiteral(".png")));
+}
+
+} // namespace
+
+void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    QObject *root = harness.root.data();
+
+    // At the right end of the status bar, left of the error indicator.
+    auto *errorsButton = harness.root->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
+    QVERIFY(errorsButton != nullptr);
+    QTRY_VERIFY(indicator->isVisible() && errorsButton->isVisible());
+    const qreal indicatorRight = indicator->mapToScene(QPointF(indicator->width(), 0)).x();
+    const qreal errorsLeft = errorsButton->mapToScene(QPointF(0, 0)).x();
+    QVERIFY2(indicatorRight <= errorsLeft && errorsLeft - indicatorRight < 12,
+             qPrintable(QStringLiteral("%1 %2").arg(indicatorRight).arg(errorsLeft)));
+
+    const QColor accent = root->property("accentColor").value<QColor>();
+    const QColor positive = root->property("positiveColor").value<QColor>();
+    const QColor warning = root->property("warningColor").value<QColor>();
+    const QColor muted = root->property("mutedColor").value<QColor>();
+
+    struct Case {
+        const char *name;
+        int state;
+        int ineligibility;
+        bool paused;
+        const char *look;
+        const char *badge;
+        double progress;
+        QColor ring;
+        QString tooltip;
+    };
+    const QList<Case> cases{
+        {"idle", 0, 0, false, "idle", "", 0.0, muted, QStringLiteral("Nothing is playing.")},
+        {"filling", 1, 0, false, "filling", "", 0.5, accent,
+         QStringLiteral("Scrobbles to Last.fm in 01:00.")},
+        {"sending", 2, 0, false, "filling", "", 1.0, accent,
+         QStringLiteral("Sending the scrobble to Last.fm…")},
+        {"accepted", 3, 0, false, "accepted", "", 1.0, positive,
+         QStringLiteral("Scrobbled to Last.fm.")},
+        {"failed", 4, 0, false, "failed", "", 1.0, warning,
+         QStringLiteral("The scrobble failed: refused for testing")},
+        {"waiting", 5, 0, false, "waiting", "clock", 1.0, muted,
+         QStringLiteral("Last.fm can't be reached (refused for testing). The scrobble is queued and sent later.")},
+        {"too-short", 6, 1, false, "ineligible", "", 0.0, muted,
+         QStringLiteral("Tracks of 30 seconds or less aren't scrobbled.")},
+        {"missing-tags", 6, 2, false, "ineligible", "", 0.0, muted,
+         QStringLiteral("Tracks without an artist and a title aren't scrobbled.")},
+        {"skipped", 7, 0, false, "paused", "pause", 0.0, muted,
+         QStringLiteral("Scrobbling was paused while this track played, so it won't be scrobbled. Scrobbling resumes with the next track.")},
+        {"paused", 1, 0, true, "paused", "pause", 0.0, muted,
+         QStringLiteral("Scrobbling is paused. This track won't be scrobbled.")},
+    };
+    bridge->setProperty("lastFmScrobbleListenedMs", 60000);
+    bridge->setProperty("lastFmScrobbleMessage", QStringLiteral("refused for testing"));
+    for (const Case &c : cases) {
+        bridge->setProperty("lastFmScrobblingPaused", c.paused);
+        bridge->setProperty("lastFmScrobbleState", c.state);
+        bridge->setProperty("lastFmScrobbleIneligibility", c.ineligibility);
+        QTRY_COMPARE(indicator->property("look").toString(), QString::fromLatin1(c.look));
+        QCOMPARE(indicator->property("badge").toString(), QString::fromLatin1(c.badge));
+        QCOMPARE(indicator->property("progress").toDouble(), c.progress);
+        QCOMPARE(indicator->property("ringColor").value<QColor>(), c.ring);
+        QVERIFY(indicator->isVisible());
+        QVariant text;
+        QVERIFY(QMetaObject::invokeMethod(indicator, "tooltipStateText", Q_RETURN_ARG(QVariant, text)));
+        QCOMPARE(text.toString(), c.tooltip);
+
+        // The ring, as drawn: at 12 o'clock it starts the fill, and at
+        // 9 o'clock a half filled ring is still its track.
+        const QImage image = harness.window->grabWindow();
+        const qreal ratio = grabRatio(image, harness.window);
+        saveIndicatorScreenshot(image, ratio, indicator, QString::fromLatin1(c.name));
+        QQuickItem *ring = qvariant_cast<QQuickItem *>(indicator->property("contentItem"));
+        QVERIFY(ring != nullptr);
+        const qreal radius = indicator->property("ringRadius").toReal();
+        const QPointF center = ring->mapToScene(QPointF(ring->width() / 2, ring->height() / 2));
+        const QColor top = pixelAt(image, ratio, center + QPointF(0.5, -radius));
+        const QColor left = pixelAt(image, ratio, center + QPointF(-radius, 0.5));
+        const QColor background = pixelAt(image, ratio, center + QPointF(0, -radius - 3));
+        if (c.progress > 0) {
+            QVERIFY2(nearer(top, c.ring, background),
+                     qPrintable(QStringLiteral("%1: %2 vs %3").arg(QString::fromLatin1(c.name),
+                         top.name(), c.ring.name())));
+        }
+        if (c.progress == 1.0) {
+            QVERIFY2(nearer(left, c.ring, background), c.name);
+        } else if (c.progress > 0) {
+            QVERIFY2(!nearer(left, c.ring, muted) || colorDistance(c.ring, muted) < 30, c.name);
+        }
+    }
+}
+
+void ScrobbleSmokeTest::scrobbleIndicatorRedrawsOnlyWhenTheRingChangesVisibly() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    QTRY_VERIFY(indicator->isVisible());
+    harness.window->grabWindow();
+    QTRY_VERIFY(indicator->property("paintCount").toInt() > 0);
+    const int steps = indicator->property("progressSteps").toInt();
+    QVERIFY(steps >= 12);
+
+    // Ten seconds of 40 ms snapshots towards a 120 s scrobble point.
+    const int paintsBefore = indicator->property("paintCount").toInt();
+    int step = indicator->property("progressStep").toInt();
+    int stepChanges = 0;
+    int snapshots = 0;
+    for (int listened = 40; listened <= 10000; listened += 40) {
+        bridge->setProperty("lastFmScrobbleListenedMs", listened);
+        harness.window->grabWindow();
+        ++snapshots;
+        const int now = indicator->property("progressStep").toInt();
+        if (now != step) {
+            ++stepChanges;
+            step = now;
+        }
+    }
+    // A step is a device pixel of the ring: a few in ten seconds.
+    QCOMPARE(stepChanges, qFloor(steps * 10000.0 / 120000.0));
+    QVERIFY(stepChanges > 0);
+    QCOMPARE(indicator->property("paintCount").toInt() - paintsBefore, stepChanges);
+    QVERIFY(stepChanges * 20 < snapshots);
+
+    // A new state is drawn at once.
+    const int paintsBeforeAccepted = indicator->property("paintCount").toInt();
+    bridge->setProperty("lastFmScrobbleState", 3);
+    harness.window->grabWindow();
+    QCOMPARE(indicator->property("paintCount").toInt(), paintsBeforeAccepted + 1);
+    // And not again while it stays.
+    bridge->setProperty("lastFmScrobbleListenedMs", 130000);
+    harness.window->grabWindow();
+    QCOMPARE(indicator->property("paintCount").toInt(), paintsBeforeAccepted + 1);
+}
+
+void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    QQuickWindow *window = harness.window;
+    QTRY_VERIFY(indicator->isVisible());
+
+    // A click pauses scrobbling, and another resumes it.
+    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(indicator));
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QCOMPARE(indicator->property("look").toString(), QStringLiteral("paused"));
+    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(indicator));
+    QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
+    QCOMPARE(bridge->property("pauseRequests").toInt(), 2);
+
+    // The menu has the pause, checked as it is, and the Last.fm settings.
+    QObject *menu = window->findChild<QObject *>(QStringLiteral("scrobbleIndicatorMenu"));
+    QVERIFY(menu != nullptr);
+    const auto menuItem = [&](const QString &name) -> QQuickItem * {
+        QQuickItem *content = qvariant_cast<QQuickItem *>(menu->property("contentItem"));
+        return content != nullptr ? findQuickItemByObjectName(content, name) : nullptr;
+    };
+    QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QQuickItem *pauseItem = menuItem(QStringLiteral("scrobbleIndicatorPauseItem"));
+    QQuickItem *settingsItem = menuItem(QStringLiteral("scrobbleIndicatorSettingsItem"));
+    QVERIFY(pauseItem != nullptr && settingsItem != nullptr);
+    QVERIFY(pauseItem->property("checkable").toBool());
+    QVERIFY(!pauseItem->property("checked").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(pauseItem));
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QTRY_VERIFY(!menu->property("visible").toBool());
+
+    QTest::mouseClick(window, Qt::RightButton, {}, centerInWindow(indicator));
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QVERIFY(pauseItem->property("checked").toBool());
+    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(settingsItem));
+    QTRY_COMPARE(harness.root->property("settingsRequests").toInt(), 1);
+    QTRY_VERIFY(!menu->property("visible").toBool());
+    QVERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+
+    // By keyboard: Tab reaches it, Space and Enter toggle it, and the
+    // menu key opens its menu.
+    QVERIFY(indicator->activeFocusOnTab());
+    indicator->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(indicator->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QTest::keyClick(window, Qt::Key_Menu);
+    QTRY_VERIFY(menu->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+void ScrobbleSmokeTest::scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    QTRY_VERIFY(indicator->isVisible());
+
+    // Not connected, or connecting.
+    for (const int authState : {0, 1, 3, 4}) {
+        bridge->setProperty("lastFmAuthState", authState);
+        QTRY_VERIFY2(!indicator->isVisible(), qPrintable(QString::number(authState)));
+    }
+    bridge->setProperty("lastFmAuthState", 2);
+    QTRY_VERIFY(indicator->isVisible());
+
+    // Scrobbling turned off.
+    bridge->setProperty("lastFmScrobblingEnabled", false);
+    QTRY_VERIFY(!indicator->isVisible());
+    bridge->setProperty("lastFmScrobblingEnabled", true);
+    QTRY_VERIFY(indicator->isVisible());
+
+    // The setting turned off.
+    bridge->setProperty("lastFmShowScrobbleProgress", false);
+    QTRY_VERIFY(!indicator->isVisible());
+    bridge->setProperty("lastFmShowScrobbleProgress", true);
+    QTRY_VERIFY(indicator->isVisible());
+}
+
+void ScrobbleSmokeTest::lastFmPageShowsTheScrobbleProgressSettingWhileConnected() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "preferences" as Preferences
+
+ApplicationWindow {
+    id: harness
+    width: 720
+    height: 640
+    visible: true
+
+    QtObject {
+        id: bridge
+        objectName: "bridge"
+        property bool lastFmScrobblingEnabled: true
+        property bool lastFmBuildConfigured: true
+        property string lastFmUsername: ""
+        property int lastFmAuthState: 0
+        property int lastFmPendingScrobbleCount: 0
+        property string lastFmStatusText: ""
+        property bool lastFmShowScrobbleProgress: true
+        property int settingChanges: 0
+        function setLastFmScrobblingEnabled(value) {}
+        function setLastFmShowScrobbleProgress(value) {
+            lastFmShowScrobbleProgress = value
+            settingChanges += 1
+        }
+        function beginLastFmAuth() {}
+        function completeLastFmAuth() {}
+        function disconnectLastFm() {}
+    }
+
+    Components.UiPalette {
+        id: palette
+        windowRoot: harness
+    }
+
+    Preferences.LastFmPage {
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QQuickItem *checkBox = findQuickItemByObjectName(
+        window->contentItem(), QStringLiteral("lastFmShowScrobbleProgressCheckBox"));
+    QVERIFY(bridge != nullptr && checkBox != nullptr);
+
+    // Only a connected account shows it.
+    QVERIFY(!checkBox->isVisible());
+    bridge->setProperty("lastFmUsername", QStringLiteral("tester"));
+    bridge->setProperty("lastFmAuthState", 2);
+    QTRY_VERIFY(checkBox->isVisible());
+    QVERIFY(checkBox->property("checked").toBool());
+    QCOMPARE(checkBox->property("text").toString(), QStringLiteral("Show scrobble progress"));
+
+    QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(checkBox));
+    QTRY_COMPARE(bridge->property("settingChanges").toInt(), 1);
+    QVERIFY(!bridge->property("lastFmShowScrobbleProgress").toBool());
+    QVERIFY(!checkBox->property("checked").toBool());
+    // The bridge's value wins.
+    bridge->setProperty("lastFmShowScrobbleProgress", true);
+    QTRY_VERIFY(checkBox->property("checked").toBool());
+
+    bridge->setProperty("lastFmAuthState", 3);
+    QTRY_VERIFY(!checkBox->isVisible());
+}
+
+void ScrobbleSmokeTest::playbackMenuPausesScrobbling() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *action = window->findChild<QObject *>(QStringLiteral("pauseScrobblingAction"));
+    QObject *menuItem = window->findChild<QObject *>(QStringLiteral("pauseScrobblingMenuItem"));
+    auto *indicator = window->findChild<QQuickItem *>(QStringLiteral("scrobbleIndicator"));
+    QVERIFY(bridge != nullptr && action != nullptr && menuItem != nullptr && indicator != nullptr);
+    QCOMPARE(qvariant_cast<QObject *>(menuItem->property("action")), action);
+    // In the Playback menu.
+    QObject *menu = menuItem->parent();
+    while (menu != nullptr && menu->property("title").toString() != QStringLiteral("&Playback")) {
+        menu = menu->parent();
+    }
+    QVERIFY2(menu != nullptr, "the item is not in the Playback menu");
+
+    // Without Last.fm, there is nothing to pause, and no indicator.
+    QVERIFY(!action->property("enabled").toBool());
+    QVERIFY(!indicator->isVisible());
+    bridge->setProperty("lastFmScrobblingEnabled", true);
+    bridge->setProperty("lastFmAuthState", 2);
+    QTRY_VERIFY(action->property("enabled").toBool());
+    QTRY_VERIFY(indicator->isVisible());
+    QVERIFY(action->property("checkable").toBool());
+    QVERIFY(!action->property("checked").toBool());
+
+    QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QVERIFY(action->property("checked").toBool());
+    QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("paused"));
+
+    // The indicator resumes it, and the menu item follows.
+    QVERIFY(QMetaObject::invokeMethod(indicator, "togglePaused"));
+    QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
+    QTRY_VERIFY(!action->property("checked").toBool());
+    QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
+    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+
+    // Its menu's settings item opens the preferences on the Last.fm page.
+    QObject *preferences = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
+    QVERIFY(preferences != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(indicator, "settingsRequested"));
+    QTRY_VERIFY(preferences->property("opened").toBool());
+    QCOMPARE(preferences->property("pageIndex").toInt(),
+             preferences->property("lastFmPageIndex").toInt());
+    QCOMPARE(preferences->property("pageTitles").toStringList().at(
+                 preferences->property("lastFmPageIndex").toInt()),
+             QStringLiteral("Last.fm"));
+}
+
+namespace {
+
 struct SmokeTestArea {
     const char *name;
     std::unique_ptr<QmlSmokeTest> (*make)(const QString &userDirectoriesParent);
@@ -24971,7 +25493,7 @@ std::unique_ptr<QmlSmokeTest> makeSmokeTest(const QString &userDirectoriesParent
 }
 
 // Every test class, by the area name that the CTest entries use.
-const std::array<SmokeTestArea, 9> kSmokeTestAreas{{
+const std::array<SmokeTestArea, 10> kSmokeTestAreas{{
     {"spectrogram", &makeSmokeTest<SpectrogramSmokeTest>},
     {"waveform", &makeSmokeTest<WaveformSmokeTest>},
     {"waveform_coverage", &makeSmokeTest<WaveformCoverageSmokeTest>},
@@ -24981,6 +25503,7 @@ const std::array<SmokeTestArea, 9> kSmokeTestAreas{{
     {"preferences", &makeSmokeTest<PreferencesSmokeTest>},
     {"errors", &makeSmokeTest<ErrorsSmokeTest>},
     {"tag_editor", &makeSmokeTest<TagEditorSmokeTest>},
+    {"scrobble", &makeSmokeTest<ScrobbleSmokeTest>},
 }};
 
 // QTest's options that take a value.

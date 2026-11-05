@@ -64,6 +64,33 @@ pub struct RuntimeState {
     /// What went wrong since the previous state, for the user. The status
     /// text shows the latest; these are shown once each.
     pub problems: Vec<Problem>,
+    /// What became of the most recent [`Command::QueueScrobble`].
+    pub latest_scrobble: Option<LatestScrobble>,
+}
+
+/// What became of the most recent scrobble the service received.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestScrobble {
+    /// Its [`RuntimeState::scrobbles_received`] count: the `n`th scrobble
+    /// sent, as [`Handle::queue_scrobble`] numbers them.
+    pub ordinal: u64,
+    pub delivery: ScrobbleDelivery,
+    /// Why it is waiting or failed, for the user; empty otherwise.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ScrobbleDelivery {
+    /// Queued and not yet answered, or held while scrobbling is paused or
+    /// Last.fm is not connected.
+    #[default]
+    Pending,
+    /// Last.fm could not be reached, or deferred it; it stays queued and is
+    /// sent again later.
+    Waiting,
+    Accepted,
+    /// Last.fm ignored it, or refused the request; the message says which.
+    Failed,
 }
 
 /// A Last.fm failure the user is told about.
@@ -119,6 +146,9 @@ pub enum Command {
     SendNowPlaying(NowPlayingTrack),
     QueueScrobble(ScrobbleEntry),
     Flush,
+    /// [`Handle::set_paused`] changed the pause; sent by it. Resuming sends
+    /// the scrobbles that waited.
+    PauseChanged,
     /// Save scrobbles that exist only in memory, before the app quits, and
     /// answer with [`Event::SavedForQuit`].
     SaveForQuit(u32),
@@ -155,6 +185,8 @@ pub struct Handle {
     requests: Arc<RequestCancellation>,
     /// How many [`Command::QueueScrobble`] reached the service's channel.
     scrobbles_sent: Arc<AtomicU64>,
+    /// Whether scrobbling is paused; see [`Handle::set_paused`].
+    paused: Arc<AtomicBool>,
 }
 
 impl Handle {
@@ -163,7 +195,19 @@ impl Handle {
             tx,
             requests: Arc::new(RequestCancellation::new()),
             scrobbles_sent: Arc::new(AtomicU64::new(0)),
+            paused: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Pause or resume scrobbling for this run of the app. While paused,
+    /// nothing new is sent to Last.fm: neither now playing updates nor
+    /// queued scrobbles, which stay queued and are sent on resuming. The
+    /// service sees the pause before it starts its next request, even with
+    /// commands queued before this call; a request already under way may
+    /// finish.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::SeqCst);
+        self.command(Command::PauseChanged);
     }
 
     pub fn command(&self, command: Command) {
@@ -171,6 +215,21 @@ impl Handle {
         if self.tx.send(command).is_ok() && scrobble {
             self.scrobbles_sent.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Sends `entry` to be queued and returns its ordinal, which
+    /// [`LatestScrobble::ordinal`] reports, or `None` if the service is
+    /// gone. The ordinals match while one thread sends the scrobbles.
+    #[must_use]
+    pub fn queue_scrobble(&self, entry: ScrobbleEntry) -> Option<u64> {
+        self.tx.send(Command::QueueScrobble(entry)).ok()?;
+        Some(self.scrobbles_sent.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Whether scrobbling is paused; see [`Self::set_paused`].
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
     }
 
     /// How many scrobbles were sent to the service. Those beyond
@@ -453,6 +512,14 @@ struct Service {
     state: RuntimeState,
     /// Failures not yet published; see [`RuntimeState::problems`].
     problems: Vec<Problem>,
+    /// Whether [`RuntimeState::latest_scrobble`] is still queued. Queued, it
+    /// is the queue's last entry: entries are only appended, and leave the
+    /// queue in order.
+    latest_queued: bool,
+    /// Whether scrobbling is paused for this run of the app, shared with
+    /// the [`Handle`], which sets it; see [`Handle::set_paused`]. Never
+    /// saved.
+    paused: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -484,6 +551,9 @@ struct ScrobbleOutcome {
     /// Per entry, in request order: whether Last.fm deferred it, so it
     /// stays queued.
     deferred: Vec<bool>,
+    /// Per entry, in request order: why Last.fm ignored it for good, if it
+    /// did.
+    ignored_reasons: Vec<Option<String>>,
     /// Entries Last.fm ignored permanently.
     ignored: usize,
     /// Reason given for the first ignored entry.
@@ -540,13 +610,15 @@ pub(crate) fn spawn_with_backends(
     let (event_tx, event_rx) = unbounded();
     let handle = Handle::new(cmd_tx);
     let cancellation = Arc::clone(&handle.requests);
+    let paused = Arc::clone(&handle.paused);
     crate::worker_thread::spawn_worker("ferrous-lastfm", move || {
         let mut backends = backends();
         backends.transport = Box::new(CancellableTransport {
             inner: Arc::from(backends.transport),
             cancellation,
         });
-        let service = Service::new(options, backends);
+        let mut service = Service::new(options, backends);
+        service.paused = paused;
         run_service_loop(&cmd_rx, &event_tx, service);
     });
     (handle, event_rx)
@@ -635,6 +707,8 @@ impl Service {
             session: None,
             pending_auth: None,
             problems: Vec::new(),
+            latest_queued: false,
+            paused: Arc::new(AtomicBool::new(false)),
             state: RuntimeState {
                 enabled: options.initial_enabled,
                 build_configured,
@@ -743,7 +817,9 @@ impl Service {
                 self.queue_scrobble(entry);
                 self.flush_queue();
             }
-            Command::Flush => self.flush_queue(),
+            // A pause is already in effect when its PauseChanged arrives;
+            // resuming sends what waited.
+            Command::Flush | Command::PauseChanged => self.flush_queue(),
             // The service loop answers these itself.
             Command::SaveForQuit(_) | Command::Shutdown(_) => {}
         }
@@ -754,6 +830,25 @@ impl Service {
         self.queue.push(entry);
         self.save_queue();
         self.state.scrobbles_received += 1;
+        self.state.latest_scrobble = Some(LatestScrobble {
+            ordinal: self.state.scrobbles_received,
+            delivery: ScrobbleDelivery::Pending,
+            message: String::new(),
+        });
+        self.latest_queued = true;
+    }
+
+    /// Records what became of the latest scrobble, if it is still queued,
+    /// and whether it still is.
+    fn set_latest_delivery(&mut self, delivery: ScrobbleDelivery, message: &str, queued: bool) {
+        if !self.latest_queued {
+            return;
+        }
+        if let Some(latest) = self.state.latest_scrobble.as_mut() {
+            latest.delivery = delivery;
+            latest.message = message.to_string();
+        }
+        self.latest_queued = queued;
     }
 
     fn begin_desktop_auth(&mut self) {
@@ -885,12 +980,13 @@ impl Service {
         self.state.status_text = status_text;
         if clear_queue {
             self.queue.clear();
+            self.latest_queued = false;
             self.save_queue();
         }
     }
 
     fn send_now_playing(&mut self, track: &NowPlayingTrack) {
-        if !self.state.enabled || !self.network_allowed {
+        if !self.state.enabled || self.is_paused() || !self.network_allowed {
             return;
         }
         let Some(credentials) = self.credentials.as_ref() else {
@@ -921,6 +1017,13 @@ impl Service {
         }
     }
 
+    /// Whether scrobbling is paused now. Read before each request, so that a
+    /// pause stops the requests after the one under way, whatever commands
+    /// are queued before it.
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
     /// Submits queued scrobbles in batches. Stops at the first batch that
     /// fails and keeps it queued; only entries that Last.fm accepted or
     /// ignored for good leave the queue. Transient failures schedule a retry.
@@ -928,7 +1031,8 @@ impl Service {
     /// resumes.
     fn flush_queue(&mut self) {
         self.retry_due = None;
-        if !self.state.enabled || !self.network_allowed || self.queue.is_empty() {
+        if !self.state.enabled || self.is_paused() || !self.network_allowed || self.queue.is_empty()
+        {
             return;
         }
         let (Some(credentials), Some(session)) = (self.credentials.clone(), self.session.clone())
@@ -937,6 +1041,11 @@ impl Service {
         };
 
         while !self.queue.is_empty() {
+            // A pause stops the flush before its next batch; resuming
+            // flushes again.
+            if self.is_paused() {
+                return;
+            }
             let batch_len = self.queue.len().min(MAX_SCROBBLES_PER_BATCH);
             let result = send_scrobble_batch(
                 self.transport.as_ref(),
@@ -946,6 +1055,21 @@ impl Service {
             );
             match result {
                 Ok(outcome) => {
+                    // The latest scrobble is the queue's last entry.
+                    if batch_len == self.queue.len() {
+                        let last = batch_len - 1;
+                        if outcome.deferred[last] {
+                            self.set_latest_delivery(
+                                ScrobbleDelivery::Waiting,
+                                "Last.fm daily scrobble limit reached",
+                                true,
+                            );
+                        } else if let Some(reason) = &outcome.ignored_reasons[last] {
+                            self.set_latest_delivery(ScrobbleDelivery::Failed, reason, false);
+                        } else {
+                            self.set_latest_delivery(ScrobbleDelivery::Accepted, "", false);
+                        }
+                    }
                     let mut index = 0;
                     self.queue.retain(|_| {
                         let keep = index >= batch_len || outcome.deferred[index];
@@ -958,6 +1082,13 @@ impl Service {
                         self.flush_ignored.reason = outcome.ignored_reason;
                     }
                     if outcome.deferred.contains(&true) {
+                        // The latest scrobble, in this batch or behind it,
+                        // waits for the retry too.
+                        self.set_latest_delivery(
+                            ScrobbleDelivery::Waiting,
+                            "Last.fm daily scrobble limit reached",
+                            true,
+                        );
                         self.schedule_retry("Last.fm daily scrobble limit reached");
                         return;
                     }
@@ -970,23 +1101,25 @@ impl Service {
                     }
                 }
                 Err(err) if is_invalid_session(&err) => {
-                    self.transition_to_reauth(
-                        "Last.fm session expired. Reconnect to flush queued scrobbles.",
-                    );
+                    let message = "Last.fm session expired. Reconnect to flush queued scrobbles.";
+                    self.set_latest_delivery(ScrobbleDelivery::Failed, message, true);
+                    self.transition_to_reauth(message);
                     return;
                 }
                 Err(err) if is_transient(&err) => {
-                    self.schedule_retry(&request_error_message(&err));
+                    let message = request_error_message(&err);
+                    self.set_latest_delivery(ScrobbleDelivery::Waiting, &message, true);
+                    self.schedule_retry(&message);
                     return;
                 }
                 Err(err) => {
                     // Last.fm refused the request itself, for example because
                     // the API key is invalid. That says nothing about these
                     // scrobbles, so they stay queued for the next flush.
-                    self.fail(
-                        format!("{}. Scrobbles stay queued.", request_error_message(&err)),
-                        false,
-                    );
+                    let message =
+                        format!("{}. Scrobbles stay queued.", request_error_message(&err));
+                    self.set_latest_delivery(ScrobbleDelivery::Failed, &message, true);
+                    self.fail(message, false);
                     return;
                 }
             }
@@ -1332,6 +1465,7 @@ fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome
 
     let mut outcome = ScrobbleOutcome {
         deferred: vec![false; batch_len],
+        ignored_reasons: vec![None; batch_len],
         ignored: 0,
         ignored_reason: None,
     };
@@ -1342,16 +1476,17 @@ fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome
             LASTFM_IGNORED_DAILY_LIMIT => outcome.deferred[index] = true,
             _ => {
                 outcome.ignored += 1;
+                let text = ignored_message
+                    .and_then(|message| message.get("#text"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty());
+                let reason =
+                    text.map_or_else(|| format!("ignore code {code}"), ToString::to_string);
                 if outcome.ignored_reason.is_none() {
-                    let text = ignored_message
-                        .and_then(|message| message.get("#text"))
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|text| !text.is_empty());
-                    outcome.ignored_reason = Some(
-                        text.map_or_else(|| format!("ignore code {code}"), ToString::to_string),
-                    );
+                    outcome.ignored_reason = Some(reason.clone());
                 }
+                outcome.ignored_reasons[index] = Some(reason);
             }
         }
     }
@@ -1897,6 +2032,315 @@ mod tests {
                 state.status_text
             );
         }
+    }
+
+    /// What became of the latest scrobble.
+    fn latest(service: &Service) -> (u64, ScrobbleDelivery, String) {
+        let latest = service
+            .published_state()
+            .latest_scrobble
+            .expect("a latest scrobble");
+        (latest.ordinal, latest.delivery, latest.message)
+    }
+
+    fn now_playing_track() -> NowPlayingTrack {
+        NowPlayingTrack {
+            artist: "Artist 0".to_string(),
+            track: "Track 0".to_string(),
+            album: String::new(),
+            track_number: None,
+            duration_seconds: Some(200),
+        }
+    }
+
+    #[test]
+    fn the_latest_scrobble_is_reported_accepted_once_last_fm_takes_it() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(1), accepted_reply(1)]);
+        let mut service = connected_service(&transport, None, Vec::new());
+        assert_eq!(service.published_state().latest_scrobble, None);
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        assert_eq!(
+            latest(&service),
+            (1, ScrobbleDelivery::Accepted, String::new())
+        );
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        assert_eq!(
+            latest(&service),
+            (2, ScrobbleDelivery::Accepted, String::new())
+        );
+        assert!(service.queue.is_empty());
+    }
+
+    #[test]
+    fn the_latest_scrobble_waits_while_last_fm_cannot_be_reached_and_is_accepted_later() {
+        let transport = ScriptedTransport::with_replies([
+            Err("connection reset".to_string()),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        let (ordinal, delivery, message) = latest(&service);
+        assert_eq!((ordinal, delivery), (1, ScrobbleDelivery::Waiting));
+        assert!(message.contains("connection reset"), "{message}");
+        assert_eq!(service.queue, entries(0..1));
+        assert!(service.retry_due.is_some());
+
+        service.handle_command(Command::Flush);
+        assert_eq!(
+            latest(&service),
+            (1, ScrobbleDelivery::Accepted, String::new())
+        );
+    }
+
+    #[test]
+    fn the_latest_scrobble_behind_a_failing_backlog_waits() {
+        let transport = ScriptedTransport::with_replies([reply(503, "<html>Bad gateway</html>")]);
+        let mut service =
+            connected_service(&transport, None, entries(0..MAX_SCROBBLES_PER_BATCH + 5));
+
+        service.handle_command(Command::QueueScrobble(entry(99)));
+        assert_eq!(latest(&service).1, ScrobbleDelivery::Waiting);
+    }
+
+    #[test]
+    fn the_latest_scrobble_deferred_by_the_daily_limit_waits() {
+        let transport =
+            ScriptedTransport::with_replies([scrobble_reply(&[LASTFM_IGNORED_DAILY_LIMIT])]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        let (_, delivery, message) = latest(&service);
+        assert_eq!(delivery, ScrobbleDelivery::Waiting);
+        assert!(message.contains("daily"), "{message}");
+        assert_eq!(service.queue, entries(0..1));
+    }
+
+    #[test]
+    fn the_latest_scrobble_behind_a_batch_the_daily_limit_deferred_waits() {
+        let mut codes = vec![0; MAX_SCROBBLES_PER_BATCH];
+        codes[0] = LASTFM_IGNORED_DAILY_LIMIT;
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&codes)]);
+        let mut service = connected_service(&transport, None, entries(0..MAX_SCROBBLES_PER_BATCH));
+
+        service.handle_command(Command::QueueScrobble(entry(99)));
+        let (_, delivery, message) = latest(&service);
+        assert_eq!(delivery, ScrobbleDelivery::Waiting);
+        assert!(message.contains("daily"), "{message}");
+        assert_eq!(scrobble_requests(&transport).len(), 1);
+        assert!(service.retry_due.is_some());
+    }
+
+    #[test]
+    fn a_scrobble_last_fm_ignores_is_reported_failed_with_the_reason() {
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[1])]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        assert_eq!(
+            latest(&service),
+            (
+                1,
+                ScrobbleDelivery::Failed,
+                "Ignored for testing".to_string()
+            )
+        );
+        assert!(service.queue.is_empty());
+        // As before, the failure is also told to the user.
+        assert!(
+            service
+                .problems
+                .iter()
+                .any(|problem| problem.message.contains("ignored 1 scrobble")),
+            "{:?}",
+            service.problems
+        );
+    }
+
+    #[test]
+    fn a_scrobble_whose_request_last_fm_refuses_is_reported_failed_and_stays_queued() {
+        let transport = ScriptedTransport::with_replies([reply(
+            403,
+            r#"{"error":10,"message":"Invalid API key"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        let (_, delivery, message) = latest(&service);
+        assert_eq!(delivery, ScrobbleDelivery::Failed);
+        assert!(message.contains("Invalid API key"), "{message}");
+        assert_eq!(service.queue, entries(0..1));
+    }
+
+    #[test]
+    fn a_scrobble_sent_with_an_expired_session_is_reported_failed() {
+        let transport = ScriptedTransport::with_replies([reply(
+            403,
+            r#"{"error":9,"message":"Invalid session key"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        let (_, delivery, message) = latest(&service);
+        assert_eq!(delivery, ScrobbleDelivery::Failed);
+        assert!(message.contains("expired"), "{message}");
+        assert_eq!(service.state.auth_state, AuthState::ReauthRequired);
+    }
+
+    /// Pauses or resumes `service` as [`Handle::set_paused`] does.
+    fn set_paused(service: &mut Service, paused: bool) {
+        service.paused.store(paused, Ordering::SeqCst);
+        service.handle_command(Command::PauseChanged);
+    }
+
+    /// Scrobbles queued before the pause, also those queued while Last.fm
+    /// could not be reached, count as scrobbled: their plays reached the
+    /// scrobble point before the pause. They wait while paused and are sent
+    /// on resuming.
+    #[test]
+    fn scrobbles_queued_before_the_pause_count_as_scrobbled_and_wait_for_the_resume() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(2)]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        set_paused(&mut service, true);
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        service.handle_command(Command::Flush);
+        assert!(
+            transport.requests().is_empty(),
+            "{:?}",
+            transport.requests()
+        );
+        assert!(service.retry_due.is_none());
+        // Held, not lost.
+        assert_eq!(service.queue, entries(0..2));
+        assert_eq!(latest(&service).1, ScrobbleDelivery::Pending);
+
+        // Resuming sends what was held.
+        set_paused(&mut service, false);
+        assert_eq!(scrobble_requests(&transport).len(), 1);
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            latest(&service),
+            (1, ScrobbleDelivery::Accepted, String::new())
+        );
+    }
+
+    #[test]
+    fn a_new_service_scrobbles_whatever_the_previous_one_paused() {
+        let transport = ScriptedTransport::default();
+        let mut service = connected_service(&transport, None, Vec::new());
+        set_paused(&mut service, true);
+        assert!(service.is_paused());
+
+        // As after a restart: the pause is not saved.
+        let service = connected_service(&transport, None, Vec::new());
+        assert!(!service.is_paused());
+        let (handle, _commands) = test_support::command_handle();
+        assert!(!handle.is_paused());
+    }
+
+    /// Answers like a [`ScriptedTransport`], and pauses scrobbling while
+    /// its first request is under way, as the user may.
+    struct PausingTransport {
+        inner: ScriptedTransport,
+        paused: Arc<AtomicBool>,
+    }
+
+    impl Transport for PausingTransport {
+        fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
+            self.paused.store(true, Ordering::SeqCst);
+            self.inner.post_form(url, form)
+        }
+    }
+
+    #[test]
+    fn a_pause_during_a_flush_stops_it_before_the_next_batch() {
+        let transport = ScriptedTransport::with_replies([
+            accepted_reply(MAX_SCROBBLES_PER_BATCH),
+            accepted_reply(MAX_SCROBBLES_PER_BATCH),
+        ]);
+        let paused = Arc::new(AtomicBool::new(false));
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: None,
+                initial_enabled: true,
+            },
+            ServiceBackends {
+                transport: Box::new(PausingTransport {
+                    inner: transport.clone(),
+                    paused: Arc::clone(&paused),
+                }),
+                ..backends(&transport, MemorySessionKeys::with_key(USERNAME, "session"))
+            },
+        );
+        service.paused = paused;
+        service.handle_command(Command::LoadStoredSession {
+            username: USERNAME.to_string(),
+        });
+        service.queue = entries(0..MAX_SCROBBLES_PER_BATCH + 10);
+
+        service.handle_command(Command::Flush);
+        // The batch under way finished; the next did not start.
+        assert_eq!(scrobble_requests(&transport).len(), 1);
+        assert_eq!(
+            service.queue,
+            entries(MAX_SCROBBLES_PER_BATCH..MAX_SCROBBLES_PER_BATCH + 10)
+        );
+        assert!(service.retry_due.is_none());
+    }
+
+    #[test]
+    fn a_pause_stops_requests_queued_behind_the_one_under_way() {
+        let dir = scratch_dir("pause-behind-a-request");
+        let queue_path = dir.join("lastfm_queue.json");
+        let (transport, requests) = test_support::BlockingTransport::new();
+        let (handle, events) = test_support::spawn_connected(transport, queue_path.clone());
+
+        // A now playing update is under way.
+        handle.command(Command::SendNowPlaying(now_playing_track()));
+        requests
+            .started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the now playing request starts");
+        // Behind it: a scrobble and another update, then the pause.
+        handle.command(Command::QueueScrobble(entry(0)));
+        handle.command(Command::SendNowPlaying(now_playing_track()));
+        handle.set_paused(true);
+        assert!(handle.is_paused());
+        // The request under way finishes.
+        requests.release.send(()).expect("release the request");
+
+        // Once the service has handled every command before this one, no
+        // other request has started: one would wait for a release here.
+        handle.command(Command::SaveForQuit(7));
+        loop {
+            match events.recv_timeout(Duration::from_secs(10)) {
+                Ok(Event::SavedForQuit { request_id: 7, .. }) => break,
+                Ok(_) => {}
+                Err(err) => panic!("the service did not answer: {err}"),
+            }
+        }
+        assert_eq!(requests.answered(), 1);
+        assert!(
+            requests.started.try_recv().is_err(),
+            "a request started while paused"
+        );
+        // The scrobble waits, saved.
+        assert_eq!(read_queue_file(&queue_path), entries(0..1));
+
+        // Resuming sends it.
+        handle.set_paused(false);
+        requests
+            .started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the scrobble is sent on resuming");
+        requests.release.send(()).expect("release the request");
+        assert_eq!(
+            handle.shutdown(Duration::from_secs(10)),
+            ShutdownOutcome::Stopped
+        );
     }
 
     #[test]
