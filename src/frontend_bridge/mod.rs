@@ -3712,9 +3712,11 @@ mod tests {
                 paused
             );
             assert!(!runtime.flags.settings_dirty, "not a setting");
-            assert!(commands.try_iter().any(
-                |command| matches!(command, LastFmCommand::SetPaused(value) if value == paused)
-            ));
+            // Already in effect for Last.fm's next request.
+            assert_eq!(runtime.lastfm.is_paused(), paused);
+            assert!(commands
+                .try_iter()
+                .any(|command| matches!(command, LastFmCommand::PauseChanged)));
         }
         assert!(!config::format_settings_text(&runtime.state.settings).contains("paused"));
         drop(runtime);

@@ -2505,8 +2505,11 @@ mod tests {
         assert!(sent(&commands).is_empty());
     }
 
+    /// A play that reached its scrobble point before the pause counts as
+    /// scrobbled, as it would once sent: its scrobble is kept, also while
+    /// it waits in the offline queue, and Last.fm gets it on resuming.
     #[test]
-    fn a_play_queued_before_scrobbling_was_paused_keeps_its_scrobble() {
+    fn a_play_that_reached_its_scrobble_point_before_the_pause_counts_as_scrobbled() {
         let (handle, commands) = lastfm::test_support::command_handle();
         let track_path = p("/fixtures/paused-after.flac");
         let mut state = lastfm_playing_state(&track_path);

@@ -399,7 +399,9 @@ fn handle_lastfm_settings_command(
         BridgeSettingsCommand::SetLastFmScrobblingPaused(paused) => {
             // Not a setting: a restart resumes scrobbling.
             state.lastfm_scrobbling_paused = *paused;
-            context.lastfm.command(LastFmCommand::SetPaused(*paused));
+            // In effect for Last.fm's next request, ahead of the commands
+            // already sent to it.
+            context.lastfm.set_paused(*paused);
         }
         BridgeSettingsCommand::SetLastFmShowScrobbleProgress(show) => {
             state.settings.integrations.lastfm_show_scrobble_progress = *show;
