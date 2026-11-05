@@ -249,6 +249,15 @@ pub(super) fn build_version_0_library(
         .collect()
 }
 
+/// Opens the library database at `path` with the schema code of Ferrous
+/// before schema versions, as 0.2.2 and earlier do whatever the version of
+/// the database. That creates the full-text index and its triggers again if
+/// they are missing, and leaves the index empty.
+pub(super) fn open_with_version_0_build(path: &Path) {
+    let conn = Connection::open(path).expect("open with the version 0 build");
+    version_0::init_schema(&conn).expect("version 0 schema");
+}
+
 fn insert_track(conn: &Connection, root: &Path, root_index: usize, track: usize) {
     let artist = format!("Artist {} ü", track % 37);
     let album = format!("Album {}", track % 113);
