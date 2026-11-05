@@ -1198,6 +1198,29 @@ pub extern "C" fn ferrous_ffi_spectrogram_render_zoom(
     )
 }
 
+/// The zoom Qt draws spectrogram data of audio at `sample_rate` whose
+/// columns are `hop` samples apart at, at `render_zoom`: the render zoom
+/// times the hop over the reference hop. The decoder reckons the centered
+/// view's window with the same arithmetic.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_effective_zoom(
+    sample_rate: u32,
+    hop: u32,
+    render_zoom: f64,
+) -> f64 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_effective_zoom",
+        |_| render_zoom,
+        || {
+            crate::analysis::spectrogram_effective_zoom(
+                sample_rate,
+                usize::try_from(hop).unwrap_or(usize::MAX),
+                render_zoom,
+            )
+        },
+    )
+}
+
 /// The column hop of spectrogram data of audio at `sample_rate` at zoom
 /// 1, which zoom levels are relative to.
 #[no_mangle]
@@ -3377,6 +3400,20 @@ mod error_packet_tests {
             section.extend_from_slice(text.as_bytes());
         }
         section
+    }
+
+    #[test]
+    fn the_spectrogram_effective_zoom_is_the_decoders() {
+        // Qt's effectiveZoomLocked calls this; the decoder reckons the
+        // centered view's window with the same function, rounding and all.
+        let render = super::ferrous_ffi_spectrogram_render_zoom(8_000, 300, 0.57);
+        let zoom = super::ferrous_ffi_spectrogram_effective_zoom(8_000, 300, render);
+        assert_eq!(
+            zoom.to_bits(),
+            crate::analysis::spectrogram_effective_zoom(8_000, 300, render).to_bits()
+        );
+        assert!(zoom < 1.0);
+        assert_eq!((1_680.0_f64 / zoom).ceil(), 1_681.0);
     }
 
     #[test]

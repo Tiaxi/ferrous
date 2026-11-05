@@ -11,7 +11,7 @@
 //! arithmetic, make the decoder and the view decide alike where a track
 //! ends and when a window covers it.
 
-use super::column_hop::{column_hop, column_hops, pixels_per_column};
+use super::column_hop::{column_hop, column_hops, effective_zoom, pixels_per_column, render_zoom};
 use super::usize_to_u64;
 
 /// The view shows the whole track once its window covers this share of
@@ -73,15 +73,22 @@ impl CenteredView {
     /// A view `width` pixels wide at `zoom` of a session of audio at
     /// `sample_rate`, of a track whose columns end at `end` (see
     /// [`decoded_end_column`]), if known. The window is its width over the
-    /// pixels a column takes, rounded up, as Qt rounds it.
+    /// zoom Qt draws the session's columns at ([`effective_zoom`] of
+    /// [`render_zoom`]), rounded up, as `centeredViewLocked` computes it
+    /// at a device pixel ratio of 1. Qt draws data at the zoom the session
+    /// decodes at, which is `zoom`.
     pub(super) fn new(width: u32, zoom: f32, sample_rate: u32, end: Option<u64>) -> Self {
         let sample_rate = sample_rate.max(1);
         let hop = column_hop(sample_rate, zoom);
-        let pixels_per_column = pixels_per_column(sample_rate, hop, f64::from(zoom)).max(0.01);
+        let zoom = effective_zoom(
+            sample_rate,
+            hop,
+            render_zoom(sample_rate, hop, f64::from(zoom)),
+        );
         // Hops are small; precision loss from usize→f64 is negligible.
         #[allow(clippy::cast_precision_loss)]
         let columns_per_second = f64::from(sample_rate) / hop as f64;
-        let window = super::f64_to_u64_saturating((f64::from(width) / pixels_per_column).ceil());
+        let window = super::f64_to_u64_saturating((f64::from(width) / zoom.max(0.01)).ceil());
         Self::of_columns(columns_per_second, window, end)
     }
 
@@ -258,6 +265,23 @@ mod tests {
         assert_eq!(view.window_columns(), 1_680);
         assert_eq!(view.left_column(21.9), 0);
         assert!(window_seconds(1_680, 1.0, 8_000) < 0.9 * 40.0);
+    }
+
+    #[test]
+    fn a_window_has_the_columns_qt_computes_for_it() {
+        // 8 kHz at zoom 0.57, 300 samples a column: Qt draws them at
+        // 171 / 300 × 300 / 171, a bit below 1, and a view 1680 pixels wide
+        // shows 1681 columns. Of the 1867 a 560,640-frame file decodes to,
+        // that is 90.04%: the view shows the whole track at 38.4 s, which
+        // 1680 columns, 89.98%, would not.
+        let end = decoded_end_column(560_640, 2_048, 0.57, 8_000);
+        assert_eq!(end, 1_867);
+        let view = CenteredView::new(1_680, 0.57, 8_000, Some(end));
+        assert_eq!(view.window_columns(), 1_681);
+        assert_eq!(view.left_column(38.4), 0);
+        let narrower = CenteredView::new(1_679, 0.57, 8_000, Some(end));
+        assert_eq!(narrower.window_columns(), 1_680);
+        assert_eq!(narrower.left_column(38.4), 1_024 - 840);
     }
 
     #[test]

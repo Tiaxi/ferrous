@@ -91,6 +91,23 @@ pub fn render_zoom(sample_rate: u32, hop: usize, zoom: f64) -> f64 {
     }
 }
 
+/// The zoom Qt draws data whose columns are `hop` samples apart at, of
+/// audio at `sample_rate`, at `render_zoom` ([`render_zoom`]): the canvas
+/// pixels a column takes at a device pixel ratio of 1. It is the render
+/// zoom times the hop over the reference hop, in `f64`, in that order, as
+/// `effectiveZoomLocked` in `ui/src/SpectrogramItem.cpp` computes it, by
+/// calling this. Wherever the hop is not the reference hop it is 1 but for
+/// rounding, which can leave it a bit below: at 8 kHz at zoom 0.57, `171 /
+/// 300 × 300 / 171` is 0.9999999999999999, and a view 1680 pixels wide
+/// shows 1681 columns.
+#[must_use]
+pub fn effective_zoom(sample_rate: u32, hop: usize, render_zoom: f64) -> f64 {
+    // Hops are at most a few hundred thousand samples.
+    #[allow(clippy::cast_precision_loss)]
+    let (hop, reference) = (hop as f64, reference_hop(sample_rate) as f64);
+    render_zoom * hop / reference
+}
+
 /// The pixels a column of data `hop` samples apart takes at
 /// [`render_zoom`]: 1 wherever the hop is not the reference hop.
 #[must_use]
@@ -231,6 +248,26 @@ mod tests {
         }
         // An unknown rate keeps the hop of 44.1 and 48 kHz.
         assert_eq!(reference_hop(0), 1024);
+    }
+
+    #[test]
+    fn the_effective_zoom_keeps_the_rounding_of_its_order_of_operations() {
+        // 171 / 300 × 300 / 171 is a bit below 1: the view shows one
+        // column more than its pixels.
+        assert_eq!(column_hop(8_000, 0.57), 300);
+        let render = render_zoom(8_000, 300, 0.57);
+        assert_eq!(render, 171.0 / 300.0);
+        let zoom = effective_zoom(8_000, 300, render);
+        assert_eq!(zoom, 0.999_999_999_999_999_9);
+        assert!(zoom < 1.0);
+        assert_eq!((1_680.0 / zoom).ceil(), 1_681.0);
+        // At the reference hop, the zoom itself.
+        assert_eq!(effective_zoom(48_000, 1_024, 2.5), 2.5);
+        // Where the hop is a power of two times the reference, exactly 1.
+        assert_eq!(
+            effective_zoom(48_000, 512, render_zoom(48_000, 512, 2.0)),
+            1.0
+        );
     }
 
     #[test]

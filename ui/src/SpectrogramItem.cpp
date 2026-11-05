@@ -2203,8 +2203,11 @@ double SpectrogramItem::effectiveZoomLocked() const {
     if (m_precomputedHopSize <= 0) {
         return m_renderZoomLevel;
     }
-    return m_renderZoomLevel * static_cast<double>(m_precomputedHopSize)
-           / referenceHopLocked();
+    // renderZoom * hop / reference hop, as the decoder reckons the centered
+    // window: its rounding decides how many columns a view shows.
+    return ferrous_ffi_spectrogram_effective_zoom(
+        static_cast<std::uint32_t>(std::max(0, m_precomputedSampleRateHz)),
+        static_cast<std::uint32_t>(m_precomputedHopSize), m_renderZoomLevel);
 }
 
 double SpectrogramItem::referenceHopLocked() const {
@@ -3092,8 +3095,11 @@ void SpectrogramItem::feedPrecomputedChunk(
             // effectiveZoom=0.998) causes the advance path to fail,
             // forcing 42ms full rebuilds every frame.  Data for another
             // zoom is drawn at its own zoom, so the preview can scale it.
+            // Data for the zoom is drawn at the zoom the backend decodes
+            // it at, which reckons the centered view's window with it: a
+            // zoom close to its last one leaves it at that one.
             m_renderZoomLevel = renderZoomForHopLocked(
-                m_precomputedHopSize, dataIsForZoom ? m_zoomLevel : 1.0);
+                m_precomputedHopSize, dataIsForZoom ? backendZoomForRequestLocked() : 1.0);
             m_crosshairDirty = true;
         }
         if (appliedReset) {
@@ -3539,8 +3545,9 @@ void SpectrogramItem::clearPrecomputed() {
     m_zoomFillActive = false;
     m_seekFillActive = false;
     // The zoom data for the zoom on screen is drawn at, as the backend
-    // reckons it (ferrous_ffi_spectrogram_render_zoom).
-    m_renderZoomLevel = renderZoomForZoomLocked(m_zoomLevel);
+    // reckons it (ferrous_ffi_spectrogram_render_zoom): at the zoom the
+    // backend decodes at.
+    m_renderZoomLevel = renderZoomForZoomLocked(backendZoomForRequestLocked());
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_positionJumpHoldActive = false;
