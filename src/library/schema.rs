@@ -15,7 +15,9 @@ use super::LibraryTrack;
 ///
 /// - 0: every database from before schema versions. It may lack columns
 ///   added since, and has the full-text index `tracks_fts`.
-/// - 1: every column, and no full-text index, which nothing queried.
+/// - 1: every column, and no full-text index, which nothing queried. Older
+///   builds may create the index again at any version, and every connection
+///   drops it then; see [`has_legacy_full_text_index`].
 /// - 2: `tracks.cover_stamp`, the stamp of the folder images a row's cover
 ///   was chosen from. Rows from before have none, so the next scan checks
 ///   their covers again, once, by the current rule.
@@ -187,6 +189,27 @@ const DROP_FULL_TEXT_INDEX: &str = r"
     DROP TABLE IF EXISTS tracks_fts;
 ";
 
+/// Whether the database has any of the objects that
+/// [`DROP_FULL_TEXT_INDEX`] drops.
+///
+/// Builds from before schema versions (0.2.2 and earlier) do not read the
+/// version, and create the index and its triggers again whenever they open
+/// the database. They fill the index only when it counts no rows, which an
+/// index with `tracks` as its content never does, so it stays empty. The
+/// triggers then ask it to delete entries it lacks, and `SQLite` fails the
+/// first update or delete of a track as a damaged database. So every
+/// connection looks for the index, whatever the version, and removes it
+/// before it writes; see [`migrate`].
+fn has_legacy_full_text_index(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE \
+             (type = 'table' AND name = 'tracks_fts') OR \
+             (type = 'trigger' AND name IN ('tracks_fts_ai', 'tracks_fts_ad', 'tracks_fts_au')))",
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// Held by the connection of this process that prepares the library
 /// database (see [`prepare_database`]), so that no other one writes to the
 /// database before it uses write-ahead logging.
@@ -215,9 +238,11 @@ pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
 /// Brings the schema to [`SCHEMA_VERSION`] and switches the database to
 /// write-ahead logging, which it keeps for every later connection: readers
 /// then never wait for a writer, and a writer waits only for another
-/// writer's transaction. A database already there is left alone, without
-/// waiting for [`PREPARING`], so every connection can call this cheaply
-/// each time it opens the database. Returns a notice for the user if
+/// writer's transaction. It also drops the full-text index that an older
+/// build may have created again; see [`has_legacy_full_text_index`]. A
+/// database already there is left alone, without waiting for [`PREPARING`]
+/// or writing, so every connection can call this cheaply each time it opens
+/// the database. Returns a notice for the user if
 /// write-ahead logging could not be enabled; the library still works then,
 /// but edits can wait for a scan's batches.
 ///
@@ -231,7 +256,10 @@ pub(super) fn init_schema(conn: &Connection) -> anyhow::Result<()> {
 pub(super) fn prepare_database(conn: &Connection) -> anyhow::Result<Option<String>> {
     // Reading finds the write-ahead log of a database that has one, which
     // the journal mode then tells.
-    if check_version(user_version(conn)?)? && journal_mode(conn)?.eq_ignore_ascii_case("wal") {
+    if check_version(user_version(conn)?)?
+        && journal_mode(conn)?.eq_ignore_ascii_case("wal")
+        && !has_legacy_full_text_index(conn)?
+    {
         return Ok(None);
     }
     let _preparing = PREPARING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -260,16 +288,18 @@ fn enable_write_ahead_log(conn: &Connection) -> Option<String> {
     }
 }
 
-/// Brings the schema to [`SCHEMA_VERSION`], in one transaction.
+/// Brings the schema to [`SCHEMA_VERSION`] and drops the full-text index of
+/// version 0, which an older build may have created again at any version
+/// (see [`has_legacy_full_text_index`]), in one transaction.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
-    if check_version(user_version(conn)?)? {
+    if check_version(user_version(conn)?)? && !has_legacy_full_text_index(conn)? {
         return Ok(());
     }
-    // Take the write lock first, so that the version read below cannot be
+    // Take the write lock first, so that what is read below cannot be
     // stale: another connection may have migrated while this one waited.
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let version = user_version(&tx)?;
-    if check_version(version)? {
+    if check_version(version)? && !has_legacy_full_text_index(&tx)? {
         return Ok(());
     }
     if version < 1 {
@@ -284,6 +314,7 @@ fn migrate(conn: &Connection) -> anyhow::Result<()> {
     if version < 4 {
         migrate_to_version_4(&tx)?;
     }
+    tx.execute_batch(DROP_FULL_TEXT_INDEX)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -305,13 +336,13 @@ pub(super) fn user_version(conn: &Connection) -> rusqlite::Result<i32> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
 }
 
-/// Version 0 to 1: create what is missing, and drop the full-text index.
+/// Version 0 to 1: create what is missing. Version 1 also drops the
+/// full-text index, which [`migrate`] does at every version.
 fn migrate_to_version_1(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(CREATE_TABLES)?;
     add_missing_columns(conn, ADDED_COLUMNS)?;
     // Indexes come after the columns they cover.
     conn.execute_batch(CREATE_INDEXES)?;
-    conn.execute_batch(DROP_FULL_TEXT_INDEX)?;
     Ok(())
 }
 

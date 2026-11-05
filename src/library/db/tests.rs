@@ -12,7 +12,7 @@ use rusqlite::types::Value;
 use super::*;
 use crate::library::schema::{init_schema, user_version, BUSY_TIMEOUT, PREPARING, SCHEMA_VERSION};
 use crate::library::test_fixtures::{
-    build_version_0_library, library_rows, schema_objects, table_rows,
+    build_version_0_library, library_rows, open_with_version_0_build, schema_objects, table_rows,
 };
 
 const SHORT_WAIT: Duration = Duration::from_millis(50);
@@ -135,6 +135,130 @@ fn a_version_0_library_migrates_without_losing_a_row_and_a_second_run_changes_no
     drop(conn);
     assert_eq!(entries(&folder), ["library.sqlite3"], "nothing moved aside");
     fs::remove_dir_all(folder).expect("cleanup");
+}
+
+/// The connections that prepare the library database as they open it.
+#[derive(Clone, Copy, Debug)]
+enum Opener {
+    LibraryWorker,
+    WaveformCache,
+}
+
+impl Opener {
+    const ALL: [Self; 2] = [Self::LibraryWorker, Self::WaveformCache];
+
+    fn open(self, path: &Path) -> Connection {
+        match self {
+            Self::LibraryWorker => {
+                let OpenedLibrary { conn, notice } =
+                    open_worker_db(path, SHORT_WAIT).expect("library worker");
+                assert_eq!(notice, None);
+                conn
+            }
+            Self::WaveformCache => {
+                crate::library::open_library_database_at(path, SHORT_WAIT).expect("waveform cache")
+            }
+        }
+    }
+}
+
+/// A current library that 0.2.2 or earlier opened since, which created the
+/// full-text index and its triggers again and left the index empty (#428).
+fn current_library_with_recreated_full_text_index(folder: &Path) -> PathBuf {
+    let path = folder.join("library.sqlite3");
+    build_version_0_library(&path, 40);
+    drop(open_worker_db(&path, SHORT_WAIT).expect("migrate"));
+    open_with_version_0_build(&path);
+    let conn = Connection::open(&path).expect("open fixture");
+    assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+    assert_eq!(
+        full_text_objects(&conn).len(),
+        4 + 4,
+        "the index, its triggers and its shadow tables are back: {:?}",
+        full_text_objects(&conn)
+    );
+    // As the issue reports, the next update of a track fails.
+    let tx = conn.unchecked_transaction().expect("transaction");
+    let error = tx
+        .execute(
+            "UPDATE tracks SET file_inode = 1 WHERE rowid = (SELECT MIN(rowid) FROM tracks)",
+            [],
+        )
+        .expect_err("the empty index fails an update");
+    assert_eq!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt),
+        "{error}"
+    );
+    drop(tx);
+    path
+}
+
+#[test]
+fn a_full_text_index_an_older_build_created_again_is_dropped_and_every_row_kept() {
+    for opener in Opener::ALL {
+        let folder = test_folder("recreated-fts");
+        let path = current_library_with_recreated_full_text_index(&folder);
+        let before = library_rows(&Connection::open(&path).expect("open fixture"));
+        assert_eq!(before[1].len(), 120);
+
+        let conn = opener.open(&path);
+
+        assert_eq!(full_text_objects(&conn), Vec::<String>::new(), "{opener:?}");
+        assert_eq!(user_version(&conn).expect("version"), SCHEMA_VERSION);
+        assert_eq!(journal_mode(&conn), "wal");
+        assert_eq!(library_rows(&conn), before, "{opener:?} keeps every row");
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("integrity check");
+        assert_eq!(integrity, "ok");
+        // A scan stores a file's identity, and removes a file that is gone.
+        let first: i64 = conn
+            .query_row("SELECT MIN(rowid) FROM tracks", [], |row| row.get(0))
+            .expect("first track");
+        let updated = conn
+            .execute(
+                "UPDATE tracks SET file_device = 7, file_inode = 11 WHERE rowid = ?1",
+                params![first],
+            )
+            .expect("an update of a track succeeds");
+        assert_eq!(updated, 1);
+        let deleted = conn
+            .execute("DELETE FROM tracks WHERE rowid = ?1 + 1", params![first])
+            .expect("a delete of a track succeeds");
+        assert_eq!(deleted, 1);
+        assert_eq!(table_rows(&conn, "tracks").len(), 119);
+        drop(conn);
+        fs::remove_dir_all(folder).expect("cleanup");
+    }
+}
+
+/// A library without the full-text index, as at every start, opens without
+/// the write lock and without changing anything, even while another
+/// connection holds the lock.
+#[test]
+fn a_library_without_a_full_text_index_opens_unchanged_without_the_write_lock() {
+    for opener in Opener::ALL {
+        let folder = test_folder("no-fts");
+        let path = folder.join("library.sqlite3");
+        build_version_0_library(&path, 10);
+        drop(open_worker_db(&path, SHORT_WAIT).expect("migrate"));
+        let writer = Connection::open(&path).expect("writer");
+        let schema = schema_objects(&writer);
+        let rows = library_rows(&writer);
+        writer
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the write lock");
+
+        let conn = opener.open(&path);
+
+        assert_eq!(conn.total_changes(), 0, "{opener:?}");
+        assert_eq!(schema_objects(&conn), schema, "{opener:?}");
+        assert_eq!(library_rows(&conn), rows, "{opener:?}");
+        writer.execute_batch("ROLLBACK").expect("release");
+        drop((conn, writer));
+        fs::remove_dir_all(folder).expect("cleanup");
+    }
 }
 
 #[test]
