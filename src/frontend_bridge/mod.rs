@@ -6861,6 +6861,7 @@ mod tests {
             buffer_reset: false,
             clear_history: false,
             widget_width: 0,
+            track_frames: 0,
         };
         let second = crate::analysis::PrecomputedSpectrogramChunk {
             track_token: 7,
@@ -6879,6 +6880,7 @@ mod tests {
             buffer_reset: false,
             clear_history: false,
             widget_width: 0,
+            track_frames: 0,
         };
 
         analysis_tx

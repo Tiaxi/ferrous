@@ -47,7 +47,8 @@ pub(super) fn window_seconds(width: u32, zoom: f32, sample_rate: u32) -> f64 {
 /// file a partial column is sent too. So the columns are the rows' frames
 /// over the column hop, rounded up, whichever column the session started
 /// at: their grid is the track's.
-pub(super) fn decoded_end_column(frames: u64, fft_size: usize, zoom: f32, sample_rate: u32) -> u64 {
+#[must_use]
+pub fn decoded_end_column(frames: u64, fft_size: usize, zoom: f32, sample_rate: u32) -> u64 {
     let hops = column_hops(fft_size, zoom, sample_rate);
     let stft_hop = usize_to_u64(hops.stft_hop.max(1));
     let Some(beyond) = frames.checked_sub(usize_to_u64(fft_size / 2)) else {

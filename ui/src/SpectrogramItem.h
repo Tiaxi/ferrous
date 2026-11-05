@@ -296,7 +296,9 @@ public:
     // the FFT size of the columns' spectra (0 if unknown, for bins of the
     // whole spectrum up to Nyquist): a session with the frequency cap on
     // sends fewer bins than `fftSize / 2 + 1`, each still
-    // `sampleRate / fftSize` Hz wide.
+    // `sampleRate / fftSize` Hz wide. `trackFrames` are the frames of the
+    // file the session's columns are of (0 if unknown), at `sampleRate`:
+    // with `fftSize`, where a session at another zoom ends.
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
@@ -305,7 +307,8 @@ public:
         bool clearHistoryOnReset = false,
         quint64 generation = 0,
         int sessionWidth = 0,
-        int fftSize = 0);
+        int fftSize = 0,
+        quint64 trackFrames = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -565,17 +568,18 @@ private:
     // (ferrous_ffi_spectrogram_render_zoom).
     double renderZoomForHopLocked(int hop, double zoom) const;
     bool zoomPreviewWantedLocked() const;
-    // The centered view that the data for the requested zoom will show,
-    // as the zoom preview places it before that data arrives, in canvas
-    // pixels `width` wide: canvas pixels per column, the window's columns,
-    // the range shown and the column under the playhead. Not valid until
-    // the requested zoom's hop and the columns a second are known.
+    // The centered view that the data for the requested zoom will show
+    // once its session has decoded the file's end, as the zoom preview
+    // places it before that data arrives, in canvas pixels `width` wide:
+    // canvas pixels per column, the window's columns, the range shown and
+    // the column the playhead is in. Not valid until the requested zoom's
+    // hop and the columns a second are known.
     struct ZoomTargetView {
         bool valid{false};
         double canvasZoom{0.0};
         int windowColumns{0};
         CenteredDisplayRange range;
-        double playheadColumn{0.0};
+        qint64 playheadColumn{0};
     };
     ZoomTargetView centeredZoomTargetLocked(
         int width,
@@ -780,6 +784,9 @@ private:
     // The FFT size of the analysis columns (0 if unknown).
     int m_precomputedFftSize{0};
     int m_precomputedTotalColumnsEstimate{0};
+    // The frames of the file the session's columns are of (0 if unknown):
+    // where a session at another zoom ends (decodedEndColumnForZoomLocked).
+    quint64 m_precomputedTrackFrames{0};
     int m_precomputedSampleRateHz{44100};
     // Whether an analysis chunk has set m_precomputedSampleRateHz.
     bool m_precomputedSampleRateKnown{false};

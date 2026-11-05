@@ -1070,6 +1070,7 @@ mod tests {
             buffer_reset: false,
             clear_history: false,
             widget_width: 0,
+            track_frames: 0,
         };
         note_precomputed_spectrogram_chunk(&mut state, &chunk);
     }

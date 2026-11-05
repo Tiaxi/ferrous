@@ -597,6 +597,9 @@ private:
         // The FFT size of the columns' spectra (0 if unknown): a bin is
         // sampleRate / fftSize Hz, whatever the bin count.
         int fftSize{0};
+        // The frames of the file the session's columns are of (0 if
+        // unknown): with fftSize, where a session at another zoom ends.
+        quint64 trackFrames{0};
         qsizetype dataBytes{0};
     };
 

@@ -20373,37 +20373,53 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
     QTest::addColumn<double>("zoom");
     QTest::addColumn<int>("hop");
     QTest::addColumn<int>("frames");
+    QTest::addColumn<bool>("lengthKnown");
     QTest::addColumn<int>("width");
     QTest::addColumn<double>("position");
     QTest::addColumn<int>("window");
     QTest::addColumn<qint64>("left");
     // Issue 436's example: 1867 columns of 300 frames, of which 1681 are
-    // 90.04%, the whole track. Centered on column 1024 at 38.4 s.
+    // 90.04%, the whole track, and 1680 89.98%. Column 1024 at 38.4 s.
     QTest::newRow("1.5x, issue example")
-        << 1.5 << 0.57 << 300 << 560'640 << 1'680 << 38.4 << 1'681 << qint64(0);
-    // A file whose columns at 0.5 come to 1867 at 0.57 as well, so that
-    // the preview's window of 1680 columns, 89.98%, did not show the whole
-    // track, and the data's did.
-    QTest::newRow("1.5x, across the whole-track lock")
-        << 1.5 << 0.57 << 300 << 560'878 << 1'680 << 38.4 << 1'681 << qint64(0);
-    // 1867 columns of 311 frames, at both zooms; column 1024 at 39.808 s.
+        << 1.5 << 0.57 << 300 << 560'640 << true << 1'680 << 38.4 << 1'681 << qint64(0);
+    // 1868 columns of 300 frames, of which 1681 are 89.99%: centered. The
+    // 1638 columns of 342 frames, rescaled, come to 1867, which the window
+    // would have shown whole.
+    QTest::newRow("1.5x, a column past the rescaled end")
+        << 1.5 << 0.57 << 300 << 561'124 << true << 1'680 << 38.4 << 1'681 << qint64(1'024 - 840);
+    // Shown whole, with the playhead three quarters into column 1024: the
+    // canvas draws it at the column's start.
+    QTest::newRow("1.5x, playhead between columns")
+        << 1.5 << 0.57 << 300 << 560'640 << true << 1'680 << 1'024.75 * 300 / 8'000
+        << 1'681 << qint64(0);
+    // A file that does not tell its length: the columns so far, rescaled,
+    // which come to the 1867 the session ends at.
+    QTest::newRow("1.5x, length not told")
+        << 1.5 << 0.57 << 300 << 560'640 << false << 1'680 << 38.4 << 1'681 << qint64(0);
+    // 1867 columns of 311 frames; column 1024 at 39.808 s.
     QTest::newRow("1.25x, across the whole-track lock")
-        << 1.25 << 0.55 << 311 << 581'524 << 1'680 << 39.808 << 1'681 << qint64(0);
+        << 1.25 << 0.55 << 311 << 581'524 << true << 1'680 << 39.808 << 1'681 << qint64(0);
     QTest::newRow("1.25x, mid-track")
-        << 1.25 << 0.55 << 311 << 581'524 << 1'600 << 39.808 << 1'601 << qint64(1'024 - 800);
+        << 1.25 << 0.55 << 311 << 581'524 << true << 1'600 << 39.808 << 1'601
+        << qint64(1'024 - 800);
 }
 
 void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDataAtFractionalScales() {
     // Until the data for a zoom arrives, the canvas on screen is shown
     // scaled to it, where the data will put it. The preview reckons the
-    // columns of the data's view as the canvas will (issue 436): the
-    // effective zoom, then the device scale. In the other order, its
-    // window was a column short of the canvas's, and across the
-    // whole-track lock, the view jumped when the data arrived.
+    // view of the data as the canvas will once the session has decoded the
+    // file's end (issue 436): its zoom is the effective zoom, then the
+    // device scale; its columns end where the decoder reckons from the
+    // file's frames; and the playhead is at the start of its column. In
+    // the other order, its window was a column short of the canvas's; by
+    // the earlier zoom's columns, rescaled, its end could be a column
+    // short; across the whole-track lock, either made the view jump when
+    // the data arrived.
     QFETCH(double, scale);
     QFETCH(double, zoom);
     QFETCH(int, hop);
     QFETCH(int, frames);
+    QFETCH(bool, lengthKnown);
     QFETCH(int, width);
     QFETCH(double, position);
     QFETCH(int, window);
@@ -20420,16 +20436,22 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
     item.setPlaying(false);
     constexpr int bins = 4;
     constexpr int rate = 8'000;
+    constexpr int fftSize = 2'048;
     constexpr int referenceHop = 171;
     constexpr int startHop = 342;
-    // A session's column estimate until it has decoded the end, and the
-    // columns of 2048-frame windows that fit in the file.
+    const quint64 trackFrames = lengthKnown ? static_cast<quint64>(frames) : 0;
+    // A session's column estimate until it has decoded the end.
     const auto estimateAt = [frames](int columnHop) {
         return static_cast<int>(
             std::ceil((frames / 1'024 + 64) * 1'024.0 / static_cast<double>(columnHop)));
     };
+    // The columns a session decodes of the file: the rows of 2048-frame
+    // windows that fit, an eighth of a window apart (or a column, if
+    // closer), in columns, the last one partial.
     const auto decodedEndAt = [frames](int columnHop) {
-        return (frames - 1'024) / columnHop + 1;
+        const int rowHop = std::min(fftSize / 8, columnHop);
+        const int rows = (frames - fftSize / 2) / rowHop + 1;
+        return (rows * rowHop + columnHop - 1) / columnHop;
     };
     // A whole session, as its chunks bring it.
     quint64 generation = 1;
@@ -20438,19 +20460,20 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
         ++generation;
         item.feedPrecomputedChunk(
             QByteArray(), bins, 0, 0, 0, estimateAt(columnHop), rate, columnHop,
-            false, true, 1, false, generation);
+            false, true, 1, false, generation, 0, fftSize, trackFrames);
         item.feedPrecomputedChunk(
             QByteArray(end * bins, '\x40'), bins, 0, end, 0, estimateAt(columnHop),
-            rate, columnHop, false, false, 1, false, generation);
+            rate, columnHop, false, false, 1, false, generation, 0, fftSize, trackFrames);
         item.feedPrecomputedChunk(
             QByteArray(), bins, 0, 0, end, end, rate, columnHop,
-            /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false, generation);
+            /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false,
+            generation, 0, fftSize, trackFrames);
     };
 
     // The pane at zoom 0.5, with all its columns in.
     item.feedPrecomputedChunk(
         QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, estimateAt(referenceHop),
-        rate, referenceHop, false, true, 1, false, generation);
+        rate, referenceHop, false, true, 1, false, generation, 0, fftSize, trackFrames);
     item.setZoomLevel(0.5);
     QVERIFY(sendPendingBackendZoom(item));
     feedSession(startHop);
@@ -20462,6 +20485,7 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(item.m_canvasScale, scale);
         QCOMPARE(item.m_precomputedHopSize, startHop);
+        QCOMPARE(item.m_precomputedTrackFrames, trackFrames);
         QVERIFY(!item.m_awaitingZoomData);
     }
 
@@ -20504,6 +20528,7 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
     // the playhead stays put, and so does the view's left edge.
     QCOMPARE(playhead->rect().x(), previewPlayheadX);
     QCOMPARE(predicted.range.left, item.m_precomputedCanvasDisplayLeft);
+    QCOMPARE(predicted.range.right, item.m_precomputedCanvasViewRight);
     QCOMPARE(predicted.windowColumns, canvasWindow);
     // Exactly: QCOMPARE would let a rounding through.
     QVERIFY2(predicted.canvasZoom == canvasZoom,

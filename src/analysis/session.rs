@@ -446,6 +446,7 @@ impl StagingChunkState {
             buffer_reset: false,
             clear_history: false,
             widget_width: 0,
+            track_frames: 0,
         })
     }
 }
@@ -532,6 +533,7 @@ fn staging_drain_stft_rows(
                 buffer_reset: false,
                 clear_history: false,
                 widget_width: 0,
+                track_frames: 0,
             };
             if tx.send(chunk).is_err() {
                 return false; // receiver dropped
@@ -1424,6 +1426,7 @@ fn run_spectrogram_session(
             buffer_reset: emit_initial_reset,
             clear_history: emit_initial_reset && clear_history_on_reset,
             widget_width: session.widget_width,
+            track_frames: session.track_frames.unwrap_or(0),
         },
     ));
 
@@ -1658,6 +1661,7 @@ fn fail_session(
             buffer_reset: true,
             clear_history: true,
             widget_width: 0,
+            track_frames: 0,
         },
     ));
     if let Some(error) = error {
@@ -2403,6 +2407,7 @@ fn handle_session_seek(
             buffer_reset: true,
             clear_history: false,
             widget_width: session.widget_width,
+            track_frames: session.track_frames.unwrap_or(0),
         },
     ));
     let _ = reports.send(SessionReport::Repositioned {
@@ -2900,6 +2905,7 @@ fn session_send_full_chunk(
             buffer_reset: false,
             clear_history: false,
             widget_width: session.widget_width,
+            track_frames: session.track_frames.unwrap_or(0),
         },
     ));
     session.chunk_start_index = session.columns_produced;
@@ -3107,6 +3113,7 @@ fn session_emit_pending_chunk(
                 buffer_reset: false,
                 clear_history: false,
                 widget_width: session.widget_width,
+                track_frames: session.track_frames.unwrap_or(0),
             },
         ));
         session.chunk_columns = 0;
@@ -3149,6 +3156,7 @@ fn session_flush_token(
             buffer_reset: false,
             clear_history: false,
             widget_width: session.widget_width,
+            track_frames: session.track_frames.unwrap_or(0),
         },
     ));
 }
@@ -3192,6 +3200,7 @@ fn session_emit_finalize_chunk(
             buffer_reset: false,
             clear_history: false,
             widget_width: session.widget_width,
+            track_frames: session.track_frames.unwrap_or(0),
         },
     ));
 }
@@ -5936,6 +5945,50 @@ mod tests {
     }
 
     #[test]
+    fn chunks_carry_the_frames_the_session_places_its_views_by() {
+        // The UI predicts where a session at another zoom will end from the
+        // file's frames and the FFT size (issue 436), as the decoder does:
+        // every chunk carries them, and the session ends where they say.
+        let path = write_tone_fixture("track-frames", 2, 8_000);
+        let (commands, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let (reports, _report_rx) = unbounded();
+        let worker = std::thread::spawn(move || {
+            spectrogram_worker_loop(
+                &command_rx,
+                &events,
+                &AtomicU64::new(1),
+                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
+                &reports,
+            );
+        });
+        commands.send(session_on(&path, 1, 1)).unwrap();
+        let mut chunks = 0;
+        let last = loop {
+            let chunk = next_chunk(&event_rx);
+            chunks += 1;
+            assert_eq!(chunk.track_frames, 16_000);
+            if chunk.complete {
+                break chunk;
+            }
+        };
+        assert!(chunks > 1);
+        assert_eq!(
+            u64::from(last.total_columns_estimate),
+            super::super::spectrogram_decoded_end_column(
+                16_000,
+                usize::try_from(last.fft_size).unwrap(),
+                1.0,
+                8_000
+            )
+        );
+        drop(commands);
+        worker.join().expect("worker");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn a_continuation_without_a_session_is_rejected_and_starts_nothing() {
         let path = write_tone_fixture("fallback", 1, 8_000);
         let missing = path.with_extension("missing.wav");
@@ -6163,6 +6216,7 @@ mod tests {
             buffer_reset: true,
             clear_history: true,
             widget_width: 0,
+            track_frames: 0,
         };
         if let SpectrogramWorkerCommand::NewTrack {
             emit_initial_reset,

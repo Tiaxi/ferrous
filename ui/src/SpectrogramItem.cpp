@@ -2374,7 +2374,8 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
         if (!target.valid) {
             return preview;
         }
-        preview.toX = (target.playheadColumn - static_cast<double>(target.range.left))
+        // The playhead's column, a whole one, as the canvas places it.
+        preview.toX = static_cast<double>(target.playheadColumn - target.range.left)
             * target.canvasZoom;
     }
     preview.scale = scale;
@@ -2398,29 +2399,42 @@ SpectrogramItem::ZoomTargetView SpectrogramItem::centeredZoomTargetLocked(
     // reckon it, so that the window has the columns the canvas will.
     target.canvasZoom =
         canvasZoomForHopLocked(targetHop, renderZoomForHopLocked(targetHop, backendZoom));
-    // The columns so far, in the requested zoom's columns.
-    const double toTargetColumns = targetColumnsPerSecond / columnsPerSecond;
-    const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-        : static_cast<qint64>(0);
-    const qint64 targetMaxColCount = static_cast<qint64>(
-        std::llround(static_cast<double>(maxColCount) * toTargetColumns));
-    const qint64 targetEstimateCount = std::max<qint64>(1, static_cast<qint64>(
-        std::llround(static_cast<double>(m_precomputedTotalColumnsEstimate)
-            * toTargetColumns)));
-    const double targetColumnF = positionSeconds * targetColumnsPerSecond;
-    const qint64 targetNowCol = static_cast<qint64>(std::floor(targetColumnF));
+    // Where the data's session ends once it has decoded the file's end: as
+    // the decoder reckons it from the file's frames, when the file tells
+    // them. Its columns end at a whole column of their own, which the
+    // columns so far, rescaled, can miss by one, and with it the
+    // whole-track lock.
+    const qint64 targetEnd = m_precomputedTrackFrames > 0 && m_precomputedFftSize > 0
+        ? static_cast<qint64>(std::min<std::uint64_t>(
+            ferrous_ffi_spectrogram_decoded_end_column(
+                m_precomputedTrackFrames,
+                static_cast<std::uint32_t>(m_precomputedFftSize),
+                static_cast<float>(backendZoom),
+                static_cast<std::uint32_t>(m_precomputedSampleRateHz)),
+            static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())))
+        : 0;
+    qint64 targetMaxColCount = targetEnd;
+    qint64 targetEstimateCount = targetEnd;
+    if (targetEnd <= 0) {
+        // A length the file does not tell: the columns so far, in the
+        // requested zoom's columns.
+        const double toTargetColumns = targetColumnsPerSecond / columnsPerSecond;
+        const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+            : static_cast<qint64>(0);
+        targetMaxColCount = static_cast<qint64>(
+            std::llround(static_cast<double>(maxColCount) * toTargetColumns));
+        targetEstimateCount = std::max<qint64>(1, static_cast<qint64>(
+            std::llround(static_cast<double>(m_precomputedTotalColumnsEstimate)
+                * toTargetColumns)));
+    }
+    target.playheadColumn =
+        static_cast<qint64>(std::floor(positionSeconds * targetColumnsPerSecond));
     target.windowColumns = static_cast<int>(
         std::ceil(static_cast<double>(width) / target.canvasZoom));
     target.range = centeredDisplayRange(
-        targetNowCol, target.windowColumns, targetMaxColCount, targetEstimateCount,
+        target.playheadColumn, target.windowColumns, targetMaxColCount, targetEstimateCount,
         targetColumnsPerSecond);
-    const bool scrolls = centeredRangeScrolls(
-        target.range.left, target.range.right, targetMaxColCount, targetEstimateCount,
-        target.range.decodedTailLooksFinal);
-    target.playheadColumn = scrolls
-        ? static_cast<double>(targetNowCol)
-        : targetColumnF;
     target.valid = true;
     return target;
 }
@@ -2627,7 +2641,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
-    quint64 generation, int sessionWidth, int fftSize) {
+    quint64 generation, int sessionWidth, int fftSize, quint64 trackFrames) {
     QMutexLocker lock(&m_stateMutex);
     if (m_storageReleased) {
         // No one sees it: it keeps no columns until it is shown again.
@@ -2895,6 +2909,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         if (totalEstimate > 0) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
         }
+        m_precomputedTrackFrames = trackFrames;
         if (sampleRate > 0) {
             m_precomputedSampleRateHz = sampleRate;
             m_precomputedSampleRateKnown = true;
@@ -3089,6 +3104,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (totalEstimate > 0) {
         m_precomputedTotalColumnsEstimate = totalEstimate;
     }
+    m_precomputedTrackFrames = trackFrames;
 
     // Only update rate/hop from chunks that carry actual column data.
     if (columns > 0) {
@@ -3553,6 +3569,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedCommittedToken = 0;
     m_precomputedBinsPerColumn = 0;
     m_precomputedFftSize = 0;
+    m_precomputedTrackFrames = 0;
     // Don't zero m_precomputedTotalColumnsEstimate here — it represents
     // the track length and should persist across resets. Zeroing it
     // creates a window where the worker's doubled estimate bypasses

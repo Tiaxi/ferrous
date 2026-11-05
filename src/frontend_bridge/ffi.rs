@@ -1221,6 +1221,31 @@ pub extern "C" fn ferrous_ffi_spectrogram_effective_zoom(
     )
 }
 
+/// The column after the last that a spectrogram session at `zoom`, with
+/// `fft_size`-sample windows, decodes of a file of `frames` frames at
+/// `sample_rate`: where the centered view of the file ends once the session
+/// has decoded its end. The decoder places its centered views by it.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_decoded_end_column(
+    frames: u64,
+    fft_size: u32,
+    zoom: f32,
+    sample_rate: u32,
+) -> u64 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_decoded_end_column",
+        |_| 0,
+        || {
+            crate::analysis::spectrogram_decoded_end_column(
+                frames,
+                usize::try_from(fft_size).unwrap_or(usize::MAX),
+                zoom,
+                sample_rate,
+            )
+        },
+    )
+}
+
 /// The column hop of spectrogram data of audio at `sample_rate` at zoom
 /// 1, which zoom levels are relative to.
 #[no_mangle]
@@ -3336,10 +3361,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 /// [44]     u8   clear_history (0 or 1)
 /// [45..49] u32  widget_width (the session's, in logical pixels; 0 = unknown)
 /// [49..53] u32  fft_size (a bin is sample_rate_hz / fft_size Hz; 0 = unknown)
-/// [53..]   column_data (column_count × channel_count × bins_per_column bytes)
+/// [53..61] u64  track_frames (the file's, for its sessions' ends; 0 = unknown)
+/// [61..]   column_data (column_count × channel_count × bins_per_column bytes)
 /// ```
 fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> Vec<u8> {
-    let header_len = 53;
+    let header_len = 61;
     let data_len = chunk.columns_u8.len();
     let total_len = header_len + data_len;
 
@@ -3362,6 +3388,7 @@ fn encode_precomputed_spectrogram_chunk(chunk: &PrecomputedSpectrogramChunk) -> 
     out.push(u8::from(chunk.clear_history));
     out.extend_from_slice(&chunk.widget_width.to_le_bytes());
     out.extend_from_slice(&chunk.fft_size.to_le_bytes());
+    out.extend_from_slice(&chunk.track_frames.to_le_bytes());
     out.extend_from_slice(&chunk.columns_u8);
     out
 }
@@ -3414,6 +3441,36 @@ mod error_packet_tests {
         );
         assert!(zoom < 1.0);
         assert_eq!((1_680.0_f64 / zoom).ceil(), 1_681.0);
+    }
+
+    #[test]
+    fn the_spectrogram_decoded_end_is_the_decoders() {
+        // Qt predicts where a session at another zoom ends with this, as
+        // the decoder places its views (issue 436): 561,124 frames at
+        // 8 kHz end at column 1868 at zoom 0.57, though the 1638 columns of
+        // zoom 0.5 come to 1867 of its columns.
+        for (frames, fft, zoom) in [
+            (561_124, 2_048, 0.57_f32),
+            (561_124, 2_048, 0.5),
+            (1_023, 2_048, 1.0),
+        ] {
+            assert_eq!(
+                super::ferrous_ffi_spectrogram_decoded_end_column(frames, fft, zoom, 8_000),
+                crate::analysis::spectrogram_decoded_end_column(frames, 2_048, zoom, 8_000)
+            );
+        }
+        assert_eq!(
+            super::ferrous_ffi_spectrogram_decoded_end_column(561_124, 2_048, 0.57, 8_000),
+            1_868
+        );
+        assert_eq!(
+            super::ferrous_ffi_spectrogram_decoded_end_column(561_124, 2_048, 0.5, 8_000),
+            1_638
+        );
+        assert_eq!(
+            super::ferrous_ffi_spectrogram_decoded_end_column(1_023, 2_048, 1.0, 8_000),
+            0
+        );
     }
 
     #[test]
@@ -5709,11 +5766,13 @@ mod tests {
             buffer_reset: true,
             clear_history: true,
             widget_width: 3_440,
+            // More than 32 bits.
+            track_frames: 5_000_000_000,
         };
 
         let frame = encode_precomputed_spectrogram_chunk(&chunk);
         let payload_len = u32::from_le_bytes(frame[0..4].try_into().expect("length prefix"));
-        assert_eq!(payload_len, 53 + 4);
+        assert_eq!(payload_len, 61 + 4);
 
         let mut offset = 4usize;
         assert_eq!(frame[offset], PRECOMPUTED_SPECTROGRAM_MAGIC);
@@ -5735,7 +5794,8 @@ mod tests {
         offset += 3;
         assert_eq!(read_u32(&frame, &mut offset), 3_440);
         assert_eq!(read_u32(&frame, &mut offset), 8_192);
-        assert_eq!(offset, 4 + 53);
+        assert_eq!(read_u64(&frame, &mut offset), 5_000_000_000);
+        assert_eq!(offset, 4 + 61);
         assert_eq!(&frame[offset..], chunk.columns_u8.as_slice());
     }
 
@@ -5760,6 +5820,7 @@ mod tests {
             buffer_reset: start_column_index == 0,
             clear_history: start_column_index == 0,
             widget_width: 0,
+            track_frames: 0,
         }
     }
 
@@ -5804,6 +5865,7 @@ mod tests {
             buffer_reset: start == 0,
             clear_history: start == 0,
             widget_width: 0,
+            track_frames: 0,
         })
     }
 
