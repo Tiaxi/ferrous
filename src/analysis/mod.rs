@@ -1815,9 +1815,11 @@ impl AnalysisRuntimeState {
     }
 
     /// Track duration (seconds) of the active worker session's file, as
-    /// published by the decode worker after its file probe.  Returns 0.0
-    /// when unknown (no session yet, probe pending, or degenerate
-    /// estimate) so callers can fall back to playhead-relative margins.
+    /// published by the decode worker after its file probe: where the
+    /// track ends, without the allowance of the column estimate, as the
+    /// Qt view ends where the decode does.  Returns 0.0 when unknown (no
+    /// session yet, probe pending, or a file that does not tell its
+    /// length) so callers can fall back to playhead-relative margins.
     fn centered_track_duration_seconds(ctx: &AnalysisContext<'_>) -> f64 {
         let ms = ctx.spectrogram_track_duration_ms.load(Ordering::Relaxed);
         // Track durations are far below f64's exact-integer range, so the

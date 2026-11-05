@@ -74,25 +74,38 @@ pub(super) struct SymphoniaFile {
 /// it shows more.
 const UNKNOWN_LENGTH_SECONDS: u64 = 300;
 
-/// The length of a file, in reference-hop columns, as far as opening it
-/// tells.
+/// The columns of [`ESTIMATE_COLUMN_FRAMES`] frames a column estimate
+/// counts past the end of a track. The estimate sizes the UI's buffers and
+/// bounds its view until a session has decoded the end, and the decoder's
+/// last columns must not run past it, or the session would take the
+/// estimate for too small and double it. The allowance is not part of the
+/// track: nothing that places or covers a view may count it.
+const ESTIMATE_ALLOWANCE_COLUMNS: u64 = 64;
+
+/// The column estimate of a track of `frames` frames: its columns of
+/// [`ESTIMATE_COLUMN_FRAMES`] frames, and [`ESTIMATE_ALLOWANCE_COLUMNS`].
+pub(super) fn columns_estimate(frames: u64) -> u32 {
+    let columns = frames / (ESTIMATE_COLUMN_FRAMES as u64) + ESTIMATE_ALLOWANCE_COLUMNS;
+    u32::try_from(columns).unwrap_or(u32::MAX)
+}
+
+/// The length of a file as far as opening it tells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TrackLength {
-    /// Includes the 64-column STFT-edge allowance of Qt's estimate.
-    pub(super) columns: u32,
-    /// Whether the file told it. Otherwise `columns` only sizes the UI's
+    /// The frames the file says it holds, where the track ends; `None` if
+    /// it does not tell.
+    pub(super) frames: Option<u64>,
+    /// The [`columns_estimate`] of those frames, or of a placeholder
+    /// length if the file does not tell it. It only sizes the UI's
     /// buffers, and says nothing of where the track ends.
-    pub(super) known: bool,
+    pub(super) columns: u32,
 }
 
 impl TrackLength {
     fn of_frames(frames: Option<u64>, sample_rate: u64) -> Self {
-        let columns = (frames.unwrap_or(sample_rate * UNKNOWN_LENGTH_SECONDS)
-            / (ESTIMATE_COLUMN_FRAMES as u64))
-            + 64;
         Self {
-            columns: u32::try_from(columns).unwrap_or(u32::MAX),
-            known: frames.is_some(),
+            frames,
+            columns: columns_estimate(frames.unwrap_or(sample_rate * UNKNOWN_LENGTH_SECONDS)),
         }
     }
 }
@@ -1568,7 +1581,9 @@ mod tests {
         std::fs::remove_file(&path).expect("remove fixture");
         let (_, rate, _, length) = opened.expect("open");
         assert_eq!(rate, 48_000);
-        assert!(length.known, "{length:?}");
+        let frames = length.frames.expect("a known length");
+        // The frames without the estimate's allowance.
+        assert!(frames.abs_diff(720 * 32 * 1536) < 10 * 1024, "{length:?}");
         let expected = 720.0 * 32.0 * 1536.0 / 1024.0 + 64.0;
         assert!(
             (f64::from(length.columns) - expected).abs() < 10.0,
@@ -1581,15 +1596,17 @@ mod tests {
         assert_eq!(
             TrackLength::of_frames(None, 48_000),
             TrackLength {
+                frames: None,
                 columns: 14_126,
-                known: false
             }
         );
+        // The frames as the file tells them; the estimate with its
+        // allowance.
         assert_eq!(
             TrackLength::of_frames(Some(48_000), 48_000),
             TrackLength {
+                frames: Some(48_000),
                 columns: 110,
-                known: true
             }
         );
     }
@@ -1644,7 +1661,7 @@ mod tests {
         std::fs::write(&path, ripped_dts_cd_bytes(TEST_DTS_44K).0).expect("write fixture");
         let (mut source, rate, channels, length) = open_audio_file(&path).expect("open");
         assert_eq!((rate, channels), (44_100, 1));
-        assert!(length.known, "{length:?}");
+        assert!(length.frames.is_some(), "{length:?}");
 
         let mut samples = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
