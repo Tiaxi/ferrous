@@ -36,9 +36,10 @@ ToolBar {
     required property var seekCommitted
 
     readonly property alias seekPressed: seekSlider.pressed
-    // The time of one device pixel of the seek bar: the smallest move of the
-    // position it shows, so the position needs to change no more often.
-    readonly property real positionStepSeconds: seekSlider.to / seekSlider.barDevicePixels
+    // The time of one device pixel of the seek bar's playhead: the smallest
+    // move of the position it shows, so the position needs to change no more
+    // often.
+    readonly property real positionStepSeconds: seekSlider.to / seekSlider.travelDevicePixels
     readonly property bool volumeSilent: root.volumeMuted
         || root.normalizedVolumeValue(root.uiBridge.volume) <= 0.0001
 
@@ -161,12 +162,28 @@ ToolBar {
                 : Screen.devicePixelRatio
             // The bar's width in device pixels.
             readonly property real barDevicePixels: Math.max(1, Math.round(width * windowDevicePixelRatio))
-            // The position the bar draws. Playback moves it by whole device
-            // pixels of the bar, so the window draws no frame for a move it
-            // would not show; a gesture's is drawn as it is.
-            readonly property real stableVisualPosition: !seekAllowed ? 0.0
-                : adjusting ? visualPosition
-                : Math.round(visualPosition * barDevicePixels) / barDevicePixels
+            // The playhead is one line, two logical pixels wide, with an
+            // outline of one on each side; each is a whole number of device
+            // pixels, so the line keeps its width and brightness as it moves.
+            readonly property int playheadLineDevicePixels: Math.max(1, Math.round(2 * windowDevicePixelRatio))
+            readonly property real playheadLineWidth: playheadLineDevicePixels / windowDevicePixelRatio
+            readonly property real playheadOutlineWidth:
+                Math.max(1, Math.round(windowDevicePixelRatio)) / windowDevicePixelRatio
+            // The device pixels the line's left edge moves over: the bar's,
+            // less the line's, so the line stays on the bar at either end.
+            readonly property real travelDevicePixels: Math.max(1, barDevicePixels - playheadLineDevicePixels)
+            // The left edge of the line on the bar, on whole device pixels,
+            // so the line moves only by whole pixels and the window draws no
+            // frame for a move it would not show.
+            readonly property real playheadX: !seekAllowed ? 0.0
+                : Math.round(visualPosition * travelDevicePixels) / windowDevicePixelRatio
+            // The handle is a grab target wider than the line and not drawn.
+            // Padding of half their difference outside the bar puts the
+            // handle's centre, which a press or drag moves under the
+            // pointer, on the line's centre at every position.
+            readonly property real grabTargetWidth: 10
+            leftPadding: (playheadLineWidth - grabTargetWidth) / 2
+            rightPadding: (playheadLineWidth - grabTargetWidth) / 2
 
             enabled: seekAllowed
             // The arrow keys', the wheel's and assistive technology's step.
@@ -277,44 +294,55 @@ ToolBar {
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
                     visible: seekSlider.seekAllowed
-                    width: parent.width * seekSlider.stableVisualPosition
+                    // Up to the playhead's line.
+                    width: seekSlider.playheadX
                     color: ColorUtils.withAlpha(root.uiPalette.uiAccentColor, 0.26)
                 }
 
+                // The playhead: its outline, cut to the bar at either end,
+                // with the line in it. One of the two contrasts with
+                // whatever is behind them.
                 Rectangle {
                     objectName: "seekPlayhead"
                     visible: seekSlider.seekAllowed
-                    width: 1
-                    antialiasing: true
+                    antialiasing: false
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    x: seekSlider.stableVisualPosition * (parent.width - 1)
-                    color: root.uiPalette.uiAccentColor
+                    x: Math.max(0, seekSlider.playheadX - seekSlider.playheadOutlineWidth)
+                    width: Math.min(parent.width, seekSlider.playheadX + seekSlider.playheadLineWidth
+                        + seekSlider.playheadOutlineWidth) - x
+                    color: root.uiPalette.uiPlayheadOutlineColor
+
+                    Rectangle {
+                        objectName: "seekPlayheadLine"
+                        antialiasing: false
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        x: seekSlider.playheadX - parent.x
+                        width: seekSlider.playheadLineWidth
+                        color: root.uiPalette.uiPlayheadColor
+                    }
                 }
             }
 
-            handle: Rectangle {
-                objectName: "seekHandle"
+            // The grab target, centred on the playhead's line; it draws
+            // nothing.
+            handle: Item {
+                objectName: "seekGrabTarget"
                 visible: seekSlider.seekAllowed
-                x: seekSlider.leftPadding + seekSlider.stableVisualPosition
-                    * (seekSlider.availableWidth - width)
+                x: seekSlider.playheadX + (seekSlider.playheadLineWidth - width) / 2
                 y: seekSlider.topPadding + (seekSlider.availableHeight - height) / 2
-                implicitWidth: 3
+                implicitWidth: seekSlider.grabTargetWidth
                 // From the background's height rather than the slider's,
                 // which depends on the handle's.
                 implicitHeight: root.uiPalette.rowHeight - 4
-                radius: 1
-                color: root.uiPalette.uiAccentColor
-                border.color: ColorUtils.mixColor(
-                    root.uiPalette.uiAccentColor, root.uiPalette.uiTextColor, 0.3)
             }
 
             Item {
                 id: seekDragOverlay
                 visible: seekSlider.adjusting && seekSlider.seekAllowed
                 z: 20
-                property real playheadX: seekSlider.leftPadding
-                    + seekSlider.stableVisualPosition * seekSlider.availableWidth
+                property real playheadX: seekSlider.playheadX + seekSlider.playheadLineWidth / 2
                 property real leftCandidateX: playheadX - width - 8
                 property real rightCandidateX: playheadX + 8
                 width: dragTimeLabel.implicitWidth + 14
