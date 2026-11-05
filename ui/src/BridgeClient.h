@@ -600,6 +600,8 @@ private:
         // The frames of the file the session's columns are of (0 if
         // unknown): with fftSize, where a session at another zoom ends.
         quint64 trackFrames{0};
+        // Where the session's centered view ends (0 if unknown).
+        int endColumn{0};
         qsizetype dataBytes{0};
     };
 

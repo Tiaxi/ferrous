@@ -447,6 +447,7 @@ impl StagingChunkState {
             clear_history: false,
             widget_width: 0,
             track_frames: 0,
+            end_column: 0,
         })
     }
 }
@@ -534,6 +535,7 @@ fn staging_drain_stft_rows(
                 clear_history: false,
                 widget_width: 0,
                 track_frames: 0,
+                end_column: 0,
             };
             if tx.send(chunk).is_err() {
                 return false; // receiver dropped
@@ -1427,6 +1429,7 @@ fn run_spectrogram_session(
             clear_history: emit_initial_reset && clear_history_on_reset,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
+            end_column: chunk_end_column(&session),
         },
     ));
 
@@ -1662,6 +1665,7 @@ fn fail_session(
             clear_history: true,
             widget_width: 0,
             track_frames: 0,
+            end_column: 0,
         },
     ));
     if let Some(error) = error {
@@ -2141,7 +2145,18 @@ fn session_seek_start_seconds(session: &SpectrogramSessionState, position_second
 /// published frames, which for a raw stream are an estimate that can run
 /// past the audio.
 fn session_view(session: &SpectrogramSessionState) -> CenteredView {
-    let end = match (session.timeline_of, session.end_column) {
+    CenteredView::new(
+        session.widget_width,
+        session.zoom_level,
+        session.effective_rate,
+        session_end_column(session),
+    )
+}
+
+/// The column after the session's last of the track, which its centered
+/// view ends at: see [`session_view`].
+fn session_end_column(session: &SpectrogramSessionState) -> Option<u64> {
+    match (session.timeline_of, session.end_column) {
         (ColumnTimeline::PlayingFile, Some(end)) => Some(end),
         (ColumnTimeline::PlayingFile, None) => session.track_frames.map(|frames| {
             centered_view::decoded_end_column(
@@ -2152,13 +2167,15 @@ fn session_view(session: &SpectrogramSessionState) -> CenteredView {
             )
         }),
         (ColumnTimeline::EarlierFile { .. }, _) => None,
-    };
-    CenteredView::new(
-        session.widget_width,
-        session.zoom_level,
-        session.effective_rate,
-        end,
-    )
+    }
+}
+
+/// [`session_end_column`] as a chunk carries it: 0 if unknown. The UI's
+/// centered view ends there, as the decoder's does, and cannot reckon it
+/// from the hop alone: at the reference hop, zooms just above 1 run the
+/// STFT a column apart, and zoom 1 an eighth of a window apart.
+fn chunk_end_column(session: &SpectrogramSessionState) -> u32 {
+    u64_to_u32_saturating(session_end_column(session).unwrap_or(0))
 }
 
 /// Take a seek to `position_seconds`. A rolling view shows what plays from
@@ -2408,6 +2425,7 @@ fn handle_session_seek(
             clear_history: false,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
+            end_column: chunk_end_column(session),
         },
     ));
     let _ = reports.send(SessionReport::Repositioned {
@@ -2906,6 +2924,7 @@ fn session_send_full_chunk(
             clear_history: false,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
+            end_column: chunk_end_column(session),
         },
     ));
     session.chunk_start_index = session.columns_produced;
@@ -3114,6 +3133,7 @@ fn session_emit_pending_chunk(
                 clear_history: false,
                 widget_width: session.widget_width,
                 track_frames: session.track_frames.unwrap_or(0),
+                end_column: chunk_end_column(session),
             },
         ));
         session.chunk_columns = 0;
@@ -3157,6 +3177,7 @@ fn session_flush_token(
             clear_history: false,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
+            end_column: chunk_end_column(session),
         },
     ));
 }
@@ -3201,6 +3222,7 @@ fn session_emit_finalize_chunk(
             clear_history: false,
             widget_width: session.widget_width,
             track_frames: session.track_frames.unwrap_or(0),
+            end_column: chunk_end_column(session),
         },
     ));
 }
@@ -5949,6 +5971,9 @@ mod tests {
         // The UI predicts where a session at another zoom will end from the
         // file's frames and the FFT size (issue 436), as the decoder does:
         // every chunk carries them, and the session ends where they say.
+        // Every chunk carries that end too, from the first: the UI's
+        // centered view ends there, as the decoder's does, before the
+        // session has decoded it.
         let path = write_tone_fixture("track-frames", 2, 8_000);
         let (commands, command_rx) = unbounded();
         let (events, event_rx) = unbounded();
@@ -5964,25 +5989,29 @@ mod tests {
             );
         });
         commands.send(session_on(&path, 1, 1)).unwrap();
-        let mut chunks = 0;
+        let mut chunks = Vec::new();
         let last = loop {
             let chunk = next_chunk(&event_rx);
-            chunks += 1;
-            assert_eq!(chunk.track_frames, 16_000);
-            if chunk.complete {
-                break chunk;
+            let complete = chunk.complete;
+            chunks.push(chunk);
+            if complete {
+                break chunks.last().unwrap();
             }
         };
-        assert!(chunks > 1);
-        assert_eq!(
-            u64::from(last.total_columns_estimate),
-            super::super::spectrogram_decoded_end_column(
-                16_000,
-                usize::try_from(last.fft_size).unwrap(),
-                1.0,
-                8_000
-            )
+        assert!(chunks.len() > 1);
+        let end = super::super::spectrogram_decoded_end_column(
+            16_000,
+            usize::try_from(last.fft_size).unwrap(),
+            1.0,
+            8_000,
         );
+        assert_eq!(u64::from(last.total_columns_estimate), end);
+        // The estimate before the end runs past it, by its allowance.
+        assert!(u64::from(chunks[0].total_columns_estimate) > end);
+        for chunk in &chunks {
+            assert_eq!(chunk.track_frames, 16_000);
+            assert_eq!(u64::from(chunk.end_column), end);
+        }
         drop(commands);
         worker.join().expect("worker");
         std::fs::remove_file(path).unwrap();
@@ -6217,6 +6246,7 @@ mod tests {
             clear_history: true,
             widget_width: 0,
             track_frames: 0,
+            end_column: 0,
         };
         if let SpectrogramWorkerCommand::NewTrack {
             emit_initial_reset,

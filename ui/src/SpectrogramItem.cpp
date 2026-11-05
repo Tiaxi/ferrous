@@ -1464,6 +1464,24 @@ SpectrogramItem::CenteredDisplayRange SpectrogramItem::centeredDisplayRange(
     return range;
 }
 
+SpectrogramItem::CenteredColumns SpectrogramItem::centeredColumnsLocked() const {
+    CenteredColumns columns;
+    const qint64 decoded = m_precomputedMaxColumnIndex >= 0
+        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+        : static_cast<qint64>(0);
+    if (m_precomputedEndColumn > 0) {
+        // Where the decoder's views end (src/analysis/session.rs): the
+        // view and the decode agree on it before the session reaches it.
+        columns.endKnown = true;
+        columns.end = m_precomputedEndColumn;
+        columns.maxColCount = decoded >= columns.end ? decoded : 0;
+    } else {
+        columns.end = m_precomputedTotalColumnsEstimate;
+        columns.maxColCount = decoded;
+    }
+    return columns;
+}
+
 SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     double positionSeconds,
     int canvasWidth,
@@ -1478,12 +1496,9 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
     // Use maxColumnIndex (actual decoded extent) only as a right-edge clamp
     // at EOF: this makes the playhead detach from center at track end
     // without affecting the display during fill.
-    const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-        : static_cast<qint64>(0);
-    const qint64 estimateCount = std::max(
-        static_cast<qint64>(m_precomputedTotalColumnsEstimate),
-        static_cast<qint64>(1));
+    const CenteredColumns columns = centeredColumnsLocked();
+    const qint64 maxColCount = columns.maxColCount;
+    const qint64 estimateCount = std::max<qint64>(columns.end, 1);
     const CenteredDisplayRange range = centeredDisplayRange(
         nowCol, visibleWindowCols, maxColCount, estimateCount, columnsPerSecond);
     CenteredView view;
@@ -2399,11 +2414,11 @@ SpectrogramItem::ZoomTargetView SpectrogramItem::centeredZoomTargetLocked(
     // reckon it, so that the window has the columns the canvas will.
     target.canvasZoom =
         canvasZoomForHopLocked(targetHop, renderZoomForHopLocked(targetHop, backendZoom));
-    // Where the data's session ends once it has decoded the file's end: as
-    // the decoder reckons it from the file's frames, when the file tells
-    // them. Its columns end at a whole column of their own, which the
-    // columns so far, rescaled, can miss by one, and with it the
-    // whole-track lock.
+    // Where the data's session ends, which its view ends at from its first
+    // chunk (centeredColumnsLocked): as the decoder reckons it from the
+    // file's frames at the requested zoom, when the file tells them. Its
+    // columns end at a whole column of their own, which the columns so
+    // far, rescaled, can miss by one, and with it the whole-track lock.
     const qint64 targetEnd = m_precomputedTrackFrames > 0 && m_precomputedFftSize > 0
         ? static_cast<qint64>(std::min<std::uint64_t>(
             ferrous_ffi_spectrogram_decoded_end_column(
@@ -2535,10 +2550,13 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         // 2. The newest column in the ring covers the display's
         //    right edge (playheadCol + screenWidth/2), so the
         //    display won't have a black region on the right.
-        // Both are capped at totalEstimate for max zoom-out.
+        // Both are capped at the track's end for max zoom-out: where the
+        // centered view ends.
+        const CenteredColumns columns = centeredColumnsLocked();
+        const int trackEnd = static_cast<int>(columns.end);
         const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
-        const int fillWidth = m_precomputedTotalColumnsEstimate > 0
-            ? std::min(screenWidth, m_precomputedTotalColumnsEstimate)
+        const int fillWidth = trackEnd > 0
+            ? std::min(screenWidth, trackEnd)
             : screenWidth;
         const bool ringHasEnoughColumns =
             ringFill >= static_cast<qint64>(fillWidth) - 16;
@@ -2551,11 +2569,9 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
             0.0, currentRenderPositionSecondsLocked(m_now()));
         const qint64 displayRightCol = static_cast<qint64>(
             playheadSeconds * cps) + screenWidth / 2;
-        const qint64 displayRightCapped =
-            m_precomputedTotalColumnsEstimate > 0
-                ? std::min(displayRightCol,
-                    static_cast<qint64>(m_precomputedTotalColumnsEstimate))
-                : displayRightCol;
+        const qint64 displayRightCapped = trackEnd > 0
+            ? std::min(displayRightCol, static_cast<qint64>(trackEnd))
+            : displayRightCol;
         const bool ringCoversDisplayRight =
             m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
 
@@ -2569,8 +2585,7 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         const int visibleWindowCols = static_cast<int>(std::ceil(
             static_cast<double>(screenWidth)
             / std::max(0.001, effectiveZoomLocked())));
-        const qint64 estimateCount = std::max<qint64>(
-            static_cast<qint64>(m_precomputedTotalColumnsEstimate), 1);
+        const qint64 estimateCount = std::max<qint64>(static_cast<qint64>(trackEnd), 1);
         const qint64 nowCol = static_cast<qint64>(playheadSeconds * cps);
         qint64 displayLeftCol;
         if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
@@ -2598,12 +2613,15 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         // persists forever and the old canvas leaves a slice of
         // stale content at the right edge.  Once maxCol is within
         // a reasonable slack of the estimate, no more data is
-        // coming; clear the freeze so the rebuild can run.
-        const bool decodeReachedEnd =
-            m_precomputedTotalColumnsEstimate > 0
-            && m_precomputedMaxColumnIndex >= 0
-            && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
-                >= static_cast<qint64>(m_precomputedTotalColumnsEstimate);
+        // coming; clear the freeze so the rebuild can run. A known end is
+        // where the columns end: they have reached it, or not.
+        const bool decodeReachedEnd = columns.endKnown
+            ? m_precomputedMaxColumnIndex >= 0
+                && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 >= columns.end
+            : trackEnd > 0
+                && m_precomputedMaxColumnIndex >= 0
+                && static_cast<qint64>(m_precomputedMaxColumnIndex) + 1 + 64
+                    >= static_cast<qint64>(trackEnd);
 
         if (m_seekFillActive) {
             // After a seek the worker decodes the playhead's columns
@@ -2641,7 +2659,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     int columns, int startIndex, int totalEstimate,
     int sampleRate, int hopSize, bool complete,
     bool bufferReset, quint64 trackToken, bool clearHistoryOnReset,
-    quint64 generation, int sessionWidth, int fftSize, quint64 trackFrames) {
+    quint64 generation, int sessionWidth, int fftSize, quint64 trackFrames, int endColumn) {
     QMutexLocker lock(&m_stateMutex);
     if (m_storageReleased) {
         // No one sees it: it keeps no columns until it is shown again.
@@ -2696,6 +2714,12 @@ void SpectrogramItem::feedPrecomputedChunk(
             && m_precomputedTotalColumnsEstimate > 0
             && static_cast<int>(totalEstimate) < m_precomputedTotalColumnsEstimate) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
+            m_precomputedCanvasDirty = true;
+        }
+        // The end the session reached, which its earlier chunks reckoned
+        // from the file's frames.
+        if (std::max(0, endColumn) != m_precomputedEndColumn) {
+            m_precomputedEndColumn = std::max(0, endColumn);
             m_precomputedCanvasDirty = true;
         }
         // The session has ended, and sent every column it decodes, the
@@ -2910,6 +2934,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedTotalColumnsEstimate = totalEstimate;
         }
         m_precomputedTrackFrames = trackFrames;
+        m_precomputedEndColumn = std::max(0, endColumn);
         if (sampleRate > 0) {
             m_precomputedSampleRateHz = sampleRate;
             m_precomputedSampleRateKnown = true;
@@ -3105,6 +3130,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedTotalColumnsEstimate = totalEstimate;
     }
     m_precomputedTrackFrames = trackFrames;
+    m_precomputedEndColumn = std::max(0, endColumn);
 
     // Only update rate/hop from chunks that carry actual column data.
     if (columns > 0) {
@@ -3504,13 +3530,13 @@ void SpectrogramItem::feedPrecomputedChunk(
 SpectrogramItem::ShownDataState SpectrogramItem::shownDataStateLocked() const {
     ShownDataState state;
     state.totalColumnsEstimate = m_precomputedTotalColumnsEstimate;
+    state.endColumn = m_precomputedEndColumn;
     const double columnsPerSecond = m_precomputedHopSize > 0
         ? static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(m_precomputedHopSize)
         : 0.0;
+    const CenteredColumns columns = centeredColumnsLocked();
     state.tailLooksFinal = centeredDecodedTailLooksFinal(
-        static_cast<qint64>(m_precomputedMaxColumnIndex) + 1,
-        m_precomputedTotalColumnsEstimate,
-        columnsPerSecond);
+        columns.maxColCount, columns.end, columnsPerSecond);
     state.ready = m_precomputedReady;
     state.canvasDirty = m_precomputedCanvasDirty;
     state.trackToken = m_precomputedTrackToken;
@@ -3570,6 +3596,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_precomputedBinsPerColumn = 0;
     m_precomputedFftSize = 0;
     m_precomputedTrackFrames = 0;
+    m_precomputedEndColumn = 0;
     // Don't zero m_precomputedTotalColumnsEstimate here — it represents
     // the track length and should persist across resets. Zeroing it
     // creates a window where the worker's doubled estimate bypasses
@@ -4379,10 +4406,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 m_idleView.changeSeconds = (static_cast<double>(nowCol)
                     + (nextPhase < 0.999 ? nextPhase : 1.0)) / columnsPerSecond;
             } else if (viewSettled) {
-                const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-                    ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-                    : static_cast<qint64>(0);
-                const qint64 estimateCount = std::max<qint64>(m_precomputedTotalColumnsEstimate, 1);
+                const CenteredColumns columns = centeredColumnsLocked();
+                const qint64 maxColCount = columns.maxColCount;
+                const qint64 estimateCount = std::max<qint64>(columns.end, 1);
                 const int visibleWindowCols = static_cast<int>(
                     std::ceil(static_cast<double>(cw) / canvasZoom));
                 const auto drawnPlayhead = [cw](int pixel) {

@@ -251,6 +251,13 @@ pub struct PrecomputedSpectrogramChunk {
     /// on from an earlier file's). With the FFT size, the UI reckons where
     /// a session at another zoom will end ([`spectrogram_decoded_end_column`]).
     pub track_frames: u64,
+    /// The column after the session's last of the track, where the
+    /// decoder's centered views end: the end it reached, or until then the
+    /// end [`spectrogram_decoded_end_column`] reckons from the file's
+    /// frames at the session's own zoom (0 if unknown, as `track_frames`).
+    /// The UI's centered view ends there too; the column estimate only
+    /// sizes its buffers when this is known.
+    pub end_column: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -2122,6 +2129,7 @@ impl AnalysisRuntimeState {
             clear_history: true,
             widget_width: 0,
             track_frames: 0,
+            end_column: 0,
         };
         let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
         self.start_session(
@@ -5177,6 +5185,7 @@ mod tests {
                         clear_history: false,
                         widget_width: 0,
                         track_frames: 0,
+                        end_column: 0,
                     });
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -5202,6 +5211,7 @@ mod tests {
                     clear_history: false,
                     widget_width: 0,
                     track_frames: 0,
+                    end_column: 0,
                 });
             })
             .unwrap();
@@ -5241,6 +5251,7 @@ mod tests {
                 clear_history: false,
                 widget_width: 0,
                 track_frames: 0,
+                end_column: 0,
             });
         }
         drop(tx);
@@ -6039,6 +6050,7 @@ mod tests {
             clear_history: false,
             widget_width: 0,
             track_frames: 0,
+            end_column: 0,
         }
     }
 
