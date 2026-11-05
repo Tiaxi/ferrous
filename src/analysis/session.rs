@@ -11,7 +11,7 @@ use std::time::Duration;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::cache::WaveformSourceStamp;
-use super::centered_view;
+use super::centered_view::{self, CenteredView};
 use super::column_hop::{column_hops, ColumnHops};
 use super::decoders::{
     open_audio_file, u64_to_u32_saturating, AudioFrameSource, AudioFrames, AudioRead,
@@ -383,11 +383,11 @@ pub(super) struct SpectrogramWorkerHandles {
     /// Where the analysis thread publishes its deactivations.
     pub(super) stops: Arc<super::SpectrogramStops>,
     pub(super) columns_produced: Arc<AtomicU64>,
-    /// Track duration (milliseconds) published by the active worker
-    /// session after its file probe.  0 = unknown.  Read by the analysis
-    /// thread to model the centered display's visible window (full-track
-    /// lock / EOF detach) when choosing session decode windows.
-    pub(super) track_duration_ms: Arc<AtomicU64>,
+    /// The [`PublishedTrackLength`] of the active worker session's file, after
+    /// its file probe.  0 = unknown.  Read by the analysis thread to model
+    /// the centered display's visible window (full-track lock / EOF
+    /// detach) when choosing session decode windows.
+    pub(super) track_length: Arc<PublishedTrackLength>,
     /// Whether the worker is still there to take commands.
     pub(super) status: SpectrogramWorkerStatus,
     /// What the worker reports about its sessions.
@@ -740,7 +740,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
     event_tx: AnalysisOutputs,
     generation: Arc<AtomicU64>,
     columns_produced: Arc<AtomicU64>,
-    track_duration_ms: Arc<AtomicU64>,
+    track_length: Arc<PublishedTrackLength>,
     reports: Sender<SessionReport>,
     status: &SpectrogramWorkerStatus,
 ) -> Option<JoinableThread> {
@@ -753,7 +753,7 @@ pub(super) fn spawn_spectrogram_decode_worker(
             &event_tx,
             &generation,
             &columns_produced,
-            &track_duration_ms,
+            &track_length,
             &reports,
         );
     };
@@ -785,11 +785,46 @@ pub(super) fn stop_spectrogram_worker_for_test(status: &SpectrogramWorkerStatus)
     assert!(worker.join().is_err(), "the test worker panics");
 }
 
-/// Make a session's decode of a file fail.
+/// Make a session's decode of a file fail, or wait to open it.
 #[cfg(test)]
 pub(crate) mod decode_test_hooks {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+
+    use crossbeam_channel::{bounded, Receiver, Sender};
+
+    /// Files whose next session waits before it opens them: it says it
+    /// reached the file on the first channel, and waits on the second.
+    #[allow(clippy::type_complexity)]
+    static HELD_OPENS: Mutex<Vec<(PathBuf, Sender<()>, Receiver<()>)>> = Mutex::new(Vec::new());
+
+    /// Make the next session of `path` wait before it opens the file, as
+    /// one of a file on a slow network share does. It sends on the returned
+    /// receiver once it waits, and goes on once the returned sender sends
+    /// or is dropped.
+    pub(crate) fn hold_open_of(path: &Path) -> (Receiver<()>, Sender<()>) {
+        let (reached_tx, reached) = bounded(1);
+        let (release, release_rx) = bounded(0);
+        HELD_OPENS
+            .lock()
+            .expect("held opens")
+            .push((path.to_path_buf(), reached_tx, release_rx));
+        (reached, release)
+    }
+
+    /// Wait before opening `path` if a test holds it, once.
+    pub(super) fn wait_to_open(path: &Path) {
+        let held = {
+            let mut held = HELD_OPENS.lock().expect("held opens");
+            held.iter()
+                .position(|(held, ..)| held == path)
+                .map(|index| held.remove(index))
+        };
+        if let Some((_, reached, release)) = held {
+            let _ = reached.send(());
+            let _ = release.recv();
+        }
+    }
 
     /// Files whose next session fails to decode, after how many packets.
     static READ_FAILURES: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
@@ -843,7 +878,7 @@ fn spectrogram_worker_loop(
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
-    track_duration_ms_out: &AtomicU64,
+    track_length_out: &PublishedTrackLength,
     reports: &Sender<SessionReport>,
 ) {
     let mut next_cmd: Option<SpectrogramWorkerCommand> = None;
@@ -870,7 +905,7 @@ fn spectrogram_worker_loop(
                     event_tx,
                     generation,
                     columns_produced_out,
-                    track_duration_ms_out,
+                    track_length_out,
                     reports,
                 );
                 // A superseded session ends for the newer one; any other
@@ -1014,10 +1049,10 @@ struct SpectrogramSessionState {
     channel_count: usize,
     bins_per_column: usize,
     total_columns_estimate: u32,
-    /// How long the file is, as published to the analysis thread; 0 if
-    /// unknown, or on the timeline of a continued file, where no track ends
-    /// at the session's last column.
-    track_duration_seconds: f64,
+    /// The frames of the file, as published to the analysis thread; `None`
+    /// if unknown, or on the timeline of a continued file, where no track
+    /// ends at the session's last column.
+    track_frames: Option<u64>,
     effective_rate: u32,
     cols_per_second: f64,
 
@@ -1156,7 +1191,7 @@ fn run_spectrogram_session(
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
-    track_duration_ms_out: &AtomicU64,
+    track_length_out: &PublishedTrackLength,
     reports: &Sender<SessionReport>,
 ) -> Option<SpectrogramWorkerCommand> {
     let QueuedCommand {
@@ -1199,6 +1234,8 @@ fn run_spectrogram_session(
         path.file_name().unwrap_or_default().to_string_lossy(),
     );
 
+    #[cfg(test)]
+    decode_test_hooks::wait_to_open(path);
     let Some((mut source, native_sample_rate, native_channels, length)) = open_audio_file(path)
     else {
         let cause = match std::fs::File::open(path) {
@@ -1228,7 +1265,7 @@ fn run_spectrogram_session(
     let effective_rate = u32::try_from(native_sample_rate).unwrap_or(48_000);
     let bins_per_column = shown_bins(fft_size, effective_rate, frequency_cap);
 
-    publish_track_length(length, effective_rate, track_duration_ms_out);
+    publish_track_length(track_length_out, gen, path, length, effective_rate);
     let _ = reports.send(SessionReport::Opened {
         generation: gen,
         track_token,
@@ -1324,7 +1361,7 @@ fn run_spectrogram_session(
         channel_count: actual_channel_count,
         bins_per_column,
         total_columns_estimate,
-        track_duration_seconds: published_track_duration_seconds(track_duration_ms_out),
+        track_frames: track_length_out.frames_of(path, effective_rate),
         effective_rate,
         cols_per_second,
         target_position_seconds,
@@ -1402,7 +1439,7 @@ fn run_spectrogram_session(
             event_tx,
             generation,
             columns_produced_out,
-            track_duration_ms_out,
+            track_length_out,
         );
 
         if let Some(SpectrogramWorkerCommand::Seek { position_seconds }) = result {
@@ -1496,13 +1533,19 @@ fn run_spectrogram_session(
                     new_length.columns,
                     session.effective_hop,
                 );
-                // handle_track_change invalidates the outgoing duration
-                // before dispatching ContinueWithFile.  A compatible
-                // continuation stays inside this worker session, so it
-                // must republish here; otherwise the duration remains
-                // unknown for every later centered seek/zoom restart.
-                publish_track_length(new_length, session.effective_rate, track_duration_ms_out);
-                session.track_duration_seconds = 0.0;
+                // The outgoing file's length is not the continued file's.
+                // A compatible continuation stays inside this worker
+                // session, so it must publish here; otherwise the length
+                // remains unknown for every later centered seek/zoom
+                // restart.
+                publish_track_length(
+                    track_length_out,
+                    session.gen,
+                    &session.path,
+                    new_length,
+                    session.effective_rate,
+                );
+                session.track_frames = None;
 
                 session.target_chunk_columns = 1;
                 session.throttle_origin = None;
@@ -1648,46 +1691,78 @@ impl SpectrogramSessionState {
     }
 }
 
-/// Publish the duration of a file that tells its length. Without one there
-/// is nothing to publish: a placeholder would put the end of the track, and
-/// every view of it, where playback can pass it. What a decode of the same
-/// file found out stays.
-fn publish_track_length(
-    length: TrackLength,
-    effective_rate: u32,
-    track_duration_ms_out: &AtomicU64,
-) {
-    if length.known {
-        publish_track_duration_ms(length.columns, effective_rate, track_duration_ms_out);
+/// The length of the file a decode worker session opened last, as it
+/// publishes it to the analysis thread: the file's frames, without the
+/// allowance of its column estimate, at the rate they are at. The decoder
+/// places its centered views by the columns it decodes of them (see
+/// [`centered_view::decoded_end_column`]), which the UI's view ends at.
+///
+/// A publication is bound to the file it is of and to the generation of the
+/// session that probed it. The probe can outlast the track: a session of
+/// the outgoing track, whose file is slow to open, publishes after the
+/// track has changed. A length is therefore only of the file whose path it
+/// carries, and a session's publication does not replace a newer
+/// session's. The file's sessions all publish its length, so the restart
+/// of one finds the length another published.
+#[derive(Debug, Default)]
+pub(super) struct PublishedTrackLength {
+    latest: Mutex<Option<TrackLengthPublication>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackLengthPublication {
+    generation: u64,
+    path: PathBuf,
+    frames: u64,
+    rate: u32,
+}
+
+impl PublishedTrackLength {
+    /// Publish that the file at `path`, which a session of `generation`
+    /// opened, has `frames` frames at `rate`, unless a session of a later
+    /// generation has published since.
+    pub(super) fn publish(&self, generation: u64, path: &Path, frames: u64, rate: u32) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        if latest
+            .as_ref()
+            .is_some_and(|published| published.generation > generation)
+        {
+            return;
+        }
+        *latest = Some(TrackLengthPublication {
+            generation,
+            path: path.to_path_buf(),
+            frames,
+            rate,
+        });
+    }
+
+    /// The frames published of the file at `path`, if they are at `rate`;
+    /// `None` for a length of another file, or of the file at another rate.
+    pub(super) fn frames_of(&self, path: &Path, rate: u32) -> Option<u64> {
+        self.latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|published| published.path == path && published.rate == rate)
+            .map(|published| published.frames)
     }
 }
 
-/// Publish the file-metadata duration represented by a reference-hop column
-/// estimate.  `total_columns` includes the same +64 STFT-edge allowance used
-/// by Qt's estimate, so retaining it keeps full-track-lock and EOF-detach math
-/// aligned across the worker and analysis threads.
-fn publish_track_duration_ms(
-    total_columns: u32,
+/// Publish the length of a file that tells it. Without one there is
+/// nothing to publish: a placeholder would put the end of the track, and
+/// every view of it, where playback can pass it. What a decode of the same
+/// file found out stays.
+fn publish_track_length(
+    out: &PublishedTrackLength,
+    generation: u64,
+    path: &Path,
+    length: TrackLength,
     effective_rate: u32,
-    track_duration_ms_out: &AtomicU64,
 ) {
-    let duration_ms = if effective_rate > 0 {
-        f64_to_u64_saturating(
-            f64::from(total_columns) * usize_to_f64_approx(ESTIMATE_COLUMN_FRAMES)
-                / f64::from(effective_rate)
-                * 1000.0,
-        )
-    } else {
-        0
-    };
-    track_duration_ms_out.store(duration_ms, Ordering::Relaxed);
-}
-
-fn published_track_duration_seconds(track_duration_ms: &AtomicU64) -> f64 {
-    // Track durations are far below f64's exact-integer range.
-    #[allow(clippy::cast_precision_loss)]
-    let milliseconds = track_duration_ms.load(Ordering::Relaxed) as f64;
-    milliseconds / 1000.0
+    if let Some(frames) = length.frames {
+        out.publish(generation, path, frames, effective_rate);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1703,7 +1778,7 @@ fn session_decode_loop(
     event_tx: &dyn AnalysisEventOutput,
     generation: &AtomicU64,
     columns_produced_out: &AtomicU64,
-    track_duration_ms_out: &AtomicU64,
+    track_length_out: &PublishedTrackLength,
 ) -> Option<SpectrogramWorkerCommand> {
     // Only check generation for staleness. Generation is incremented whenever
     // analysis starts a fresh precomputed session for a new track or reset.
@@ -1901,7 +1976,7 @@ fn session_decode_loop(
         //    files where GStreamer cannot query duration from the headerless
         //    bitstream.  Without this, the UI ring buffer is undersized and
         //    early columns get evicted, causing the spectrogram to go black.
-        maybe_update_columns_estimate(session, source, generation, track_duration_ms_out);
+        maybe_update_columns_estimate(session, source, generation, track_length_out);
     }
 
     if let Some((path, track_token)) = session.pending_continue.take() {
@@ -2053,32 +2128,33 @@ fn session_seek_start_seconds(session: &SpectrogramSessionState, position_second
     if session.display_mode != SpectrogramDisplayMode::Centered {
         return position_seconds;
     }
-    let window_seconds = centered_view::window_seconds(
+    session_view(session).decode_start_seconds(position_seconds)
+}
+
+/// The UI's centered view of the session's columns. It ends where the file
+/// does: once the session has decoded the end, at the end its chunks
+/// carry; until then at the columns the session decodes of the file's
+/// published frames, which for a raw stream are an estimate that can run
+/// past the audio.
+fn session_view(session: &SpectrogramSessionState) -> CenteredView {
+    let end = match (session.timeline_of, session.end_column) {
+        (ColumnTimeline::PlayingFile, Some(end)) => Some(end),
+        (ColumnTimeline::PlayingFile, None) => session.track_frames.map(|frames| {
+            centered_view::decoded_end_column(
+                frames,
+                session.fft_size,
+                session.zoom_level,
+                session.effective_rate,
+            )
+        }),
+        (ColumnTimeline::EarlierFile { .. }, _) => None,
+    };
+    CenteredView::new(
         session.widget_width,
         session.zoom_level,
         session.effective_rate,
-    );
-    centered_view::decode_start_seconds(
-        position_seconds,
-        window_seconds,
-        view_duration_seconds(session),
+        end,
     )
-}
-
-/// How long the track is for a centered view of the session: where the
-/// file ends, once the session has decoded its end, as the UI's view ends
-/// at the end its chunks carry; until then the published duration, which
-/// for a raw stream is an estimate that can run past the audio.
-fn view_duration_seconds(session: &SpectrogramSessionState) -> f64 {
-    match session.end_column {
-        Some(end) if session.timeline_of == ColumnTimeline::PlayingFile => {
-            // Column counts are far below f64's exact-integer range.
-            #[allow(clippy::cast_precision_loss)]
-            let end = end as f64;
-            end / session.cols_per_second
-        }
-        _ => session.track_duration_seconds,
-    }
 }
 
 /// Take a seek to `position_seconds`. A rolling view shows what plays from
@@ -2111,17 +2187,7 @@ fn decoded_columns_cover_view(session: &SpectrogramSessionState, position_second
     {
         return false;
     }
-    let window = centered_view::window_seconds(
-        session.widget_width,
-        session.zoom_level,
-        session.effective_rate,
-    );
-    let left = centered_view::visible_left_edge_seconds(
-        position_seconds,
-        window,
-        view_duration_seconds(session),
-    );
-    let left_column = f64_to_u64_saturating(left * session.cols_per_second);
+    let left_column = session_view(session).left_column(position_seconds);
     let frontier = decoded_frontier(session);
     let retained_left = session
         .session_start_column
@@ -2409,17 +2475,8 @@ fn decoded_frontier(session: &SpectrogramSessionState) -> u64 {
 /// The column at the right edge of the session's centered view of its
 /// playback position.
 fn view_right_column(session: &SpectrogramSessionState) -> u64 {
-    let window = centered_view::window_seconds(
-        session.widget_width,
-        session.zoom_level,
-        session.effective_rate,
-    );
-    let left = centered_view::visible_left_edge_seconds(
-        session.target_position_seconds,
-        window,
-        view_duration_seconds(session),
-    );
-    f64_to_u64_saturating((left + window) * session.cols_per_second)
+    let view = session_view(session);
+    view.left_column(session.target_position_seconds) + view.window_columns()
 }
 
 /// Where a session decoding the right of its view leaves it for the left:
@@ -2881,11 +2938,10 @@ fn session_send_full_chunk(
 /// breaking the zoom-out minZoom computation on the Qt side.
 #[cfg(any(feature = "gst", test))]
 fn duration_requery_estimate_for_session(effective_frames: u64, effective_hop: usize) -> u32 {
-    let new_est_ref = u32::try_from(
-        ((effective_frames / (ESTIMATE_COLUMN_FRAMES as u64)) + 64).min(u64::from(u32::MAX)),
+    scale_columns_estimate(
+        super::decoders::columns_estimate(effective_frames),
+        effective_hop,
     )
-    .unwrap_or(u32::MAX);
-    scale_columns_estimate(new_est_ref, effective_hop)
 }
 
 /// Tell the analysis thread, which starts every other session of the file,
@@ -2897,24 +2953,25 @@ fn publish_requeried_duration(
     session: &mut SpectrogramSessionState,
     total_frames: u64,
     generation: &AtomicU64,
-    track_duration_ms_out: &AtomicU64,
+    track_length_out: &PublishedTrackLength,
 ) {
     if generation.load(Ordering::Relaxed) != session.gen {
         return;
     }
-    publish_track_duration_ms(
-        duration_requery_estimate_for_session(total_frames, ESTIMATE_COLUMN_FRAMES),
+    track_length_out.publish(
+        session.gen,
+        &session.path,
+        total_frames,
         session.effective_rate,
-        track_duration_ms_out,
     );
-    session.track_duration_seconds = published_track_duration_seconds(track_duration_ms_out);
+    session.track_frames = Some(total_frames);
 }
 
 fn maybe_update_columns_estimate(
     session: &mut SpectrogramSessionState,
     source: &AudioFrameSource,
     generation: &AtomicU64,
-    track_duration_ms_out: &AtomicU64,
+    track_length_out: &PublishedTrackLength,
 ) {
     // The file's end, once decoded, is its extent.
     if session.end_column.is_some() {
@@ -2931,7 +2988,7 @@ fn maybe_update_columns_estimate(
             let rate = u64::from(session.effective_rate);
             let total_frames = ns * rate / 1_000_000_000;
             let effective = total_frames;
-            publish_requeried_duration(session, effective, generation, track_duration_ms_out);
+            publish_requeried_duration(session, effective, generation, track_length_out);
             let new_est = duration_requery_estimate_for_session(effective, session.effective_hop);
             if new_est > session.total_columns_estimate {
                 profile_eprintln!(
@@ -2947,7 +3004,7 @@ fn maybe_update_columns_estimate(
     }
 
     // Suppress the unused-variable warnings when GStreamer is disabled.
-    let _ = (source, generation, track_duration_ms_out);
+    let _ = (source, generation, track_length_out);
 
     // Safety net for sources without a trustworthy duration (the
     // 300-second fallback in decoders.rs): if the decoder has actually
@@ -3190,7 +3247,7 @@ mod tests {
                     &events,
                     &AtomicU64::new(1),
                     &AtomicU64::new(0),
-                    &AtomicU64::new(0),
+                    &PublishedTrackLength::default(),
                     &unbounded().0,
                 )
             });
@@ -3402,7 +3459,7 @@ mod tests {
                 &events,
                 &worker_generation,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &report_tx,
             );
         });
@@ -3490,7 +3547,7 @@ mod tests {
                     &events,
                     &AtomicU64::new(1),
                     &AtomicU64::new(0),
-                    &AtomicU64::new(0),
+                    &PublishedTrackLength::default(),
                     &unbounded().0,
                 )
             });
@@ -3646,7 +3703,7 @@ mod tests {
                         &events,
                         &AtomicU64::new(1),
                         &AtomicU64::new(0),
-                        &AtomicU64::new(0),
+                        &PublishedTrackLength::default(),
                         &unbounded().0,
                     )
                 });
@@ -3703,7 +3760,7 @@ mod tests {
                         &events,
                         &AtomicU64::new(1),
                         &AtomicU64::new(0),
-                        &AtomicU64::new(0),
+                        &PublishedTrackLength::default(),
                         &unbounded().0,
                     )
                 });
@@ -3835,7 +3892,7 @@ mod tests {
                 &events,
                 &AtomicU64::new(1),
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &reports,
             )
         });
@@ -3944,7 +4001,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4059,7 +4116,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4117,7 +4174,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4183,7 +4240,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4241,7 +4298,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4330,7 +4387,7 @@ mod tests {
             channel_count: 1,
             bins_per_column: 1_025,
             total_columns_estimate: 8_739,
-            track_duration_seconds: 0.0,
+            track_frames: None,
             effective_rate: 48_000,
             cols_per_second: 46.875,
             target_position_seconds: 2.0,
@@ -4366,71 +4423,110 @@ mod tests {
     #[test]
     fn continued_file_republishes_track_duration() {
         // Compatible ContinueWithFile handoffs do not create a new worker
-        // session.  Publishing the next file's estimate must therefore
-        // replace the zero written by handle_track_change rather than leave
-        // centered restart math in its unknown-duration fallback.
-        let published_duration_ms = AtomicU64::new(0);
-
-        publish_track_duration_ms(2_000, 48_000, &published_duration_ms);
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 42_666);
-
-        publish_track_duration_ms(4_000, 48_000, &published_duration_ms);
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 85_333);
+        // session.  Publishing the next file's length must therefore
+        // replace the outgoing file's rather than leave centered restart
+        // math in its unknown-duration fallback.
+        let published = PublishedTrackLength::default();
+        for (path, frames) in [("a.flac", 2_048_000), ("b.flac", 4_096_000)] {
+            let length = TrackLength {
+                frames: Some(frames),
+                columns: super::super::decoders::columns_estimate(frames),
+            };
+            publish_track_length(&published, 1, Path::new(path), length, 48_000);
+            assert_eq!(published.frames_of(Path::new(path), 48_000), Some(frames));
+        }
+        assert_eq!(published.frames_of(Path::new("a.flac"), 48_000), None);
     }
 
     #[test]
     fn a_length_a_file_does_not_tell_is_not_published_as_its_duration() {
         // The placeholder for a raw stream would end its view at 300 s.
-        let published_duration_ms = AtomicU64::new(0);
+        let published = PublishedTrackLength::default();
+        let path = Path::new("raw.ac3");
         let placeholder = TrackLength {
+            frames: None,
             columns: 14_126,
-            known: false,
         };
-        publish_track_length(placeholder, 48_000, &published_duration_ms);
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 0);
+        publish_track_length(&published, 1, path, placeholder, 48_000);
+        assert_eq!(published.frames_of(path, 48_000), None);
 
         // Nor does it replace what a decode of the file found out.
-        published_duration_ms.store(751_000, Ordering::Relaxed);
-        publish_track_length(placeholder, 48_000, &published_duration_ms);
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 751_000);
+        published.publish(1, path, 751 * 48_000, 48_000);
+        publish_track_length(&published, 2, path, placeholder, 48_000);
+        assert_eq!(published.frames_of(path, 48_000), Some(751 * 48_000));
 
         let known = TrackLength {
-            columns: 2_000,
-            known: true,
+            frames: Some(2_048_000),
+            columns: 2_064,
         };
-        publish_track_length(known, 48_000, &published_duration_ms);
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 42_666);
+        publish_track_length(&published, 2, path, known, 48_000);
+        assert_eq!(published.frames_of(path, 48_000), Some(2_048_000));
+    }
+
+    #[test]
+    fn a_published_length_is_the_tracks_frames_without_the_estimates_allowance() {
+        // 320 s at 8 kHz, whose column estimate runs 64 columns of 1024
+        // frames, 8.2 s, past the end. A view placed by that would reach
+        // further left, once the UI pins it to the end, than its decode.
+        let frames = 320 * 8_000;
+        let length = TrackLength {
+            frames: Some(frames),
+            columns: super::super::decoders::columns_estimate(frames),
+        };
+        assert_eq!(length.columns, 2_500 + 64);
+        let published = PublishedTrackLength::default();
+        let path = Path::new("track.wav");
+        publish_track_length(&published, 1, path, length, 8_000);
+        assert_eq!(published.frames_of(path, 8_000), Some(frames));
+        // A length at another rate, or of another file, is not this one's.
+        assert_eq!(published.frames_of(path, 44_100), None);
+        assert_eq!(published.frames_of(Path::new("other.wav"), 8_000), None);
+    }
+
+    #[test]
+    fn a_session_publishes_no_length_over_a_later_sessions() {
+        // The probe of the outgoing track's file ends after the new track's
+        // session has published: the new track keeps its length.
+        let published = PublishedTrackLength::default();
+        let (outgoing, playing) = (Path::new("outgoing.flac"), Path::new("playing.flac"));
+        published.publish(2, playing, 480_000, 8_000);
+        published.publish(1, outgoing, 320_000, 8_000);
+        assert_eq!(published.frames_of(playing, 8_000), Some(480_000));
+        assert_eq!(published.frames_of(outgoing, 8_000), None);
+        // Ending before it, it is of a file no longer playing: the playing
+        // one's length is unknown until its session publishes it.
+        let published = PublishedTrackLength::default();
+        published.publish(1, outgoing, 320_000, 8_000);
+        assert_eq!(published.frames_of(playing, 8_000), None);
+        published.publish(2, playing, 480_000, 8_000);
+        assert_eq!(published.frames_of(playing, 8_000), Some(480_000));
+        // A session of the same generation, which went on with the next
+        // file gaplessly, publishes that file's.
+        published.publish(2, outgoing, 320_000, 8_000);
+        assert_eq!(published.frames_of(outgoing, 8_000), Some(320_000));
     }
 
     #[test]
     fn a_requeried_duration_reaches_the_analysis_thread_and_the_session() {
         let mut session = make_test_session();
-        let published_duration_ms = AtomicU64::new(0);
+        let published = PublishedTrackLength::default();
         let generation = AtomicU64::new(session.gen);
-        publish_requeried_duration(
-            &mut session,
-            751 * 48_000,
-            &generation,
-            &published_duration_ms,
+        publish_requeried_duration(&mut session, 751 * 48_000, &generation, &published);
+        // The track's frames, without the column estimate's allowance.
+        assert_eq!(
+            published.frames_of(&session.path, 48_000),
+            Some(751 * 48_000)
         );
-        // The published length includes the STFT-edge allowance.
-        let published = published_duration_ms.load(Ordering::Relaxed);
-        assert!(published.abs_diff(752_365) <= 5, "{published}");
-        assert!((session.track_duration_seconds - 752.365).abs() < 0.005);
+        assert_eq!(session.track_frames, Some(751 * 48_000));
     }
 
     #[test]
     fn a_superseded_session_does_not_publish_its_requeried_duration() {
         let mut session = make_test_session();
-        let published_duration_ms = AtomicU64::new(0);
+        let published = PublishedTrackLength::default();
         let generation = AtomicU64::new(session.gen + 1);
-        publish_requeried_duration(
-            &mut session,
-            751 * 48_000,
-            &generation,
-            &published_duration_ms,
-        );
-        assert_eq!(published_duration_ms.load(Ordering::Relaxed), 0);
+        publish_requeried_duration(&mut session, 751 * 48_000, &generation, &published);
+        assert_eq!(published.frames_of(&session.path, 48_000), None);
     }
 
     /// A centered session decoding at 258 s, further behind
@@ -4458,10 +4554,12 @@ mod tests {
         let start = session_seek_start_seconds(&session, 609.7);
         assert!((start - 595.06).abs() < 0.01, "{start}");
 
-        // Near the end of the track, the view starts a window before it.
-        session.track_duration_seconds = 620.0;
+        // Near the end of the track, the view starts a window before the
+        // column after its last, 29062 of the 620 s.
+        session.track_frames = Some(620 * 48_000);
         let start = session_seek_start_seconds(&session, 615.0);
-        assert!((start - 592.72).abs() < 0.01, "{start}");
+        let expected = (29_062.0 - 1_185.0) / 46.875 - 2.0;
+        assert!((start - expected).abs() < 1e-9, "{start}");
     }
 
     #[test]
@@ -4484,7 +4582,7 @@ mod tests {
         session.display_mode = SpectrogramDisplayMode::Centered;
         session.columns_produced = 0;
         session.lookahead_columns = 1_920;
-        session.track_duration_seconds = 45.0;
+        session.track_frames = Some(45 * 48_000);
         session.widget_width = 1920;
         assert!(apply_position(&mut session, 44.0).is_none());
         assert!(session_seek_start_seconds(&session, 44.0).abs() < f64::EPSILON);
@@ -5415,7 +5513,12 @@ mod tests {
         let source = make_dummy_source();
 
         let generation = AtomicU64::new(session.gen);
-        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
+        maybe_update_columns_estimate(
+            &mut session,
+            &source,
+            &generation,
+            &PublishedTrackLength::default(),
+        );
         assert_eq!(
             session.total_columns_estimate, 1000,
             "should not grow below estimate"
@@ -5423,7 +5526,12 @@ mod tests {
 
         session.columns_produced = 750;
         let generation = AtomicU64::new(session.gen);
-        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
+        maybe_update_columns_estimate(
+            &mut session,
+            &source,
+            &generation,
+            &PublishedTrackLength::default(),
+        );
         assert_eq!(
             session.total_columns_estimate, 1000,
             "75% threshold no longer triggers doubling"
@@ -5431,7 +5539,12 @@ mod tests {
 
         session.columns_produced = 1000;
         let generation = AtomicU64::new(session.gen);
-        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
+        maybe_update_columns_estimate(
+            &mut session,
+            &source,
+            &generation,
+            &PublishedTrackLength::default(),
+        );
         assert_eq!(
             session.total_columns_estimate, 1000,
             "AT the estimate must not trigger doubling — bounded \
@@ -5452,7 +5565,12 @@ mod tests {
 
         session.columns_produced = 1001;
         let generation = AtomicU64::new(session.gen);
-        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
+        maybe_update_columns_estimate(
+            &mut session,
+            &source,
+            &generation,
+            &PublishedTrackLength::default(),
+        );
         assert_eq!(
             session.total_columns_estimate, 2000,
             "overshoot by 1 col must double"
@@ -5462,7 +5580,12 @@ mod tests {
         // it catches up with the real length.
         session.columns_produced = 2500;
         let generation = AtomicU64::new(session.gen);
-        maybe_update_columns_estimate(&mut session, &source, &generation, &AtomicU64::new(0));
+        maybe_update_columns_estimate(
+            &mut session,
+            &source,
+            &generation,
+            &PublishedTrackLength::default(),
+        );
         assert_eq!(session.total_columns_estimate, 4000);
     }
 
@@ -5583,7 +5706,7 @@ mod tests {
                 &events,
                 &generation,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &unbounded().0,
             );
         });
@@ -5741,7 +5864,7 @@ mod tests {
                 &events,
                 &AtomicU64::new(1),
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
             );
         });
         let mut chunks = Vec::new();
@@ -5838,7 +5961,7 @@ mod tests {
                     &events,
                     &worker_generation,
                     &AtomicU64::new(0),
-                    &AtomicU64::new(0),
+                    &PublishedTrackLength::default(),
                     &reports,
                 );
             });
@@ -5929,7 +6052,7 @@ mod tests {
                 &events,
                 &generation,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &reports,
             );
             assert!(ended.is_none(), "{ended:?}");
@@ -5964,7 +6087,7 @@ mod tests {
                     &events,
                     &AtomicU64::new(4),
                     &AtomicU64::new(0),
-                    &AtomicU64::new(0),
+                    &PublishedTrackLength::default(),
                     &reports,
                 )
             });
@@ -6012,7 +6135,7 @@ mod tests {
                 &events,
                 &worker_generation,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &unbounded().0,
             );
         });
@@ -6110,7 +6233,7 @@ mod tests {
                     &events,
                     &AtomicU64::new(1),
                     &AtomicU64::new(0),
-                    &AtomicU64::new(0),
+                    &PublishedTrackLength::default(),
                     &reports,
                 );
             });
@@ -7124,7 +7247,7 @@ mod tests {
             &events,
             &AtomicU64::new(1),
             &AtomicU64::new(0),
-            &AtomicU64::new(0),
+            &PublishedTrackLength::default(),
         );
 
         assert!(result.is_none(), "{result:?}");
@@ -7720,8 +7843,8 @@ mod tests {
     /// Where a centered session for a playhead at `target` starts: its
     /// view's left edge, less the warm-up.
     fn backfill_start_seconds(target: f64) -> f64 {
-        let window = centered_view::window_seconds(BACKFILL_WIDTH, BACKFILL_ZOOM, BACKFILL_RATE);
-        centered_view::decode_start_seconds(target, window, 0.0)
+        CenteredView::new(BACKFILL_WIDTH, BACKFILL_ZOOM, BACKFILL_RATE, None)
+            .decode_start_seconds(target)
     }
 
     fn backfill_column(seconds: f64) -> u64 {
@@ -7787,7 +7910,7 @@ mod tests {
                 &WatchedOutput { events, on_chunk },
                 &generation_for_worker,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &unbounded().0,
             )
         });
@@ -8199,18 +8322,11 @@ mod tests {
         .0
     }
 
-    #[cfg(feature = "gst")]
-    fn padded_columns_per_second() -> f64 {
-        f64::from(PADDED_RATE)
-            / usize_to_f64_approx(column_hops(2048, 1.0, PADDED_RATE).effective_hop)
-    }
-
     /// Where a centered session of the padded file for a playhead at
-    /// `target` starts, in a track `duration` seconds long (0 if unknown).
+    /// `target` starts, in a track whose columns end at `end`, if known.
     #[cfg(feature = "gst")]
-    fn padded_start_seconds(target: f64, duration: f64) -> f64 {
-        let window = centered_view::window_seconds(BACKFILL_WIDTH, 1.0, PADDED_RATE);
-        centered_view::decode_start_seconds(target, window, duration)
+    fn padded_start_seconds(target: f64, end: Option<u64>) -> f64 {
+        CenteredView::new(BACKFILL_WIDTH, 1.0, PADDED_RATE, end).decode_start_seconds(target)
     }
 
     /// A centered session of `path` as `track_token`, with its playhead at
@@ -8230,7 +8346,7 @@ mod tests {
             *token = track_token;
             *display_mode = SpectrogramDisplayMode::Centered;
             *widget_width = BACKFILL_WIDTH;
-            *start_seconds = padded_start_seconds(target, 0.0);
+            *start_seconds = padded_start_seconds(target, None);
             *target_position_seconds = target;
         }
         command
@@ -8272,7 +8388,7 @@ mod tests {
         assert_eq!(spans_of(&reference), vec![(0, end)]);
 
         let target = 22.0;
-        let start = padded_column(padded_start_seconds(target, 0.0));
+        let start = padded_column(padded_start_seconds(target, None));
         let playhead = padded_column(target);
         assert!(
             start < end && end + MIN_BACKFILL_COLUMNS < playhead,
@@ -8289,7 +8405,7 @@ mod tests {
                 &events,
                 &worker_generation,
                 &AtomicU64::new(0),
-                &AtomicU64::new(0),
+                &PublishedTrackLength::default(),
                 &unbounded().0,
             );
         });
@@ -8318,7 +8434,6 @@ mod tests {
         // of what it decoded. The padded duration would put the view's left
         // edge in the columns decoded, and leave the UI's view without the
         // columns left of them.
-        let end_seconds = end as f64 / padded_columns_per_second();
         let view_left = end - u64::from(BACKFILL_WIDTH);
         assert!(view_left < start, "{view_left} {start}");
         for (session, seek) in [20.1, 25.0, 18.0].into_iter().enumerate() {
@@ -8334,7 +8449,7 @@ mod tests {
                 .unwrap();
             let chunks = chunks_through(&event_rx, |chunk| chunk.complete);
             assert!(chunks[0].buffer_reset, "{seek}");
-            let seek_start = padded_column(padded_start_seconds(seek, end_seconds));
+            let seek_start = padded_column(padded_start_seconds(seek, Some(end)));
             assert_eq!(
                 u64::from(chunks[0].start_column_index),
                 seek_start,
@@ -8525,7 +8640,7 @@ mod tests {
         // The file's end shows its last column.
         let mut session = centered_session_decoded(start, column_at(600.0), 590.0);
         session.end_column = Some(session.columns_produced);
-        session.track_duration_seconds = 600.0;
+        session.track_frames = Some(600 * 48_000);
         assert!(matches!(
             apply_seek(&mut session, 600.0),
             SessionAction::Continue
@@ -8768,7 +8883,7 @@ mod tests {
         let (control_events, _control_event_rx) = unbounded::<AnalysisEvent>();
         let generation = AtomicU64::new(0);
         let columns_produced = AtomicU64::new(0);
-        let track_duration_ms = AtomicU64::new(0);
+        let track_length = PublishedTrackLength::default();
         let waveform_token = AtomicU64::new(0);
         // The worker waits at the playhead's first column until the
         // analysis thread has sent the seek.
@@ -8793,7 +8908,7 @@ mod tests {
                     &output,
                     &generation,
                     &columns_produced,
-                    &track_duration_ms,
+                    &track_length,
                     &reports,
                 );
             });
@@ -8805,7 +8920,7 @@ mod tests {
                 spectrogram_cmd_tx: &command_tx,
                 spectrogram_decode_generation: &generation,
                 spectrogram_decode_columns_produced: &columns_produced,
-                spectrogram_track_duration_ms: &track_duration_ms,
+                spectrogram_track_length: &track_length,
             };
             state.refill_centered_spectrogram(first_target, &ctx);
             reached
@@ -8847,7 +8962,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
         assert_eq!(generation.load(Ordering::Relaxed), 1, "the seek restarted");
         assert!(
             later.iter().all(|chunk| !chunk.buffer_reset),
@@ -8856,9 +8971,11 @@ mod tests {
 
         // The session seeked to where the view of 100 s starts, by the
         // length it published, which the analysis thread judged it by too.
-        let window = f64::from(BACKFILL_WIDTH) / (f64::from(BACKFILL_RATE) / 1_024.0);
-        let duration = published_track_duration_seconds(&track_duration_ms);
-        let start_seconds = centered_view::decode_start_seconds(target, window, duration);
+        let end = track_length.frames_of(&path, BACKFILL_RATE).map(|frames| {
+            centered_view::decoded_end_column(frames, 2_048, BACKFILL_ZOOM, BACKFILL_RATE)
+        });
+        let start_seconds = CenteredView::new(BACKFILL_WIDTH, BACKFILL_ZOOM, BACKFILL_RATE, end)
+            .decode_start_seconds(target);
         let repositioned: Vec<_> = report_rx
             .try_iter()
             .filter_map(|report| match report {
@@ -8890,5 +9007,504 @@ mod tests {
                 "decoded {from}..{to} in the gap {gap:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The end of a centered view, by the track's real length
+    // -----------------------------------------------------------------------
+
+    /// The columns the UI's centered view shows of a track decoded to the
+    /// column before `end`, which its chunks then carry as their estimate,
+    /// with the playhead at column `now` and a window of `window` columns:
+    /// `centeredDisplayRange` in `ui/src/SpectrogramItem.cpp`. The view
+    /// shows the whole track once the window covers 90% of its columns,
+    /// and otherwise centers the playhead; once the rest of the track is
+    /// shorter than half a window, it ends at the last column, a window
+    /// before it.
+    fn ui_centered_view(now: u64, window: u64, end: u64) -> std::ops::Range<u64> {
+        let half = window / 2;
+        let (mut left, mut right) = if window * 100 / end >= 90 {
+            (0, end - 1)
+        } else {
+            let right = (end - 1).min(now.saturating_sub(half) + window - 1);
+            ((right + 1).saturating_sub(window), right)
+        };
+        if end - 1 < now + half {
+            right = right.min(end - 1);
+            left = (right + 1).saturating_sub(window);
+        }
+        left..right + 1
+    }
+
+    /// A mono 16-bit WAV of `frames` frames of noise at `rate`.
+    fn write_frames_fixture(name: &str, rate: u32, frames: u32) -> PathBuf {
+        let folder = crate::paths::test_root();
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(format!("analysis-end-{name}-{rate}-{frames}.wav"));
+        let data_bytes = frames * 2;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(b"\x02\0\x10\0data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        let mut random = 0x2545_f491_u32 ^ rate ^ frames;
+        for _ in 0..frames {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let sample = i16::try_from(random >> 18).unwrap() - 8_192;
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// Where the view of a track ends, and what its window is a share of,
+    /// is where sessions of it end: the decoder places its views by it
+    /// before any session has decoded the end. Sessions that start at
+    /// other columns end at the same one, at every rate, window and zoom,
+    /// whether a column's rows end on its last or part of the way through.
+    #[test]
+    fn the_decoded_end_column_is_where_sessions_of_the_track_end() {
+        for (rate, frames) in [
+            (8_000, 48_001),
+            (44_100, 264_601),
+            (48_000, 288_517),
+            (96_000, 576_111),
+        ] {
+            let path = write_frames_fixture("predicted", rate, frames);
+            let seconds = f64::from(frames) / f64::from(rate);
+            for fft in [512, 2_048, 8_192] {
+                for zoom in [0.3, 1.0, 1.7, 4.0] {
+                    let expected =
+                        centered_view::decoded_end_column(u64::from(frames), fft, zoom, rate);
+                    for start in [seconds - 1.5, seconds * 0.5] {
+                        let mut command = test_new_track(&path.to_string_lossy(), 1);
+                        if let SpectrogramWorkerCommand::NewTrack {
+                            fft_size,
+                            zoom_level,
+                            display_mode,
+                            start_seconds,
+                            target_position_seconds,
+                            ..
+                        } = &mut command
+                        {
+                            *fft_size = fft;
+                            *zoom_level = zoom;
+                            *display_mode = SpectrogramDisplayMode::Centered;
+                            *start_seconds = start;
+                            *target_position_seconds = start;
+                        }
+                        let chunks = run_watched_session(
+                            command,
+                            1,
+                            unbounded(),
+                            &Arc::new(AtomicU64::new(1)),
+                            |_| {},
+                            ends_complete,
+                        );
+                        let last = chunks.last().unwrap();
+                        assert!(last.complete, "{rate} Hz {fft} {zoom} from {start} s");
+                        assert_eq!(
+                            u64::from(last.total_columns_estimate),
+                            expected,
+                            "{rate} Hz, {frames} frames, FFT {fft}, zoom {zoom}, from {start} s"
+                        );
+                    }
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// Releases a worker that a test holds at a column, and ends it, when
+    /// dropped: as the test ends, or as a failed assertion unwinds it, which
+    /// would otherwise wait for the worker while the worker waits for it.
+    struct ReleasedWorker {
+        commands: Option<Sender<SpectrogramWorkerCommand>>,
+        /// Dropped, they fail the worker's reports that it reached where
+        /// it waits.
+        reached: Vec<Receiver<()>>,
+        /// Dropped, they let the worker go on from where it waits.
+        go_on: Vec<Sender<()>>,
+    }
+
+    impl Drop for ReleasedWorker {
+        fn drop(&mut self) {
+            self.reached.clear();
+            self.go_on.clear();
+            if let Some(commands) = self.commands.take() {
+                let _ = commands.send(SpectrogramWorkerCommand::StopSession);
+            }
+        }
+    }
+
+    /// How a seek reaches the session: as a restart of it, or as a seek
+    /// the analysis thread hands it, if it judges it can take it.
+    #[derive(Debug, Clone, Copy)]
+    enum EndSeek {
+        Restart,
+        Seek,
+    }
+
+    /// The columns of `path`, of `frames` frames at `rate`, that the UI
+    /// holds, and the column after the last, once a centered session at
+    /// `zoom` for a view `width` pixels
+    /// wide, started at the track's start, has been sent a seek to
+    /// `target` as `how` and has decoded to the end of the file.
+    fn columns_after_a_centered_seek(
+        (path, frames): (&Path, u32),
+        rate: u32,
+        (zoom, width): (f32, u32),
+        target: f64,
+        how: EndSeek,
+    ) -> (std::collections::BTreeMap<u64, Vec<u8>>, u64) {
+        use super::super::{AnalysisContext, AnalysisRuntimeState, WaveformDecodeJob};
+
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(path.to_path_buf());
+        state.active_track_token = 1;
+        state.active_session_effective_rate = rate;
+        state.active_session_channel_count = 1;
+        state.spectrogram_view_mode = SpectrogramViewMode::Downmix;
+        state.fft_size = 2_048;
+        state.zoom_level = zoom;
+        state.spectrogram_widget_width = width;
+        state.spectrogram_session_widget_width = width;
+
+        let (command_tx, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let (reports, _report_rx) = unbounded();
+        let (waveform_job_tx, _waveform_jobs) = unbounded::<WaveformDecodeJob>();
+        let (control_events, _control_event_rx) = unbounded::<AnalysisEvent>();
+        let generation = AtomicU64::new(0);
+        let columns_produced = AtomicU64::new(0);
+        let track_length = PublishedTrackLength::default();
+        let waveform_token = AtomicU64::new(0);
+        // The worker waits at the first column of the track's start until
+        // the analysis thread has sent the seek.
+        let (at_first_column, reached) = crossbeam_channel::bounded::<()>(0);
+        let (go_on, resume) = crossbeam_channel::bounded::<()>(0);
+        let held = AtomicBool::new(false);
+        let output = WatchedOutput {
+            events,
+            on_chunk: |chunk: &PrecomputedSpectrogramChunk| {
+                if chunk.column_count > 0 && !held.swap(true, Ordering::Relaxed) {
+                    let _ = at_first_column.send(());
+                    let _ = resume.recv();
+                }
+            },
+        };
+        let chunks = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                spectrogram_worker_loop(
+                    &command_rx,
+                    &output,
+                    &generation,
+                    &columns_produced,
+                    &track_length,
+                    &reports,
+                );
+            });
+            // Declared before the context that borrows it, it is dropped
+            // after it, and before the scope waits for the worker.
+            let worker = ReleasedWorker {
+                commands: Some(command_tx),
+                reached: vec![reached],
+                go_on: vec![go_on],
+            };
+            let ctx = AnalysisContext {
+                event_tx: &control_events,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_token,
+                spectrogram_cmd_tx: worker.commands.as_ref().unwrap(),
+                spectrogram_decode_generation: &generation,
+                spectrogram_decode_columns_produced: &columns_produced,
+                spectrogram_track_length: &track_length,
+            };
+            state.refill_centered_spectrogram(0.0, &ctx);
+            worker.reached[0]
+                .recv_timeout(OUTPUT_WAIT)
+                .expect("the first column");
+            // The session published the length of the file when it opened
+            // it, which the seek is placed by.
+            assert_eq!(track_length.frames_of(path, rate), Some(u64::from(frames)));
+            match how {
+                EndSeek::Restart => state.refill_centered_spectrogram(target, &ctx),
+                EndSeek::Seek => state.seek_spectrogram_position(target, &ctx),
+            }
+            state.update_spectrogram_position(target, &ctx);
+            worker.go_on[0].send(()).unwrap();
+
+            // Until the session for the seek has decoded to the end, and
+            // sent the left of its view.
+            let mut chunks = Vec::new();
+            while !chunks
+                .last()
+                .is_some_and(|chunk: &PrecomputedSpectrogramChunk| {
+                    chunk.complete && chunk.generation == generation.load(Ordering::Relaxed)
+                })
+            {
+                let event = event_rx.recv_timeout(OUTPUT_WAIT).expect("the end");
+                if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event {
+                    chunks.push(chunk);
+                }
+            }
+            chunks
+        });
+        // The UI holds the columns of the last session since its last
+        // reset.
+        let last_generation = chunks.last().unwrap().generation;
+        let session: Vec<_> = chunks
+            .into_iter()
+            .filter(|chunk| chunk.generation == last_generation)
+            .collect();
+        let reset = session
+            .iter()
+            .rposition(|chunk| chunk.buffer_reset)
+            .expect("the seek's reset");
+        let end = u64::from(session.last().unwrap().total_columns_estimate);
+        (columns_of(&session[reset..]), end)
+    }
+
+    /// A centered view of a file that tells its length, with a seek a few
+    /// seconds before its end. Once the session has decoded the end, the UI
+    /// ends the view there, a window before it: every column of that view
+    /// is decoded. And a view that covers 90% of the track's columns shows
+    /// the whole of it, from its start, while the playhead is more than half
+    /// a window before the end. Placed by the column estimate, whose
+    /// allowance runs 64 columns of 1024 frames past the end (1.5 s at 44.1
+    /// kHz, 8.2 s at 8 kHz), the seek decoded from further right: at 8 kHz
+    /// in every case, at 44.1 kHz, whose allowance the 2 s of warm-up hides
+    /// at the end, in the view of the whole track. Placed by the seconds of
+    /// the file, not the columns decoded of it, a view of 90% to 90.4% of
+    /// the columns did not show the whole track; nor did a view that the
+    /// rounding of Qt's zoom gives a column more than its pixels.
+    #[test]
+    fn a_centered_view_by_the_end_of_a_track_is_decoded_to_its_left_edge() {
+        // 40 s at 8 kHz and at 44.1 kHz, and 70.08 s at 8 kHz.
+        let (short, short_cd, long) = (320_000, 1_764_000, 560_640);
+        // (rate, frames, (zoom, width), playhead, whether the UI shows the
+        // whole track): views of 64% of the track, as wide as at zoom 1 and
+        // as one zoomed in, and of 91%, which shows the whole track, and
+        // would not by the estimate. Views at the edge of the whole track,
+        // of 1866 columns at 8 kHz and 1722 at 44.1 kHz: of 89.98% and
+        // 89.95%, and of 90.03% and 90.01%, which are 35.91 s and 35.99 s,
+        // less than 90% of the 40 s, and of a column more. And at zoom 0.57,
+        // 300 samples a column, which Qt draws at 171 / 300 × 300 / 171, a
+        // bit below 1: 1680 pixels show 1681 of the 1867 columns, 90.04%,
+        // and 1679 pixels 1680, 89.98%.
+        let cases = [
+            (8_000, short, (1.0, 1_200), 37.0, Some(false)),
+            (8_000, short, (2.0, 1_200), 37.0, Some(false)),
+            (8_000, short, (1.0, 1_710), 37.0, None),
+            (8_000, short, (1.0, 1_710), 21.3, Some(true)),
+            (8_000, short, (1.0, 1_679), 21.9, Some(false)),
+            (8_000, short, (1.0, 1_680), 21.9, Some(true)),
+            (8_000, short, (1.0, 1_681), 21.9, Some(true)),
+            (8_000, long, (0.57, 1_679), 38.4, Some(false)),
+            (8_000, long, (0.57, 1_680), 38.4, Some(true)),
+            (44_100, short_cd, (1.0, 1_100), 37.0, Some(false)),
+            (44_100, short_cd, (2.0, 2_200), 37.0, Some(false)),
+            (44_100, short_cd, (1.0, 1_568), 37.0, None),
+            (44_100, short_cd, (1.0, 1_568), 21.5, Some(true)),
+            (44_100, short_cd, (1.0, 1_549), 21.5, Some(false)),
+            (44_100, short_cd, (1.0, 1_550), 21.5, Some(true)),
+            (44_100, short_cd, (1.0, 1_551), 21.5, Some(true)),
+        ];
+        for file in [(8_000, short), (8_000, long), (44_100, short_cd)] {
+            let (rate, frames) = file;
+            let path = write_frames_fixture("pinned", rate, frames);
+            for (_, _, view, target, whole) in cases
+                .iter()
+                .filter(|(case_rate, case_frames, ..)| (*case_rate, *case_frames) == file)
+            {
+                let (zoom, width) = *view;
+                // The view's window and playhead column, as Qt's
+                // centeredViewLocked reckons them at a device pixel ratio
+                // of 1, with the zoom its effectiveZoomLocked draws at.
+                let hop = super::super::column_hop::column_hop(rate, zoom);
+                let drawn = super::super::column_hop::effective_zoom(
+                    rate,
+                    hop,
+                    super::super::column_hop::render_zoom(rate, hop, f64::from(zoom)),
+                );
+                let window = f64_to_u64_saturating((f64::from(width) / drawn).ceil());
+                let columns_per_second = f64::from(rate) / usize_to_f64_approx(hop);
+                let now = f64_to_u64_saturating((target * columns_per_second).floor());
+                for how in [EndSeek::Restart, EndSeek::Seek] {
+                    let (columns, end) =
+                        columns_after_a_centered_seek((&path, frames), rate, *view, *target, how);
+                    // The columns the decoder expects of the file.
+                    assert_eq!(
+                        end,
+                        centered_view::decoded_end_column(u64::from(frames), 2_048, zoom, rate),
+                        "{rate} Hz {view:?} {how:?}"
+                    );
+                    let shown = ui_centered_view(now, window, end);
+                    if let Some(whole) = whole {
+                        assert_eq!(
+                            shown == (0..end),
+                            *whole,
+                            "{rate} Hz {view:?} at {target} s: the view {shown:?} of {end}"
+                        );
+                    }
+                    let missing: Vec<u64> = shown
+                        .clone()
+                        .filter(|column| !columns.contains_key(column))
+                        .collect();
+                    assert!(
+                        missing.is_empty(),
+                        "{rate} Hz {view:?} at {target} s {how:?}: the view {shown:?} misses {} \
+                         columns, {:?}..{:?}",
+                        missing.len(),
+                        missing.first(),
+                        missing.last(),
+                    );
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    /// The session of the outgoing track opens its file slowly, as one on a
+    /// network share can, and publishes the file's length after the track
+    /// has changed. A seek in the new track before the new track's session
+    /// has published its own must not place the view by the outgoing
+    /// file's length: the new track's length is unknown until then, and
+    /// the view stays centered on the playhead.
+    #[test]
+    fn a_probe_that_ends_after_the_track_changed_does_not_place_the_new_tracks_view() {
+        use super::super::{AnalysisContext, AnalysisRuntimeState, WaveformDecodeJob};
+
+        // 40 s, and 60 s, at 8 kHz. By the outgoing file's 1866 columns, a
+        // view of 1200 at 37 s ends at them, 22.2 s left of where the
+        // playhead centers it in the 60 s.
+        let rate = 8_000;
+        let outgoing = write_frames_fixture("probe-outgoing", rate, 320_000);
+        let playing = write_frames_fixture("probe-playing", rate, 480_000);
+        let (width, target) = (1_200, 37.0);
+        let unknown = CenteredView::new(width, 1.0, rate, None).decode_start_seconds(target);
+        let outgoing_end = centered_view::decoded_end_column(320_000, 2_048, 1.0, rate);
+        let by_outgoing =
+            CenteredView::new(width, 1.0, rate, Some(outgoing_end)).decode_start_seconds(target);
+        let playing_end = centered_view::decoded_end_column(480_000, 2_048, 1.0, rate);
+        let by_playing =
+            CenteredView::new(width, 1.0, rate, Some(playing_end)).decode_start_seconds(target);
+        assert!(by_outgoing < unknown - 5.0, "{by_outgoing} {unknown}");
+        assert!(
+            (by_playing - unknown).abs() < 1e-9,
+            "{by_playing} {unknown}"
+        );
+
+        let mut state = AnalysisRuntimeState::new();
+        state.display_mode = SpectrogramDisplayMode::Centered;
+        state.active_track_path = Some(outgoing.clone());
+        state.active_track_token = 1;
+        state.active_session_effective_rate = rate;
+        state.active_session_channel_count = 1;
+        state.spectrogram_view_mode = SpectrogramViewMode::Downmix;
+        state.fft_size = 2_048;
+        state.zoom_level = 1.0;
+        state.spectrogram_widget_width = width;
+        state.spectrogram_session_widget_width = width;
+
+        let (command_tx, command_rx) = unbounded();
+        let (events, event_rx) = unbounded();
+        let (reports, report_rx) = unbounded();
+        let (waveform_job_tx, _waveform_jobs) = unbounded::<WaveformDecodeJob>();
+        let (control_events, _control_event_rx) = unbounded::<AnalysisEvent>();
+        let generation = AtomicU64::new(0);
+        let columns_produced = AtomicU64::new(0);
+        let track_length = PublishedTrackLength::default();
+        let waveform_token = AtomicU64::new(0);
+        let output = WatchedOutput {
+            events,
+            on_chunk: |_: &PrecomputedSpectrogramChunk| {},
+        };
+        let (outgoing_reached, outgoing_release) = decode_test_hooks::hold_open_of(&outgoing);
+        let (playing_reached, playing_release) = decode_test_hooks::hold_open_of(&playing);
+        let first_chunk = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                spectrogram_worker_loop(
+                    &command_rx,
+                    &output,
+                    &generation,
+                    &columns_produced,
+                    &track_length,
+                    &reports,
+                );
+            });
+            // Declared before the context that borrows it, it is dropped
+            // after it, and before the scope waits for the worker.
+            let mut worker = ReleasedWorker {
+                commands: Some(command_tx),
+                reached: vec![outgoing_reached, playing_reached],
+                go_on: vec![outgoing_release, playing_release],
+            };
+            let ctx = AnalysisContext {
+                event_tx: &control_events,
+                waveform_job_tx: &waveform_job_tx,
+                waveform_decode_active_token: &waveform_token,
+                spectrogram_cmd_tx: worker.commands.as_ref().unwrap(),
+                spectrogram_decode_generation: &generation,
+                spectrogram_decode_columns_produced: &columns_produced,
+                spectrogram_track_length: &track_length,
+            };
+            // The outgoing track's session waits to open its file.
+            state.refill_centered_spectrogram(0.0, &ctx);
+            worker.reached[0]
+                .recv_timeout(OUTPUT_WAIT)
+                .expect("the outgoing session at its file");
+            state.handle_track_change(playing.clone(), true, false, 2, &ctx);
+            // The probe ends after the track change, and the outgoing
+            // session publishes the file's length as it reports it opened.
+            drop(worker.go_on.remove(0));
+            loop {
+                match report_rx
+                    .recv_timeout(OUTPUT_WAIT)
+                    .expect("the outgoing file opened")
+                {
+                    SessionReport::Opened { path, .. } if path == outgoing => break,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                track_length.frames_of(&outgoing, rate),
+                Some(320_000),
+                "the outgoing session published its file's length"
+            );
+            // A seek in the new track, before its session has opened the
+            // file, restarts the view of it.
+            let restart_start = state.spectrogram_restart_start_seconds(target, &ctx);
+            assert!(
+                (restart_start - unknown).abs() < 1e-9,
+                "the restart starts at {restart_start} s, not {unknown} s (by the outgoing \
+                 file's length, {by_outgoing} s)"
+            );
+            state.refill_centered_spectrogram(target, &ctx);
+            let restart_generation = generation.load(Ordering::Relaxed);
+            drop(worker.go_on.remove(0));
+            let first_chunk = loop {
+                let event = event_rx.recv_timeout(OUTPUT_WAIT).expect("the restart");
+                // The session's first chunk, after the reset the worker
+                // sends before it opens the file, which has no bins.
+                if let AnalysisEvent::PrecomputedSpectrogramChunk(chunk) = event {
+                    if chunk.generation == restart_generation && chunk.bins_per_column > 0 {
+                        break chunk;
+                    }
+                }
+            };
+            // Once the new track's session has published, its length
+            // places the view.
+            assert_eq!(track_length.frames_of(&playing, rate), Some(480_000));
+            assert_eq!(track_length.frames_of(&outgoing, rate), None);
+            first_chunk
+        });
+        std::fs::remove_file(outgoing).unwrap();
+        std::fs::remove_file(playing).unwrap();
+        let hops = column_hops(2_048, 1.0, rate);
+        let (start_column, _) = stft_seek_grid(unknown, rate, hops.stft_hop, hops.effective_hop);
+        assert_eq!(u64::from(first_chunk.start_column_index), start_column);
     }
 }

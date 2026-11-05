@@ -1172,6 +1172,11 @@ private slots:
     void spectrogramCenteredSeekRestartRebuildsEarlierWindow();
     void spectrogramFullscreenRefillAfterSeekCoversLeftEdge();
     void spectrogramCenteredFinalizeChunkShrinksTotalEstimate();
+    void spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate_data();
+    void spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate();
+    void spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns_data();
+    void spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns();
+    void spectrogramReferenceHopDataIsDrawnAtTheBackendsZoom();
     void spectrogramEndSeekReleasesCanvasOnFinalize();
     void spectrogramSeekFreezeEndsWithTheSession();
     void spectrogramCenteredFinalizeChunkIgnoredForStaleToken();
@@ -12393,6 +12398,257 @@ void SpectrogramSmokeTest::spectrogramCenteredFinalizeChunkShrinksTotalEstimate(
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, actualDecodedCols);
     QCOMPARE(item.m_precomputedMaxColumnIndex, 199);
     QVERIFY(item.m_ringWriteSeq > 0);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate_data() {
+    // The column estimate a session sends until it has decoded the end of
+    // a 120 s file at 8 kHz, in columns of 171 frames (the reference hop
+    // at 8 kHz): the file's length in columns of 1024 frames, or the 300 s
+    // the decoder assumes for a file that does not tell it, and 64 more,
+    // 8.2 s, which only size buffers.
+    const auto estimate = [](qint64 frames) {
+        return static_cast<int>(std::ceil(
+            static_cast<double>(frames / 1024 + 64) * 1024.0 / 171.0));
+    };
+    QTest::addColumn<int>("estimate");
+    QTest::newRow("known length") << estimate(120 * 8'000);
+    QTest::newRow("unknown length") << estimate(300 * 8'000);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate() {
+    // The decoder places a centered view, its seeks and restarts, by the
+    // columns a session decodes of the track (issue 421), not by its
+    // column estimate, which runs past the end. The view here keeps
+    // bounding itself
+    // by the estimate until the session has decoded the end, and then
+    // shows the whole track once its window covers 90% of the columns
+    // decoded, and ends where the decode did, a window before it, once the
+    // rest of the track is shorter than half a window: the full-track lock
+    // and the end of the view come from the decoded end, for files that
+    // tell their length and for files that do not.
+    QFETCH(int, estimate);
+    SpectrogramItem item;
+    item.setWidth(400);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int hop = 171;
+    constexpr double columnsPerSecond = static_cast<double>(rate) / hop;
+    // The columns of 2048-sample windows centered on each column that fit
+    // in 120 s.
+    constexpr int decodedEnd = (120 * rate - 1'024) / hop + 1;
+    QCOMPARE(decodedEnd, 5'609);
+    QVERIFY(estimate > decodedEnd);
+    constexpr int narrowWindow = 1'200;
+    // 91% of the columns decoded, and less of the estimate.
+    constexpr int wideWindow = 5'100;
+    QVERIFY(static_cast<qint64>(wideWindow) * 100 / estimate < 90);
+    QVERIFY(static_cast<qint64>(wideWindow) * 100 / decodedEnd >= 90);
+    // 3 s before the end, and 60 s, where the wide window's right edge is
+    // short of the end.
+    constexpr double nearEnd = 117.0;
+    constexpr double midTrack = 60.0;
+    const auto column = [&](double seconds) {
+        return static_cast<qint64>(std::floor(seconds * columnsPerSecond));
+    };
+    QVERIFY(column(midTrack) + wideWindow / 2 < decodedEnd - 1);
+    // The view of a pane as many pixels wide as the window's columns, at
+    // the canvas width and zoom the paint reckons it with.
+    const auto view = [&](double seconds, int window) {
+        item.setWidth(window);
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.centeredViewLocked(seconds, item.canvasWidthLocked(),
+            item.canvasHeightLocked(), item.canvasZoomLocked(), columnsPerSecond);
+    };
+
+    // Every column is in, but the session has yet to say it reached the
+    // end: the chunks carry the estimate.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estimate, rate, hop, false, true, 1);
+    item.feedPrecomputedChunk(
+        QByteArray(decodedEnd * bins, '\x40'), bins, 0, decodedEnd, 0, estimate,
+        rate, hop, false, false, 1);
+    {
+        const SpectrogramItem::CenteredView narrow = view(nearEnd, narrowWindow);
+        QVERIFY(!narrow.decodedTailLooksFinal);
+        const qint64 right = std::min<qint64>(
+            estimate - 1, column(nearEnd) - narrowWindow / 2 + narrowWindow - 1);
+        QCOMPARE(narrow.right, right);
+        QCOMPARE(narrow.left, right - narrowWindow + 1);
+        const SpectrogramItem::CenteredView wide = view(midTrack, wideWindow);
+        QVERIFY(!wide.decodedTailLooksFinal);
+        QCOMPARE(wide.left, column(midTrack) - wideWindow / 2);
+    }
+
+    // The session's last chunk carries the decoded end.
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, decodedEnd, decodedEnd, rate, hop,
+        /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, decodedEnd);
+    const SpectrogramItem::CenteredView narrow = view(nearEnd, narrowWindow);
+    QVERIFY(narrow.decodedTailLooksFinal);
+    QCOMPARE(narrow.right, qint64(decodedEnd - 1));
+    QCOMPARE(narrow.left, qint64(decodedEnd - narrowWindow));
+    const SpectrogramItem::CenteredView wide = view(midTrack, wideWindow);
+    QCOMPARE(wide.left, qint64(0));
+    QCOMPARE(wide.right, qint64(decodedEnd - 1));
+    // Near the end, the whole track's view ends there too.
+    const SpectrogramItem::CenteredView wideAtEnd = view(nearEnd, wideWindow);
+    QCOMPARE(wideAtEnd.right, qint64(decodedEnd - 1));
+    QCOMPARE(wideAtEnd.left, qint64(decodedEnd - wideWindow));
+
+    // The decoder reckons the view by the same end, the same window, and
+    // the same whole columns: near the end its left edge is the view's, and
+    // mid-track it shows the whole track as the view does. By the
+    // estimate, which runs 8.2 s past the end, a decode started right of
+    // the view's left edge, 2 s of warm-up and all, and did not show the
+    // whole track.
+    QCOMPARE(qint64(decodedEnd - narrowWindow), narrow.left);
+    QVERIFY(static_cast<qint64>(wideWindow) * 100 / decodedEnd >= 90);
+    constexpr double warmUp = 2.0;
+    const double estimatedEnd = 120.0 + 65'536.0 / rate;
+    QVERIFY(column(estimatedEnd - narrowWindow / columnsPerSecond - warmUp) > narrow.left);
+    QVERIFY(wideWindow / columnsPerSecond < 0.9 * estimatedEnd);
+    QVERIFY(column(midTrack - wideWindow / columnsPerSecond / 2.0 - warmUp) > wide.left);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns_data() {
+    // Files at 8 kHz decoded with 2048-sample windows, and views of them as
+    // wide as a pane's pixels, at a device pixel ratio of 1. The decoder's
+    // model of the view is tested on the same cases (src/analysis/
+    // centered_view.rs and session.rs).
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<int>("hop");
+    QTest::addColumn<int>("frames");
+    QTest::addColumn<int>("decodedEnd");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<double>("position");
+    QTest::addColumn<qint64>("window");
+    QTest::addColumn<qint64>("left");
+    // 40 s at zoom 1, in 1866 columns of 171 frames: 1680 of them are
+    // 90.03%, which the view shows the whole track at, though they are
+    // 35.91 s, less than 90% of the 40 s. Centered on column 1024 at 21.9 s.
+    QTest::newRow("zoom 1, 89.98%")
+        << 1.0 << 171 << 320'000 << 1'866 << 1'679 << 21.9 << qint64(1'679)
+        << qint64(1'024 - 1'679 / 2);
+    QTest::newRow("zoom 1, 90.03%")
+        << 1.0 << 171 << 320'000 << 1'866 << 1'680 << 21.9 << qint64(1'680) << qint64(0);
+    QTest::newRow("zoom 1, 90.08%")
+        << 1.0 << 171 << 320'000 << 1'866 << 1'681 << 21.9 << qint64(1'681) << qint64(0);
+    // 70.08 s at zoom 0.57, in 1867 columns of 300 frames, which the view
+    // draws at 171 / 300 × 300 / 171, a bit below 1: 1680 pixels show 1681
+    // columns, 90.04%, and 1679 pixels 1680, 89.98%. Centered on column
+    // 1024 at 38.4 s.
+    QTest::newRow("zoom 0.57, 89.98%")
+        << 0.57 << 300 << 560'640 << 1'867 << 1'679 << 38.4 << qint64(1'680)
+        << qint64(1'024 - 1'680 / 2);
+    QTest::newRow("zoom 0.57, 90.04%")
+        << 0.57 << 300 << 560'640 << 1'867 << 1'680 << 38.4 << qint64(1'681) << qint64(0);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredViewShowsTheWholeTrackAtNinetyPercentOfTheDecodedColumns() {
+    // The decoder starts a seek's decode at the view's left edge by the
+    // same columns, the same zoom (ferrous_ffi_spectrogram_effective_zoom)
+    // and the same integer share (issue 421): placed by seconds, the
+    // 90.03% view started its decode at 1.95 s and left columns 0 to 89
+    // black; placed by a column a pixel, the 90.04% one left 0 to 129.
+    QFETCH(double, zoom);
+    QFETCH(int, hop);
+    QFETCH(int, frames);
+    QFETCH(int, decodedEnd);
+    QFETCH(int, width);
+    QFETCH(double, position);
+    QFETCH(qint64, window);
+    QFETCH(qint64, left);
+    SpectrogramItem item;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int referenceHop = 171;
+    // The column estimate a session sends: the file in columns of 1024
+    // frames, and 64 more, in its own columns.
+    const auto estimateAt = [frames](int columnHop) {
+        return static_cast<int>(
+            std::ceil((frames / 1024 + 64) * 1024.0 / static_cast<double>(columnHop)));
+    };
+    if (hop != referenceHop) {
+        // Zoomed from a view at zoom 1, as playback zooms: the backend
+        // restarts at the zoom's hop, and the view draws its data at the
+        // zoom the backend decodes at.
+        item.feedPrecomputedChunk(
+            QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, estimateAt(referenceHop),
+            rate, referenceHop, false, true, 1);
+        item.setZoomLevel(zoom);
+        item.m_zoomDebounceTimer->stop();
+        QVERIFY(item.m_awaitingZoomData);
+    }
+    const int estimate = estimateAt(hop);
+    QVERIFY(estimate > decodedEnd);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, 0, estimate, rate, hop, false, true, 1);
+    item.feedPrecomputedChunk(
+        QByteArray(decodedEnd * bins, '\x40'), bins, 0, decodedEnd, 0, estimate,
+        rate, hop, false, false, 1);
+    item.feedPrecomputedChunk(
+        QByteArray(), bins, 0, 0, decodedEnd, decodedEnd, rate, hop,
+        /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false);
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.m_precomputedHopSize, hop);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, decodedEnd);
+    const double canvasZoom = item.canvasZoomLocked();
+    const int canvasWidth = item.canvasWidthLocked();
+    QCOMPARE(canvasWidth, width);
+    if (hop != referenceHop) {
+        QVERIFY(!item.m_awaitingZoomData);
+        QCOMPARE(item.m_renderZoomLevel, static_cast<double>(referenceHop) / hop);
+        QVERIFY(canvasZoom < 1.0);
+    }
+    QCOMPARE(static_cast<qint64>(std::ceil(static_cast<double>(canvasWidth) / canvasZoom)),
+        window);
+    const double columnsPerSecond = static_cast<double>(rate) / hop;
+    const SpectrogramItem::CenteredView view = item.centeredViewLocked(
+        position, canvasWidth, item.canvasHeightLocked(), canvasZoom, columnsPerSecond);
+    QCOMPARE(view.left, left);
+    QCOMPARE(view.right, left == 0 ? qint64(decodedEnd - 1) : left + window - 1);
+}
+
+void SpectrogramSmokeTest::spectrogramReferenceHopDataIsDrawnAtTheBackendsZoom() {
+    // The backend decodes at the zoom it is sent, a float, and reckons the
+    // centered view's window with it (issue 421). Data at the reference
+    // hop, which is drawn at its zoom, is drawn at that zoom too, not at
+    // the zoom asked for, which a float does not hold: their windows could
+    // differ by a column.
+    SpectrogramItem item;
+    item.setWidth(1'000);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    constexpr int bins = 4;
+    constexpr int columns = 20'000;
+    item.feedPrecomputedChunk(QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, columns,
+        48'000, 1'280, false, true, 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_lastBackendZoom = 0.8f;
+        item.m_zoomLevel = 0.8;
+    }
+    constexpr double asked = 1.0003;
+    QVERIFY(static_cast<double>(static_cast<float>(asked)) != asked);
+    item.setZoomLevel(asked);
+    item.m_zoomDebounceTimer->stop();
+    QVERIFY(item.m_awaitingZoomData);
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, 0, columns, 48'000, 1'024, false, true, 1);
+    item.feedPrecomputedChunk(QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, columns,
+        48'000, 1'024, false, false, 1);
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY(!item.m_awaitingZoomData);
+    const double backend = static_cast<double>(static_cast<float>(asked));
+    QCOMPARE(item.m_renderZoomLevel, backend);
+    QCOMPARE(item.effectiveZoomLocked(),
+        ferrous_ffi_spectrogram_effective_zoom(48'000, 1'024, backend));
 }
 
 void SpectrogramSmokeTest::spectrogramCenteredFinalizeChunkIgnoredForStaleToken() {

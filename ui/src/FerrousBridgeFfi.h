@@ -24,6 +24,11 @@ std::uint32_t ferrous_ffi_spectrogram_reference_hop(std::uint32_t sampleRate);
 // capacity reckon with the same zoom.
 double ferrous_ffi_spectrogram_render_zoom(
     std::uint32_t sampleRate, std::uint32_t hop, double zoom);
+// The zoom to draw spectrogram data of audio at sampleRate whose columns
+// are hop samples apart at, at renderZoom: renderZoom * hop / the reference
+// hop, which the decoder reckons the centered view's window with too.
+double ferrous_ffi_spectrogram_effective_zoom(
+    std::uint32_t sampleRate, std::uint32_t hop, double renderZoom);
 // The zoom the spectrogram moves to when requested is asked of it at
 // current; current if it keeps its zoom.
 float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);
