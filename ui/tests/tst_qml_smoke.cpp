@@ -26,6 +26,7 @@
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGRendererInterface>
+#include <QSGTransformNode>
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -1431,6 +1432,14 @@ private slots:
     void waveformSceneGraphStrokeWeightHoldsAcrossTheThreshold_data();
     void waveformSceneGraphStrokeWeightHoldsAcrossTheThreshold();
     void waveformSceneGraphDrawsEveryLaneAtDeepZoom();
+    void waveformSceneGraphScrollsSampleChunks_data();
+    void waveformSceneGraphScrollsSampleChunks();
+    void waveformSceneGraphSampleChunkBoundariesDoNotShow_data();
+    void waveformSceneGraphSampleChunkBoundariesDoNotShow();
+    void waveformSceneGraphRebuildsSampleChunksOnChange_data();
+    void waveformSceneGraphRebuildsSampleChunksOnChange();
+    void waveformSceneGraphKeepsSampleChunksAcrossDetailWindows();
+    void waveformSceneGraphSplitsLargeSampleChunks();
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
     void waveformSceneGraphMatchesRaster_data();
@@ -10044,9 +10053,14 @@ constexpr int kSlowBuildTimeoutMs = 30'000;
 // Gives `item` raw samples of `channels` channels at `rate` from `start` to
 // `end` seconds, a sine of its own in each channel, as a detail window at
 // sample resolution.
-void giveSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end) {
+// With `sameSource`, the window is the next of the same file, as one a
+// view asks for while it moves on; otherwise its data is new, as another
+// file's.
+void giveSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end,
+    bool sameSource = false) {
     const qint64 firstFrame = std::llround(start * rate);
     const int points = static_cast<int>(std::llround((end - start) * rate));
+    if (!sameSource) item.clearDetailLocked();
     item.m_sampleRateHz = rate;
     item.m_channelCount = channels;
     auto &detail = item.m_detail;
@@ -10170,8 +10184,9 @@ QString lanesWithEmptyColumns(const QImage &image, int lanes, int skipFirst = -1
 // Gives `item` raw samples as giveSampleDetail does, of a signal with more
 // in it than one sine: a slow wave with quicker, quieter ones on it, as
 // music has, whose curve between samples differs from straight segments.
-void giveRichSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end) {
-    giveSampleDetail(item, rate, channels, start, end);
+void giveRichSampleDetail(WaveformEditorItem &item, int rate, int channels, double start, double end,
+    bool sameSource = false) {
+    giveSampleDetail(item, rate, channels, start, end, sameSource);
     auto &detail = item.m_detail;
     const qint64 firstFrame = std::llround(start * rate);
     for (int point = 0; point < detail.pointCount; ++point) {
@@ -10204,6 +10219,23 @@ void giveZigzagSampleDetail(WaveformEditorItem &item, int rate, int channels, do
     }
 }
 
+// Calls `visit` with each node under `node` that draws, in the order a
+// renderer draws them, and the translation of its coordinates in the
+// scene's: chunks of geometry are under transform nodes that translate.
+template <typename Visit>
+void visitDrawnNodes(const QSGNode *node, QPointF offset, Visit &&visit) {
+    for (const QSGNode *child = node->firstChild(); child; child = child->nextSibling()) {
+        if (child->type() == QSGNode::TransformNodeType) {
+            const QMatrix4x4 matrix = static_cast<const QSGTransformNode *>(child)->matrix();
+            visitDrawnNodes(child, offset + QPointF(matrix(0, 3), matrix(1, 3)), visit);
+        } else if (child->type() == QSGNode::BasicNodeType) {
+            visitDrawnNodes(child, offset, visit);
+        } else {
+            visit(child, offset);
+        }
+    }
+}
+
 // The scene's vertex-colored geometry and rectangles drawn as a GPU draws
 // them without multisampling: a pixel takes a triangle's color, interpolated
 // across it, where its center is inside, blended premultiplied over what is
@@ -10221,9 +10253,9 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
             static_cast<int>(std::lround(b + qBlue(*pixel) * keep)),
             static_cast<int>(std::lround(a * 255.0 + qAlpha(*pixel) * keep)));
     };
-    for (const QSGNode *child = scene->firstChild(); child; child = child->nextSibling()) {
+    visitDrawnNodes(scene, QPointF(), [&](const QSGNode *child, QPointF offset) {
         if (const auto *rectangle = dynamic_cast<const QSGRectangleNode *>(child)) {
-            const QRectF rect = rectangle->rect();
+            const QRectF rect = rectangle->rect().translated(offset);
             const QColor color = rectangle->color();
             const double alpha = color.alphaF();
             for (int y = std::max(0, static_cast<int>(std::lround(rect.top() * scale)));
@@ -10233,17 +10265,17 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
                     blend(x, y, color.red() * alpha, color.green() * alpha, color.blue() * alpha, alpha);
                 }
             }
-            continue;
+            return;
         }
         // Images, labels and the playhead, are left out.
         if (child->type() != QSGNode::GeometryNodeType || dynamic_cast<const QSGImageNode *>(child)) {
-            continue;
+            return;
         }
         const QSGGeometry *geometry = static_cast<const QSGGeometryNode *>(child)->geometry();
         if (geometry == nullptr
             || geometry->sizeOfVertex() != static_cast<int>(sizeof(QSGGeometry::ColoredPoint2D))
             || geometry->drawingMode() != QSGGeometry::DrawTriangles) {
-            continue;
+            return;
         }
         const auto *vertices = geometry->vertexDataAsColoredPoint2D();
         for (int first = 0; first + 2 < geometry->vertexCount(); first += 3) {
@@ -10251,7 +10283,10 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
                 &vertices[first], &vertices[first + 1], &vertices[first + 2]};
             double px[3];
             double py[3];
-            for (int i = 0; i < 3; ++i) { px[i] = corner[i]->x * scale; py[i] = corner[i]->y * scale; }
+            for (int i = 0; i < 3; ++i) {
+                px[i] = (corner[i]->x + offset.x()) * scale;
+                py[i] = (corner[i]->y + offset.y()) * scale;
+            }
             const double area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
             if (area == 0.0) continue;
             const double sign = area > 0 ? 1.0 : -1.0;
@@ -10293,7 +10328,7 @@ QImage rasterizeSceneGeometry(const QSGNode *scene, QSize size, double scale, QC
                 }
             }
         }
-    }
+    });
     return image.convertToFormat(QImage::Format_RGB32);
 }
 
@@ -10362,17 +10397,20 @@ std::vector<int> blurredGreen(const QImage &image, int radius) {
 }
 
 // The visible samples a lane of `item` draws, those within the margin
-// drawDetailSlice draws curves into: their positions in logical pixels,
-// and their points of the detail.
+// drawDetailSlice draws curves into, of 8 pixels or three samples and 3
+// pixels: their positions in logical pixels, and their points of the
+// detail.
 QList<std::pair<double, int>> visibleSamples(WaveformEditorItem &item, int width) {
     QMutexLocker lock(&item.m_stateMutex);
     const auto [start, end] = item.visibleRangeLocked();
     const double secondsPerPixel = (end - start) / width;
+    const double spacing = WaveformEditorItem::sampleSpacingPixels(item.m_detail, width, start, end);
+    const double margin = std::max(8.0, std::ceil(3.0 * spacing + 3.0));
     QList<std::pair<double, int>> samples;
     for (int point = 0; point < item.m_detail.pointCount; ++point) {
         const double time = WaveformEditorItem::detailPointTime(item.m_detail, point);
-        const double position = std::round((time / secondsPerPixel - start / secondsPerPixel) * 256.0) / 256.0;
-        if (position >= -8.0 && position < width + 8.0) samples.push_back({position, point});
+        const double position = std::round((time - start) / secondsPerPixel * 256.0) / 256.0;
+        if (position >= -margin && position < width + margin) samples.push_back({position, point});
     }
     return samples;
 }
@@ -10813,24 +10851,30 @@ namespace {
 // pixels: the markers of samples, or for antialiased ones their insides.
 // The waveform's primitives are quads, (a, b, c, c, b, d), and triangles.
 QList<QRectF> sceneSquares(const QSGNode *scene, QColor color) {
-    // The vertices of consecutive geometry nodes, as one: a geometry too
-    // large for a node is split between triangles, which may be a quad's.
+    // The vertices of consecutive geometry nodes, as one, in the scene's
+    // coordinates: a geometry too large for a node is split between
+    // triangles, which may be a quad's.
     std::vector<QSGGeometry::ColoredPoint2D> vertices;
-    for (const QSGNode *child = scene->firstChild(); child; child = child->nextSibling()) {
+    visitDrawnNodes(scene, QPointF(), [&vertices](const QSGNode *child, QPointF offset) {
         // The software renderer's image and rectangle nodes hold no real
         // geometry.
         if (child->type() != QSGNode::GeometryNodeType || dynamic_cast<const QSGImageNode *>(child)
             || dynamic_cast<const QSGRectangleNode *>(child)) {
-            continue;
+            return;
         }
         const QSGGeometry *geometry = static_cast<const QSGGeometryNode *>(child)->geometry();
         if (geometry == nullptr
             || geometry->sizeOfVertex() != static_cast<int>(sizeof(QSGGeometry::ColoredPoint2D))) {
-            continue;
+            return;
         }
         const auto *v = geometry->vertexDataAsColoredPoint2D();
-        vertices.insert(vertices.end(), v, v + geometry->vertexCount());
-    }
+        for (int i = 0; i < geometry->vertexCount(); ++i) {
+            QSGGeometry::ColoredPoint2D point = v[i];
+            point.x = static_cast<float>(point.x + offset.x());
+            point.y = static_cast<float>(point.y + offset.y());
+            vertices.push_back(point);
+        }
+    });
     QList<QRectF> squares;
     {
         // Quads start at any triangle: bevelled joins are three triangles.
@@ -10852,6 +10896,33 @@ QList<QRectF> sceneSquares(const QSGNode *scene, QColor color) {
         }
     }
     return squares;
+}
+// The samples of the view, at `positions` in each of `lanes` lanes of a
+// view of `size`, that have no marker, or more than one: a square centred
+// within a device pixel of it.
+QString samplesWithoutOneMarker(const QList<QRectF> &squares, const QList<double> &positions, QSize size,
+    int lanes, double scale) {
+    const double laneHeight = static_cast<double>(size.height()) / lanes;
+    QString result;
+    int wrong = 0;
+    for (int lane = 0; lane < lanes; ++lane) {
+        std::vector<double> centres;
+        for (const QRectF &square : squares) {
+            if (static_cast<int>(square.center().y() / laneHeight) == lane) centres.push_back(square.center().x());
+        }
+        std::sort(centres.begin(), centres.end());
+        for (const double position : positions) {
+            if (position < 0.0 || position >= size.width()) continue;
+            const auto from = std::lower_bound(centres.begin(), centres.end(), position - 1.0 / scale);
+            const auto to = std::upper_bound(centres.begin(), centres.end(), position + 1.0 / scale);
+            const auto count = to - from;
+            if (count != 1 && ++wrong <= 8) {
+                result += QStringLiteral("lane %1: %2 markers at %3; ").arg(lane).arg(count).arg(position);
+            }
+        }
+    }
+    if (wrong > 8) result += QStringLiteral("%1 in all").arg(wrong);
+    return result;
 }
 } // namespace
 
@@ -11025,16 +11096,11 @@ void WaveformSmokeTest::waveformSceneGraphCloseSamplesLookAsBefore() {
         after, kLanes, playheadX - playheadMargin, playheadX + playheadMargin);
     QVERIFY2(empty.isEmpty(), qPrintable(empty));
     // A marker at each sample of every lane.
-    const auto samples = static_cast<int>(visibleSamplePositions(item, size.width()).size());
     QVERIFY2(afterSquares.size() == beforeSquares.size(), qPrintable(QStringLiteral("%1 squares, %2 before")
         .arg(afterSquares.size()).arg(beforeSquares.size())));
-    for (int lane = 0; lane < kLanes; ++lane) {
-        const auto inLane = std::count_if(afterSquares.begin(), afterSquares.end(),
-            [lane, &size](const QRectF &square) {
-                return static_cast<int>(square.center().y() / (size.height() / kLanes)) == lane;
-            });
-        QCOMPARE(static_cast<int>(inLane), samples);
-    }
+    const QString unmarked = samplesWithoutOneMarker(
+        afterSquares, visibleSamplePositions(item, size.width()), size, kLanes, scale);
+    QVERIFY2(unmarked.isEmpty(), qPrintable(unmarked));
     const auto [different, mean] = imageDifference(before, after, 45);
     const int pixels = after.width() * after.height();
     const auto radius = static_cast<int>(std::lround(scale));
@@ -11101,6 +11167,620 @@ void WaveformSmokeTest::waveformSceneGraphDrawsEveryLaneAtDeepZoom() {
         playheadX + static_cast<int>(std::ceil(scale)) + 1);
     if (!empty.isEmpty()) grab.save(QDir::tempPath() + QStringLiteral("/waveform-deep-zoom-grab.png"));
     QVERIFY2(empty.isEmpty(), qPrintable(empty));
+}
+
+namespace {
+// The layer of chunks of a waveform scene, or none.
+const QSGNode *sampleChunkLayer(const QSGNode *scene) {
+    for (const QSGNode *child = scene != nullptr ? scene->firstChild() : nullptr; child;
+         child = child->nextSibling()) {
+        if (child->type() == QSGNode::BasicNodeType) return child;
+    }
+    return nullptr;
+}
+
+// A chunk's node as a frame left it: what its geometry holds, and where.
+struct SampleChunkNode {
+    size_t hash{0};
+    int vertices{0};
+    double x{0.0};
+};
+
+// The nodes of a waveform scene's chunks that hold geometry.
+QHash<const QSGNode *, SampleChunkNode> sampleChunkNodes(const QSGNode *scene) {
+    QHash<const QSGNode *, SampleChunkNode> result;
+    const QSGNode *layer = sampleChunkLayer(scene);
+    for (const QSGNode *slot = layer != nullptr ? layer->firstChild() : nullptr; slot;
+         slot = slot->nextSibling()) {
+        SampleChunkNode state;
+        state.x = static_cast<const QSGTransformNode *>(slot)->matrix()(0, 3);
+        for (const QSGNode *child = slot->firstChild(); child; child = child->nextSibling()) {
+            const QSGGeometry *geometry = static_cast<const QSGGeometryNode *>(child)->geometry();
+            state.hash = qHashBits(geometry->vertexData(),
+                static_cast<size_t>(geometry->vertexCount()) * static_cast<size_t>(geometry->sizeOfVertex()),
+                state.hash);
+            state.vertices += geometry->vertexCount();
+        }
+        if (state.vertices > 0) result.insert(slot, state);
+    }
+    return result;
+}
+
+// `item`'s samples, drawn as the scene graph draws a frame of them: in
+// chunks, kept in `node` from frame to frame, or, with `chunked` false,
+// the whole frame drawn again into a new scene.
+QSGNode *renderSamples(WaveformEditorItem &item, QQuickWindow &window, QSGNode *node, bool chunked) {
+    const QSize size(static_cast<int>(item.width()), static_cast<int>(item.height()));
+    return WaveformSceneGraph::render(node, &window, size, [&item, size, chunked](QPainter *painter) {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        const int lanes = item.displayedChannelCountLocked();
+        painter->fillRect(QRect(QPoint(), size), QColor(5, 9, 7));
+        const auto chunks = chunked
+            ? item.sampleChunksLocked(start, size.width(), size.height(), lanes)
+            : std::optional<WaveformSceneGraph::Chunks>();
+        if (!chunks || !WaveformSceneGraph::drawChunks(*painter, *chunks)) {
+            item.drawDetailLocked(*painter, size.width(), size.height(), start, end, lanes, 1.0,
+                item.renderScaleLocked());
+        }
+    }, false, WaveformSceneGraph::Primitives::Geometry);
+}
+
+// A frame of `item`'s samples drawn in chunks, which `chunks` keeps from
+// frame to frame, and the same frame drawn whole, as a GPU draws them: the
+// pixels that differ, and by how much at most, the three channels' sum.
+struct SampleFrames {
+    QImage chunked;
+    QImage whole;
+    WaveformSceneGraph::Statistics stats;
+    QList<QRectF> squares;
+    QList<QRectF> wholeSquares;
+    double scale{1.0};
+    int different{0};
+    int largest{0};
+    // The most that pixels differ by where neither frame has a marker
+    // within a device pixel.
+    int largestStroke{0};
+};
+
+SampleFrames compareSampleFrames(WaveformEditorItem &item, QQuickWindow &window, QSGNode *&chunks) {
+    SampleFrames frames;
+    const QSize size(static_cast<int>(item.width()), static_cast<int>(item.height()));
+    const double scale = window.effectiveDevicePixelRatio();
+    chunks = renderSamples(item, window, chunks, true);
+    QSGNode *whole = renderSamples(item, window, nullptr, false);
+    if (chunks == nullptr || whole == nullptr) {
+        delete whole;
+        return frames;
+    }
+    frames.stats = WaveformSceneGraph::statistics(chunks);
+    frames.scale = scale;
+    frames.squares = sceneSquares(chunks, QColor(54, 225, 161));
+    frames.wholeSquares = sceneSquares(whole, QColor(54, 225, 161));
+    frames.chunked = rasterizeSceneGeometry(chunks, size, scale, QColor(5, 9, 7));
+    frames.whole = rasterizeSceneGeometry(whole, size, scale, QColor(5, 9, 7));
+    delete whole;
+    // The device pixels of either frame's markers, and one around them.
+    QImage markers(frames.chunked.size(), QImage::Format_Grayscale8);
+    markers.fill(0);
+    for (const QList<QRectF> *list : {&frames.squares, &frames.wholeSquares}) {
+        for (const QRectF &square : *list) {
+            const QRect pixels = QRectF(square.topLeft() * scale, square.size() * scale).toAlignedRect()
+                .adjusted(-1, -1, 1, 1).intersected(markers.rect());
+            for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+                std::fill_n(markers.scanLine(y) + pixels.left(), pixels.width(), uchar(1));
+            }
+        }
+    }
+    for (int y = 0; y < frames.chunked.height(); ++y) {
+        const auto *a = reinterpret_cast<const QRgb *>(frames.chunked.constScanLine(y));
+        const auto *b = reinterpret_cast<const QRgb *>(frames.whole.constScanLine(y));
+        const uchar *marked = markers.constScanLine(y);
+        for (int x = 0; x < frames.chunked.width(); ++x) {
+            const int delta = std::abs(qRed(a[x]) - qRed(b[x])) + std::abs(qGreen(a[x]) - qGreen(b[x]))
+                + std::abs(qBlue(a[x]) - qBlue(b[x]));
+            frames.different += delta > 0;
+            frames.largest = std::max(frames.largest, delta);
+            if (marked[x] == 0) frames.largestStroke = std::max(frames.largestStroke, delta);
+        }
+    }
+    return frames;
+}
+
+// Whether a frame drawn in chunks looks as one drawn whole. A chunk's
+// vertices are in its own coordinates, rounded to floats there, so that
+// antialiased edges may round a level apart in a channel; a gap, a seam or
+// an edge drawn twice differs by tens of levels. At a scale that is not a
+// whole number, a chunk places samples on the 1/256 pixel from its own
+// start, which is a fraction of that from the view's: strokes may differ
+// by a few levels, and a marker, snapped to device pixels, by a pixel.
+QString sampleFramesDiffer(const SampleFrames &frames) {
+    if (frames.chunked.isNull() || frames.whole.isNull()) return QStringLiteral("no frame");
+    if (frames.scale == std::round(frames.scale)) {
+        if (frames.largest <= 3 && frames.different * 100 <= frames.chunked.width() * frames.chunked.height()) {
+            return {};
+        }
+        return QStringLiteral("%1 pixels differ, by up to %2").arg(frames.different).arg(frames.largest);
+    }
+    // The markers in the view, which both frames draw.
+    const double width = frames.chunked.width() / frames.scale;
+    std::vector<QPointF> chunked;
+    std::vector<QPointF> whole;
+    for (const QRectF &square : frames.squares) {
+        if (square.right() > 0.0 && square.left() < width) chunked.push_back(square.center());
+    }
+    for (const QRectF &square : frames.wholeSquares) {
+        if (square.right() > 0.0 && square.left() < width) whole.push_back(square.center());
+    }
+    if (chunked.size() != whole.size()) {
+        return QStringLiteral("%1 markers, %2 drawn whole").arg(chunked.size()).arg(whole.size());
+    }
+    const auto byPosition = [](QPointF a, QPointF b) { return a.y() < b.y() || (a.y() == b.y() && a.x() < b.x()); };
+    std::sort(chunked.begin(), chunked.end(), byPosition);
+    std::sort(whole.begin(), whole.end(), byPosition);
+    for (std::size_t i = 0; i < chunked.size(); ++i) {
+        const QPointF moved = (chunked[i] - whole[i]) * frames.scale;
+        if (std::abs(moved.x()) > 1.0 + 1e-3 || std::abs(moved.y()) > 1e-3) {
+            return QStringLiteral("a marker at %1, %2 drawn whole at %3, %4").arg(chunked[i].x()).arg(chunked[i].y())
+                .arg(whole[i].x()).arg(whole[i].y());
+        }
+    }
+    if (frames.largestStroke <= 12) return {};
+    return QStringLiteral("strokes differ by up to %1").arg(frames.largestStroke);
+}
+
+// A window shown at `scale`, or false without a screen of it.
+bool showSampleWindow(QQuickWindow &window, double scale) {
+    if (scale != 1.0) return showOnScreen(window, scale);
+    window.resize(64, 64);
+    window.show();
+    return QTest::qWaitForWindowExposed(&window);
+}
+} // namespace
+
+void WaveformSmokeTest::waveformSceneGraphScrollsSampleChunks_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<int>("stepsOut");
+    // At the deepest zoom, curves; 5 steps out, straight segments.
+    for (const double scale : {1.0, 2.0}) {
+        for (const int stepsOut : {0, 5}) QTest::addRow("%dout-%.0fx", stepsOut, scale) << scale << stepsOut;
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphScrollsSampleChunks() {
+    // Playing at 360 frames a second, six lanes of 48 kHz samples: each
+    // frame builds the chunks that come into view, and writes no other
+    // geometry; the others keep theirs, and move with the view by whole
+    // device pixels, as their translation alone.
+    QFETCH(double, scale);
+    QFETCH(int, stepsOut);
+    QQuickWindow window;
+    if (!showSampleWindow(window, scale)) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    const QSize size(1720, 300);
+    TestTime time;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    time.drive(item);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(6);
+    giveSampleDetail(item, 48'000, 6, 29.5, 30.5);
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    setTestPosition(item, 30.0);
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    QSGNode *node = nullptr;
+    QHash<const QSGNode *, SampleChunkNode> previous;
+    qint64 previousFirst = 0;
+    qint64 previousLast = -1;
+    int kept = 0;
+    for (int frame = 0; frame < 24; ++frame) {
+        if (frame > 0) time.advance(1.0 / 360.0);
+        qint64 first = 0;
+        qint64 last = -1;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto [start, end] = item.visibleRangeLocked();
+            QVERIFY(item.renderDetailDirectlyLocked(start, end));
+            const auto chunks = item.sampleChunksLocked(start, size.width(), size.height(), 6);
+            QVERIFY(chunks.has_value());
+            first = chunks->first;
+            last = chunks->last;
+        }
+        node = WaveformSceneGraph::render(node, &window, size,
+            [&item](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        QVERIFY(node != nullptr);
+        const auto stats = WaveformSceneGraph::statistics(node);
+        qint64 entered = 0;
+        for (qint64 index = first; index <= last; ++index) entered += index < previousFirst || index > previousLast;
+        QCOMPARE(stats.chunks, static_cast<int>(last - first + 1));
+        QCOMPARE(stats.chunksBuilt, static_cast<int>(entered));
+        // The geometry written: the new chunks', and none other.
+        const auto current = sampleChunkNodes(node);
+        int rebuilt = 0;
+        int rebuiltVertices = 0;
+        QList<double> moves;
+        for (auto it = current.cbegin(); it != current.cend(); ++it) {
+            const auto before = previous.constFind(it.key());
+            if (before == previous.cend() || before->hash != it->hash) {
+                ++rebuilt;
+                rebuiltVertices += it->vertices;
+            } else {
+                moves.push_back(it->x - before->x);
+            }
+        }
+        QCOMPARE(rebuilt, static_cast<int>(entered));
+        QCOMPARE(stats.uploadedVertices, rebuiltVertices);
+        QCOMPARE(static_cast<int>(current.size()), stats.chunks);
+        for (const double move : moves) {
+            QCOMPARE(move, moves.front());
+            QVERIFY(move < 0.0);
+            QCOMPARE(move * scale, std::round(move * scale));
+        }
+        QVERIFY(stats.chunksMoved >= moves.size());
+        kept += static_cast<int>(moves.size());
+        previous = current;
+        previousFirst = first;
+        previousLast = last;
+    }
+    QVERIFY2(kept > 0, "no chunk was kept from a frame to the next");
+    delete node;
+}
+
+void WaveformSmokeTest::waveformSceneGraphSampleChunkBoundariesDoNotShow_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("zigzag");
+    QTest::addColumn<int>("stepsOut");
+    QTest::addColumn<int>("place");
+    // Curves at the deepest zoom and straight segments 4 steps out, with a
+    // bevel at every zigzag's bend: at the track's start, in its middle,
+    // and at its end, where the view stops a fraction of a column past the
+    // grid.
+    const char *const places[] = {"start", "middle", "end"};
+    for (const double scale : {1.0, 1.5, 1.25, 2.0}) {
+        for (const bool zigzag : {false, true}) {
+            for (const int stepsOut : {0, 4}) {
+                for (int place = 0; place < 3; ++place) {
+                    QTest::addRow("%s-%dout-%s-%gx", zigzag ? "zigzag" : "smooth", stepsOut, places[place],
+                        scale) << scale << zigzag << stepsOut << place;
+                }
+            }
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphSampleChunkBoundariesDoNotShow() {
+    // Playing across chunks' boundaries, a frame drawn in chunks, as a GPU
+    // draws it, looks as the frame drawn whole: no gaps, seams or doubled
+    // edges where they meet, every lane drawn across the view, and one
+    // marker for each sample. With FERROUS_WAVEFORM_GRAB_DIR set, the
+    // frames are saved there, with the boundaries' device columns.
+    QFETCH(double, scale);
+    QFETCH(bool, zigzag);
+    QFETCH(int, stepsOut);
+    QFETCH(int, place);
+    QQuickWindow window;
+    if (!showSampleWindow(window, scale)) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    const QSize size(600, 240);
+    constexpr int kLanes = 3;
+    constexpr int kRate = 96'000;
+    TestTime time;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    time.drive(item);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kLanes);
+    const double detailStart[] = {0.0, 29.9, 59.88};
+    const double position[] = {0.0002, 30.0, 59.9985};
+    if (zigzag) giveZigzagSampleDetail(item, kRate, kLanes, detailStart[place], detailStart[place] + 0.12, 0.8);
+    else giveRichSampleDetail(item, kRate, kLanes, detailStart[place], detailStart[place] + 0.12);
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    setTestPosition(item, position[place]);
+    item.setPlaying(true);
+    setTestPosition(item, position[place]);
+    QSGNode *chunks = nullptr;
+    int boundaries = 0;
+    const QString grabs = qEnvironmentVariable("FERROUS_WAVEFORM_GRAB_DIR");
+    for (int frame = 0; frame < 6; ++frame) {
+        if (frame > 0) time.advance(1.0 / 360.0);
+        double spacing = 0.0;
+        QStringList columns;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto [start, end] = item.visibleRangeLocked();
+            QVERIFY(item.renderDetailDirectlyLocked(start, end));
+            const auto layout = item.sampleChunksLocked(start, size.width(), size.height(), kLanes);
+            QVERIFY(layout.has_value());
+            // The chunks' boundaries inside the view.
+            for (qint64 index = layout->first + 1; index <= layout->last; ++index) {
+                const double x = layout->offset(index);
+                if (x > 0.0 && x < size.width()) {
+                    ++boundaries;
+                    columns << QString::number(std::lround(x * scale));
+                }
+            }
+            spacing = item.sampleSpacingPixelsLocked();
+        }
+        const SampleFrames frames = compareSampleFrames(item, window, chunks);
+        QVERIFY(frames.stats.chunks > 0);
+        if (!grabs.isEmpty()) {
+            const QString name = QStringLiteral("%1/%2-frame%3-").arg(grabs,
+                QString::fromLatin1(QTest::currentDataTag())).arg(frame);
+            frames.chunked.save(name + QStringLiteral("chunked.png"));
+            frames.whole.save(name + QStringLiteral("whole.png"));
+            QFile file(name + QStringLiteral("boundaries.txt"));
+            if (file.open(QIODevice::WriteOnly)) file.write(columns.join(QLatin1Char(' ')).toUtf8());
+        }
+        const QString differ = sampleFramesDiffer(frames);
+        if (!differ.isEmpty()) {
+            frames.chunked.save(QDir::tempPath() + QStringLiteral("/waveform-chunked.png"));
+            frames.whole.save(QDir::tempPath() + QStringLiteral("/waveform-whole.png"));
+        }
+        QVERIFY2(differ.isEmpty(), qPrintable(QStringLiteral("frame %1: %2").arg(frame).arg(differ)));
+        // After the track's last sample, the view shows nothing.
+        const int lastColumn = place == 2
+            ? frames.chunked.width() - static_cast<int>(std::ceil(spacing * scale)) - 1
+            : frames.chunked.width();
+        const QString empty = lanesWithEmptyColumns(frames.chunked, kLanes, lastColumn, frames.chunked.width());
+        QVERIFY2(empty.isEmpty(), qPrintable(QStringLiteral("frame %1: %2").arg(frame).arg(empty)));
+        const QString unmarked = samplesWithoutOneMarker(
+            frames.squares, visibleSamplePositions(item, size.width()), size, kLanes, scale);
+        QVERIFY2(unmarked.isEmpty(), qPrintable(QStringLiteral("frame %1: %2").arg(frame).arg(unmarked)));
+    }
+    QVERIFY(boundaries > 0);
+    delete chunks;
+}
+
+void WaveformSmokeTest::waveformSceneGraphRebuildsSampleChunksOnChange_data() {
+    QTest::addColumn<QString>("change");
+    for (const char *change : {"zoom", "scale", "width", "height", "channels", "view-mode", "mute", "solo",
+             "track", "gapless", "repeat-one", "seek", "detail"}) {
+        QTest::newRow(change) << QString::fromLatin1(change);
+    }
+}
+
+void WaveformSmokeTest::waveformSceneGraphRebuildsSampleChunksOnChange() {
+    // A still view keeps its chunks; whatever changes what they show
+    // builds them again, and the frame then looks as one drawn whole. A
+    // new detail window of the same file builds again only the chunks it
+    // holds more of.
+    QFETCH(QString, change);
+    QQuickWindow window;
+    QVERIFY(showSampleWindow(window, 1.0));
+    constexpr int kRate = 96'000;
+    TestTime time;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    time.drive(item);
+    item.setWidth(1720);
+    item.setHeight(240);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(3);
+    item.setSourcePath(QStringLiteral("/fixture/first.wav"));
+    // At the deepest zoom, the view spans 1720 / 8 samples.
+    const bool repeatOne = change == QLatin1String("repeat-one");
+    const double position = repeatOne ? 59.999 : 30.0;
+    const double samples = 1720.0 / 8.0 / kRate;
+    if (change == QLatin1String("detail")) {
+        // Just over the view: the chunks at its edges take shape from
+        // samples it does not hold.
+        giveRichSampleDetail(item, kRate, 3, position - 0.6 * samples, position + 0.6 * samples);
+    } else {
+        giveRichSampleDetail(item, kRate, 3, position - 0.05, std::min(60.0, position + 0.05));
+    }
+    item.setZoomLevel(item.maximumZoomLevel());
+    setTestPosition(item, position);
+    QSGNode *chunks = nullptr;
+    SampleFrames frames = compareSampleFrames(item, window, chunks);
+    QVERIFY(frames.stats.chunks > 0);
+    QCOMPARE(frames.stats.chunksBuilt, frames.stats.chunks);
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+    frames = compareSampleFrames(item, window, chunks);
+    QCOMPARE(frames.stats.chunksBuilt, 0);
+    QCOMPARE(frames.stats.chunksMoved, 0);
+    QCOMPARE(frames.stats.uploadedVertices, 0);
+    // The chunks a new window holds more of.
+    int partial = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        const auto layout = item.sampleChunksLocked(start, 1720, 240, 3);
+        for (qint64 index = layout->first; index <= layout->last; ++index) partial += layout->stamp(index) != 0;
+    }
+    if (change == QLatin1String("zoom")) {
+        item.setZoomLevel(item.maximumZoomLevel() / 1.25);
+    } else if (change == QLatin1String("scale")) {
+        QScreen *screen = hiDpiTestScreen(2.0);
+        if (screen == nullptr) QSKIP("Needs the offscreen platform's HiDPI test screens");
+        QVERIFY(moveWindowToScreen(window, screen));
+    } else if (change == QLatin1String("width")) {
+        item.setWidth(1500);
+        item.setZoomLevel(item.maximumZoomLevel());
+    } else if (change == QLatin1String("height")) {
+        item.setHeight(300);
+    } else if (change == QLatin1String("channels")) {
+        giveRichSampleDetail(item, kRate, 2, position - 0.05, position + 0.05);
+    } else if (change == QLatin1String("view-mode")) {
+        item.setViewMode(0);
+    } else if (change == QLatin1String("mute")) {
+        item.setMutedChannelsMask(0b010);
+    } else if (change == QLatin1String("solo")) {
+        item.setSoloedChannelsMask(0b001);
+    } else if (change == QLatin1String("track")) {
+        item.setSourcePath(QStringLiteral("/fixture/second.wav"));
+        giveZigzagSampleDetail(item, kRate, 3, position - 0.05, position + 0.05, 0.6);
+        item.setZoomLevel(item.maximumZoomLevel());
+    } else if (change == QLatin1String("gapless")) {
+        // The next track takes over where the clock says, with another
+        // token, as at a gapless commit.
+        item.setSourcePath(QStringLiteral("/fixture/second.wav"));
+        setTestPosition(item, position, 7);
+        giveZigzagSampleDetail(item, kRate, 3, position - 0.05, position + 0.05, 0.6);
+        item.setZoomLevel(item.maximumZoomLevel());
+    } else if (repeatOne) {
+        // The same track again from its start: the same file.
+        setTestPosition(item, 0.0001);
+        giveRichSampleDetail(item, kRate, 3, 0.0, 0.1, true);
+    } else if (change == QLatin1String("seek")) {
+        // A jump the clock starts over at, within the window.
+        setTestPosition(item, position + 0.04);
+    } else if (change == QLatin1String("detail")) {
+        giveRichSampleDetail(item, kRate, 3, position - 0.05, position + 0.05, true);
+    }
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.renderDetailDirectlyLocked(start, end));
+    }
+    frames = compareSampleFrames(item, window, chunks);
+    QVERIFY(frames.stats.chunks > 0);
+    if (change == QLatin1String("detail")) {
+        QVERIFY(partial > 0 && partial < frames.stats.chunks);
+        QCOMPARE(frames.stats.chunksBuilt, partial);
+    } else {
+        QCOMPARE(frames.stats.chunksBuilt, frames.stats.chunks);
+    }
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+    delete chunks;
+}
+
+void WaveformSmokeTest::waveformSceneGraphKeepsSampleChunksAcrossDetailWindows() {
+    // Through the decoder: a new window of the same file keeps the chunks
+    // the old one held whole, and a window that arrives for a view the
+    // item has left is not drawn; the chunks of the new view are built
+    // from its own window.
+    QQuickWindow window;
+    QVERIFY(showSampleWindow(window, 1.0));
+    constexpr int kRate = 96'000;
+    constexpr int kLanes = 3;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(1720);
+    item.setHeight(240);
+    item.setDurationSeconds(120.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kLanes);
+    auto gate = std::make_shared<QSemaphore>();
+    auto held = std::make_shared<std::atomic_bool>(false);
+    item.m_decodeWindow = [gate, held](const QString &, double start, double end, int points,
+                                       const std::shared_ptr<std::atomic_bool> &) {
+        if (held->load()) gate->tryAcquire(1, 5000);
+        return sampleDetailWindow(kRate, kLanes, start, end, points);
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/chunks.wav"));
+    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    item.setZoomLevel(item.maximumZoomLevel());
+    const auto viewHasSamples = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && item.renderDetailDirectlyLocked(start, end);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QSGNode *chunks = nullptr;
+    SampleFrames frames = compareSampleFrames(item, window, chunks);
+    QVERIFY(frames.stats.chunks > 0);
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+
+    // The next window of the file.
+    const auto generation = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_detail.generation;
+    };
+    const quint64 first = generation();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.invalidateDetailRequestLocked();
+        item.clearPendingRequestLocked();
+    }
+    item.requestDetailWindow();
+    QTRY_VERIFY_WITH_TIMEOUT(generation() != first && !item.m_decodeActive, kSlowBuildTimeoutMs);
+    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    frames = compareSampleFrames(item, window, chunks);
+    QCOMPARE(frames.stats.chunksBuilt, 0);
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+
+    // A window asked for here arrives after a seek elsewhere: stale.
+    held->store(true);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.invalidateDetailRequestLocked();
+        item.clearPendingRequestLocked();
+    }
+    item.requestDetailWindow();
+    QVERIFY(item.m_decodeActive);
+    const quint64 second = generation();
+    setTestPosition(item, 90.0);
+    const auto paint = [&]() {
+        QSGNode *node = WaveformSceneGraph::render(chunks, &window, QSize(1720, 240),
+            [&item](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        chunks = node;
+        return WaveformSceneGraph::statistics(node);
+    };
+    // Until the view's own window comes, it shows no chunks.
+    QCOMPARE(paint().chunks, 0);
+    QCOMPARE(sampleChunkLayer(chunks), nullptr);
+    held->store(false);
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    QVERIFY(generation() != second);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_detail.startSeconds > 80.0);
+    }
+    frames = compareSampleFrames(item, window, chunks);
+    QVERIFY(frames.stats.chunks > 0);
+    QCOMPARE(frames.stats.chunksBuilt, frames.stats.chunks);
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+    delete chunks;
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSmokeTest::waveformSceneGraphSplitsLargeSampleChunks() {
+    // Thirty-two lanes at the deepest zoom: a chunk holds more vertices than
+    // a node may, and is split between nodes of whole triangles, within
+    // 65,532 vertices each, and looks as the frame drawn whole.
+    QQuickWindow window;
+    QVERIFY(showSampleWindow(window, 1.0));
+    constexpr int kLanes = 32;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    item.setWidth(1720);
+    item.setHeight(1600);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kLanes);
+    giveSampleDetail(item, 96'000, kLanes, 29.9, 30.1);
+    item.setZoomLevel(item.maximumZoomLevel());
+    setTestPosition(item, 30.0);
+    QSGNode *chunks = nullptr;
+    const SampleFrames frames = compareSampleFrames(item, window, chunks);
+    QVERIFY(frames.stats.chunks > 0);
+    int largestChunk = 0;
+    for (const SampleChunkNode &chunk : sampleChunkNodes(chunks)) largestChunk = std::max(largestChunk, chunk.vertices);
+    QVERIFY2(largestChunk > 65'535, qPrintable(QString::number(largestChunk)));
+    QVERIFY2(frames.stats.largestGeometryVertices <= 65'532,
+        qPrintable(QString::number(frames.stats.largestGeometryVertices)));
+    QCOMPARE(frames.stats.largestGeometryVertices % 3, 0);
+    QVERIFY2(sampleFramesDiffer(frames).isEmpty(), qPrintable(sampleFramesDiffer(frames)));
+    const QString empty = lanesWithEmptyColumns(frames.chunked, kLanes);
+    QVERIFY2(empty.isEmpty(), qPrintable(empty));
+    delete chunks;
 }
 
 namespace {
@@ -11351,11 +12031,13 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
     // while the GUI thread waits, at 2x: 3440 x 1412 logical pixels, six
     // lanes of 96 kHz samples, steps of the wheel out from the deepest zoom.
     // Each run seeks to where no tiles are, then plays 120 frames 1/120 s
-    // apart in real time, so that workers have the time they would.
+    // apart in real time, so that workers have the time they would, and
+    // again at 360 frames a second, 1/360 s apart.
     if (!qEnvironmentVariableIsSet("FERROUS_BENCHMARK_WAVEFORM")) QSKIP("optional render benchmark");
     QQuickWindow window;
     if (!showOnScreen(window, 2.0)) QSKIP("Needs the offscreen platform's HiDPI test screens");
     const QSize size(3440, 1412);
+    for (const int rate : {120, 360})
     for (const int stepsOut : {0, 3, 4, 5, 6, 7, 8, 10, 12}) {
         TestTime time;
         WaveformEditorItem item;
@@ -11378,22 +12060,25 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
         int complete = 0;
         double vertices = 0.0;
         double uploadedBytes = 0.0;
+        double chunksBuilt = 0.0;
         constexpr int frames = 120;
         for (int frame = 0; frame < frames; ++frame) {
             QElapsedTimer pace;
             pace.start();
-            if (frame > 0) time.advance(1.0 / 120.0);
+            if (frame > 0) time.advance(1.0 / rate);
             QElapsedTimer timer;
             timer.start();
             node = WaveformSceneGraph::render(node, &window, size,
                 [&item](QPainter *painter) { item.paint(painter); }, false,
                 WaveformSceneGraph::Primitives::Geometry);
             frameMs.push_back(timer.nsecsElapsed() / 1.0e6);
-            // Geometry is made again each frame, and uploaded whole.
+            // The geometry drawn, and that written: the frame's own, and
+            // that of the chunks it builds.
             const auto stats = WaveformSceneGraph::statistics(node);
             vertices += stats.geometryVertices;
             uploadedBytes += static_cast<double>(stats.uploadedBytes)
-                + static_cast<double>(stats.geometryVertices) * sizeof(QSGGeometry::ColoredPoint2D);
+                + static_cast<double>(stats.uploadedVertices) * sizeof(QSGGeometry::ColoredPoint2D);
+            chunksBuilt += stats.chunksBuilt;
             {
                 QMutexLocker lock(&item.m_stateMutex);
                 const auto [start, end] = item.visibleRangeLocked();
@@ -11402,7 +12087,7 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
             }
             item.handleWindowFrameSwapped();
             QCoreApplication::processEvents();
-            const qint64 left = 8'333'333 - pace.nsecsElapsed();
+            const qint64 left = 1'000'000'000 / rate - pace.nsecsElapsed();
             if (left > 0) QThread::usleep(static_cast<unsigned long>(left / 1000));
         }
         std::vector<double> sorted = frameMs;
@@ -11417,11 +12102,11 @@ void WaveformSmokeTest::waveformEditorDeepZoomPlaybackBenchmark() {
             direct = item.renderDetailDirectlyLocked(start, end);
         }
         const auto slowest = std::max_element(frameMs.begin(), frameMs.end()) - frameMs.begin();
-        qInfo("deep-zoom 2x %dx%d steps=%d px/sample=%.2f direct=%d first_ms=%.2f mean_ms=%.2f p95_ms=%.2f max_ms=%.2f (frame %d) complete_frames=%d/%d vertices_per_frame=%.0f upload_kib_per_frame=%.0f",
-            size.width(), size.height(), stepsOut, 8.0 / std::pow(1.25, stepsOut), direct ? 1 : 0,
+        qInfo("deep-zoom 2x %dx%d hz=%d steps=%d px/sample=%.2f direct=%d first_ms=%.2f mean_ms=%.2f p95_ms=%.2f max_ms=%.2f (frame %d) complete_frames=%d/%d vertices_per_frame=%.0f upload_kib_per_frame=%.0f chunks_built_per_frame=%.2f",
+            size.width(), size.height(), rate, stepsOut, 8.0 / std::pow(1.25, stepsOut), direct ? 1 : 0,
             frameMs.front(), mean, sorted[sorted.size() * 95 / 100], sorted.back(),
             static_cast<int>(slowest), complete, frames, vertices / frames,
-            uploadedBytes / frames / 1024.0);
+            uploadedBytes / frames / 1024.0, chunksBuilt / frames);
         delete node;
         item.setParentItem(nullptr);
     }
