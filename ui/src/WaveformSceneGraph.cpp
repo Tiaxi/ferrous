@@ -99,6 +99,10 @@ Vertex vertex(QPointF point, QColor color, double coverage = 1.0) {
 // all. A multiple of 6, a quad's triangles, below 0xffff, which some APIs
 // take for a primitive restart.
 constexpr std::size_t kMaximumGeometryVertices = 65'532;
+// Polyline bends whose half has a cosine below this (sharper than about
+// 52 degrees) are bevelled: a miter's tip would reach beyond the bevel's
+// edge by more than a tenth of the stroke's width.
+constexpr double kMiterHalfBendCos = 0.9;
 
 // A node of the scene: a command, or for geometry, a part of its vertices
 // that one node holds.
@@ -314,7 +318,7 @@ public:
             // without a path to build and flatten.
             QPolygonF polyline(count);
             for (int i = 0; i < count; ++i) polyline[i] = painter()->transform().map(points[i]);
-            appendStroke(geometry(), polyline, pen, 0.5 / scene.scale);
+            appendPolylineStroke(geometry(), polyline, pen, 0.5 / scene.scale);
             return;
         }
         QPainterPath path; path.moveTo(points[0]);
@@ -375,6 +379,64 @@ private:
             quad(vertices, vertex(a + previousNormal * inner, color), vertex(a + previousNormal * outer, color, 0),
                 vertex(b + nextNormal * inner, color), vertex(b + nextNormal * outer, color, 0));
             previousNormal = nextNormal;
+        }
+    }
+    // A polyline's stroke, each segment with its own normal, so that it
+    // keeps its width however steep the segments are and however sharply
+    // they turn: alternating samples make nearly vertical segments, whose
+    // neighbours' chord is level. Gentle bends are mitred, which adds no
+    // vertices; sharper ones are bevelled, as QPainter's default pen joins
+    // lines, with the wedge outside the bend filled.
+    static void appendPolylineStroke(std::vector<Vertex> &vertices, const QPolygonF &points, const QPen &pen, double fringe) {
+        if (points.size() < 2) return;
+        const auto segments = static_cast<std::size_t>(points.size() - 1);
+        vertices.reserve(vertices.size() + segments * 18);
+        const double half = std::max(1.0, pen.widthF()) * 0.5;
+        const double inner = std::max(0.0, half - fringe);
+        const double outer = half + fringe;
+        const QColor color = pen.color();
+        std::vector<QPointF> normals(segments);
+        for (std::size_t i = 0; i < segments; ++i) {
+            const QPointF direction = points[static_cast<qsizetype>(i) + 1] - points[static_cast<qsizetype>(i)];
+            const double length = std::hypot(direction.x(), direction.y());
+            normals[i] = length > 0 ? QPointF(-direction.y() / length, direction.x() / length)
+                : (i > 0 ? normals[i - 1] : QPointF(0, 1));
+        }
+        // The offset of a unit of width at the segment's start.
+        QPointF start = normals[0];
+        for (std::size_t i = 0; i < segments; ++i) {
+            const QPointF normal = normals[i];
+            const QPointF a = points[static_cast<qsizetype>(i)];
+            const QPointF b = points[static_cast<qsizetype>(i) + 1];
+            QPointF end = normal;
+            bool bevel = false;
+            if (i + 1 < segments) {
+                // cos² of half the bend: a miter is 1/cos as long as the
+                // width, along the bisector of the two normals.
+                const QPointF sum = normal + normals[i + 1];
+                const double halfBendCos2 = (sum.x() * sum.x() + sum.y() * sum.y()) * 0.25;
+                if (halfBendCos2 >= kMiterHalfBendCos * kMiterHalfBendCos) end = sum / (2.0 * halfBendCos2);
+                else bevel = true;
+            }
+            quad(vertices, vertex(a - start * inner, color), vertex(a + start * inner, color),
+                vertex(b - end * inner, color), vertex(b + end * inner, color));
+            quad(vertices, vertex(a - start * outer, color, 0), vertex(a - start * inner, color),
+                vertex(b - end * outer, color, 0), vertex(b - end * inner, color));
+            quad(vertices, vertex(a + start * inner, color), vertex(a + start * outer, color, 0),
+                vertex(b + end * inner, color), vertex(b + end * outer, color, 0));
+            if (bevel) {
+                // The wedge on the outside of the bend, between the two
+                // segments' ends: its inside, then its edge.
+                const QPointF next = normals[i + 1];
+                const QPointF turn = points[static_cast<qsizetype>(i) + 2] - b;
+                const double cross = (b - a).x() * turn.y() - (b - a).y() * turn.x();
+                const double side = cross > 0 ? -1.0 : 1.0;
+                vertices.insert(vertices.end(), {vertex(b, color),
+                    vertex(b + normal * side * inner, color), vertex(b + next * side * inner, color)});
+                quad(vertices, vertex(b + normal * side * inner, color), vertex(b + normal * side * outer, color, 0),
+                    vertex(b + next * side * inner, color), vertex(b + next * side * outer, color, 0));
+            }
+            start = bevel ? normals[i + 1] : end;
         }
     }
     Scene &scene;
