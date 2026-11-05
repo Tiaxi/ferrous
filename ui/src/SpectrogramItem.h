@@ -296,7 +296,11 @@ public:
     // the FFT size of the columns' spectra (0 if unknown, for bins of the
     // whole spectrum up to Nyquist): a session with the frequency cap on
     // sends fewer bins than `fftSize / 2 + 1`, each still
-    // `sampleRate / fftSize` Hz wide.
+    // `sampleRate / fftSize` Hz wide. `trackFrames` are the frames of the
+    // file the session's columns are of (0 if unknown), at `sampleRate`:
+    // with `fftSize`, where a session at another zoom ends. `endColumn` is
+    // the column after the session's last, which the decoder's centered
+    // views end at (0 if unknown): the centered view ends there too.
     Q_INVOKABLE void feedPrecomputedChunk(
         const QByteArray &data, int bins, int channelIndex,
         int columns, int startIndex, int totalEstimate,
@@ -305,7 +309,9 @@ public:
         bool clearHistoryOnReset = false,
         quint64 generation = 0,
         int sessionWidth = 0,
-        int fftSize = 0);
+        int fftSize = 0,
+        quint64 trackFrames = 0,
+        int endColumn = 0);
     Q_INVOKABLE void clearPrecomputed();
 
     Q_INVOKABLE void reset();
@@ -402,6 +408,18 @@ private:
         // Where display column `left` starts, in canvas pixels.
         double drawX{0.0};
     };
+    // The track's columns as a centered view reckons them: the session's
+    // end once it is known, where the decoder's views end too, and else
+    // the column estimate (`end`, 0 if neither is known). Until the
+    // columns decoded reach a known end, they say nothing of where the
+    // track ends, and maxColCount is 0: the view's end-of-decode clamp is
+    // for the estimate's overshoot.
+    struct CenteredColumns {
+        qint64 maxColCount{0};
+        qint64 end{0};
+        bool endKnown{false};
+    };
+    CenteredColumns centeredColumnsLocked() const;
     CenteredView centeredViewLocked(
         double positionSeconds,
         int canvasWidth,
@@ -536,6 +554,10 @@ private:
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
     double effectiveZoomLocked() const;
+    // The same for data `hop` samples apart drawn at `renderZoom`
+    // (ferrous_ffi_spectrogram_effective_zoom); `renderZoom` until a hop
+    // is known.
+    double effectiveZoomForHopLocked(int hop, double renderZoom) const;
     // The session's column hop at zoom 1, in samples: what zoom levels
     // are relative to, for the rate of the session's data.
     double referenceHopLocked() const;
@@ -544,6 +566,10 @@ private:
     double currentPixelsPerSecondLocked() const;
     // Canvas pixels per display column.
     double canvasZoomLocked() const;
+    // The same for data `hop` samples apart drawn at `renderZoom`: the
+    // effective zoom, then the canvas's scale. In the other order its
+    // rounding can differ, and with it the columns a view shows.
+    double canvasZoomForHopLocked(int hop, double renderZoom) const;
     int canvasWidthLocked() const;
     int canvasHeightLocked() const;
     // The window's device pixel ratio, or the current one without a window.
@@ -557,6 +583,24 @@ private:
     // (ferrous_ffi_spectrogram_render_zoom).
     double renderZoomForHopLocked(int hop, double zoom) const;
     bool zoomPreviewWantedLocked() const;
+    // The centered view that the data for the requested zoom will show, as
+    // the zoom preview places it before that data arrives, in canvas pixels
+    // `width` wide (for a file that does not tell its length, once its
+    // session has decoded the end):
+    // canvas pixels per column, the window's columns, the range shown and
+    // the column the playhead is in. Not valid until the requested zoom's
+    // hop and the columns a second are known.
+    struct ZoomTargetView {
+        bool valid{false};
+        double canvasZoom{0.0};
+        int windowColumns{0};
+        CenteredDisplayRange range;
+        qint64 playheadColumn{0};
+    };
+    ZoomTargetView centeredZoomTargetLocked(
+        int width,
+        double positionSeconds,
+        double columnsPerSecond) const;
     SpectrogramZoomPreview zoomPreviewLocked(
         int width,
         double positionSeconds,
@@ -591,6 +635,7 @@ private:
     // What a data chunk could change of a frame besides its columns.
     struct ShownDataState {
         int totalColumnsEstimate{0};
+        int endColumn{0};
         bool tailLooksFinal{false};
         bool ready{false};
         bool canvasDirty{false};
@@ -756,6 +801,13 @@ private:
     // The FFT size of the analysis columns (0 if unknown).
     int m_precomputedFftSize{0};
     int m_precomputedTotalColumnsEstimate{0};
+    // The frames of the file the session's columns are of (0 if unknown):
+    // where a session at another zoom ends (decodedEndColumnForZoomLocked).
+    quint64 m_precomputedTrackFrames{0};
+    // The column after the session's last, as the decoder reckons it (0 if
+    // unknown): where the centered view ends, in place of the column
+    // estimate, which runs past it by an allowance that sizes buffers.
+    int m_precomputedEndColumn{0};
     int m_precomputedSampleRateHz{44100};
     // Whether an analysis chunk has set m_precomputedSampleRateHz.
     bool m_precomputedSampleRateKnown{false};

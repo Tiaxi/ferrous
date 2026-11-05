@@ -91,8 +91,10 @@ QByteArray makePrecomputedFrame(
     const quint32 widgetWidth = 0,
     const quint32 hopSize = 1024,
     const quint32 sampleRate = 48000,
-    const quint32 fftSize = 0) {
-    constexpr int headerLen = 57;
+    const quint32 fftSize = 0,
+    const quint64 trackFrames = 0,
+    const quint32 endColumn = 0) {
+    constexpr int headerLen = 69;
     QByteArray raw(headerLen + bins * channelCount * columns, '\0');
     auto *d = reinterpret_cast<quint8 *>(raw.data());
 
@@ -118,6 +120,8 @@ QByteArray makePrecomputedFrame(
     d[base + 43] = 1;
     memcpy(d + base + 45, &widgetWidth, sizeof(widgetWidth));
     memcpy(d + base + 49, &fftSize, sizeof(fftSize));
+    memcpy(d + base + 53, &trackFrames, sizeof(trackFrames));
+    memcpy(d + base + 61, &endColumn, sizeof(endColumn));
 
     for (int col = 0; col < columns; ++col) {
         for (int ch = 0; ch < channelCount; ++ch) {
@@ -316,6 +320,7 @@ private slots:
     void bridgePollRunResultCountsPrecomputedSpectrogramWork();
     void precomputedSpectrogramChunksRouteDirectlyToRegisteredItems();
     void spectrogramPanesSizeTheirRingsForTheWidthTheSessionDecodesFor();
+    void spectrogramFramesCarryTheTracksFrames();
     void cappedSpectrogramFramesShrinkEachPanesRingColumns();
     void spectrogramFramesCarryHopsOfMoreThanSixteenBits();
     void delayedSpectrogramBatchesPreserveColumnsAndRejectOldGeneration();
@@ -4582,6 +4587,43 @@ void BridgeClientTest::spectrogramFramesCarryHopsOfMoreThanSixteenBits() {
     QCOMPARE(stats.widgetWidth, 1920);
     QCOMPARE(pane.m_precomputedHopSize, 163840);
     QCOMPARE(pane.m_precomputedSampleRateHz, 384000);
+}
+
+void BridgeClientTest::spectrogramFramesCarryTheTracksFrames() {
+    // Each frame carries the frames of the file its columns are of, which
+    // a pane reckons the end of a session at another zoom by, and the end
+    // of its own session, which its centered view ends at (issue 436);
+    // the Rust side's layout is tested in
+    // precomputed_spectrogram_frame_includes_generation. A long track at
+    // 384 kHz has more than 32 bits of them.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    SpectrogramItem pane;
+    pane.setWidth(1920);
+    pane.setDisplayMode(1);
+    client.registerSpectrogramItem(&pane, 0);
+    constexpr quint64 frames = 5'000'000'000ULL;
+    const QByteArray frame = makePrecomputedFrame(
+        4, 1, 3, 0, 20'000, 42, 1, 1920, 1'024, 48'000, 2'048, frames, 19'500);
+    const BridgeClient::PrecomputedDispatchStats stats =
+        client.parsePrecomputedSpectrogramFrame(frame);
+    QVERIFY(stats.valid);
+    QCOMPARE(stats.trackFrames, frames);
+    // And where the session's centered view ends.
+    QCOMPARE(stats.endColumn, 19'500);
+    QCOMPARE(pane.m_precomputedEndColumn, 19'500);
+    QCOMPARE(stats.fftSize, 2048);
+    QCOMPARE(pane.m_precomputedTrackFrames, frames);
+    QCOMPARE(pane.m_precomputedFftSize, 2048);
+    QCOMPARE(pane.m_ring.column(0)[0], static_cast<quint8>(0x11));
+
+    // A session that does not know it, such as one that went on from an
+    // earlier file, says so.
+    const QByteArray unknown =
+        makePrecomputedFrame(4, 1, 3, 3, 20'000, 42, 1, 1920, 1'024, 48'000, 2'048, 0);
+    QVERIFY(client.parsePrecomputedSpectrogramFrame(unknown).valid);
+    QCOMPARE(pane.m_precomputedTrackFrames, quint64(0));
+    QCOMPARE(pane.m_precomputedEndColumn, 0);
 }
 
 void BridgeClientTest::cappedSpectrogramFramesShrinkEachPanesRingColumns() {

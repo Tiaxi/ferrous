@@ -246,6 +246,18 @@ pub struct PrecomputedSpectrogramChunk {
     /// unknown). The UI sizes its ring for at least this width, so the ring
     /// holds the session's lookahead even in a narrower view.
     pub widget_width: u32,
+    /// The frames of the file the session's columns are of, as the decoder
+    /// places its centered views by them (0 if unknown, or if the columns go
+    /// on from an earlier file's). With the FFT size, the UI reckons where
+    /// a session at another zoom will end ([`spectrogram_decoded_end_column`]).
+    pub track_frames: u64,
+    /// The column after the session's last of the track, where the
+    /// decoder's centered views end: the end it reached, or until then the
+    /// end [`spectrogram_decoded_end_column`] reckons from the file's
+    /// frames at the session's own zoom (0 if unknown, as `track_frames`).
+    /// The UI's centered view ends there too; the column estimate only
+    /// sizes its buffers when this is known.
+    pub end_column: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +322,7 @@ pub(crate) const ANALYSIS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// their own column hop.
 const ESTIMATE_COLUMN_FRAMES: usize = 1024;
 
+pub use centered_view::decoded_end_column as spectrogram_decoded_end_column;
 pub use column_hop::effective_zoom as spectrogram_effective_zoom;
 pub use column_hop::reference_hop as spectrogram_reference_hop;
 pub use column_hop::render_zoom as spectrogram_render_zoom;
@@ -2115,6 +2128,8 @@ impl AnalysisRuntimeState {
             buffer_reset: true,
             clear_history: true,
             widget_width: 0,
+            track_frames: 0,
+            end_column: 0,
         };
         let start = self.spectrogram_restart_start_seconds(position_seconds, ctx);
         self.start_session(
@@ -5169,6 +5184,8 @@ mod tests {
                         buffer_reset: false,
                         clear_history: false,
                         widget_width: 0,
+                        track_frames: 0,
+                        end_column: 0,
                     });
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -5193,6 +5210,8 @@ mod tests {
                     buffer_reset: false,
                     clear_history: false,
                     widget_width: 0,
+                    track_frames: 0,
+                    end_column: 0,
                 });
             })
             .unwrap();
@@ -5231,6 +5250,8 @@ mod tests {
                 buffer_reset: false,
                 clear_history: false,
                 widget_width: 0,
+                track_frames: 0,
+                end_column: 0,
             });
         }
         drop(tx);
@@ -6028,6 +6049,8 @@ mod tests {
             buffer_reset: false,
             clear_history: false,
             widget_width: 0,
+            track_frames: 0,
+            end_column: 0,
         }
     }
 

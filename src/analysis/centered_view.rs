@@ -47,7 +47,8 @@ pub(super) fn window_seconds(width: u32, zoom: f32, sample_rate: u32) -> f64 {
 /// file a partial column is sent too. So the columns are the rows' frames
 /// over the column hop, rounded up, whichever column the session started
 /// at: their grid is the track's.
-pub(super) fn decoded_end_column(frames: u64, fft_size: usize, zoom: f32, sample_rate: u32) -> u64 {
+#[must_use]
+pub fn decoded_end_column(frames: u64, fft_size: usize, zoom: f32, sample_rate: u32) -> u64 {
     let hops = column_hops(fft_size, zoom, sample_rate);
     let stft_hop = usize_to_u64(hops.stft_hop.max(1));
     let Some(beyond) = frames.checked_sub(usize_to_u64(fft_size / 2)) else {
@@ -305,5 +306,18 @@ mod tests {
         // Shorter than half a window: no row.
         assert_eq!(decoded_end_column(1_023, 2_048, 1.0, 44_100), 0);
         assert_eq!(decoded_end_column(1_024, 2_048, 1.0, 44_100), 1);
+    }
+
+    #[test]
+    fn the_decoded_end_needs_the_sessions_zoom_not_only_its_hop() {
+        // At the reference hop, a zoom just above 1 runs the STFT a column
+        // apart and zoom 1 an eighth of a window apart, so a session's end
+        // is not the hop's: chunks carry it rather than leave the UI to
+        // reckon it from the hop (issue 436).
+        // 60 s at 32 kHz: columns of 683 frames, rows of 256 at zoom 1.
+        assert_eq!(column_hop(32_000, 1.0), 683);
+        assert_eq!(column_hop(32_000, 1.0003), 683);
+        assert_eq!(decoded_end_column(1_920_000, 2_048, 1.0, 32_000), 2_811);
+        assert_eq!(decoded_end_column(1_920_000, 2_048, 1.0003, 32_000), 2_810);
     }
 }

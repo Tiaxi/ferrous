@@ -29,6 +29,12 @@ double ferrous_ffi_spectrogram_render_zoom(
 // hop, which the decoder reckons the centered view's window with too.
 double ferrous_ffi_spectrogram_effective_zoom(
     std::uint32_t sampleRate, std::uint32_t hop, double renderZoom);
+// The column after the last that a session at zoom, with fftSize-sample
+// windows, decodes of a file of frames frames at sampleRate: where the
+// centered view ends once the session has decoded the file's end, as the
+// decoder places its views. 0 for a file shorter than half a window.
+std::uint64_t ferrous_ffi_spectrogram_decoded_end_column(
+    std::uint64_t frames, std::uint32_t fftSize, float zoom, std::uint32_t sampleRate);
 // The zoom the spectrogram moves to when requested is asked of it at
 // current; current if it keeps its zoom.
 float ferrous_ffi_spectrogram_zoom_after_request(float current, float requested);
