@@ -7,6 +7,7 @@
 #include "ViewCorner.h"
 
 #include <KLocalizedString>
+#include <QDataStream>
 #include <QFontMetrics>
 #include <QFutureWatcher>
 #include <QHoverEvent>
@@ -42,6 +43,11 @@ constexpr double kMinimumSampleMarkerSize = 1.5;
 constexpr double kMaximumSampleMarkerSize = 3.0;
 constexpr double kSampleCurveSubpixelScale = 256.0;
 constexpr int kSampleCurveBoundaryMarginPixels = 8;
+// The samples either side of a stroke's own that its segments' joins and
+// curves take shape from: a curve between two samples from the samples
+// either side of them, and its normals at its ends from the curves either
+// side of it.
+constexpr int kSampleCurveContextSamples = 3;
 constexpr double kMinimumDetailMarginSeconds = 0.75;
 // While playing, the share of a detail request's margins that lies behind
 // the view: the view moves on into the rest, ahead of it.
@@ -924,8 +930,14 @@ void WaveformEditorItem::requestDetailWindow() {
         }));
 }
 
+quint64 WaveformEditorItem::nextDetailGeneration() {
+    static std::atomic<quint64> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 void WaveformEditorItem::clearDetailLocked() {
     m_detail = DetailWindow{};
+    ++m_detailSourceEpoch;
     m_channelCount = 0;
     m_sampleRateHz = 0;
 }
@@ -1014,11 +1026,17 @@ double WaveformEditorItem::followingStartLocked(double span, double position) co
     return (playheadColumn - middleColumn) * column;
 }
 
+double WaveformEditorItem::visibleSpanForZoomLocked(double zoomLevel) const {
+    if (m_durationSeconds <= 0.0) return 0.0;
+    const double span = m_durationSeconds / std::max(1.0, zoomLevel);
+    return span >= m_durationSeconds * 0.9999 ? m_durationSeconds : span;
+}
+
 std::pair<double, double> WaveformEditorItem::visibleRangeForZoomLocked(
     double zoomLevel, qint64 nowNs) const {
     if (m_durationSeconds <= 0.0) return {0.0, 0.0};
-    const double span = m_durationSeconds / std::max(1.0, zoomLevel);
-    if (span >= m_durationSeconds * 0.9999) return {0.0, m_durationSeconds};
+    const double span = visibleSpanForZoomLocked(zoomLevel);
+    if (span >= m_durationSeconds) return {0.0, m_durationSeconds};
     const double start = std::clamp(
         followingStartLocked(span, displayedPositionSecondsLocked(nowNs)),
         0.0, m_durationSeconds - span);
@@ -1819,6 +1837,107 @@ bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
     return laneStyleLocked().muted(channel);
 }
 
+double WaveformEditorItem::sampleChunkColumnLocked(double visibleStart) const {
+    const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+    const double columns = deviceColumnsLocked();
+    if (span <= 0.0 || columns <= 0.0) return std::numeric_limits<double>::quiet_NaN();
+    const double viewColumn = visibleStart / (span / columns);
+    const double nearest = std::round(viewColumn);
+    return std::abs(viewColumn - nearest) < 1e-6 ? nearest : std::floor(viewColumn);
+}
+
+std::optional<WaveformSceneGraph::Chunks> WaveformEditorItem::sampleChunksLocked(
+    double visibleStart, int width, int height, int channels, bool clipToView) const {
+    // The span the zoom gives, not the view's end less its start, which
+    // differs by a rounding from frame to frame.
+    const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+    const double scale = renderScaleLocked();
+    const double columns = deviceColumnsLocked();
+    const int rate = m_detail.sampleRateHz;
+    if (span <= 0.0 || columns <= 0.0 || rate <= 0 || m_detail.framesPerPoint != 1) return std::nullopt;
+    // Chunks lie on the track's grid of device columns, which the view
+    // follows playback on (see followingStartLocked), or from the track's
+    // start; at its end, the view is a fraction of a column past one,
+    // and the chunks are too while it stays there.
+    const double column = span / columns;
+    const double viewColumn = visibleStart / column;
+    const double nearest = std::round(viewColumn);
+    const bool onGrid = std::abs(viewColumn - nearest) < 1e-6;
+    const double firstColumn = onGrid ? nearest : std::floor(viewColumn);
+    const double phase = onGrid ? 0.0 : viewColumn - firstColumn;
+    const double spacing = static_cast<double>(width) / (span * rate);
+    const double chunkColumns = kSampleChunkColumns;
+    // A sample's marker and its segment to the next reach a few pixels
+    // either side of it: the chunks of samples just outside the view show
+    // in it.
+    const double before = std::ceil((spacing + 4.0) * scale);
+    const double after = std::ceil(4.0 * scale);
+    WaveformSceneGraph::Chunks chunks;
+    chunks.first = static_cast<qint64>(std::floor((firstColumn - before) / chunkColumns));
+    chunks.last = static_cast<qint64>(std::floor(
+        (firstColumn + std::ceil(columns - kColumnEpsilon) - 1.0 + after) / chunkColumns));
+    const LaneStyle style = laneStyleLocked();
+    {
+        QDataStream stream(&chunks.key, QIODevice::WriteOnly);
+        stream << quint8(1) << width << height << scale << span << channels << style.viewMode
+               << quint64{style.mutedMask} << quint64{style.soloedMask}
+               << style.straightSamplePixelsPerSample << phase << kSampleChunkColumns
+               << kWaveform.rgba() << kMutedWaveform.rgba() << rate << m_detail.channelCount
+               << m_detail.framesPerPoint << !m_detail.downmixExtrema.empty() << m_detailSourceEpoch
+               << m_clockState.trackToken << m_clockState.epoch;
+    }
+    // Where a chunk starts on the track, and the first frame it owns: by
+    // frame, so that every frame has one owner, whatever the detail
+    // window holding it.
+    const auto origin = [column, phase, chunkColumns](qint64 index) {
+        return (static_cast<double>(index) * chunkColumns + phase) * column;
+    };
+    // The first frame at or after a column of the grid.
+    const auto frameAt = [column, phase, rate](double gridColumn) {
+        return static_cast<qint64>(std::ceil((gridColumn + phase) * column * rate - 1e-6));
+    };
+    const auto boundary = [frameAt, chunkColumns](qint64 index) {
+        return frameAt(static_cast<double>(index) * chunkColumns);
+    };
+    // The frames whose samples the view shows, as the chunks are chosen.
+    const qint64 viewFirst = clipToView ? frameAt(firstColumn - before)
+                                        : std::numeric_limits<qint64>::min();
+    const qint64 viewEnd = clipToView
+        ? frameAt(firstColumn + std::ceil(columns - kColumnEpsilon) + after)
+        : std::numeric_limits<qint64>::max();
+    // The frames a chunk owns, those of them the view shows.
+    const auto owned = [boundary, viewFirst, viewEnd](qint64 index) {
+        const qint64 first = std::max(boundary(index), viewFirst);
+        return SampleOwnership{first, std::max(first, std::min(boundary(index + 1), viewEnd))};
+    };
+    chunks.offset = [firstColumn, scale, chunkColumns](qint64 index) {
+        return (static_cast<double>(index) * chunkColumns - firstColumn) / scale;
+    };
+    // A chunk holds for the next detail window while this one holds every
+    // sample it takes shape from; one at an edge of the window holds only
+    // for the window. The frames it owns tell one built whole from one
+    // built for a view.
+    chunks.stamp = [this, owned, rate](qint64 index) -> WaveformSceneGraph::Chunks::Stamp {
+        const SampleOwnership frames = owned(index);
+        const qint64 detailFirst = std::llround(m_detail.startSeconds * rate);
+        const qint64 detailEnd = detailFirst + m_detail.pointCount;
+        const bool fromStart = detailFirst <= 0
+            || frames.firstFrame - kSampleCurveContextSamples >= detailFirst;
+        const bool toEnd = frames.endFrame + kSampleCurveContextSamples <= detailEnd
+            || m_detail.endSeconds + 2.0 / rate >= m_durationSeconds;
+        return {fromStart && toEnd ? 0 : m_detail.generation, frames.firstFrame, frames.endFrame};
+    };
+    chunks.paint = [this, origin, owned, span, width, height, channels, scale, style](
+                       QPainter &painter, qint64 index) {
+        // A view of the same span and width starting where the chunk does.
+        const double start = origin(index);
+        const SampleOwnership frames = owned(index);
+        drawDetailSlice(painter, m_detail, style, width, height, start, start + span, channels,
+            0, width, 1.0, scale, &frames);
+    };
+    return chunks;
+}
+
 QSGNode *WaveformEditorItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
     // Qt asks a hidden item for its node too, whenever it changes or enters
     // a window, as the waveform the spectrogram replaces does with it when
@@ -1910,12 +2029,27 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 || m_cachedViewportWidth != renderPixelWidthLocked()
                 || m_cachedViewportHeight != renderPixelHeightLocked());
 #endif
+        if (!directDetail) m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
         if (directDetail) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
-            drawDetailLocked(
-                *painter, canvasWidth, canvasHeight,
-                visibleStart, visibleEnd, displayedChannelCountLocked(), 1.0,
-                renderScaleLocked());
+            // The scene graph keeps the samples' geometry, in chunks; any
+            // other painter draws them.
+            const int lanes = displayedChannelCountLocked();
+            // A frame that moved on by the view's width or more shows none
+            // of the last frame's chunks, nor will the next frame its own.
+            const double column = sampleChunkColumnLocked(visibleStart);
+            const bool clipToView = std::abs(column - m_lastSampleChunkColumn) >= deviceColumnsLocked();
+            const auto chunks = sampleChunksLocked(
+                visibleStart, canvasWidth, canvasHeight, lanes, clipToView);
+            if (chunks && WaveformSceneGraph::drawChunks(*painter, *chunks)) {
+                m_lastSampleChunkColumn = column;
+            } else {
+                m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
+                drawDetailLocked(
+                    *painter, canvasWidth, canvasHeight,
+                    visibleStart, visibleEnd, lanes, 1.0,
+                    renderScaleLocked());
+            }
         } else {
             tiledPlayback = playbackTilesEligibleLocked(
                 visibleStart, visibleEnd);
@@ -2899,20 +3033,25 @@ void WaveformEditorItem::drawDetailSliceLocked(
 
 QRectF WaveformEditorItem::sampleDot(QPointF point, double size, double deviceScale) {
     const double pixels = std::max(1.0, std::round(size * deviceScale));
-    const double left = std::round(point.x() * deviceScale - pixels * 0.5);
-    const double top = std::round(point.y() * deviceScale - pixels * 0.5);
+    // Halves round up, left of the origin too, so that a marker moved by
+    // whole device pixels, as a chunk is, snaps as it would in place.
+    const double left = std::floor(point.x() * deviceScale - pixels * 0.5 + 0.5);
+    const double top = std::floor(point.y() * deviceScale - pixels * 0.5 + 0.5);
     return {left / deviceScale, top / deviceScale, pixels / deviceScale, pixels / deviceScale};
 }
 
 void WaveformEditorItem::drawDetailSlice(
     QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
     int width, int height, double visibleStart, double visibleEnd, int channels,
-    int firstX, int lastX, double pixelScale, double deviceScale) {
+    int firstX, int lastX, double pixelScale, double deviceScale,
+    const SampleOwnership *ownership) {
     const double detailSpan = detail.endSeconds - detail.startSeconds;
     const double visibleSpan = visibleEnd - visibleStart;
     firstX = std::clamp(firstX, 0, width);
     lastX = std::clamp(lastX, firstX, width);
     if (detailSpan <= 0.0 || visibleSpan <= 0.0 || firstX >= lastX) return;
+    // Owned samples are counted in frames: samples, at a point each.
+    if (ownership && (detail.framesPerPoint != 1 || detail.sampleRateHz <= 0)) return;
     const double sampleSpacing = sampleSpacingPixels(
         detail, width, visibleStart, visibleEnd);
     const bool sampleCurve = sampleSpacing + kGridAlignmentEpsilon
@@ -2930,15 +3069,34 @@ void WaveformEditorItem::drawDetailSlice(
         < style.straightSamplePixelsPerSample;
     const double secondsPerPixel = visibleSpan
         / static_cast<double>(std::max(1, width));
+    // Curves take in the samples whose segments, or their neighbours'
+    // joins, reach into the slice, so that it shows them as a wider one
+    // would: three samples and a marker beyond its edges.
     const int boundaryMargin = sampleCurve
-        ? kSampleCurveBoundaryMarginPixels
+        ? std::max(kSampleCurveBoundaryMarginPixels,
+            static_cast<int>(std::ceil(sampleSpacing * kSampleCurveContextSamples + 3.0)))
         : 1;
     const double sliceStart = visibleStart
         + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel;
     const double sliceEnd = visibleStart
         + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel;
-    const auto [firstPoint, lastPoint] = detailPointRange(detail,
+    auto [firstPoint, lastPoint] = detailPointRange(detail,
         sliceStart, sliceEnd);
+    // The owned samples' points, and as their polyline's indices.
+    int ownedFirst = 0;
+    int ownedEnd = 0;
+    if (ownership) {
+        const qint64 detailFirstFrame = std::llround(detail.startSeconds * detail.sampleRateHz);
+        const auto point = [&detail, detailFirstFrame](qint64 frame) {
+            return static_cast<int>(std::clamp<qint64>(frame - detailFirstFrame, 0, detail.pointCount));
+        };
+        ownedFirst = point(ownership->firstFrame);
+        ownedEnd = std::max(ownedFirst, point(ownership->endFrame));
+        firstPoint = point(ownership->firstFrame - kSampleCurveContextSamples);
+        lastPoint = std::max(firstPoint, point(ownership->endFrame + kSampleCurveContextSamples));
+        ownedFirst -= firstPoint;
+        ownedEnd -= firstPoint;
+    }
     const int sliceWidth = lastX - firstX;
     for (int displayChannel = 0; displayChannel < channels; ++displayChannel) {
         const double top = static_cast<double>(displayChannel) * height / channels;
@@ -2965,10 +3123,12 @@ void WaveformEditorItem::drawDetailSlice(
                 && (time < visibleStart || time >= visibleEnd)) {
                 continue;
             }
+            // From the slice's start: the same for a view and for a chunk
+            // that starts whole device pixels from it, but for the
+            // difference.
             const double pixelPosition = sampleCurve
                 ? std::round(
-                    (time / secondsPerPixel
-                        - visibleStart / secondsPerPixel)
+                    (time - visibleStart) / secondsPerPixel
                     * kSampleCurveSubpixelScale)
                     / kSampleCurveSubpixelScale
                 : (time - visibleStart) / secondsPerPixel;
@@ -2977,8 +3137,8 @@ void WaveformEditorItem::drawDetailSlice(
                     pixelPosition + kGridAlignmentEpsilon)),
                 0, width - 1);
             if (sampleCurve) {
-                if (pixelPosition < firstX - boundaryMargin
-                    || pixelPosition >= lastX + boundaryMargin) {
+                if (!ownership && (pixelPosition < firstX - boundaryMargin
+                    || pixelPosition >= lastX + boundaryMargin)) {
                     continue;
                 }
             } else if (x < firstX || x >= lastX) {
@@ -3029,6 +3189,11 @@ void WaveformEditorItem::drawDetailSlice(
                 Qt::IntersectClip);
             painter.setRenderHint(QPainter::Antialiasing, true);
             painter.setBrush(Qt::NoBrush);
+            // A chunk's segments, from its samples, with the others to join
+            // them to; every point is on its polyline.
+            if (ownership) WaveformSceneGraph::strokeOnlySegments(painter, ownedFirst, ownedEnd);
+            const qsizetype markersFirst = ownership ? ownedFirst : 0;
+            const qsizetype markersEnd = ownership ? ownedEnd : polyline.size();
             if (straightSegments) {
                 painter.drawPolyline(polyline);
             } else {
@@ -3041,9 +3206,9 @@ void WaveformEditorItem::drawDetailSlice(
                 // quad each.
                 const double dotSize = sampleMarkerSize + painter.pen().widthF();
                 QVector<QRectF> dots;
-                dots.reserve(polyline.size());
-                for (const QPointF &point : polyline) {
-                    dots.push_back(sampleDot(point, dotSize, deviceScale));
+                dots.reserve(markersEnd - markersFirst);
+                for (qsizetype index = markersFirst; index < markersEnd; ++index) {
+                    dots.push_back(sampleDot(polyline.at(index), dotSize, deviceScale));
                 }
                 painter.setRenderHint(QPainter::Antialiasing, false);
                 painter.setPen(Qt::NoPen);
@@ -3052,7 +3217,8 @@ void WaveformEditorItem::drawDetailSlice(
             } else if (sampleMarkers) {
                 painter.setBrush(color);
                 const double markerOffset = sampleMarkerSize * 0.5;
-                for (const QPointF &point : polyline) {
+                for (qsizetype index = markersFirst; index < markersEnd; ++index) {
+                    const QPointF point = polyline.at(index);
                     painter.drawRect(QRectF(
                         point.x() - markerOffset,
                         point.y() - markerOffset,

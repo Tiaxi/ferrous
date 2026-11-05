@@ -25,12 +25,14 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
 #include "WaveformReaderLease.h"
+#include "WaveformSceneGraph.h"
 #include "WindowPresence.h"
 
 class QHoverEvent;
@@ -197,6 +199,9 @@ private:
 #endif
 
     struct DetailWindow {
+        // Which window this is: a new one, from a decode or cleared, has
+        // another; a copy has its own's.
+        quint64 generation{nextDetailGeneration()};
         int sampleRateHz{0};
         int channelCount{0};
         double startSeconds{0.0};
@@ -235,6 +240,19 @@ private:
     // the curve between them shows only where it is steep, and there it is
     // close to its chord. Further apart, its bends show.
     static constexpr double kStraightSamplePixelsPerSample = 4.2;
+    // Samples drawn directly are drawn in chunks of this many device
+    // columns along the track, each built once and moved with the view
+    // (see sampleChunksLocked): a tenth of a 3440-pixel view at 2x, small
+    // enough that the parts of chunks a frame shows past the view's edges
+    // cost little where every frame shows new ones, and large enough that
+    // the context each chunk draws its segments' joins from does too.
+    static constexpr int kSampleChunkColumns = 512;
+    // The samples a chunk owns: their markers and the segments from them
+    // to the next, by frame of the track.
+    struct SampleOwnership {
+        qint64 firstFrame{0};
+        qint64 endFrame{0};
+    };
 
     // How lanes are drawn: the channels mixed in one, or one each, and
     // which channels are not heard.
@@ -284,6 +302,8 @@ private:
     bool detailResolutionCoversLocked(double startSeconds, double endSeconds) const;
     bool detailResolutionCoversPixelSpanLocked(
         double startSeconds, double endSeconds, int pixelWidth) const;
+    // The seconds a view at a zoom spans.
+    double visibleSpanForZoomLocked(double zoomLevel) const;
     std::pair<double, double> visibleRangeForZoomLocked(
         double zoomLevel, qint64 nowNs) const;
     std::pair<double, double> visibleRangeForZoomLocked(double zoomLevel) const;
@@ -429,10 +449,26 @@ private:
                                double visibleStart, double visibleEnd, int channels,
                                int firstX, int lastX, double pixelScale = 1.0,
                                double deviceScale = 1.0) const;
+    // With `ownership`, it draws the markers of those samples and the
+    // segments from them, as the whole view would, whatever firstX and
+    // lastX are; see WaveformSceneGraph::strokeOnlySegments.
     static void drawDetailSlice(
         QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
         int width, int height, double visibleStart, double visibleEnd, int channels,
-        int firstX, int lastX, double pixelScale, double deviceScale = 1.0);
+        int firstX, int lastX, double pixelScale, double deviceScale = 1.0,
+        const SampleOwnership *ownership = nullptr);
+    // The chunks a frame drawn directly shows its samples in, the view
+    // starting at visibleStart, with `channels` lanes; see
+    // kSampleChunkColumns. With `clipToView`, each is built for the
+    // samples the view shows of it alone: for a frame that moved on by the
+    // view's width or more since the last, whose chunks no later frame
+    // shows, so that it builds no more than the view.
+    std::optional<WaveformSceneGraph::Chunks> sampleChunksLocked(
+        double visibleStart, int width, int height, int channels, bool clipToView = false) const;
+    // The device column of the track's grid the view starts on (see
+    // sampleChunksLocked), or NaN.
+    double sampleChunkColumnLocked(double visibleStart) const;
+    static quint64 nextDetailGeneration();
     // A sample's marker: a square of `size` centred on `point`, snapped to
     // whole device pixels.
     static QRectF sampleDot(QPointF point, double size, double deviceScale);
@@ -489,6 +525,13 @@ private:
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     DetailWindow m_detail;
+    // Changes when the detail may hold other data for the same frames,
+    // such as another file's: a sample chunk built from one window holds
+    // for the next only while it is the same.
+    quint64 m_detailSourceEpoch{0};
+    // The column the last frame drawn in chunks started on; NaN after one
+    // that was not.
+    double m_lastSampleChunkColumn{std::numeric_limits<double>::quiet_NaN()};
     bool m_zoomFallbackToOverview{false};
     // The cache, the staged cache and the playback tiles are in device
     // pixels.

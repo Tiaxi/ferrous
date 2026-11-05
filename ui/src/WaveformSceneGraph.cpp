@@ -18,19 +18,23 @@
 #include <QSGRectangleNode>
 #include <QSGRendererInterface>
 #include <QSGTexture>
+#include <QSGTransformNode>
 #include <QSGVertexColorMaterial>
 
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <memory>
+#include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
 using Vertex = QSGGeometry::ColoredPoint2D;
 struct Command {
-    enum Kind { Rectangle, Image, Geometry } kind{Rectangle};
+    // Layer: the chunks of geometry kept from frame to frame.
+    enum Kind { Rectangle, Image, Geometry, Layer } kind{Rectangle};
     QRectF target;
     QRectF source;
     QColor color;
@@ -63,16 +67,14 @@ struct Label {
     // Where the image goes relative to the text's origin.
     QRect bounds;
 };
+struct Layer;
 struct Scene final : QSGClipNode {
     Scene() : rasterCache(16 * 1024), labelCache(4 * 1024) {
         setIsRectangular(true);
         setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 4));
         setFlag(QSGNode::OwnsGeometry);
     }
-    ~Scene() override {
-        // Image nodes borrow textures; destroy them before their resources.
-        while (firstChild()) delete firstChild();
-    }
+    ~Scene() override;
     QCache<QByteArray, QImage> rasterCache; // KiB, bounded independently of zoom
     QCache<LabelKey, Label> labelCache; // KiB
     std::map<std::tuple<qint64, int, int>, Texture> textures;
@@ -80,7 +82,43 @@ struct Scene final : QSGClipNode {
     WaveformSceneGraph::Statistics stats;
     QImage rasterFrame;
     double scale{1.0};
+    // The chunks, a child where the frame draws them; none while no frame
+    // draws chunks.
+    Layer *layer{nullptr};
 };
+
+// A chunk's geometry at its translation. Qt's renderer makes a transform
+// node with enough vertices a batch root when it first moves, which
+// rebuilds all its batches: from then on, moving it changes a matrix only,
+// and new geometry in it uploads that geometry alone. A slot is therefore
+// kept, and given the next chunk, while the layer lasts; adding or taking
+// away nodes would rebuild the batches of the whole layer.
+struct Slot final : QSGTransformNode {
+    std::vector<QSGGeometryNode *> nodes;
+    int vertices{0};
+};
+struct Layer final : QSGNode {
+    explicit Layer(Scene &scene) : scene(scene) {}
+    ~Layer() override {
+        if (scene.layer == this) scene.layer = nullptr;
+    }
+    struct Chunk {
+        WaveformSceneGraph::Chunks::Stamp stamp{};
+        // None for a chunk with no geometry.
+        Slot *slot{nullptr};
+    };
+    Scene &scene;
+    QByteArray key;
+    std::map<qint64, Chunk> chunks;
+    // Slots no chunk has, their geometry emptied.
+    std::vector<Slot *> free;
+};
+Scene::~Scene() {
+    // A layer a failed frame made, or moved, before it was put in place.
+    if (layer != nullptr && layer->parent() == nullptr) delete layer;
+    // Image nodes borrow textures; destroy them before their resources.
+    while (firstChild()) delete firstChild();
+}
 
 Vertex vertex(QPointF point, QColor color, double coverage = 1.0) {
     const double alpha = color.alphaF() * coverage;
@@ -133,6 +171,65 @@ void quad(std::vector<Vertex> &vertices, Vertex a, Vertex b, Vertex c, Vertex d)
     vertices.insert(vertices.end(), {a, b, c, c, b, d});
 }
 
+QSGGeometryNode *newGeometryNode() {
+    auto *node = new QSGGeometryNode;
+    node->setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0));
+    node->geometry()->setDrawingMode(QSGGeometry::DrawTriangles);
+    node->setMaterial(new QSGVertexColorMaterial);
+    node->setFlag(QSGNode::OwnsGeometry);
+    node->setFlag(QSGNode::OwnsMaterial);
+    return node;
+}
+
+// Gives `slot` these vertices, in nodes of at most
+// kMaximumGeometryVertices; nodes it no longer needs are emptied, not
+// taken away.
+void setSlotGeometry(Slot &slot, const std::vector<Vertex> &vertices,
+    WaveformSceneGraph::Statistics &stats) {
+    std::size_t index = 0;
+    for (std::size_t first = 0; first < vertices.size(); first += kMaximumGeometryVertices, ++index) {
+        if (index == slot.nodes.size()) {
+            slot.nodes.push_back(newGeometryNode());
+            slot.appendChildNode(slot.nodes.back());
+        }
+        const auto count = static_cast<int>(std::min(kMaximumGeometryVertices, vertices.size() - first));
+        QSGGeometry *geometry = slot.nodes[index]->geometry();
+        geometry->allocate(count);
+        std::copy_n(vertices.begin() + static_cast<std::ptrdiff_t>(first), count,
+            geometry->vertexDataAsColoredPoint2D());
+        slot.nodes[index]->markDirty(QSGNode::DirtyGeometry);
+        stats.largestGeometryVertices = std::max(stats.largestGeometryVertices, count);
+    }
+    for (; index < slot.nodes.size(); ++index) {
+        if (slot.nodes[index]->geometry()->vertexCount() == 0) continue;
+        slot.nodes[index]->geometry()->allocate(0);
+        slot.nodes[index]->markDirty(QSGNode::DirtyGeometry);
+    }
+    slot.vertices = static_cast<int>(vertices.size());
+}
+
+void releaseSlot(Layer &layer, Slot *slot) {
+    if (slot == nullptr) return;
+    for (QSGGeometryNode *node : slot->nodes) {
+        if (node->geometry()->vertexCount() == 0) continue;
+        node->geometry()->allocate(0);
+        node->markDirty(QSGNode::DirtyGeometry);
+    }
+    slot->vertices = 0;
+    layer.free.push_back(slot);
+}
+
+Slot *acquireSlot(Layer &layer) {
+    if (!layer.free.empty()) {
+        Slot *slot = layer.free.back();
+        layer.free.pop_back();
+        return slot;
+    }
+    auto *slot = new Slot;
+    layer.appendChildNode(slot);
+    return slot;
+}
+
 // This adapter implements WaveformEditorItem::paint's drawing vocabulary:
 // opaque body images with Source composition, then SourceOver overlays, all
 // in viewport coordinates. The root provides the sample path's viewport clip.
@@ -140,10 +237,10 @@ void quad(std::vector<Vertex> &vertices, Vertex a, Vertex b, Vertex c, Vertex d)
 // composition modes, or smaller per-primitive clips.
 class Engine final : public QPaintEngine {
 public:
-    Engine(Scene &scene, bool software)
+    Engine(Scene &scene, QSize size, bool software)
         : QPaintEngine(AlphaBlend | PorterDuff | PainterPaths | Antialiasing
                        | PrimitiveTransform | PixmapTransform),
-          scene(scene), software(software) {}
+          software(software), scene(scene), size(size) {}
     bool begin(QPaintDevice *device) override {
         setPaintDevice(device); setActive(true); return true;
     }
@@ -274,12 +371,17 @@ public:
             label->image.rect(), Qt::AutoColor);
     }
     void drawPath(const QPainterPath &path) override {
+        const auto segments = std::exchange(strokeSegments, std::nullopt);
         if (path.isEmpty()) return;
         const QPen pen = painter()->pen();
         // Sample curves are sparse vector strokes. Keep them off the raster
         // path too: at high zoom their bounding box is still fullscreen-sized.
         if (!software && painter()->brush().style() == Qt::NoBrush
             && pen.style() == Qt::SolidLine) {
+            if (segments) {
+                appendPathSegments(path, pen, segments->first, segments->second);
+                return;
+            }
             const auto polygons = path.toSubpathPolygons(painter()->transform());
             for (const QPolygonF &polygon : polygons) appendStroke(geometry(), polygon, pen, 0.5 / scene.scale);
             return;
@@ -311,6 +413,7 @@ public:
         drawImage(bounds, *image, image->rect(), Qt::AutoColor);
     }
     void drawPolygon(const QPointF *points, int count, PolygonDrawMode mode) override {
+        const auto segments = std::exchange(strokeSegments, std::nullopt);
         if (count == 0) return;
         const QPen pen = painter()->pen();
         if (mode == PolylineMode && !software && pen.style() == Qt::SolidLine) {
@@ -318,7 +421,8 @@ public:
             // without a path to build and flatten.
             QPolygonF polyline(count);
             for (int i = 0; i < count; ++i) polyline[i] = painter()->transform().map(points[i]);
-            appendPolylineStroke(geometry(), polyline, pen, 0.5 / scene.scale);
+            appendPolylineStroke(geometry(), polyline, pen, 0.5 / scene.scale,
+                segments ? segments->first : 0, segments ? segments->second : count);
             return;
         }
         QPainterPath path; path.moveTo(points[0]);
@@ -332,8 +436,72 @@ public:
         drawPolygon(polygon.constData(), count, mode);
     }
 
+    // Builds the chunks the layer lacks, keeps and moves the others, and
+    // puts the layer where the frame draws it.
+    void drawChunks(const WaveformSceneGraph::Chunks &chunks) {
+        if (scene.layer == nullptr) scene.layer = new Layer(scene);
+        Layer &layer = *scene.layer;
+        if (layer.key != chunks.key) {
+            for (auto &[index, chunk] : layer.chunks) {
+                Q_UNUSED(index);
+                releaseSlot(layer, chunk.slot);
+                ++chunkStats.chunksDropped;
+            }
+            layer.chunks.clear();
+            layer.key = chunks.key;
+        }
+        for (auto it = layer.chunks.begin(); it != layer.chunks.end();) {
+            if (it->first >= chunks.first && it->first <= chunks.last) {
+                ++it;
+                continue;
+            }
+            releaseSlot(layer, it->second.slot);
+            ++chunkStats.chunksDropped;
+            it = layer.chunks.erase(it);
+        }
+        for (qint64 index = chunks.first; index <= chunks.last; ++index) {
+            const WaveformSceneGraph::Chunks::Stamp stamp = chunks.stamp(index);
+            auto [it, added] = layer.chunks.try_emplace(index);
+            Layer::Chunk &chunk = it->second;
+            if (added || chunk.stamp != stamp) {
+                chunk.stamp = stamp;
+                const std::vector<Vertex> vertices = chunkGeometry(chunks, index);
+                if (vertices.empty()) {
+                    releaseSlot(layer, std::exchange(chunk.slot, nullptr));
+                } else {
+                    if (chunk.slot == nullptr) chunk.slot = acquireSlot(layer);
+                    setSlotGeometry(*chunk.slot, vertices, chunkStats);
+                }
+                ++chunkStats.chunksBuilt;
+                chunkStats.uploadedVertices += static_cast<int>(vertices.size());
+            }
+            ++chunkStats.chunks;
+            if (chunk.slot == nullptr) continue;
+            QMatrix4x4 matrix;
+            matrix.translate(static_cast<float>(chunks.offset(index)), 0.0F);
+            if (chunk.slot->matrix() != matrix) {
+                chunk.slot->setMatrix(matrix);
+                ++chunkStats.chunksMoved;
+            }
+            chunkStats.geometryVertices += chunk.slot->vertices;
+            for (const QSGGeometryNode *node : chunk.slot->nodes) {
+                chunkStats.largestGeometryVertices = std::max(
+                    chunkStats.largestGeometryVertices, node->geometry()->vertexCount());
+            }
+        }
+        Command command;
+        command.kind = Command::Layer;
+        commands.push_back(std::move(command));
+    }
+
     std::vector<Command> commands;
     int labelRasters{0};
+    // The segments of the next stroke that get geometry; see
+    // WaveformSceneGraph::strokeOnlySegments.
+    std::optional<std::pair<qsizetype, qsizetype>> strokeSegments;
+    // The chunks' part of the frame's statistics.
+    WaveformSceneGraph::Statistics chunkStats;
+    const bool software;
 private:
     std::vector<Vertex> &geometry() {
         if (commands.empty() || commands.back().kind != Command::Geometry) {
@@ -355,9 +523,15 @@ private:
                 vertex(outside[next], color, 0), vertex(inside[next], color));
         }
     }
-    static void appendStroke(std::vector<Vertex> &vertices, const QPolygonF &points, const QPen &pen, double fringe) {
+    // The stroke of a flattened curve, or of its pieces `first` up to
+    // `end`, those from each of these points to the next.
+    static void appendStroke(std::vector<Vertex> &vertices, const QPolygonF &points, const QPen &pen, double fringe,
+        qsizetype first = 0, qsizetype end = -1) {
         if (points.size() < 2) return;
-        vertices.reserve(vertices.size() + static_cast<std::size_t>(points.size() - 1) * 18);
+        if (end < 0 || end > points.size() - 1) end = points.size() - 1;
+        first = std::max<qsizetype>(0, first);
+        if (first >= end) return;
+        vertices.reserve(vertices.size() + static_cast<std::size_t>(end - first) * 18);
         const double half = std::max(1.0, pen.widthF()) * 0.5;
         const double inner = std::max(0.0, half - fringe);
         const double outer = half + fringe;
@@ -368,8 +542,8 @@ private:
             const double length = std::hypot(direction.x(), direction.y());
             return length > 0 ? QPointF(-direction.y() / length, direction.x() / length) : QPointF(0, 1);
         };
-        QPointF previousNormal = normal(0);
-        for (qsizetype i = 1; i < points.size(); ++i) {
+        QPointF previousNormal = normal(first);
+        for (qsizetype i = first + 1; i <= end; ++i) {
             const QPointF nextNormal = normal(i);
             const QPointF a = points[i - 1]; const QPointF b = points[i];
             quad(vertices, vertex(a - previousNormal * inner, color), vertex(a + previousNormal * inner, color),
@@ -386,11 +560,17 @@ private:
     // they turn: alternating samples make nearly vertical segments, whose
     // neighbours' chord is level. Gentle bends are mitred, which adds no
     // vertices; sharper ones are bevelled, as QPainter's default pen joins
-    // lines, with the wedge outside the bend filled.
-    static void appendPolylineStroke(std::vector<Vertex> &vertices, const QPolygonF &points, const QPen &pen, double fringe) {
+    // lines, with the wedge outside the bend filled. Only the segments
+    // `first` up to `end` get geometry, joined to the others as they would
+    // be.
+    static void appendPolylineStroke(std::vector<Vertex> &vertices, const QPolygonF &points, const QPen &pen, double fringe,
+        qsizetype first, qsizetype end) {
         if (points.size() < 2) return;
         const auto segments = static_cast<std::size_t>(points.size() - 1);
-        vertices.reserve(vertices.size() + segments * 18);
+        const auto from = static_cast<std::size_t>(std::max<qsizetype>(0, first));
+        const auto to = std::min(segments, static_cast<std::size_t>(std::max<qsizetype>(0, end)));
+        if (from >= to) return;
+        vertices.reserve(vertices.size() + (to - from) * 18);
         const double half = std::max(1.0, pen.widthF()) * 0.5;
         const double inner = std::max(0.0, half - fringe);
         const double outer = half + fringe;
@@ -402,22 +582,28 @@ private:
             normals[i] = length > 0 ? QPointF(-direction.y() / length, direction.x() / length)
                 : (i > 0 ? normals[i - 1] : QPointF(0, 1));
         }
+        // The join at the end of segment i: its miter, the offset of a unit
+        // of width there, or a bevel.
+        const auto join = [&normals, segments](std::size_t i) -> std::pair<QPointF, bool> {
+            if (i + 1 >= segments) return {normals[i], false};
+            // cos² of half the bend: a miter is 1/cos as long as the width,
+            // along the bisector of the two normals.
+            const QPointF sum = normals[i] + normals[i + 1];
+            const double halfBendCos2 = (sum.x() * sum.x() + sum.y() * sum.y()) * 0.25;
+            if (halfBendCos2 >= kMiterHalfBendCos * kMiterHalfBendCos) return {sum / (2.0 * halfBendCos2), false};
+            return {normals[i], true};
+        };
         // The offset of a unit of width at the segment's start.
-        QPointF start = normals[0];
-        for (std::size_t i = 0; i < segments; ++i) {
+        QPointF start = normals[from];
+        if (from > 0) {
+            const auto [miter, bevelled] = join(from - 1);
+            if (!bevelled) start = miter;
+        }
+        for (std::size_t i = from; i < to; ++i) {
             const QPointF normal = normals[i];
             const QPointF a = points[static_cast<qsizetype>(i)];
             const QPointF b = points[static_cast<qsizetype>(i) + 1];
-            QPointF end = normal;
-            bool bevel = false;
-            if (i + 1 < segments) {
-                // cos² of half the bend: a miter is 1/cos as long as the
-                // width, along the bisector of the two normals.
-                const QPointF sum = normal + normals[i + 1];
-                const double halfBendCos2 = (sum.x() * sum.x() + sum.y() * sum.y()) * 0.25;
-                if (halfBendCos2 >= kMiterHalfBendCos * kMiterHalfBendCos) end = sum / (2.0 * halfBendCos2);
-                else bevel = true;
-            }
+            const auto [end, bevel] = join(i);
             quad(vertices, vertex(a - start * inner, color), vertex(a + start * inner, color),
                 vertex(b - end * inner, color), vertex(b + end * inner, color));
             quad(vertices, vertex(a - start * outer, color, 0), vertex(a - start * inner, color),
@@ -439,12 +625,56 @@ private:
             start = bevel ? normals[i + 1] : end;
         }
     }
+    // A chunk's geometry, as its paint function draws it.
+    std::vector<Vertex> chunkGeometry(const WaveformSceneGraph::Chunks &chunks, qint64 index);
+    // A path's cubics and lines, from on-curve point `first` up to `end`:
+    // each flattened as the whole path's are, with the others as their
+    // neighbours.
+    void appendPathSegments(const QPainterPath &path, const QPen &pen, qsizetype first, qsizetype end) {
+        const QTransform transform = painter()->transform();
+        QPolygonF polygon;
+        // Where each on-curve point is in the polygon.
+        std::vector<qsizetype> starts;
+        for (int i = 0; i < path.elementCount(); ++i) {
+            const QPainterPath::Element element = path.elementAt(i);
+            const QPointF point = QPointF(element.x, element.y) * transform;
+            if (element.type == QPainterPath::MoveToElement) {
+                // drawDetailSlice draws a lane as one subpath.
+                if (!polygon.isEmpty()) break;
+                polygon.append(point);
+            } else if (element.type == QPainterPath::LineToElement) {
+                polygon.append(point);
+            } else if (element.type == QPainterPath::CurveToElement && i + 2 < path.elementCount()) {
+                // As toSubpathPolygons flattens it: on its own, from the
+                // point before it.
+                QPainterPath cubic;
+                const QPainterPath::Element from = path.elementAt(i - 1);
+                const QPainterPath::Element control = path.elementAt(i + 1);
+                const QPainterPath::Element to = path.elementAt(i + 2);
+                cubic.moveTo(from.x, from.y);
+                cubic.cubicTo(element.x, element.y, control.x, control.y, to.x, to.y);
+                const QList<QPolygonF> flattened = cubic.toSubpathPolygons(transform);
+                if (!flattened.isEmpty()) polygon.append(flattened.front().mid(1));
+                else polygon.append(QPointF(to.x, to.y) * transform);
+                i += 2;
+            } else {
+                continue;
+            }
+            starts.push_back(polygon.size() - 1);
+        }
+        const auto points = static_cast<qsizetype>(starts.size());
+        first = std::clamp<qsizetype>(first, 0, points);
+        end = std::clamp<qsizetype>(end, first, points);
+        if (end - first < 1 || first + 1 >= points) return;
+        appendStroke(geometry(), polygon, pen, 0.5 / scene.scale, starts[static_cast<std::size_t>(first)],
+            starts[static_cast<std::size_t>(std::min(end, points - 1))]);
+    }
     Scene &scene;
-    bool software;
+    QSize size;
 };
 class Device final : public QPaintDevice {
 public:
-    Device(Scene &scene, QSize size, bool software) : engine(scene, software), size(size) {}
+    Device(Scene &scene, QSize size, bool software) : engine(scene, size, software), size(size) {}
     QPaintEngine *paintEngine() const override { return const_cast<Engine *>(&engine); }
     mutable Engine engine;
 protected:
@@ -465,6 +695,38 @@ protected:
 private:
     QSize size;
 };
+
+std::vector<Vertex> Engine::chunkGeometry(const WaveformSceneGraph::Chunks &chunks, qint64 index) {
+    Device device(scene, size, false);
+    QPainter painter(&device);
+    chunks.paint(painter, index);
+    painter.end();
+    std::vector<Vertex> vertices;
+    for (Command &command : device.engine.commands) {
+        if (command.kind == Command::Geometry) {
+            // Moved, not copied, where it is the first: usually the only one.
+            if (vertices.empty()) vertices = std::move(command.vertices);
+            else vertices.insert(vertices.end(), command.vertices.begin(), command.vertices.end());
+        } else if (command.kind == Command::Rectangle) {
+            // A lone marker: its quad, as a batch of them makes it.
+            const QRectF &rect = command.target;
+            quad(vertices, vertex(rect.topLeft(), command.color), vertex(rect.topRight(), command.color),
+                vertex(rect.bottomLeft(), command.color), vertex(rect.bottomRight(), command.color));
+        }
+    }
+    return vertices;
+}
+}
+
+bool WaveformSceneGraph::drawChunks(QPainter &painter, const Chunks &chunks) {
+    auto *engine = dynamic_cast<Engine *>(painter.paintEngine());
+    if (engine == nullptr || engine->software) return false;
+    engine->drawChunks(chunks);
+    return true;
+}
+
+void WaveformSceneGraph::strokeOnlySegments(QPainter &painter, qsizetype first, qsizetype end) {
+    if (auto *engine = dynamic_cast<Engine *>(painter.paintEngine())) engine->strokeSegments = {{first, end}};
 }
 
 QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSize size,
@@ -500,16 +762,31 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
         paint(&painter);
     }
     painter.end();
-    scene->stats = {};
+    scene->stats = device.engine.chunkStats;
     scene->stats.labelRasters = device.engine.labelRasters;
     for (auto &[key, texture] : scene->textures) { Q_UNUSED(key); texture.used = false; }
+    const std::vector<Piece> framePieces = pieces(device.engine.commands);
+    if (scene->layer != nullptr && scene->layer->parent() == scene) {
+        // The layer stays in place while the frame draws it there; one it
+        // draws elsewhere moves there, and one it does not draw goes, with
+        // its chunks, as the nodes of other commands do.
+        const auto drawn = std::find_if(framePieces.begin(), framePieces.end(),
+            [](const Piece &piece) { return piece.command->kind == Command::Layer; });
+        const auto kept = std::find(scene->kinds.begin(), scene->kinds.end(), Command::Layer);
+        if (drawn != framePieces.end() && kept != scene->kinds.end()
+            && drawn - framePieces.begin() != kept - scene->kinds.begin()) {
+            scene->removeChildNode(scene->layer);
+            scene->kinds.erase(kept);
+        }
+    }
     QSGNode *node = scene->firstChild();
     std::vector<Command::Kind> kinds;
-    kinds.reserve(device.engine.commands.size());
-    for (const Piece &piece : pieces(device.engine.commands)) {
+    kinds.reserve(framePieces.size());
+    for (const Piece &piece : framePieces) {
         const Command &command = *piece.command;
         const std::size_t index = kinds.size();
-        const bool matching = node && index < scene->kinds.size() && scene->kinds[index] == command.kind;
+        const bool matching = node && index < scene->kinds.size() && scene->kinds[index] == command.kind
+            && (command.kind != Command::Layer || node == scene->layer);
         if (node && !matching) {
             QSGNode *next = node->nextSibling(); delete node; node = next;
         }
@@ -517,14 +794,8 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
         if (!current) {
             if (command.kind == Command::Image) current = window->createImageNode();
             else if (command.kind == Command::Rectangle) current = window->createRectangleNode();
-            else {
-                auto *geometryNode = new QSGGeometryNode;
-                geometryNode->setGeometry(new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 0));
-                geometryNode->geometry()->setDrawingMode(QSGGeometry::DrawTriangles);
-                geometryNode->setMaterial(new QSGVertexColorMaterial);
-                geometryNode->setFlag(QSGNode::OwnsGeometry); geometryNode->setFlag(QSGNode::OwnsMaterial);
-                current = geometryNode;
-            }
+            else if (command.kind == Command::Layer) current = scene->layer;
+            else current = newGeometryNode();
         }
         if (!current) {
             delete scene;
@@ -552,7 +823,7 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
         } else if (command.kind == Command::Rectangle) {
             auto *rectangle = static_cast<QSGRectangleNode *>(current);
             rectangle->setRect(command.target); rectangle->setColor(command.color);
-        } else {
+        } else if (command.kind == Command::Geometry) {
             auto *geometry = static_cast<QSGGeometryNode *>(current);
             const auto first = command.vertices.begin() + static_cast<std::ptrdiff_t>(piece.firstVertex);
             const int count = static_cast<int>(piece.vertexCount);
@@ -560,6 +831,7 @@ QSGNode *WaveformSceneGraph::render(QSGNode *previous, QQuickWindow *window, QSi
             std::copy(first, first + count, geometry->geometry()->vertexDataAsColoredPoint2D());
             geometry->markDirty(QSGNode::DirtyGeometry);
             scene->stats.geometryVertices += count;
+            scene->stats.uploadedVertices += count;
             scene->stats.largestGeometryVertices = std::max(
                 scene->stats.largestGeometryVertices, count);
         }
