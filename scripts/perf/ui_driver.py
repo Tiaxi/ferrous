@@ -117,19 +117,22 @@ class App:
 
     # ---------------------------------------------------------- MPRIS
     def mpris(self, *args):
-        """Calls a Player method on this app's own MPRIS name.
+        """Calls a Player method on this app's own D-Bus connection.
 
-        Only a name that the started process owns is used: the generic
-        name may belong to another Ferrous running in the same session,
-        such as the user's own, which a run must never control.
+        Only the unique connection of an MPRIS name that the started
+        process owns is called: the generic name may belong to another
+        Ferrous running in the same session, such as the user's own, which
+        a run must never control. A unique name is never reused, so the
+        call fails once the app is gone instead of reaching another one.
         """
         names = subprocess.run(["busctl", "--user", "list", "--no-legend"], capture_output=True, text=True).stdout
         name = None
         for line in names.splitlines():
             parts = line.split()
-            if (len(parts) > 1 and parts[0].startswith("org.mpris.MediaPlayer2.ferrous")
-                    and parts[1] == str(self.pid)):
-                name = parts[0]
+            if (len(parts) > 4 and parts[0].startswith("org.mpris.MediaPlayer2.ferrous")
+                    and parts[1] == str(self.pid) and parts[4].startswith(":")):
+                name = parts[4]
+                break
         if name is None:
             raise RuntimeError(f"no Ferrous MPRIS name is owned by PID {self.pid}; "
                                "refusing to call another instance")

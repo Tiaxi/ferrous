@@ -11,10 +11,12 @@ audio plays.
 
 The app runs on the real session bus, which the scripts use for MPRIS. Ferrous
 is single-instance there, so a Ferrous already running in the session takes
-over the start and the new process quits. `ui_driver.App` then fails, and
-`App.mpris()` calls only a Ferrous MPRIS name owned by the process it started,
-so a run never controls another instance. Close any other Ferrous, or run the
-scripts under their own session bus (`dbus-run-session`), before measuring.
+over the start and the new process quits. `ui_driver.App` then fails. The
+MPRIS calls of `ui_driver.App.mpris()`, `app_states.sh` and `app_library.sh`
+go only to the unique D-Bus connection of the process the script started,
+which fails once that process is gone, so a run never controls another
+instance. Close any other Ferrous, or run the scripts under their own session
+bus (`dbus-run-session`), before measuring.
 
 Bring your own audio files; none are included. Name them `<ID>.<ext>` in one
 directory; the scenarios use `S01` (stereo 44.1 kHz) and `S05` (5.1 96 kHz),
