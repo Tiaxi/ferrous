@@ -1811,7 +1811,8 @@ bool WaveformEditorItem::LaneStyle::muted(int channel) const {
 }
 
 WaveformEditorItem::LaneStyle WaveformEditorItem::laneStyleLocked() const {
-    return {m_viewMode, m_mutedChannelsMask, m_soloedChannelsMask};
+    return {m_viewMode, m_mutedChannelsMask, m_soloedChannelsMask,
+        m_straightSamplePixelsPerSample};
 }
 
 bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
@@ -1913,7 +1914,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             drawDetailLocked(
                 *painter, canvasWidth, canvasHeight,
-                visibleStart, visibleEnd, displayedChannelCountLocked(), 1.0);
+                visibleStart, visibleEnd, displayedChannelCountLocked(), 1.0,
+                renderScaleLocked());
         } else {
             tiledPlayback = playbackTilesEligibleLocked(
                 visibleStart, visibleEnd);
@@ -2882,23 +2884,30 @@ void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int he
 
 void WaveformEditorItem::drawDetailLocked(QPainter &painter, int width, int height,
                                            double visibleStart, double visibleEnd, int channels,
-                                           double pixelScale) const {
-    drawDetailSliceLocked(
-        painter, width, height, visibleStart, visibleEnd, channels, 0, width, pixelScale);
+                                           double pixelScale, double deviceScale) const {
+    drawDetailSliceLocked(painter, width, height, visibleStart, visibleEnd, channels,
+        0, width, pixelScale, deviceScale);
 }
 
 void WaveformEditorItem::drawDetailSliceLocked(
     QPainter &painter, int width, int height,
     double visibleStart, double visibleEnd, int channels,
-    int firstX, int lastX, double pixelScale) const {
+    int firstX, int lastX, double pixelScale, double deviceScale) const {
     drawDetailSlice(painter, m_detail, laneStyleLocked(), width, height,
-        visibleStart, visibleEnd, channels, firstX, lastX, pixelScale);
+        visibleStart, visibleEnd, channels, firstX, lastX, pixelScale, deviceScale);
+}
+
+QRectF WaveformEditorItem::sampleDot(QPointF point, double size, double deviceScale) {
+    const double pixels = std::max(1.0, std::round(size * deviceScale));
+    const double left = std::round(point.x() * deviceScale - pixels * 0.5);
+    const double top = std::round(point.y() * deviceScale - pixels * 0.5);
+    return {left / deviceScale, top / deviceScale, pixels / deviceScale, pixels / deviceScale};
 }
 
 void WaveformEditorItem::drawDetailSlice(
     QPainter &painter, const DetailWindow &detail, const LaneStyle &style,
     int width, int height, double visibleStart, double visibleEnd, int channels,
-    int firstX, int lastX, double pixelScale) {
+    int firstX, int lastX, double pixelScale, double deviceScale) {
     const double detailSpan = detail.endSeconds - detail.startSeconds;
     const double visibleSpan = visibleEnd - visibleStart;
     firstX = std::clamp(firstX, 0, width);
@@ -2917,6 +2926,8 @@ void WaveformEditorItem::drawDetailSlice(
         sampleSpacing * 0.75,
         kMinimumSampleMarkerSize * pixelScale,
         kMaximumSampleMarkerSize * pixelScale);
+    const bool straightSegments = sampleSpacing / pixelScale + kGridAlignmentEpsilon
+        < style.straightSamplePixelsPerSample;
     const double secondsPerPixel = visibleSpan
         / static_cast<double>(std::max(1, width));
     const int boundaryMargin = sampleCurve
@@ -3018,8 +3029,27 @@ void WaveformEditorItem::drawDetailSlice(
                 Qt::IntersectClip);
             painter.setRenderHint(QPainter::Antialiasing, true);
             painter.setBrush(Qt::NoBrush);
-            painter.drawPath(buildSamplePath(polyline));
-            if (sampleMarkers) {
+            if (straightSegments) {
+                painter.drawPolyline(polyline);
+            } else {
+                painter.drawPath(buildSamplePath(polyline));
+            }
+            if (sampleMarkers && straightSegments) {
+                // The squares the pen and fill would cover, in whole device
+                // pixels: all the same size, with edges that need no
+                // antialiasing. One batch, which the scene graph makes one
+                // quad each.
+                const double dotSize = sampleMarkerSize + painter.pen().widthF();
+                QVector<QRectF> dots;
+                dots.reserve(polyline.size());
+                for (const QPointF &point : polyline) {
+                    dots.push_back(sampleDot(point, dotSize, deviceScale));
+                }
+                painter.setRenderHint(QPainter::Antialiasing, false);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(color);
+                painter.drawRects(dots.constData(), static_cast<int>(dots.size()));
+            } else if (sampleMarkers) {
                 painter.setBrush(color);
                 const double markerOffset = sampleMarkerSize * 0.5;
                 for (const QPointF &point : polyline) {
