@@ -46,7 +46,6 @@ jobs:
         include:
           - fedora: '44'
           - fedora: '45'
-            experimental: true
     continue-on-error: ${{ matrix.experimental == true }}
     container:
       image: fedora:${{ matrix.fedora }}
@@ -127,7 +126,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # A failed non-blocking build uploads nothing, and the download then has
+      # A failed experimental build uploads nothing, and the download then has
       # one artifact, which download-artifact@v5 extracts straight into
       # packages/ instead of packages/<artifact name>/. The collect script
       # finds the packages in either layout.
@@ -142,7 +141,7 @@ jobs:
       # directory of downloaded assets. --require-dist names each build in the
       # build-rpm matrix that is not experimental.
       - name: Collect assets and write SHA256SUMS
-        run: ./scripts/collect-release-assets.sh --require-dist fc44 packages release-assets
+        run: ./scripts/collect-release-assets.sh --require-dist fc44 --require-dist fc45 packages release-assets
 
       - name: Create release
         uses: softprops/action-gh-release@v2

@@ -14,15 +14,16 @@ permissions:
 
 jobs:
   rust-backend:
-    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}, non-blocking)', matrix.fedora) || '' }}"
+    name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}{1})', matrix.fedora, matrix.experimental && ', non-blocking' || '') || '' }}"
     strategy:
       fail-fast: false
       matrix:
         # pinned: the reviewed toolchain, which also runs formatting, Clippy
         # and cargo audit on the release platform.
         # fedora: Fedora's rust and cargo packages, which build the release RPMs.
-        # The next Fedora release tests the pinned toolchain against its
-        # system libraries, without blocking merges.
+        # Each other supported Fedora release tests the pinned toolchain
+        # against its system libraries. experimental: a Fedora release that
+        # is not out yet, which does not block merges.
         # deny_warnings: fail the build on compiler warnings. Clippy already
         # denies them on the lint entry.
         include:
@@ -36,7 +37,6 @@ jobs:
             timeout: 30
           - fedora: '45'
             toolchain: pinned
-            experimental: true
             deny_warnings: true
             timeout: 40
     runs-on: ubuntu-latest
