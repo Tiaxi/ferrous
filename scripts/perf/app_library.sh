@@ -26,8 +26,18 @@ pid=$!
 trap 'kill -TERM $pid 2>/dev/null || true' EXIT
 sample() { python3 -I "$here/threadsample.py" "$pid" "$1" "$2" "$out" > /dev/null; }
 mpris() {
-    busctl --user call org.mpris.MediaPlayer2.ferrous /org/mpris/MediaPlayer2 \
-        org.mpris.MediaPlayer2.Player "$@"
+    # Calls only the D-Bus connection of the app started here: the generic
+    # MPRIS name may belong to another Ferrous, such as the user's own, and a
+    # unique connection name is never reused, so a call fails once the app
+    # is gone instead of reaching another instance.
+    local conn
+    conn=$(busctl --user list --no-legend | awk -v pid="$pid" \
+        '!found && $1 ~ /^org\.mpris\.MediaPlayer2\.ferrous/ && $2 == pid { print $5; found = 1 }')
+    if [ -z "$conn" ]; then
+        echo "no Ferrous MPRIS name is owned by PID $pid; refusing to call another instance" >&2
+        return 1
+    fi
+    busctl --user call "$conn" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player "$@"
 }
 for i in 1 2 3 4 5 6 7 8 9; do
     sample 10 "$label startup_${i}0s"
