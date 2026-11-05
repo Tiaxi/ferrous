@@ -347,7 +347,9 @@ if(BUILD_TESTING)
         )
         # The other repository scripts, run on scratch copies and stand-in
         # commands.
-        foreach(_script_test IN ITEMS bump-version install-rpm run-ui-cleanup stress-tests)
+        foreach(_script_test IN ITEMS
+                bump-version collect-release-assets extract-messages install-rpm
+                run-ui-cleanup stress-tests)
             add_test(NAME ferrous_script_${_script_test}
                 COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
                     "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
