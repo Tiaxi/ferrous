@@ -536,6 +536,10 @@ private:
         qint64 displayLeft,
         bool rollingMode, double columnsPerSecond, double drawX);
     double effectiveZoomLocked() const;
+    // The same for data `hop` samples apart drawn at `renderZoom`
+    // (ferrous_ffi_spectrogram_effective_zoom); `renderZoom` until a hop
+    // is known.
+    double effectiveZoomForHopLocked(int hop, double renderZoom) const;
     // The session's column hop at zoom 1, in samples: what zoom levels
     // are relative to, for the rate of the session's data.
     double referenceHopLocked() const;
@@ -544,6 +548,10 @@ private:
     double currentPixelsPerSecondLocked() const;
     // Canvas pixels per display column.
     double canvasZoomLocked() const;
+    // The same for data `hop` samples apart drawn at `renderZoom`: the
+    // effective zoom, then the canvas's scale. In the other order its
+    // rounding can differ, and with it the columns a view shows.
+    double canvasZoomForHopLocked(int hop, double renderZoom) const;
     int canvasWidthLocked() const;
     int canvasHeightLocked() const;
     // The window's device pixel ratio, or the current one without a window.
@@ -557,6 +565,22 @@ private:
     // (ferrous_ffi_spectrogram_render_zoom).
     double renderZoomForHopLocked(int hop, double zoom) const;
     bool zoomPreviewWantedLocked() const;
+    // The centered view that the data for the requested zoom will show,
+    // as the zoom preview places it before that data arrives, in canvas
+    // pixels `width` wide: canvas pixels per column, the window's columns,
+    // the range shown and the column under the playhead. Not valid until
+    // the requested zoom's hop and the columns a second are known.
+    struct ZoomTargetView {
+        bool valid{false};
+        double canvasZoom{0.0};
+        int windowColumns{0};
+        CenteredDisplayRange range;
+        double playheadColumn{0.0};
+    };
+    ZoomTargetView centeredZoomTargetLocked(
+        int width,
+        double positionSeconds,
+        double columnsPerSecond) const;
     SpectrogramZoomPreview zoomPreviewLocked(
         int width,
         double positionSeconds,

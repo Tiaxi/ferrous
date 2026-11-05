@@ -2200,14 +2200,18 @@ double SpectrogramItem::zoomLevel() const {
 }
 
 double SpectrogramItem::effectiveZoomLocked() const {
-    if (m_precomputedHopSize <= 0) {
-        return m_renderZoomLevel;
+    return effectiveZoomForHopLocked(m_precomputedHopSize, m_renderZoomLevel);
+}
+
+double SpectrogramItem::effectiveZoomForHopLocked(int hop, double renderZoom) const {
+    if (hop <= 0) {
+        return renderZoom;
     }
     // renderZoom * hop / reference hop, as the decoder reckons the centered
     // window: its rounding decides how many columns a view shows.
     return ferrous_ffi_spectrogram_effective_zoom(
         static_cast<std::uint32_t>(std::max(0, m_precomputedSampleRateHz)),
-        static_cast<std::uint32_t>(m_precomputedHopSize), m_renderZoomLevel);
+        static_cast<std::uint32_t>(hop), renderZoom);
 }
 
 double SpectrogramItem::referenceHopLocked() const {
@@ -2222,7 +2226,11 @@ double SpectrogramItem::currentPixelsPerSecondLocked() const {
 }
 
 double SpectrogramItem::canvasZoomLocked() const {
-    return effectiveZoomLocked() * m_canvasScale;
+    return canvasZoomForHopLocked(m_precomputedHopSize, m_renderZoomLevel);
+}
+
+double SpectrogramItem::canvasZoomForHopLocked(int hop, double renderZoom) const {
+    return effectiveZoomForHopLocked(hop, renderZoom) * m_canvasScale;
 }
 
 int SpectrogramItem::canvasWidthLocked() const {
@@ -2361,41 +2369,60 @@ SpectrogramZoomPreview SpectrogramItem::zoomPreviewLocked(
     // about it keeps the preview where that data will be.
     preview.toX = static_cast<double>(width);
     if (!rollingMode) {
-        const int targetHop = columnHopForZoomLocked(backendZoomForRequestLocked());
-        if (targetHop <= 0 || columnsPerSecond <= 0.0) {
+        const ZoomTargetView target =
+            centeredZoomTargetLocked(width, positionSeconds, columnsPerSecond);
+        if (!target.valid) {
             return preview;
         }
-        const double targetColumnsPerSecond =
-            static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(targetHop);
-        const double targetEffectiveZoom = m_canvasScale
-            * targetZoom * static_cast<double>(targetHop) / referenceHopLocked();
-        const double toTargetColumns = targetColumnsPerSecond / columnsPerSecond;
-        const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
-            ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
-            : static_cast<qint64>(0);
-        const qint64 targetMaxColCount = static_cast<qint64>(
-            std::llround(static_cast<double>(maxColCount) * toTargetColumns));
-        const qint64 targetEstimateCount = std::max<qint64>(1, static_cast<qint64>(
-            std::llround(static_cast<double>(m_precomputedTotalColumnsEstimate)
-                * toTargetColumns)));
-        const double targetColumnF = positionSeconds * targetColumnsPerSecond;
-        const qint64 targetNowCol = static_cast<qint64>(std::floor(targetColumnF));
-        const int targetWindowCols = static_cast<int>(
-            std::ceil(static_cast<double>(width) / targetEffectiveZoom));
-        const CenteredDisplayRange range = centeredDisplayRange(
-            targetNowCol, targetWindowCols, targetMaxColCount, targetEstimateCount,
-            targetColumnsPerSecond);
-        const bool scrolls = centeredRangeScrolls(
-            range.left, range.right, targetMaxColCount, targetEstimateCount,
-            range.decodedTailLooksFinal);
-        const double playheadColumn = scrolls
-            ? static_cast<double>(targetNowCol)
-            : targetColumnF;
-        preview.toX = (playheadColumn - static_cast<double>(range.left)) * targetEffectiveZoom;
+        preview.toX = (target.playheadColumn - static_cast<double>(target.range.left))
+            * target.canvasZoom;
     }
     preview.scale = scale;
     preview.active = true;
     return preview;
+}
+
+SpectrogramItem::ZoomTargetView SpectrogramItem::centeredZoomTargetLocked(
+    int width,
+    double positionSeconds,
+    double columnsPerSecond) const {
+    ZoomTargetView target;
+    const double backendZoom = backendZoomForRequestLocked();
+    const int targetHop = columnHopForZoomLocked(backendZoom);
+    if (targetHop <= 0 || columnsPerSecond <= 0.0 || m_precomputedSampleRateHz <= 0) {
+        return target;
+    }
+    const double targetColumnsPerSecond =
+        static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(targetHop);
+    // The zoom the data will be drawn at, reckoned as the canvas will
+    // reckon it, so that the window has the columns the canvas will.
+    target.canvasZoom =
+        canvasZoomForHopLocked(targetHop, renderZoomForHopLocked(targetHop, backendZoom));
+    // The columns so far, in the requested zoom's columns.
+    const double toTargetColumns = targetColumnsPerSecond / columnsPerSecond;
+    const qint64 maxColCount = m_precomputedMaxColumnIndex >= 0
+        ? static_cast<qint64>(m_precomputedMaxColumnIndex) + 1
+        : static_cast<qint64>(0);
+    const qint64 targetMaxColCount = static_cast<qint64>(
+        std::llround(static_cast<double>(maxColCount) * toTargetColumns));
+    const qint64 targetEstimateCount = std::max<qint64>(1, static_cast<qint64>(
+        std::llround(static_cast<double>(m_precomputedTotalColumnsEstimate)
+            * toTargetColumns)));
+    const double targetColumnF = positionSeconds * targetColumnsPerSecond;
+    const qint64 targetNowCol = static_cast<qint64>(std::floor(targetColumnF));
+    target.windowColumns = static_cast<int>(
+        std::ceil(static_cast<double>(width) / target.canvasZoom));
+    target.range = centeredDisplayRange(
+        targetNowCol, target.windowColumns, targetMaxColCount, targetEstimateCount,
+        targetColumnsPerSecond);
+    const bool scrolls = centeredRangeScrolls(
+        target.range.left, target.range.right, targetMaxColCount, targetEstimateCount,
+        target.range.decodedTailLooksFinal);
+    target.playheadColumn = scrolls
+        ? static_cast<double>(targetNowCol)
+        : targetColumnF;
+    target.valid = true;
+    return target;
 }
 
 bool SpectrogramItem::zoomPreviewWantedLocked() const {

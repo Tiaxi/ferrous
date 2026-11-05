@@ -1315,6 +1315,8 @@ private slots:
     void spectrogramWheelZoomFollowsTheDeltaAndPassesHorizontalScroll();
     void spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayToTheData();
     void spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayToTheData();
+    void spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDataAtFractionalScales_data();
+    void spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDataAtFractionalScales();
     void spectrogramSecondsAreAsWideAtEveryRateOfAFamily();
     void spectrogramZoomSnapsToTheScaledHopOfAHighRate();
     void spectrogramTrackChangeToAHighRateKeepsZoomAtItsReferenceHop();
@@ -20356,6 +20358,158 @@ void SpectrogramSmokeTest::spectrogramRollingZoomPreviewShowsAtOnceAndGivesWayTo
     QCOMPARE(drawnCanvasScale(node), 1.0);
     QVERIFY(std::abs(item.effectiveZoomLocked() - 1.0) < 1e-9);
     QCOMPARE(item.m_renderZoomLevel, 2.0);
+
+    delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDataAtFractionalScales_data() {
+    // Panes of 8 kHz files on screens at fractional scales, zoomed in from
+    // 0.5 (columns of 342 frames) to a zoom whose data the canvas draws at
+    // a bit less than a column a device pixel: 171 / hop × hop / 171 is
+    // 0.9999999999999999, and at 0.57 (300 frames) a 1680-pixel pane at
+    // 1.5x, or at 0.55 (311 frames) one at 1.25x, shows a column more than
+    // its pixels, 1681 of them.
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<double>("zoom");
+    QTest::addColumn<int>("hop");
+    QTest::addColumn<int>("frames");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<double>("position");
+    QTest::addColumn<int>("window");
+    QTest::addColumn<qint64>("left");
+    // Issue 436's example: 1867 columns of 300 frames, of which 1681 are
+    // 90.04%, the whole track. Centered on column 1024 at 38.4 s.
+    QTest::newRow("1.5x, issue example")
+        << 1.5 << 0.57 << 300 << 560'640 << 1'680 << 38.4 << 1'681 << qint64(0);
+    // A file whose columns at 0.5 come to 1867 at 0.57 as well, so that
+    // the preview's window of 1680 columns, 89.98%, did not show the whole
+    // track, and the data's did.
+    QTest::newRow("1.5x, across the whole-track lock")
+        << 1.5 << 0.57 << 300 << 560'878 << 1'680 << 38.4 << 1'681 << qint64(0);
+    // 1867 columns of 311 frames, at both zooms; column 1024 at 39.808 s.
+    QTest::newRow("1.25x, across the whole-track lock")
+        << 1.25 << 0.55 << 311 << 581'524 << 1'680 << 39.808 << 1'681 << qint64(0);
+    QTest::newRow("1.25x, mid-track")
+        << 1.25 << 0.55 << 311 << 581'524 << 1'600 << 39.808 << 1'601 << qint64(1'024 - 800);
+}
+
+void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDataAtFractionalScales() {
+    // Until the data for a zoom arrives, the canvas on screen is shown
+    // scaled to it, where the data will put it. The preview reckons the
+    // columns of the data's view as the canvas will (issue 436): the
+    // effective zoom, then the device scale. In the other order, its
+    // window was a column short of the canvas's, and across the
+    // whole-track lock, the view jumped when the data arrived.
+    QFETCH(double, scale);
+    QFETCH(double, zoom);
+    QFETCH(int, hop);
+    QFETCH(int, frames);
+    QFETCH(int, width);
+    QFETCH(double, position);
+    QFETCH(int, window);
+    QFETCH(qint64, left);
+    QQuickWindow quickWindow;
+    if (!showOnScreen(quickWindow, scale)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    quickWindow.resize(width + 40, 160);
+    SpectrogramItem &item = *new SpectrogramItem(quickWindow.contentItem());
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int referenceHop = 171;
+    constexpr int startHop = 342;
+    // A session's column estimate until it has decoded the end, and the
+    // columns of 2048-frame windows that fit in the file.
+    const auto estimateAt = [frames](int columnHop) {
+        return static_cast<int>(
+            std::ceil((frames / 1'024 + 64) * 1'024.0 / static_cast<double>(columnHop)));
+    };
+    const auto decodedEndAt = [frames](int columnHop) {
+        return (frames - 1'024) / columnHop + 1;
+    };
+    // A whole session, as its chunks bring it.
+    quint64 generation = 1;
+    const auto feedSession = [&](int columnHop) {
+        const int end = decodedEndAt(columnHop);
+        ++generation;
+        item.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, 0, estimateAt(columnHop), rate, columnHop,
+            false, true, 1, false, generation);
+        item.feedPrecomputedChunk(
+            QByteArray(end * bins, '\x40'), bins, 0, end, 0, estimateAt(columnHop),
+            rate, columnHop, false, false, 1, false, generation);
+        item.feedPrecomputedChunk(
+            QByteArray(), bins, 0, 0, end, end, rate, columnHop,
+            /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false, generation);
+    };
+
+    // The pane at zoom 0.5, with all its columns in.
+    item.feedPrecomputedChunk(
+        QByteArray(64 * bins, '\x40'), bins, 0, 64, 0, estimateAt(referenceHop),
+        rate, referenceHop, false, true, 1, false, generation);
+    item.setZoomLevel(0.5);
+    QVERIFY(sendPendingBackendZoom(item));
+    feedSession(startHop);
+    setTestPosition(item, position);
+    QSGNode *node = paintSettled(item, nullptr);
+    QVERIFY(node != nullptr);
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_canvasScale, scale);
+        QCOMPARE(item.m_precomputedHopSize, startHop);
+        QVERIFY(!item.m_awaitingZoomData);
+    }
+
+    // Zoomed in: the canvas is shown scaled until the data arrives.
+    item.setZoomLevel(zoom);
+    QVERIFY(sendPendingBackendZoom(item));
+    node = paintSettled(item, node);
+    SpectrogramItem::ZoomTargetView predicted;
+    int canvasWidth = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_awaitingZoomData);
+        QVERIFY(item.m_zoomPreviewShown);
+        QCOMPARE(item.columnHopForZoomLocked(item.backendZoomForRequestLocked()), hop);
+        canvasWidth = item.canvasWidthLocked();
+        predicted = item.centeredZoomTargetLocked(
+            canvasWidth, position, static_cast<double>(rate) / startHop);
+    }
+    QVERIFY(predicted.valid);
+    const double previewPlayheadX = playhead->rect().x();
+
+    // The data for the zoom replaces the preview.
+    feedSession(hop);
+    node = paintSettled(item, node);
+    QMutexLocker lock(&item.m_stateMutex);
+    QVERIFY(!item.m_awaitingZoomData);
+    QVERIFY(!item.m_zoomFillActive);
+    QVERIFY(!item.m_zoomPreviewShown);
+    QCOMPARE(item.m_precomputedHopSize, hop);
+    QCOMPARE(item.m_precomputedTotalColumnsEstimate, decodedEndAt(hop));
+    QCOMPARE(item.canvasWidthLocked(), canvasWidth);
+    const double canvasZoom = item.canvasZoomLocked();
+    QVERIFY(canvasZoom < scale);
+    const int canvasWindow =
+        static_cast<int>(std::ceil(static_cast<double>(canvasWidth) / canvasZoom));
+    QCOMPARE(canvasWindow, window);
+    QCOMPARE(item.m_precomputedCanvasDisplayLeft, left);
+
+    // The preview showed the canvas's columns, where the canvas shows them:
+    // the playhead stays put, and so does the view's left edge.
+    QCOMPARE(playhead->rect().x(), previewPlayheadX);
+    QCOMPARE(predicted.range.left, item.m_precomputedCanvasDisplayLeft);
+    QCOMPARE(predicted.windowColumns, canvasWindow);
+    // Exactly: QCOMPARE would let a rounding through.
+    QVERIFY2(predicted.canvasZoom == canvasZoom,
+             qPrintable(QStringLiteral("%1 != %2")
+                            .arg(predicted.canvasZoom, 0, 'g', 17)
+                            .arg(canvasZoom, 0, 'g', 17)));
 
     delete node;
 }
