@@ -292,6 +292,10 @@ private slots:
     void seekClickSeeksToTheTimeUnderThePointer();
     void playbackMovesTheSeekBarByWholePixels();
     void seekBarStepsByTheWindowsDevicePixels();
+    void seekBarPlayheadIsOneOutlinedLine();
+    void seekBarPlayheadStaysOnTheBarAtEitherEnd();
+    void seekBarPlayheadContrastsWithTheBar_data();
+    void seekBarPlayheadContrastsWithTheBar();
     void playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds();
     void seekBarDescriptionFollowsTheSecondsBetweenPixels();
     void seekBarCatchesUpWithRealPlayback();
@@ -1252,9 +1256,9 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
     QVERIFY2(window != nullptr, qPrintable(errorText));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+    QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
-    QVERIFY(seek != nullptr && handle != nullptr && progress != nullptr);
+    QVERIFY(seek != nullptr && line != nullptr && progress != nullptr);
     int frames = 0;
     connect(window, &QQuickWindow::frameSwapped, window, [&frames]() { ++frames; });
     QTRY_VERIFY(frames > 0);
@@ -1275,13 +1279,14 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     const double durationSeconds = 200.0;
     const int steps = 180;
     struct Drawn {
-        qreal handleX;
+        qreal lineX;
         qreal progressWidth;
         QString positionText;
         bool operator==(const Drawn &) const = default;
     };
     const auto drawn = [&]() {
-        return Drawn{handle->x(), progress->width(), root->property("positionText").toString()};
+        return Drawn{line->mapToItem(progress->parentItem(), QPointF()).x(), progress->width(),
+                     root->property("positionText").toString()};
     };
     Drawn previous = drawn();
     int changes = 0;
@@ -1298,21 +1303,24 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     qInfo("seek bar playback: %s in %d position updates", qPrintable(counts), steps);
     QVERIFY2(changes >= 3 && changes < steps / 4 && frames <= changes, qPrintable(counts));
 
-    // The value stays exact, and the bar is within a device pixel of it.
+    // The value stays exact, and the bar is within a device pixel of it:
+    // the fill ends at the playhead's line, which moves over the bar less
+    // its own width.
     const double endSeconds = startSeconds + steps / 60.0;
     QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds));
     const qreal devicePixel = 1.0 / window->effectiveDevicePixelRatio();
-    const qreal exactWidth = progress->parentItem()->width() * endSeconds / durationSeconds;
+    const qreal travel = progress->parentItem()->width() - line->width();
+    const qreal exactWidth = travel * endSeconds / durationSeconds;
     QVERIFY2(std::abs(progress->width() - exactWidth) <= devicePixel,
              qPrintable(QStringLiteral("%1 vs %2").arg(progress->width()).arg(exactWidth)));
 
-    // A held key draws its value as it is.
+    // A held key draws its value to the nearest device pixel.
     QVERIFY(tabTo(window, seek));
     QTest::keyPress(window, Qt::Key_Right);
     QVERIFY(seek->property("adjusting").toBool());
     QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds + 5.0));
-    QVERIFY(fuzzyEqual(progress->width(),
-                       progress->parentItem()->width() * (endSeconds + 5.0) / durationSeconds));
+    QVERIFY2(std::abs(progress->width() - travel * (endSeconds + 5.0) / durationSeconds) <= devicePixel / 2,
+             qPrintable(QString::number(progress->width())));
     QTest::keyRelease(window, Qt::Key_Right);
     QVERIFY(sameValues(recordedValues(root.data(), "seeks"), {endSeconds + 5.0}));
 
@@ -1325,10 +1333,56 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     const QList<double> seeks = recordedValues(root.data(), "seeks");
     QVERIFY2(sameValues(seeks, {endSeconds + 5.0, endSeconds + 10.0}), qPrintable(describeValues(seeks)));
     root->setProperty("positionSeconds", endSeconds + 10.0);
-    QVERIFY(std::abs(progress->width()
-                     - progress->parentItem()->width() * (endSeconds + 10.0) / durationSeconds)
-            <= devicePixel);
+    QVERIFY(std::abs(progress->width() - travel * (endSeconds + 10.0) / durationSeconds) <= devicePixel);
 }
+
+namespace {
+
+// What is wrong with the seek bar's playhead as drawn at `dpr` device pixels
+// to a logical one, or nothing. Its line is two logical pixels wide and its
+// outline one on each side where the bar has room, each a whole number of
+// device pixels; the line's left edge is on a whole device pixel of the bar,
+// and the played fill ends there. The line and its outline are on the bar.
+QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr) {
+    QQuickItem *outline = line->parentItem();
+    QQuickItem *bar = progress->parentItem();
+    const qreal lineX = line->mapToItem(bar, QPointF()).x();
+    const qreal lineWidth = std::max<qreal>(1.0, std::round(2.0 * dpr)) / dpr;
+    const qreal outlineWidth = std::max<qreal>(1.0, std::round(dpr)) / dpr;
+    const qreal outlineLeft = std::max<qreal>(0.0, lineX - outlineWidth);
+    const qreal outlineRight = std::min(bar->width(), lineX + lineWidth + outlineWidth);
+    QStringList errors;
+    if (!fuzzyEqual(line->width(), lineWidth)) {
+        errors.push_back(QStringLiteral("line %1 wide, not %2").arg(line->width()).arg(lineWidth));
+    }
+    if (!fuzzyEqual(lineX * dpr, std::round(lineX * dpr))) {
+        errors.push_back(QStringLiteral("line at %1 device pixels").arg(lineX * dpr));
+    }
+    if (!fuzzyEqual(progress->width(), lineX)) {
+        errors.push_back(QStringLiteral("fill ends at %1, line at %2").arg(progress->width()).arg(lineX));
+    }
+    if (!fuzzyEqual(outline->x(), outlineLeft) || !fuzzyEqual(outline->x() + outline->width(), outlineRight)) {
+        errors.push_back(QStringLiteral("outline from %1 to %2, not %3 to %4")
+                             .arg(outline->x()).arg(outline->x() + outline->width())
+                             .arg(outlineLeft).arg(outlineRight));
+    }
+    if (!fuzzyEqual(line->height(), bar->height()) || !fuzzyEqual(outline->height(), bar->height())) {
+        errors.push_back(QStringLiteral("not the bar's height"));
+    }
+    constexpr qreal kTolerance = 1e-6;
+    const qreal lineRight = lineX + line->width();
+    if (lineX < -kTolerance || lineRight > bar->width() + kTolerance) {
+        errors.push_back(QStringLiteral("line from %1 to %2 off the bar of %3")
+                             .arg(lineX).arg(lineRight).arg(bar->width()));
+    }
+    if (outline->x() < -kTolerance || outline->x() + outline->width() > bar->width() + kTolerance) {
+        errors.push_back(QStringLiteral("outline from %1 to %2 off the bar of %3")
+                             .arg(outline->x()).arg(outline->x() + outline->width()).arg(bar->width()));
+    }
+    return errors.join(QStringLiteral("; "));
+}
+
+} // namespace
 
 void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     // A window drawn at 1.25 device pixels to a logical one on a screen at
@@ -1354,16 +1408,23 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     harness->setParentItem(window.contentItem());
     control.polishItems();
     QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
-    QVERIFY(progress != nullptr && progress->parentItem()->width() > 500);
+    QQuickItem *line = itemsNamed(harness, QStringLiteral("seekPlayheadLine")).value(0);
+    QVERIFY(progress != nullptr && line != nullptr && progress->parentItem()->width() > 500);
 
     // Each step the bar takes in five seconds of playback is one of the
-    // window's device pixels.
+    // window's device pixels, and the playhead keeps its device pixels' size
+    // and stays on whole ones, with the fill up to it.
     const auto checkSteps = [&](double fromSeconds) {
         root->setProperty("positionSeconds", fromSeconds);
         QList<qreal> steps;
         qreal width = progress->width();
         for (int step = 1; step <= 250; ++step) {
             root->setProperty("positionSeconds", fromSeconds + step / 50.0);
+            const QString geometryError =
+                playheadGeometryError(line, progress, window.effectiveDevicePixelRatio());
+            QVERIFY2(geometryError.isEmpty(),
+                     qPrintable(QStringLiteral("at %1: %2")
+                                    .arg(window.effectiveDevicePixelRatio()).arg(geometryError)));
             if (progress->width() != width) {
                 steps.push_back((progress->width() - width) * window.effectiveDevicePixelRatio());
                 width = progress->width();
@@ -1392,6 +1453,314 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     checkSteps(60.0);
 }
 
+void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    const qreal dpr = window->effectiveDevicePixelRatio();
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    QVERIFY(seek != nullptr && progress != nullptr);
+
+    // One marker: a line in its outline. No other playhead or handle draws.
+    const QList<QQuickItem *> outlines = itemsNamed(window->contentItem(), QStringLiteral("seekPlayhead"));
+    const QList<QQuickItem *> lines = itemsNamed(window->contentItem(), QStringLiteral("seekPlayheadLine"));
+    QCOMPARE(outlines.size(), 1);
+    QCOMPARE(lines.size(), 1);
+    QCOMPARE(lines.first()->parentItem(), outlines.first());
+    QVERIFY(outlines.first()->isVisible() && lines.first()->isVisible());
+    QVERIFY(itemsNamed(window->contentItem(), QStringLiteral("seekHandle")).isEmpty());
+    QQuickItem *outline = outlines.first();
+    QQuickItem *line = lines.first();
+    QQuickItem *bar = progress->parentItem();
+    QCOMPARE(line->property("antialiasing").toBool(), false);
+    QCOMPARE(outline->property("antialiasing").toBool(), false);
+
+    // Two logical pixels wide, with one on each side, at the position.
+    QCOMPARE(dpr, 1.0);
+    QString geometryError = playheadGeometryError(line, progress, dpr);
+    QVERIFY2(geometryError.isEmpty(), qPrintable(geometryError));
+    QCOMPARE(line->width(), 2.0);
+    QCOMPARE(line->x(), 1.0);
+    QCOMPARE(outline->width(), 4.0);
+    const qreal travel = bar->width() - line->width();
+    QVERIFY(std::abs(progress->width() - travel * 50.0 / 200.0) <= 0.5);
+
+    // The grab target is wider than the marker and centred on its line, and
+    // it draws nothing.
+    QQuickItem *grab = qvariant_cast<QQuickItem *>(seek->property("handle"));
+    QVERIFY(grab != nullptr);
+    QCOMPARE(grab->objectName(), QStringLiteral("seekGrabTarget"));
+    QVERIFY2(grab->width() > outline->width(), qPrintable(QString::number(grab->width())));
+    QVERIFY(!grab->flags().testFlag(QQuickItem::ItemHasContents));
+    QVERIFY(grab->childItems().isEmpty());
+    const auto lineCentre = [&]() { return line->mapToItem(seek, QPointF(line->width() / 2, 0)).x(); };
+    QCOMPARE(grab->mapToItem(seek, QPointF(grab->width() / 2, 0)).x(), lineCentre());
+
+    // A press on the line's centre is at the time the line shows, to within
+    // the step of a device pixel.
+    const double stepSeconds = 200.0 / seek->property("travelDevicePixels").toDouble();
+    QVERIFY(std::abs(secondsAtX(seek, lineCentre()) - 50.0) <= stepSeconds / 2 + 1e-9);
+
+    // At either end, the line stays on the bar and its outline is cut to it.
+    root->setProperty("positionSeconds", 0.0);
+    geometryError = playheadGeometryError(line, progress, dpr);
+    QVERIFY2(geometryError.isEmpty(), qPrintable(geometryError));
+    QCOMPARE(line->mapToItem(bar, QPointF()).x(), 0.0);
+    QCOMPARE(outline->x(), 0.0);
+    QCOMPARE(progress->width(), 0.0);
+    QCOMPARE(grab->mapToItem(seek, QPointF(grab->width() / 2, 0)).x(), lineCentre());
+    root->setProperty("positionSeconds", 200.0);
+    geometryError = playheadGeometryError(line, progress, dpr);
+    QVERIFY2(geometryError.isEmpty(), qPrintable(geometryError));
+    const qreal lineRight = line->mapToItem(bar, QPointF(line->width(), 0)).x();
+    QVERIFY2(std::abs(lineRight - bar->width()) <= 0.5 && outline->x() + outline->width() <= bar->width(),
+             qPrintable(QStringLiteral("%1 of %2").arg(lineRight).arg(bar->width())));
+    QCOMPARE(grab->mapToItem(seek, QPointF(grab->width() / 2, 0)).x(), lineCentre());
+}
+
+void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
+    // The transport harness as an item of a window drawn at fractional and
+    // whole device pixel ratios, as in seekBarStepsByTheWindowsDevicePixels.
+    QQuickRenderControl control;
+    QQuickWindow window(&control);
+    QImage canvas(16, 16, QImage::Format_ARGB32_Premultiplied);
+    QQuickRenderTarget renderTarget = QQuickRenderTarget::fromPaintDevice(&canvas);
+    renderTarget.setDevicePixelRatio(1.25);
+    window.setRenderTarget(renderTarget);
+    QQmlEngine engine;
+    QString errorText;
+    QByteArray source = transportHarnessQml();
+    QVERIFY(source.contains("ApplicationWindow {"));
+    source.replace("ApplicationWindow {", "Control {");
+    QScopedPointer<QObject> root(createQml(engine, source, &errorText));
+    auto *harness = qobject_cast<QQuickItem *>(root.data());
+    QVERIFY2(harness != nullptr, qPrintable(errorText));
+    harness->setParentItem(window.contentItem());
+    control.polishItems();
+    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
+    QQuickItem *line = itemsNamed(harness, QStringLiteral("seekPlayheadLine")).value(0);
+    QVERIFY(progress != nullptr && line != nullptr);
+    QQuickItem *bar = progress->parentItem();
+
+    for (const qreal dpr : {1.25, 1.5, 2.0}) {
+        renderTarget.setDevicePixelRatio(dpr);
+        window.setRenderTarget(renderTarget);
+        QEvent changed(QEvent::DevicePixelRatioChange);
+        QCoreApplication::sendEvent(&window, &changed);
+        QCOMPARE(window.effectiveDevicePixelRatio(), dpr);
+        QSet<qint64> barWidths;
+        int oddBars = 0;
+        // Harness widths, some fractional, that give the bar even and odd
+        // widths; the layout gives it whole logical pixels.
+        for (const qreal width : {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0}) {
+            harness->setWidth(width);
+            control.polishItems();
+            const qreal barWidth = bar->width();
+            const auto wholeWidth = static_cast<qint64>(std::round(barWidth));
+            if (!barWidths.contains(wholeWidth) && fuzzyEqual(barWidth, static_cast<qreal>(wholeWidth))) {
+                oddBars += wholeWidth % 2 == 1 ? 1 : 0;
+            }
+            barWidths.insert(wholeWidth);
+            for (const double seconds : {0.0, 200.0}) {
+                root->setProperty("positionSeconds", seconds);
+                const QString geometryError = playheadGeometryError(line, progress, dpr);
+                QVERIFY2(geometryError.isEmpty(),
+                         qPrintable(QStringLiteral("at %1, bar %2, %3 s: %4")
+                                        .arg(dpr).arg(barWidth).arg(seconds).arg(geometryError)));
+            }
+            // At the end, the line's right edge is within a device pixel of
+            // the bar's end.
+            const qreal lineRight = line->mapToItem(bar, QPointF(line->width(), 0)).x();
+            QVERIFY2(barWidth - lineRight < 1.0 / dpr - 1e-6,
+                     qPrintable(QStringLiteral("at %1, bar %2: line ends at %3")
+                                    .arg(dpr).arg(barWidth).arg(lineRight)));
+        }
+        QVERIFY2(barWidths.size() >= 6 && oddBars >= 3,
+                 qPrintable(QStringLiteral("at %1: %2 bar widths, %3 odd").arg(dpr).arg(barWidths.size()).arg(oddBars)));
+    }
+}
+
+namespace {
+
+// The transport bar under a palette of the given colours, as Kirigami's
+// theme and the window's palette give them.
+QByteArray paletteTransportHarnessQml(const QString &window, const QString &base, const QString &alternateBase,
+                                      const QString &text, const QString &highlight) {
+    return QStringLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
+import "components" as Components
+import "panes" as Panes
+
+ApplicationWindow {
+    id: harness
+    width: 1000
+    height: 200
+    visible: true
+    palette.window: "%1"
+    palette.base: "%2"
+    palette.alternateBase: "%3"
+    palette.text: "%4"
+    palette.windowText: "%4"
+    property alias palette0: uiPalette
+
+    Item {
+        anchors.fill: parent
+        Kirigami.Theme.inherit: false
+        Kirigami.Theme.backgroundColor: "%1"
+        Kirigami.Theme.textColor: "%4"
+        Kirigami.Theme.highlightColor: "%5"
+
+        Components.UiPalette {
+            id: uiPalette
+            windowRoot: harness
+        }
+
+        QtObject {
+            id: bridge
+            property real durationSeconds: 200
+            property string durationText: "03:20"
+            property string playbackState: "Playing"
+            property real volume: 0.5
+            property var waveformPeaksPacked: ""
+            property real waveformCoverageSeconds: 0
+            property bool waveformComplete: false
+        }
+
+        Action { id: previousAction; text: "Previous" }
+        Action { id: playAction; text: "Play" }
+        Action { id: pauseAction; text: "Pause" }
+        Action { id: stopAction; text: "Stop" }
+        Action { id: nextAction; text: "Next" }
+
+        Panes.TransportBar {
+            width: parent.width
+            uiBridge: bridge
+            uiPalette: uiPalette
+            previousAction: previousAction
+            playAction: playAction
+            pauseAction: pauseAction
+            stopAction: stopAction
+            nextAction: nextAction
+            volumeMuted: false
+            keyboardSeekStepSeconds: 5
+            displayedPositionSeconds: 50
+            toggleMutedVolume: function() {}
+            setAppVolume: function(value) {}
+            normalizedVolumeValue: function(value) { return value }
+            seekCommitted: function(value) {}
+        }
+    }
+}
+)QML")
+        .arg(window, base, alternateBase, text, highlight)
+        .toUtf8();
+}
+
+// WCAG's relative luminance of an opaque colour.
+double relativeLuminance(const QColor &color) {
+    const auto linear = [](double channel) {
+        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+}
+
+// WCAG's contrast ratio of two opaque colours.
+double contrastRatio(const QColor &a, const QColor &b) {
+    const double la = relativeLuminance(a);
+    const double lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// `top` drawn over the opaque `bottom`.
+QColor drawnOver(const QColor &top, const QColor &bottom) {
+    const double alpha = top.alphaF();
+    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
+                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
+                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
+}
+
+} // namespace
+
+void AccessibilityTest::seekBarPlayheadContrastsWithTheBar_data() {
+    QTest::addColumn<QString>("window");
+    QTest::addColumn<QString>("base");
+    QTest::addColumn<QString>("alternateBase");
+    QTest::addColumn<QString>("text");
+    QTest::addColumn<QString>("highlight");
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze light") << "#eff0f1" << "#ffffff" << "#f7f7f7" << "#232629" << "#3daee9" << false;
+    QTest::newRow("breeze dark") << "#202326" << "#141618" << "#1d1f22" << "#fcfcfc" << "#3daee9" << true;
+    QTest::newRow("light, orange accent") << "#f3eee4" << "#fffbf2" << "#ece4d6" << "#1d1b16" << "#f67400"
+                                          << false;
+    QTest::newRow("dark, purple accent") << "#2a2e32" << "#1b1e20" << "#232629" << "#eff0f1" << "#9b59b6"
+                                         << true;
+}
+
+void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
+    QFETCH(QString, window);
+    QFETCH(QString, base);
+    QFETCH(QString, alternateBase);
+    QFETCH(QString, text);
+    QFETCH(QString, highlight);
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(
+        createQml(engine, paletteTransportHarnessQml(window, base, alternateBase, text, highlight), &errorText));
+    auto *quickWindow = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY2(quickWindow != nullptr, qPrintable(errorText));
+    QVERIFY(QTest::qWaitForWindowExposed(quickWindow));
+    QObject *palette = qvariant_cast<QObject *>(root->property("palette0"));
+    QVERIFY(palette != nullptr);
+    QCOMPARE(palette->property("themeIsDark").toBool(), dark);
+    QCOMPARE(palette->property("uiTextColor").value<QColor>(), QColor::fromString(text));
+
+    QQuickItem *background = visibleItemNamed(quickWindow, QStringLiteral("seekBackground"));
+    QQuickItem *progress = visibleItemNamed(quickWindow, QStringLiteral("seekProgress"));
+    QQuickItem *outline = visibleItemNamed(quickWindow, QStringLiteral("seekPlayhead"));
+    QQuickItem *line = visibleItemNamed(quickWindow, QStringLiteral("seekPlayheadLine"));
+    QVERIFY(background != nullptr && progress != nullptr && outline != nullptr && line != nullptr);
+    WaveformItem *waveform = nullptr;
+    for (QQuickItem *sibling : progress->parentItem()->childItems()) {
+        waveform = waveform != nullptr ? waveform : qobject_cast<WaveformItem *>(sibling);
+    }
+    QVERIFY(waveform != nullptr);
+
+    // The line is the text's colour, outlined in black on light text and in
+    // white on dark.
+    const QColor lineColor = line->property("color").value<QColor>();
+    const QColor outlineColor = outline->property("color").value<QColor>();
+    QCOMPARE(lineColor, QColor::fromString(text));
+    QCOMPARE(outlineColor, dark ? QColor(Qt::black) : QColor(Qt::white));
+
+    // One of them stands out against the empty bar, the waveform and the
+    // played fill over either.
+    const QColor emptyBar = background->property("color").value<QColor>();
+    const QColor waveformColor = waveform->property("barColor").value<QColor>();
+    const QColor fill = progress->property("color").value<QColor>();
+    QCOMPARE(emptyBar.alphaF(), 1.0f);
+    QCOMPARE(waveformColor.alphaF(), 1.0f);
+    QVERIFY(fill.alphaF() > 0.0f && fill.alphaF() < 1.0f);
+    const QList<std::pair<QString, QColor>> behind{
+        {QStringLiteral("empty bar"), emptyBar},
+        {QStringLiteral("waveform"), waveformColor},
+        {QStringLiteral("played bar"), drawnOver(fill, emptyBar)},
+        {QStringLiteral("played waveform"), drawnOver(fill, waveformColor)},
+    };
+    for (const auto &[name, color] : behind) {
+        const double lineContrast = contrastRatio(lineColor, color);
+        const double outlineContrast = contrastRatio(outlineColor, color);
+        QVERIFY2(std::max(lineContrast, outlineContrast) >= 3.0,
+                 qPrintable(QStringLiteral("%1 %2: line %3:1, outline %4:1")
+                                .arg(name, color.name()).arg(lineContrast).arg(outlineContrast)));
+    }
+}
+
 namespace {
 
 // A start far from zero, as a monotonic clock has.
@@ -1404,7 +1773,7 @@ struct ClockHarness {
     QScopedPointer<QObject> root;
     QQuickWindow *window{nullptr};
     QQuickItem *seek{nullptr};
-    QQuickItem *handle{nullptr};
+    QQuickItem *line{nullptr};
     QAccessibleInterface *seekInterface{nullptr};
 
     bool load(PlaybackClock &clock, double durationSeconds, QString *errorText) {
@@ -1415,8 +1784,8 @@ struct ClockHarness {
         }
         QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
         seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-        handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
-        if (bridge == nullptr || seek == nullptr || handle == nullptr) {
+        line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+        if (bridge == nullptr || seek == nullptr || line == nullptr) {
             *errorText = QStringLiteral("harness items missing");
             return false;
         }
@@ -1439,21 +1808,25 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
     // A 20 s track: the bar moves by about 30 device pixels a second.
     constexpr double kDuration = 20.0;
     QVERIFY2(harness.load(clock, kDuration, &errorText), qPrintable(errorText));
-    const double barPixels = harness.seek->property("barDevicePixels").toDouble();
-    QVERIFY(barPixels > 300.0);
-    const double step = kDuration / barPixels;
+    const double travelPixels = harness.seek->property("travelDevicePixels").toDouble();
+    QVERIFY(travelPixels > 300.0);
+    const double step = kDuration / travelPixels;
     QCOMPARE(clock.positionStepSeconds(), step);
     const auto pixelOf = [step](double seconds) { return std::floor(seconds / step + 0.5); };
 
+    // The line's place on the bar.
+    const auto lineX = [&harness]() {
+        return harness.line->mapToItem(harness.line->parentItem()->parentItem(), QPointF()).x();
+    };
     QList<double> shown;
-    int handleMoves = 0;
-    qreal handleX = 0.0;
+    int lineMoves = 0;
+    qreal lineAt = 0.0;
     QStringList descriptions;
     connect(&clock, &PlaybackClock::positionChanged, harness.window, [&]() {
         shown.push_back(clock.positionSeconds());
-        if (harness.handle->x() != handleX) {
-            ++handleMoves;
-            handleX = harness.handle->x();
+        if (lineX() != lineAt) {
+            ++lineMoves;
+            lineAt = lineX();
         }
         const QString description = harness.description();
         if (descriptions.isEmpty() || descriptions.last() != description) {
@@ -1471,9 +1844,9 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
 
     // Three seconds of playback from 1.1 s, in the clock's own ticks.
     clock.applySample(PlaybackSample{1.1, now, true, kDuration, 1}, true);
-    handleX = harness.handle->x();
+    lineAt = lineX();
     shown.clear();
-    handleMoves = 0;
+    lineMoves = 0;
     descriptions = QStringList{harness.description()};
     values.clear();
     texts.clear();
@@ -1486,14 +1859,14 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
     }
     now = end;
 
-    // The position, the slider's value and the handle moved at every pixel
+    // The position, the slider's value and the playhead moved at every pixel
     // boundary, once, at most a millisecond after it, and only then.
     const double endSeconds = clock.currentPositionSeconds();
     const int pixels = static_cast<int>(pixelOf(endSeconds) - pixelOf(1.1));
-    const QString counts = QStringLiteral("%1 boundaries: %2 positions, %3 values, %4 handle moves, %5 ticks")
-                               .arg(pixels).arg(shown.size()).arg(values.count()).arg(handleMoves).arg(ticks);
+    const QString counts = QStringLiteral("%1 boundaries: %2 positions, %3 values, %4 playhead moves, %5 ticks")
+                               .arg(pixels).arg(shown.size()).arg(values.count()).arg(lineMoves).arg(ticks);
     QVERIFY2(pixels > 80, qPrintable(counts));
-    QVERIFY2(shown.size() == pixels && values.count() == pixels && handleMoves == pixels, qPrintable(counts));
+    QVERIFY2(shown.size() == pixels && values.count() == pixels && lineMoves == pixels, qPrintable(counts));
     for (qsizetype i = 0; i < shown.size(); ++i) {
         const double pixel = pixelOf(1.1) + static_cast<double>(i) + 1.0;
         QCOMPARE(pixelOf(shown[i]), pixel);
@@ -1665,10 +2038,10 @@ void AccessibilityTest::transportBarHasNoWarnings() {
     QTRY_COMPARE(window->width(), 640);
     window->resize(1400, 240);
     QTRY_COMPARE(window->width(), 1400);
-    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekHandle"));
+    QQuickItem *handle = visibleItemNamed(window, QStringLiteral("seekGrabTarget"));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QVERIFY(handle != nullptr && seek != nullptr);
-    qInfo("seek slider height %g, handle height %g", seek->height(), handle->height());
+    qInfo("seek slider height %g, grab target height %g", seek->height(), handle->height());
     // cleanup() fails on any warning, such as a binding loop.
 }
 
@@ -2355,11 +2728,12 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
     QVERIFY(progress != nullptr);
     QVERIFY(sameRgb(progress->property("color").value<QColor>(), paletteColor("uiAccentColor")));
-    for (const QString &name : {QStringLiteral("seekPlayhead"), QStringLiteral("seekHandle")}) {
-        QQuickItem *item = visibleItemNamed(window, name);
-        QVERIFY2(item != nullptr, qPrintable(name));
-        QCOMPARE(item->property("color").value<QColor>(), paletteColor("uiAccentColor"));
-    }
+    QQuickItem *playhead = visibleItemNamed(window, QStringLiteral("seekPlayhead"));
+    QQuickItem *playheadLine = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+    QVERIFY(playhead != nullptr && playheadLine != nullptr);
+    QCOMPARE(playheadLine->property("color").value<QColor>(), paletteColor("uiPlayheadColor"));
+    QCOMPARE(paletteColor("uiPlayheadColor"), paletteColor("uiTextColor"));
+    QCOMPARE(playhead->property("color").value<QColor>(), paletteColor("uiPlayheadOutlineColor"));
     QList<WaveformItem *> waveforms;
     const std::function<void(QQuickItem *)> findWaveforms = [&](QQuickItem *item) {
         if (auto *waveform = qobject_cast<WaveformItem *>(item)) {

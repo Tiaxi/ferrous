@@ -50,6 +50,15 @@ QtObject {
         Kirigami.Theme.textColor,
         Kirigami.Theme.highlightColor,
         0.35)
+    // The seek bar's playhead: the text colour, outlined in the opposite
+    // brightness of the text colour itself (not of the palette's
+    // background): black when the text is light and white when it is dark.
+    // Whatever is behind them, the waveform or the bar, one of the two
+    // stands out.
+    readonly property color uiPlayheadColor: uiTextColor
+    readonly property color uiPlayheadOutlineColor: ColorUtils.colorLuma(uiTextColor) >= 0.5
+        ? Qt.rgba(0, 0, 0, 1)
+        : Qt.rgba(1, 1, 1, 1)
 
     // The font of the window's text, which sizes the rows. A window root
     // that is not a window has no font of its own.
