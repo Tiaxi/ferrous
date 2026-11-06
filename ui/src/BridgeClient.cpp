@@ -1798,6 +1798,10 @@ int BridgeClient::currentTrackNumber() const {
     return m_currentTrackNumber;
 }
 
+int BridgeClient::currentTrackTotal() const {
+    return m_currentTrackTotal;
+}
+
 QString BridgeClient::currentTrackFormatLabel() const {
     return m_currentTrackFormatLabel;
 }
@@ -5645,6 +5649,9 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     QString nextTrackGenre = m_currentTrackGenre;
     QVariant nextTrackYear = m_currentTrackYear;
     int nextTrackNumber = currentPath.isEmpty() ? 0 : m_currentTrackNumber;
+    // The backend counts the album for the number in the metadata, so the
+    // total belongs to the current track's metadata alone.
+    int nextTrackTotal = currentPath.isEmpty() || currentPathChanged ? 0 : m_currentTrackTotal;
     const bool metadataMatchesCurrentPath =
         !currentPath.isEmpty() && snapshot.metadata.present && metadataSourcePath == currentPath;
     QString nextTrackFormatLabel = currentPath.isEmpty()
@@ -5722,6 +5729,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackChannels = metadataChannels;
         nextChannelLabels = snapshot.metadata.channelLabels;
         nextTrackTreeKeys = snapshot.metadata.treeKeys;
+        nextTrackTotal = metadataTrackNumber > 0 ? snapshot.metadata.trackTotal : 0;
         nextTrackSampleRateHz = metadataSampleRateHz;
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
@@ -5758,6 +5766,14 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackNumber != nextTrackNumber) {
         m_currentTrackNumber = nextTrackNumber;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (nextTrackTotal < nextTrackNumber || nextTrackNumber <= 0) {
+        nextTrackTotal = 0;
+    }
+    if (m_currentTrackTotal != nextTrackTotal) {
+        m_currentTrackTotal = nextTrackTotal;
         changed = true;
         trackMetadataSignalChanged = true;
     }

@@ -528,6 +528,11 @@ pub struct BridgeSnapshot {
     /// it. They follow the tree's own grouping, so the UI can mark a
     /// collapsed row that holds the playing track.
     pub now_playing_tree_keys: Vec<String>,
+    /// The tracks on the album of the track `metadata` describes, when its
+    /// tags or the library know it surely; see
+    /// [`BridgeState::refresh_now_playing_track_total`]. `None` without a
+    /// track number.
+    pub now_playing_track_total: Option<u32>,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue_len: usize,
     pub queue_revision: u64,
@@ -746,6 +751,11 @@ pub(super) struct BridgeState {
     library_artist_count: usize,
     library_album_count: usize,
     library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
+    /// The track counts of the tree's albums, from the latest tree; see
+    /// [`library_tree::LibraryTreeCache::album_track_totals`].
+    library_album_track_totals: Arc<HashMap<String, u32>>,
+    /// See [`BridgeSnapshot::now_playing_track_total`].
+    now_playing_track_total: Option<u32>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
     expanded_keys: HashSet<String>,
     library_view_selection_key: String,
@@ -869,8 +879,32 @@ impl BridgeState {
             self.library = Arc::new(next);
             self.library_index
                 .follow(&previous, &self.library, &applied);
+            self.refresh_now_playing_track_total();
         }
         applied
+    }
+
+    /// Find [`BridgeSnapshot::now_playing_track_total`] again, after the
+    /// track's metadata, the library's tracks or the tree's album counts
+    /// changed: the tags' total, or else the count of the track's album in
+    /// the library when the track is in it and the tree knows the count
+    /// surely. A total below the track's number is not believed.
+    fn refresh_now_playing_track_total(&mut self) {
+        self.now_playing_track_total = resolve_track_total(
+            self.metadata.track_number,
+            self.metadata.track_total,
+            || {
+                let path = self.metadata.source_path.as_deref()?;
+                let position = self
+                    .library_index
+                    .position(&self.library, Path::new(path))?;
+                library_tree::track_album_total(
+                    &self.library_album_track_totals,
+                    &self.library.roots,
+                    &self.library.tracks[position],
+                )
+            },
+        );
     }
 
     /// Have the UI compare its queue rows with the queue's details, which
@@ -926,6 +960,7 @@ impl BridgeState {
             library_view_anchor_offset: self.library_view_anchor_offset,
             library_reveal_generation: self.library_reveal_generation,
             now_playing_tree_keys: self.now_playing_tree_keys(),
+            now_playing_track_total: self.now_playing_track_total,
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
             } else {
@@ -948,6 +983,21 @@ impl BridgeState {
     }
 }
 
+/// The album's track total to show with track `number`: `tag_total`, or
+/// else `library_total`'s, whichever is at least the number. None without
+/// a number.
+fn resolve_track_total(
+    number: Option<u32>,
+    tag_total: Option<u32>,
+    library_total: impl FnOnce() -> Option<u32>,
+) -> Option<u32> {
+    let number = number.filter(|number| *number > 0)?;
+    let fits = |total: &u32| *total >= number;
+    tag_total
+        .filter(fits)
+        .or_else(|| library_total().filter(fits))
+}
+
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
     TrackMetadata {
         source_path: metadata.source_path.clone(),
@@ -958,6 +1008,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         genre: metadata.genre.clone(),
         year: metadata.year,
         track_number: metadata.track_number,
+        track_total: metadata.track_total,
         sample_rate_hz: metadata.sample_rate_hz,
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,
@@ -1964,6 +2015,8 @@ impl BridgeLoopRuntime {
             self.state.library_album_count,
         ) = result.counts;
         self.state.library_root_track_counts = result.root_track_counts;
+        self.state.library_album_track_totals = result.album_track_totals;
+        self.state.refresh_now_playing_track_total();
         self.snapshot_plan.include_tree_in_next_snapshot = true;
         SnapshotUrgency::Immediate
     }

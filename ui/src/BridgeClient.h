@@ -69,6 +69,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString currentTrackGenre READ currentTrackGenre NOTIFY trackMetadataChanged)
     Q_PROPERTY(QVariant currentTrackYear READ currentTrackYear NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackNumber READ currentTrackNumber NOTIFY trackMetadataChanged)
+    // The tracks on the current track's album, when the backend knows them
+    // surely for its number; 0 otherwise.
+    Q_PROPERTY(int currentTrackTotal READ currentTrackTotal NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackFormatLabel READ currentTrackFormatLabel NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackChannelLayoutText READ currentTrackChannelLayoutText NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackMetadataChanged)
@@ -218,6 +221,7 @@ public:
     QString currentTrackGenre() const;
     QVariant currentTrackYear() const;
     int currentTrackNumber() const;
+    int currentTrackTotal() const;
     QString currentTrackFormatLabel() const;
     QString currentTrackChannelLayoutText() const;
     QString currentTrackChannelLayoutIconKey() const;
@@ -815,6 +819,7 @@ private:
     QString m_currentTrackGenre;
     QVariant m_currentTrackYear;
     int m_currentTrackNumber{0};
+    int m_currentTrackTotal{0};
     QString m_currentTrackFormatLabel;
     int m_currentTrackChannels{0};
     QStringList m_currentTrackChannelLabels;

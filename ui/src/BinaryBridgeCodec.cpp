@@ -547,6 +547,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
             out->treeKeys.append(key);
         }
     }
+    quint32 trackTotal = 0;
+    if (!reader.atEnd() && !reader.readU32(&trackTotal)) return false;
     if (!reader.atEnd()) return false;
     out->present = true;
     out->sampleRateHz = static_cast<int>(sampleRateHz);
@@ -555,6 +557,8 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
     out->bitDepth = static_cast<int>(bitDepth);
     out->currentBitrateKbps = static_cast<int>(currentBitrateKbps);
     out->trackNumber = static_cast<int>(trackNumber);
+    out->trackTotal = static_cast<int>(
+        std::min(trackTotal, static_cast<quint32>(std::numeric_limits<int>::max())));
     return true;
 }
 

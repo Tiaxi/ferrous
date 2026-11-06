@@ -1873,6 +1873,7 @@ Item {
         property string currentTrackGenre: ""
         property var currentTrackYear: null
         property int currentTrackNumber: 0
+        property int currentTrackTotal: 0
         property int currentTrackChannels: 0
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false

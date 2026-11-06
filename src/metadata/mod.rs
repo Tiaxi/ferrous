@@ -50,6 +50,10 @@ pub struct TrackMetadata {
     pub genre: String,
     pub year: Option<i32>,
     pub track_number: Option<u32>,
+    /// The tracks on the album as the tags say: a track total tag, such as
+    /// `TRACKTOTAL` or `TOTALTRACKS`, or the second number of an "n/m"
+    /// track number.
+    pub track_total: Option<u32>,
     pub sample_rate_hz: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub channels: Option<u8>,
@@ -227,7 +231,7 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
         .genre()
         .map_or_else(String::new, std::borrow::Cow::into_owned);
     metadata.year = tag.date().map(|value| i32::from(value.year));
-    metadata.track_number = tag.track();
+    (metadata.track_number, metadata.track_total) = track_number_and_total(tag);
 
     if let (None, Some(pic)) = (&metadata.cover_art_path, tag.pictures().first()) {
         if let Some(cover_path) =
@@ -236,6 +240,26 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
             metadata.cover_art_path = Some(cover_path.to_string_lossy().into_owned());
         }
     }
+}
+
+/// The track number and the album's track total of `tag`. Most formats
+/// split an "n/m" track number when they are read; for one that keeps it
+/// whole, the two numbers are read from it here.
+fn track_number_and_total(tag: &lofty::tag::Tag) -> (Option<u32>, Option<u32>) {
+    let (mut number, mut total) = (tag.track(), tag.track_total());
+    if number.is_none() || total.is_none() {
+        if let Some((pair_number, pair_total)) = tag
+            .get_string(ItemKey::TrackNumber)
+            .and_then(|value| value.split_once('/'))
+        {
+            number = number.or_else(|| pair_number.trim().parse().ok());
+            total = total.or_else(|| pair_total.trim().parse().ok());
+        }
+    }
+    (
+        number.filter(|value| *value > 0),
+        total.filter(|value| *value > 0),
+    )
 }
 
 fn apply_raw_surround_tags(path: &Path, metadata: &mut TrackMetadata) {
@@ -259,6 +283,8 @@ fn apply_raw_surround_tags(path: &Path, metadata: &mut TrackMetadata) {
             metadata.genre = genre;
         }
         metadata.year = tagged.year.or(metadata.year);
+        metadata.track_number = tagged.track_no.or(metadata.track_number);
+        metadata.track_total = tagged.track_total.or(metadata.track_total);
     }
 }
 
@@ -589,11 +615,12 @@ fn codec_label(codec: CodecType) -> Option<&'static str> {
 mod tests {
     use super::{
         bytes_to_kbps, encoded_picture, format_label_from_extension, load_metadata_for_path,
-        needs_stream_details_probe, run_metadata_worker, test_cache, write_wav_with_picture,
-        CoverCacheBinding, EmbeddedCoverCache, MetadataEvent, MetadataService, TrackMetadata,
+        needs_stream_details_probe, run_metadata_worker, test_cache, track_number_and_total,
+        write_wav_with_picture, CoverCacheBinding, EmbeddedCoverCache, MetadataEvent,
+        MetadataService, TrackMetadata,
     };
     use crate::raw_audio::write_test_apev2_file;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn metadata_test_path(name: &str, ext: &str) -> PathBuf {
@@ -702,17 +729,89 @@ mod tests {
         assert_eq!(metadata.genre, "Progressive death metal");
         assert_eq!(metadata.year, Some(2010));
         assert_eq!(metadata.format_label, "AC3");
+        assert_eq!(metadata.track_number, Some(3));
+        assert_eq!(metadata.track_total, Some(8));
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn metadata_reads_album_artist_separately_from_track_artist() {
+    fn track_total_comes_from_a_track_total_tag() {
+        use lofty::ogg::VorbisComments;
+        use lofty::tag::Tag;
+
+        for key in ["TRACKTOTAL", "TOTALTRACKS"] {
+            let mut comments = VorbisComments::default();
+            comments.insert("TRACKNUMBER".into(), "2".into());
+            comments.insert(key.into(), "8".into());
+            assert_eq!(
+                track_number_and_total(&Tag::from(comments)),
+                (Some(2), Some(8)),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn track_total_comes_from_a_track_number_kept_as_a_pair() {
+        use lofty::prelude::ItemKey;
+        use lofty::tag::{Tag, TagType};
+
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.insert_text(ItemKey::TrackNumber, "2/8".into());
+        assert_eq!(track_number_and_total(&tag), (Some(2), Some(8)));
+    }
+
+    #[test]
+    fn track_total_is_unknown_without_a_total_tag() {
+        use lofty::prelude::{Accessor, ItemKey};
+        use lofty::tag::{Tag, TagType};
+
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_track(2);
+        assert_eq!(track_number_and_total(&tag), (Some(2), None));
+        // A zero is no total, nor is text that is not a number.
+        tag.insert_text(ItemKey::TrackNumber, "2/0".into());
+        assert_eq!(track_number_and_total(&tag), (Some(2), None));
+        tag.insert_text(ItemKey::TrackNumber, "A2/side".into());
+        assert_eq!(track_number_and_total(&tag), (None, None));
+    }
+
+    #[test]
+    fn metadata_reads_an_n_of_m_track_number_from_the_file() {
         use lofty::config::WriteOptions;
         use lofty::prelude::{Accessor, ItemKey};
         use lofty::tag::{Tag, TagExt, TagType};
 
-        let path = metadata_test_path("album-artist", "wav");
+        let path = metadata_test_path("track-total", "wav");
+        write_test_wave(&path);
+        // ID3v2 keeps the two in one frame, as "2/8".
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_track(2);
+        tag.set_track_total(8);
+        tag.save_to_path(&path, WriteOptions::new())
+            .expect("tag fixture");
+        let bytes = std::fs::read(&path).expect("read tagged fixture");
+        assert!(bytes.windows(3).any(|window| window == b"2/8"));
+
+        let metadata = load_metadata_for_path(&path);
+        assert_eq!(metadata.track_number, Some(2));
+        assert_eq!(metadata.track_total, Some(8));
+
+        let mut numbered = Tag::new(TagType::Id3v2);
+        numbered.insert_text(ItemKey::TrackNumber, "2".into());
+        numbered
+            .save_to_path(&path, WriteOptions::new())
+            .expect("retag fixture");
+        let metadata = load_metadata_for_path(&path);
+        assert_eq!(metadata.track_number, Some(2));
+        assert_eq!(metadata.track_total, None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A short mono PCM wave file with no tags.
+    fn write_test_wave(path: &Path) {
         let mut wave = Vec::new();
         wave.extend_from_slice(b"RIFF");
         wave.extend_from_slice(&2036_u32.to_le_bytes());
@@ -727,7 +826,17 @@ mod tests {
         wave.extend_from_slice(b"data");
         wave.extend_from_slice(&2000_u32.to_le_bytes());
         wave.resize(2044, 0);
-        std::fs::write(&path, &wave).expect("write wave fixture");
+        std::fs::write(path, &wave).expect("write wave fixture");
+    }
+
+    #[test]
+    fn metadata_reads_album_artist_separately_from_track_artist() {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::{Accessor, ItemKey};
+        use lofty::tag::{Tag, TagExt, TagType};
+
+        let path = metadata_test_path("album-artist", "wav");
+        write_test_wave(&path);
         let mut tag = Tag::new(TagType::Id3v2);
         tag.set_artist("Soloist".into());
         tag.insert_text(ItemKey::AlbumArtist, "Orchestra".into());

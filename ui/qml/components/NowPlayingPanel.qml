@@ -56,10 +56,17 @@ Item {
         const year = root.uiBridge.currentTrackYear
         return year !== undefined && year !== null ? String(year).trim() : ""
     }
-    readonly property string trackNumberText: root.uiBridge.currentTrackNumber > 0
-        ? I18n.i18nc("@info the playing track's number on its album", "Track %1",
-                     root.uiBridge.currentTrackNumber)
-        : ""
+    // The total only when the backend knows it surely.
+    readonly property string trackNumberText: {
+        const number = root.uiBridge.currentTrackNumber
+        const total = root.uiBridge.currentTrackTotal
+        if (!(number > 0))
+            return ""
+        return total >= number
+            ? I18n.i18nc("@info the playing track's number and the tracks on its album",
+                         "Track %1 of %2", number, total)
+            : I18n.i18nc("@info the playing track's number on its album", "Track %1", number)
+    }
     // Missing values are left out rather than shown as dashes.
     readonly property string artistAlbumText: root._joined([root.artistText, root.albumText], " — ")
     readonly property string detailsText: root._joined(

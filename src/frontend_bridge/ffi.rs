@@ -3076,6 +3076,9 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     {
         push_string(&mut out, key);
     }
+    // The tracks on the album, or 0 when unknown; see
+    // `BridgeSnapshot::now_playing_track_total`.
+    push_u32(&mut out, snapshot.now_playing_track_total.unwrap_or(0));
     out
 }
 
@@ -3651,6 +3654,7 @@ mod tests {
                 genre: "Rock".to_string(),
                 year: Some(2020),
                 track_number: Some(3),
+                track_total: Some(8),
                 sample_rate_hz: Some(48_000),
                 bitrate_kbps: Some(320),
                 channels: Some(2),
@@ -3699,6 +3703,7 @@ mod tests {
                 "root|/music".to_string(),
                 "artist|/music|Sample Artist".to_string(),
             ],
+            now_playing_track_total: Some(8),
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue_len: 1,
             queue_revision: 1,
@@ -5390,7 +5395,17 @@ mod tests {
             read_string(&encoded, &mut offset),
             "artist|/music|Sample Artist"
         );
+        // Then the tracks on the album.
+        assert_eq!(read_u32(&encoded, &mut offset), 8);
         assert_eq!(offset, encoded.len());
+    }
+
+    #[test]
+    fn metadata_section_encodes_an_unknown_track_total_as_zero() {
+        let mut snapshot = sample_snapshot();
+        snapshot.now_playing_track_total = None;
+        let encoded = encode_metadata_section(&snapshot);
+        assert_eq!(&encoded[encoded.len() - 4..], &0u32.to_le_bytes());
     }
 
     #[test]

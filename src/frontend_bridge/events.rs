@@ -597,6 +597,7 @@ pub(super) fn process_metadata_event(
         MetadataEvent::Loaded(mut metadata) => {
             keep_newer_cover(state, &mut metadata);
             state.metadata = metadata;
+            state.refresh_now_playing_track_total();
             SnapshotUrgency::Immediate
         }
     }
@@ -1048,6 +1049,71 @@ mod tests {
     use crate::playback::MonotonicTime;
     use std::path::PathBuf;
     use std::time::Instant;
+
+    #[test]
+    fn now_playing_track_total_comes_from_the_tags_or_else_the_library_album() {
+        let root_path = PathBuf::from("/music");
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![crate::library::LibraryRoot {
+                path: root_path.clone(),
+                name: String::new(),
+            }],
+            tracks: crate::library::shared_tracks(
+                (1..=8)
+                    .map(|number| LibraryTrack {
+                        path: root_path.join(format!("A/Album/{number:02}.flac")),
+                        root_path: root_path.clone(),
+                        album: "Album".to_string(),
+                        track_no: Some(number),
+                        ..LibraryTrack::default()
+                    })
+                    .collect(),
+            ),
+            ..LibrarySnapshot::default()
+        });
+        let mut state = BridgeState {
+            library_album_track_totals: Arc::clone(
+                &super::super::library_tree::LibraryTreeCache::new(&library).album_track_totals,
+            ),
+            library,
+            ..BridgeState::default()
+        };
+        let mut load = |path: &str, number: Option<u32>, total: Option<u32>| {
+            process_metadata_event(
+                MetadataEvent::Loaded(crate::metadata::TrackMetadata {
+                    source_path: Some(path.to_string()),
+                    track_number: number,
+                    track_total: total,
+                    ..crate::metadata::TrackMetadata::default()
+                }),
+                &mut state,
+            );
+            state.snapshot(false).now_playing_track_total
+        };
+        let in_library = "/music/A/Album/02.flac";
+        let outside = "/elsewhere/A/Album/02.flac";
+
+        // The tags' total comes first.
+        assert_eq!(load(in_library, Some(2), Some(12)), Some(12));
+        // Without one, the album's count in the library.
+        assert_eq!(load(in_library, Some(2), None), Some(8));
+        // A total below the number is wrong.
+        assert_eq!(load(in_library, Some(2), Some(1)), Some(8));
+        assert_eq!(load(in_library, Some(9), None), None);
+        // No total without a number.
+        assert_eq!(load(in_library, None, Some(12)), None);
+        // A track outside the library has only its tags'.
+        assert_eq!(load(outside, Some(2), None), None);
+        assert_eq!(load(outside, Some(2), Some(9)), Some(9));
+
+        // A track taken out of the library loses the library's count.
+        assert_eq!(load(in_library, Some(2), None), Some(8));
+        state.apply_library_changes(&crate::library::LibraryChanges {
+            removed: vec![PathBuf::from(in_library)],
+            ..crate::library::LibraryChanges::default()
+        });
+        assert_eq!(state.snapshot(false).now_playing_track_total, None);
+    }
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
