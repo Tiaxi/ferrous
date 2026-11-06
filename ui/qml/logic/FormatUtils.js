@@ -27,6 +27,17 @@ function formatSeekTime(seconds) {
         + ":" + secs.toString().padStart(2, "0")
 }
 
+// A time of the clock texts ("01:17", "1:02:03") as the transport and the
+// status bar show it, without the minutes' leading zero: "1:17".
+function clockText(text) {
+    return String(text || "").replace(/^0(\d:)/, "$1")
+}
+
+// `seconds` as the transport shows a time: "1:17", "1:02:03".
+function formatClockTime(seconds) {
+    return clockText(formatSeekTime(seconds))
+}
+
 function metadataTrackNumberText(trackNumber) {
     if (trackNumber === undefined || trackNumber === null) {
         return "--"

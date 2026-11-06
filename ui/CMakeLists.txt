@@ -212,12 +212,9 @@ qt_add_qml_module(ferrous_ui_qml
         qml/viewers/SpectrogramViewerShell.qml
         qml/viewers/WaveformSurface.qml
     RESOURCES
-        qml/assets/channel-mono.svg
-        qml/assets/channel-stereo.svg
-        qml/assets/channel-4_0.svg
-        qml/assets/channel-5_0.svg
-        qml/assets/channel-5_1.svg
-        qml/assets/channel-7_1.svg
+        qml/assets/lastfm.svg
+        qml/assets/status-offline.svg
+        qml/assets/status-warning.svg
         qml/logic/ChannelLabels.js
         qml/logic/ColorUtils.js
         qml/logic/ErrorUtils.js
@@ -459,6 +456,29 @@ if(BUILD_TESTING)
         TIMEOUT 90
     )
     ferrous_add_default_platform_test(ferrous_ui_foundations_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The transport and the status bar of #373, from the QML sources.
+    qt_add_executable(ferrous_transport_status_tests
+        tests/tst_transport_status.cpp
+        src/Localization.cpp
+        src/WaveformItem.cpp
+    )
+    set_target_properties(ferrous_transport_status_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_include_directories(ferrous_transport_status_tests PRIVATE src)
+    target_compile_definitions(ferrous_transport_status_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_transport_status_tests PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets Qt6::Test
+        KF6::I18n KF6::I18nQml
+    )
+    ferrous_enable_strict_warnings(ferrous_transport_status_tests)
+    add_test(NAME ferrous_transport_status_tests COMMAND ferrous_transport_status_tests)
+    set_tests_properties(ferrous_transport_status_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_transport_status_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp

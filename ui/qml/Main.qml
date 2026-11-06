@@ -590,25 +590,6 @@ ApplicationWindow {
         root.wheelScrollRemainder = { view: view, pixels: targetY - view.contentY }
     }
 
-    function channelStatusIconSource(iconKey) {
-        switch (iconKey) {
-        case "mono":
-            return Qt.resolvedUrl("assets/channel-mono.svg")
-        case "stereo":
-            return Qt.resolvedUrl("assets/channel-stereo.svg")
-        case "4.0":
-            return Qt.resolvedUrl("assets/channel-4_0.svg")
-        case "5.0":
-            return Qt.resolvedUrl("assets/channel-5_0.svg")
-        case "5.1":
-            return Qt.resolvedUrl("assets/channel-5_1.svg")
-        case "7.1":
-            return Qt.resolvedUrl("assets/channel-7_1.svg")
-        default:
-            return ""
-        }
-    }
-
     function openDiagnostics() {
         diagnosticsDialog.open()
     }
@@ -1278,12 +1259,13 @@ ApplicationWindow {
     }
 
     footer: Panes.StatusBar {
+        objectName: "statusBar"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        channelStatusIconSource: root.channelStatusIconSource
         themeIsDark: root.themeIsDark
         errorController: errorController
-        positionText: playbackController.positionText
+        issuesOpen: recentErrorsDialog.visible
+        currentPositionSeconds: playbackController.currentPositionSeconds
         onLastFmSettingsRequested: preferencesDialog.openLastFmPage()
     }
 

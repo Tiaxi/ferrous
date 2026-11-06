@@ -30,7 +30,7 @@ foreach(expected
         # QML, with a context.
         "msgctxt \"@title:window\"\nmsgid \"Edit Tags\""
         # A QML plural.
-        "msgid \"%1 track (%2)\"\nmsgid_plural \"%1 tracks (%2)\""
+        "msgid \"%1 new issue\"\nmsgid_plural \"%1 new issues\""
         # JavaScript.
         "msgid \"Repeat one\""
         # C++, and a C++ plural.

@@ -45,7 +45,7 @@ Dialog {
     // Over a viewer the keyboard would otherwise stay with the viewer.
     onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
     // Errors that arrived while it was open have been seen too.
-    onClosed: root.errorController.dismissLatest()
+    onClosed: root.errorController.markSeen()
     onErrorCountChanged: {
         if (root.errorCount === 0) {
             root.close()
