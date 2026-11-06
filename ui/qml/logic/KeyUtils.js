@@ -12,3 +12,15 @@ function isUnmodified(event) {
 function isPlainSpace(event) {
     return event.key === Qt.Key_Space && isUnmodified(event)
 }
+
+// Whether `event` is Return or Enter alone, which presses a dialog's
+// default button.
+function isEnter(event) {
+    return (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && isUnmodified(event)
+}
+
+// Whether `item` is a text field or area the user types in, such as a spin
+// box's: it takes Enter itself, to accept what was typed.
+function editsText(item) {
+    return !!item && ("cursorPosition" in item) && ("readOnly" in item) && !item.readOnly
+}

@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
@@ -34,6 +35,8 @@ Dialog {
     }
 
     footer: Components.DialogButtons {
+
+        id: dialogButtons
         primary: confirmDialogConfirmButton
         Button {
             id: confirmDialogConfirmButton
@@ -50,6 +53,9 @@ Dialog {
     }
 
     contentItem: ColumnLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+
         spacing: 12
 
         Label {

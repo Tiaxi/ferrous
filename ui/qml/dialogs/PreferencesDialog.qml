@@ -3,10 +3,12 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "../preferences" as Preferences
+import "../logic/KeyUtils.js" as KeyUtils
 
 // Configure Ferrous: a KDE page list beside the pages. The settings change
 // on OK or Apply, Cancel drops what was changed since, and Defaults sets
@@ -196,10 +198,21 @@ Dialog {
             }
         }
 
+        // Enter on Defaults presses it; on the other buttons, the row takes it.
+        Keys.onPressed: function(event) {
+            if (KeyUtils.isEnter(event) && defaultsButton.activeFocus) {
+                event.accepted = true
+                if (defaultsButton.enabled) {
+                    defaultsButton.clicked()
+                }
+            }
+        }
+
         contentItem: RowLayout {
             spacing: 0
 
             Button {
+                id: defaultsButton
                 objectName: "preferencesDefaultsButton"
                 Layout.leftMargin: Kirigami.Units.largeSpacing * 2
                 text: I18n.i18nc("@action:button", "Defaults")
@@ -211,6 +224,8 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Components.DialogButtons {
+
+                id: dialogButtons
                 primary: preferencesOkButton
                 Button {
                     id: preferencesOkButton
@@ -240,6 +255,9 @@ Dialog {
     }
 
     contentItem: RowLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+
         spacing: 0
 
         Shortcut {
