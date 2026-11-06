@@ -140,7 +140,7 @@ LevelMeterItem::LevelMeterItem(QQuickItem *parent) : QQuickItem(parent) {
     setImplicitWidth(kColumnWidth);
     m_readoutTimer.setSingleShot(true);
     m_readoutTimer.setInterval(kReadoutIntervalMs);
-    connect(&m_readoutTimer, &QTimer::timeout, this, &LevelMeterItem::readoutChanged);
+    connect(&m_readoutTimer, &QTimer::timeout, this, &LevelMeterItem::announceReadout);
     connect(this, &QQuickItem::windowChanged, this, &LevelMeterItem::bindWindow);
     connect(this, &QQuickItem::visibleChanged, this, &LevelMeterItem::visibilityChanged);
     m_wakeTimer.setSingleShot(true);
@@ -262,7 +262,12 @@ void LevelMeterItem::setReadoutWanted(bool value) {
     if (m_readoutWanted == value) return;
     m_readoutWanted = value;
     emit readoutWantedChanged();
-    if (value) emit readoutChanged();
+    if (value) announceReadout();
+}
+
+void LevelMeterItem::announceReadout() {
+    ++m_readoutRevision;
+    emit readoutChanged();
 }
 
 void LevelMeterItem::setColor(QColor &member, const QColor &value) {

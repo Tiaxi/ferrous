@@ -74,6 +74,10 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // a muted channel's, each lane's centre line, the seams between lanes and
     // the playhead's core and casing. The defaults are for tests that draw
     // the item on its own; the view sets them all.
+    // A time of the track to follow, such as where its file is cut off, or
+    // -1; markerX is where the view draws it, NaN while it does not.
+    Q_PROPERTY(double markerSeconds READ markerSeconds WRITE setMarkerSeconds NOTIFY markerSecondsChanged)
+    Q_PROPERTY(double markerX READ markerX NOTIFY markerXChanged)
     Q_PROPERTY(QColor backgroundColor READ backgroundColor WRITE setBackgroundColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor waveformColor READ waveformColor WRITE setWaveformColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor mutedWaveformColor READ mutedWaveformColor WRITE setMutedWaveformColor NOTIFY colorsChanged)
@@ -132,6 +136,9 @@ public:
     int channelCount() const;
     int sampleRateHz() const;
     bool samplePointsVisible() const;
+    double markerSeconds() const;
+    void setMarkerSeconds(double value);
+    double markerX() const { return m_markerX; }
     QColor backgroundColor() const;
     void setBackgroundColor(const QColor &value);
     QColor waveformColor() const;
@@ -177,6 +184,8 @@ signals:
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
     void colorsChanged();
+    void markerSecondsChanged();
+    void markerXChanged();
     void seekRequested(double seconds);
 
 protected:
@@ -617,6 +626,10 @@ private:
     qulonglong m_mutedChannelsMask{0};
     qulonglong m_soloedChannelsMask{0};
     Colors m_colors;
+    double m_markerSeconds{-1.0};
+    double m_markerXLaidOut{std::numeric_limits<double>::quiet_NaN()};
+    double m_markerX{std::numeric_limits<double>::quiet_NaN()};
+    void publishMarkerX(double x);
     int m_channelCountHint{1};
     int m_channelCount{0};
     int m_sampleRateHz{0};

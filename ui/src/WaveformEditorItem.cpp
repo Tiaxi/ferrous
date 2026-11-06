@@ -535,6 +535,32 @@ void WaveformEditorItem::setPlayheadColor(const QColor &value) { setColor(&Color
 QColor WaveformEditorItem::playheadCasingColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.playheadCasing; }
 void WaveformEditorItem::setPlayheadCasingColor(const QColor &value) { setColor(&Colors::playheadCasing, value); }
 
+double WaveformEditorItem::markerSeconds() const { QMutexLocker lock(&m_stateMutex); return m_markerSeconds; }
+
+void WaveformEditorItem::setMarkerSeconds(double value) {
+    if (!std::isfinite(value) || value < 0.0) value = -1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_markerSeconds == value) return;
+        m_markerSeconds = value;
+    }
+    emit markerSecondsChanged();
+    update();
+}
+
+void WaveformEditorItem::publishMarkerX(double x) {
+    QMutexLocker lock(&m_stateMutex);
+    // NaN, the marker not drawn, is not equal to itself: compare by kind.
+    if ((std::isnan(x) && std::isnan(m_markerXLaidOut)) || x == m_markerXLaidOut) return;
+    m_markerXLaidOut = x;
+    // Drawn on the render thread; the view binds on the GUI thread.
+    QMetaObject::invokeMethod(this, [this, x] {
+        if ((std::isnan(x) && std::isnan(m_markerX)) || x == m_markerX) return;
+        m_markerX = x;
+        emit markerXChanged();
+    }, Qt::QueuedConnection);
+}
+
 void WaveformEditorItem::setColor(QColor Colors::*member, const QColor &value) {
     {
         QMutexLocker lock(&m_stateMutex);
@@ -2175,6 +2201,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool stagingContinues = false;
     double scale = 1.0;
     Colors colors;
+    double markerSeconds = -1.0;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     // Replace body pixels rather than blending with the previous raster; the
@@ -2186,6 +2213,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         // the clock, and must not move apart while the frame is drawn.
         const qint64 frameNs = m_nowNs();
         colors = m_colors;
+        markerSeconds = m_markerSeconds;
         presentationCommitted = advanceStagedCacheLocked(frameNs);
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked(frameNs);
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
@@ -2377,15 +2405,25 @@ void WaveformEditorItem::paint(QPainter *painter) {
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
         drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels, colors.laneSeam);
     }
+    publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
+        ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
+        : std::numeric_limits<double>::quiet_NaN());
     if (visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
         const double x = axis.x(axis.columnOf(position));
-        // A 1 px core cased in 1 px on each side, on device pixels: the
-        // column's left edge is on one.
+        // A device pixel's core cased in one on each side: the column's
+        // left edge is on one, and cosmetic pens draw a device pixel wide.
         const double pixel = 1.0 / scale;
-        const double left = std::floor(x * scale) / scale;
-        painter->fillRect(QRectF(left - pixel, 0.0, 3.0 * pixel, canvasHeight), colors.playheadCasing);
-        painter->fillRect(QRectF(left, 0.0, pixel, canvasHeight), colors.playhead);
+        const auto line = [&](double at, const QColor &color) {
+            QPen pen(color);
+            pen.setWidth(0);
+            pen.setCapStyle(Qt::FlatCap);
+            painter->setPen(pen);
+            painter->drawLine(QLineF(at, 0.0, at, canvasHeight - 1.0));
+        };
+        line(x - pixel, colors.playheadCasing);
+        line(x + pixel, colors.playheadCasing);
+        line(x, colors.playhead);
     }
     if (crosshair && hoverActive) {
         QMutexLocker lock(&m_stateMutex);

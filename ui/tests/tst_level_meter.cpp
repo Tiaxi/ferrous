@@ -82,13 +82,16 @@ LevelMeterItem::Window levelWindow(double start, double end, const std::function
     return window;
 }
 
-// A 400 px meter in a window, playing a 100 s track on its own clock.
+// A meter with a 400 px scale in a window (one lane 410 px tall: 3 px
+// insets, the 3 px lamp and the gap under it), playing a 100 s track on its
+// own clock.
 struct MeterFixture {
     MeterFixture() {
-        view.resize(400, 20);
+        view.resize(10, 410);
         // As QML does: the item joins the window after it is made.
         item.setParentItem(view.contentItem());
-        item.setSize(QSizeF(400, 20));
+        item.setSize(QSizeF(10, 410));
+        item.setActive(true);
     }
     void setAdvancing(bool advancing) {
         PlaybackSample sample;
@@ -100,13 +103,13 @@ struct MeterFixture {
         clock.applySample(sample, false);
     }
     double position() const { return clock.positionAt(clock.nowNs()); }
-    int fill(int channel = 0) const {
-        const auto index = static_cast<std::size_t>(channel) * 2;
-        return item.m_paintedPixels.size() > index ? item.m_paintedPixels[index] : -2;
+    int fill(int lane = 0) const {
+        const auto index = static_cast<std::size_t>(lane);
+        return item.m_painted.size() > index ? item.m_painted[index].fill : -2;
     }
-    int peak(int channel = 0) const {
-        const auto index = static_cast<std::size_t>(channel) * 2 + 1;
-        return item.m_paintedPixels.size() > index ? item.m_paintedPixels[index] : -2;
+    int peak(int lane = 0) const {
+        const auto index = static_cast<std::size_t>(lane);
+        return item.m_painted.size() > index ? item.m_painted[index].peak : -2;
     }
 
     PlaybackClock clock;
@@ -167,7 +170,7 @@ struct SteppedMeter : MeterFixture {
     // Ticks a frame and draws it if a bar or marker moved; returns whether it drew.
     bool frame() {
         item.tick();
-        if (item.showsPainted(item.m_shown, item.deviceWidth())) return false;
+        if (item.showsPainted(item.m_shown)) return false;
         view.grabWindow();
         return true;
     }
@@ -221,8 +224,10 @@ struct ReferenceMeter {
     std::size_t bins{0};
 };
 
-// Device pixels of `db` on the 400 px meter.
-int pixels(double db) { return qRound(400 * (db + 60) / 60); }
+// Device pixels of `db` on the 400 px scale.
+int pixels(double db) { return qRound(LevelMeterItem::meterPosition(db, 400)); }
+constexpr double kRelease = LevelMeterItem::kReleaseDbPerSecond;
+constexpr double kPeakRelease = LevelMeterItem::kPeakReleaseDbPerSecond;
 }
 
 class LevelMeterTest : public QObject {
@@ -239,7 +244,11 @@ private slots:
     void requestsAreBoundedAndObsoleteResultsAreDiscarded();
     void destructionCancelsPendingDecode();
     void readsItsFileOnlyWhileVisibleForPlayback();
-    void sceneGraphDrawsFixedGradientAndThinSurroundRows();
+    void scaleAndLanesAreLaidOutLikeThePlot();
+    void sceneGraphDrawsAColumnPerLane();
+    void stoppedMeterIsAnEmptyTrough();
+    void oneLaneShowsTheLoudestChannel();
+    void readoutGivesExactLevelsOnlyToReaders();
     void shownLevelsFollowTheBallistics();
     void steadyLevelsDrawNoFrames();
     void silenceDrawsNoFrames();
@@ -256,23 +265,38 @@ void LevelMeterTest::attackReleaseAndPeakHold() {
     channel.observe(-6, 0);
     QCOMPARE(channel.level, -6.0);
     QCOMPARE(channel.peak, -6.0);
+    // The fill falls at 20 dB/s at once; the peak holds 1.5 s, then falls
+    // at 20 dB/s.
     channel.decay(0.5);
-    QCOMPARE(channel.level, -36.0);
+    QCOMPARE(channel.level, -16.0);
     QCOMPARE(channel.peak, -6.0);
     QCOMPARE(channel.hold, 1.0);
     channel.observe(-20, 0);
     QCOMPARE(channel.hold, 1.0);
     channel.decay(1.25);
-    QCOMPARE(channel.level, -60.0);
-    QCOMPARE(channel.peak, -9.0);
+    QCOMPARE(channel.level, -41.0);
+    QCOMPARE(channel.peak, -11.0);
     QCOMPARE(channel.hold, 0.0);
+    QCOMPARE(channel.clip, 0.0);
     channel.observe(6, 0);
     QCOMPARE(channel.level, 0.0);
     QCOMPARE(channel.peak, 0.0);
     QCOMPARE(channel.hold, 1.5);
+    // Full scale lights the clip lamp for 2 s.
+    QCOMPARE(channel.clip, 2.0);
+    channel.decay(1.5);
+    QCOMPARE(channel.clip, 0.5);
+    channel.observe(-0.5, 0);
+    QCOMPARE(channel.clip, 0.5);
+    // A bin heard late lights it for what is left of its 2 s.
+    channel.observe(0, 1.75);
+    QCOMPARE(channel.clip, 0.5);
+    channel.observe(0, 1.25);
+    QCOMPARE(channel.clip, 0.75);
     channel.decay(10);
     QCOMPARE(channel.level, -60.0);
     QCOMPARE(channel.peak, -60.0);
+    QCOMPARE(channel.clip, 0.0);
 }
 
 void LevelMeterTest::ballisticsAreRefreshRateIndependent() {
@@ -305,29 +329,34 @@ void LevelMeterTest::loudToQuietAndSilenceReleasePromptly() {
         for (int fps : {30, 60, 144, 360}) {
             LevelMeterItem item;
             item.m_playing = true;
-            item.m_window = {0, 2, 1.0 / 1024, 2, std::vector<float>(4096)};
+            item.m_window = {0, 4, 1.0 / 1024, 2, std::vector<float>(8192)};
             const double quietLeft = silence ? -60.0 : -36.0;
             const double quietRight = silence ? -60.0 : -48.0;
-            for (int point = 0; point < 2048; ++point) {
+            for (int point = 0; point < 4096; ++point) {
                 item.m_window.peaksDb[point * 2] = point < 128 ? 0.0F : float(quietLeft);
                 item.m_window.peaksDb[point * 2 + 1] = point < 128 ? -6.0F : float(quietRight);
             }
             item.advance(0.125, 0.125);
             QCOMPARE(item.m_channels[0].level, 0.0);
             QCOMPARE(item.m_channels[1].level, -6.0);
-            for (int frame = 1; frame <= fps; ++frame) {
+            for (int frame = 1; frame <= fps * 3; ++frame) {
                 item.advance(0.125 + double(frame) / fps, 1.0 / fps);
                 if (frame == fps / 2) {
-                    QVERIFY(std::abs(item.m_channels[0].level + 30) < 1e-8);
-                    QVERIFY(std::abs(item.m_channels[1].level + 36) < 1e-8);
+                    QVERIFY(std::abs(item.m_channels[0].level + 10) < 1e-8);
+                    QVERIFY(std::abs(item.m_channels[1].level + 16) < 1e-8);
+                }
+                if (frame == fps) {
+                    // The hold outlasts the fill's fall.
+                    QCOMPARE(item.m_channels[0].peak, 0.0);
+                    QCOMPARE(item.m_channels[1].peak, -6.0);
+                    QVERIFY(std::abs(item.m_channels[0].hold - 0.5) < 1e-8);
                 }
             }
             QVERIFY(std::abs(item.m_channels[0].level - quietLeft) < 1e-8);
             QVERIFY(std::abs(item.m_channels[1].level - quietRight) < 1e-8);
-            // Faster bar release leaves the independent peak hold intact.
-            QCOMPARE(item.m_channels[0].peak, 0.0);
-            QCOMPARE(item.m_channels[1].peak, -6.0);
-            QVERIFY(std::abs(item.m_channels[0].hold - 0.5) < 1e-8);
+            // The peaks fell at 20 dB/s for the 1.5 s after their hold.
+            QVERIFY(std::abs(item.m_channels[0].peak - std::max(quietLeft, -30.0)) < 1e-8);
+            QVERIFY(std::abs(item.m_channels[1].peak - std::max(quietRight, -36.0)) < 1e-8);
         }
     }
 }
@@ -570,46 +599,168 @@ void LevelMeterTest::readsItsFileOnlyWhileVisibleForPlayback() {
     QTRY_VERIFY(WaveformReaderLog::releasesUnread().load() > passes);
 }
 
-void LevelMeterTest::sceneGraphDrawsFixedGradientAndThinSurroundRows() {
+void LevelMeterTest::scaleAndLanesAreLaidOutLikeThePlot() {
+    // The listed levels are a fifth of the scale apart; -60 dB is its floor.
+    QCOMPARE(LevelMeterItem::meterPosition(0, 400), 400.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-6, 400), 320.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-12, 400), 240.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-24, 400), 160.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-48, 400), 80.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-60, 400), 0.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-36, 400), 120.0);
+    QCOMPARE(LevelMeterItem::meterPosition(3, 400), 400.0);
+    QCOMPARE(LevelMeterItem::meterPosition(-80, 400), 0.0);
+    // Lanes with a 1 px seam between them, on the rows the waveform draws
+    // its seams on.
+    using Rows = std::pair<double, double>;
+    QCOMPARE(LevelMeterItem::laneRows(0, 1, 200), Rows(0, 200));
+    QCOMPARE(LevelMeterItem::laneRows(0, 2, 201), Rows(0, 101));
+    QCOMPARE(LevelMeterItem::laneRows(1, 2, 201), Rows(102, 201));
+    QCOMPARE(LevelMeterItem::laneRows(2, 6, 300), Rows(101, 150));
+    QCOMPARE(LevelMeterItem::laneRows(5, 6, 300), Rows(251, 300));
+}
+
+void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
     QQuickWindow view;
-    view.resize(600, 20);
+    view.resize(10, 402);
     LevelMeterItem item(view.contentItem());
-    item.setSize(QSizeF(600, 20));
+    item.setSize(QSizeF(10, 402));
+    item.setActive(true);
+    // Distinct colours, to tell the parts apart.
+    item.setBackgroundColor(QColor(0x10, 0x00, 0x00));
+    item.setSeamColor(QColor(0x20, 0x00, 0x00));
+    item.setTroughColor(QColor(0x30, 0x00, 0x00));
+    item.setFillColor(QColor(0x40, 0x00, 0x00));
+    item.setPeakColor(QColor(0x50, 0x00, 0x00));
+    item.setClipOffColor(QColor(0x60, 0x00, 0x00));
+    item.setClipColor(QColor(0x70, 0x00, 0x00));
     view.show();
     QTRY_VERIFY(view.isExposed());
-    for (int count : {1, 2, 6, 8}) {
-        item.setChannelCountHint(count);
-        item.m_channels.assign(static_cast<std::size_t>(count), {});
-        for (auto &channel : item.m_channels) channel.observe(-6, 0);
-        item.m_channels[0].peak = -2;
+    for (int lanes : {1, 2, 6}) {
+        item.setLaneCount(lanes);
+        item.setChannelCountHint(lanes);
+        item.m_channels.assign(static_cast<std::size_t>(lanes), {});
+        for (auto &channel : item.m_channels) channel.observe(-30, 0);
+        // The first channel peaked at -9 dB and clipped.
+        item.m_channels[0].peak = -9;
+        item.m_channels[0].clip = 1;
         item.m_shown = item.m_channels;
         item.update();
-        // Grabbing draws the window's scene as it is now.
         const QImage image = view.grabWindow();
         QVERIFY(!image.isNull());
-        QCOMPARE(item.height(), 20.0);
-        // grabWindow returns physical pixels; its QImage DPR metadata can be 1.
-        const double scaleX = double(image.width()) / view.width();
-        const double scaleY = double(image.height()) / view.height();
-        const auto pixel = [&](int x, int y) {
-            return image.pixelColor(qRound(x * scaleX), qRound(y * scaleY));
+        const double scale = double(image.width()) / view.width();
+        const auto pixel = [&](double x, double y) {
+            return image.pixelColor(int(x * scale), int(y * scale)).red();
         };
-        const auto low = pixel(100, 0);
-        const auto high = pixel(500, 0);
-        QVERIFY(low.green() > low.red());
-        QVERIFY(high.red() > low.red());
-        QCOMPARE(pixel(595, 0), QColor("#090c0e"));
-        const int peakX = qRound(580 * scaleX);
-        QCOMPARE(image.pixelColor(peakX, 0), QColor("#d6d3b9"));
-        // Check physical neighbors so a two-pixel marker fails at any scale.
-        QCOMPARE(image.pixelColor(peakX - 1, 0), QColor("#090c0e"));
-        QCOMPARE(image.pixelColor(peakX + 1, 0), QColor("#090c0e"));
-        if (count == 2) {
-            QCOMPARE(pixel(10, 9), QColor("#202427"));
-            QCOMPARE(pixel(10, 10), QColor("#202427"));
-            QVERIFY(pixel(10, 11).green() > pixel(10, 11).red());
+        for (int lane = 0; lane < lanes; ++lane) {
+            const auto [top, bottom] = LevelMeterItem::laneRows(lane, lanes, 402);
+            const double height = bottom - top;
+            const double meterBottom = bottom - 3;
+            const double scaleHeight = height - 6 - 3 - 1;
+            const auto at = [&](double db) { return meterBottom - LevelMeterItem::meterPosition(db, scaleHeight); };
+            // The seam on the column's left; the column's floor above the
+            // meter; the trough over the fill; the lamp; the gap under it.
+            QCOMPARE(pixel(0, top + height / 2), 0x20);
+            QCOMPARE(pixel(5, top + 1), 0x10);
+            QCOMPARE(pixel(5, bottom - 1), 0x10);
+            QCOMPARE(pixel(5, at(-18)), 0x30);
+            QCOMPARE(pixel(5, at(-40) - 0.5), 0x40);
+            QCOMPARE(pixel(5, top + 4), lane == 0 ? 0x70 : 0x60);
+            QCOMPARE(pixel(5, top + 6.5), 0x10);
+            // The fill spans the column's 9 px, nothing 4 or 5 px wide.
+            QCOMPARE(pixel(1.5, at(-40) - 0.5), 0x40);
+            QCOMPARE(pixel(9.5, at(-40) - 0.5), 0x40);
+            // The gaps: -6 and -24 dB always, -12 dB in lanes of 64 px or more.
+            QCOMPARE(pixel(5, std::round(at(-6)) + 0.5), 0x10);
+            QCOMPARE(pixel(5, std::round(at(-24)) + 0.5), 0x10);
+            QCOMPARE(pixel(5, std::round(at(-12)) + 0.5), height >= 64 ? 0x10 : 0x30);
+            if (lane == 0) {
+                // The peak: 2 px across the column at -9 dB.
+                const double peak = at(-9);
+                QCOMPARE(pixel(5, peak - 0.5), 0x50);
+                QCOMPARE(pixel(5, peak + 0.5), 0x50);
+                QCOMPARE(pixel(1.5, peak - 0.5), 0x50);
+                QCOMPARE(pixel(5, peak - 2.5), 0x30);
+            }
         }
     }
+}
+
+void LevelMeterTest::stoppedMeterIsAnEmptyTrough() {
+    QQuickWindow view;
+    view.resize(10, 200);
+    LevelMeterItem item(view.contentItem());
+    item.setSize(QSizeF(10, 200));
+    item.setTroughColor(QColor(0x30, 0x00, 0x00));
+    item.setClipOffColor(QColor(0x60, 0x00, 0x00));
+    item.setFillColor(QColor(0x40, 0x00, 0x00));
+    view.show();
+    QTRY_VERIFY(view.isExposed());
+    item.m_channels.assign(2, {});
+    for (auto &channel : item.m_channels) channel.observe(-6, 0);
+    item.m_shown = item.m_channels;
+    QVERIFY(!item.active());
+    item.update();
+    QImage image = view.grabWindow();
+    const double scale = double(image.width()) / view.width();
+    // No fill, scale, lamp or tick: the trough from top to bottom.
+    for (double y : {4.0, 6.5, 100.0, 190.0}) {
+        QCOMPARE(image.pixelColor(int(5 * scale), int(y * scale)).red(), 0x30);
+    }
+    const auto readout = item.laneReadout(0);
+    QVERIFY(std::isinf(readout.value("level").toDouble()));
+    QVERIFY(!readout.value("clipping").toBool());
+    // Its width stays the same: the plot narrows only with the option.
+    QCOMPARE(item.implicitWidth(), LevelMeterItem::kColumnWidth);
+    item.setActive(true);
+    item.update();
+    image = view.grabWindow();
+    QCOMPARE(image.pixelColor(int(5 * scale), int(4 * scale)).red(), 0x60);
+    QCOMPARE(image.pixelColor(int(5 * scale), int(190 * scale)).red(), 0x40);
+}
+
+void LevelMeterTest::oneLaneShowsTheLoudestChannel() {
+    LevelMeterItem item;
+    item.setActive(true);
+    item.m_shown.assign(3, {});
+    item.m_shown[0].observe(-20, 0);
+    item.m_shown[1].observe(-8, 0.5);
+    item.m_shown[2].observe(0, 1.0);
+    item.setLaneCount(1);
+    auto readout = item.laneReadout(0);
+    // The loudest fill is the second channel's, the highest peak and the
+    // clip the third's: its full-scale bin is still held after 1 s.
+    QCOMPARE(readout.value("level").toDouble(), -18.0);
+    QCOMPARE(readout.value("peak").toDouble(), 0.0);
+    QVERIFY(readout.value("clipping").toBool());
+    // A lane each: each its own channel.
+    item.setLaneCount(3);
+    readout = item.laneReadout(0);
+    QCOMPARE(readout.value("level").toDouble(), -20.0);
+    QVERIFY(!readout.value("clipping").toBool());
+    readout = item.laneReadout(2);
+    QCOMPARE(readout.value("level").toDouble(), -20.0);
+    QVERIFY(readout.value("clipping").toBool());
+}
+
+void LevelMeterTest::readoutGivesExactLevelsOnlyToReaders() {
+    SteppedMeter meter([](double t) -> float { return t < 0.5 ? -12.5F : -60.0F; });
+    QVERIFY(meter.exposed);
+    QSignalSpy readouts(&meter.item, &LevelMeterItem::readoutChanged);
+    meter.framesUntil(0.3);
+    QTest::qWait(300);
+    // Nobody reads the levels: nobody hears of them.
+    QCOMPARE(readouts.count(), 0);
+    meter.item.setReadoutWanted(true);
+    QCOMPARE(readouts.count(), 1);
+    QCOMPARE(meter.item.readoutRevision(), 1);
+    QCOMPARE(meter.item.laneReadout(0).value("level").toDouble(), -12.5);
+    meter.framesUntil(0.4);
+    // At most every 250 ms.
+    QTRY_COMPARE(readouts.count(), 2);
+    meter.framesUntil(0.45);
+    QTest::qWait(50);
+    QCOMPARE(readouts.count(), 2);
 }
 
 void LevelMeterTest::shownLevelsFollowTheBallistics() {
@@ -635,7 +786,7 @@ void LevelMeterTest::shownLevelsFollowTheBallistics() {
         QVERIFY2(mismatch.isEmpty(), qPrintable(mismatch));
         if (position > 0.05 && position < 1.6) QCOMPARE(item.m_shown[0].peak, -3.0);
     }
-    // The hold ended 1.5 s after the loud passage; the peak fell at 12 dB/s.
+    // The hold ended 1.5 s after the loud passage; the peak fell at 20 dB/s.
     QCOMPARE(item.m_shown[0].peak, -60.0);
     QCOMPARE(item.m_shown[0].level, -60.0);
     // Paused, the bars decay from the state at the frame.
@@ -650,8 +801,8 @@ void LevelMeterTest::shownLevelsFollowTheBallistics() {
         QCOMPARE(item.m_shown[0].peak, expected.peak);
         QVERIFY(std::isnan(item.m_shownAt));
     }
-    QCOMPARE(item.m_shown[0].level, -60.0);
-    QCOMPARE(item.m_shown[0].peak, -6.0 - 12 * 0.65);
+    QCOMPARE(item.m_shown[0].level, -12.0 - kRelease * 0.9);
+    QCOMPARE(item.m_shown[0].peak, -6.0 - kPeakRelease * 0.65);
 }
 
 void LevelMeterTest::steadyLevelsDrawNoFrames() {
@@ -669,8 +820,8 @@ void LevelMeterTest::steadyLevelsDrawNoFrames() {
     QVERIFY(meter.item.m_window.end > meter.position());
     // A new size is drawn at once.
     meter.frames = 0;
-    meter.item.setWidth(600);
-    QTRY_COMPARE(meter.fill(), qRound(600 * 54.0 / 60));
+    meter.item.setHeight(610);
+    QTRY_COMPARE(meter.fill(), qRound(LevelMeterItem::meterPosition(-6, 600)));
     QVERIFY(meter.frames > 0);
     QCOMPARE(meter.framesPerSecond(500), 0.0);
 }
@@ -700,18 +851,19 @@ void LevelMeterTest::pauseDrawsOnlyTheDecay() {
     QCOMPARE(meter.framesUntil(1.0), 0);
     meter.setAdvancing(false);
     meter.item.setPlaying(false);
-    // The bar falls to the floor in 0.1 s, a frame for each tick.
-    QVERIFY(meter.framesUntil(1.2) >= 5);
+    // The bar falls to the floor in 0.3 s, a frame for each tick.
+    QVERIFY(meter.framesUntil(1.35) >= 5);
     QCOMPARE(meter.fill(), 0);
     // The peak holds for 1.5 s from the last bin: no frames, and the timer
-    // waits for the hold to end and the marker to leave its pixel (6.25 ms).
+    // waits for the hold to end and the tick to leave its pixel: half of
+    // one is 0.075 dB there, 3.75 ms.
     QVERIFY(meter.item.m_wakeTimer.isActive());
-    const int expected = int(std::ceil((meter.item.m_shown[0].hold + 0.00625) * 1000));
+    const int expected = int(std::ceil((meter.item.m_shown[0].hold + 0.075 / kPeakRelease) * 1000));
     QVERIFY2(std::abs(meter.item.m_wakeTimer.interval() - expected) <= 1,
              qPrintable(QString::number(meter.item.m_wakeTimer.interval())));
     QCOMPARE(meter.framesUntil(2.45), 0);
     QCOMPARE(meter.peak(), pixels(-54));
-    // Then it falls 6 dB at 12 dB/s, at most a frame per pixel, and settles.
+    // Then it falls 6 dB at 20 dB/s, at most a frame per pixel, and settles.
     const int falling = meter.framesUntil(3.1);
     QCOMPARE(meter.peak(), -1);
     QVERIFY(falling > 5);
@@ -761,15 +913,23 @@ void LevelMeterTest::idleMeterWakesForItsNextPixel() {
     QVERIFY(meter.frame());
     QCOMPARE(meter.peak(), pixels(-30));
     QVERIFY(!meter.frame());
-    // The marker leaves its pixel 0.075 dB below, 6.25 ms after the hold.
+    // The tick leaves its pixel 0.15 dB below, 7.5 ms after the hold:
+    // between -48 and -24 dB a pixel is 0.3 dB.
     QVERIFY(item.m_wakeTimer.isActive());
-    QCOMPARE(item.m_wakeTimer.interval(), 1007);
-    // A falling bar wakes for each pixel: half of one, 0.075 dB, takes 1.25 ms.
+    QCOMPARE(item.m_wakeTimer.interval(), 1008);
+    // A falling bar wakes for each pixel: half of one, 0.15 dB, takes 7.5 ms.
     item.m_channels[0] = {-30, -30, 1.0};
     item.m_shown = item.m_channels;
     QVERIFY(meter.frame());
     QVERIFY(!meter.frame());
-    QCOMPARE(item.m_wakeTimer.interval(), 2);
+    QCOMPARE(item.m_wakeTimer.interval(), 8);
+    // A lit clip lamp wakes when it goes out.
+    item.m_channels[0] = {-60, -60, 0.0, 0.5};
+    item.m_shown = item.m_channels;
+    QVERIFY(meter.frame());
+    QVERIFY(meter.item.m_painted[0].clip);
+    QVERIFY(!meter.frame());
+    QCOMPARE(item.m_wakeTimer.interval(), 500);
 }
 
 void LevelMeterTest::pauseAndResumeKeepTheTimeBetween() {
@@ -805,8 +965,8 @@ void LevelMeterTest::pauseAndResumeKeepTheTimeBetween() {
         QVERIFY(std::abs(state.level - expected.level) < 1e-9);
         QVERIFY(std::abs(state.peak - expected.peak) < 1e-9);
         QVERIFY(std::abs(state.hold - expected.hold) < 1e-9);
-        // The bar fell 48 dB and the hold ran 0.8 s since the last loud bin.
-        QVERIFY(std::abs(state.level - (-54.0)) < 0.1);
+        // The bar fell 16 dB and the hold ran 0.8 s since the last loud bin.
+        QVERIFY(std::abs(state.level - (-22.0)) < 0.1);
         QVERIFY(std::abs(state.hold - 0.7) < 0.01);
     }
 }
@@ -829,11 +989,12 @@ void LevelMeterTest::idleWakesTakeEveryBufferedBin() {
         const QString mismatch = reference.mismatch(meter.item, meter.position());
         QVERIFY2(mismatch.isEmpty(), qPrintable(mismatch));
         const double peak = reference.channel.peak;
-        QCOMPARE(meter.peak(), peak > -60 ? qRound(400 * (peak + 60) / 60) : -1);
+        QCOMPARE(meter.peak(), peak > -60 ? pixels(peak) : -1);
     }
     // The second peak held the marker again until about 3.1 s; without it
-    // the marker would be near -47 dB by now.
-    QVERIFY2(reference.channel.peak > -29.5 && reference.channel.peak < -29.2,
+    // the marker would be at the floor by now.
+    const double expected = -6.58 - kPeakRelease * (5.0 - 1.6 - LevelMeterItem::kPeakHoldSeconds);
+    QVERIFY2(std::abs(reference.channel.peak - expected) < 0.2,
              qPrintable(QString::number(reference.channel.peak)));
 }
 

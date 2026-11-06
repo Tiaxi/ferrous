@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/KeyUtils.js" as KeyUtils
 
 // A 24 px tool button on a PlotPlate: a theme icon (`icon.name`), or short
 // text such as the M and S of a lane. Its `text` is the tooltip and the
@@ -25,6 +26,8 @@ ToolButton {
     implicitHeight: 24
     padding: 0
     flat: true
+    // The hover tint, whatever the platform's hover effects.
+    hoverEnabled: true
     display: AbstractButton.IconOnly
     icon.width: Kirigami.Units.iconSizes.small
     icon.height: Kirigami.Units.iconSizes.small
@@ -35,8 +38,14 @@ ToolButton {
 
     Accessible.name: root.text
 
+    // Space presses the focused button rather than playing or pausing; keys
+    // with modifiers stay the shortcuts'.
+    Keys.onShortcutOverride: function(event) {
+        event.accepted = KeyUtils.isPlainSpace(event)
+    }
+
     ToolTip.text: root.text
-    ToolTip.visible: root.hovered && root.text.length > 0
+    ToolTip.visible: (root.hovered || root.visualFocus) && root.text.length > 0
     ToolTip.delay: Kirigami.Units.toolTipDelay
 
     contentItem: Item {

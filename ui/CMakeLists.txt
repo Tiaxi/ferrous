@@ -177,6 +177,8 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/KeyScrollView.qml
         qml/components/LaneScrollBar.qml
         qml/components/NowPlayingPanel.qml
+        qml/components/PlotLaneHead.qml
+        qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
         qml/components/PopupTransition.qml
@@ -186,7 +188,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/SurfaceCard.qml
         qml/components/UiPalette.qml
         qml/components/ViewerCloseButton.qml
-        qml/components/VisualizationModeSwitch.qml
         qml/controllers/ErrorController.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml
@@ -222,6 +223,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/preferences/SystemMediaPage.qml
         qml/viewers/AlbumArtSurface.qml
         qml/viewers/AlbumArtViewerShell.qml
+        qml/viewers/PlotLayer.qml
         qml/viewers/SpectrogramSurface.qml
         qml/viewers/SpectrogramViewerShell.qml
         qml/viewers/WaveformSurface.qml
@@ -235,6 +237,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/FormatUtils.js
         qml/logic/KeyUtils.js
         qml/logic/PathUtils.js
+        qml/logic/PlotLanes.js
         qml/logic/SearchIcons.js
         qml/logic/WheelUtils.js
 )

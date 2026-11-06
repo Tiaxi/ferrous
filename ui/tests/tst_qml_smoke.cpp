@@ -325,6 +325,14 @@ bool nearlyEqual(const QRectF &a, const QRectF &b) {
         && std::abs(a.width() - b.width()) < 1e-4 && std::abs(a.height() - b.height()) < 1e-4;
 }
 
+// The spectrogram's floor, plotBg, where it has no column to draw.
+const QRgb kSpectrogramFloor = qRgb(0x14, 0x06, 0x2e);
+
+// The children of a spectrogram's scene node: the background, the canvas
+// tiles, the newest columns, the playhead's casing and the playhead, the
+// frequency scale, the time scale, the crosshair and the FPS counter.
+constexpr int kPlayheadChild = 4;
+
 OverlayOnScreen overlayOnScreen(QSGNode *node, int layer) {
     OverlayOnScreen shown;
     QSGNode *root = node->childAtIndex(layer);
@@ -1025,6 +1033,10 @@ class WaveformSurfaceTestBridge final : public QObject {
     Q_PROPERTY(QList<bool> mutedChannels READ mutedChannels NOTIFY playbackChanged)
     Q_PROPERTY(QList<bool> soloedChannels READ soloedChannels NOTIFY playbackChanged)
     Q_PROPERTY(int channelButtonsVisibility MEMBER m_channelButtonsVisibility CONSTANT)
+    // What the plot layer reads: no meter, no cut, not connected.
+    Q_PROPERTY(bool showLevelMeter MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool waveformEndsEarly MEMBER m_unset CONSTANT)
+    Q_PROPERTY(bool connected MEMBER m_unset CONSTANT)
 
 public:
     QList<bool> mutedChannels() const {
@@ -1783,20 +1795,12 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     }
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
-    QVERIFY(modeSwitch->property("width").toDouble() <= 50.0);
+    // Two 24 px tool buttons on one plate, 2 px apart with 2 px around.
+    QCOMPARE(modeSwitch->property("width").toDouble(), 54.0);
+    QCOMPARE(modeSwitch->property("height").toDouble(), 28.0);
     QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
-    // Visible without hovering, dimmed until the pointer is on it.
-    const double idleOpacity = modeSwitch->property("idleOpacity").toDouble();
-    QVERIFY(idleOpacity >= 0.5 && idleOpacity < 0.95);
-    QCOMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
-    auto *modeSwitchItem = qobject_cast<QQuickItem *>(modeSwitch);
-    QVERIFY(modeSwitchItem != nullptr);
-    QVERIFY(modeSwitch->setProperty("pointerHovered", true));
-    QTRY_VERIFY(modeSwitch->property("opacity").toDouble() > 0.95);
-    QVERIFY(modeSwitch->setProperty("controlsVisible", false));
-    QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
-    QVERIFY(modeSwitch->setProperty("controlsVisible", true));
-    QTRY_COMPARE(modeSwitch->property("opacity").toDouble(), idleOpacity);
+    // A plate, opaque without hovering.
+    QCOMPARE(modeSwitch->property("opacity").toDouble(), 1.0);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());
     setMode.call(QJSValueList{QJSValue(1)});
@@ -2480,6 +2484,14 @@ Item {
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
         property int channelButtonsVisibility: 2
+        property var mutedChannels: []
+        property bool showLevelMeter: false
+        property string currentTrackPath: ""
+        property bool waveformEndsEarly: false
+        property real waveformCoverageSeconds: 0
+        property bool connected: true
+        property real durationSeconds: 0
+        property int currentTrackChannels: 0
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
@@ -2492,12 +2504,28 @@ Item {
         function soloChannel(channelIndex) {}
     }
 
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
     Viewers.SpectrogramSurface {
         id: surface
         objectName: "spectrogramSurface"
         anchors.fill: parent
+        plotWidth: layer.plotWidth
         uiBridge: bridge
-        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
+        uiPalette: palette
+    }
+
+    // The labels and buttons are on the plot layer, as in the window.
+    Viewers.PlotLayer {
+        id: layer
+        objectName: "plotLayer"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+        controlsVisible: surface.interactiveOverlaysVisible
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
+        hoveredLane: surface.hoveredLane
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2534,12 +2562,12 @@ Item {
                 != nullptr);
     auto *spectrogramItem = qobject_cast<SpectrogramItem *>(findQuickItemByObjectName(
         surfaceItem, QStringLiteral("spectrogramPaneItem")));
-    QQuickItem *channelMarker = findQuickItemByObjectName(
-        surfaceItem, QStringLiteral("spectrogramChannelMarker"));
-    QQuickItem *muteButton = findQuickItemByObjectName(
-        surfaceItem, QStringLiteral("spectrogramMuteButton"));
-    QQuickItem *soloButton = findQuickItemByObjectName(
-        surfaceItem, QStringLiteral("spectrogramSoloButton"));
+    auto *layer = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("plotLayer")));
+    QVERIFY(layer != nullptr);
+    QTRY_VERIFY(findQuickItemByObjectName(layer, QStringLiteral("plotLaneButtons")) != nullptr);
+    QQuickItem *channelMarker = findQuickItemByObjectName(layer, QStringLiteral("plotLaneLabel"));
+    QQuickItem *muteButton = findQuickItemByObjectName(layer, QStringLiteral("plotLaneButtons"));
+    QQuickItem *soloButton = findQuickItemByObjectName(layer, QStringLiteral("visualizationModeSwitch"));
     QQuickItem *pointerArea = findQuickItemByObjectName(
         surfaceItem, QStringLiteral("spectrogramSurfacePointerArea"));
     QVERIFY(spectrogramItem != nullptr);
@@ -2607,6 +2635,14 @@ Window {
         property int channelButtonsVisibility: 1
         property var soloedChannels: []
         property int muteCalls: 0
+        property bool showLevelMeter: false
+        property string currentTrackPath: ""
+        property bool waveformEndsEarly: false
+        property real waveformCoverageSeconds: 0
+        property bool connected: true
+        property real durationSeconds: 0
+        property int currentTrackChannels: 0
+        property var mutedChannels: []
         property int soloCalls: 0
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
@@ -2619,12 +2655,26 @@ Window {
         function soloChannel(channelIndex) { ++soloCalls }
     }
 
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
     Viewers.SpectrogramSurface {
         id: surface
         objectName: "clickableSpectrogramSurface"
         anchors.fill: parent
+        plotWidth: layer.plotWidth
         uiBridge: bridge
-        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
+        uiPalette: palette
+    }
+
+    Viewers.PlotLayer {
+        id: layer
+        objectName: "plotLayer"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
+        hoveredLane: surface.hoveredLane
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2644,47 +2694,58 @@ Window {
         {QStringLiteral("channelIndex"), 0},
     }});
 
+    QQuickItem *layer = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("plotLayer")));
+    QVERIFY(layer != nullptr);
+    QQuickItem *buttons = nullptr;
     QQuickItem *muteButton = nullptr;
     QQuickItem *soloButton = nullptr;
-    QQuickItem *muteMouseArea = nullptr;
-    QQuickItem *soloMouseArea = nullptr;
     QTRY_VERIFY([&]() {
-        muteButton = findQuickItemByObjectName(
-            surface, QStringLiteral("spectrogramMuteButton"));
-        soloButton = findQuickItemByObjectName(
-            surface, QStringLiteral("spectrogramSoloButton"));
-        muteMouseArea = findQuickItemByObjectName(
-            surface, QStringLiteral("spectrogramMuteMouseArea"));
-        soloMouseArea = findQuickItemByObjectName(
-            surface, QStringLiteral("spectrogramSoloMouseArea"));
-        // The surface initially creates a label-free placeholder delegate.
-        // Wait until the descriptor above has replaced it; its mute control
-        // follows the visible channel label instead of starting at x=8.
-        return muteButton != nullptr && soloButton != nullptr
-            && muteMouseArea != nullptr && soloMouseArea != nullptr
-            && muteMouseArea->mapToScene(QPointF(0, 0)).x() > 20.0;
+        buttons = findQuickItemByObjectName(layer, QStringLiteral("plotLaneButtons"));
+        muteButton = findQuickItemByObjectName(layer, QStringLiteral("plotLaneMuteButton"));
+        soloButton = findQuickItemByObjectName(layer, QStringLiteral("plotLaneSoloButton"));
+        // The buttons are 8 px right of the lane's label.
+        return buttons != nullptr && muteButton != nullptr && soloButton != nullptr
+            && muteButton->mapToScene(QPointF(0, 0)).x() > 20.0;
     }());
+    // Hidden, the buttons stay in the scene, for the keyboard.
+    QVERIFY(buttons->isVisible());
+    QCOMPARE(buttons->opacity(), 0.0);
 
     // Hover the pane to reveal the controls, then move onto each control.
-    // The row's own hover must keep it visible until the click is released.
+    // The plate's own hover keeps it shown until the click is released.
     QTest::mouseMove(window, QPoint(320, 160));
-    QTRY_VERIFY(muteButton->isVisible());
-    const QPoint muteCenter = muteMouseArea->mapToScene(QPointF(
-        muteMouseArea->width() * 0.5, muteMouseArea->height() * 0.5)).toPoint();
+    QTRY_COMPARE(buttons->opacity(), 1.0);
+    const QPoint muteCenter = muteButton->mapToScene(QPointF(
+        muteButton->width() * 0.5, muteButton->height() * 0.5)).toPoint();
     QTest::mouseMove(window, muteCenter);
-    QTRY_VERIFY(muteButton->isVisible());
-    QTRY_VERIFY_WITH_TIMEOUT(
-        muteMouseArea->property("containsMouse").toBool(), 250);
+    QTRY_VERIFY(muteButton->property("hovered").toBool());
+    QCOMPARE(buttons->opacity(), 1.0);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, muteCenter);
     QTRY_COMPARE(bridge->property("muteCalls").toInt(), 1);
 
-    const QPoint soloCenter = soloMouseArea->mapToScene(QPointF(
-        soloMouseArea->width() * 0.5, soloMouseArea->height() * 0.5)).toPoint();
+    const QPoint soloCenter = soloButton->mapToScene(QPointF(
+        soloButton->width() * 0.5, soloButton->height() * 0.5)).toPoint();
     QTest::mouseMove(window, soloCenter);
-    QTRY_VERIFY(soloButton->isVisible());
-    QTRY_VERIFY(soloMouseArea->property("containsMouse").toBool());
+    QTRY_VERIFY(soloButton->property("hovered").toBool());
+    QCOMPARE(buttons->opacity(), 1.0);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, soloCenter);
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
+
+    // Off the pane they hide again; keyboard focus on either shows them,
+    // and they stay while it is inside.
+    QTest::mouseMove(window, QPoint(320, 310));
+    QTest::mouseMove(window, QPoint(-10, -10));
+    QTRY_COMPARE(buttons->opacity(), 0.0);
+    muteButton->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_COMPARE(buttons->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(soloButton->hasActiveFocus());
+    QCOMPARE(buttons->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
+    soloButton->setFocus(false);
+    layer->forceActiveFocus();
+    QTRY_COMPARE(buttons->opacity(), 0.0);
 }
 
 // The pane, each lane and the viewer are the spectrogram's floor colour,
@@ -2843,6 +2904,13 @@ Item {
         property bool spectrogramZoomEnabled: true
         property int channelButtonsVisibility: 2
         property var soloedChannels: []
+        property bool showLevelMeter: false
+        property string currentTrackPath: ""
+        property bool waveformEndsEarly: false
+        property real waveformCoverageSeconds: 0
+        property bool connected: true
+        property real durationSeconds: 0
+        property int currentTrackChannels: 0
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
         signal playbackChanged()
         onMutedChannelsChanged: playbackChanged()
@@ -2860,11 +2928,23 @@ Item {
         function soloChannel(channelIndex) {}
     }
 
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
     Viewers.SpectrogramSurface {
+        id: surface
         objectName: "soloSpectrogramSurface"
         anchors.fill: parent
         uiBridge: bridge
-        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
+        uiPalette: palette
+    }
+
+    Viewers.PlotLayer {
+        objectName: "soloPlotLayer"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2872,7 +2952,10 @@ Item {
     auto *surface = qobject_cast<QQuickItem *>(root->findChild<QObject *>(
         QStringLiteral("soloSpectrogramSurface")));
     QObject *bridge = root->findChild<QObject *>(QStringLiteral("soloBridge"));
+    auto *layer = qobject_cast<QQuickItem *>(root->findChild<QObject *>(
+        QStringLiteral("soloPlotLayer")));
     QVERIFY(surface != nullptr);
+    QVERIFY(layer != nullptr);
     QVERIFY(bridge != nullptr);
     QVariantList descriptors;
     for (int channel = 0; channel < 3; ++channel) {
@@ -2890,7 +2973,7 @@ Item {
     const std::function<void(QQuickItem *, const QString &, QList<bool> *)> collect =
         [&collect](QQuickItem *item, const QString &button, QList<bool> *shown) {
             if (item->objectName() == button) {
-                shown->push_back(item->property("active").toBool());
+                shown->push_back(item->property("checked").toBool());
             }
             for (QQuickItem *child : item->childItems()) {
                 collect(child, button, shown);
@@ -2898,12 +2981,12 @@ Item {
         };
     const auto soloShown = [&]() {
         QList<bool> shown;
-        collect(surface, QStringLiteral("spectrogramSoloButton"), &shown);
+        collect(layer, QStringLiteral("plotLaneSoloButton"), &shown);
         return shown;
     };
     const auto muteShown = [&]() {
         QList<bool> shown;
-        collect(surface, QStringLiteral("spectrogramMuteButton"), &shown);
+        collect(layer, QStringLiteral("plotLaneMuteButton"), &shown);
         return shown;
     };
     // Whether each pane is greyed out, in pane order.
@@ -2950,9 +3033,11 @@ void WaveformSmokeTest::waveformSurfaceFollowsSharedChannelAndOverlaySettings() 
     QString errorText;
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Item {
+    id: paletteRoot
     width: 640
     height: 320
 
@@ -2985,6 +3070,7 @@ Item {
         objectName: "waveformSurface"
         anchors.fill: parent
         uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2999,15 +3085,16 @@ Item {
     QVERIFY(!waveform->overviewComplete());
     QTRY_COMPARE(waveform->viewMode(), 1);
     QTRY_COMPARE(waveform->channelCount(), 2);
-    QTRY_VERIFY(waveform->gridEnabled());
+    // The scale is the spectrogram's: none on the waveform.
+    QVERIFY(!waveform->gridEnabled());
     QTRY_VERIFY(waveform->crosshairEnabled());
     QTRY_VERIFY(waveform->showFpsOverlay());
     QVERIFY(!waveform->playing());
 
     QObject *durationIndicator = root->findChild<QObject *>(
         QStringLiteral("waveformViewportDurationIndicator"));
-    QObject *durationText = root->findChild<QObject *>(
-        QStringLiteral("waveformViewportDurationText"));
+    // The indicator is a plate in the plot's colours, with the text.
+    QObject *durationText = durationIndicator;
     QVERIFY(durationIndicator != nullptr);
     QVERIFY(durationText != nullptr);
     QVERIFY(!durationIndicator->property("visible").toBool());
@@ -3083,15 +3170,33 @@ void WaveformSmokeTest::waveformSurfaceMuteButtonsFollowTheMutedChannels() {
     QString errorText;
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Item {
+    id: paletteRoot
     width: 640
     height: 320
 
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
     Viewers.WaveformSurface {
+        id: surface
+        anchors.fill: parent
+        plotWidth: layer.plotWidth
+        uiBridge: testBridge
+        uiPalette: palette
+    }
+
+    // The channel buttons are the plot layer's.
+    Viewers.PlotLayer {
+        id: layer
         anchors.fill: parent
         uiBridge: testBridge
+        uiPalette: palette
+        visualizationMode: 1
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
     }
 }
 )QML"), baseUrl, &errorText));
@@ -3104,9 +3209,10 @@ Item {
     // A Repeater's delegates are only its parent's child items.
     const std::function<int(QQuickItem *, const QString &, int)> shownIn =
         [&shownIn](QQuickItem *item, const QString &button, int channel) {
-            if (item->objectName() == button
+            if (item->objectName() == QStringLiteral("plotLaneHead")
                 && item->property("channelIndex").toInt() == channel) {
-                return item->property("active").toBool() ? 1 : 0;
+                QQuickItem *found = item->findChild<QQuickItem *>(button);
+                return found != nullptr && found->property("checked").toBool() ? 1 : 0;
             }
             for (QQuickItem *child : item->childItems()) {
                 const int shown = shownIn(child, button, channel);
@@ -3114,8 +3220,8 @@ Item {
             }
             return -1;
         };
-    const QString muteButton = QStringLiteral("waveformChannelMuteButton");
-    const QString soloButton = QStringLiteral("waveformChannelSoloButton");
+    const QString muteButton = QStringLiteral("plotLaneMuteButton");
+    const QString soloButton = QStringLiteral("plotLaneSoloButton");
 
     for (const int channels : {2, 6}) {
         bridge.setChannels(channels);
@@ -5477,19 +5583,32 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     root->setProperty("height", 1000);
     auto *meter = root->findChild<LevelMeterItem *>(QStringLiteral("levelMeter"));
     auto *surface = root->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    auto *layer = root->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
     auto *spectrogram = root->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
     auto *waveform = root->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
     auto *queue = root->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
     auto *controller = root->findChild<QObject *>(QStringLiteral("viewerController"));
     auto *bridge = qvariant_cast<QObject *>(root->property("uiBridge"));
-    QVERIFY(meter && surface && spectrogram && waveform && queue && controller && bridge);
-    QTRY_COMPARE(meter->height(), 20.0);
+    QVERIFY(meter && surface && layer && spectrogram && waveform && queue && controller && bridge);
+    // Off by default; the plot is the whole pane, and the meter takes no
+    // height in either state.
+    QVERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(surface->height() > 20);
-    QTRY_COMPARE(queue->height(), 560.0);
-    QTRY_COMPARE(spectrogram->height(), surface->height() - 20);
-    QTRY_COMPARE(waveform->height(), spectrogram->height());
-    QTRY_COMPARE(meter->y(), spectrogram->height());
+    QTRY_COMPARE(queue->height(), 580.0);
+    QVERIFY(!meter->isVisible());
+    QTRY_COMPARE(spectrogram->height(), surface->height());
+    QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width());
     const double originalHeight = spectrogram->height();
+    bridge->setProperty("showLevelMeter", true);
+    QTRY_VERIFY(meter->isVisible());
+    // A 10 px column at the right end of the lanes, as tall as the pane.
+    QCOMPARE(meter->width(), 10.0);
+    QCOMPARE(meter->height(), surface->height());
+    QCOMPARE(meter->mapToItem(surface, QPointF()).x(), surface->width() - 10.0);
+    QCOMPARE(spectrogram->height(), originalHeight);
+    QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - 10.0);
+    QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - 10.0);
+    QCOMPARE(queue->height(), 580.0);
     auto *originalParent = surface->parentItem();
     for (int mode : {0, 1}) {
         controller->setProperty("visualizationMode", mode);
@@ -5498,29 +5617,30 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
         for (int channels : {1, 2, 6, 8}) {
             bridge->setProperty("currentTrackChannels", channels);
             QTRY_COMPARE(meter->channelCountHint(), channels);
-            QCOMPARE(meter->height(), 20.0);
+            // The meter has a column for each lane the plot shows.
+            QTRY_COMPARE(meter->laneCount(), layer->property("laneCount").toInt());
+            QCOMPARE(meter->height(), surface->height());
             QCOMPARE(spectrogram->height(), originalHeight);
-            QCOMPARE(meter->width(), surface->width());
         }
     }
+    bridge->setProperty("spectrogramViewMode", 1);
+    controller->setProperty("visualizationMode", 0);
     bridge->setProperty("currentTrackChannels", 6);
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
         Q_ARG(int, 6), Q_ARG(bool, true)));
-    QTRY_VERIFY(findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramChannelLabel")));
-    auto *label = findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramChannelLabel"));
+    QTRY_COMPARE(meter->laneCount(), 6);
+    const auto labels = [&]() { return layer->property("laneLabels").toStringList(); };
+    QTRY_COMPARE(labels().value(0), QStringLiteral("1"));
     QPointer<QQuickItem> originalPane = findQuickItemByObjectName(
         spectrogram, QStringLiteral("spectrogramPaneItem"));
-    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1"));
+    // Late layout metadata relabels the lanes without replacing them.
     const QStringList positions{"C", "L", "R", "SL", "SR", "LFE"};
-    for (int mode : {0, 1}) {
-        bridge->setProperty("spectrogramViewMode", mode);
-        bridge->setProperty("currentTrackChannelLabels", positions);
-        QTRY_COMPARE(label->property("text").toString(), QStringLiteral("C"));
-        QVERIFY(originalPane);
-        QCOMPARE(findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramPaneItem")), originalPane.data());
-        bridge->setProperty("currentTrackChannelLabels", QStringList{});
-        QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1"));
-    }
+    bridge->setProperty("currentTrackChannelLabels", positions);
+    QTRY_COMPARE(labels(), positions);
+    QVERIFY(originalPane);
+    QCOMPARE(findQuickItemByObjectName(spectrogram, QStringLiteral("spectrogramPaneItem")), originalPane.data());
+    bridge->setProperty("currentTrackChannelLabels", QStringList{});
+    QTRY_COMPARE(labels().value(0), QStringLiteral("1"));
     // Every consumer reads the bridge's one clock.
     PlaybackClock clock;
     bridge->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock)));
@@ -5545,14 +5665,19 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     meter->m_channels[0].observe(-3, 0);
     clock.holdAt(0.0);
     QCOMPARE(meter->m_channels[0].peak, -60.0);
+    // Stopped, the column is an empty trough, and reads nothing.
+    QVERIFY(!meter->active());
+    QVERIFY(meter->sourcePath().isEmpty());
     // The preference pages are made when the dialog opens.
     QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "open"));
     QObject *checkBox = nullptr;
     QTRY_VERIFY((checkBox = root->findChild<QObject *>(QStringLiteral("showLevelMeterCheckBox"))) != nullptr);
     QVERIFY(checkBox->property("checked").toBool());
+    bridge->setProperty("connected", true);
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/first.wav"));
     QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/first.wav"));
+    QVERIFY(meter->active());
     const auto cancelled = std::make_shared<std::atomic_bool>(false);
     meter->m_cancelled = cancelled;
     meter->m_channels[0].observe(-3, 0);
@@ -5560,10 +5685,10 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
     QTRY_VERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(!meter->isVisible());
-    QTRY_COMPARE(meter->height(), 0.0);
-    QTRY_COMPARE(queue->height(), 580.0);
-    QTRY_COMPARE(spectrogram->height(), originalHeight);
-    QTRY_COMPARE(waveform->height(), originalHeight);
+    QTRY_COMPARE(spectrogram->property("plotWidth").toReal(), surface->width());
+    QCOMPARE(queue->height(), 580.0);
+    QCOMPARE(spectrogram->height(), originalHeight);
+    QCOMPARE(waveform->height(), originalHeight);
     QVERIFY(cancelled->load());
     QVERIFY(meter->sourcePath().isEmpty());
     QCOMPARE(meter->m_channels[0].peak, -60.0);
@@ -5573,7 +5698,8 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
     QTRY_VERIFY(meter->isVisible());
     QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/next.wav"));
-    QTRY_COMPARE(queue->height(), 560.0);
+    QCOMPARE(queue->height(), 580.0);
+    // The viewers show the same pane, with its meter when it is on.
     for (int mode : {0, 1}) {
         controller->setProperty("visualizationMode", mode);
         bridge->setProperty("spectrogramDisplayMode", mode);
@@ -5583,17 +5709,17 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
             QTRY_VERIFY(surface->parentItem() != originalParent);
             for (bool enabled : {false, true}) {
                 bridge->setProperty("showLevelMeter", enabled);
-                QTRY_VERIFY(!meter->isVisible());
-                QTRY_COMPARE(meter->height(), 0.0);
+                QTRY_COMPARE(meter->isVisible(), enabled);
+                QTRY_COMPARE(meter->height(), surface->height());
                 QTRY_COMPARE(spectrogram->height(), surface->height());
-                QTRY_COMPARE(waveform->height(), surface->height());
-                QVERIFY(meter->sourcePath().isEmpty());
+                QTRY_COMPARE(spectrogram->property("plotWidth").toReal(),
+                             surface->width() - (enabled ? 10.0 : 0.0));
+                QCOMPARE(meter->sourcePath().isEmpty(), !enabled);
             }
             controller->setProperty("spectrogramViewerOpen", false);
             QTRY_COMPARE(surface->parentItem(), originalParent);
             QTRY_COMPARE(spectrogram->height(), originalHeight);
             QTRY_VERIFY(meter->isVisible());
-            QTRY_COMPARE(meter->height(), 20.0);
         }
     }
 }
@@ -7121,7 +7247,7 @@ void SpectrogramSmokeTest::spectrogramRollingRepeatOneDrawsTheReplay() {
         const QImage shown = canvasInViewOrder(item);
         QCOMPARE(shown.width(), 320);
         const QRgb replayColor = shown.pixel(shown.width() - 1, shown.height() / 2);
-        QVERIFY(replayColor != qRgb(0, 0, 0));
+        QVERIFY(replayColor != kSpectrogramFloor);
         const QRgb leftColor = shown.pixel(0, shown.height() / 2);
         // Further back than the pane's width, the first play is gone from
         // view by 14 s; before that its end shows on the left.
@@ -7993,7 +8119,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         }
         if (heldStart == start && heldEnd == end) {
             const QVector<double> playhead =
-                verticalLinesIn(record()->engine, Qt::CustomDashLine);
+                verticalLinesIn(record()->engine, Qt::SolidLine, item->playheadColor());
             QCOMPARE(playhead.size(), 1);
             QVERIFY2(std::abs(playhead.constFirst() - columnX) < 1e-9,
                 qPrintable(QStringLiteral("playhead at %1, crosshair at %2")
@@ -8010,7 +8136,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
     if (zoom == 1.0) {
         testClock(*item).holdAt(5.0);
         const auto drawn = record();
-        const QVector<double> playhead = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
+        const QVector<double> playhead = verticalLinesIn(drawn->engine, Qt::SolidLine, item->playheadColor());
         QCOMPARE(playhead.size(), 1);
         QVERIFY(verticalLinesIn(drawn->engine, Qt::SolidLine, QColor(20, 82, 49))
             .contains(playhead.constFirst()));
@@ -10747,7 +10873,8 @@ void WaveformCoverageSmokeTest::waveformEditorDrawsEveryLaneAcrossTheView() {
             playheadX = (item.displayedPositionSecondsLocked() - start) / (end - start)
                 * size.width() * scale;
         }
-        const int margin = static_cast<int>(std::ceil(scale));
+        // The playhead, with its casing on each side.
+        const int margin = 2 * static_cast<int>(std::ceil(scale));
         const QString empty = lanesWithEmptyColumns(
             image, split ? channels : 1, static_cast<int>(std::floor(playheadX)) - margin,
             static_cast<int>(std::floor(playheadX)) + margin);
@@ -15446,7 +15573,7 @@ void SpectrogramSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     bool frozenCanvasHasContent = false;
     for (int y = 0; y < item.m_canvas.height() && !frozenCanvasHasContent; ++y) {
         for (int x = 0; x < item.m_canvas.width(); ++x) {
-            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+            if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
                 frozenCanvasHasContent = true;
                 break;
             }
@@ -15478,7 +15605,7 @@ void SpectrogramSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     bool refilledCanvasHasContent = false;
     for (int y = 0; y < item.m_canvas.height() && !refilledCanvasHasContent; ++y) {
         for (int x = 0; x < item.m_canvas.width(); ++x) {
-            if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+            if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
                 refilledCanvasHasContent = true;
                 break;
             }
@@ -16181,27 +16308,24 @@ void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {
         item.updateCrosshairOverlayLocked(width, height, 0, false, 46.875, 0.0);
     };
 
-    // Without a reserved corner, the labels are on the right edge.
-    layOut(5.0);
-    QVERIFY(item.m_crosshairFreqLabelRect.intersects(corner));
-    bool gridLabelInCorner = false;
-    for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
-        gridLabelInCorner = gridLabelInCorner || image.rect.toRect().intersects(corner);
+    // The frequency labels keep 34 px clear of the lane's top, where the
+    // mode switch and the lane's label are, wherever the corner is; they
+    // end 10 px from the edge, each beside its 6 px tick.
+    for (const QSizeF cornerSize : {QSizeF(), reserved}) {
+        item.setReservedCorner(cornerSize);
+        layOut(5.0);
+        QVERIFY(!item.m_freqGrid.images.isEmpty());
+        QCOMPARE(item.m_freqGrid.images.size(), item.m_freqGrid.lines.size());
+        for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
+            QVERIFY2(image.rect.top() >= 34.0, qPrintable(image.text));
+            QCOMPARE(image.rect.right(), width - 10.0);
+            QVERIFY(image.text.endsWith(QStringLiteral("Hz")));
+        }
+        for (const QRect &line : item.m_freqGrid.lines) {
+            QCOMPARE(line.width(), 6);
+            QCOMPARE(line.right(), width - 1);
+        }
     }
-    QVERIFY(gridLabelInCorner);
-    const QRect edgeLabel = item.m_crosshairFreqLabelRect;
-
-    item.setReservedCorner(reserved);
-    layOut(5.0);
-    QVERIFY(!item.m_crosshairFreqLabelRect.isEmpty());
-    QVERIFY(!item.m_crosshairFreqLabelRect.intersects(corner));
-    QCOMPARE(item.m_crosshairFreqLabelRect.y(), edgeLabel.y());
-    for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
-        QVERIFY(!image.rect.toRect().intersects(corner));
-    }
-    // Below the corner, the readout is on the edge again.
-    layOut(70.0);
-    QCOMPARE(item.m_crosshairFreqLabelRect.right(), edgeLabel.right());
 
     // The counter ends beside the corner, wherever its text starts.
     double counterRight = -1.0;
@@ -16252,7 +16376,7 @@ void SpectrogramSmokeTest::spectrogramStillFramesLeaveTextureNodesAlone() {
         QCOMPARE(SpectrogramItem::sceneStatistics(node).textureNodeChanges, 0);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasTextures, 0);
         QCOMPARE(SpectrogramItem::sceneStatistics(node).canvasUploads, 0);
-        auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+        auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
         const QRectF before = playhead->rect();
         setTestPosition(item, 50.0 + 1.5 / kWholeTrackColumnsPerSecond);
         node = item.updatePaintNode(node, nullptr);
@@ -16313,7 +16437,7 @@ void SpectrogramSmokeTest::spectrogramIdleCenteredViewWaitsForThePlayheadsNextPi
     // pixel, and the next frame waits for the column after.
     time.nowNs = item.m_frameScheduler->dueNs(&item);
     QTRY_COMPARE(item.m_playbackFrameRequests, requested + 1);
-    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     const double before = playhead->rect().left();
     node = item.updatePaintNode(node, nullptr);
     QCOMPARE(playhead->rect().left(), before + 1.0);
@@ -16419,7 +16543,7 @@ void SpectrogramSmokeTest::spectrogramScrollingViewWaitsForTheNextPixel() {
     prepareScrollingPlayback(item, time, mode);
     QSGNode *node = paintSettled(item, nullptr);
     node = item.updatePaintNode(node, nullptr);
-    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     const auto canvasOnWholePixels = [&]() {
         QSGNode *tiles = node->childAtIndex(1);
         for (int i = 0; i < tiles->childCount(); ++i) {
@@ -16818,7 +16942,7 @@ void SpectrogramSmokeTest::spectrogramPaintedCenteredViewFollowsASmallEndCorrect
     const QImage shown = canvasInViewOrder(item);
     QCOMPARE(shown.width(), static_cast<int>(window));
     for (int x = 0; x < shown.width(); ++x) {
-        QVERIFY2(shown.pixel(x, shown.height() / 2) != qRgb(0, 0, 0),
+        QVERIFY2(shown.pixel(x, shown.height() / 2) != kSpectrogramFloor,
                  qPrintable(QStringLiteral("x %1 is blank").arg(x)));
     }
 
@@ -18757,18 +18881,31 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayGeneratesOnHover() {
     QVERIFY(item.m_crosshair.valid);
     QCOMPARE(item.m_crosshair.size, QSize(200, 100));
 
-    // Its dotted lines through the pointer, and its frequency label.
+    // Its dashed lines through the pointer; the readout is the tooltip's.
     QVector<SpectrogramOverlayImage::Kind> kinds;
     for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
         kinds.push_back(image.kind);
     }
     QCOMPARE(kinds, (QVector<SpectrogramOverlayImage::Kind>{
-        SpectrogramOverlayImage::DottedColumn,
-        SpectrogramOverlayImage::DottedRow,
-        SpectrogramOverlayImage::CrosshairLabel}));
+        SpectrogramOverlayImage::DashedColumn,
+        SpectrogramOverlayImage::DashedRow}));
     QCOMPARE(item.m_crosshair.images[0].rect, QRectF(50.0, 0.0, 1.0, 100.0));
     QCOMPARE(item.m_crosshair.images[1].rect, QRectF(0.0, 40.0, 200.0, 1.0));
-    QVERIFY(item.m_crosshair.images[2].text.endsWith(QStringLiteral("Hz")));
+    // The frequency and the level at the pointer, then the time in the
+    // track: 128 of 255 is -75 dBFS, and column 50 is at 1.07 s.
+    const QStringList lines = item.m_crosshairLaidOutReadout.split(QLatin1Char('\n'));
+    QCOMPARE(lines.size(), 2);
+    QVERIFY2(lines[0].contains(QStringLiteral("kHz, \u221275 dB")), qPrintable(lines[0]));
+    QCOMPARE(lines[1], QStringLiteral("0:01.1"));
+    // The GUI thread shows it once the event loop runs.
+    QTRY_COMPARE(item.crosshairReadout(), item.m_crosshairLaidOutReadout);
+    // Off the pane, there is none.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_hoverActive = false;
+        item.updateCrosshairOverlayLocked(200, 100, 0, false, 48000.0 / 1024.0, 0.0);
+    }
+    QTRY_VERIFY(item.crosshairReadout().isEmpty());
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
@@ -18792,9 +18929,13 @@ void SpectrogramSmokeTest::spectrogramCrosshairOverlayMovesOnlyItsTimeLabel() {
         item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.0);
         QVERIFY(item.m_crosshair.valid);
         const SpectrogramOverlayLayout first = item.m_crosshair;
-        // The view moving on moves the time label, and nothing else.
-        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 0.5);
+        const QString readout = item.m_crosshairLaidOutReadout;
+        // The view moving on changes the readout's time, and nothing else.
+        item.updateCrosshairOverlayLocked(200, 100, 0, true, cps, 25.0);
         QVERIFY(item.m_crosshair.valid);
+        QVERIFY(item.m_crosshairLaidOutReadout != readout);
+        QCOMPARE(item.m_crosshairLaidOutReadout.section(QLatin1Char('\n'), 0, 0),
+                 readout.section(QLatin1Char('\n'), 0, 0));
         QCOMPARE(item.m_crosshair.images.size(), first.images.size());
         QCOMPARE(item.m_crosshair.images[0].rect, first.images[0].rect);
         QCOMPARE(item.m_crosshair.images[1].rect, first.images[1].rect);
@@ -18828,15 +18969,35 @@ void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
 
     QVERIFY(item.m_freqGrid.valid);
     QCOMPARE(item.m_freqGrid.size, QSize(200, 100));
-    // Lines across the pane, each with its label.
+    // A tick at the edge for each label, not a line across the plot.
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
     QCOMPARE(item.m_freqGrid.images.size(), item.m_freqGrid.lines.size());
     for (const QRect &line : item.m_freqGrid.lines) {
-        QCOMPARE(line.width(), 200);
+        QCOMPARE(line.width(), 6);
         QCOMPARE(line.height(), 1);
+    }
+    for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
+        QCOMPARE(image.kind, SpectrogramOverlayImage::ScaleLabel);
+    }
+    // The time scale is the first lane's, along its top.
+    QVERIFY(!item.m_timeGrid.valid);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_showTimeLabels = true;
+        item.updateTimeGridOverlayLocked(2000, 100, 0, 0, false, 48000.0 / 1024.0, 0.0);
     }
     QVERIFY(item.m_timeGrid.valid);
     QVERIFY(!item.m_timeGrid.lines.isEmpty());
+    QCOMPARE(item.m_timeGrid.images.size(), item.m_timeGrid.lines.size());
+    // A 5 px tick down from the top and its label under it, every 10 s at
+    // zoom 1: 469 px at 46.9 columns a second.
+    for (const QRect &line : item.m_timeGrid.lines) {
+        QCOMPARE(line.top(), 0);
+        QCOMPARE(line.height(), 5);
+    }
+    QCOMPARE(item.m_timeGrid.images[0].text, QStringLiteral("0:00"));
+    QCOMPARE(item.m_timeGrid.images[1].text, QStringLiteral("0:10"));
+    QCOMPARE(item.m_timeGrid.images[1].rect.top(), 5.0);
 }
 
 void SpectrogramSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
@@ -18970,7 +19131,8 @@ void SpectrogramSmokeTest::spectrogramOverlayStalenessDetectsBinChange() {
 
 void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleInput() {
     SpectrogramItem item;
-    item.setWidth(200);
+    // Wide enough for the time scale's ticks, 10 s apart.
+    item.setWidth(1200);
     item.setHeight(100);
     item.setSampleRateHz(48000);
     item.setDisplayMode(1); // Centered
@@ -18980,12 +19142,12 @@ void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleIn
     item.setShowTimeLabels(true);
 
     const int bins = 4097;
-    const int columns = 500;
+    const int columns = 3000;
     QByteArray data(bins * columns, '\x80');
     item.feedPrecomputedChunk(data, bins, 0, columns, 0, columns, 48000, 1024,
                                false, true, 1, false);
 
-    setTestPosition(item, 1.0);
+    setTestPosition(item, 20.0);
     item.setPlaying(false);
 
     {
@@ -18998,7 +19160,7 @@ void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleIn
     QVERIFY(node != nullptr);
 
     qint64 firstCrosshairDisplayLeft;
-    const QVector<QRectF> firstTimeGridLines = overlayOnScreen(node, 5).lines;
+    const QVector<QRectF> firstTimeGridLines = overlayOnScreen(node, 6).lines;
     QVERIFY(!firstTimeGridLines.isEmpty());
     {
         QMutexLocker lock(&item.m_stateMutex);
@@ -19010,7 +19172,7 @@ void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleIn
         firstCrosshairDisplayLeft = item.m_crosshairCachedDisplayLeft;
     }
 
-    setTestPosition(item, 5.0);
+    setTestPosition(item, 30.0);
 
     QSGNode *node2 = paintSettled(item, node);
     QVERIFY(node2 != nullptr);
@@ -19022,7 +19184,7 @@ void SpectrogramSmokeTest::spectrogramOverlayRebuildsViaUpdatePaintNodeOnStaleIn
         QVERIFY(item.m_crosshairCachedDisplayLeft != firstCrosshairDisplayLeft);
     }
     // The time grid follows the view.
-    QVERIFY(overlayOnScreen(node2, 5).lines != firstTimeGridLines);
+    QVERIFY(overlayOnScreen(node2, 6).lines != firstTimeGridLines);
 
     delete node2;
 }
@@ -19348,15 +19510,14 @@ void SpectrogramSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
         QCOMPARE(item.m_crosshairCachedDisplayLeft, canvasLeft);
     }
 
-    // The time the crosshair's label shows.
+    // The time the crosshair's tooltip shows, on its second line.
     QString shown;
     {
         QMutexLocker lock(&item.m_stateMutex);
-        static const QRegularExpression timeLabel(QStringLiteral("^(\\d+):(\\d\\d\\.\\d{3})$"));
-        for (const SpectrogramOverlayImage &image : item.m_crosshair.images) {
-            if (timeLabel.match(image.text).hasMatch()) {
-                shown = image.text;
-            }
+        static const QRegularExpression timeLabel(QStringLiteral("^(\\d+):(\\d\\d\\.\\d)$"));
+        const QString time = item.m_crosshairLaidOutReadout.section(QLatin1Char('\n'), 1, 1);
+        if (timeLabel.match(time).hasMatch()) {
+            shown = time;
         }
     }
     QVERIFY(!shown.isEmpty());
@@ -19369,8 +19530,8 @@ void SpectrogramSmokeTest::spectrogramClickToSeekMatchesTheHeldView() {
     item.mousePressEvent(&press);
     QCOMPARE(seekSpy.count(), 1);
     const double seconds = seekSpy.at(0).at(0).toDouble();
-    // To the millisecond the label shows; a column is 21 ms.
-    QVERIFY2(std::abs(seconds - shownSeconds) <= 0.0005 + 1e-9,
+    // To the tenth of a second the tooltip shows.
+    QVERIFY2(std::abs(seconds - shownSeconds) <= 0.05 + 1e-9,
         qPrintable(QStringLiteral("seeks to %1 s, shows %2").arg(seconds, 0, 'f', 4).arg(shown)));
     delete node;
 }
@@ -20264,7 +20425,7 @@ void SpectrogramSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
         0, 400, 48000, 1024, false, true, 1, false, 1);
     QSGNode *node = paintSettled(item, nullptr);
     QCOMPARE(item.m_precomputedCanvasDisplayRight, qint64(199));
-    QCOMPARE(item.m_canvas.pixel(170, 50), qRgb(0, 0, 0));
+    QCOMPARE(item.m_canvas.pixel(170, 50), kSpectrogramFloor);
 
     // Columns the view shows arrive while its canvas rasterizes without them.
     item.setDbRange(120.0);
@@ -20274,7 +20435,7 @@ void SpectrogramSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawnIn() {
         QByteArray(bins * 50, '\x60'), bins, 0, 50,
         150, 400, 48000, 1024, false, false, 1, false, 1);
     QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
-    QVERIFY(item.m_canvas.pixel(170, 50) != qRgb(0, 0, 0));
+    QVERIFY(item.m_canvas.pixel(170, 50) != kSpectrogramFloor);
     QCOMPARE(item.m_canvas.pixel(170, 50), item.m_canvas.pixel(100, 50));
 
     delete node;
@@ -20707,7 +20868,7 @@ void SpectrogramSmokeTest::spectrogramUnwrittenRingColumnsDrawAsBackground() {
 
     const QImage canvas = freshCanvas(item, 200, 16, 0, 199, false);
     QCOMPARE(canvas.width(), 200);
-    const QRgb background = qRgb(0, 0, 0);
+    const QRgb background = kSpectrogramFloor;
     // Each pixel may blend in its neighbour; leave out the two at the edge.
     for (int x = 0; x < written - 1; ++x) {
         for (int y = 0; y < canvas.height(); ++y) {
@@ -20901,11 +21062,11 @@ void SpectrogramSmokeTest::spectrogramSeekShowsThePlayheadFirstAndFillsTheLeftIn
     QVERIFY(item.m_precomputedCanvasDirty);
     feedBackfillColumns(item, playhead + 1, 300, 2);
 
-    const QRgb missing = qRgb(0, 0, 0);
+    const QRgb missing = kSpectrogramFloor;
     const auto pixelsAreMissing = [&item](int from, int to) {
         for (int x = from; x < to; ++x) {
             for (int y = 0; y < item.m_canvas.height(); ++y) {
-                if (item.m_canvas.pixel(x, y) != qRgb(0, 0, 0)) {
+                if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
                     return false;
                 }
             }
@@ -21650,7 +21811,7 @@ void SpectrogramSmokeTest::releasedSpectrogramFreesItsColumnsAndCanvasUntilRetai
             }
         }
         QVERIFY(!item.m_canvas.isNull());
-        QVERIFY(item.m_canvas.pixel(50, 5) != qRgb(0, 0, 0));
+        QVERIFY(item.m_canvas.pixel(50, 5) != kSpectrogramFloor);
     }
 }
 
@@ -21682,7 +21843,7 @@ void SpectrogramSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset()
 
     // Column 151 is not decoded yet, so its physical circular slot is black.
     QCOMPARE(item.m_canvasWriteX, 10);
-    QCOMPARE(item.m_canvas.pixel(1, 5), qRgb(0, 0, 0));
+    QCOMPARE(item.m_canvas.pixel(1, 5), kSpectrogramFloor);
 
     QByteArray late(9 * bins, '\x70');
     item.feedPrecomputedChunk(
@@ -21691,7 +21852,7 @@ void SpectrogramSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOffset()
 
     // Logical x=91 maps to physical x=(canvasStart 10 + 91) % 100 = 1.
     // Painting x=91 directly leaves the visible gap permanently black.
-    QVERIFY(item.m_canvas.pixel(1, 5) != qRgb(0, 0, 0));
+    QVERIFY(item.m_canvas.pixel(1, 5) != kSpectrogramFloor);
 }
 
 void SpectrogramSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
@@ -22987,7 +23148,7 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsAtOnceAndGivesWayT
     QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
     QCOMPARE(drawnCanvasScale(node), 1.0);
-    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     QVERIFY(std::abs(playhead->rect().x() - 100.0) <= 1.0);
 
     // The user zooms out to half, and the backend restarts for it; then,
@@ -23212,7 +23373,7 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewShowsTheColumnsOfItsDat
     setTestPosition(item, position);
     QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
-    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     {
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(item.m_canvasScale, scale);
@@ -23360,7 +23521,7 @@ void SpectrogramSmokeTest::spectrogramCenteredZoomPreviewHoldsThroughTheDataBefo
     setTestPosition(item, position);
     QSGNode *node = paintSettled(item, nullptr);
     QVERIFY(node != nullptr);
-    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3));
+    auto *playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild));
     {
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(item.m_precomputedHopSize, startHop);
@@ -24019,8 +24180,10 @@ void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     QCOMPARE(toggled.count(), 0);
     QTest::keyClick(window, Qt::Key_Tab, Qt::ShiftModifier);
     QTRY_VERIFY(spectrogramButton->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Return);
+    // A tool button: Space presses it.
+    QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QCOMPARE(toggled.count(), 0);
 }
 
 namespace {
@@ -24117,18 +24280,12 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
                         QVERIFY(view.right() - modeSwitch.right() < margin);
                     }
 
-                    // Beside the channels' labels and buttons, not over them.
-                    QList<QQuickItem *> strips;
-                    for (QQuickItem *marker : visibleItemsNamed(
-                             surface, QStringLiteral("spectrogramChannelMarker"))) {
-                        strips.push_back(marker->parentItem());
-                    }
-                    for (QQuickItem *mute : visibleItemsNamed(
-                             surface, QStringLiteral("waveformChannelMuteButton"))) {
-                        strips.push_back(mute->parentItem());
-                    }
-                    QCOMPARE(strips.size(), channels);
-                    QVERIFY(sceneRectOf(strips.constFirst()).width() > 0.0);
+                    // Beside the lanes' labels and buttons, not over them.
+                    const QList<QQuickItem *> strips = visibleItemsNamed(
+                        controlsRoot, QStringLiteral("plotLaneHead"));
+                    QTRY_COMPARE(visibleItemsNamed(controlsRoot, QStringLiteral("plotLaneHead")).size(),
+                                 channels);
+                    QVERIFY(!strips.isEmpty() && sceneRectOf(strips.constFirst()).width() > 0.0);
 
                     QObject *painted = visualizationMode == 0
                         ? static_cast<QObject *>(firstVisibleItemNamed(
@@ -24335,6 +24492,7 @@ import "components" as Components
 import "viewers" as Viewers
 
 Window {
+    id: paletteRoot
     width: 640
     height: 320
     visible: true
@@ -24360,6 +24518,10 @@ Window {
         property int channelButtonsVisibility: 2
         property int muteCalls: 0
         property int soloCalls: 0
+        property var mutedChannels: []
+        property bool showLevelMeter: false
+        property bool waveformEndsEarly: false
+        property bool connected: true
         function isChannelSilent(channelIndex) { return false }
         function toggleChannelMute(channelIndex) { ++muteCalls }
         function soloChannel(channelIndex) { ++soloCalls }
@@ -24371,14 +24533,35 @@ Window {
         active: true
     }
 
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    function notePointer(x, y) {
+        ++pointerMoves
+        autoHide.pointerMoved(x, y)
+    }
+
     Viewers.WaveformSurface {
+        id: surface
+        anchors.fill: parent
+        plotWidth: layer.plotWidth
+        uiBridge: bridge
+        uiPalette: palette
+        interactiveOverlaysVisible: autoHide.controlsVisible
+        pointerActivity: paletteRoot.notePointer
+    }
+
+    // The labels and the channel buttons, as over the window's waveform.
+    Viewers.PlotLayer {
+        id: layer
         anchors.fill: parent
         uiBridge: bridge
-        interactiveOverlaysVisible: autoHide.controlsVisible
-        pointerActivity: function(x, y) {
-            ++pointerMoves
-            autoHide.pointerMoved(x, y)
-        }
+        uiPalette: palette
+        visualizationMode: 1
+        controlsVisible: autoHide.controlsVisible
+        pointerActivity: paletteRoot.notePointer
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
+        hoveredLane: surface.hoveredLane
     }
 }
 )QML"), baseUrl, &errorText));
@@ -24400,8 +24583,10 @@ Window {
         autoHide->setProperty("hideDelay", 5000);
         QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
     };
-    // Hides the controls, then moves the pointer to `at` and sees them return.
-    const auto hideThenMoveTo = [&](QPoint at) {
+    // Hides the controls, then moves the pointer to `at` and sees them
+    // return. A tool button there takes the hover from the waveform, as a
+    // button does: `onButton`.
+    const auto hideThenMoveTo = [&](QPoint at, bool onButton = false) {
         autoHide->setProperty("hideDelay", 1);
         QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
         QTRY_VERIFY(!waveform->crosshairEnabled());
@@ -24410,15 +24595,23 @@ Window {
         QTRY_VERIFY(!controlsChanged.isEmpty());
         keepControlsShown();
         QTRY_VERIFY(waveform->crosshairEnabled());
+        if (onButton) {
+            return;
+        }
         QTRY_VERIFY(waveform->m_hoverActive);
         QCOMPARE(waveform->mapToScene(waveform->m_hoverPosition).toPoint(), at);
         QVERIFY(hoverHandler->property("hovered").toBool());
     };
     const auto center = [](const QQuickItem *item) { return sceneRectOf(item).center().toPoint(); };
-    // The row resizes for its returned buttons as it next polishes, and a
-    // click outside the row does not reach them.
+    // Whether a button shows: its plate is in the scene and opaque. Hidden
+    // on hover, a plate stays in the scene for the keyboard.
+    const auto shows = [](QQuickItem *button) {
+        return button->isVisible() && button->parentItem()->parentItem()->opacity() == 1.0;
+    };
+    // The plate lays out its returned buttons as it next polishes, and a
+    // click outside the plate does not reach them.
     const auto waitForRowLaidOut = [&](QQuickItem *mute, QQuickItem *solo) {
-        QTRY_VERIFY(mute->isVisible() && solo->isVisible());
+        QTRY_VERIFY(shows(mute) && shows(solo));
         QTRY_VERIFY(sceneRectOf(solo->parentItem()).contains(sceneRectOf(mute))
                     && sceneRectOf(solo->parentItem()).contains(sceneRectOf(solo)));
     };
@@ -24452,7 +24645,7 @@ Window {
 
     // On a channel's label, which stays while the controls are hidden.
     QQuickItem *label = firstVisibleItemNamed(
-        window->contentItem(), QStringLiteral("waveformChannelLabel"));
+        window->contentItem(), QStringLiteral("plotLaneLabel"));
     QVERIFY(label != nullptr);
     hideThenMoveTo(center(label));
     if (QTest::currentTestFailed()) {
@@ -24462,21 +24655,21 @@ Window {
     // Where a button shows when the controls return, and then on it: the
     // pointer keeps the controls up, and the button still takes the click.
     QQuickItem *solo = firstVisibleItemNamed(
-        window->contentItem(), QStringLiteral("waveformChannelSoloButton"));
+        window->contentItem(), QStringLiteral("plotLaneSoloButton"));
     QQuickItem *mute = firstVisibleItemNamed(
-        window->contentItem(), QStringLiteral("waveformChannelMuteButton"));
+        window->contentItem(), QStringLiteral("plotLaneMuteButton"));
     QVERIFY(solo != nullptr && mute != nullptr);
     waitForRowLaidOut(mute, solo);
     const QPoint onSolo = center(solo);
     const QPoint onMute = center(mute);
-    hideThenMoveTo(onSolo);
+    hideThenMoveTo(onSolo, true);
     if (QTest::currentTestFailed()) {
         return;
     }
     waitForRowLaidOut(mute, solo);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
-    hideThenMoveTo(onMute);
+    hideThenMoveTo(onMute, true);
     if (QTest::currentTestFailed()) {
         return;
     }
@@ -24493,22 +24686,26 @@ Window {
     // Shown on hover, a row's buttons follow the pointer from row to row,
     // and stay for the click while the pointer is on them.
     bridge->setProperty("channelButtonsVisibility", 1);
-    const QList<QQuickItem *> solos = visibleItemsNamed(
-        window->contentItem(), QStringLiteral("waveformChannelSoloButton"));
-    QCOMPARE(solos.size(), 1);
-    QCOMPARE(solos.constFirst(), solo);
+    const auto shownSolos = [&]() {
+        int shown = 0;
+        for (QQuickItem *button : visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneSoloButton"))) {
+            shown += shows(button) ? 1 : 0;
+        }
+        return shown;
+    };
+    QTRY_COMPARE(shownSolos(), 1);
+    QVERIFY(shows(solo));
     QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.bottom()) - 2));
-    QTRY_VERIFY(!solo->isVisible());
-    QTRY_COMPARE(visibleItemsNamed(window->contentItem(),
-                                   QStringLiteral("waveformChannelSoloButton")).size(), 1);
+    QTRY_VERIFY(!shows(solo));
+    QTRY_COMPARE(shownSolos(), 1);
     QTest::mouseMove(window, QPoint(onSolo.x(), static_cast<int>(view.top()) + 2));
-    QTRY_VERIFY(solo->isVisible());
+    QTRY_VERIFY(shows(solo));
     waitForRowLaidOut(mute, solo);
     QTest::mouseMove(window, onSolo);
-    QVERIFY(solo->isVisible());
+    QVERIFY(shows(solo));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, onSolo);
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 2);
-    QVERIFY(solo->isVisible());
+    QVERIFY(shows(solo));
     bridge->setProperty("channelButtonsVisibility", 2);
 
     // The controls do not depend on the crosshair being on.
@@ -24526,7 +24723,7 @@ Window {
     bridge->setProperty("spectrogramViewMode", 0);
     QTRY_COMPARE(waveform->channelCount(), 1);
     QTRY_VERIFY(firstVisibleItemNamed(
-                    window->contentItem(), QStringLiteral("waveformChannelLabel")) == nullptr);
+                    window->contentItem(), QStringLiteral("plotLaneLabel")) == nullptr);
     hideThenMoveTo(view.center().toPoint() + QPoint(9, 0));
     if (QTest::currentTestFailed()) {
         return;
@@ -26016,18 +26213,21 @@ void SpectrogramSmokeTest::spectrogramDrawsAtDevicePixels() {
         }
     };
 
-    // The frequency grid's lines are on device rows, on whole hundreds of
-    // hertz; its labels are drawn at device resolution.
+    // The frequency scale's ticks are on device rows, on whole hundreds of
+    // hertz, 6 px at the right edge; its labels are drawn at device
+    // resolution.
     QVERIFY(item.m_freqGrid.valid);
     QCOMPARE(item.m_freqGrid.size, QSize(deviceWidth, deviceHeight));
     QVERIFY(!item.m_freqGrid.lines.isEmpty());
-    const OverlayOnScreen freqGrid = overlayOnScreen(node, 4);
+    const OverlayOnScreen freqGrid = overlayOnScreen(node, 5);
     QCOMPARE(freqGrid.lines.size(), item.m_freqGrid.lines.size());
+    const int tickWidth = static_cast<int>(std::floor(6 * scale + 1e-6));
     for (int i = 0; i < item.m_freqGrid.lines.size(); ++i) {
         const QRect line = item.m_freqGrid.lines[i];
-        QCOMPARE(line, QRect(0, line.y(), deviceWidth, lineWidth));
+        QCOMPARE(line, QRect(deviceWidth - tickWidth, line.y(), tickWidth, lineWidth));
+        // devicePixels() floors: whole device pixels within the 6 px.
         QVERIFY(nearlyEqual(freqGrid.lines[i],
-            QRectF(0.0, line.y() / scale, deviceWidth / scale, lineWidth / scale)));
+            QRectF(line.x() / scale, line.y() / scale, tickWidth / scale, lineWidth / scale)));
         const double hz = item.pixelToFrequencyHzLocked(line.y(), deviceHeight);
         const double hzPerRow = 24000.0 / deviceHeight;
         QVERIFY2(std::abs(hz - std::round(hz / 100.0) * 100.0) <= hzPerRow,
@@ -26036,26 +26236,28 @@ void SpectrogramSmokeTest::spectrogramDrawsAtDevicePixels() {
     QCOMPARE(freqGrid.images.size(), item.m_freqGrid.images.size());
     checkImages(freqGrid);
 
-    // The time grid's lines are on the device columns of whole seconds.
+    // The time scale's ticks are on the device columns of whole seconds,
+    // 5 px down from the top.
     QVERIFY(item.m_timeGrid.valid);
     QCOMPARE(item.m_timeGrid.size.height(), deviceHeight);
     const double canvasZoom = item.canvasZoomLocked();
     const double columnsPerSecond = 48000.0 / 1024.0;
     QVERIFY(!item.m_timeGrid.lines.isEmpty());
     for (const QRect &line : item.m_timeGrid.lines) {
-        QCOMPARE(line, QRect(line.x(), 0, lineWidth, deviceHeight));
+        QCOMPARE(line, QRect(line.x(), 0, lineWidth, static_cast<int>(std::floor(5 * scale + 1e-6))));
         const double seconds = (static_cast<double>(item.m_timeGridRenderDisplayLeft)
             + (line.x() - item.m_timeGridRenderDrawX) / canvasZoom) / columnsPerSecond;
         QVERIFY2(std::abs(seconds - std::round(seconds)) * columnsPerSecond * canvasZoom <= 0.5 + 1e-9,
                  qPrintable(QStringLiteral("line at %1 s").arg(seconds)));
     }
-    const OverlayOnScreen timeGrid = overlayOnScreen(node, 5);
-    QVERIFY(!timeGrid.lines.isEmpty());
+    // What a 200 px pane shows of it: its ticks keep 48 px from the left
+    // and 40 px from the right.
+    const OverlayOnScreen timeGrid = overlayOnScreen(node, 6);
     for (const QRectF &line : timeGrid.lines) {
         QVERIFY(onDevicePixels(line));
         QVERIFY(std::abs(line.width() - lineWidth / scale) < 1e-4);
+        QVERIFY(line.left() >= 48.0 && line.left() <= 160.0);
     }
-    QVERIFY(!timeGrid.images.isEmpty());
     checkImages(timeGrid);
 
     // The crosshair is on the device column and row under the pointer.
@@ -26064,9 +26266,9 @@ void SpectrogramSmokeTest::spectrogramDrawsAtDevicePixels() {
     const int crosshairY = static_cast<int>(std::floor(41.0 * scale));
     QCOMPARE(item.m_crosshairVerticalLineRect, QRect(crosshairX, 0, lineWidth, deviceHeight));
     QCOMPARE(item.m_crosshairHorizontalLineRect, QRect(0, crosshairY, deviceWidth, lineWidth));
-    const OverlayOnScreen crosshair = overlayOnScreen(node, 6);
+    const OverlayOnScreen crosshair = overlayOnScreen(node, 7);
     checkImages(crosshair);
-    QVERIFY(crosshair.images.size() >= 3);
+    QCOMPARE(crosshair.images.size(), 2);
     QVERIFY(nearlyEqual(crosshair.images[0].first,
         QRectF(crosshairX / scale, 0.0, lineWidth / scale, deviceHeight / scale)));
     QVERIFY(nearlyEqual(crosshair.images[1].first,
@@ -26146,7 +26348,7 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
         bandX.insert(texture, x);
     }
     QImage expected(size, QImage::Format_RGB32);
-    expected.fill(Qt::black);
+    expected.fill(kSpectrogramFloor);
     *mask = QImage(size, QImage::Format_Grayscale8);
     mask->fill(255);
     const auto draw = [&](const QSGSimpleTextureNode *span) {
@@ -26177,10 +26379,13 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
         draw(static_cast<QSGSimpleTextureNode *>(tiles->childAtIndex(i)));
     }
     draw(static_cast<QSGSimpleTextureNode *>(node->childAtIndex(2)));
-    const QRectF playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(3))->rect();
+    // The playhead and its casing, a device pixel either side of the core,
+    // with a pixel to spare: the window's frame may have it a pixel apart.
+    const QRectF playhead = static_cast<QSGSimpleRectNode *>(node->childAtIndex(kPlayheadChild))->rect();
     if (!playhead.isEmpty()) {
-        const int left = std::max(0, static_cast<int>(std::floor(playhead.left() * scale)) - 1);
-        const int right = std::min(size.width() - 1, static_cast<int>(std::ceil(playhead.right() * scale)) + 1);
+        const int left = std::max(0, static_cast<int>(std::floor(playhead.left() * scale)) - 2 * static_cast<int>(std::ceil(scale)));
+        const int right = std::min(size.width() - 1,
+            static_cast<int>(std::ceil(playhead.right() * scale)) + 2 * static_cast<int>(std::ceil(scale)));
         for (int y = 0; y < size.height(); ++y) {
             for (int x = left; x <= right; ++x) {
                 mask->setPixel(x, y, 0);
@@ -26559,9 +26764,9 @@ void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
                  qPrintable(QStringLiteral("%1: a %2 x %3 overlay image")
                      .arg(QLatin1String(what)).arg(largest.width()).arg(largest.height())));
     };
-    QVERIFY(!overlayOnScreen(node, 4).lines.isEmpty());
-    QVERIFY(!overlayOnScreen(node, 5).images.isEmpty());
+    QVERIFY(!overlayOnScreen(node, 5).lines.isEmpty());
     QVERIFY(!overlayOnScreen(node, 6).images.isEmpty());
+    QVERIFY(!overlayOnScreen(node, 7).images.isEmpty());
     checkFrame("first frame");
 
     {

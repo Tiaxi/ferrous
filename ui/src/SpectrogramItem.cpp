@@ -2153,6 +2153,34 @@ void SpectrogramItem::setDisplayMode(int value) {
     }
 }
 
+double SpectrogramItem::markerSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_markerSeconds;
+}
+
+void SpectrogramItem::setMarkerSeconds(double value) {
+    if (!std::isfinite(value) || value < 0.0) value = -1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_markerSeconds == value) return;
+        m_markerSeconds = value;
+    }
+    emit markerSecondsChanged();
+    update();
+}
+
+void SpectrogramItem::publishMarkerX(double x) {
+    // NaN, the marker not drawn, is not equal to itself: compare by kind.
+    if ((std::isnan(x) && std::isnan(m_markerXLaidOut)) || x == m_markerXLaidOut) return;
+    m_markerXLaidOut = x;
+    // Laid out on the render thread; the view binds on the GUI thread.
+    QMetaObject::invokeMethod(this, [this, x] {
+        if ((std::isnan(x) && std::isnan(m_markerX)) || x == m_markerX) return;
+        m_markerX = x;
+        emit markerXChanged();
+    }, Qt::QueuedConnection);
+}
+
 bool SpectrogramItem::crosshairEnabled() const {
     return m_crosshairEnabled;
 }
@@ -4022,6 +4050,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     SpectrogramOverlayFrame freqGridFrame;
     SpectrogramOverlayFrame timeGridFrame;
+    // Where markerSeconds is drawn; NaN if it is not.
+    double markerX = std::numeric_limits<double>::quiet_NaN();
     SpectrogramOverlayFrame crosshairFrame;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
@@ -4535,6 +4565,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                              QRectF(48.0, 0.0, std::max(0.0, clearRight - 48.0), static_cast<double>(h)));
             }
 
+            // Where the marker's time is, for the view: a time of the track
+            // like the time scale's.
+            if (m_markerSeconds >= 0.0 && m_precomputedHopSize > 0) {
+                const double cps = static_cast<double>(m_precomputedSampleRateHz)
+                    / static_cast<double>(m_precomputedHopSize);
+                const double deviceX = timeToPixelX(
+                    m_markerSeconds + m_gaplessPositionOffset, displayLeft, rollingMode,
+                    m_rollingEpoch, cps, drawX, canvasZoomLocked());
+                markerX = std::round(deviceX / scale);
+            }
+
             // Crosshair overlay — laid out again on mouse move or display
             // parameter change. Shown on the hovered pane (full crosshair)
             // and on non-hovered panes when crosshairSharedX >= 0 (vertical
@@ -4725,6 +4766,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
+    publishMarkerX(markerX);
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
         const QRectF target = ViewCorner::fpsCounterRect(
@@ -5204,13 +5246,16 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     // Labels this close to the lane's top, where its label and the mode
     // switch are, are left out.
     constexpr int kTopClearance = 34;
-    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 10;
+    // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
+    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
 
     // Nyquist, or with the frequency cap, the cap.
     const double topHz = topFrequencyHzLocked();
 
+    // Round numbers of kilohertz go 1, 5, 10: a taller lane keeps 5 kHz
+    // steps rather than crowding its edge with 2 kHz ones.
     static constexpr double kFreqCandidates[] = {
-        50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000
+        50, 100, 200, 500, 1000, 5000, 10000, 20000
     };
     const double hzPerPixel = topHz / static_cast<double>(logicalHeight);
     const double freqInterval = selectGridInterval(
@@ -5619,7 +5664,7 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
     ensureMapping(height);
     if (m_canvas.width() != cols || m_canvas.height() != height || m_canvas.format() != QImage::Format_RGB32) {
         m_canvas = QImage(cols, height, QImage::Format_RGB32);
-        m_canvas.fill(Qt::black);
+        m_canvas.fill(kBackgroundColor);
         m_rasterTiles.clear();
         m_canvasDirty = true;
         markCanvasDirtyLocked();
@@ -5633,7 +5678,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     if (m_canvas.isNull()) {
         return;
     }
-    m_canvas.fill(Qt::black);
+    m_canvas.fill(kBackgroundColor);
     m_rasterTiles.clear();
     m_canvasWriteX = 0;
     m_canvasFilledCols = 0;

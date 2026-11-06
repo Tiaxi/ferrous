@@ -46,6 +46,8 @@ class LevelMeterItem : public QQuickItem {
     // readoutChanged() tells it of new ones, a few times a second. It also
     // does while an assistive technology is active.
     Q_PROPERTY(bool readoutWanted READ readoutWanted WRITE setReadoutWanted NOTIFY readoutWantedChanged)
+    // Counts readoutChanged(), for bindings that read laneReadout().
+    Q_PROPERTY(int readoutRevision READ readoutRevision NOTIFY readoutChanged)
     // Where playback is; the meter shows the levels at its position.
     Q_PROPERTY(PlaybackClock *clock READ clock WRITE setClock NOTIFY clockChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
@@ -89,6 +91,7 @@ public:
     bool active() const { return m_active; }
     void setActive(bool value);
     bool readoutWanted() const { return m_readoutWanted; }
+    int readoutRevision() const { return m_readoutRevision; }
     void setReadoutWanted(bool value);
     void setBackgroundColor(const QColor &value) { setColor(m_backgroundColor, value); }
     void setSeamColor(const QColor &value) { setColor(m_seamColor, value); }
@@ -209,6 +212,8 @@ private:
     int m_laneCount{1};
     bool m_active{false};
     bool m_readoutWanted{false};
+    int m_readoutRevision{0};
+    void announceReadout();
     QColor m_backgroundColor{QStringLiteral("#14062e")};
     QColor m_seamColor{QStringLiteral("#0a0318")};
     QColor m_troughColor{QStringLiteral("#2b1f43")};
