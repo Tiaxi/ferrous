@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ferrous, 128 px. The 64-unit drawing at 2 px a unit. -->
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <path id="tile" fill="#3a1490" d="M8 110 V18 A10 10 0 0 1 18 8 H110 A10 10 0 0 1 120 18 V110 Z"/>
+  <path id="floor" fill="#a6006e" d="M8 110 H120 V110 A10 10 0 0 1 110 120 H18 A10 10 0 0 1 8 110 Z"/>
+  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="6" stroke-linecap="round" d="M24 70 L80 20"/>
+  <path id="glide" fill="none" stroke="#ffb000" stroke-width="10" stroke-linecap="round" d="M24 90 L104 54"/>
+</svg>

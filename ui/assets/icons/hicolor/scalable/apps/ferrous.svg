@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ferrous, scalable. The 64-unit drawing, for sizes without a drawing of their own. -->
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <path id="tile" fill="#3a1490" d="M4 55 V9 A5 5 0 0 1 9 4 H55 A5 5 0 0 1 60 9 V55 Z"/>
+  <path id="floor" fill="#a6006e" d="M4 55 H60 V55 A5 5 0 0 1 55 60 H9 A5 5 0 0 1 4 55 Z"/>
+  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="3" stroke-linecap="round" d="M12 35 L40 10"/>
+  <path id="glide" fill="none" stroke="#ffb000" stroke-width="5" stroke-linecap="round" d="M12 45 L52 27"/>
+</svg>

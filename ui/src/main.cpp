@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
-#include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
@@ -16,6 +15,7 @@
 #endif
 
 #include "BridgeClient.h"
+#include "AppIcon.h"
 #include "AppInstanceController.h"
 #include "ConsoleTee.h"
 #include "CoverImageProvider.h"
@@ -51,7 +51,7 @@ int main(int argc, char *argv[]) {
     FerrousLocalization::setUpApplicationDomain();
     QApplication::setApplicationName(QStringLiteral("Ferrous"));
     QApplication::setApplicationDisplayName(QStringLiteral("Ferrous"));
-    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/assets/ferrous.svg")));
+    QApplication::setWindowIcon(FerrousAppIcon::icon());
     if (hasInstalledDesktopEntry(QStringLiteral("ferrous.desktop"))) {
         QApplication::setDesktopFileName(QStringLiteral("ferrous"));
     }
