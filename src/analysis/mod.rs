@@ -82,6 +82,13 @@ macro_rules! profile_eprintln {
     ($($arg:tt)*) => {};
 }
 
+/// A file cut off before the length its header gives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CutOff {
+    /// What the file's frames are called, such as `FLAC`; `None` for PCM.
+    frames: Option<&'static str>,
+}
+
 /// An update of the overview waveform decode of the active track.
 #[derive(Debug, Clone)]
 pub struct WaveformUpdate {
@@ -91,9 +98,8 @@ pub struct WaveformUpdate {
     complete: bool,
     /// Whether this is the decode's last update.
     done: bool,
-    /// Whether the decode found the file cut off at `coverage_seconds`, and
-    /// what its frames are called (see [`OverviewProgress::EndsEarly`]).
-    ends_early: Option<Option<&'static str>>,
+    /// Whether the decode found the file cut off at `coverage_seconds`.
+    ends_early: Option<CutOff>,
     /// The stamp of the file the decode read, which may be another than the
     /// one at the path when the track was loaded; `None` if not known, and
     /// then the waveform is not saved.
@@ -114,7 +120,7 @@ impl WaveformUpdate {
             complete: progress == OverviewProgress::Complete,
             done: progress != OverviewProgress::Partial,
             ends_early: match progress {
-                OverviewProgress::EndsEarly(frames) => Some(frames),
+                OverviewProgress::EndsEarly(frames) => Some(CutOff { frames }),
                 _ => None,
             },
             source,
@@ -2191,10 +2197,10 @@ impl AnalysisRuntimeState {
         self.snapshot.waveform_coverage_seconds = coverage_seconds;
         self.snapshot.waveform_complete = complete;
         self.snapshot.waveform_ends_early = ends_early.is_some();
-        if let (Some(frames), Some(path)) = (ends_early, self.active_track_path.as_deref()) {
+        if let (Some(cut), Some(path)) = (ends_early, self.active_track_path.as_deref()) {
             let _ = event_tx.send(AnalysisEvent::FileEndsEarly {
                 path: path.to_path_buf(),
-                message: ends_early_message(path, frames, coverage_seconds),
+                message: ends_early_message(path, cut.frames, coverage_seconds),
             });
         }
         // A decode stopped by an error shows what it covered, and the next
@@ -7416,7 +7422,7 @@ mod tests {
         assert!(!peaks.is_empty());
         let update = WaveformUpdate::of(peaks.clone(), *coverage, *progress, None);
         assert!(update.done && !update.complete);
-        assert_eq!(update.ends_early, Some(None));
+        assert_eq!(update.ends_early, Some(CutOff { frames: None }));
     }
 
     #[test]
@@ -7440,7 +7446,9 @@ mod tests {
             coverage_seconds: 242.0,
             complete: false,
             done: true,
-            ends_early: Some(Some("FLAC")),
+            ends_early: Some(CutOff {
+                frames: Some("FLAC"),
+            }),
             source: None,
         };
         state.handle_waveform_progress(4, update, &tx);
@@ -7466,7 +7474,7 @@ mod tests {
             coverage_seconds: 10.0,
             complete: false,
             done: true,
-            ends_early: Some(None),
+            ends_early: Some(CutOff { frames: None }),
             source: None,
         };
         state.handle_waveform_progress(3, stale, &tx);

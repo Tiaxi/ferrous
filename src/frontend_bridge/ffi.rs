@@ -110,8 +110,8 @@ struct AnalysisDelta {
     frame_seq: u32,
     waveform_changed: bool,
     waveform_coverage_millis: u32,
-    waveform_complete: bool,
-    waveform_ends_early: bool,
+    /// The analysis frame's flags for how far the waveform reaches.
+    waveform_end_flags: u8,
     waveform_peaks_u8: Vec<u8>,
 }
 
@@ -3295,10 +3295,22 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         frame_seq: emit_state.analysis_frame_seq,
         waveform_changed,
         waveform_coverage_millis,
-        waveform_complete: s.analysis.waveform_complete,
-        waveform_ends_early: s.analysis.waveform_ends_early,
+        waveform_end_flags: waveform_end_flags(&s.analysis),
         waveform_peaks_u8,
     }
+}
+
+/// The analysis frame's flags for a waveform that reached the end of its
+/// file, or the cut of a file that ends early.
+fn waveform_end_flags(analysis: &crate::analysis::AnalysisSnapshot) -> u8 {
+    let mut flags = 0u8;
+    if analysis.waveform_complete {
+        flags |= ANALYSIS_FLAG_WAVEFORM_COMPLETE;
+    }
+    if analysis.waveform_ends_early {
+        flags |= ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY;
+    }
+    flags
 }
 
 fn to_u8_norm(v: f32) -> u8 {
@@ -3330,12 +3342,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     if delta.waveform_changed && waveform_len > 0 {
         flags |= ANALYSIS_FLAG_WAVEFORM;
     }
-    if delta.waveform_complete {
-        flags |= ANALYSIS_FLAG_WAVEFORM_COMPLETE;
-    }
-    if delta.waveform_ends_early {
-        flags |= ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY;
-    }
+    flags |= delta.waveform_end_flags;
     // A frame without flags still tells the UI that the coverage, the
     // completeness or the cut changed, as when a track change clears them.
 

@@ -451,7 +451,8 @@ impl AnalysisTally {
                     self.first_peaks.get_or_insert(at);
                 }
                 self.waveform_coverage = snapshot.waveform_coverage_seconds;
-                if snapshot.waveform_complete {
+                // A file cut off ends its overview at the cut.
+                if snapshot.waveform_complete || snapshot.waveform_ends_early {
                     self.waveform_done.get_or_insert(at);
                 }
             }
@@ -480,6 +481,7 @@ impl AnalysisTally {
                 }
             }
             AnalysisEvent::WorkerFailed(message) => return Err(message),
+            AnalysisEvent::FileEndsEarly { .. } => {}
         }
         Ok(())
     }
@@ -982,7 +984,7 @@ fn run_overview_window(options: &Options) -> Result<Fields, String> {
         match events.recv_timeout(Duration::from_millis(50)) {
             Ok(AnalysisEvent::Snapshot(snapshot)) => {
                 coverage = snapshot.waveform_coverage_seconds;
-                if snapshot.waveform_complete {
+                if snapshot.waveform_complete || snapshot.waveform_ends_early {
                     overview_done = Some(started.elapsed());
                 }
             }
