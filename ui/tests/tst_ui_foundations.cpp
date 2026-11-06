@@ -231,6 +231,13 @@ bool installIconFixture(const QString &dataDirectory) {
     return true;
 }
 
+// The device pixels per logical pixel of a window grab. A grab under a
+// scale factor (QT_SCALE_FACTOR) is larger than the window but can report a
+// device pixel ratio of 1, so the scale comes from the sizes.
+qreal grabScale(const QImage &image, const QQuickWindow *window) {
+    return window->width() > 0 ? static_cast<qreal>(image.width()) / window->width() : 1.0;
+}
+
 QColor pixelAt(const QImage &image, const QPointF &point) {
     return image.pixelColor(static_cast<int>(std::floor(point.x())), static_cast<int>(std::floor(point.y())));
 }
@@ -632,7 +639,7 @@ void UiFoundationsTest::rowBackgroundDrawsTheRingAndTintAsOneRectangle() {
 
     const QImage image = window->grabWindow();
     QVERIFY(!image.isNull());
-    const qreal scale = image.devicePixelRatio();
+    const qreal scale = grabScale(image, window);
     const QPointF topLeft = background->mapToScene(QPointF(0, 0)) * scale;
     const qreal width = background->width() * scale;
     const qreal height = background->height() * scale;
@@ -943,7 +950,7 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
 
         const QImage image = window->grabWindow();
         QVERIFY(!image.isNull());
-        const qreal scale = image.devicePixelRatio();
+        const qreal scale = grabScale(image, window);
         const QPointF origin = button->mapToScene(QPointF(0, 0)) * scale;
         const auto pixel = [&](qreal x) { return pixelAt(image, origin + QPointF(x * scale, 12 * scale)); };
         const auto expect = [&](qreal x, const QColor &wanted, const QString &what) {
