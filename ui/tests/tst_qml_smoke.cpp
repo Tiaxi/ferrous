@@ -1447,6 +1447,8 @@ private slots:
     void waveformEditorDeferredZoomOutLandsWhilePlaying();
     void waveformEditorLateDetailDrawsNoRasterEachFrame_data();
     void waveformEditorLateDetailDrawsNoRasterEachFrame();
+    void waveformEditorPauseRedrawsTheRasterPlaybackLeft_data();
+    void waveformEditorPauseRedrawsTheRasterPlaybackLeft();
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
@@ -9301,10 +9303,20 @@ void WaveformSmokeTest::waveformEditorPlaybackOverviewCacheHasForwardHeadroom() 
 }
 
 void WaveformSmokeTest::waveformEditorCachedPaintClearsUncoveredPixels() {
+    // A cache that covers only part of the view, as one playback has moved
+    // past while no detail window comes: the part it does not cover is
+    // cleared. (Paused, the cache would be drawn again for the view.)
     WaveformEditorItem item;
     item.setWidth(100);
     item.setHeight(100);
     item.setDurationSeconds(10.0);
+    item.setPlaying(true);
+    setTestPosition(item, 0.0);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        // A file whose detail has not come, without asking for it.
+        item.m_sourcePath = QStringLiteral("/fixture/a.flac");
+    }
     item.m_requestTimer.stop();
     item.m_cache = QImage(100, 100, QImage::Format_RGB32);
     item.m_cache.fill(QColor(54, 225, 161));
@@ -12323,6 +12335,101 @@ void WaveformSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame() {
     QVERIFY(framesWithoutDetail >= 30);
     QVERIFY2(misplacedRequests.isEmpty(), qPrintable(misplacedRequests.join(QStringLiteral(", "))));
     QVERIFY2(mostRasters <= 1, qPrintable(QStringLiteral("%1 rasters between two windows").arg(mostRasters)));
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSmokeTest::waveformEditorPauseRedrawsTheRasterPlaybackLeft_data() {
+    QTest::addColumn<bool>("requestFails");
+    QTest::addRow("no-window-comes") << false;
+    QTest::addRow("request-fails") << true;
+}
+
+void WaveformSmokeTest::waveformEditorPauseRedrawsTheRasterPlaybackLeft() {
+    // While playing without detail, playback may move the view past the
+    // raster that stands in for it, which is drawn again only once another
+    // window comes. Pausing there must draw it again at once, for the view
+    // where it stopped: from the overview, as no detail comes, rather than
+    // leaving the view blank.
+    QFETCH(bool, requestFails);
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(320);
+    item.setHeight(120);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(0);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(4096, static_cast<char>(255)));
+    auto gate = std::make_shared<QSemaphore>();
+    item.m_decodeWindow = [gate, requestFails](const QString &, double, double, int,
+                                               const std::shared_ptr<std::atomic_bool> &) {
+        // A request that fails replies with nothing; one whose window
+        // never comes waits for the end of the test.
+        if (!requestFails) gate->tryAcquire(1, 30'000);
+        return QByteArray();
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/stereo.flac"));
+    // A tenth of a second in view.
+    item.setZoomLevel(600.0);
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    // A request goes out, and fails or stays in flight.
+    item.handleWindowFrameSwapped();
+    QTRY_VERIFY_WITH_TIMEOUT(item.m_decodeActive || item.m_detailArrivals > 0, kSlowBuildTimeoutMs);
+    if (requestFails) QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+
+    QImage canvas(320, 120, QImage::Format_RGB32);
+    const auto paintFrame = [&item, &canvas]() {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    };
+    // Rows away from the center line, which is drawn over the waveform.
+    const auto waveformShows = [&canvas]() {
+        int pixels = 0;
+        for (int y = 10; y < 50; ++y) {
+            for (int x = 0; x < canvas.width(); ++x) {
+                if (canvas.pixelColor(x, y) == QColor(54, 225, 161)) ++pixels;
+            }
+        }
+        return pixels > canvas.width() * 20;
+    };
+    paintFrame();
+    QVERIFY(waveformShows());
+    // Playback moves the view past the raster, with no window coming
+    // between: the view shows what the raster still covers, nothing here.
+    time.advance(1.0);
+    paintFrame();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(!item.cacheCoversRangeLocked(start, end));
+    }
+    QVERIFY(!waveformShows());
+
+    // Paused there, the view is drawn again where it stopped.
+    item.setPlaying(false);
+    paintFrame();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.cacheCoversRangeLocked(start, end));
+    }
+    QVERIFY(waveformShows());
+
+    // Played on and paused by the engine, which holds the clock while
+    // the item still plays: the same.
+    item.setPlaying(true);
+    setTestPosition(item, item.positionSeconds());
+    time.advance(1.0);
+    paintFrame();
+    QVERIFY(!waveformShows());
+    testClock(item).holdAt(item.positionSeconds());
+    paintFrame();
+    QVERIFY(waveformShows());
+
     item.setSourcePath(QString());
     gate->release(4);
     QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);

@@ -394,9 +394,11 @@ private:
     // samples, which follow the view as it moves, so that no raster need
     // be drawn for it first.
     bool deferredZoomDrawnByPlaybackLocked(qint64 nowNs) const;
-    // Whether playback, moving the view out of the cache, may have the
-    // cache drawn again for it; see m_cacheDetailArrivals.
-    bool playbackRedrawsCacheLocked(double visibleStart, double visibleEnd) const;
+    // Whether the cache, which may not cover the view, is to be drawn
+    // again for it now. While playback moves the view on and the view has
+    // no detail, only once another detail window has come; see
+    // m_cacheDetailArrivals.
+    bool cacheRedrawDueLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
         bool notifySamplePointsChanged, bool requestRepaint);
     void rebuildCacheLocked(

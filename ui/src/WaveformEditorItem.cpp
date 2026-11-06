@@ -391,11 +391,14 @@ void WaveformEditorItem::clockStateChanged() {
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
         const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
-        cacheNeedsUpdate = !m_zoomOutHandoffPending
-            && !tiledPlayback
+        // A jump, a pause or a resume redraws a cache that does not cover
+        // the view at once; playback moving it on, as cacheRedrawDueLocked
+        // says.
+        cacheNeedsUpdate = !tiledPlayback
             && rangeMoved
-            && !cacheCoversRangeLocked(start, end)
-            && (!courseCorrection || playbackRedrawsCacheLocked(start, end));
+            && (courseCorrection
+                ? cacheRedrawDueLocked(start, end)
+                : !m_zoomOutHandoffPending && !cacheCoversRangeLocked(start, end));
         if (cacheNeedsUpdate) invalidateCacheLocked();
         if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
@@ -1513,11 +1516,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool direct = renderDetailDirectlyLocked(start, end);
         const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
-        if (!m_zoomOutHandoffPending
-            && !direct
-            && !tiledPlayback
-            && !cacheCoversRangeLocked(start, end)
-            && playbackRedrawsCacheLocked(start, end)) {
+        if (!direct && !tiledPlayback && cacheRedrawDueLocked(start, end)) {
             invalidateCacheLocked();
         }
         // Detail arriving asks for its own frame.
@@ -1651,8 +1650,16 @@ bool WaveformEditorItem::cacheCoversRangeLocked(double start, double end) const 
         && rasterCoversRange(m_cacheStartSeconds, m_cacheEndSeconds, start, end);
 }
 
-bool WaveformEditorItem::playbackRedrawsCacheLocked(
+bool WaveformEditorItem::cacheRedrawDueLocked(
     double visibleStart, double visibleEnd) const {
+    if (m_zoomOutHandoffPending || cacheCoversRangeLocked(visibleStart, visibleEnd)) {
+        return false;
+    }
+    // Only playback moving the view on past the cache waits for another
+    // window: paused, or with the clock held, the view stays where it is,
+    // and the cache is drawn for it at once, from the overview if nothing
+    // better comes.
+    if (!m_playing || !m_clockState.advancing()) return true;
     return m_cacheDetailArrivals != m_detailArrivals
         // No window will come.
         || m_sourcePath.isEmpty()
@@ -2131,6 +2138,12 @@ void WaveformEditorItem::paint(QPainter *painter) {
                         visibleStart, visibleEnd, canvasWidth);
                 }
             } else {
+                // A cache that playback left while the view had no detail
+                // is drawn again once the view stops moving, or another
+                // window comes: whatever the frame that asked for this one.
+                if (!m_cacheDirty && cacheRedrawDueLocked(visibleStart, visibleEnd)) {
+                    invalidateCacheLocked();
+                }
                 rebuildCacheLocked(
                     renderPixelWidthLocked(), renderPixelHeightLocked(),
                     visibleStart, visibleEnd);
