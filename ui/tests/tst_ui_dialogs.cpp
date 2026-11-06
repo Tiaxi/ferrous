@@ -1081,6 +1081,21 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
     QTRY_VERIFY(!popup->property("visible").toBool());
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/gone.flac")});
 
+    // Reopened while it fades out, the action chosen before still runs, once.
+    QVERIFY(QMetaObject::invokeMethod(object(window, QStringLiteral("errorController")), "clear"));
+    report(window, 1, 1, QStringLiteral("/music/gone-again.flac"), QStringLiteral("The file could not be opened."));
+    QVERIFY(openIssues(window));
+    QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
+    click(window, action);
+    QVERIFY2(popup->property("visible").toBool(), "the popup closed without fading out, so this checks nothing");
+    QVERIFY(QMetaObject::invokeMethod(popup, "open"));
+    const QStringList bothShown{QStringLiteral("/music/gone.flac"), QStringLiteral("/music/gone-again.flac")};
+    QTRY_COMPARE(bridge->property("shownInLibrary").toStringList(), bothShown);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QVERIFY(QMetaObject::invokeMethod(popup, "close"));
+    QTRY_VERIFY(!popup->property("visible").toBool());
+    QCOMPARE(bridge->property("shownInLibrary").toStringList(), bothShown);
+
     // A library notice opens the library settings; a Last.fm one, Last.fm's.
     const QList<QPair<int, int>> settings{{2, 0}, {5, 3}};
     for (const auto &[category, page] : settings) {

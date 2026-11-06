@@ -131,6 +131,9 @@ Dialog {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
+                // A heading for screen readers, as Kirigami's placeholder
+                // message gives its text.
+                Accessible.role: Accessible.Heading
                 text: I18n.i18nc("@info", "No file is renamed")
                 font.pointSize: root.uiPalette.basePointSize * 1.125
                 font.weight: Font.DemiBold

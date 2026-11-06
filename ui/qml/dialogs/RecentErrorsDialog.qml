@@ -147,7 +147,9 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     onAboutToShow: {
-        root.chosenAction = null
+        // Reopened while it fades out: closed never comes for that close,
+        // so the action chosen before it runs now.
+        root.runChosenAction()
         root.errorController.dismissLatest()
         // Not visible yet: the refresh below would skip it.
         root.queuedSubjects = ({})
