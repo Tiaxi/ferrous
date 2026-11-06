@@ -3077,8 +3077,8 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         push_string(&mut out, key);
     }
     // The tracks on the album, or 0 when unknown; see
-    // `BridgeSnapshot::now_playing_track_total`.
-    push_u32(&mut out, snapshot.now_playing_track_total.unwrap_or(0));
+    // `TrackMetadata::shown_track_total`.
+    push_u32(&mut out, snapshot.metadata.shown_track_total().unwrap_or(0));
     out
 }
 
@@ -3666,6 +3666,7 @@ mod tests {
                 cover_art_path: Some("/music/a.cover.png".to_string()),
                 cover_art_stamp: 0x0102_0304_0506_0708,
                 cover_read_at: crate::library::CoverReadAt::default(),
+                file_fingerprint: None,
             },
             library: Arc::new(LibrarySnapshot {
                 roots: vec![root("/music")],
@@ -3703,7 +3704,6 @@ mod tests {
                 "root|/music".to_string(),
                 "artist|/music|Sample Artist".to_string(),
             ],
-            now_playing_track_total: Some(8),
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue_len: 1,
             queue_revision: 1,
@@ -5403,7 +5403,11 @@ mod tests {
     #[test]
     fn metadata_section_encodes_an_unknown_track_total_as_zero() {
         let mut snapshot = sample_snapshot();
-        snapshot.now_playing_track_total = None;
+        snapshot.metadata.track_total = None;
+        let encoded = encode_metadata_section(&snapshot);
+        assert_eq!(&encoded[encoded.len() - 4..], &0u32.to_le_bytes());
+        // Nor is a total below the number sent.
+        snapshot.metadata.track_total = Some(2);
         let encoded = encode_metadata_section(&snapshot);
         assert_eq!(&encoded[encoded.len() - 4..], &0u32.to_le_bytes());
     }

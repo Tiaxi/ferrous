@@ -597,7 +597,6 @@ pub(super) fn process_metadata_event(
         MetadataEvent::Loaded(mut metadata) => {
             keep_newer_cover(state, &mut metadata);
             state.metadata = metadata;
-            state.refresh_now_playing_track_total();
             SnapshotUrgency::Immediate
         }
     }
@@ -935,6 +934,9 @@ pub(super) struct LibraryEventsApplied {
     /// How many tracks were upserted or removed; roots count as one.
     pub(super) rows_changed: usize,
     pub(super) status_changed: bool,
+    /// Whether a scan read the playing track's file in another state than
+    /// its metadata was read in, so that the metadata is to be read again.
+    pub(super) read_current_metadata: bool,
 }
 
 impl LibraryEventsApplied {
@@ -967,6 +969,7 @@ pub(super) fn apply_library_events(
     let mut applied = LibraryEventsApplied {
         rows_changed: 0,
         status_changed: state.library_status != status,
+        read_current_metadata: current_file_changed(state, &changes.changed_files),
     };
     state.library_status = status;
     if changes.is_empty() {
@@ -983,6 +986,25 @@ pub(super) fn apply_library_events(
         super::sync_queue_details(state);
     }
     applied
+}
+
+/// Whether `changed`, files a scan found changed on disk and read again,
+/// has the playing track's file in another state than its metadata was
+/// read in. The row may be as it was, since a row holds only some of the
+/// tags, so only the file's state tells. Metadata still to arrive for the
+/// track is read after the change anyway.
+fn current_file_changed(state: &BridgeState, changed: &[(PathBuf, TrackFileFingerprint)]) -> bool {
+    let Some(current) = state.playback.current.as_deref() else {
+        return false;
+    };
+    if state.metadata.source_path.as_deref().map(Path::new) != Some(current) {
+        return false;
+    }
+    changed
+        .iter()
+        .rev()
+        .find(|(path, _)| path == current)
+        .is_some_and(|(_, read)| state.metadata.file_fingerprint != Some(*read))
 }
 
 /// Shows the cover that a scan chose for the current track, such as after
@@ -1049,71 +1071,6 @@ mod tests {
     use crate::playback::MonotonicTime;
     use std::path::PathBuf;
     use std::time::Instant;
-
-    #[test]
-    fn now_playing_track_total_comes_from_the_tags_or_else_the_library_album() {
-        let root_path = PathBuf::from("/music");
-        let library = Arc::new(LibrarySnapshot {
-            roots: vec![crate::library::LibraryRoot {
-                path: root_path.clone(),
-                name: String::new(),
-            }],
-            tracks: crate::library::shared_tracks(
-                (1..=8)
-                    .map(|number| LibraryTrack {
-                        path: root_path.join(format!("A/Album/{number:02}.flac")),
-                        root_path: root_path.clone(),
-                        album: "Album".to_string(),
-                        track_no: Some(number),
-                        ..LibraryTrack::default()
-                    })
-                    .collect(),
-            ),
-            ..LibrarySnapshot::default()
-        });
-        let mut state = BridgeState {
-            library_album_track_totals: Arc::clone(
-                &super::super::library_tree::LibraryTreeCache::new(&library).album_track_totals,
-            ),
-            library,
-            ..BridgeState::default()
-        };
-        let mut load = |path: &str, number: Option<u32>, total: Option<u32>| {
-            process_metadata_event(
-                MetadataEvent::Loaded(crate::metadata::TrackMetadata {
-                    source_path: Some(path.to_string()),
-                    track_number: number,
-                    track_total: total,
-                    ..crate::metadata::TrackMetadata::default()
-                }),
-                &mut state,
-            );
-            state.snapshot(false).now_playing_track_total
-        };
-        let in_library = "/music/A/Album/02.flac";
-        let outside = "/elsewhere/A/Album/02.flac";
-
-        // The tags' total comes first.
-        assert_eq!(load(in_library, Some(2), Some(12)), Some(12));
-        // Without one, the album's count in the library.
-        assert_eq!(load(in_library, Some(2), None), Some(8));
-        // A total below the number is wrong.
-        assert_eq!(load(in_library, Some(2), Some(1)), Some(8));
-        assert_eq!(load(in_library, Some(9), None), None);
-        // No total without a number.
-        assert_eq!(load(in_library, None, Some(12)), None);
-        // A track outside the library has only its tags'.
-        assert_eq!(load(outside, Some(2), None), None);
-        assert_eq!(load(outside, Some(2), Some(9)), Some(9));
-
-        // A track taken out of the library loses the library's count.
-        assert_eq!(load(in_library, Some(2), None), Some(8));
-        state.apply_library_changes(&crate::library::LibraryChanges {
-            removed: vec![PathBuf::from(in_library)],
-            ..crate::library::LibraryChanges::default()
-        });
-        assert_eq!(state.snapshot(false).now_playing_track_total, None);
-    }
 
     fn p(path: &str) -> PathBuf {
         PathBuf::from(path)
@@ -2025,9 +1982,61 @@ mod tests {
                 roots: None,
                 upserted: upserted.into_iter().map(Arc::new).collect(),
                 removed,
+                changed_files: Vec::new(),
             },
             ..LibraryEvent::default()
         }
+    }
+
+    #[test]
+    fn a_scan_that_read_the_playing_file_in_another_state_asks_for_its_metadata() {
+        let playing = p("/music/A/Album/02.flac");
+        let read_state = TrackFileFingerprint {
+            mtime_ns: 1,
+            size_bytes: 100,
+        };
+        let changed_state = TrackFileFingerprint {
+            mtime_ns: 2,
+            size_bytes: 100,
+        };
+        let mut state = BridgeState::default();
+        state.playback.current = Some(playing.clone());
+        state.metadata.source_path = Some(playing.to_string_lossy().into_owned());
+        state.metadata.file_fingerprint = Some(read_state);
+        let scanned = |files: Vec<(PathBuf, TrackFileFingerprint)>| {
+            let mut event = library_event(Vec::new(), Vec::new());
+            event.changes.changed_files = files;
+            event
+        };
+        let mut apply = |events: Vec<LibraryEvent>| {
+            apply_library_events(events, &mut state).read_current_metadata
+        };
+
+        // Another state of the playing file: read it again.
+        assert!(apply(vec![scanned(vec![(playing.clone(), changed_state)])]));
+        // The state its metadata was read in, another file, or no file:
+        // nothing to read.
+        assert!(!apply(vec![scanned(vec![(playing.clone(), read_state)])]));
+        assert!(!apply(vec![scanned(vec![(
+            p("/music/A/Album/03.flac"),
+            changed_state
+        )])]));
+        assert!(!apply(vec![library_event(Vec::new(), Vec::new())]));
+        // The latest state a batch of events read counts.
+        assert!(!apply(vec![
+            scanned(vec![(playing.clone(), changed_state)]),
+            scanned(vec![(playing.clone(), read_state)]),
+        ]));
+
+        // Metadata still about another track waits for its own read.
+        state.metadata.source_path = Some("/music/A/Album/01.flac".to_string());
+        assert!(
+            !apply_library_events(
+                vec![scanned(vec![(playing.clone(), changed_state)])],
+                &mut state
+            )
+            .read_current_metadata
+        );
     }
 
     fn library_track(path: &str, title: &str) -> crate::library::LibraryTrack {

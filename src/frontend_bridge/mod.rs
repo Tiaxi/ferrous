@@ -528,11 +528,6 @@ pub struct BridgeSnapshot {
     /// it. They follow the tree's own grouping, so the UI can mark a
     /// collapsed row that holds the playing track.
     pub now_playing_tree_keys: Vec<String>,
-    /// The tracks on the album of the track `metadata` describes, when its
-    /// tags or the library know it surely; see
-    /// [`BridgeState::refresh_now_playing_track_total`]. `None` without a
-    /// track number.
-    pub now_playing_track_total: Option<u32>,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue_len: usize,
     pub queue_revision: u64,
@@ -751,11 +746,6 @@ pub(super) struct BridgeState {
     library_artist_count: usize,
     library_album_count: usize,
     library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
-    /// The track counts of the tree's albums, from the latest tree; see
-    /// [`library_tree::LibraryTreeCache::album_track_totals`].
-    library_album_track_totals: Arc<HashMap<String, u32>>,
-    /// See [`BridgeSnapshot::now_playing_track_total`].
-    now_playing_track_total: Option<u32>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
     expanded_keys: HashSet<String>,
     library_view_selection_key: String,
@@ -879,32 +869,8 @@ impl BridgeState {
             self.library = Arc::new(next);
             self.library_index
                 .follow(&previous, &self.library, &applied);
-            self.refresh_now_playing_track_total();
         }
         applied
-    }
-
-    /// Find [`BridgeSnapshot::now_playing_track_total`] again, after the
-    /// track's metadata, the library's tracks or the tree's album counts
-    /// changed: the tags' total, or else the count of the track's album in
-    /// the library when the track is in it and the tree knows the count
-    /// surely. A total below the track's number is not believed.
-    fn refresh_now_playing_track_total(&mut self) {
-        self.now_playing_track_total = resolve_track_total(
-            self.metadata.track_number,
-            self.metadata.track_total,
-            || {
-                let path = self.metadata.source_path.as_deref()?;
-                let position = self
-                    .library_index
-                    .position(&self.library, Path::new(path))?;
-                library_tree::track_album_total(
-                    &self.library_album_track_totals,
-                    &self.library.roots,
-                    &self.library.tracks[position],
-                )
-            },
-        );
     }
 
     /// Have the UI compare its queue rows with the queue's details, which
@@ -960,7 +926,6 @@ impl BridgeState {
             library_view_anchor_offset: self.library_view_anchor_offset,
             library_reveal_generation: self.library_reveal_generation,
             now_playing_tree_keys: self.now_playing_tree_keys(),
-            now_playing_track_total: self.now_playing_track_total,
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
             } else {
@@ -981,21 +946,6 @@ impl BridgeState {
             scrobble_indicator: self.scrobble_indicator.clone(),
         }
     }
-}
-
-/// The album's track total to show with track `number`: `tag_total`, or
-/// else `library_total`'s, whichever is at least the number. None without
-/// a number.
-fn resolve_track_total(
-    number: Option<u32>,
-    tag_total: Option<u32>,
-    library_total: impl FnOnce() -> Option<u32>,
-) -> Option<u32> {
-    let number = number.filter(|number| *number > 0)?;
-    let fits = |total: &u32| *total >= number;
-    tag_total
-        .filter(fits)
-        .or_else(|| library_total().filter(fits))
 }
 
 fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
@@ -1020,6 +970,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         cover_art_path: metadata.cover_art_path.clone(),
         cover_art_stamp: metadata.cover_art_stamp,
         cover_read_at: metadata.cover_read_at,
+        file_fingerprint: metadata.file_fingerprint,
     }
 }
 
@@ -2015,8 +1966,6 @@ impl BridgeLoopRuntime {
             self.state.library_album_count,
         ) = result.counts;
         self.state.library_root_track_counts = result.root_track_counts;
-        self.state.library_album_track_totals = result.album_track_totals;
-        self.state.refresh_now_playing_track_total();
         self.snapshot_plan.include_tree_in_next_snapshot = true;
         SnapshotUrgency::Immediate
     }
@@ -2228,6 +2177,11 @@ impl BridgeLoopRuntime {
             self.edit_refreshes.forget_applied();
         }
         let applied = apply_library_events(events, &mut self.state);
+        if applied.read_current_metadata {
+            if let Some(current) = self.state.playback.current.clone() {
+                self.metadata.request(current);
+            }
+        }
         self.handle_library_refresh(applied);
         applied.urgency()
     }
@@ -4477,6 +4431,67 @@ mod tests {
         })
     }
 
+    /// Reads the metadata events of `runtime`'s metadata worker into its
+    /// state until one has a track total.
+    fn apply_metadata_until_total(runtime: &mut BridgeLoopRuntime, total: u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = runtime
+                .metadata_rx
+                .recv_deadline(deadline)
+                .expect("metadata event");
+            runtime.handle_metadata_event(event);
+            if runtime.state.metadata.track_total == Some(total) {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_rescan_of_the_playing_file_changed_on_disk_reads_its_tags_again() {
+        let _guard = test_guard();
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-rescan-current-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let track = dir.join("02.wav");
+        crate::metadata::write_numbered_test_wave(&track, 2, 8);
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        runtime.state.playback.current = Some(track.clone());
+        runtime.metadata.request(track.clone());
+        apply_metadata_until_total(&mut runtime, 8);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(8));
+
+        // Changed outside Ferrous, then found by a scan, whose row of the
+        // file stays the same.
+        let read_at = std::fs::metadata(&track)
+            .and_then(|metadata| metadata.modified())
+            .expect("fixture time");
+        crate::metadata::write_numbered_test_wave(&track, 2, 10);
+        // A later time, whatever the file system's clock resolution.
+        std::fs::File::options()
+            .write(true)
+            .open(&track)
+            .and_then(|file| file.set_modified(read_at + Duration::from_secs(1)))
+            .expect("fixture time");
+        let changed = crate::library::track_file_fingerprint(&track).expect("changed file");
+        assert_ne!(runtime.state.metadata.file_fingerprint, Some(changed));
+        let mut event = LibraryEvent::default();
+        event.changes.changed_files = vec![(track.clone(), changed)];
+        runtime.handle_wake(BridgeLoopWake::Library(event), &event_tx);
+        apply_metadata_until_total(&mut runtime, 10);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
+        assert_eq!(runtime.state.metadata.file_fingerprint, Some(changed));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A track file for imports, which expand and canonicalize their paths.
     fn import_fixture(name: &str) -> (PathBuf, PathBuf) {
         let dir =
@@ -6551,6 +6566,7 @@ mod tests {
                     })
                     .collect(),
                 removed: removed.iter().map(|path| (*path).clone()).collect(),
+                changed_files: Vec::new(),
             },
             status: crate::library::LibraryStatus::default(),
             read_after,

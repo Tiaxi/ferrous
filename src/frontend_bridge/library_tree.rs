@@ -428,8 +428,6 @@ pub struct LibraryTreeCache {
     /// The tracks each root holds, which removing the root takes out of
     /// the library.
     pub(crate) root_track_counts: Arc<HashMap<PathBuf, usize>>,
-    /// See [`album_track_totals`].
-    pub(crate) album_track_totals: Arc<HashMap<String, u32>>,
 }
 
 impl LibraryTreeCache {
@@ -456,14 +454,12 @@ impl LibraryTreeCache {
                 .entry(track.root_path.clone())
                 .or_insert(0) += 1;
         }
-        let album_track_totals = Arc::new(album_track_totals(&builders));
         Self {
             builders,
             resolved_albums: HashMap::new(),
             keys,
             counts,
             root_track_counts: Arc::new(root_track_counts),
-            album_track_totals,
         }
     }
 
@@ -621,109 +617,6 @@ pub(crate) fn track_ancestor_keys(roots: &[LibraryRoot], track: &LibraryTrack) -
         }
     }
     keys
-}
-
-/// The track count of each album row whose count is surely the album's,
-/// by the album row's key: albums with all their tracks in the album's
-/// folder itself, with one album tag that no other folder of the artist
-/// has, and numbered from 1 to the count once each. An album with section
-/// folders, such as one per disc, or with its tag in another folder, a gap
-/// or a repeat in its numbers, or a track without a number may have tracks
-/// elsewhere or count several discs, so it has no count here.
-fn album_track_totals(builders: &BTreeMap<String, RootNodeBuilder>) -> HashMap<String, u32> {
-    let mut totals = HashMap::new();
-    for root in builders.values() {
-        let root_path = root.root_path.to_string_lossy();
-        for artist in root.artists.values() {
-            let folders_by_tag = folders_by_album_tag(artist);
-            for album in artist.albums.values() {
-                let Some(total) = complete_album_total(album) else {
-                    continue;
-                };
-                let tag = album.root_tracks[0].album_tag.as_str();
-                if !tag.is_empty() && folders_by_tag.get(tag).copied().unwrap_or(0) > 1 {
-                    continue;
-                }
-                totals.insert(
-                    album_row_key(&root_path, &artist.artist_name, &album.folder_name),
-                    total,
-                );
-            }
-        }
-    }
-    totals
-}
-
-/// How many of `artist`'s album folders, and its folder of loose tracks,
-/// hold tracks with each album tag.
-fn folders_by_album_tag(artist: &ArtistNodeBuilder) -> HashMap<&str, usize> {
-    let mut counts = HashMap::new();
-    let folders = std::iter::once(artist.loose_tracks.iter().collect::<Vec<_>>()).chain(
-        artist.albums.values().map(|album| {
-            album
-                .root_tracks
-                .iter()
-                .chain(album.sections.values().flatten())
-                .collect()
-        }),
-    );
-    for tracks in folders {
-        let tags = tracks
-            .iter()
-            .map(|track| track.album_tag.as_str())
-            .collect::<HashSet<_>>();
-        for tag in tags {
-            *counts.entry(tag).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-fn complete_album_total(album: &AlbumNodeBuilder) -> Option<u32> {
-    let tracks = &album.root_tracks;
-    let first = tracks.first()?;
-    if !album.sections.is_empty()
-        || tracks
-            .iter()
-            .any(|track| track.album_tag != first.album_tag)
-    {
-        return None;
-    }
-    let total = u32::try_from(tracks.len()).ok()?;
-    let mut seen = vec![false; tracks.len()];
-    for track in tracks {
-        let number = track
-            .track_no
-            .filter(|number| (1..=total).contains(number))?;
-        let slot = seen.get_mut(usize::try_from(number - 1).ok()?)?;
-        if std::mem::replace(slot, true) {
-            return None;
-        }
-    }
-    Some(total)
-}
-
-/// The track count of `track`'s album in `totals`, built by
-/// [`album_track_totals`]: `None` for a track outside every library folder,
-/// one not in an album folder, or one whose album's count is uncertain.
-pub(crate) fn track_album_total(
-    totals: &HashMap<String, u32>,
-    roots: &[LibraryRoot],
-    track: &LibraryTrack,
-) -> Option<u32> {
-    let root = pick_root_for_track(roots, track)?;
-    let place = track_place(root, track)?;
-    if place.section.is_some() {
-        return None;
-    }
-    let album_folder = place.album_folder?;
-    totals
-        .get(&album_row_key(
-            &root.path.to_string_lossy(),
-            &place.artist_name,
-            &album_folder,
-        ))
-        .copied()
 }
 
 fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, track: &LibraryTrack) {
@@ -1972,154 +1865,6 @@ mod tests {
         // A track outside every library folder has none.
         let outside = track("/elsewhere/01.flac", "", None, None, "Outside");
         assert!(track_ancestor_keys(&library.roots, &outside).is_empty());
-    }
-
-    /// The count of each album in a library of `tracks` (path, album tag
-    /// and number) under `/music`, by album folder, as the playing track
-    /// at the first path would show it.
-    fn album_total_of(tracks: &[(&str, &str, Option<u32>)]) -> Option<u32> {
-        let library = LibrarySnapshot {
-            roots: vec![root("/music")],
-            tracks: crate::library::shared_tracks(
-                tracks
-                    .iter()
-                    .map(|(path, album, number)| track(path, album, None, *number, "Song"))
-                    .collect(),
-            ),
-            ..LibrarySnapshot::default()
-        };
-        let cache = LibraryTreeCache::new(&library);
-        track_album_total(
-            &cache.album_track_totals,
-            &library.roots,
-            &library.tracks[0],
-        )
-    }
-
-    #[test]
-    fn album_total_counts_a_completely_numbered_album_folder() {
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/02.flac", "Album", Some(2)),
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/A/Album/03.flac", "Album", Some(3)),
-                // Another album folder does not count.
-                ("/music/A/Other/01.flac", "Other", Some(1)),
-            ]),
-            Some(3)
-        );
-    }
-
-    #[test]
-    fn album_total_is_unknown_when_the_folder_may_not_hold_the_album() {
-        // Tracks missing from the numbers, as with an album only partly in
-        // the library.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/02.flac", "Album", Some(2)),
-                ("/music/A/Album/05.flac", "Album", Some(5)),
-            ]),
-            None
-        );
-        // Repeated numbers, as with two discs in one folder.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/1-01.flac", "Album", Some(1)),
-                ("/music/A/Album/2-01.flac", "Album", Some(1)),
-            ]),
-            None
-        );
-        // A track without a number.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/A/Album/bonus.flac", "Album", None),
-            ]),
-            None
-        );
-        // Two albums in one folder.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Mixed/01.flac", "First", Some(1)),
-                ("/music/A/Mixed/02.flac", "Second", Some(2)),
-            ]),
-            None
-        );
-        // An album split across section folders, such as discs, and a
-        // track in one of them.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/A/Album/CD2/01.flac", "Album", Some(1)),
-            ]),
-            None
-        );
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/CD1/01.flac", "Album", Some(1)),
-                ("/music/A/Album/CD1/02.flac", "Album", Some(2)),
-            ]),
-            None
-        );
-        // An album split across two folders of its artist, or with a track
-        // loose in the artist's folder.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/A/Album/02.flac", "Album", Some(2)),
-                ("/music/A/Album (more)/03.flac", "Album", Some(3)),
-            ]),
-            None
-        );
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/A/03.flac", "Album", Some(3)),
-            ]),
-            None
-        );
-        // The same title by another artist is another album.
-        assert_eq!(
-            album_total_of(&[
-                ("/music/A/Album/01.flac", "Album", Some(1)),
-                ("/music/B/Album/01.flac", "Album", Some(1)),
-            ]),
-            Some(1)
-        );
-        // A track loose in its artist's folder has no album folder.
-        assert_eq!(
-            album_total_of(&[("/music/A/01.flac", "Album", Some(1))]),
-            None
-        );
-    }
-
-    #[test]
-    fn album_total_is_unknown_for_a_track_outside_the_library_folders() {
-        let library = LibrarySnapshot {
-            roots: vec![root("/music")],
-            tracks: crate::library::shared_tracks(vec![track(
-                "/music/A/Album/01.flac",
-                "Album",
-                None,
-                Some(1),
-                "Song",
-            )]),
-            ..LibrarySnapshot::default()
-        };
-        let cache = LibraryTreeCache::new(&library);
-        assert_eq!(
-            track_album_total(
-                &cache.album_track_totals,
-                &library.roots,
-                &library.tracks[0]
-            ),
-            Some(1)
-        );
-        let outside = track("/elsewhere/A/Album/01.flac", "Album", None, Some(1), "Song");
-        assert_eq!(
-            track_album_total(&cache.album_track_totals, &library.roots, &outside),
-            None
-        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use rusqlite::Connection;
 use super::schema::load_snapshot;
 use super::{
     next_file_sequence, LibraryEvent, LibraryRoot, LibrarySnapshot, LibraryStatus, LibraryTrack,
+    TrackFileFingerprint,
 };
 
 /// Changes to the library's roots and tracks. A path is either upserted or
@@ -27,12 +28,17 @@ pub struct LibraryChanges {
     pub upserted: Vec<Arc<LibraryTrack>>,
     /// Paths whose tracks were removed.
     pub removed: Vec<PathBuf>,
+    /// Indexed files that a scan found changed on disk and read again, in
+    /// the state it read them in, oldest first. Their rows may be as they
+    /// were, since a row holds only some of a file's tags, so the bridge
+    /// reads the playing track's tags again from these.
+    pub(crate) changed_files: Vec<(PathBuf, TrackFileFingerprint)>,
 }
 
 impl LibraryChanges {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.roots.is_none() && !self.has_rows()
+        self.roots.is_none() && !self.has_rows() && self.changed_files.is_empty()
     }
 
     /// Whether any track changed.
@@ -47,6 +53,7 @@ impl LibraryChanges {
         if let Some(roots) = newer.roots.take() {
             self.roots = Some(roots);
         }
+        self.changed_files.append(&mut newer.changed_files);
         if !newer.has_rows() {
             return;
         }
@@ -217,6 +224,8 @@ struct Pending {
     upserted: Vec<PathBuf>,
     upserted_set: HashSet<PathBuf>,
     removed: HashSet<PathBuf>,
+    /// See [`LibraryChanges::changed_files`].
+    changed_files: Vec<(PathBuf, TrackFileFingerprint)>,
     /// The [`WorkerLibrary::reads_after`] number of the first change.
     read_after: Option<u64>,
 }
@@ -319,6 +328,16 @@ impl WorkerLibrary {
             self.snapshot.tracks.push(track);
         }
         self.snapshot.bump_search_revision();
+        self.note_change();
+    }
+
+    /// Notes files that a scan found changed on disk and read again; see
+    /// [`LibraryChanges::changed_files`].
+    pub(super) fn files_changed(&mut self, files: Vec<(PathBuf, TrackFileFingerprint)>) {
+        if files.is_empty() {
+            return;
+        }
+        self.pending.changed_files.extend(files);
         self.note_change();
     }
 
@@ -428,6 +447,7 @@ impl WorkerLibrary {
             roots: pending.roots.then(|| self.snapshot.roots.clone()),
             upserted,
             removed,
+            changed_files: pending.changed_files,
         };
         (changes, pending.read_after.unwrap_or(self.reads_after))
     }

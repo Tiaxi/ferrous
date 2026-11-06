@@ -38,6 +38,8 @@ use crate::raw_audio::{
 #[cfg(test)]
 pub(crate) use cover_cache::tests::{encoded_picture, test_cache, write_wav_with_picture};
 pub(crate) use cover_cache::{CoverCacheBinding, EmbeddedCoverCache};
+#[cfg(test)]
+pub(crate) use tests::write_numbered_test_wave;
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
@@ -71,6 +73,10 @@ pub struct TrackMetadata {
     /// When the cover was chosen. A cover that the bridge learns of later,
     /// from a scan or artwork apply, is newer than this one.
     pub cover_read_at: crate::library::CoverReadAt,
+    /// The size and time of the file, taken before it was read: a scan
+    /// that reads the file in another state tells the bridge to read it
+    /// again.
+    pub(crate) file_fingerprint: Option<crate::library::TrackFileFingerprint>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +127,14 @@ impl MetadataService {
 }
 
 impl TrackMetadata {
+    /// The album's track total to show with the track number: the tags'
+    /// total, when there is a number and the total is not below it.
+    #[must_use]
+    pub fn shown_track_total(&self) -> Option<u32> {
+        let number = self.track_number.filter(|number| *number > 0)?;
+        self.track_total.filter(|total| *total >= number)
+    }
+
     #[must_use]
     pub fn displayed_bitrate_kbps(&self, position_seconds: f64) -> Option<u32> {
         if position_seconds.is_finite() && position_seconds >= 0.0 {
@@ -176,6 +190,7 @@ fn load_metadata_for_path(path: &Path) -> TrackMetadata {
             .to_owned(),
         ..TrackMetadata::default()
     };
+    metadata.file_fingerprint = crate::library::track_file_fingerprint(path);
     // The folder image comes first, as in the library, so that artwork
     // applied to the folder shows in both.
     metadata.cover_read_at = crate::library::CoverReadAt::now();
@@ -808,6 +823,20 @@ mod tests {
         assert_eq!(metadata.track_total, None);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A short wave file whose ID3v2 tag numbers it `number` of `total`.
+    pub(crate) fn write_numbered_test_wave(path: &Path, number: u32, total: u32) {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::Accessor;
+        use lofty::tag::{Tag, TagExt, TagType};
+
+        write_test_wave(path);
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_track(number);
+        tag.set_track_total(total);
+        tag.save_to_path(path, WriteOptions::new())
+            .expect("tag fixture");
     }
 
     /// A short mono PCM wave file with no tags.

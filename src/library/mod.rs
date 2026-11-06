@@ -354,6 +354,7 @@ impl LibraryEvent {
                 roots: Some(library.roots),
                 upserted: library.tracks,
                 removed: Vec::new(),
+                changed_files: Vec::new(),
             },
             status: LibraryStatus::default(),
             read_after: 0,

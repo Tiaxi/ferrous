@@ -24,8 +24,6 @@ pub(super) struct TreeResult {
     pub(super) expanded: HashSet<String>,
     pub(super) counts: (usize, usize),
     pub(super) root_track_counts: Arc<HashMap<PathBuf, usize>>,
-    /// See [`LibraryTreeCache::album_track_totals`].
-    pub(super) album_track_totals: Arc<HashMap<String, u32>>,
     generation: u64,
 }
 
@@ -71,7 +69,6 @@ impl TreeWorker {
                             expanded: request.expanded,
                             counts: cache.counts,
                             root_track_counts: Arc::clone(&cache.root_track_counts),
-                            album_track_totals: Arc::clone(&cache.album_track_totals),
                             generation: request.generation,
                         })
                         .is_err()
