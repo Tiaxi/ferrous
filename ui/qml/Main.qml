@@ -369,35 +369,48 @@ ApplicationWindow {
         property real lastSeekSeconds: -1
         function seek(seconds) { lastSeekSeconds = seconds }
         function setVolume(value) { volume = value }
-        function setFftSize(value) {}
-        function setSpectrogramViewMode(value) {}
-        function setSpectrogramDisplayMode(value) {}
-        function setViewerFullscreenMode(value) {}
-        function setPreventDisplaySleepInFullscreen(value) {}
-        function setDbRange(value) {}
-        function setLogScale(value) {}
-        function setSpectrogramFrequencyCap(value) {}
+        function setFftSize(value) { fftSize = value }
+        function setSpectrogramViewMode(value) { spectrogramViewMode = value }
+        function setSpectrogramDisplayMode(value) { spectrogramDisplayMode = value }
+        function setViewerFullscreenMode(value) { viewerFullscreenMode = value }
+        function setPreventDisplaySleepInFullscreen(value) { preventDisplaySleepInFullscreen = value }
+        function setDbRange(value) { dbRange = Math.max(50, Math.min(150, value)) }
+        function setLogScale(value) { logScale = value }
+        function setSpectrogramFrequencyCap(value) { spectrogramFrequencyCap = value }
         function setRepeatMode(mode) { repeatMode = mode }
         function setShuffleEnabled(value) { shuffleEnabled = value }
-        function setShowFps(value) {}
+        function setShowFps(value) { showFps = value }
         function setShowLevelMeter(value) { showLevelMeter = value }
-        function setShowSpectrogramCrosshair(value) {}
+        // As BridgeClient::settingDefaults, which the bridge's tests check.
+        function settingDefaults() {
+            return {
+                fftSize: 8192, spectrogramViewMode: 0, spectrogramDisplayMode: 0,
+                viewerFullscreenMode: 0, dbRange: 132, logScale: false, showFps: false,
+                showLevelMeter: false, librarySortMode: 0, systemMediaControlsEnabled: true,
+                preventDisplaySleepInFullscreen: true, showSpectrogramCrosshair: false,
+                showSpectrogramScale: false, channelButtonsVisibility: 1,
+                spectrogramZoomEnabled: true, libraryWatchEnabled: true,
+                spectrogramFrequencyCap: false, lastFmShowScrobbleProgress: true,
+                lastFmScrobblingEnabled: false
+            }
+        }
+        function setShowSpectrogramCrosshair(value) { showSpectrogramCrosshair = value }
         function setShowSpectrogramScale(value) { showSpectrogramScale = value }
-        function setSpectrogramZoomEnabled(value) {}
+        function setSpectrogramZoomEnabled(value) { spectrogramZoomEnabled = value }
         function setSpectrogramZoomLevel(level) {}
         function setSpectrogramWidgetWidth(width) {}
         function registerSpectrogramItem(item, channelIndex) {}
         function unregisterSpectrogramItem(item) {}
-        function setSystemMediaControlsEnabled(value) {}
-        function setLibraryWatchEnabled(value) {}
-        function setLastFmScrobblingEnabled(value) {}
+        function setSystemMediaControlsEnabled(value) { systemMediaControlsEnabled = value }
+        function setLibraryWatchEnabled(value) { libraryWatchEnabled = value }
+        function setLastFmScrobblingEnabled(value) { lastFmScrobblingEnabled = value }
         function beginLastFmAuth() {}
         function completeLastFmAuth() {}
         function disconnectLastFm() {}
         function setLastFmScrobblingPaused(value) { lastFmScrobblingPaused = value }
         function setLastFmShowScrobbleProgress(value) { lastFmShowScrobbleProgress = value }
         function playAt(index) {}
-        function selectQueueIndex(index) {}
+        function selectQueueIndex(index) { selectedQueueIndex = index }
         // The queue edits asked for, for tests.
         property var queueCommands: []
         function removeAt(index) { queueCommands = queueCommands.concat(["remove " + index]) }
@@ -434,6 +447,9 @@ ApplicationWindow {
         function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
+        // The queue rows' paths, which tests set.
+        property var queuePaths: []
+        function queueIndexOfPath(path) { return queuePaths.indexOf(path) }
         function addLibraryRoot(path, name) {}
         function setLibraryRootName(path, name) {}
         function removeLibraryRoot(path) {}
@@ -441,8 +457,10 @@ ApplicationWindow {
         function rescanAllLibraryRoots() {}
         function setLibraryNodeExpanded(key, expanded) {}
         function setLibraryViewState(selectionKey, anchorKey, anchorOffset) {}
-        function showTrackInLibrary(path) {}
-        function setLibrarySortMode(mode) {}
+        // The tracks shown in the library, for tests.
+        property var shownInLibrary: []
+        function showTrackInLibrary(path) { shownInLibrary = shownInLibrary.concat([path]) }
+        function setLibrarySortMode(mode) { librarySortMode = mode }
         function setGlobalSearchQuery(query) {}
         function searchCurrentTrackArtworkSuggestions() {}
         function clearItunesArtworkSuggestions() {}
@@ -486,7 +504,7 @@ ApplicationWindow {
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
         function isChannelSilent(channelIndex) { return false }
-        function setChannelButtonsVisibility(value) {}
+        function setChannelButtonsVisibility(value) { channelButtonsVisibility = value }
     }
 
     QtObject {
@@ -520,6 +538,12 @@ ApplicationWindow {
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
+        function bulkFieldChanged(field) { return false }
+        function bulkOriginalValue(field) { return "" }
+        function bulkOriginalValueMixed(field) { return false }
+        function revertBulkField(field) {}
+        function fieldChanged(field) { return false }
+        function revertField(field) {}
         function applyBulkField(field, value) {}
         function applyBulkFieldToRows(rows, field, value) {}
         function setCell(row, field, value) {}
@@ -573,6 +597,21 @@ ApplicationWindow {
 
     function openDiagnostics() {
         diagnosticsDialog.open()
+    }
+
+    // Selects the queue's row of `path` and brings it into view, with the
+    // keyboard on the queue.
+    function showQueuePath(path) {
+        const index = root.uiBridge.queueIndexOfPath ? root.uiBridge.queueIndexOfPath(path) : -1
+        if (index < 0) {
+            return false
+        }
+        queueController.setSingleSelection(index)
+        queueController.ensureIndexVisible(index)
+        if (queueController.view) {
+            queueController.view.forceActiveFocus(Qt.OtherFocusReason)
+        }
+        return true
     }
 
     function submitExternalImport(paths, replaceQueue) {
@@ -1171,6 +1210,8 @@ ApplicationWindow {
 
     Dialogs.AboutDialog {
         id: aboutDialog
+        uiPalette: root.uiPalette
+        windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
     }
 
@@ -1184,9 +1225,6 @@ ApplicationWindow {
         spectrogramFftChoices: root.spectrogramFftChoices
         promptAddLibraryRoot: root.promptAddLibraryRoot
         openLibraryRootNameDialog: root.openLibraryRootNameDialog
-        stepScrollView: root.stepScrollView
-        snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
-        snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
     }
 
     Dialogs.LibraryRootNameDialog {
@@ -1227,6 +1265,11 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         popupTransitionMs: root.uiPopupTransitionMs
+        uiBridge: root.uiBridge
+        showInQueue: root.showQueuePath
+        showInLibrary: function(path) { libraryController.showTrackInLibrary(path) }
+        openPreferencesPage: function(index) { preferencesDialog.openPage(index) }
+        openDiagnostics: root.openDiagnostics
     }
 
     Platform.FileDialog {

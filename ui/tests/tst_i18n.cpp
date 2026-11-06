@@ -401,7 +401,7 @@ void TranslationTest::tagEditorTellsMixedValuesByAFlag() {
     // translated, says the files keep their own.
     QQuickItem *title = findQuickItemByObjectName(window->contentItem(), QStringLiteral("tagEditorField_title"));
     QVERIFY(title != nullptr);
-    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("<keep>")));
+    QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Multiple values")));
     QCOMPARE(title->property("text").toString(), QString());
 
     // The albums are the same, whatever their text: it is the field's value.

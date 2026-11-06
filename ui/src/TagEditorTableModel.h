@@ -82,6 +82,9 @@ public:
     TagEditorRowState *rowAt(int row);
     bool setFieldValue(int row, const QString &field, const QString &value);
     QString fieldValue(int row, const QString &field) const;
+    // The value of `field` that the row's file holds: what saving would
+    // replace, and what reverting gives back.
+    QString originalFieldValue(int row, const QString &field) const;
     QStringList loadedPaths() const;
     bool hasDirtyRows() const;
     // Marks exactly `rows` selected, notifying only the rows that change.

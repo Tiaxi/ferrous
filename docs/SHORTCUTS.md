@@ -51,7 +51,9 @@ The handles between the queue's column headings resize the Artist, Album and Len
 
 Tab and Shift+Tab move between the controls, including the transport buttons, the seek bar and the volume. With the seek bar focused, Left and Right seek back or forward 5 seconds.
 
-In **Preferences**, Tab reaches the page tabs, and Space opens the focused one. Left and Right on a tab, Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp move to the next or previous page.
+In **Configure Ferrous** (**Edit > Preferences**), the page list has the keyboard first: Up and Down move between the pages, and so do Ctrl+Tab and Ctrl+Shift+Tab, or Ctrl+PageDown and Ctrl+PageUp, from anywhere in the dialog. Tab goes on to the page's controls and the buttons. Changes take effect with OK or Apply; Escape cancels them.
+
+In **Recent Issues**, the arrow and Page keys scroll the list, and Tab reaches each issue's action, Open Diagnostics… and Clear All.
 
 ## Viewers
 

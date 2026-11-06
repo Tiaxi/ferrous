@@ -6,53 +6,28 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "." as Preferences
 
-ScrollView {
+// The Media Controls page.
+Preferences.PreferencesPage {
     id: root
 
-    required property var uiBridge
-    required property var uiPalette
+    title: I18n.i18nc("@title preferences page", "Media Controls")
 
-    clip: true
-    contentWidth: availableWidth
-    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+    CheckBox {
+        id: mediaCheckBox
+        objectName: "systemMediaControlsCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Plasma:")
+        text: I18n.i18nc("@option:check", "Show in the media controls and answer media keys")
+        checked: root.settings.value("systemMediaControlsEnabled")
+        onToggled: root.settings.setValue("systemMediaControlsEnabled", checked)
+    }
 
-    ColumnLayout {
-        width: root.availableWidth
-        spacing: 0
-
-        Components.SurfaceCard {
-            Layout.fillWidth: true
-            color: root.uiPalette.uiSurfaceColor
-            borderColor: root.uiPalette.uiBorderColor
-            implicitHeight: contentColumn.implicitHeight + 36
-
-            ColumnLayout {
-                id: contentColumn
-                anchors.fill: parent
-                anchors.margins: 18
-                spacing: 14
-
-                Kirigami.Heading {
-                    Layout.fillWidth: true
-                    level: 2
-                    text: I18n.i18nc("@title", "System Media")
-                    font.weight: Font.DemiBold
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Enable KDE media controls and media buttons")
-                    checked: root.uiBridge.systemMediaControlsEnabled
-                    onToggled: root.uiBridge.setSystemMediaControlsEnabled(checked)
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    text: I18n.i18nc("@label", "When enabled, Ferrous appears in Plasma's media controls and responds to Play/Pause, Previous, Next, and Stop media buttons. Keyboard volume buttons always control system volume, not Ferrous volume.")
-                }
-            }
-        }
+    Components.FormHelpText {
+        uiPalette: root.uiPalette
+        indent: mediaCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "Ferrous appears in Plasma’s media controls and answers the Play/Pause, "
+            + "Previous, Next and Stop keys. The volume keys always set the system volume, not "
+            + "Ferrous’s.")
     }
 }

@@ -383,6 +383,8 @@ private slots:
     void eachTestStartsWithEmptyUserDirectories_data();
     void eachTestStartsWithEmptyUserDirectories();
     void destroyingTheClientWaitsForTheBackendsFinalSave();
+    void settingDefaultsAreANewBackendsSettings();
+    void theDynamicRangeKeepsTheBackendsWholeRange();
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
     void spectrogramOverlaySettingsApplyFromSnapshot();
@@ -2328,6 +2330,10 @@ void BridgeClientTest::thousandsOfAppendedPathsReachTheBackendInOrder() {
     for (int i = 0; i < paths.size(); ++i) {
         QCOMPARE(bridge.queuePathAt(i), paths[i]);
     }
+    // Recent Issues finds a file's row by its path.
+    QCOMPARE(bridge.queueIndexOfPath(paths[4321]), 4321);
+    QCOMPARE(bridge.queueIndexOfPath(base + QStringLiteral("/missing.flac")), -1);
+    QCOMPARE(bridge.queueIndexOfPath(QString()), -1);
     QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
     // Leave no queue of removed fixtures to the tests after this one.
     bridge.clearQueue();
@@ -6447,6 +6453,49 @@ void BridgeClientTest::destroyingTheClientWaitsForTheBackendsFinalSave() {
     const QStringList leftovers = configDir.entryList(
         {QStringLiteral("*.tmp")}, QDir::Files | QDir::Hidden);
     QVERIFY2(leftovers.isEmpty(), qPrintable(leftovers.join(QStringLiteral(", "))));
+}
+
+void BridgeClientTest::settingDefaultsAreANewBackendsSettings() {
+    // Each test starts with empty user directories: no settings file.
+    auto client = std::make_unique<BridgeClient>();
+    QVERIFY(client->m_ffiBridge != nullptr);
+    QSignalSpy snapshots(client.get(), &BridgeClient::snapshotChanged);
+    QVERIFY(snapshots.wait(5000));
+    // Configure Ferrous's Defaults: what the backend starts with.
+    const QVariantMap defaults = client->settingDefaults();
+    QCOMPARE(defaults.size(), 19);
+    // The level meter is off for new installs.
+    QCOMPARE(defaults.value(QStringLiteral("showLevelMeter")), QVariant(false));
+    for (auto it = defaults.cbegin(); it != defaults.cend(); ++it) {
+        const QVariant actual = client->property(qPrintable(it.key()));
+        QVERIFY2(actual.isValid(), qPrintable(it.key()));
+        QVERIFY2(actual == it.value() || (actual.canConvert<double>()
+                     && qFuzzyCompare(actual.toDouble() + 1.0, it.value().toDouble() + 1.0)),
+            qPrintable(QStringLiteral("%1: %2, default %3")
+                           .arg(it.key(), actual.toString(), it.value().toString())));
+    }
+}
+
+void BridgeClientTest::theDynamicRangeKeepsTheBackendsWholeRange() {
+    // The backend keeps 50 to 150 dB, its default 132 among them; the client
+    // once cut everything past 120.
+    auto client = std::make_unique<BridgeClient>();
+    QVERIFY(client->m_ffiBridge != nullptr);
+    client->setDbRange(132.0);
+    QCOMPARE(client->dbRange(), 132.0);
+    client->setDbRange(150.0);
+    QCOMPARE(client->dbRange(), 150.0);
+    client->setDbRange(400.0);
+    QCOMPARE(client->dbRange(), 150.0);
+    client->setDbRange(10.0);
+    QCOMPARE(client->dbRange(), 50.0);
+    client->setDbRange(145.0);
+    client.reset();
+    QFile settings(QDir(qEnvironmentVariable("XDG_CONFIG_HOME"))
+                       .filePath(QStringLiteral("ferrous/settings.txt")));
+    QVERIFY(settings.open(QIODevice::ReadOnly));
+    const QByteArray saved = settings.readAll();
+    QVERIFY2(saved.contains("db_range=145.00\n"), saved.constData());
 }
 
 void BridgeClientTest::saveBeforeQuitReportsAFailedSaveAndSavesOnRetry() {

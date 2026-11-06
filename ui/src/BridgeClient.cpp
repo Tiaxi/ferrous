@@ -2343,7 +2343,8 @@ void BridgeClient::setPreventDisplaySleepInFullscreen(bool value) {
 }
 
 void BridgeClient::setDbRange(double value) {
-    const double clamped = std::clamp(value, 50.0, 120.0);
+    // The range the backend keeps (src/frontend_bridge/commands.rs).
+    const double clamped = std::clamp(value, 50.0, 150.0);
     if (!qFuzzyCompare(m_dbRange + 1.0, clamped + 1.0)) {
         m_dbRange = clamped;
         scheduleSnapshotChanged();
@@ -2351,6 +2352,34 @@ void BridgeClient::setDbRange(double value) {
     sendBinaryCommand(BinaryBridgeCodec::encodeCommandF32(
         BinaryBridgeCodec::CmdSetDbRange,
         static_cast<float>(clamped)));
+}
+
+QVariantMap BridgeClient::settingDefaults() const {
+    // The decoder's defaults are the backend's, for settings a snapshot
+    // leaves out; tst_bridge_client compares them with a new backend's.
+    const BinaryBridgeCodec::DecodedSettings defaults;
+    return {
+        {QStringLiteral("fftSize"), defaults.fftSize},
+        {QStringLiteral("spectrogramViewMode"), defaults.spectrogramViewMode},
+        {QStringLiteral("spectrogramDisplayMode"), defaults.spectrogramDisplayMode},
+        {QStringLiteral("viewerFullscreenMode"), defaults.viewerFullscreenMode},
+        {QStringLiteral("dbRange"), static_cast<double>(defaults.dbRange)},
+        {QStringLiteral("logScale"), defaults.logScale},
+        {QStringLiteral("showFps"), defaults.showFps},
+        {QStringLiteral("showLevelMeter"), defaults.showLevelMeter},
+        {QStringLiteral("librarySortMode"), defaults.librarySortMode},
+        {QStringLiteral("systemMediaControlsEnabled"), defaults.systemMediaControlsEnabled},
+        {QStringLiteral("preventDisplaySleepInFullscreen"), defaults.preventDisplaySleepInFullscreen},
+        {QStringLiteral("showSpectrogramCrosshair"), defaults.showSpectrogramCrosshair},
+        {QStringLiteral("showSpectrogramScale"), defaults.showSpectrogramScale},
+        {QStringLiteral("channelButtonsVisibility"), defaults.channelButtonsVisibility},
+        {QStringLiteral("spectrogramZoomEnabled"), defaults.spectrogramZoomEnabled},
+        {QStringLiteral("libraryWatchEnabled"), defaults.libraryWatchEnabled},
+        {QStringLiteral("spectrogramFrequencyCap"), defaults.spectrogramFrequencyCap},
+        {QStringLiteral("lastFmShowScrobbleProgress"), defaults.lastFmShowScrobbleProgress},
+        // Not in the settings section: scrobbling starts off.
+        {QStringLiteral("lastFmScrobblingEnabled"), false},
+    };
 }
 
 void BridgeClient::setLogScale(bool value) {
@@ -3264,6 +3293,20 @@ QString BridgeClient::libraryThumbnailSource(const QString &path, const QString 
 QString BridgeClient::queuePathAt(int index) const {
     const QueueRowData *row = m_queueRowsModel.rowAt(index);
     return row != nullptr ? row->path : QString{};
+}
+
+int BridgeClient::queueIndexOfPath(const QString &path) const {
+    if (path.isEmpty()) {
+        return -1;
+    }
+    const int count = m_queueRowsModel.rowCount();
+    for (int index = 0; index < count; ++index) {
+        const QueueRowData *row = m_queueRowsModel.rowAt(index);
+        if (row != nullptr && row->path == path) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 bool BridgeClient::applyQueueRows(const BinaryBridgeCodec::DecodedQueue &queue,

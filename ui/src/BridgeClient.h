@@ -323,6 +323,9 @@ public:
     Q_INVOKABLE void setViewerFullscreenMode(int value);
     Q_INVOKABLE void setPreventDisplaySleepInFullscreen(bool value);
     Q_INVOKABLE void setDbRange(double value);
+    // The settings of a new install, by the name of their properties: what
+    // the backend starts with when it has no settings file.
+    Q_INVOKABLE QVariantMap settingDefaults() const;
     Q_INVOKABLE void setLogScale(bool value);
     Q_INVOKABLE void setRepeatMode(int mode);
     Q_INVOKABLE void setShuffleEnabled(bool value);
@@ -417,6 +420,8 @@ public:
     Q_INVOKABLE QString libraryThumbnailSource(
         const QString &path, const QString &stamp = QString()) const;
     Q_INVOKABLE QString queuePathAt(int index) const;
+    // The first row of the queue that holds `path`, or -1.
+    Q_INVOKABLE int queueIndexOfPath(const QString &path) const;
     Q_INVOKABLE QVariant queueTrackNumberAt(int index) const;
     Q_INVOKABLE void addLibraryRoot(const QString &path, const QString &name = QString());
     Q_INVOKABLE void setLibraryRootName(const QString &path, const QString &name);

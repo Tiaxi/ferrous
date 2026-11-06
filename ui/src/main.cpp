@@ -16,6 +16,7 @@
 
 #include "BridgeClient.h"
 #include "AppIcon.h"
+#include "AboutComponents.h"
 #include "AppInstanceController.h"
 #include "ConsoleTee.h"
 #include "CoverImageProvider.h"
@@ -101,6 +102,7 @@ int main(int argc, char *argv[]) {
         &displaySleepInhibitor);
     engine.rootContext()->setContextProperty(QStringLiteral("appVersion"),
         QStringLiteral(FERROUS_APP_VERSION));
+    engine.rootContext()->setContextProperty(QStringLiteral("appComponents"), aboutComponents());
 
     QObject::connect(
         &engine,
