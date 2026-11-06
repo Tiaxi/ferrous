@@ -6,6 +6,7 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
 Rectangle {
@@ -319,6 +320,46 @@ Rectangle {
     readonly property bool firstRun: root.uiBridge.queueLength === 0
         && root.uiBridge.libraryRootCount === 0
 
+    // A track change: the row that becomes now is amber at once, from its
+    // own state; the row that was now fades its amber out (#373 Motion).
+    // `nowRow` is the row that is amber, as last seen; the playing row's
+    // index, path and state change together, and are read together here.
+    // A row is matched by its index and its path, so an edit that moves
+    // other rows to that index fades nothing, and only a row the queue
+    // still has where it was fades.
+    property var nowRow: null
+    readonly property QtObject nowFade: queueNowFade
+
+    Components.NowFadeOut {
+        id: queueNowFade
+    }
+
+    function followNowRow() {
+        const index = root.uiBridge.playingQueueIndex
+        const path = root.uiBridge.currentTrackPath || ""
+        const state = root.uiBridge.playbackState || "Stopped"
+        const was = root.nowRow
+        if (was !== null && (index !== was.index || path !== was.path)
+                && root.uiBridge.queuePathAt(was.index) === was.path) {
+            root.nowFade.start(was)
+        }
+        root.nowRow = state !== "Stopped" && index >= 0
+            ? {
+                index: index,
+                path: path,
+                glyph: state === "Paused" ? "media-playback-pause" : "media-playback-start"
+            }
+            : null
+    }
+
+    readonly property int playingQueueIndex: root.uiBridge.playingQueueIndex
+    readonly property string playingTrackPath: root.uiBridge.currentTrackPath || ""
+    readonly property string playbackState: root.uiBridge.playbackState || "Stopped"
+    onPlayingQueueIndexChanged: root.followNowRow()
+    onPlayingTrackPathChanged: root.followNowRow()
+    onPlaybackStateChanged: root.followNowRow()
+    Component.onCompleted: root.followNowRow()
+
     color: root.uiPalette.view
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
@@ -563,6 +604,34 @@ Rectangle {
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Queue")
 
+                // Rows a drag drops elsewhere are where the pointer left
+                // them at once, over the rows they displace, which slide
+                // to their places. Only a drag's moves slide; the
+                // controller tells which made the latest.
+                readonly property int slideDuration: Kirigami.Units.shortDuration
+                readonly property bool slidesMoves: root.controller.movesSlide
+                    && playlistView.slideDuration > 0
+                readonly property QtObject slideAnimation: queueSlideAnimation
+                move: Transition {
+                    objectName: "queueMoveTransition"
+                    enabled: playlistView.slidesMoves
+                    PropertyAction { property: "z"; value: 2 }
+                }
+                moveDisplaced: Transition {
+                    objectName: "queueMoveDisplacedTransition"
+                    enabled: playlistView.slidesMoves
+                    SequentialAnimation {
+                        PropertyAction { property: "z"; value: 1 }
+                        NumberAnimation {
+                            id: queueSlideAnimation
+                            objectName: "queueMoveDisplacedAnimation"
+                            property: "y"
+                            duration: playlistView.slideDuration
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+                }
+
                 Component.onCompleted: root.controller.registerView(playlistView)
 
                 // The row being dragged, which Escape stops.
@@ -632,6 +701,14 @@ Rectangle {
                     // Playing or paused: amber marks only what is playing now.
                     readonly property bool isNow: isCurrentQueueRow
                         && root.uiBridge.playbackState !== "Stopped"
+                    // The amber left on the row that was now, fading out
+                    // after a track change; 0 on every other row.
+                    readonly property real amberLeft: {
+                        const fading = queueNowFade.target
+                        return fading !== null && !isNow && index === fading.index
+                            && pathValue === fading.path
+                            ? queueNowFade.level : 0
+                    }
                     readonly property string unreadableReason: root.errorController
                         && pathValue.length > 0
                         ? (root.errorController.unreadablePaths[pathValue] || "")
@@ -659,6 +736,9 @@ Rectangle {
 
                     width: ListView.view.width
                     height: playlistView.rowHeight
+                    // Moved rows over the rows they displace; see the
+                    // view's transitions.
+                    z: 1
 
                     Accessible.role: Accessible.ListItem
                     Accessible.name: [
@@ -675,6 +755,7 @@ Rectangle {
 
                     Components.RowBackground {
                         uiPalette: root.uiPalette
+                        opaque: true
                         hovered: playlistRowMouseArea.containsMouse
                         selected: playlistRow.rowSelected
                         active: playlistView.activeFocus
@@ -715,6 +796,20 @@ Rectangle {
                                 id: stateHover
                             }
                         }
+
+                        // The glyph the row had while it was now, fading
+                        // out over whatever it shows next.
+                        Kirigami.Icon {
+                            objectName: "queueRowFadingState"
+                            visible: playlistRow.amberLeft > 0
+                            anchors.centerIn: parent
+                            width: 12
+                            height: 12
+                            source: visible ? queueNowFade.target.glyph : ""
+                            isMask: true
+                            color: root.uiPalette.now
+                            opacity: playlistRow.amberLeft
+                        }
                     }
 
                     Text {
@@ -743,9 +838,13 @@ Rectangle {
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.titleValue
+                        readonly property color plainColor: playlistRow.unreadable
+                            ? root.uiPalette.textSecondary : root.uiPalette.text
                         color: playlistRow.isNow
                             ? root.uiPalette.now
-                            : (playlistRow.unreadable ? root.uiPalette.textSecondary : root.uiPalette.text)
+                            : (playlistRow.amberLeft > 0
+                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberLeft)
+                                : plainColor)
                     }
 
                     Text {

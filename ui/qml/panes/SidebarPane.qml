@@ -47,6 +47,7 @@ Rectangle {
         }
 
         LibraryPane {
+            objectName: "libraryPane"
             Layout.fillWidth: true
             Layout.fillHeight: true
             controller: root.controller

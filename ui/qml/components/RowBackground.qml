@@ -14,6 +14,9 @@ import org.kde.kirigami 2.20 as Kirigami
 //   on a selected row, the tint and the ring are one rectangle; on an
 //   unselected row, the ring alone, as in Breeze.
 // Selection and focus change at once.
+//
+// - opaque: the row also paints the view colour under its tints, so a row
+//   that slides over another while its list moves rows hides it.
 Item {
     id: root
 
@@ -24,6 +27,7 @@ Item {
     // tint otherwise.
     property bool active: true
     property bool focused: false
+    property bool opaque: false
     // The scrollbar lane on the right, which the row leaves free.
     property real scrollbarLane: Kirigami.Units.largeSpacing
 
@@ -33,6 +37,13 @@ Item {
 
     anchors.fill: parent
     anchors.rightMargin: root.scrollbarLane
+
+    Rectangle {
+        objectName: "rowBackgroundBase"
+        anchors.fill: parent
+        color: root.uiPalette.view
+        visible: root.opaque
+    }
 
     Rectangle {
         id: hoverTint

@@ -447,7 +447,18 @@ ApplicationWindow {
         function libraryAlbumCoverAt(index) { return "" }
         function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
-        function queuePathAt(index) { return "" }
+        // As BridgeClient::queuePathAt, over the rows tests set: a list of
+        // rows, or a QueueRowsModel.
+        function queuePathAt(index) {
+            const rows = queueRows
+            if (rows && typeof rows.rowCount === "function") {
+                return index >= 0 && index < rows.rowCount()
+                    ? (rows.data(rows.index(index, 0), Qt.UserRole + 7) || "")
+                    : ""
+            }
+            const row = rows && typeof rows.length === "number" ? rows[index] : null
+            return row && row.path ? row.path : ""
+        }
         // As BridgeClient::queueContainsPath: a QueueRowsModel answers from
         // its index of paths.
         function queueContainsPath(path) {

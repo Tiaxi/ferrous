@@ -69,6 +69,100 @@ Item {
         : (root.albumText.length > 0 ? root.albumText : root.yearText)
     readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText], " · ")
 
+    // The lines the panel shows, wide and narrow.
+    readonly property var trackLines: ({
+        title: root.titleText,
+        artistAlbum: root.artistAlbumText,
+        details: root.detailsText,
+        artist: root.artistText,
+        narrowAlbum: root.narrowAlbumText,
+        narrowDetails: root.narrowDetailsText
+    })
+
+    readonly property var noLines: ({
+        title: "", artistAlbum: "", details: "", artist: "", narrowAlbum: "", narrowDetails: ""
+    })
+
+    // A track change cross-fades (#373 Motion): the next track of the same
+    // album fades its lines in over the old ones over shortDuration; a
+    // track of another album, or with another cover, fades the cover and
+    // the lines together on one curve over longDuration. What shows is
+    // always the playing track's; the track before's only fades out over
+    // it. Its metadata arriving or changing later changes the lines in
+    // place. With animations off, a track change is instant.
+    readonly property string trackKey: root.hasTrack
+        ? root._trimmed(root.uiBridge.currentTrackPath) : ""
+    readonly property string coverPath: root.uiBridge.currentTrackCoverPath || ""
+    // What the panel showed, as last seen: the track before's while the
+    // next one's come in.
+    property var shown: null
+    // The track before's lines and cover, fading out, or null.
+    property var outgoing: null
+    // How far the playing track has come in: 0 at a track change, 1 once
+    // it alone shows.
+    property real handover: 1
+    readonly property NumberAnimation handoverAnimation: NumberAnimation {
+        objectName: "nowPlayingHandoverAnimation"
+        target: root
+        property: "handover"
+        from: 0
+        to: 1
+        easing.type: Easing.OutCubic
+        onFinished: root.outgoing = null
+    }
+
+    function followTrack() {
+        const next = {
+            trackKey: root.trackKey,
+            album: root.albumText,
+            albumKey: root.albumText + "\n" + root.coverPath,
+            coverPath: root.coverPath,
+            lines: root.trackLines
+        }
+        const was = root.shown
+        root.shown = next
+        if (was === null) {
+            return
+        }
+        if (was.trackKey === next.trackKey) {
+            // An album named after the track itself, as when the file's
+            // metadata comes, joins the cover to the fade under way.
+            const fading = root.outgoing
+            if (fading !== null && !fading.albumChange && fading.album !== next.album) {
+                root.startHandover(fading.lines, fading.coverPath, fading.album, true)
+            }
+            return
+        }
+        if (was.trackKey.length === 0 || next.trackKey.length === 0) {
+            return
+        }
+        root.startHandover(was.lines, was.coverPath, was.album, was.albumKey !== next.albumKey)
+    }
+
+    function startHandover(lines, coverPath, album, albumChange) {
+        const duration = albumChange ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
+        root.handoverAnimation.stop()
+        if (duration <= 0) {
+            root.outgoing = null
+            root.handover = 1
+            return
+        }
+        root.outgoing = {
+            lines: lines,
+            coverPath: coverPath,
+            album: album,
+            albumChange: albumChange
+        }
+        root.handoverAnimation.duration = duration
+        root.handover = 0
+        root.handoverAnimation.start()
+    }
+
+    onTrackLinesChanged: root.followTrack()
+    onTrackKeyChanged: root.followTrack()
+    onCoverPathChanged: root.followTrack()
+    Component.onCompleted: root.followTrack()
+
     // 15, 14 and 12 px with the default 13 px font.
     readonly property real titlePointSize: root.uiPalette.basePointSize * 15 / 13
     readonly property real narrowTitlePointSize: root.uiPalette.basePointSize * 14 / 13
@@ -77,7 +171,7 @@ Item {
         ? emptyRow.height + 2 * Kirigami.Units.smallSpacing + root.textInset
         : (root.layoutMode === "narrow"
             ? root.narrowCoverSize + root.textInset
-            : root.width + wideText.implicitHeight + root.textInset + 14)
+            : root.width + liveText.wideHeight + root.textInset + 14)
 
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Now playing")
@@ -102,6 +196,115 @@ Item {
         color: root.uiPalette.textSecondary
         Accessible.role: Accessible.StaticText
         Accessible.name: text
+    }
+
+    // The lines of one track, wide or narrow: the playing track's, and the
+    // track before's while it fades out over them.
+    component TrackText: Item {
+        id: block
+
+        // The lines, as `trackLines` has them.
+        required property var lines
+        // The start of its items' names: "nowPlaying" for the playing
+        // track's.
+        required property string namePrefix
+        readonly property real wideHeight: wideColumn.implicitHeight
+        readonly property bool truncated: root.layoutMode === "wide"
+            ? (wideTitle.truncated || wideArtistAlbum.truncated || wideDetails.truncated)
+            : (root.layoutMode === "narrow"
+                && (narrowTitle.truncated || narrowArtist.truncated
+                    || narrowAlbum.truncated || narrowDetails.truncated))
+        readonly property bool hovered: wideHover.hovered || narrowHover.hovered
+        readonly property Item wideItem: wideColumn
+        readonly property Item narrowItem: narrowColumn
+
+        x: 0
+        y: 0
+        width: root.width
+        height: root.height
+
+        // Wide: the text block under the cover.
+        ColumnLayout {
+            id: wideColumn
+            objectName: block.namePrefix + "WideText"
+            visible: root.layoutMode === "wide"
+            x: root.textInset
+            y: cover.height + root.textInset
+            width: Math.max(0, root.width - 2 * root.textInset)
+            spacing: 2
+
+            HoverHandler {
+                id: wideHover
+            }
+
+            DetailLine {
+                id: wideTitle
+                objectName: block.namePrefix + "Title"
+                text: block.lines.title
+                font.pointSize: root.titlePointSize
+                font.weight: Font.DemiBold
+                color: root.uiPalette.text
+                lineHeightMode: Text.FixedHeight
+                lineHeight: Math.round(root.uiPalette.rowHeight * 20 / 26)
+            }
+            DetailLine {
+                id: wideArtistAlbum
+                objectName: block.namePrefix + "ArtistAlbum"
+                text: block.lines.artistAlbum
+            }
+            DetailLine {
+                id: wideDetails
+                objectName: block.namePrefix + "Details"
+                text: block.lines.details
+                font.pointSize: root.uiPalette.smallPointSize
+                font.features: root.uiPalette.tabularFigures
+                color: root.uiPalette.textTertiary
+            }
+        }
+
+        // Narrow: four short lines beside the cover.
+        ColumnLayout {
+            id: narrowColumn
+            objectName: block.namePrefix + "NarrowText"
+            visible: root.layoutMode === "narrow"
+            x: root.narrowCoverSize + root.textInset
+            y: 10
+            width: Math.max(0, root.width - x - root.textInset)
+            spacing: 0
+
+            HoverHandler {
+                id: narrowHover
+            }
+
+            DetailLine {
+                id: narrowTitle
+                objectName: block.namePrefix + "NarrowTitle"
+                text: block.lines.title
+                font.pointSize: root.narrowTitlePointSize
+                font.weight: Font.DemiBold
+                color: root.uiPalette.text
+            }
+            DetailLine {
+                id: narrowArtist
+                text: block.lines.artist
+                font.pointSize: root.uiPalette.smallPointSize
+                Layout.topMargin: 2
+            }
+            DetailLine {
+                id: narrowAlbum
+                text: block.lines.narrowAlbum
+                font.pointSize: root.uiPalette.smallPointSize
+                font.features: root.uiPalette.tabularFigures
+                color: root.uiPalette.textTertiary
+            }
+            DetailLine {
+                id: narrowDetails
+                text: block.lines.narrowDetails
+                font.pointSize: root.uiPalette.smallPointSize
+                font.features: root.uiPalette.tabularFigures
+                color: root.uiPalette.textTertiary
+            }
+        }
     }
 
     // Nothing loaded.
@@ -151,101 +354,37 @@ Item {
         replaceFromItunesAction: root.replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
         openAlbumArtViewer: root.openAlbumArtViewer
+        // The album before's cover, over this one while it fades out.
+        outgoingShown: root.outgoing !== null && root.outgoing.albumChange
+        outgoingCoverPath: cover.outgoingShown ? root.outgoing.coverPath : ""
+        outgoingOpacity: 1 - root.handover
     }
 
-    // Wide: the text block under the cover.
-    ColumnLayout {
-        id: wideText
-        objectName: "nowPlayingWideText"
-        visible: root.layoutMode === "wide"
-        x: root.textInset
-        y: cover.height + root.textInset
-        width: Math.max(0, root.width - 2 * root.textInset)
-        spacing: 2
-
-        HoverHandler {
-            id: wideHover
-        }
-
-        DetailLine {
-            id: wideTitle
-            objectName: "nowPlayingTitle"
-            text: root.titleText
-            font.pointSize: root.titlePointSize
-            font.weight: Font.DemiBold
-            color: root.uiPalette.text
-            lineHeightMode: Text.FixedHeight
-            lineHeight: Math.round(root.uiPalette.rowHeight * 20 / 26)
-        }
-        DetailLine {
-            id: wideArtistAlbum
-            objectName: "nowPlayingArtistAlbum"
-            text: root.artistAlbumText
-        }
-        DetailLine {
-            id: wideDetails
-            objectName: "nowPlayingDetails"
-            text: root.detailsText
-            font.pointSize: root.uiPalette.smallPointSize
-            font.features: root.uiPalette.tabularFigures
-            color: root.uiPalette.textTertiary
-        }
+    // The playing track's lines, which fade in over a track change.
+    TrackText {
+        id: liveText
+        visible: root.layoutMode !== "empty"
+        lines: root.trackLines
+        namePrefix: "nowPlaying"
+        opacity: root.outgoing !== null ? root.handover : 1
     }
 
-    // Narrow: four short lines beside the cover.
-    ColumnLayout {
-        id: narrowText
-        objectName: "nowPlayingNarrowText"
-        visible: root.layoutMode === "narrow"
-        x: root.narrowCoverSize + root.textInset
-        y: 10
-        width: Math.max(0, root.width - x - root.textInset)
-        spacing: 0
-
-        HoverHandler {
-            id: narrowHover
-        }
-
-        DetailLine {
-            id: narrowTitle
-            objectName: "nowPlayingNarrowTitle"
-            text: root.titleText
-            font.pointSize: root.narrowTitlePointSize
-            font.weight: Font.DemiBold
-            color: root.uiPalette.text
-        }
-        DetailLine {
-            id: narrowArtist
-            text: root.artistText
-            font.pointSize: root.uiPalette.smallPointSize
-            Layout.topMargin: 2
-        }
-        DetailLine {
-            id: narrowAlbum
-            text: root.narrowAlbumText
-            font.pointSize: root.uiPalette.smallPointSize
-            font.features: root.uiPalette.tabularFigures
-            color: root.uiPalette.textTertiary
-        }
-        DetailLine {
-            id: narrowDetails
-            text: root.narrowDetailsText
-            font.pointSize: root.uiPalette.smallPointSize
-            font.features: root.uiPalette.tabularFigures
-            color: root.uiPalette.textTertiary
-        }
+    // The track before's lines, fading out.
+    TrackText {
+        id: outgoingText
+        visible: root.outgoing !== null && root.layoutMode !== "empty"
+        lines: root.outgoing !== null ? root.outgoing.lines : root.noLines
+        namePrefix: "nowPlayingOutgoing"
+        opacity: 1 - root.handover
+        Accessible.ignored: true
     }
 
     // The whole text of the lines, when one of them is cut off.
-    readonly property bool textTruncated: root.layoutMode === "wide"
-        ? (wideTitle.truncated || wideArtistAlbum.truncated || wideDetails.truncated)
-        : (root.layoutMode === "narrow"
-            && (narrowTitle.truncated || narrowArtist.truncated
-                || narrowAlbum.truncated || narrowDetails.truncated))
+    readonly property bool textTruncated: liveText.truncated
 
     ToolTip {
-        parent: root.layoutMode === "wide" ? wideText : narrowText
-        visible: (wideHover.hovered || narrowHover.hovered) && root.textTruncated
+        parent: root.layoutMode === "wide" ? liveText.wideItem : liveText.narrowItem
+        visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
         text: root.layoutMode === "wide"
             ? root._joined([root.titleText, root.artistAlbumText, root.detailsText], "\n")
