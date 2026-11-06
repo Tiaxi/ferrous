@@ -497,13 +497,20 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     bridge->setProperty("libraryArtistCount", 1);
     QTRY_COMPARE(libraryTotals->property("text").toString(),
                  QStringLiteral("1 artist · 28 albums · 176 tracks"));
-    // A scan shows its progress after the totals.
+    // A scan shows its progress in the status bar, not after the totals.
+    QQuickItem *scanCount = named(window, "statusBarScanCount");
+    QVERIFY(scanCount != nullptr);
+    // The status bar shows the scan of a connected bridge.
+    bridge->setProperty("connected", true);
     bridge->setProperty("libraryScanProcessed", 41);
     bridge->setProperty("libraryScanDiscovered", 120);
     bridge->setProperty("libraryScanInProgress", true);
-    QTRY_COMPARE(libraryTotals->property("text").toString(),
-                 QStringLiteral("1 artist · 28 albums · 176 tracks · Scanning 41 / 120"));
+    QTRY_VERIFY(shown(scanCount));
+    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("41 / 120"));
+    QCOMPARE(libraryTotals->property("text").toString(),
+             QStringLiteral("1 artist · 28 albums · 176 tracks"));
     bridge->setProperty("libraryScanInProgress", false);
+    QTRY_VERIFY(!shown(scanCount));
 
     // The queue's name and totals.
     bridge->setProperty("queueRows", sampleQueueRows(3));
