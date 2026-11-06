@@ -523,7 +523,7 @@ private:
         QString artistName;
         QString collectionUrl;
         QString previewUrl;
-        QStringList assetUrls;
+        QString assetUrl;
         double relevanceScore{0.0};
         int apiOrder{0};
     };
@@ -531,8 +531,6 @@ private:
     struct ItunesArtworkAssetJobResult {
         quint64 generation{0};
         int candidateIndex{-1};
-        int assetUrlIndex{0};
-        bool usedFallback{false};
         bool success{false};
         QString errorMessage;
         QString normalizedPath;
@@ -652,11 +650,11 @@ private:
         const QByteArray &payload,
         const QString &tempDirPath,
         quint64 generation,
-        int candidateIndex,
-        int assetUrlIndex);
-    void startItunesArtworkAssetDownload(
-        int candidateIndex,
-        int assetUrlIndex = 0);
+        int candidateIndex);
+    // The largest rendition of the iTunes artwork whose 100 px thumbnail is
+    // `artworkUrl100`, or empty when it is not an Apple thumbnail URL.
+    static QString itunesArtworkUrl(const QString &artworkUrl100);
+    void startItunesArtworkAssetDownload(int candidateIndex);
     void applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result);
     void resetItunesArtworkTempDir();
     bool ensureItunesArtworkTempDir();
