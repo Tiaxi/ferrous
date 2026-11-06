@@ -11,7 +11,6 @@ use lofty::file::{FileType, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::Accessor;
 use lofty::tag::Tag;
-use url::Url;
 
 use crate::file_edit_lock;
 use crate::folder_cover::{find_folder_cover, find_named_cover};
@@ -19,12 +18,6 @@ use crate::raw_audio::{is_raw_surround_file, read_appended_apev2_text_metadata};
 use crate::safe_save::{check_rewritable, create_file, replace_file};
 use crate::tag_write::{save_tag, seeded_tag};
 use crate::vorbis_comment_scan::skipped_comments;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ItunesAlbumArtworkUrls {
-    pub original_url: String,
-    pub high_res_fallback_url: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedArtwork {
@@ -110,25 +103,6 @@ impl ApplyArtworkOutcome {
             describe_track_errors(&self.failed_tracks)
         ))
     }
-}
-
-#[must_use]
-pub fn derive_itunes_album_artwork_urls(artwork_url_100: &str) -> Option<ItunesAlbumArtworkUrls> {
-    let high_res_seed = artwork_url_100.replace("100x100bb", "100000x100000-999");
-    let parsed = Url::parse(&high_res_seed).ok()?;
-    let high_res_fallback_url = format!("https://is5-ssl.mzstatic.com{}", parsed.path());
-
-    let thumb_marker = "/image/thumb/";
-    let thumb_path = parsed.path();
-    let thumb_offset = thumb_path.find(thumb_marker)?;
-    let remaining = &thumb_path[thumb_offset + thumb_marker.len()..];
-    let slash = remaining.rfind('/')?;
-    let original_path = &remaining[..slash];
-
-    Some(ItunesAlbumArtworkUrls {
-        original_url: format!("https://a5.mzstatic.com/us/r1000/0/{original_path}"),
-        high_res_fallback_url,
-    })
 }
 
 /// Normalize an image file to the square artwork payload Ferrous applies.
@@ -549,22 +523,6 @@ mod tests {
         let tag = tagged.primary_tag().expect("primary tag");
         tag.get_picture_type(PictureType::CoverFront)
             .map(|picture| picture.data().to_vec())
-    }
-
-    #[test]
-    fn derives_itunes_album_original_and_high_res_urls() {
-        let urls = derive_itunes_album_artwork_urls(
-            "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/aa/bb/cc/dddd/source/100x100bb.jpg",
-        )
-        .expect("itunes urls");
-        assert_eq!(
-            urls.high_res_fallback_url,
-            "https://is5-ssl.mzstatic.com/image/thumb/Music126/v4/aa/bb/cc/dddd/source/100000x100000-999.jpg"
-        );
-        assert_eq!(
-            urls.original_url,
-            "https://a5.mzstatic.com/us/r1000/0/Music126/v4/aa/bb/cc/dddd/source"
-        );
     }
 
     #[test]

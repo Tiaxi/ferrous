@@ -339,6 +339,10 @@ private slots:
     void aCenteredRingShowingTheWholeTrackSurvivesStopAndPlay();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void asyncImageFileDetailsAcceptsImageProviderUrl();
+    void itunesArtworkUrlRequestsLargestRendition_data();
+    void itunesArtworkUrlRequestsLargestRendition();
+    void itunesArtworkUrlRejectsUnexpectedSources_data();
+    void itunesArtworkUrlRejectsUnexpectedSources();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
@@ -5240,6 +5244,55 @@ void BridgeClientTest::asyncImageFileDetailsAcceptsImageProviderUrl() {
     QCOMPARE(byProviderUrl.value(QStringLiteral("fileName")).toString(), QStringLiteral("front cover.png"));
 }
 
+void BridgeClientTest::itunesArtworkUrlRequestsLargestRendition_data() {
+    QTest::addColumn<QString>("thumbnail");
+    QTest::addColumn<QString>("expected");
+
+    const QString thumb = QStringLiteral("https://is1-ssl.mzstatic.com/image/thumb/Music116/v4/aa/bb/cc");
+    QTest::newRow("jpeg source")
+        << thumb + QStringLiteral("/source.jpg/100x100bb.jpg")
+        << thumb + QStringLiteral("/source.jpg/10000x10000-999.jpg");
+    QTest::newRow("png source stays lossless")
+        << thumb + QStringLiteral("/634904078164.png/100x100bb.jpg")
+        << thumb + QStringLiteral("/634904078164.png/10000x10000-999.png");
+    QTest::newRow("tiff source comes as jpeg")
+        << thumb + QStringLiteral("/source.tif/100x100bb.jpg")
+        << thumb + QStringLiteral("/source.tif/10000x10000-999.jpg");
+    QTest::newRow("source without extension")
+        << thumb + QStringLiteral("/source/100x100bb.jpg")
+        << thumb + QStringLiteral("/source/10000x10000-999.jpg");
+    QTest::newRow("keeps host, drops query")
+        << QStringLiteral(" https://is4-ssl.mzstatic.com/image/thumb/Music/x.PNG/100x100bb.jpg?a=1 ")
+        << QStringLiteral("https://is4-ssl.mzstatic.com/image/thumb/Music/x.PNG/10000x10000-999.png");
+}
+
+void BridgeClientTest::itunesArtworkUrlRequestsLargestRendition() {
+    QFETCH(QString, thumbnail);
+    QFETCH(QString, expected);
+    QCOMPARE(BridgeClient::itunesArtworkUrl(thumbnail), expected);
+}
+
+void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources_data() {
+    QTest::addColumn<QString>("thumbnail");
+
+    QTest::newRow("empty") << QString();
+    QTest::newRow("http")
+        << QStringLiteral("http://is1-ssl.mzstatic.com/image/thumb/Music116/v4/aa/source.jpg/100x100bb.jpg");
+    QTest::newRow("lookalike host")
+        << QStringLiteral("https://mzstatic.com.evil.test/image/thumb/Music116/source.jpg/100x100bb.jpg");
+    QTest::newRow("other host")
+        << QStringLiteral("https://evil.test/image/thumb/Music116/source.jpg/100x100bb.jpg");
+    QTest::newRow("not a thumbnail")
+        << QStringLiteral("https://is1-ssl.mzstatic.com/other/path/100x100bb.jpg");
+    QTest::newRow("local file")
+        << QStringLiteral("file:///image/thumb/Music116/source.jpg/100x100bb.jpg");
+}
+
+void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources() {
+    QFETCH(QString, thumbnail);
+    QVERIFY(BridgeClient::itunesArtworkUrl(thumbnail).isEmpty());
+}
+
 void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -5258,7 +5311,7 @@ void BridgeClientTest::itunesRectangularArtworkRowUsesNormalizedFileDetails() {
     BridgeClient::ItunesArtworkCandidate candidate;
     candidate.albumTitle = QStringLiteral("Album");
     candidate.artistName = QStringLiteral("Artist");
-    candidate.assetUrls = QStringList{QUrl::fromLocalFile(sourcePath).toString()};
+    candidate.assetUrl = QUrl::fromLocalFile(sourcePath).toString();
     client.m_itunesArtworkCandidates.push_back(candidate);
 
     QVariantMap row;
@@ -5315,7 +5368,7 @@ void BridgeClientTest::itunesSquareArtworkReuseSkipsRedundantNormalization() {
     BridgeClient::ItunesArtworkCandidate candidate;
     candidate.albumTitle = QStringLiteral("Album");
     candidate.artistName = QStringLiteral("Artist");
-    candidate.assetUrls = QStringList{QUrl::fromLocalFile(sourcePath).toString()};
+    candidate.assetUrl = QUrl::fromLocalFile(sourcePath).toString();
     client.m_itunesArtworkCandidates.push_back(candidate);
 
     QVariantMap row;
