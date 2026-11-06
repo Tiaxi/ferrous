@@ -11,6 +11,7 @@ Item {
     id: root
 
     required property var uiBridge
+    required property var uiPalette
     // Where playback is; see PlaybackClock.
     property var clock: null
     property var seekCommitted: null
@@ -255,8 +256,9 @@ Item {
                 Layout.minimumHeight: 0
 
                 Rectangle {
+                    objectName: "spectrogramLaneFloor"
                     anchors.fill: parent
-                    color: "#0b0b0f"
+                    color: root.uiPalette.spectrogramPlot.plotBg
                 }
 
                 SpectrogramItem {

@@ -1386,6 +1386,7 @@ ApplicationWindow {
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: root.visualizationMinimumHeight + root.embeddedLevelMeterHeight
                     openViewer: viewerController.openSpectrogramViewer
+                    uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
                     setVisualizationMode: viewerController.setVisualizationMode
                 }
@@ -1424,6 +1425,7 @@ ApplicationWindow {
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
             clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
         }
@@ -1463,6 +1465,7 @@ ApplicationWindow {
     Viewers.SpectrogramViewerShell {
         id: spectrogramViewerShell
         windowRoot: root
+        uiPalette: root.uiPalette
         viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         popupTransitionMs: root.uiPopupTransitionMs

@@ -1143,6 +1143,7 @@ private slots:
     void spectrogramFullscreenIdleHidesOverlaysButKeepsChannelMarkers();
     void spectrogramHoverChannelButtonsRemainClickable();
     void spectrogramSoloButtonsShowEverySoloedChannel();
+    void spectrogramBackgroundsAreThePlotFloor();
     void spectrogramMetadataOnlyResetWaitsForDataChunk();
     void spectrogramRollingSeekKeepsHistoryContinuous();
     void spectrogramCenteredToRollingAtMaxZoomReanchorsEpoch();
@@ -2241,6 +2242,7 @@ Item {
         width: 420
         height: 160
         uiBridge: bridge
+        uiPalette: palette
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2256,6 +2258,7 @@ void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoi
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 ApplicationWindow {
@@ -2268,6 +2271,7 @@ ApplicationWindow {
         objectName: "spectrogramViewerShell"
         anchors.fill: parent
         windowRoot: windowRoot
+        uiPalette: Components.UiPalette { windowRoot: windowRoot }
         viewerOpen: true
         useWholeScreenViewerMode: true
         popupTransitionMs: 0
@@ -2331,6 +2335,7 @@ void TransportInputSmokeTest::fullscreenVisualizationInhibitsDisplaySleepOnlyWhi
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 ApplicationWindow {
@@ -2358,6 +2363,7 @@ ApplicationWindow {
         objectName: "spectrogramViewerShell"
         anchors.fill: parent
         windowRoot: windowRoot
+        uiPalette: Components.UiPalette { windowRoot: windowRoot }
         viewerOpen: false
         useWholeScreenViewerMode: true
         popupTransitionMs: 0
@@ -2428,9 +2434,11 @@ void SpectrogramSmokeTest::spectrogramFullscreenIdleHidesOverlaysButKeepsChannel
     QString errorText;
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Item {
+    id: paletteRoot
     width: 640
     height: 320
 
@@ -2465,6 +2473,7 @@ Item {
         objectName: "spectrogramSurface"
         anchors.fill: parent
         uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2548,9 +2557,11 @@ void SpectrogramSmokeTest::spectrogramHoverChannelButtonsRemainClickable() {
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Window {
+    id: paletteRoot
     width: 640
     height: 320
     visible: true
@@ -2589,6 +2600,7 @@ Window {
         objectName: "clickableSpectrogramSurface"
         anchors.fill: parent
         uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -2651,6 +2663,130 @@ Window {
     QTRY_COMPARE(bridge->property("soloCalls").toInt(), 1);
 }
 
+// The pane, each lane and the viewer are the spectrogram's floor colour,
+// the same in both themes, rather than blacks of their own.
+void SpectrogramSmokeTest::spectrogramBackgroundsAreThePlotFloor() {
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "panes" as Panes
+import "viewers" as Viewers
+
+ApplicationWindow {
+    id: window
+    width: 640
+    height: 480
+    visible: true
+    palette.window: "#eff0f1"
+    palette.base: "#ffffff"
+
+    Components.UiPalette {
+        id: tokens
+        objectName: "tokens"
+        windowRoot: window
+    }
+
+    QtObject {
+        id: bridge
+        objectName: "floorBridge"
+        property string playbackState: "Stopped"
+        property var mutedChannels: []
+        property int spectrogramViewMode: 1
+        property int spectrogramDisplayMode: 0
+        property real dbRange: 90
+        property bool logScale: false
+        property bool spectrogramFrequencyCap: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: true
+        property bool showSpectrogramScale: true
+        property bool spectrogramZoomEnabled: true
+        property int channelButtonsVisibility: 2
+        property var soloedChannels: []
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelSilent(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Panes.SpectrogramPane {
+        objectName: "floorPane"
+        width: 320
+        height: 200
+        openViewer: function() {}
+        uiPalette: tokens
+
+        Viewers.SpectrogramSurface {
+            objectName: "floorSurface"
+            anchors.fill: parent
+            uiBridge: bridge
+            uiPalette: tokens
+        }
+    }
+
+    Viewers.SpectrogramViewerShell {
+        objectName: "floorShell"
+        anchors.fill: parent
+        windowRoot: window
+        uiPalette: tokens
+        viewerOpen: false
+        useWholeScreenViewerMode: false
+        popupTransitionMs: 0
+        titleText: "Ferrous"
+        closeViewer: function() {}
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->findChild<QObject *>(QStringLiteral("tokens"));
+    auto *pane = root->findChild<QQuickItem *>(QStringLiteral("floorPane"));
+    auto *surface = root->findChild<QQuickItem *>(QStringLiteral("floorSurface"));
+    QVERIFY(tokens != nullptr && pane != nullptr && surface != nullptr);
+    const QColor floor(QStringLiteral("#14062e"));
+    QCOMPARE(tokens->property("spectrogramPlot").value<QObject *>()->property("plotBg").value<QColor>(), floor);
+
+    QCOMPARE(pane->property("color").value<QColor>(), floor);
+    QVariantList descriptors;
+    for (int channel = 0; channel < 2; ++channel) {
+        descriptors.push_back(QVariantMap{
+            {QStringLiteral("label"), QString::number(channel)},
+            {QStringLiteral("showLabel"), true},
+            {QStringLiteral("muted"), false},
+            {QStringLiteral("channelIndex"), channel},
+        });
+    }
+    surface->setProperty("channelDescriptors", descriptors);
+    // The lanes are a Repeater's delegates: items under the surface, not
+    // its QObject children.
+    const std::function<void(QQuickItem *, QList<QQuickItem *> *)> collectLanes =
+        [&collectLanes](QQuickItem *item, QList<QQuickItem *> *found) {
+            if (item->objectName() == QStringLiteral("spectrogramLaneFloor")) {
+                found->push_back(item);
+            }
+            for (QQuickItem *child : item->childItems()) {
+                collectLanes(child, found);
+            }
+        };
+    QList<QQuickItem *> lanes;
+    QTRY_VERIFY((lanes.clear(), collectLanes(surface, &lanes), lanes.size() == 2));
+    for (QQuickItem *lane : std::as_const(lanes)) {
+        QCOMPARE(lane->property("color").value<QColor>(), floor);
+    }
+    QObject *popupFloor = root->findChild<QObject *>(QStringLiteral("spectrogramPopupFloor"));
+    QVERIFY(popupFloor != nullptr);
+    QCOMPARE(popupFloor->property("color").value<QColor>(), floor);
+}
+
 void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {
     QQmlApplicationEngine engine;
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -2658,9 +2794,11 @@ void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {
     QString errorText;
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Item {
+    id: paletteRoot
     width: 640
     height: 320
 
@@ -2702,6 +2840,7 @@ Item {
         objectName: "soloSpectrogramSurface"
         anchors.fill: parent
         uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: paletteRoot }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -19333,6 +19472,7 @@ void SpectrogramSmokeTest::spectrogramSurfaceCoalescesWidthReports() {
     QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Window {
@@ -19376,6 +19516,7 @@ Window {
         anchors.bottom: parent.bottom
         width: root.paneWidth
         uiBridge: bridge
+        uiPalette: Components.UiPalette { windowRoot: root }
     }
 }
 )QML"), baseUrl, &errorText));

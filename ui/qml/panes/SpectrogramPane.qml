@@ -8,6 +8,7 @@ Rectangle {
 
     property alias hostItem: spectrogramMainHost
     required property var openViewer
+    required property var uiPalette
     property int visualizationMode: 0
     property var setVisualizationMode: function(mode) {}
 
@@ -17,7 +18,7 @@ Rectangle {
         2 * modeSwitch.anchors.rightMargin + modeSwitch.width,
         modeSwitch.anchors.topMargin + modeSwitch.height)
 
-    color: "#0b0b0f"
+    color: root.uiPalette.spectrogramPlot.plotBg
     border.color: Qt.rgba(0, 0, 0, 0.25)
 
     MouseArea {

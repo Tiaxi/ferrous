@@ -163,7 +163,11 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
         qml/components/MetadataMarqueeRow.qml
+        qml/components/PlotPlate.qml
+        qml/components/PlotToolButton.qml
         qml/components/PopupTransition.qml
+        qml/components/RegionHeader.qml
+        qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
         qml/components/SurfaceCard.qml
         qml/components/TrackMetadataCard.qml
@@ -437,6 +441,25 @@ if(BUILD_TESTING)
         TIMEOUT 90
     )
     ferrous_add_default_platform_test(ferrous_level_meter_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # UiPalette's tokens and the shared components of #373.
+    qt_add_executable(ferrous_ui_foundations_tests
+        tests/tst_ui_foundations.cpp
+    )
+    set_target_properties(ferrous_ui_foundations_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_compile_definitions(ferrous_ui_foundations_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_ui_foundations_tests PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets Qt6::Test
+    )
+    ferrous_enable_strict_warnings(ferrous_ui_foundations_tests)
+    add_test(NAME ferrous_ui_foundations_tests COMMAND ferrous_ui_foundations_tests)
+    set_tests_properties(ferrous_ui_foundations_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 90
+    )
+    ferrous_add_default_platform_test(ferrous_ui_foundations_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
