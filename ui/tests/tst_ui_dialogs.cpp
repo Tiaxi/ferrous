@@ -171,6 +171,60 @@ void click(QQuickWindow *window, QQuickItem *item) {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre.toPoint());
 }
 
+// The item a press at `scenePos` goes to: of the shown items there that
+// take the left button, the one painted last, siblings in their z order.
+QQuickItem *pressTargetAt(QQuickWindow *window, const QPointF &scenePos) {
+    QQuickItem *target = nullptr;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (!item->isVisible()) {
+            return;
+        }
+        if ((item->acceptedMouseButtons() & Qt::LeftButton) && item->contains(item->mapFromScene(scenePos))) {
+            target = item;
+        }
+        QList<QQuickItem *> children = item->childItems();
+        std::stable_sort(children.begin(), children.end(),
+                         [](QQuickItem *a, QQuickItem *b) { return a->z() < b->z(); });
+        for (QQuickItem *child : children) {
+            visit(child);
+        }
+    };
+    visit(window->contentItem());
+    return target;
+}
+
+QString describe(QQuickItem *item) {
+    if (item == nullptr) {
+        return QStringLiteral("nothing");
+    }
+    return QStringLiteral("%1 \"%2\"").arg(QString::fromLatin1(item->metaObject()->className()),
+                                         item->objectName());
+}
+
+// Clicks `button` once it is enabled and nothing covers it, and checks that
+// the click reached it: a failure names what took the press instead.
+bool clickButtonWhenReachable(QQuickWindow *window, QQuickItem *button, QString *failure) {
+    const auto reachable = [&]() {
+        return button->isVisible() && button->isEnabled()
+            && pressTargetAt(window, sceneRect(button).center()) == button;
+    };
+    if (!QTest::qWaitFor(reachable)) {
+        *failure = QStringLiteral("%1 is %2, %3; a press there goes to %4")
+                       .arg(describe(button),
+                            button->isVisible() ? QStringLiteral("shown") : QStringLiteral("hidden"),
+                            button->isEnabled() ? QStringLiteral("enabled") : QStringLiteral("disabled"),
+                            describe(pressTargetAt(window, sceneRect(button).center())));
+        return false;
+    }
+    QSignalSpy clicked(button, SIGNAL(clicked()));
+    click(window, button);
+    if (clicked.count() != 1) {
+        *failure = QStringLiteral("%1 had %2 clicks").arg(describe(button)).arg(clicked.count());
+        return false;
+    }
+    return true;
+}
+
 bool emitClicked(QObject *button) {
     return button != nullptr && QMetaObject::invokeMethod(button, "clicked");
 }
@@ -1454,17 +1508,18 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
 
     // Only some rows selected: the field reverts those, the column every row.
     editor.setSelectedRows({0, 1});
-    QTRY_VERIFY(revert->isVisible());
-    click(window, revert);
-    QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Classical"));
+    QString failure;
+    QVERIFY2(clickButtonWhenReachable(window, revert, &failure), qPrintable(failure));
+    // A click reverts at once.
+    QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Classical"));
     QCOMPARE(editor.m_tableModel.fieldValue(1, QStringLiteral("genre")), QStringLiteral("Classical"));
     QCOMPARE(editor.m_tableModel.fieldValue(2, QStringLiteral("genre")), QStringLiteral("Ambient"));
     QTRY_VERIFY(!revert->isVisible());
     QCOMPARE(field->property("text").toString(), QStringLiteral("Classical"));
     QVERIFY(columnRevert->isVisible());
     QVERIFY(editor.dirty());
-    click(window, columnRevert);
-    QTRY_COMPARE(editor.m_tableModel.fieldValue(7, QStringLiteral("genre")), QStringLiteral("Classical"));
+    QVERIFY2(clickButtonWhenReachable(window, columnRevert, &failure), qPrintable(failure));
+    QCOMPARE(editor.m_tableModel.fieldValue(7, QStringLiteral("genre")), QStringLiteral("Classical"));
     QTRY_VERIFY(!columnRevert->isVisible());
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY(!editor.dirty());
