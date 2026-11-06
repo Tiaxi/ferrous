@@ -351,6 +351,8 @@ private slots:
     void soloedChannelsKeepEveryBitOfTheMask();
     void metadataChannelLabelsDecodeOptionalTail();
     void channelLayoutFollowsMatchingMetadataAcrossTracks();
+    void metadataTreeKeysDecodeAfterTheChannelLabels();
+    void currentTrackTreeKeysFollowTheMetadataOfTheCurrentTrack();
     void itunesSquareArtworkReuseSkipsRedundantNormalization();
     void trackOnlySnapshotSetsTrackFlagOnly();
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
@@ -6745,6 +6747,88 @@ void BridgeClientTest::channelLayoutFollowsMatchingMetadataAcrossTracks()
     QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("5.1"));
     QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("5.1"));
     QCOMPARE(client.currentTrackChannelLabels(), snapshot.metadata.channelLabels);
+}
+
+void BridgeClientTest::metadataTreeKeysDecodeAfterTheChannelLabels()
+{
+    QByteArray payload;
+    QDataStream stream(&payload, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    auto appendText = [&stream](const QByteArray &value) {
+        stream << quint32(value.size());
+        stream.writeRawData(value.constData(), value.size());
+    };
+    appendText("/music/A/Album/01.flac");
+    for (int i = 0; i < 5; ++i) appendText("");
+    stream << qint32(0) << quint32(44100) << quint32(0) << quint16(2) << quint16(16);
+    appendText("FLAC");
+    stream << quint32(0);
+    appendText("");
+    stream << quint64(0) << quint32(1);
+    stream << quint16(0); // no channel labels
+    auto decode = [](const QByteArray &body, BinaryBridgeCodec::DecodedSnapshot *decoded) {
+        QByteArray packet;
+        QDataStream header(&packet, QIODevice::WriteOnly);
+        header.setByteOrder(QDataStream::LittleEndian);
+        header << quint32(0xFE550001u) << quint32(16 + body.size())
+               << quint16(BinaryBridgeCodec::SectionMetadata) << quint16(0)
+               << quint32(body.size());
+        packet.append(body);
+        QString error;
+        return BinaryBridgeCodec::decodeSnapshotPacket(packet, decoded, &error);
+    };
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QVERIFY(decode(payload, &decoded)); // Without keys: none.
+    QVERIFY(decoded.metadata.treeKeys.isEmpty());
+    const QByteArray withoutKeys = payload;
+    const QStringList keys{QStringLiteral("root|/music"), QStringLiteral("artist|/music|A"),
+                           QStringLiteral("album|/music|A|Album")};
+    stream << quint16(keys.size());
+    for (const QString &key : keys) appendText(key.toUtf8());
+    QVERIFY(decode(payload, &decoded));
+    QCOMPARE(decoded.metadata.treeKeys, keys);
+    QVERIFY(!decode(payload.first(payload.size() - 1), &decoded));
+    QVERIFY(!decode(payload + QByteArray(1, '\0'), &decoded));
+    // More rows than a track can be in is malformed.
+    QByteArray tooMany = withoutKeys;
+    QDataStream more(&tooMany, QIODevice::Append);
+    more.setByteOrder(QDataStream::LittleEndian);
+    more << quint16(BinaryBridgeCodec::kMaxTrackTreeKeys + 1);
+    for (int i = 0; i <= BinaryBridgeCodec::kMaxTrackTreeKeys; ++i) {
+        more << quint32(1);
+        more.writeRawData("k", 1);
+    }
+    QVERIFY(!decode(tooMany, &decoded));
+}
+
+void BridgeClientTest::currentTrackTreeKeysFollowTheMetadataOfTheCurrentTrack()
+{
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/01.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.treeKeys = {QStringLiteral("root|/music"), QStringLiteral("artist|/music|A"),
+                                  QStringLiteral("album|/music|A|Album")};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTreeKeys(), snapshot.metadata.treeKeys);
+    // A rescan that regroups the library moves the track's rows, with the
+    // track unchanged, and the poll announces them.
+    client.m_pollTrackMetadataChanged = false;
+    snapshot.metadata.treeKeys = {QStringLiteral("root|/music"), QStringLiteral("artist|/music|B")};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTreeKeys(), snapshot.metadata.treeKeys);
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    // Metadata still about the previous track names no rows for the next.
+    snapshot.playback.currentPath = QStringLiteral("/music/A/Album/02.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackTreeKeys().isEmpty());
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTreeKeys(), snapshot.metadata.treeKeys);
 }
 
 void BridgeClientTest::mutedChannelsKeepEveryBitOfTheMask()

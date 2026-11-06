@@ -48,6 +48,7 @@ public:
         OpenPathRole,
         PlayPathsRole,
         SelectedRole,
+        YearRole,
     };
 
     explicit LibraryTreeModel(QObject *parent = nullptr);
@@ -126,6 +127,8 @@ private:
         int count{0};
         int sourceIndex{-1};
         int trackNumber{0};
+        // The year of an album or section, or 0.
+        int year{0};
         QString trackPath;
         QString openPath;
         QString coverPath;
@@ -145,6 +148,8 @@ private:
         bool expanded{false};
         int sourceIndex{-1};
         int trackNumber{0};
+        // The year of an album or section, or 0.
+        int year{0};
         QString trackPath;
         QString openPath;
         QString coverPath;

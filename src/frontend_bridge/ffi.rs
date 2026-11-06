@@ -3053,6 +3053,17 @@ fn encode_metadata_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     {
         push_string(&mut out, label);
     }
+    // The library tree rows that hold the track, which the UI marks while
+    // they are collapsed: a library folder, an artist, an album and a
+    // section at most.
+    push_u16(&mut out, clamp_u16(snapshot.now_playing_tree_keys.len()));
+    for key in snapshot
+        .now_playing_tree_keys
+        .iter()
+        .take(usize::from(u16::MAX))
+    {
+        push_string(&mut out, key);
+    }
     out
 }
 
@@ -3641,6 +3652,10 @@ mod tests {
             library_view_anchor_key: "artist|/music|Sample Artist".to_string(),
             library_view_anchor_offset: 4.0,
             library_reveal_generation: 0,
+            now_playing_tree_keys: vec![
+                "root|/music".to_string(),
+                "artist|/music|Sample Artist".to_string(),
+            ],
             pre_built_tree_bytes: Some(Arc::new(vec![0, 0, 0, 0])),
             queue_len: 1,
             queue_revision: 1,
@@ -5316,6 +5331,13 @@ mod tests {
         offset += 2;
         assert_eq!(read_string(&encoded, &mut offset), "L");
         assert_eq!(read_string(&encoded, &mut offset), "R");
+        // Then the tree rows that hold the track.
+        assert_eq!(read_u16(&encoded, &mut offset), 2);
+        assert_eq!(read_string(&encoded, &mut offset), "root|/music");
+        assert_eq!(
+            read_string(&encoded, &mut offset),
+            "artist|/music|Sample Artist"
+        );
         assert_eq!(offset, encoded.len());
     }
 

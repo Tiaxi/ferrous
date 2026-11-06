@@ -2,7 +2,7 @@
 
 use crate::analysis::{SpectrogramOutputRoute, SpectrogramStops};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -519,6 +519,11 @@ pub struct BridgeSnapshot {
     pub library_view_anchor_key: String,
     pub library_view_anchor_offset: f32,
     pub library_reveal_generation: u32,
+    /// The keys of the library tree rows that hold the track `metadata`
+    /// describes, outermost first; empty when the library does not have
+    /// it. They follow the tree's own grouping, so the UI can mark a
+    /// collapsed row that holds the playing track.
+    pub now_playing_tree_keys: Vec<String>,
     pub pre_built_tree_bytes: Option<Arc<Vec<u8>>>,
     pub queue_len: usize,
     pub queue_revision: u64,
@@ -869,6 +874,22 @@ impl BridgeState {
         }
     }
 
+    /// See [`BridgeSnapshot::now_playing_tree_keys`]: a lookup in the
+    /// library's path index and a few keys.
+    fn now_playing_tree_keys(&self) -> Vec<String> {
+        self.metadata
+            .source_path
+            .as_deref()
+            .and_then(|path| self.library_index.position(&self.library, Path::new(path)))
+            .map(|position| {
+                library_tree::track_ancestor_keys(
+                    &self.library.roots,
+                    &self.library.tracks[position],
+                )
+            })
+            .unwrap_or_default()
+    }
+
     fn snapshot(&self, include_tree: bool) -> BridgeSnapshot {
         let mut metadata = metadata_for_snapshot(&self.metadata);
         metadata.current_bitrate_kbps = self
@@ -897,6 +918,7 @@ impl BridgeState {
             library_view_anchor_key: self.library_view_anchor_key.clone(),
             library_view_anchor_offset: self.library_view_anchor_offset,
             library_reveal_generation: self.library_reveal_generation,
+            now_playing_tree_keys: self.now_playing_tree_keys(),
             pre_built_tree_bytes: if include_tree {
                 Some(self.pre_built_tree_bytes.clone())
             } else {

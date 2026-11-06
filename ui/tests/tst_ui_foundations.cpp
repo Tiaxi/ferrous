@@ -714,7 +714,10 @@ void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {
     QCOMPARE(titleOrigin.x(), 12.0);
     // The layout puts items on whole pixels.
     QVERIFY(std::abs(totalsOrigin.x() - (titleOrigin.x() + title->width() + 8.0)) <= 1.0);
-    QCOMPARE(title->width(), title->implicitWidth());
+    // The whole name, on whole pixels: never a fraction short, which
+    // would elide it.
+    QCOMPARE(title->width(), std::ceil(title->implicitWidth()));
+    QVERIFY(!title->property("truncated").toBool());
     const QFont titleFont = title->property("font").value<QFont>();
     const QFont totalsFont = totals->property("font").value<QFont>();
     const qreal smallPointSize = tokens->property("smallPointSize").toReal();

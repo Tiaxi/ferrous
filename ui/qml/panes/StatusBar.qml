@@ -31,14 +31,16 @@ ToolBar {
     topPadding: 2
     bottomPadding: 2
 
+    // Chrome, with the last of the main window's four seams along its top.
     background: Rectangle {
-        color: root.uiPalette.uiPaneColor
+        color: root.uiPalette.chrome
         Rectangle {
+            objectName: "statusBarSeam"
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
             height: 1
-            color: root.uiPalette.uiBorderColor
+            color: root.uiPalette.chromeLine
         }
     }
 

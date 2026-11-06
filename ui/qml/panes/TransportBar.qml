@@ -49,6 +49,10 @@ ToolBar {
     rightPadding: 12
     topPadding: 4
     bottomPadding: 4
+    // Chrome. The seam under it is the main window's.
+    background: Rectangle {
+        color: root.uiPalette.chrome
+    }
 
     // A slider whose held arrow keys are one gesture, as a drag is. Qt's
     // autorepeat clears `pressed` at each repeat, but not `adjusting`.

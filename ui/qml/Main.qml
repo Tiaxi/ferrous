@@ -168,8 +168,8 @@ ApplicationWindow {
     }
 
     readonly property int visualizationMinimumHeight: 220
-    // Room for a split handle, which is a few pixels thick in every style.
-    readonly property int splitHandleAllowance: 8
+    // The split handles are the seams between the panes, 1 px thick.
+    readonly property int splitHandleAllowance: 1
     // The smallest window that shows every pane at its own minimum size,
     // with the level meter whether it is shown or not, so that the window's
     // minimum does not change with a setting.
@@ -182,7 +182,7 @@ ApplicationWindow {
         + transportBar.implicitHeight
         + queuePane.SplitView.minimumHeight
         + root.visualizationMinimumHeight + root.levelMeterHeight
-        + root.splitHandleAllowance
+        + root.splitHandleAllowance + transportSeam.height
         + (root.footer ? root.footer.implicitHeight : 0))
 
     readonly property var libraryViewRef: libraryController.view
@@ -247,6 +247,8 @@ ApplicationWindow {
         property string currentTrackAlbum: ""
         property string currentTrackGenre: ""
         property var currentTrackYear: null
+        property int currentTrackNumber: 0
+        property var currentTrackTreeKeys: []
         property string currentTrackFormatLabel: ""
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""
@@ -540,27 +542,24 @@ ApplicationWindow {
         return Math.max(140, Math.ceil(maxPx))
     }
 
-    // Fits the widest number, and at least four characters.
+    // The queue's number column: 26 px at the default font, as wide as a
+    // row is tall, or as the widest number.
     readonly property int playlistOrderColumnWidth: Math.ceil(Math.max(
-        playlistOrderFontMetrics.averageCharacterWidth * 4,
-        playlistOrderTextMetrics.boundingRect.width + playlistOrderFontMetrics.averageCharacterWidth * 1.5))
+        uiPalette.rowHeight, playlistOrderTextMetrics.advanceWidth))
     readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
-    // Wide enough for the play, pause or stop symbol.
-    readonly property int playlistIndicatorColumnWidth: Math.ceil(playlistOrderFontMetrics.height)
+    // The queue's state glyph column: 28 px at the default font.
+    readonly property int playlistIndicatorColumnWidth: Math.round(uiPalette.rowHeight * 28 / 26)
 
     FontMetrics {
         id: menuFontMetrics
         font: root.font
     }
 
-    FontMetrics {
-        id: playlistOrderFontMetrics
-        font: root.font
-    }
-
     TextMetrics {
         id: playlistOrderTextMetrics
-        font: root.font
+        font.family: uiPalette.baseFont.family
+        font.pointSize: uiPalette.basePointSize
+        font.features: uiPalette.tabularFigures
         text: FormatUtils.playlistOrderText(Math.max(0, uiBridge.queueLength - 1))
     }
 
@@ -1257,6 +1256,27 @@ ApplicationWindow {
         onRejected: pendingFolderDialogContext = ""
     }
 
+    // A split handle: a 1 px seam, grabbable a few pixels either side.
+    Component {
+        id: seamHandle
+
+        Rectangle {
+            id: seam
+            objectName: "seamHandle"
+            // How far across the pointer finds it.
+            readonly property int grab: Kirigami.Units.smallSpacing * 2 - 1
+            implicitWidth: 1
+            implicitHeight: 1
+            color: seam.SplitHandle.pressed ? root.uiPalette.focusRing : root.uiPalette.seam
+            containmentMask: Item {
+                x: seam.width > seam.height ? 0 : (seam.width - width) / 2
+                y: seam.width > seam.height ? (seam.height - height) / 2 : 0
+                width: seam.width > seam.height ? seam.width : seam.grab
+                height: seam.width > seam.height ? seam.grab : seam.height
+            }
+        }
+    }
+
     footer: Panes.StatusBar {
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
@@ -1304,6 +1324,17 @@ ApplicationWindow {
             seekCommitted: playbackController.seekCommitted
         }
 
+        // The first of the four seams: between the transport's chrome and
+        // the content. The status bar draws the last, and the split handles
+        // the two between the panes.
+        Rectangle {
+            id: transportSeam
+            objectName: "transportSeam"
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            color: root.uiPalette.chromeLine
+        }
+
         SplitView {
             id: mainSplit
             objectName: "mainSplit"
@@ -1311,6 +1342,7 @@ ApplicationWindow {
             Layout.fillHeight: true
             enabled: !root.backendStopped
             orientation: Qt.Horizontal
+            handle: seamHandle
 
             // A drag of a handle sets the share the pane keeps as the window
             // is resized.
@@ -1331,7 +1363,8 @@ ApplicationWindow {
                     mainSplit.width,
                     sidebarPane.SplitView.minimumWidth,
                     rightSplit.SplitView.minimumWidth + root.splitHandleAllowance,
-                    Math.max(300, mainSplit.width * 0.26))
+                    // 360 px in a 1600 px window, 260 px in a 1000 px one.
+                    Math.max(260, Math.min(360, Math.round(mainSplit.width * 0.225))))
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer
@@ -1342,12 +1375,14 @@ ApplicationWindow {
                 playAllLibraryTracksAction: playAllLibraryTracksAction
                 appendAllLibraryTracksAction: appendAllLibraryTracksAction
                 addLibraryFolderAction: addLibraryFolderAction
+                errorController: errorController
             }
 
             SplitView {
                 id: rightSplit
                 objectName: "rightSplit"
                 orientation: Qt.Vertical
+                handle: seamHandle
                 SplitView.fillWidth: true
                 SplitView.minimumWidth: queuePane.minimumContentWidth
 
@@ -1378,10 +1413,13 @@ ApplicationWindow {
                     snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                     droppedExternalPaths: PathUtils.droppedExternalPaths
+                    errorController: errorController
+                    addLibraryFolderAction: addLibraryFolderAction
                 }
 
                 Panes.SpectrogramPane {
                     id: spectrogramPane
+                    objectName: "spectrogramPane"
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: root.visualizationMinimumHeight + root.embeddedLevelMeterHeight

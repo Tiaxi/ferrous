@@ -74,6 +74,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QString currentTrackChannelLayoutIconKey READ currentTrackChannelLayoutIconKey NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackChannels READ currentTrackChannels NOTIFY trackMetadataChanged)
     Q_PROPERTY(QStringList currentTrackChannelLabels READ currentTrackChannelLabels NOTIFY trackMetadataChanged)
+    // The keys of the library tree rows that hold the current track,
+    // outermost first, as the backend groups the tree; empty when the
+    // library does not have the track. The tree marks them while collapsed.
+    Q_PROPERTY(QStringList currentTrackTreeKeys READ currentTrackTreeKeys NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackSampleRateHz READ currentTrackSampleRateHz NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackBitDepth READ currentTrackBitDepth NOTIFY trackMetadataChanged)
     Q_PROPERTY(int currentTrackCurrentBitrateKbps READ currentTrackCurrentBitrateKbps NOTIFY trackMetadataChanged)
@@ -213,6 +217,7 @@ public:
     QString currentTrackChannelLayoutIconKey() const;
     int currentTrackChannels() const;
     QStringList currentTrackChannelLabels() const;
+    QStringList currentTrackTreeKeys() const;
     int currentTrackSampleRateHz() const;
     int currentTrackBitDepth() const;
     int currentTrackCurrentBitrateKbps() const;
@@ -794,6 +799,7 @@ private:
     QString m_currentTrackFormatLabel;
     int m_currentTrackChannels{0};
     QStringList m_currentTrackChannelLabels;
+    QStringList m_currentTrackTreeKeys;
     int m_currentTrackSampleRateHz{0};
     int m_currentTrackBitDepth{0};
     int m_currentTrackCurrentBitrateKbps{0};

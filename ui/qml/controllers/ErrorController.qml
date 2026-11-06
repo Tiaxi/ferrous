@@ -27,6 +27,23 @@ QtObject {
         return root.entries.count > 0 ? root.entries.get(0) : null
     }
 
+    // The files the playback could not read, from the history: each
+    // playback error's file and its message. The queue and the library mark
+    // their rows; they stay marked while the history keeps the error.
+    readonly property var unreadablePaths: {
+        root.revision
+        const paths = ({})
+        for (let i = root.entries.count - 1; i >= 0; --i) {
+            const entry = root.entries.get(i)
+            if (entry.category === ErrorUtils.CategoryPlayback
+                    && entry.severity === ErrorUtils.SeverityError
+                    && entry.subject.length > 0) {
+                paths[entry.subject] = entry.message
+            }
+        }
+        return paths
+    }
+
     // Asks for the history to open.
     signal historyRequested()
     // An error arrived or repeated, and is the newest entry now.

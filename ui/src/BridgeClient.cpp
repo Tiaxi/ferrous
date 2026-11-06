@@ -1794,6 +1794,10 @@ QStringList BridgeClient::currentTrackChannelLabels() const {
     return m_currentTrackChannelLabels;
 }
 
+QStringList BridgeClient::currentTrackTreeKeys() const {
+    return m_currentTrackTreeKeys;
+}
+
 int BridgeClient::currentTrackChannels() const {
     return m_currentTrackChannels;
 }
@@ -5538,6 +5542,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     int nextTrackChannels = currentPath.isEmpty() || currentPathChanged ? 0 : m_currentTrackChannels;
     QStringList nextChannelLabels = currentPath.isEmpty() || currentPathChanged
         ? QStringList{} : m_currentTrackChannelLabels;
+    // The tree rows the backend names for the track the metadata describes;
+    // a library change can move the track, so they follow every section.
+    QStringList nextTrackTreeKeys = currentPath.isEmpty() || currentPathChanged
+        ? QStringList{} : m_currentTrackTreeKeys;
     int nextTrackSampleRateHz = currentPath.isEmpty() ? 0 : m_currentTrackSampleRateHz;
     int nextTrackBitDepth = currentPath.isEmpty() ? 0 : m_currentTrackBitDepth;
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
@@ -5600,6 +5608,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         }
         nextTrackChannels = metadataChannels;
         nextChannelLabels = snapshot.metadata.channelLabels;
+        nextTrackTreeKeys = snapshot.metadata.treeKeys;
         nextTrackSampleRateHz = metadataSampleRateHz;
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
@@ -5651,6 +5660,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_currentTrackChannelLabels != nextChannelLabels) {
         m_currentTrackChannelLabels = nextChannelLabels;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    if (m_currentTrackTreeKeys != nextTrackTreeKeys) {
+        m_currentTrackTreeKeys = nextTrackTreeKeys;
         changed = true;
         trackMetadataSignalChanged = true;
     }

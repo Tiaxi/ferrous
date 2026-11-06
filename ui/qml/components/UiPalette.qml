@@ -240,10 +240,12 @@ QtObject {
         pointSize: root.baseFont.pointSize,
         bold: true
     })
-    // The height of a list row: a line of text and a third of a line of
-    // margin. The rows and the scrolling, paging and drop positions that
+    // The height of a list row: a line of text and a small spacing above
+    // and below it, 26 px with the default 10 pt font (a grid unit and
+    // 8 px). The rows and the scrolling, paging and drop positions that
     // count in rows all use it, so they follow the font size.
-    readonly property real rowHeight: Math.round(root._baseFontMetrics.height * 4 / 3)
+    readonly property real rowHeight: Math.round(root._baseFontMetrics.height)
+        + 2 * Kirigami.Units.smallSpacing
     // The base font's size in points, for text sized relative to it.
     readonly property real basePointSize: root.baseFont.pointSize > 0
         ? root.baseFont.pointSize
