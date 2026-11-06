@@ -1037,6 +1037,59 @@ QString TagEditorController::extraValuesNote(const QString &field) const {
                   rowsWithExtras);
 }
 
+bool TagEditorController::anyFieldChanged(const QVector<int> &rows, const QString &field) const {
+    return std::any_of(rows.cbegin(), rows.cend(), [this, &field](int row) {
+        return m_tableModel.fieldValue(row, field) != m_tableModel.originalFieldValue(row, field);
+    });
+}
+
+void TagEditorController::revertRows(const QVector<int> &rows, const QString &field) {
+    if (m_loading || m_saving) return;
+    bool changed = false;
+    for (int row : rows) {
+        changed = m_tableModel.setFieldValue(row, field, m_tableModel.originalFieldValue(row, field))
+            || changed;
+    }
+    if (changed) {
+        notifyRowMutation();
+    }
+}
+
+bool TagEditorController::bulkFieldChanged(const QString &field) const {
+    return anyFieldChanged(targetRows(), field);
+}
+
+QString TagEditorController::bulkOriginalValue(const QString &field) const {
+    const QVector<int> rows = targetRows();
+    if (rows.isEmpty() || bulkOriginalValueMixed(field)) {
+        return {};
+    }
+    return m_tableModel.originalFieldValue(rows[0], field);
+}
+
+bool TagEditorController::bulkOriginalValueMixed(const QString &field) const {
+    const QVector<int> rows = targetRows();
+    if (rows.isEmpty()) {
+        return false;
+    }
+    const QString first = m_tableModel.originalFieldValue(rows[0], field);
+    return std::any_of(rows.cbegin() + 1, rows.cend(), [this, &field, &first](int row) {
+        return m_tableModel.originalFieldValue(row, field) != first;
+    });
+}
+
+void TagEditorController::revertBulkField(const QString &field) {
+    revertRows(targetRows(), field);
+}
+
+bool TagEditorController::fieldChanged(const QString &field) const {
+    return anyFieldChanged(allRows(), field);
+}
+
+void TagEditorController::revertField(const QString &field) {
+    revertRows(allRows(), field);
+}
+
 void TagEditorController::applyBulkField(const QString &field, const QString &value) {
     if (m_loading || m_saving) return;
     for (int row : targetRows()) {
@@ -1212,7 +1265,11 @@ QVector<int> TagEditorController::targetRows() const {
         std::sort(rows.begin(), rows.end());
         return rows;
     }
+    return allRows();
+}
 
+QVector<int> TagEditorController::allRows() const {
+    QVector<int> rows;
     rows.reserve(m_tableModel.rowCount());
     for (int row = 0; row < m_tableModel.rowCount(); ++row) {
         rows.push_back(row);

@@ -6,233 +6,167 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "." as Preferences
 
-ScrollView {
+Preferences.PreferencesPage {
     id: root
 
-    required property var uiBridge
-    required property var uiPalette
     required property var spectrogramFftChoices
 
-    clip: true
-    contentWidth: availableWidth
-    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+    // A control's width in the form.
+    readonly property real comboWidth: Kirigami.Units.gridUnit * 9
 
-    ColumnLayout {
-        width: root.availableWidth
-        spacing: 0
+    title: I18n.i18nc("@title preferences page", "Spectrogram")
 
-        Components.SurfaceCard {
+    Components.DialogComboBox {
+        objectName: "spectrogramViewComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
+        Layout.preferredWidth: root.comboWidth
+        model: [
+            I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
+            I18n.i18nc("@item:inlistbox spectrogram view", "Per channel")
+        ]
+        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramViewMode")))
+        onActivated: function(index) { root.settings.setValue("spectrogramViewMode", index) }
+    }
+
+    Components.DialogComboBox {
+        objectName: "spectrogramDisplayComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
+        Layout.preferredWidth: root.comboWidth
+        model: [
+            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
+            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
+        ]
+        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramDisplayMode")))
+        onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
+    }
+
+    Components.DialogComboBox {
+        objectName: "spectrogramFftComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
+        Layout.preferredWidth: root.comboWidth
+        model: root.spectrogramFftChoices
+        currentIndex: {
+            const index = root.spectrogramFftChoices.indexOf(root.settings.value("fftSize"))
+            return index >= 0 ? index : 0
+        }
+        onActivated: function(index) {
+            root.settings.setValue("fftSize", root.spectrogramFftChoices[Math.max(0, index)])
+        }
+    }
+
+    RowLayout {
+        Kirigami.FormData.label: I18n.i18nc("@label:slider", "Dynamic range:")
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+        spacing: Kirigami.Units.largeSpacing
+
+        Slider {
+            id: dbRangeSlider
+            objectName: "dbRangeSlider"
             Layout.fillWidth: true
-            color: root.uiPalette.uiSurfaceColor
-            borderColor: root.uiPalette.uiBorderColor
-            implicitHeight: contentColumn.implicitHeight + 36
+            from: 50
+            to: 150
+            stepSize: 1
+            // One tick mark every 10 dB, not one a step.
+            Kirigami.StyleHints.tickMarkStepSize: 10
+            value: root.settings.value("dbRange")
+            onMoved: root.settings.setValue("dbRange", Math.round(value))
+            Accessible.name: I18n.i18nc("@label:slider", "Dynamic range")
+        }
 
-            ColumnLayout {
-                id: contentColumn
-                anchors.fill: parent
-                anchors.margins: 18
-                spacing: 14
+        Label {
+            objectName: "dbRangeValueLabel"
+            text: I18n.i18nc("@label:slider value in decibels", "%1 dB", Math.round(dbRangeSlider.value))
+            font.features: root.uiPalette.tabularFigures
+            Layout.minimumWidth: dbRangeMetrics.advanceWidth
+            horizontalAlignment: Text.AlignRight
 
-                Kirigami.Heading {
-                    Layout.fillWidth: true
-                    level: 2
-                    text: I18n.i18nc("@title", "Spectrogram")
-                    font.weight: Font.DemiBold
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    text: I18n.i18nc("@label", "Spectrogram-specific rendering and analysis options.")
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "View")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    ComboBox {
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: [
-                            I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
-                            I18n.i18nc("@item:inlistbox spectrogram view", "Per-channel")
-                        ]
-                        currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramViewMode))
-                        onActivated: root.uiBridge.setSpectrogramViewMode(currentIndex)
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "Display")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    ComboBox {
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: [
-                            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
-                            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
-                        ]
-                        currentIndex: Math.max(0, Math.min(1, root.uiBridge.spectrogramDisplayMode))
-                        onActivated: root.uiBridge.setSpectrogramDisplayMode(currentIndex)
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "FFT Window")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    ComboBox {
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: root.spectrogramFftChoices
-                        currentIndex: {
-                            const index = root.spectrogramFftChoices.indexOf(root.uiBridge.fftSize)
-                            return index >= 0 ? index : 0
-                        }
-                        onActivated: root.uiBridge.setFftSize(
-                            root.spectrogramFftChoices[Math.max(0, currentIndex)])
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "dB Range")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    Slider {
-                        id: dbRangeSlider
-                        Layout.fillWidth: true
-                        from: 50
-                        to: 150
-                        stepSize: 1
-                        value: root.uiBridge.dbRange
-                        onMoved: root.uiBridge.setDbRange(value)
-                        onPressedChanged: {
-                            if (!pressed) {
-                                root.uiBridge.setDbRange(value)
-                            }
-                        }
-                    }
-
-                    Label {
-                        text: Math.round(dbRangeSlider.value).toString()
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 1.5
-                        horizontalAlignment: Text.AlignRight
-                    }
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Log Scale Spectrogram")
-                    checked: root.uiBridge.logScale
-                    onToggled: root.uiBridge.setLogScale(checked)
-                }
-
-                CheckBox {
-                    objectName: "spectrogramFrequencyCapCheckBox"
-                    text: I18n.i18nc("@option:check", "Limit to 22.05/24 kHz")
-                    checked: root.uiBridge.spectrogramFrequencyCap
-                    onToggled: root.uiBridge.setSpectrogramFrequencyCap(checked)
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 32
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    font: Kirigami.Theme.smallFont
-                    text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz family and 24 kHz for others, instead of up to half their sample rate.")
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Show Visualization FPS Overlay")
-                    checked: root.uiBridge.showFps
-                    onToggled: root.uiBridge.setShowFps(checked)
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Show Crosshair on Hover")
-                    checked: root.uiBridge.showSpectrogramCrosshair
-                    onToggled: root.uiBridge.setShowSpectrogramCrosshair(checked)
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 32
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    font: Kirigami.Theme.smallFont
-                    text: I18n.i18nc("@label", "When enabled, right-clicking the spectrogram in centered mode seeks to that position in the track.")
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Show Frequency/Time Scale")
-                    checked: root.uiBridge.showSpectrogramScale
-                    onToggled: root.uiBridge.setShowSpectrogramScale(checked)
-                }
-
-                CheckBox {
-                    text: I18n.i18nc("@option:check", "Allow Spectrogram Zoom")
-                    checked: root.uiBridge.spectrogramZoomEnabled
-                    onToggled: root.uiBridge.setSpectrogramZoomEnabled(checked)
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 32
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    font: Kirigami.Theme.smallFont
-                    text: I18n.i18nc("@label", "Scroll to zoom in/out. Middle-click to reset.")
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "Channel Buttons")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    ComboBox {
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: [
-                            I18n.i18nc("@item:inlistbox channel buttons", "Disabled"),
-                            I18n.i18nc("@item:inlistbox channel buttons", "On Hover"),
-                            I18n.i18nc("@item:inlistbox channel buttons", "Always")
-                        ]
-                        currentIndex: Math.max(0, Math.min(2, root.uiBridge.channelButtonsVisibility))
-                        onActivated: root.uiBridge.setChannelButtonsVisibility(currentIndex)
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
+            TextMetrics {
+                id: dbRangeMetrics
+                text: I18n.i18nc("@label:slider value in decibels", "%1 dB", 150)
             }
         }
+    }
+
+    CheckBox {
+        objectName: "spectrogramLogScaleCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Frequency axis:")
+        text: I18n.i18nc("@option:check", "Logarithmic scale")
+        checked: root.settings.value("logScale")
+        onToggled: root.settings.setValue("logScale", checked)
+    }
+
+    CheckBox {
+        id: frequencyCapCheckBox
+        objectName: "spectrogramFrequencyCapCheckBox"
+        text: I18n.i18nc("@option:check", "Limit to 22.05 or 24 kHz")
+        checked: root.settings.value("spectrogramFrequencyCap")
+        onToggled: root.settings.setValue("spectrogramFrequencyCap", checked)
+    }
+
+    Components.FormHelpText {
+        uiPalette: root.uiPalette
+        indent: frequencyCapCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
+            + "family and 24 kHz for others, instead of up to half their sample rate.")
+    }
+
+    CheckBox {
+        objectName: "spectrogramScaleCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Show:")
+        text: I18n.i18nc("@option:check", "Frequency and time scale")
+        checked: root.settings.value("showSpectrogramScale")
+        onToggled: root.settings.setValue("showSpectrogramScale", checked)
+    }
+
+    CheckBox {
+        id: crosshairCheckBox
+        objectName: "spectrogramCrosshairCheckBox"
+        text: I18n.i18nc("@option:check", "Crosshair on hover")
+        checked: root.settings.value("showSpectrogramCrosshair")
+        onToggled: root.settings.setValue("showSpectrogramCrosshair", checked)
+    }
+
+    Components.FormHelpText {
+        uiPalette: root.uiPalette
+        indent: crosshairCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
+            + "seeks to that position in the track.")
+    }
+
+    CheckBox {
+        objectName: "spectrogramFpsCheckBox"
+        text: I18n.i18nc("@option:check", "Frame rate")
+        checked: root.settings.value("showFps")
+        onToggled: root.settings.setValue("showFps", checked)
+    }
+
+    CheckBox {
+        id: zoomCheckBox
+        objectName: "spectrogramZoomCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
+        text: I18n.i18nc("@option:check", "Allow zooming")
+        checked: root.settings.value("spectrogramZoomEnabled")
+        onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
+    }
+
+    Components.FormHelpText {
+        uiPalette: root.uiPalette
+        indent: zoomCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
+    }
+
+    Components.DialogComboBox {
+        objectName: "channelButtonsComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
+        Layout.preferredWidth: root.comboWidth
+        model: [
+            I18n.i18nc("@item:inlistbox channel buttons", "Never"),
+            I18n.i18nc("@item:inlistbox channel buttons", "On hover"),
+            I18n.i18nc("@item:inlistbox channel buttons", "Always")
+        ]
+        currentIndex: Math.max(0, Math.min(2, root.settings.value("channelButtonsVisibility")))
+        onActivated: function(index) { root.settings.setValue("channelButtonsVisibility", index) }
     }
 }

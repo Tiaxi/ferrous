@@ -6,83 +6,38 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "." as Preferences
 
-ScrollView {
+// The Appearance page: the viewers and the level meter.
+Preferences.PreferencesPage {
     id: root
 
-    required property var uiBridge
-    required property var uiPalette
+    title: I18n.i18nc("@title preferences page", "Appearance")
 
-    clip: true
-    contentWidth: availableWidth
-    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+    Components.DialogComboBox {
+        objectName: "viewerFullscreenComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Fullscreen viewers:")
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 11
+        model: [
+            I18n.i18nc("@item:inlistbox viewer fullscreen", "Fill the window"),
+            I18n.i18nc("@item:inlistbox viewer fullscreen", "Fill the screen")
+        ]
+        currentIndex: Math.max(0, Math.min(1, root.settings.value("viewerFullscreenMode")))
+        onActivated: function(index) { root.settings.setValue("viewerFullscreenMode", index) }
+    }
 
-    ColumnLayout {
-        width: root.availableWidth
-        spacing: 0
+    CheckBox {
+        objectName: "preventDisplaySleepInFullscreenCheckBox"
+        text: I18n.i18nc("@option:check", "Keep the display awake while playing fullscreen")
+        checked: root.settings.value("preventDisplaySleepInFullscreen")
+        onToggled: root.settings.setValue("preventDisplaySleepInFullscreen", checked)
+    }
 
-        Components.SurfaceCard {
-            Layout.fillWidth: true
-            color: root.uiPalette.uiSurfaceColor
-            borderColor: root.uiPalette.uiBorderColor
-            implicitHeight: contentColumn.implicitHeight + 36
-
-            ColumnLayout {
-                id: contentColumn
-                anchors.fill: parent
-                anchors.margins: 18
-                spacing: 14
-
-                Kirigami.Heading {
-                    Layout.fillWidth: true
-                    level: 2
-                    text: I18n.i18nc("@title", "Display")
-                    font.weight: Font.DemiBold
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.disabledTextColor
-                    text: I18n.i18nc("@label", "Shared viewer presentation options for album art and spectrogram.")
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 12
-
-                    Label {
-                        text: I18n.i18nc("@label", "Viewer Fullscreen")
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 5
-                    }
-
-                    ComboBox {
-                        Layout.preferredWidth: root.uiPalette.rowHeight * 9
-                        model: [
-                            I18n.i18nc("@item:inlistbox viewer fullscreen", "Within app window"),
-                            I18n.i18nc("@item:inlistbox viewer fullscreen", "Whole screen")
-                        ]
-                        currentIndex: Math.max(0, Math.min(1, root.uiBridge.viewerFullscreenMode))
-                        onActivated: root.uiBridge.setViewerFullscreenMode(currentIndex)
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                CheckBox {
-                    objectName: "showLevelMeterCheckBox"
-                    text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
-                    checked: root.uiBridge.showLevelMeter
-                    onToggled: root.uiBridge.setShowLevelMeter(checked)
-                }
-
-                CheckBox {
-                    objectName: "preventDisplaySleepInFullscreenCheckBox"
-                    text: I18n.i18nc("@option:check", "Prevent display sleep and dimming while playing in fullscreen viewer")
-                    checked: root.uiBridge.preventDisplaySleepInFullscreen
-                    onToggled: root.uiBridge.setPreventDisplaySleepInFullscreen(checked)
-                }
-            }
-        }
+    CheckBox {
+        objectName: "showLevelMeterCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
+        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        checked: root.settings.value("showLevelMeter")
+        onToggled: root.settings.setValue("showLevelMeter", checked)
     }
 }

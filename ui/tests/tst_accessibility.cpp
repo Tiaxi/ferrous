@@ -323,7 +323,6 @@ private slots:
     void aCompressedQueueColumnResizesFromItsPreferredWidth();
     void queueColumnTextStaysInsideItsColumnAtTheMinimum();
     void lightPaletteLeavesNoFixedColours();
-    void tagEditorCaseButtonsAreBesideTheScrollBar();
     void modeSwitchIconFollowsTheMode();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
@@ -368,63 +367,58 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QObject *pages = nullptr;
     QTRY_VERIFY((pages = visibleItemNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
-    QQuickItem *tabBar = visibleItemNamed(window, QStringLiteral("preferencesTabBar"));
-    QVERIFY(tabBar != nullptr);
+    // The page list is a list of page tabs, and has the keyboard first.
+    QQuickItem *pageList = visibleItemNamed(window, QStringLiteral("preferencesPageList"));
+    QVERIFY(pageList != nullptr);
+    QCOMPARE(accessibleRole(pageList), QAccessible::PageTabList);
+    QTRY_VERIFY(pageList->hasActiveFocus());
     const int pageCount = 5;
-    QList<QQuickItem *> tabs;
     for (int i = 0; i < pageCount; ++i) {
-        tabs.push_back(visibleItemNamed(window, QStringLiteral("preferencesTab_%1").arg(i)));
-        QVERIFY(tabs.last() != nullptr);
-        QCOMPARE(accessibleRole(tabs.last()), QAccessible::PageTab);
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = visibleItemNamed(window, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
+        QCOMPARE(accessibleRole(page), QAccessible::PageTab);
     }
     QCOMPARE(pages->property("currentIndex").toInt(), 0);
 
-    // Tab moves through the tabs; Space opens the focused one.
+    // The arrow keys move down the list, and Ctrl+Tab cycles the pages.
     const auto tabTo = [&](QQuickItem *target) {
         for (int presses = 0; presses < 60 && !target->hasActiveFocus(); ++presses) {
             QTest::keyClick(window, Qt::Key_Tab);
         }
         return target->hasActiveFocus();
     };
-    for (int i = 0; i < pageCount; ++i) {
-        QVERIFY2(tabTo(tabs[i]), qPrintable(QStringLiteral("Tab did not reach tab %1").arg(i)));
-        QTest::keyClick(window, Qt::Key_Space);
+    for (int i = 1; i < pageCount; ++i) {
+        QTest::keyClick(window, Qt::Key_Down);
         QTRY_COMPARE(pages->property("currentIndex").toInt(), i);
     }
-
-    // The arrow keys and Ctrl+Tab move between the pages.
-    QVERIFY(tabs[pageCount - 1]->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Right);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 0);
-    QVERIFY(tabs[0]->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Left);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 1);
-    QTest::keyClick(window, Qt::Key_Right);
-    QTest::keyClick(window, Qt::Key_Right);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 1);
-    QVERIFY(tabs[1]->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 2);
+    QTRY_COMPARE(pages->property("currentIndex").toInt(), 0);
     QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 1);
+    QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 1);
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
-    QTRY_COMPARE(pages->property("currentIndex").toInt(), 0);
-    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 2);
 
-    // The checkboxes on the pages take focus too, and Space toggles them.
-    QTest::keyClick(window, Qt::Key_PageDown, Qt::ControlModifier);
+    // The check boxes on the pages take focus too, and Space toggles them;
+    // OK applies the change.
+    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 2);
     QQuickItem *levelMeterBox = visibleItemNamed(window, QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(levelMeterBox != nullptr);
-    // Off by default.
+    // Off by default for a new install.
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(!bridge->property("showLevelMeter").toBool());
     QVERIFY(!levelMeterBox->property("checked").toBool());
     QVERIFY(tabTo(levelMeterBox));
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(levelMeterBox->property("checked").toBool());
-    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    QVERIFY(bridge->property("showLevelMeter").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
+    // Nothing changes until OK.
+    QVERIFY(!bridge->property("showLevelMeter").toBool());
+    QQuickItem *ok = visibleItemNamed(window, QStringLiteral("preferencesOkButton"));
+    QVERIFY(ok != nullptr);
+    QVERIFY(tabTo(ok));
+    QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("preferencesPages")) == nullptr);
+    QVERIFY(bridge->property("showLevelMeter").toBool());
 }
 
 void AccessibilityTest::libraryAndQueueRowsHaveAccessibleNames() {
@@ -3183,6 +3177,12 @@ ApplicationWindow {
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
+        function bulkFieldChanged(field) { return field === "genre" }
+        function bulkOriginalValue(field) { return "Classical" }
+        function bulkOriginalValueMixed(field) { return false }
+        function revertBulkField(field) {}
+        function fieldChanged(field) { return field === "genre" }
+        function revertField(field) {}
         function applyBulkFieldToRows(rows, field, value) {}
         function applyEnglishTitleCase(field) {}
         function applyFinnishCapitalize(field) {}
@@ -3254,53 +3254,34 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     QVERIFY(mute != nullptr);
     QCOMPARE(evaluateOn(mute, QStringLiteral("icon.color")).value<QColor>(), paletteColor("text"));
 
-    // The tag editor's rows and status.
+    // The tag editor's rows, header and status, in the light theme's
+    // tokens: the selected row is the selection tint, the others are the
+    // view, and a changed column's header is the text colour.
     QObject *tagEditor = qvariant_cast<QObject *>(root->property("tagEditor"));
     QVERIFY(QMetaObject::invokeMethod(tagEditor, "open"));
     QList<QQuickItem *> rows;
     QTRY_COMPARE((rows = visibleRows(window->contentItem(), QStringLiteral("tagEditorRow"))).size(), 3);
-    QCOMPARE(rows[0]->property("color").value<QColor>(), paletteColor("uiSelectionColor"));
-    QCOMPARE(rows[1]->property("color").value<QColor>(), paletteColor("uiSurfaceAltColor"));
-    QCOMPARE(rows[2]->property("color").value<QColor>(), paletteColor("uiSurfaceRaisedColor"));
-    QQuickItem *chip = visibleItemNamed(window, QStringLiteral("tagEditorStatusChip"));
-    QVERIFY(chip != nullptr);
-    QVERIFY(sameRgb(chip->property("color").value<QColor>(),
-                    chip->property("toneColor").value<QColor>()));
-}
-
-void AccessibilityTest::tagEditorCaseButtonsAreBesideTheScrollBar() {
-    QQmlApplicationEngine engine;
-    QString errorText;
-    QScopedPointer<QObject> root(createQml(engine, lightHarnessQml(), &errorText));
-    QVERIFY2(root != nullptr, qPrintable(errorText));
-    auto *window = qobject_cast<QQuickWindow *>(root.data());
-    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
-    window->resize(1200, 500);
-    QObject *tagEditor = qvariant_cast<QObject *>(root->property("tagEditor"));
-    QVERIFY(QMetaObject::invokeMethod(tagEditor, "open"));
-    QQuickItem *caseButton = nullptr;
-    QTRY_VERIFY((caseButton = visibleItemNamed(window, QStringLiteral("tagEditorCaseButton_title"))) != nullptr);
-    // The fields' scroll view is the button's nearest scrolling ancestor.
-    QQuickItem *scrollView = caseButton->parentItem();
-    while (scrollView != nullptr && !scrollView->inherits("QQuickScrollView")) {
-        scrollView = scrollView->parentItem();
-    }
-    QVERIFY(scrollView != nullptr);
-    auto *bar = qvariant_cast<QQuickItem *>(evaluateOn(scrollView, QStringLiteral("ScrollBar.vertical")));
-    QVERIFY(bar != nullptr);
-    QTRY_VERIFY(bar->isVisible());
-    // Breeze puts the scroll bar beside the content, which the Basic
-    // style overlays.
-    QVERIFY(scrollView->setProperty("rightPadding", bar->width()));
-    QTRY_VERIFY(tagEditor->property("opened").toBool());
-    // The field's row spans the width beside the scroll bar.
-    QTRY_COMPARE(caseButton->parentItem()->width(),
-                 scrollView->property("availableWidth").toReal());
-    const qreal buttonRight = caseButton->mapToScene(QPointF(caseButton->width(), 0)).x();
-    const qreal barLeft = bar->mapToScene(QPointF()).x();
-    QVERIFY2(buttonRight <= barLeft + 0.5,
-             qPrintable(QStringLiteral("button ends at %1, the scroll bar starts at %2")
-                            .arg(buttonRight).arg(barLeft)));
+    const auto rowTint = [](QQuickItem *row) {
+        const QList<QQuickItem *> tints = row->findChildren<QQuickItem *>(QStringLiteral("rowBackgroundTint"));
+        return tints.isEmpty() ? nullptr : tints.first();
+    };
+    QVERIFY(rowTint(rows[0]) != nullptr && rowTint(rows[0])->isVisible());
+    QVERIFY(sameRgb(rowTint(rows[0])->property("color").value<QColor>(), paletteColor("selectionInactive"))
+            || sameRgb(rowTint(rows[0])->property("color").value<QColor>(), paletteColor("selection")));
+    QVERIFY(!rowTint(rows[1])->isVisible());
+    QVERIFY(!rowTint(rows[2])->isVisible());
+    QQuickItem *genre = visibleItemNamed(window, QStringLiteral("tagEditorColumn_genre"));
+    QQuickItem *title = visibleItemNamed(window, QStringLiteral("tagEditorColumn_title"));
+    QVERIFY(genre != nullptr && title != nullptr);
+    const auto columnLabelColor = [](QQuickItem *column) {
+        return column->findChildren<QQuickItem *>(QStringLiteral("tagEditorColumnLabel")).first()
+            ->property("color").value<QColor>();
+    };
+    QVERIFY(sameRgb(columnLabelColor(genre), paletteColor("text")));
+    QVERIFY(sameRgb(columnLabelColor(title), paletteColor("textSecondary")));
+    QQuickItem *status = visibleItemNamed(window, QStringLiteral("tagEditorStatusLabel"));
+    QVERIFY(status != nullptr);
+    QVERIFY(sameRgb(status->property("color").value<QColor>(), paletteColor("textSecondary")));
 }
 
 void AccessibilityTest::modeSwitchIconFollowsTheMode() {

@@ -100,6 +100,7 @@ add_custom_target(ferrous_rust_bridge ALL
 )
 
 qt_add_executable(ferrous
+    src/AboutComponents.cpp
     src/AppInstanceController.cpp
     src/ConsoleTee.cpp
     src/main.cpp
@@ -172,7 +173,13 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
         qml/components/AppMenu.qml
+        qml/components/DialogButtons.qml
+        qml/components/DialogComboBox.qml
+        qml/components/DialogFooter.qml
+        qml/components/DialogHeader.qml
+        qml/components/DialogSurface.qml
         qml/components/ErrorBanner.qml
+        qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
         qml/components/KeyHintMenuItem.qml
@@ -187,7 +194,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
-        qml/components/SurfaceCard.qml
         qml/components/UiPalette.qml
         qml/components/ViewerCloseButton.qml
         qml/controllers/ErrorController.qml
@@ -222,6 +228,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/preferences/DisplayPage.qml
         qml/preferences/LastFmPage.qml
         qml/preferences/LibraryPage.qml
+        qml/preferences/PreferencesPage.qml
         qml/preferences/SpectrogramPage.qml
         qml/preferences/SystemMediaPage.qml
         qml/viewers/AlbumArtSurface.qml
@@ -794,6 +801,78 @@ if(BUILD_TESTING)
         TIMEOUT 180
     )
     ferrous_add_default_platform_test(ferrous_ui_main_window_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The dialogs of #373, from the QML sources.
+    qt_add_executable(ferrous_ui_dialogs_tests
+        tests/tst_ui_dialogs.cpp
+        src/AboutComponents.cpp
+        src/BinaryBridgeCodec.cpp
+        src/BridgeClient.cpp
+        src/QueueRows.cpp
+        src/CoverImageProvider.cpp
+        src/DiagnosticsLog.cpp
+        src/Localization.cpp
+        src/DisplaySleepInhibitor.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/LibraryTreeModel.cpp
+        src/MprisController.cpp
+        src/CoverRevisionLinks.cpp
+        src/PlaybackClock.cpp
+        src/PlaybackFrameScheduler.cpp
+        src/WindowPresence.cpp
+        src/WaveformReaderLease.cpp
+        src/TagEditorController.cpp
+        src/TagEditorTableModel.cpp
+        src/SpectrogramItem.cpp
+        src/WindowActivation.cpp
+        src/WaveformItem.cpp
+        src/WaveformSceneGraph.cpp
+        src/WaveformSceneGraph.h
+        src/WaveformEditorItem.cpp
+        src/LevelMeterItem.cpp
+    )
+    target_include_directories(ferrous_ui_dialogs_tests PRIVATE src)
+    add_dependencies(ferrous_ui_dialogs_tests ferrous_rust_bridge)
+    target_compile_definitions(ferrous_ui_dialogs_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_ui_dialogs_tests PRIVATE
+        ferrous_app_icon
+        Qt6::Core
+        Qt6::DBus
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Concurrent
+        Qt6::Network
+        Qt6::Widgets
+        Qt6::Test
+        KF6::Kirigami
+        KF6::I18n
+        KF6::I18nQml
+        "${FERROUS_RUST_STATIC_LIB}"
+        PkgConfig::FERROUS_GSTREAMER
+        dl
+        m
+        pthread
+    )
+    ferrous_enable_strict_warnings(ferrous_ui_dialogs_tests)
+    if(FERROUS_ENABLE_PROFILE_LOGS)
+        target_sources(ferrous_ui_dialogs_tests PRIVATE src/SpectrogramSeekTrace.cpp)
+        target_compile_definitions(ferrous_ui_dialogs_tests PRIVATE
+            FERROUS_ENABLE_PROFILE_LOGS=1
+        )
+    endif()
+    set_target_properties(ferrous_ui_dialogs_tests PROPERTIES
+        QT_QML_MODULE_NO_IMPORT_SCAN TRUE
+    )
+    add_test(NAME ferrous_ui_dialogs_tests COMMAND ferrous_ui_dialogs_tests)
+    set_tests_properties(ferrous_ui_dialogs_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 180
+    )
+    ferrous_add_default_platform_test(ferrous_ui_dialogs_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The menus of #373, in a session of its own: no desktop's platform
     # theme, colours or fonts.

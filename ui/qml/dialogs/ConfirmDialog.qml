@@ -3,7 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // Asks before an action that cannot be undone. Escape and Cancel keep
 // things as they are; only the confirm button sends `confirmed`.
@@ -22,17 +26,37 @@ Dialog {
     modal: true
     x: Math.round(((parent ? parent.width : root.windowRoot.width) - width) / 2)
     y: Math.round(((parent ? parent.height : root.windowRoot.height) - height) / 2)
-    width: 440
-    standardButtons: Dialog.NoButton
+    width: Math.min(Kirigami.Units.gridUnit * 25, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     closePolicy: Popup.CloseOnEscape
 
-    background: Rectangle {
-        radius: 6
-        color: root.uiPalette.uiPaneColor
-        border.color: root.uiPalette.uiBorderColor
+    onAccepted: root.confirmed()
+
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    footer: Components.DialogButtons {
+
+        id: dialogButtons
+        primary: confirmDialogConfirmButton
+        Button {
+            id: confirmDialogConfirmButton
+            objectName: "confirmDialogConfirmButton"
+            text: root.confirmText
+            DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+        }
+        Button {
+            objectName: "confirmDialogCancelButton"
+            text: I18n.i18nc("@action:button", "Cancel")
+            icon.name: "dialog-cancel"
+            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+        }
     }
 
     contentItem: ColumnLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+
         spacing: 12
 
         Label {
@@ -47,30 +71,8 @@ Dialog {
             Layout.fillWidth: true
             visible: root.details.length > 0
             wrapMode: Text.Wrap
-            color: root.uiPalette.uiMutedTextColor
+            color: root.uiPalette.textSecondary
             text: root.details
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                objectName: "confirmDialogCancelButton"
-                text: I18n.i18nc("@action:button", "Cancel")
-                onClicked: root.reject()
-            }
-            Button {
-                objectName: "confirmDialogConfirmButton"
-                text: root.confirmText
-                highlighted: true
-                onClicked: {
-                    root.close()
-                    root.confirmed()
-                }
-            }
         }
     }
 }

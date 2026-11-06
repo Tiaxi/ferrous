@@ -14,17 +14,13 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
 
     property string diagnosticsText: ""
 
     modal: true
     title: I18n.i18nc("@title:window", "Diagnostics")
-    standardButtons: Dialog.Close
-    width: Math.min(980, root.windowRoot.width - 80)
-    height: Math.min(680, root.windowRoot.height - 80)
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
+    width: Math.min(Kirigami.Units.gridUnit * 54, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
+    height: Math.min(Kirigami.Units.gridUnit * 38, root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
 
     function syncDiagnosticsText() {
         root.diagnosticsText = root.uiBridge.diagnosticsText || ""
@@ -36,6 +32,19 @@ Dialog {
     }
 
     onClosed: diagnosticsText = ""
+
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    footer: Components.DialogButtons {
+        Button {
+            objectName: "diagnosticsCloseButton"
+            text: I18n.i18nc("@action:button", "Close")
+            icon.name: "window-close"
+            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+        }
+    }
 
     Connections {
         target: root.uiBridge
@@ -52,8 +61,8 @@ Dialog {
             Layout.fillWidth: true
 
             Label {
-                text: I18n.i18nc("@label", "Log file:")
-                color: Kirigami.Theme.disabledTextColor
+                text: I18n.i18nc("@label:textbox", "Log file:")
+                color: root.uiPalette.text
             }
 
             TextField {
@@ -64,6 +73,7 @@ Dialog {
             }
 
             Button {
+                icon.name: "document-open-folder"
                 text: I18n.i18nc("@action:button", "Open Folder")
                 enabled: (root.uiBridge.diagnosticsLogPath || "").length > 0
                 onClicked: root.uiBridge.openContainingFolder(root.uiBridge.diagnosticsLogPath || "")
@@ -74,6 +84,7 @@ Dialog {
             Layout.fillWidth: true
 
             Button {
+                icon.name: "view-refresh"
                 text: I18n.i18nc("@action:button", "Reload")
                 onClicked: {
                     root.uiBridge.reloadDiagnosticsFromDisk()
@@ -83,7 +94,8 @@ Dialog {
 
             Button {
                 objectName: "diagnosticsClearButton"
-                text: I18n.i18nc("@action:button", "Clear...")
+                icon.name: "edit-clear-history"
+                text: I18n.i18nc("@action:button", "Clear\u2026")
                 enabled: (root.diagnosticsText || "").length > 0
                 onClicked: clearDiagnosticsConfirmDialog.open()
             }
@@ -91,6 +103,7 @@ Dialog {
             Item { Layout.fillWidth: true }
 
             Button {
+                icon.name: "edit-copy"
                 text: I18n.i18nc("@action:button", "Copy All")
                 onClicked: {
                     if ((diagnosticsTextArea.text || "").length > 0) {
@@ -112,7 +125,7 @@ Dialog {
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.NoWrap
-                font.family: "Monospace"
+                font: Kirigami.Theme.fixedWidthFont
                 persistentSelection: true
 
                 MouseArea {
@@ -139,8 +152,6 @@ Dialog {
 
                 Menu {
                     id: diagnosticsContextMenu
-                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
                         text: I18n.i18nc("@action:inmenu", "Copy")

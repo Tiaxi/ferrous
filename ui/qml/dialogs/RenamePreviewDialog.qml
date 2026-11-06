@@ -3,8 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // The new name of each selected file, and why any cannot be renamed, before
 // anything is renamed. Cancel and Escape rename nothing.
@@ -50,19 +53,46 @@ Dialog {
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 80, 760)
-    height: Math.min(root.windowRoot.height - 80, 520)
+    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 42)
+    // As tall as the list, up to a limit.
+    height: Math.min(root.windowRoot.height - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 29,
+        root.implicitHeight)
     title: I18n.i18nc("@title:window", "Rename Files")
-    standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
-    background: Rectangle {
-        radius: 6
-        color: root.uiPalette.uiPaneColor
-        border.color: root.uiPalette.uiBorderColor
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    footer: Components.DialogFooter {
+
+        id: dialogButtons
+        primary: renamePreviewRenameButton
+        Button {
+            id: renamePreviewRenameButton
+            objectName: "renamePreviewRenameButton"
+            text: I18n.i18ncp("@action:button", "Rename %1 File", "Rename %1 Files", root.renameCount)
+            icon.name: "edit-rename"
+            enabled: root.renameCount > 0 && root.errorText.length === 0
+            DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            onClicked: {
+                root.close()
+                root.renameRequested()
+            }
+        }
+        Button {
+            objectName: "renamePreviewCancelButton"
+            text: I18n.i18nc("@action:button", "Cancel")
+            icon.name: "dialog-cancel"
+            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
+        }
     }
 
     contentItem: ColumnLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+
         spacing: 10
 
         Label {
@@ -70,7 +100,55 @@ Dialog {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: root.summaryText()
-            color: root.errorText.length > 0 ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
+            visible: root.rows.length > 0 || root.errorText.length > 0
+            color: root.errorText.length > 0 ? root.uiPalette.negative : root.uiPalette.text
+        }
+
+        // Nothing to list: a message alone, in the middle. Plain labels: a
+        // placeholder message's selectable text brings a Copy action whose
+        // Ctrl+C the window's own Copy has.
+        ColumnLayout {
+            objectName: "renamePreviewEmpty"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.topMargin: Kirigami.Units.gridUnit
+            Layout.bottomMargin: Kirigami.Units.gridUnit
+            visible: root.rows.length === 0 && root.errorText.length === 0
+            spacing: Kirigami.Units.largeSpacing
+
+            Item { Layout.fillHeight: true }
+
+            Kirigami.Icon {
+                Layout.alignment: Qt.AlignHCenter
+                implicitWidth: Kirigami.Units.iconSizes.huge
+                implicitHeight: Kirigami.Units.iconSizes.huge
+                source: "edit-rename"
+                opacity: 0.5
+                Accessible.ignored: true
+            }
+
+            Label {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                // A heading for screen readers, as Kirigami's placeholder
+                // message gives its text.
+                Accessible.role: Accessible.Heading
+                text: I18n.i18nc("@info", "No file is renamed")
+                font.pointSize: root.uiPalette.basePointSize * 1.125
+                font.weight: Font.DemiBold
+                color: root.uiPalette.textSecondary
+            }
+
+            Label {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                text: I18n.i18nc("@info", "The selected files already have the names their tags give.")
+                color: root.uiPalette.textSecondary
+            }
+
+            Item { Layout.fillHeight: true }
         }
 
         ListView {
@@ -78,6 +156,8 @@ Dialog {
             objectName: "renamePreviewList"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.preferredHeight: contentHeight
+            visible: root.rows.length > 0
             clip: true
             model: root.rows
             spacing: 4
@@ -95,10 +175,10 @@ Dialog {
                     text: modelData.unchanged
                         ? I18n.i18nc("@item file name", "%1 (keeps its name)", modelData.oldName)
                         : I18n.i18nc("@item old file name, new file name", "%1 → %2",
-                            modelData.oldName, modelData.newName || "?")
+                            modelData.oldName, modelData.newName || "")
                     color: modelData.ok
-                        ? (modelData.unchanged ? root.uiPalette.uiMutedTextColor : Kirigami.Theme.textColor)
-                        : Kirigami.Theme.negativeTextColor
+                        ? (modelData.unchanged ? root.uiPalette.textSecondary : root.uiPalette.text)
+                        : root.uiPalette.negative
                 }
 
                 Label {
@@ -107,31 +187,8 @@ Dialog {
                     visible: !modelData.ok
                     wrapMode: Text.Wrap
                     text: modelData.error || ""
-                    color: Kirigami.Theme.negativeTextColor
-                    font: Kirigami.Theme.smallFont
-                }
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                objectName: "renamePreviewCancelButton"
-                text: I18n.i18nc("@action:button", "Cancel")
-                onClicked: root.reject()
-            }
-            Button {
-                objectName: "renamePreviewRenameButton"
-                text: I18n.i18ncp("@action:button", "Rename %1 File", "Rename %1 Files", root.renameCount)
-                enabled: root.renameCount > 0 && root.errorText.length === 0
-                highlighted: true
-                onClicked: {
-                    root.close()
-                    root.renameRequested()
+                    color: root.uiPalette.negative
+                    font.pointSize: root.uiPalette.smallPointSize
                 }
             }
         }

@@ -3,7 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // Shown while quitting waits for a tag save or rename to finish.
 Dialog {
@@ -27,20 +31,42 @@ Dialog {
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
-    width: 460
+    width: Math.min(Kirigami.Units.gridUnit * 26, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Finishing Tag Changes")
-    standardButtons: Dialog.NoButton
     closePolicy: Popup.CloseOnEscape
 
     onRejected: root.stopQuittingRequested()
 
-    background: Rectangle {
-        radius: 6
-        color: root.uiPalette.uiPaneColor
-        border.color: root.uiPalette.uiBorderColor
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    footer: Components.DialogFooter {
+
+        id: dialogButtons
+        primary: tagEditorQuitWaitKeepWaitingButton
+        visible: root.offerChoice
+
+        Button {
+            id: tagEditorQuitWaitKeepWaitingButton
+            objectName: "tagEditorQuitWaitKeepWaitingButton"
+            text: I18n.i18nc("@action:button", "Keep Waiting")
+            DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            onClicked: root.keepWaitingRequested()
+        }
+        Button {
+            objectName: "tagEditorQuitWaitQuitButton"
+            text: I18n.i18nc("@action:button", "Quit Anyway")
+            icon.name: "application-exit"
+            DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
+            onClicked: root.quitAnywayRequested()
+        }
     }
 
     contentItem: ColumnLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+
         spacing: 12
 
         RowLayout {
@@ -49,8 +75,8 @@ Dialog {
 
             BusyIndicator {
                 running: root.visible
-                implicitWidth: 20
-                implicitHeight: 20
+                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                implicitHeight: Kirigami.Units.iconSizes.smallMedium
             }
 
             Label {
@@ -67,7 +93,7 @@ Dialog {
             Layout.fillWidth: true
             visible: root.files.length > 0
             wrapMode: Text.WordWrap
-            color: root.uiPalette.uiMutedTextColor
+            color: root.uiPalette.textSecondary
             text: root.files.slice(0, root.shownFileCount).join("\n")
                 + (root.files.length > root.shownFileCount
                     ? "\n" + I18n.i18ncp("@info more files than the list shows", "and %1 more", "and %1 more",
@@ -84,26 +110,6 @@ Dialog {
                 + "network share. Quit Anyway stops waiting, and the tag changes not yet "
                 + "written may be lost. Each file keeps its old tags or gets its new ones; "
                 + "none is left half-written.")
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            visible: root.offerChoice
-            spacing: 8
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                objectName: "tagEditorQuitWaitQuitButton"
-                text: I18n.i18nc("@action:button", "Quit Anyway")
-                onClicked: root.quitAnywayRequested()
-            }
-            Button {
-                objectName: "tagEditorQuitWaitKeepWaitingButton"
-                text: I18n.i18nc("@action:button", "Keep Waiting")
-                highlighted: true
-                onClicked: root.keepWaitingRequested()
-            }
         }
     }
 }

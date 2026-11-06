@@ -3,7 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 Dialog {
     id: root
@@ -28,21 +32,64 @@ Dialog {
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
-    width: 400
+    width: Math.min(Kirigami.Units.gridUnit * 25, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Unsaved Changes")
-    standardButtons: Dialog.NoButton
     // Escape keeps editing, except while a save is running.
     closePolicy: root.tagEditorApi.saving ? Popup.NoAutoClose : Popup.CloseOnEscape
 
     onRejected: root.keepEditingRequested()
 
-    background: Rectangle {
-        radius: 6
-        color: root.uiPalette.uiPaneColor
-        border.color: root.uiPalette.uiBorderColor
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    // Save, Discard, Cancel.
+    footer: Components.DialogFooter {
+        id: dialogButtons
+        // Save, or Discard and Reload when there is nothing else to do.
+        primary: root.forReload ? discardButton : saveButton
+        Button {
+            id: saveButton
+            objectName: "tagEditorCloseConfirmSaveButton"
+            visible: !root.forReload
+            text: root.tagEditorApi.saving
+                ? I18n.i18nc("@action:button", "Saving\u2026")
+                : I18n.i18nc("@action:button", "Save")
+            icon.name: "document-save"
+            enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+            DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            onClicked: root.saveRequested()
+        }
+        Button {
+            id: discardButton
+            objectName: "tagEditorCloseConfirmDiscardButton"
+            text: root.forReload
+                ? I18n.i18nc("@action:button", "Discard and Reload")
+                : I18n.i18nc("@action:button", "Discard")
+            icon.name: "edit-delete-remove"
+            enabled: !root.tagEditorApi.saving
+            DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
+            onClicked: {
+                root.close()
+                root.discardRequested()
+            }
+        }
+        Button {
+            objectName: "tagEditorCloseConfirmKeepEditingButton"
+            text: root.forQuit || root.forReload
+                ? I18n.i18nc("@action:button", "Cancel")
+                : I18n.i18nc("@action:button", "Keep Editing")
+            icon.name: "dialog-cancel"
+            enabled: !root.tagEditorApi.saving
+            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
+        }
     }
 
     contentItem: ColumnLayout {
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+
         spacing: 12
 
         Label {
@@ -59,7 +106,7 @@ Dialog {
         Label {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            color: root.uiPalette.uiMutedTextColor
+            color: root.uiPalette.textSecondary
             text: root.forQuit
                 ? I18n.i18nc("@info", "Save writes the current edits and quits. "
                     + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
@@ -67,43 +114,6 @@ Dialog {
                     ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
                     : I18n.i18nc("@info",
                         "Save writes the current edits. Discard closes the dialog and drops every unsaved change."))
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                objectName: "tagEditorCloseConfirmKeepEditingButton"
-                text: root.forQuit || root.forReload
-                    ? I18n.i18nc("@action:button", "Cancel")
-                    : I18n.i18nc("@action:button", "Keep Editing")
-                enabled: !root.tagEditorApi.saving
-                onClicked: root.reject()
-            }
-            Button {
-                objectName: "tagEditorCloseConfirmDiscardButton"
-                text: root.forReload
-                    ? I18n.i18nc("@action:button", "Discard and Reload")
-                    : I18n.i18nc("@action:button", "Discard")
-                enabled: !root.tagEditorApi.saving
-                onClicked: {
-                    root.close()
-                    root.discardRequested()
-                }
-            }
-            Button {
-                objectName: "tagEditorCloseConfirmSaveButton"
-                visible: !root.forReload
-                text: root.tagEditorApi.saving
-                    ? I18n.i18nc("@action:button", "Saving...")
-                    : I18n.i18nc("@action:button", "Save")
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
-                highlighted: true
-                onClicked: root.saveRequested()
-            }
         }
     }
 }

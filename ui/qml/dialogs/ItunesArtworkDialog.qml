@@ -3,9 +3,11 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../logic/PathUtils.js" as PathUtils
+import "../components" as Components
 import "." as Dialogs
 
 Dialog {
@@ -32,10 +34,22 @@ Dialog {
     z: 100
     width: Math.min(Math.max(320, hostWidth - 48), 920)
     height: Math.min(Math.max(320, hostHeight - 48), 680)
-    x: (hostWidth - width) / 2
-    y: (hostHeight - height) / 2
-    title: I18n.i18nc("@title:window", "Replace From iTunes")
-    standardButtons: Dialog.Close
+    x: Math.round((hostWidth - width) / 2)
+    y: Math.round((hostHeight - height) / 2)
+    title: I18n.i18nc("@title:window", "Replace from iTunes")
+
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
+    }
+
+    footer: Components.DialogButtons {
+        Button {
+            objectName: "itunesArtworkCloseButton"
+            text: I18n.i18nc("@action:button", "Close")
+            icon.name: "window-close"
+            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+        }
+    }
 
     function clearPendingActionState() {
         root.pendingPreviewIndex = -1
@@ -209,7 +223,7 @@ Dialog {
             Text {
                 Layout.fillWidth: true
                 text: root.uiBridge.itunesArtworkStatusText || ""
-                color: root.uiPalette.uiTextColor
+                color: root.uiPalette.text
                 wrapMode: Text.Wrap
             }
         }
@@ -218,9 +232,9 @@ Dialog {
             Layout.fillWidth: true
             Layout.preferredHeight: implicitHeight
             implicitHeight: currentArtworkSummaryRow.implicitHeight + 20
-            radius: 12
-            color: root.uiPalette.uiPaneColor
-            border.color: root.uiPalette.uiBorderColor
+            radius: Kirigami.Units.cornerRadius
+            color: root.uiPalette.view
+            border.color: root.uiPalette.seam
             clip: true
 
             RowLayout {
@@ -238,6 +252,8 @@ Dialog {
                         id: currentArtworkImage
                         anchors.fill: parent
                         fillMode: Image.PreserveAspectFit
+                        sourceSize.width: Math.ceil(width * Screen.devicePixelRatio)
+                        sourceSize.height: Math.ceil(height * Screen.devicePixelRatio)
                         source: root.currentArtworkSource
                         smooth: true
                         asynchronous: true
@@ -247,15 +263,15 @@ Dialog {
 
                     Rectangle {
                         anchors.fill: parent
-                        radius: 10
-                        color: root.uiPalette.uiSurfaceAltColor
-                        border.color: root.uiPalette.uiBorderColor
+                        radius: 2
+                        color: root.uiPalette.hover
+                        border.color: root.uiPalette.seam
                         visible: !currentArtworkImage.visible
 
                         Text {
                             anchors.centerIn: parent
                             text: I18n.i18nc("@label", "No art")
-                            color: root.uiPalette.uiMutedTextColor
+                            color: root.uiPalette.textSecondary
                         }
                     }
                 }
@@ -267,8 +283,8 @@ Dialog {
                     Text {
                         Layout.fillWidth: true
                         text: I18n.i18nc("@label", "Current album art")
-                        color: root.uiPalette.uiTextColor
-                        font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
+                        color: root.uiPalette.text
+                        font.pointSize: root.uiPalette.basePointSize * 1.125
                         font.weight: Font.DemiBold
                         elide: Text.ElideRight
                     }
@@ -279,8 +295,8 @@ Dialog {
                             (root.currentArtworkInfo.resolutionText || ""),
                             (root.currentArtworkInfo.fileType || ""),
                             (root.currentArtworkInfo.fileSizeText || "")
-                        ].filter(Boolean).join("  |  ")
-                        color: root.uiPalette.uiMutedTextColor
+                        ].filter(Boolean).join(" \u00b7 ")
+                        color: root.uiPalette.textSecondary
                         wrapMode: Text.Wrap
                         visible: text.length > 0
                     }
@@ -289,7 +305,7 @@ Dialog {
                         Layout.fillWidth: true
                         visible: (root.currentArtworkInfo.mimeType || "").length > 0
                         text: I18n.i18nc("@info", "MIME: %1", root.currentArtworkInfo.mimeType || "")
-                        color: root.uiPalette.uiMutedTextColor
+                        color: root.uiPalette.textSecondary
                         elide: Text.ElideRight
                     }
 
@@ -297,7 +313,7 @@ Dialog {
                         Layout.fillWidth: true
                         visible: (root.currentArtworkSource || "").length === 0
                         text: I18n.i18nc("@label", "No current album art is available for this track.")
-                        color: root.uiPalette.uiMutedTextColor
+                        color: root.uiPalette.textSecondary
                         wrapMode: Text.Wrap
                     }
 
@@ -306,7 +322,7 @@ Dialog {
                         visible: (root.currentArtworkSource || "").length > 0
                             && Object.keys(root.currentArtworkInfo || {}).length === 0
                         text: I18n.i18nc("@label", "Current artwork metadata is not available.")
-                        color: root.uiPalette.uiMutedTextColor
+                        color: root.uiPalette.textSecondary
                         wrapMode: Text.Wrap
                     }
                 }
@@ -342,9 +358,9 @@ Dialog {
                 x: ListView.view.leftMargin
                 width: Math.max(0, ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin)
                 implicitHeight: 136
-                radius: 12
-                color: root.uiPalette.uiPaneColor
-                border.color: root.uiPalette.uiBorderColor
+                radius: Kirigami.Units.cornerRadius
+                color: root.uiPalette.view
+                border.color: root.uiPalette.seam
 
                 RowLayout {
                     anchors.fill: parent
@@ -355,6 +371,8 @@ Dialog {
                         Layout.preferredWidth: 92
                         Layout.preferredHeight: 92
                         fillMode: Image.PreserveAspectFit
+                        sourceSize.width: Math.ceil(92 * Screen.devicePixelRatio)
+                        sourceSize.height: Math.ceil(92 * Screen.devicePixelRatio)
                         source: (modelData && (modelData.previewSource || "")) || ""
                         smooth: true
                         asynchronous: true
@@ -368,8 +386,8 @@ Dialog {
                         Text {
                             Layout.fillWidth: true
                             text: (modelData && (modelData.albumTitle || "")) || ""
-                            color: root.uiPalette.uiTextColor
-                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
+                            color: root.uiPalette.text
+                            font.pointSize: root.uiPalette.basePointSize * 1.125
                             font.weight: Font.DemiBold
                             elide: Text.ElideRight
                         }
@@ -377,7 +395,7 @@ Dialog {
                         Text {
                             Layout.fillWidth: true
                             text: (modelData && (modelData.artistName || "")) || ""
-                            color: root.uiPalette.uiMutedTextColor
+                            color: root.uiPalette.textSecondary
                             elide: Text.ElideRight
                         }
 
@@ -387,8 +405,8 @@ Dialog {
                                 (modelData && (modelData.resolutionText || "")) || "",
                                 (modelData && (modelData.fileType || "")) || "",
                                 (modelData && (modelData.fileSizeText || "")) || ""
-                            ].filter(Boolean).join("  |  ")
-                            color: root.uiPalette.uiMutedTextColor
+                            ].filter(Boolean).join(" \u00b7 ")
+                            color: root.uiPalette.textSecondary
                             wrapMode: Text.Wrap
                         }
 
@@ -396,7 +414,7 @@ Dialog {
                             Layout.fillWidth: true
                             visible: ((modelData && (modelData.mimeType || "")) || "").length > 0
                             text: I18n.i18nc("@info", "MIME: %1", (modelData && (modelData.mimeType || "")) || "")
-                            color: root.uiPalette.uiMutedTextColor
+                            color: root.uiPalette.textSecondary
                             elide: Text.ElideRight
                         }
 
@@ -413,8 +431,8 @@ Dialog {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: I18n.i18nc("@label", "Loading high-resolution artwork...")
-                                color: root.uiPalette.uiMutedTextColor
+                                text: I18n.i18nc("@label", "Loading high-resolution artwork\u2026")
+                                color: root.uiPalette.textSecondary
                                 wrapMode: Text.Wrap
                             }
                         }
@@ -423,7 +441,7 @@ Dialog {
                             Layout.fillWidth: true
                             visible: ((modelData && (modelData.assetError || "")) || "").length > 0
                             text: (modelData && (modelData.assetError || "")) || ""
-                            color: Kirigami.Theme.negativeTextColor
+                            color: root.uiPalette.negative
                             wrapMode: Text.Wrap
                         }
 
@@ -432,7 +450,7 @@ Dialog {
                             visible: !((modelData && (modelData.assetLoading || false)) || false)
                                 && ((modelData && (modelData.detailStatusText || "")) || "").length > 0
                             text: (modelData && (modelData.detailStatusText || "")) || ""
-                            color: root.uiPalette.uiMutedTextColor
+                            color: root.uiPalette.textSecondary
                             wrapMode: Text.Wrap
                         }
                     }
@@ -443,7 +461,7 @@ Dialog {
                         Button {
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingPreviewIndex === index
-                                ? I18n.i18nc("@action:button", "Loading...")
+                                ? I18n.i18nc("@action:button", "Loading\u2026")
                                 : I18n.i18nc("@action:button", "Preview")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
                             onClicked: root.requestSuggestionPreview(index)
@@ -452,7 +470,7 @@ Dialog {
                         Button {
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingApplyIndex === index
-                                ? I18n.i18nc("@action:button", "Loading...")
+                                ? I18n.i18nc("@action:button", "Loading\u2026")
                                 : I18n.i18nc("@action:button", "Apply")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
                             onClicked: root.requestSuggestionApply(index)

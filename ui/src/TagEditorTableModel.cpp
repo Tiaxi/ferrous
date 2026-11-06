@@ -163,6 +163,20 @@ QString TagEditorTableModel::fieldValue(int row, const QString &field) const {
     return target ? *target : QString();
 }
 
+QString TagEditorTableModel::originalFieldValue(int row, const QString &field) const {
+    const TagEditorRowState *item = rowAt(row);
+    if (!item) {
+        return {};
+    }
+    const QString name = normalizedFieldName(field);
+    for (const EditableField &editable : kEditableFields) {
+        if (normalizedFieldName(QLatin1String(editable.name)) == name) {
+            return item->*editable.original;
+        }
+    }
+    return fieldValue(row, field);
+}
+
 QStringList TagEditorTableModel::loadedPaths() const {
     QStringList out;
     out.reserve(m_rows.size());

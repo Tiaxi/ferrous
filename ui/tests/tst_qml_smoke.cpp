@@ -1807,7 +1807,7 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
 
     bool invoked = QMetaObject::invokeMethod(root, "openItunesArtworkDialog");
     QVERIFY(invoked);
-    QObject *itunesDialog = findObjectByStringProperty(root, "title", QStringLiteral("Replace From iTunes"));
+    QObject *itunesDialog = findObjectByStringProperty(root, "title", QStringLiteral("Replace from iTunes"));
     QVERIFY2(itunesDialog != nullptr, "Could not find iTunes artwork dialog instance");
     QTRY_VERIFY(itunesDialog->property("visible").toBool());
 }
@@ -2057,6 +2057,12 @@ Item {
         function bulkValue(field) { return "" }
         function bulkValueMixed(field) { return false }
         function extraValuesNote(field) { return "" }
+        function bulkFieldChanged(field) { return false }
+        function bulkOriginalValue(field) { return "" }
+        function bulkOriginalValueMixed(field) { return false }
+        function revertBulkField(field) {}
+        function fieldChanged(field) { return false }
+        function revertField(field) {}
         function applyBulkFieldToRows(rows, field, value) {}
         function applyEnglishTitleCase(field) {}
         function applyFinnishCapitalize(field) {}
@@ -2087,13 +2093,9 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
         spectrogramFftChoices: [512, 1024, 2048]
         promptAddLibraryRoot: function(context) {}
         openLibraryRootNameDialog: function(mode, path, name) {}
-        stepScrollView: function(scrollView, wheel, stepSize, stepsPerWheel) {}
-        snappyScrollFlickDeceleration: 18000
-        snappyScrollMaxFlickVelocity: 1400
     }
 
     Dialogs.DiagnosticsDialog {
@@ -2101,7 +2103,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
     }
 
     Dialogs.LibraryRootNameDialog {
@@ -2109,7 +2110,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
         dialogMode: "add"
         pathValue: "/music"
         nameValue: "Music"
@@ -3504,10 +3504,13 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QTRY_COMPARE(historyList->property("count").toInt(), 2);
     QTRY_COMPARE(visibleTextItems(content, skipped).size(), 1);
     QCOMPARE(visibleTextItems(content, scan).size(), 1);
-    // Category, repeat count, and subject.
+    // A one-sentence message is titled by its category. The file is named
+    // in the message, so its path does not repeat; the entry shows it in
+    // the library, as it is not in the queue.
     QCOMPARE(visibleTextItems(content, QStringLiteral("Playback")).size(), 1);
     QCOMPARE(visibleTextItems(content, QStringLiteral("Library")).size(), 1);
-    QCOMPARE(visibleTextItems(content, QStringLiteral("/music/bad.flac")).size(), 1);
+    QCOMPARE(visibleTextItems(content, QStringLiteral("/music/bad.flac")).size(), 0);
+    QCOMPARE(visibleTextItems(content, QStringLiteral("Show in Library")).size(), 1);
     // They stay new while the dialog shows them, on the open button's tint.
     QCOMPARE(statusButton->property("text").toString(), QStringLiteral("2 new issues"));
     QObject *statusBar = window->findChild<QObject *>(QStringLiteral("statusBar"));
@@ -3521,14 +3524,9 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QTRY_COMPARE(historyList->property("count").toInt(), 3);
     QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("3 new issues"));
 
-    // Each entry goes on its own, by its row's button.
-    const QList<QQuickItem *> removeButtons =
-        itemsNamed(content, QStringLiteral("errorHistoryRemoveButton"));
-    QCOMPARE(removeButtons.size(), 3);
-    QVERIFY(QMetaObject::invokeMethod(removeButtons.at(1), "clicked"));
-    QTRY_COMPARE(historyList->property("count").toInt(), 2);
-    QCOMPARE(errorHistoryMessages(errors),
-             (QStringList{QStringLiteral("Last.fm session expired."), skipped}));
+    // The rows have no dismiss buttons of their own: Clear All empties the
+    // list.
+    QVERIFY(itemsNamed(content, QStringLiteral("errorHistoryRemoveButton")).isEmpty());
     QVERIFY(dialog->property("visible").toBool());
 
     // Clear All empties the list, which closes the dialog: the last entry
@@ -5699,6 +5697,9 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     meter->m_channels[0].observe(-3, 0);
     checkBox->setProperty("checked", false);
     QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
+    // The change waits for OK.
+    QVERIFY(bridge->property("showLevelMeter").toBool());
+    QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "accept"));
     QTRY_VERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(!meter->isVisible());
     QTRY_COMPARE(spectrogram->property("plotWidth").toReal(), surface->width());
@@ -5710,8 +5711,11 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QCOMPARE(meter->m_channels[0].peak, -60.0);
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/next.wav"));
     QVERIFY(meter->sourcePath().isEmpty());
+    QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "open"));
+    QTRY_VERIFY(root->findChild<QObject *>(QStringLiteral("preferencesDialog"))->property("opened").toBool());
     checkBox->setProperty("checked", true);
     QVERIFY(QMetaObject::invokeMethod(checkBox, "toggled"));
+    QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "accept"));
     QTRY_VERIFY(meter->isVisible());
     QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/next.wav"));
     QCOMPARE(queue->height(), 580.0);
@@ -5783,16 +5787,23 @@ ApplicationWindow {
         windowRoot: harness
     }
 
+    // Applies each change at once, where Configure Ferrous waits for OK.
+    QtObject {
+        id: settings
+        function value(key) { return bridge[key] }
+        function setValue(key, value) {
+            bridge["set" + key.charAt(0).toUpperCase() + key.slice(1)](value)
+        }
+    }
+
     Preferences.LibraryPage {
         anchors.fill: parent
         uiBridge: bridge
         uiPalette: palette
+        settings: settings
         windowRoot: harness
         promptAddLibraryRoot: function(context) {}
         openLibraryRootNameDialog: function(mode, path, name) {}
-        stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        snappyScrollFlickDeceleration: 18000
-        snappyScrollMaxFlickVelocity: 1400
     }
 }
 )QML"), baseUrl, &errorText));
@@ -24792,9 +24803,9 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QQuickItem *content = popupContent(dialog);
     QVERIFY(content != nullptr);
     QQuickItem *view = itemNamed(content, QStringLiteral("errorHistoryView"));
-    QQuickItem *closeButton = itemNamed(content, QStringLiteral("errorHistoryCloseButton"));
+    QQuickItem *diagnostics = itemNamed(content, QStringLiteral("errorHistoryDiagnosticsButton"));
     QQuickItem *clearAll = itemNamed(content, QStringLiteral("errorHistoryClearButton"));
-    QVERIFY(view != nullptr && closeButton != nullptr && clearAll != nullptr);
+    QVERIFY(view != nullptr && diagnostics != nullptr && clearAll != nullptr);
 
     // As many errors as the history keeps, with a message of some length.
     const int limit = errors->property("historyLimit").toInt();
@@ -24809,9 +24820,9 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
 
-    // The dialog fits the window; the list scrolls, and has the keyboard.
+    // The popup fits the window; the list scrolls, and has the keyboard.
     QVERIFY(shownInsideItsWindow(content));
-    QVERIFY(shownInsideItsWindow(closeButton));
+    QVERIFY(shownInsideItsWindow(diagnostics));
     QVERIFY(shownInsideItsWindow(clearAll));
     QVERIFY(view->height() >= QFontMetricsF(QGuiApplication::font()).lineSpacing() * 4);
     auto *flickable = qvariant_cast<QQuickItem *>(view->property("contentItem"));
@@ -24845,54 +24856,56 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTRY_VERIFY(view->hasActiveFocus());
 
     // Everything has a name.
-    QAccessibleInterface *popupAccessible = QAccessible::queryAccessibleInterface(content->parentItem());
+    QAccessibleInterface *popupAccessible = QAccessible::queryAccessibleInterface(content);
     QVERIFY(popupAccessible != nullptr);
-    QCOMPARE(popupAccessible->text(QAccessible::Name), QStringLiteral("Recent Errors"));
+    QCOMPARE(popupAccessible->text(QAccessible::Name), QStringLiteral("Recent Issues"));
     QCOMPARE(popupAccessible->role(), QAccessible::Dialog);
     QCOMPARE(QAccessible::queryAccessibleInterface(view)->text(QAccessible::Name),
-             QStringLiteral("Recent errors"));
+             QStringLiteral("Recent issues"));
 
-    // Tab goes on to each row's button, scrolling the row into view.
-    const QList<QQuickItem *> removeButtons =
-        itemsNamed(content, QStringLiteral("errorHistoryRemoveButton"));
-    QCOMPARE(removeButtons.size(), limit);
+    // Tab goes on to each row's action, scrolling the row into view.
+    QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    QCOMPARE(actions.size(), limit);
     QTest::keyClick(window, Qt::Key_Tab);
-    QTRY_VERIFY(removeButtons.first()->hasActiveFocus());
-    QCOMPARE(QAccessible::queryAccessibleInterface(removeButtons.first())->text(QAccessible::Name),
-             QStringLiteral("Remove this error"));
+    QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QCOMPARE(QAccessible::queryAccessibleInterface(actions.first())->text(QAccessible::Name),
+             QStringLiteral("Show in Library"));
     for (int press = 1; press < limit; ++press) {
         QTest::keyClick(window, Qt::Key_Tab);
     }
-    QQuickItem *lastRemove = removeButtons.last();
-    QTRY_VERIFY(lastRemove->hasActiveFocus());
+    QQuickItem *lastAction = actions.last();
+    QTRY_VERIFY(lastAction->hasActiveFocus());
     QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
     const QRectF lastInView =
-        lastRemove->mapRectToItem(flickable, QRectF(0, 0, lastRemove->width(), lastRemove->height()));
+        lastAction->mapRectToItem(flickable, QRectF(0, 0, lastAction->width(), lastAction->height()));
     QVERIFY(lastInView.top() >= 0 && lastInView.bottom() <= flickable->height() + 1);
 
-    // Space presses it rather than playing or pausing, and the focus moves
-    // to the row that takes its place.
-    QTest::keyClick(window, Qt::Key_Space);
-    QTRY_COMPARE(errorHistoryMessages(errors).size(), limit - 1);
-    QCOMPARE(toggled.count(), 0);
-    QTRY_VERIFY(content->window()->activeFocusItem() != nullptr);
-    QTRY_COMPARE(content->window()->activeFocusItem()->objectName(),
-                 QStringLiteral("errorHistoryRemoveButton"));
-    QVERIFY(content->isAncestorOf(content->window()->activeFocusItem()));
-
-    // On to the dialog's own buttons; Escape closes it from any of them,
-    // and the keyboard goes back to the window.
+    // On to Open Diagnostics and Clear All; Escape closes the popup from
+    // any of them, and the keyboard goes back to the window.
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(diagnostics->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(clearAll->hasActiveFocus());
-    QTest::keyClick(window, Qt::Key_Tab);
-    QTRY_VERIFY(closeButton->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
-    QCOMPARE(errorHistoryMessages(errors).size(), limit - 1);
+    QCOMPARE(errorHistoryMessages(errors).size(), limit);
     QVERIFY(window->activeFocusItem() == nullptr
             || !content->isAncestorOf(window->activeFocusItem()));
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(toggled.count(), 1);
+
+    // Space presses a focused action rather than playing or pausing.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QTRY_VERIFY(view->hasActiveFocus());
+    actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    QVERIFY(!actions.isEmpty());
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(toggled.count(), 1);
+    QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/track 0.flac")});
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
@@ -24921,9 +24934,9 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
     bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
     QQuickItem *content = popupContent(dialog);
     QVERIFY(content != nullptr);
-    QQuickItem *closeButton = itemNamed(content, QStringLiteral("errorHistoryCloseButton"));
+    QQuickItem *clearAll = itemNamed(content, QStringLiteral("errorHistoryClearButton"));
     QQuickItem *view = itemNamed(content, QStringLiteral("errorHistoryView"));
-    QVERIFY(closeButton != nullptr && view != nullptr);
+    QVERIFY(clearAll != nullptr && view != nullptr);
 
     struct Viewer {
         const char *open;
@@ -24972,14 +24985,14 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
         QVERIFY(viewer->property(shown.openProperty).toBool());
         QTRY_VERIFY2(view->hasActiveFocus(), name.constData());
 
-        // In the window the user is looking at, and on top of it: a click
-        // there reaches its button, and the viewer stays open.
+        // In the window the user is looking at, and on top of it. A press
+        // outside closes it alone: the viewer stays open.
         QCOMPARE(content->window(), host);
         QVERIFY(dialog->property("modal").toBool());
-        QTRY_VERIFY(shownInsideItsWindow(closeButton));
-        // What the dialog shows counts as seen, so the banner has gone.
+        QTRY_VERIFY(shownInsideItsWindow(clearAll));
+        // What the popup shows counts as seen, so the banner has gone.
         QTRY_VERIFY2(!banner->isVisible(), name.constData());
-        QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(closeButton));
+        QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, QPoint(host->width() / 3, host->height() / 3));
         QTRY_VERIFY2(!dialog->property("visible").toBool(), name.constData());
         QVERIFY(viewer->property(shown.openProperty).toBool());
 
@@ -25029,8 +25042,8 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
             && statusButton != nullptr);
     QQuickItem *content = popupContent(dialog);
     QVERIFY(content != nullptr);
-    QQuickItem *closeButton = itemNamed(content, QStringLiteral("errorHistoryCloseButton"));
-    QVERIFY(closeButton != nullptr);
+    QQuickItem *clearAll = itemNamed(content, QStringLiteral("errorHistoryClearButton"));
+    QVERIFY(clearAll != nullptr);
     bridge->setProperty("viewerFullscreenMode", 1);
     QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play it."), 1, 1));
 
@@ -25050,8 +25063,9 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
     QTRY_COMPARE(content->window(), window);
     QVERIFY(dialog->property("visible").toBool());
     QVERIFY(QTest::qWaitForWindowActive(window));
-    QTRY_VERIFY(shownInsideItsWindow(closeButton));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(closeButton));
+    QTRY_VERIFY(shownInsideItsWindow(clearAll));
+    // A press outside it, in the main window, closes it.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, QPoint(window->width() / 3, window->height() / 3));
     QTRY_VERIFY(!dialog->property("visible").toBool());
 
     // Nothing of it stays in the way of the main window.
@@ -25394,16 +25408,20 @@ ApplicationWindow {
         function rescanLibraryRoot(path) {}
         function rescanAllLibraryRoots() {}
     }
+    QtObject {
+        id: settings
+        property int librarySortMode: 0
+        function value(key) { return key === "librarySortMode" ? librarySortMode : bridge[key] }
+        function setValue(key, value) {}
+    }
     Preferences.LibraryPage {
         anchors.fill: parent
         uiBridge: bridge
         uiPalette: palette
+        settings: settings
         windowRoot: window
         promptAddLibraryRoot: function() {}
         openLibraryRootNameDialog: function() {}
-        stepScrollView: function() {}
-        snappyScrollFlickDeceleration: 18000
-        snappyScrollMaxFlickVelocity: 1400
     }
 }
 )QML"), baseUrl, &errorText));
@@ -25697,7 +25715,6 @@ ApplicationWindow {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: window
-        popupTransitionMs: 0
     }
 }
 )QML"), baseUrl, &errorText));
@@ -28599,10 +28616,20 @@ ApplicationWindow {
         windowRoot: harness
     }
 
+    // Applies each change at once, where Configure Ferrous waits for OK.
+    QtObject {
+        id: settings
+        function value(key) { return bridge[key] }
+        function setValue(key, value) {
+            bridge["set" + key.charAt(0).toUpperCase() + key.slice(1)](value)
+        }
+    }
+
     Preferences.LastFmPage {
         anchors.fill: parent
         uiBridge: bridge
         uiPalette: palette
+        settings: settings
     }
 }
 )QML"), baseUrl, &errorText));
@@ -28620,7 +28647,7 @@ ApplicationWindow {
     bridge->setProperty("lastFmAuthState", 2);
     QTRY_VERIFY(checkBox->isVisible());
     QVERIFY(checkBox->property("checked").toBool());
-    QCOMPARE(checkBox->property("text").toString(), QStringLiteral("Show scrobble progress"));
+    QCOMPARE(checkBox->property("text").toString(), QStringLiteral("Show the Last.fm status in the status bar"));
 
     QTest::mouseClick(window, Qt::LeftButton, {}, centerInWindow(checkBox));
     QTRY_COMPARE(bridge->property("settingChanges").toInt(), 1);

@@ -3,11 +3,13 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
-import "../logic/ColorUtils.js" as ColorUtils
+import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
+import "../logic/KeyUtils.js" as KeyUtils
 
 Dialog {
     id: root
@@ -34,48 +36,113 @@ Dialog {
     readonly property int quitWaitBoundMs: 5000
     readonly property real tableRowHeight: root.uiPalette.rowHeight
     // Shown in a field whose rows hold different values, which saving keeps.
-    readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "<keep>")
-    readonly property color uiSurfaceColor: root.uiPalette.uiSurfaceColor
-    readonly property color uiSurfaceRaisedColor: root.uiPalette.uiPaneColor
-    readonly property color uiHeaderColor: root.uiPalette.uiHeaderColor
-    readonly property color uiColumnsColor: root.uiPalette.uiColumnsColor
-    readonly property color uiBorderColor: root.uiPalette.uiBorderColor
-    readonly property color uiMutedTextColor: root.uiPalette.uiMutedTextColor
+    readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
+    readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
+    // Bumped whenever the selection or the edits change, for the bindings
+    // that ask the editor which fields changed.
+    property int summaryRevision: 0
     readonly property var editorFields: [
-        { key: "title", label: I18n.i18nc("@label tag field", "Title"), allowTitleCase: true, allowCapitalize: true },
-        { key: "artist", label: I18n.i18nc("@label tag field", "Artist"), allowTitleCase: true, allowCapitalize: true },
-        { key: "album", label: I18n.i18nc("@label tag field", "Album"), allowTitleCase: true, allowCapitalize: true },
-        { key: "genre", label: I18n.i18nc("@label tag field", "Genre"), allowTitleCase: false, allowCapitalize: true },
-        { key: "year", label: I18n.i18nc("@label tag field", "Year"), allowTitleCase: false, allowCapitalize: false },
-        { key: "albumArtist", label: I18n.i18nc("@label tag field", "Album Artist"), allowTitleCase: true, allowCapitalize: true },
-        { key: "trackNo", label: I18n.i18nc("@label tag field", "Track"), allowTitleCase: false, allowCapitalize: false },
-        { key: "discNo", label: I18n.i18nc("@label tag field", "Disc"), allowTitleCase: false, allowCapitalize: false },
-        { key: "totalTracks", label: I18n.i18nc("@label tag field", "Tracks"), allowTitleCase: false, allowCapitalize: false },
-        { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), allowTitleCase: false, allowCapitalize: false },
-        { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), allowTitleCase: false, allowCapitalize: false }
+        { key: "title", label: I18n.i18nc("@label tag field", "Title"), formLabel: I18n.i18nc("@label:textbox tag field", "Title:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "artist", label: I18n.i18nc("@label tag field", "Artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Artist:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "album", label: I18n.i18nc("@label tag field", "Album"), formLabel: I18n.i18nc("@label:textbox tag field", "Album:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "albumArtist", label: I18n.i18nc("@label tag field", "Album Artist"), formLabel: I18n.i18nc("@label:textbox tag field", "Album Artist:"), allowTitleCase: true, allowCapitalize: true },
+        { key: "genre", label: I18n.i18nc("@label tag field", "Genre"), formLabel: I18n.i18nc("@label:textbox tag field", "Genre:"), allowTitleCase: false, allowCapitalize: true },
+        { key: "year", label: I18n.i18nc("@label tag field", "Year"), formLabel: I18n.i18nc("@label:textbox tag field", "Year:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "trackNo", label: I18n.i18nc("@label tag field", "Track"), formLabel: I18n.i18nc("@label:textbox tag field", "Track:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalTracks", label: I18n.i18nc("@label tag field", "Tracks"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
+        { key: "discNo", label: I18n.i18nc("@label tag field", "Disc"), formLabel: I18n.i18nc("@label:textbox tag field", "Disc:"), allowTitleCase: false, allowCapitalize: false },
+        { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
+        { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
     ]
+    // The table's columns; the last one takes the room that is left.
     readonly property var tableColumns: [
-        { key: "fileName", label: I18n.i18nc("@title:column", "File"), width: 168 },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 210 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 136 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 182 },
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 42 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 96 },
-        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52 },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 46 },
-        { key: "formatKind", label: I18n.i18nc("@title:column abbreviation of file format", "Fmt"), width: 52 },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110 },
+        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56 },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48 },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220 },
+        { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156 },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120 }
     ]
-    readonly property int tableContentWidth: root.tableColumns.reduce(
-        function(sum, column) { return sum + column.width + 6 }, 20)
+    readonly property real tableInset: Kirigami.Units.largeSpacing
+    readonly property real fixedColumnsWidth: root.tableColumns.reduce(
+        function(sum, column, index) {
+            return index === root.tableColumns.length - 1 ? sum : sum + column.width
+        }, 2 * root.tableInset)
+    readonly property real tableContentWidth: Math.max(
+        root.fixedColumnsWidth + root.tableColumns[root.tableColumns.length - 1].width,
+        tagEditorTable.width)
+
+    function columnWidth(index) {
+        return index === root.tableColumns.length - 1
+            ? root.tableContentWidth - root.fixedColumnsWidth
+            : root.tableColumns[index].width
+    }
+
+    // The fields the edits changed, by their labels.
+    function changedFieldLabels() {
+        root.summaryRevision
+        const labels = []
+        for (let i = 0; i < root.editorFields.length; ++i) {
+            if (root.tagEditorApi.bulkFieldChanged(root.editorFields[i].key)) {
+                labels.push(root.editorFields[i])
+            }
+        }
+        return labels
+    }
+
+    // "8 files selected. Genre changed from Classical."
+    function summaryText() {
+        const count = root.selectedCount > 0 ? root.selectedCount : root.totalRows
+        let text = root.selectedCount > 0
+            ? I18n.i18ncp("@info:status", "%1 file selected.", "%1 files selected.", count)
+            : I18n.i18ncp("@info:status", "%1 file loaded.", "%1 files loaded.", count)
+        const changed = root.changedFieldLabels()
+        if (changed.length === 1) {
+            const key = changed[0].key
+            const original = root.tagEditorApi.bulkOriginalValueMixed(key)
+                ? "" : root.tagEditorApi.bulkOriginalValue(key)
+            text += " " + (original.length > 0
+                ? I18n.i18nc("@info:status tag field, value it had", "%1 changed from %2.", changed[0].label, original)
+                : I18n.i18nc("@info:status tag field", "%1 changed.", changed[0].label))
+        } else if (changed.length > 1) {
+            text += " " + I18n.i18ncp("@info:status", "%1 field changed.", "%1 fields changed.", changed.length)
+        }
+        return text
+    }
+
+    function statusLine() {
+        if (root.tagEditorApi.loading) {
+            return I18n.i18nc("@info:status", "Loading tags…")
+        }
+        if (root.operationInFlight || root.tagEditorApi.saving) {
+            return root.operationText
+        }
+        if (root.tagEditorApi.statusText.length > 0 && (root.statusHasFailure || tagEditorStatusFlash.visible)) {
+            return root.tagEditorApi.statusText
+        }
+        return root.summaryText()
+    }
+
+    // The tooltip of a field's revert button: "Revert to Classical".
+    function revertToolTip(key) {
+        root.summaryRevision
+        const original = root.tagEditorApi.bulkOriginalValueMixed(key) ? "" : root.tagEditorApi.bulkOriginalValue(key)
+        return original.length > 0
+            ? I18n.i18nc("@info:tooltip value the field had", "Revert to %1", original)
+            : I18n.i18nc("@info:tooltip", "Revert")
+    }
 
     modal: true
     x: Math.round((root.windowRoot.width - width) / 2)
     y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 28, 1440)
-    height: Math.min(root.windowRoot.height - 24, 820)
+    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 80)
+    height: Math.min(root.windowRoot.height - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 46)
     title: I18n.i18nc("@title:window", "Edit Tags")
     standardButtons: Dialog.NoButton
     closePolicy: Popup.NoAutoClose
@@ -108,7 +175,7 @@ Dialog {
         }
         root.commitPendingEditorEdits()
         root.operationInFlight = true
-        root.operationText = I18n.i18nc("@info:status", "Saving tags...")
+        root.operationText = I18n.i18nc("@info:status", "Saving tags…")
         root.closeAfterSave = closeAfterSuccess
         if (!root.tagEditorApi.save()) {
             root.operationInFlight = false
@@ -125,7 +192,7 @@ Dialog {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving || root.selectedCount === 0) return
         root.commitPendingEditorEdits()
         root.operationInFlight = true
-        root.operationText = I18n.i18nc("@info:status", "Checking new file names...")
+        root.operationText = I18n.i18nc("@info:status", "Checking new file names…")
         root.renamePreviewPending = root.tagEditorApi.previewRenameSelectedFiles()
         if (!root.renamePreviewPending) {
             root.operationInFlight = false
@@ -137,7 +204,7 @@ Dialog {
     function renameNow() {
         if (root.tagEditorApi.loading || root.tagEditorApi.saving) return
         root.operationInFlight = true
-        root.operationText = I18n.i18nc("@info:status", "Renaming files...")
+        root.operationText = I18n.i18nc("@info:status", "Renaming files…")
         if (!root.tagEditorApi.renamePreviewedFiles()) {
             root.operationInFlight = false
             root.operationText = ""
@@ -418,16 +485,30 @@ Dialog {
                 tagEditorStatusFlash.visible = false
                 return
             }
-            tagEditorStatusFlash.visible = true
+            tagEditorStatusFlash.restart()
         }
     }
 
+    // A result shows in the status line for a moment, then the selection's
+    // summary again; a failure stays.
     Timer {
         id: tagEditorStatusFlash
         interval: 2200
         repeat: false
         property bool visible: false
+        onRunningChanged: {
+            if (running) {
+                visible = true
+            }
+        }
         onTriggered: visible = false
+    }
+
+    Connections {
+        target: root.tagEditorApi
+        ignoreUnknownSignals: true
+        function onBulkSummaryChanged() { root.summaryRevision++ }
+        function onSelectionChanged() { root.summaryRevision++ }
     }
 
     Dialogs.AutoNumberDialog {
@@ -498,173 +579,304 @@ Dialog {
         windowRoot: root.windowRoot
     }
 
-    background: Rectangle {
-        radius: 6
-        color: root.uiSurfaceRaisedColor
-        border.color: root.uiBorderColor
+    background: Components.DialogSurface {
+        uiPalette: root.uiPalette
     }
 
-    header: Frame {
-        padding: 8
-        background: Rectangle {
-            radius: 6
-            color: root.uiHeaderColor
-            border.color: root.uiBorderColor
+    // The style's header closes at once; this one asks about unsaved edits.
+    header: Components.DialogHeader {
+        title: root.title
+        closeButtonName: "tagEditorCloseButton"
+        closeEnabled: !root.tagEditorApi.saving
+        onCloseRequested: root.requestClose()
+    }
+
+    // A text field of a tag: its label turns semibold and a revert button
+    // shows while the edits change it.
+    component TagField: TextField {
+        id: fieldEditor
+
+        required property var field
+        property bool touched: false
+        property var editRowsSnapshot: []
+        readonly property bool changed: root.summaryRevision >= 0
+            && root.tagEditorApi.bulkFieldChanged(fieldEditor.field.key)
+
+        function captureEditRowsSnapshot() {
+            editRowsSnapshot = root.tagEditorApi.selectedRows()
         }
 
-        contentItem: RowLayout {
-            spacing: 8
-
-            Kirigami.Heading {
-                text: I18n.i18nc("@title", "Unified Tag Editor")
-                level: 1
-                font.weight: Font.DemiBold
+        function syncFromController() {
+            const value = root.tagEditorApi.bulkValue(fieldEditor.field.key)
+            const mixed = root.tagEditorApi.bulkValueMixed(fieldEditor.field.key)
+            root.setExtraValuesNote(fieldEditor.field.key,
+                root.tagEditorApi.extraValuesNote(fieldEditor.field.key))
+            if (activeFocus && touched) {
+                return
             }
+            text = mixed ? "" : value
+            placeholderText = mixed ? root.keepText : ""
+            editRowsSnapshot = []
+            touched = false
+        }
 
-            Rectangle {
-                visible: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                    || tagEditorStatusFlash.visible || root.tagEditorApi.statusText.length > 0
-                objectName: "tagEditorStatusChip"
-                readonly property color toneColor: root.operationInFlight
-                        || root.tagEditorApi.loading || root.tagEditorApi.saving
-                    ? root.uiPalette.uiAccentColor
-                    : (root.statusHasFailure
-                        ? Kirigami.Theme.negativeTextColor
-                        : Kirigami.Theme.positiveTextColor)
-                radius: 4
-                color: ColorUtils.withAlpha(toneColor, 0.15)
-                border.color: ColorUtils.withAlpha(toneColor, 0.42)
-                Layout.fillWidth: true
-                implicitHeight: Math.max(root.tableRowHeight + 4, statusChipRow.implicitHeight + 4)
+        objectName: "tagEditorField_" + fieldEditor.field.key
+        Layout.fillWidth: true
+        selectByMouse: true
+        persistentSelection: true
+        rightPadding: fieldEditor.changed
+            ? revertButton.width + Kirigami.Units.smallSpacing
+            : leftPadding
+        Accessible.name: fieldEditor.field.label
+        Accessible.description: fieldEditor.changed ? I18n.i18nc("@info", "Changed") : ""
 
-                RowLayout {
-                    id: statusChipRow
-                    anchors.fill: parent
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    spacing: 8
+        onActiveFocusChanged: {
+            if (activeFocus && !touched) {
+                captureEditRowsSnapshot()
+            }
+        }
+        onTextEdited: {
+            if (!touched) {
+                captureEditRowsSnapshot()
+            }
+            touched = true
+        }
+        onEditingFinished: {
+            if (!touched) {
+                return
+            }
+            root.tagEditorApi.applyBulkFieldToRows(
+                editRowsSnapshot,
+                fieldEditor.field.key,
+                text)
+            editRowsSnapshot = []
+            touched = false
+            syncFromController()
+        }
 
-                    BusyIndicator {
-                        running: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                        visible: running
-                        implicitWidth: root.tableRowHeight * 2 / 3
-                        implicitHeight: implicitWidth
-                    }
+        Component.onCompleted: syncFromController()
 
-                    Label {
-                        text: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
-                            ? (root.tagEditorApi.loading ? I18n.i18nc("@info:status", "Loading tags...") : root.operationText)
-                            : root.tagEditorApi.statusText
-                        color: root.statusHasFailure
-                            ? Kirigami.Theme.negativeTextColor
-                            : Kirigami.Theme.textColor
-                        elide: Text.ElideRight
-                        Layout.fillWidth: true
-                    }
+        Connections {
+            target: root.tagEditorApi
+            ignoreUnknownSignals: true
+            function onSelectionChanged() { fieldEditor.syncFromController() }
+            function onBulkSummaryChanged() { fieldEditor.syncFromController() }
+        }
 
-                    Button {
-                        visible: !root.operationInFlight
-                            && !root.tagEditorApi.loading
-                            && !root.tagEditorApi.saving
-                            && root.tagEditorApi.statusDetails.length > 0
-                        text: I18n.i18nc("@action:button", "Details")
-                        padding: 3
-                        implicitHeight: root.tableRowHeight - 2
-                        onClicked: tagEditorStatusDetailsDialog.open()
+        ToolButton {
+            id: revertButton
+            objectName: "tagEditorRevert_" + fieldEditor.field.key
+            anchors.right: parent.right
+            anchors.rightMargin: 2
+            anchors.verticalCenter: parent.verticalCenter
+            width: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+            height: width
+            visible: fieldEditor.changed
+            enabled: !root.busy
+            icon.name: "edit-undo"
+            display: AbstractButton.IconOnly
+            text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
+            ToolTip.visible: hovered || visualFocus
+            ToolTip.delay: Kirigami.Units.toolTipDelay
+            ToolTip.text: root.revertToolTip(fieldEditor.field.key)
+            onClicked: {
+                fieldEditor.touched = false
+                root.tagEditorApi.revertBulkField(fieldEditor.field.key)
+                fieldEditor.syncFromController()
+            }
+        }
+    }
+
+    // A case change of one field, in the Tools menu.
+    component CaseItem: MenuItem {
+        required property string fieldKey
+        required property bool titleCase
+        objectName: (titleCase ? "tagEditorTitleCase_" : "tagEditorCapitalCase_") + fieldKey
+        text: root.fieldAt(fieldKey).label
+        onClicked: root.changeCase(fieldKey, titleCase)
+    }
+
+    // The label of a field: semibold while the edits change it.
+    component FieldLabel: Label {
+        required property var field
+        readonly property bool changed: root.summaryRevision >= 0
+            && root.tagEditorApi.bulkFieldChanged(field.key)
+        objectName: "tagEditorLabel_" + field.key
+        Layout.preferredWidth: root.fieldLabelWidth
+        horizontalAlignment: Text.AlignRight
+        text: field.formLabel
+        font.weight: changed ? Font.DemiBold : Font.Normal
+        color: root.uiPalette.text
+        Accessible.ignored: true
+    }
+
+    // The notes under the fields of rows with several values, by field.
+    property var extraValuesNotes: ({})
+
+    function setExtraValuesNote(key, note) {
+        if ((root.extraValuesNotes[key] || "") === note) {
+            return
+        }
+        const notes = Object.assign({}, root.extraValuesNotes)
+        notes[key] = note
+        root.extraValuesNotes = notes
+    }
+
+    function fieldAt(key) {
+        for (let i = 0; i < root.editorFields.length; ++i) {
+            if (root.editorFields[i].key === key) {
+                return root.editorFields[i]
+            }
+        }
+        return null
+    }
+
+    // A case change of `key` in the edited rows.
+    function changeCase(key, titleCase) {
+        root.commitPendingEditorEdits()
+        if (titleCase) {
+            root.tagEditorApi.applyEnglishTitleCase(key)
+        } else if (key === "genre") {
+            root.tagEditorApi.applyGenreCapitalize()
+        } else {
+            root.tagEditorApi.applyFinnishCapitalize(key)
+        }
+    }
+
+    footer: RowLayout {
+        spacing: Kirigami.Units.largeSpacing
+
+        Button {
+            id: toolsButton
+            objectName: "tagEditorToolsButton"
+            Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+            text: I18n.i18nc("@action:button", "Tools")
+            enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+            // A menu button, which Breeze draws with its arrow.
+            Accessible.role: Accessible.ButtonMenu
+            onClicked: toolsMenu.open()
+
+            Menu {
+                id: toolsMenu
+                objectName: "tagEditorToolsMenu"
+                y: toolsButton.height
+
+                MenuItem {
+                    objectName: "tagEditorAutoNumberButton"
+                    text: I18n.i18nc("@action:inmenu", "Auto Number…")
+                    icon.name: "format-list-ordered"
+                    enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+                    onClicked: {
+                        root.commitPendingEditorEdits()
+                        autoNumberDialog.open()
                     }
                 }
-            }
+                MenuItem {
+                    objectName: "tagEditorRenameButton"
+                    text: I18n.i18nc("@action:inmenu", "Rename Files…")
+                    icon.name: "edit-rename"
+                    enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedCount > 0
+                    onClicked: root.triggerRename()
+                }
+                MenuSeparator {}
+                Menu {
+                    title: I18n.i18nc("@title:menu", "Title Case")
 
-            Item {
-                visible: !root.operationInFlight
-                    && !root.tagEditorApi.loading
-                    && !root.tagEditorApi.saving
-                    && !tagEditorStatusFlash.visible
-                    && !root.tagEditorApi.statusText.length
-                Layout.fillWidth: true
-            }
+                    CaseItem { fieldKey: "title"; titleCase: true }
+                    CaseItem { fieldKey: "artist"; titleCase: true }
+                    CaseItem { fieldKey: "album"; titleCase: true }
+                    CaseItem { fieldKey: "albumArtist"; titleCase: true }
+                }
+                Menu {
+                    title: I18n.i18nc("@title:menu", "Capital Case")
 
-            Label {
-                text: root.selectedCount > 0
-                    ? I18n.i18ncp("@info:status", "%1 selected", "%1 selected", root.selectedCount)
-                    : I18n.i18ncp("@info:status", "%1 loaded", "%1 loaded", root.totalRows)
-                color: root.tagEditorApi.dirty ? Kirigami.Theme.negativeTextColor : root.uiMutedTextColor
-                font.weight: Font.DemiBold
-            }
-
-            Button {
-                objectName: "tagEditorCloseButton"
-                text: "\u00d7"
-                enabled: !root.tagEditorApi.saving
-                padding: 2
-                implicitWidth: root.tableRowHeight + 2
-                implicitHeight: root.tableRowHeight
-                Accessible.name: I18n.i18nc("@action:button", "Close")
-                ToolTip.visible: hovered || visualFocus
-                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
-                ToolTip.text: I18n.i18nc("@info:tooltip", "Close")
-                onClicked: root.requestClose()
+                    CaseItem { fieldKey: "title"; titleCase: false }
+                    CaseItem { fieldKey: "artist"; titleCase: false }
+                    CaseItem { fieldKey: "album"; titleCase: false }
+                    CaseItem { fieldKey: "albumArtist"; titleCase: false }
+                    CaseItem { fieldKey: "genre"; titleCase: false }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: I18n.i18nc("@action:inmenu", "Select All")
+                    icon.name: "edit-select-all"
+                    enabled: root.totalRows > 0
+                    onClicked: root.selectAllRows()
+                }
+                MenuItem {
+                    objectName: "tagEditorClearSelectionItem"
+                    text: I18n.i18nc("@action:inmenu", "Clear Selection")
+                    icon.name: "edit-select-none"
+                    enabled: root.selectedCount > 0
+                    onClicked: root.clearSelection()
+                }
             }
         }
-    }
 
-    footer: Frame {
-        padding: 8
-        background: Rectangle {
-            radius: 6
-            color: root.uiHeaderColor
-            border.color: root.uiBorderColor
+        Button {
+            objectName: "tagEditorReloadButton"
+            text: I18n.i18nc("@action:button", "Reload")
+            icon.name: "view-refresh"
+            enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+            onClicked: root.requestReload()
         }
 
-        contentItem: RowLayout {
-            spacing: 8
+        BusyIndicator {
+            running: root.busy
+            visible: running
+            Layout.preferredWidth: Kirigami.Units.iconSizes.small
+            Layout.preferredHeight: Kirigami.Units.iconSizes.small
+        }
 
-            Button {
-                text: I18n.i18nc("@action:button", "Clear Selection")
-                enabled: root.selectedCount > 0
-                onClicked: root.clearSelection()
-            }
+        Label {
+            objectName: "tagEditorStatusLabel"
+            Layout.fillWidth: true
+            Layout.leftMargin: Kirigami.Units.smallSpacing
+            text: root.statusLine()
+            font.pointSize: root.uiPalette.smallPointSize
+            color: root.statusHasFailure && !root.busy ? root.uiPalette.negative : root.uiPalette.textSecondary
+            elide: Text.ElideRight
+            Accessible.role: Accessible.StatusBar
+        }
 
-            Item { Layout.fillWidth: true }
+        Button {
+            objectName: "tagEditorDetailsButton"
+            visible: !root.busy && root.tagEditorApi.statusDetails.length > 0
+            text: I18n.i18nc("@action:button", "Details…")
+            onClicked: tagEditorStatusDetailsDialog.open()
+        }
 
+        Components.DialogButtons {
+
+            id: dialogButtons
+            primary: tagEditorSaveButton
             Button {
-                objectName: "tagEditorReloadButton"
-                text: I18n.i18nc("@action:button", "Reload")
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
-                onClicked: root.requestReload()
-            }
-            Button {
-                objectName: "tagEditorAutoNumberButton"
-                text: I18n.i18nc("@action:button", "Auto Number")
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
-                onClicked: autoNumberDialog.open()
-            }
-            Button {
-                objectName: "tagEditorRenameButton"
-                text: I18n.i18nc("@action:button", "Rename Files...")
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.selectedCount > 0
-                onClicked: root.triggerRename()
+                id: tagEditorSaveButton
+                objectName: "tagEditorSaveButton"
+                text: root.tagEditorApi.saving
+                    ? I18n.i18nc("@action:button", "Saving…")
+                    : I18n.i18nc("@action:button", "Save")
+                icon.name: "document-save"
+                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                onClicked: root.triggerSave(false)
             }
             Button {
                 objectName: "tagEditorCancelButton"
                 text: I18n.i18nc("@action:button", "Cancel")
+                icon.name: "dialog-cancel"
                 enabled: !root.tagEditorApi.saving
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
                 onClicked: root.requestClose()
-            }
-            Button {
-                objectName: "tagEditorSaveButton"
-                text: root.tagEditorApi.saving
-                    ? I18n.i18nc("@action:button", "Saving...")
-                    : I18n.i18nc("@action:button", "Save")
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
-                highlighted: true
-                onClicked: root.triggerSave(false)
             }
         }
     }
 
     contentItem: RowLayout {
-        spacing: 6
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+
+        spacing: Kirigami.Units.gridUnit - 2
 
         Shortcut {
             sequences: ["Ctrl+S"]
@@ -685,209 +897,55 @@ Dialog {
             context: Qt.WindowShortcut
             enabled: root.visible && !tagEditorCloseConfirmDialog.visible
                 && !autoNumberDialog.visible && !tagEditorStatusDetailsDialog.visible
-                && !tagEditorQuitWaitDialog.visible
+                && !tagEditorQuitWaitDialog.visible && !renamePreviewDialog.visible
+                && !toolsMenu.visible
             onActivated: root.requestClose()
         }
 
-        Frame {
-            id: tagEditorEditorPane
-            Layout.preferredWidth: 332
-            Layout.minimumWidth: 320
+        ScrollView {
+            id: tagEditorFieldsScroll
+            objectName: "tagEditorFields"
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 19
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 16
             Layout.fillHeight: true
-            padding: 3
-            background: Rectangle {
-                radius: 4
-                color: root.uiSurfaceColor
-                border.color: root.uiBorderColor
-            }
+            clip: true
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-            contentItem: ScrollView {
-                id: tagEditorFieldsScroll
-                clip: true
-                padding: 0
-                contentWidth: availableWidth
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ColumnLayout {
+                id: fieldsColumn
+                width: tagEditorFieldsScroll.availableWidth
+                spacing: Kirigami.Units.largeSpacing + 2
 
-                Column {
-                    // Beside the scroll bar, so it does not cover the case buttons.
-                    width: tagEditorFieldsScroll.availableWidth
-                    spacing: 4
-
-                    Repeater {
-                        model: root.editorFields
-                        delegate: Column {
-                            required property var modelData
-                            width: tagEditorFieldsScroll.availableWidth
-                            spacing: 1
-
-                            Row {
-                                width: parent.width
-                                spacing: 2
-
-                                Label {
-                                    text: modelData.label
-                                    font: Kirigami.Theme.smallFont
-                                    color: root.uiMutedTextColor
-                                    width: parent.width - (caseButton.visible ? caseButton.width + parent.spacing : 0)
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-
-                                Button {
-                                    id: caseButton
-                                    objectName: "tagEditorCaseButton_" + modelData.key
-                                    visible: modelData.allowTitleCase || modelData.allowCapitalize
-                                    text: "Aa"
-                                    font: Kirigami.Theme.smallFont
-                                    padding: 1
-                                    implicitWidth: Math.ceil(root.tableRowHeight * 0.9)
-                                    implicitHeight: Math.ceil(root.tableRowHeight * 0.75)
-                                    Accessible.name: I18n.i18nc("@action:button %1 is a tag field", "Change case of %1", modelData.label)
-                                    onClicked: {
-                                        const popupPosition = mapToItem(
-                                            root.contentItem,
-                                            0,
-                                            height + 2)
-                                        casePopup.x = popupPosition.x
-                                        casePopup.y = popupPosition.y
-                                        casePopup.open()
-                                    }
-                                }
-                            }
-
-                            TextField {
-                                id: fieldEditor
-                                objectName: "tagEditorField_" + modelData.key
-                                width: parent.width
-                                selectByMouse: true
-                                persistentSelection: true
-                                property bool touched: false
-                                property var editRowsSnapshot: []
-
-                                function captureEditRowsSnapshot() {
-                                    editRowsSnapshot = root.tagEditorApi.selectedRows()
-                                }
-
-                                function syncFromController() {
-                                    extraValuesNote.text = root.tagEditorApi.extraValuesNote(modelData.key)
-                                    const value = root.tagEditorApi.bulkValue(modelData.key)
-                                    const mixed = root.tagEditorApi.bulkValueMixed(modelData.key)
-                                    if (activeFocus && touched) {
-                                        return
-                                    }
-                                    text = mixed ? "" : value
-                                    placeholderText = mixed ? root.keepText : ""
-                                    editRowsSnapshot = []
-                                    touched = false
-                                }
-
-                                onActiveFocusChanged: {
-                                    if (activeFocus && !touched) {
-                                        captureEditRowsSnapshot()
-                                    }
-                                }
-                                onTextEdited: {
-                                    if (!touched) {
-                                        captureEditRowsSnapshot()
-                                    }
-                                    touched = true
-                                }
-                                onEditingFinished: {
-                                    if (!touched) {
-                                        return
-                                    }
-                                    root.tagEditorApi.applyBulkFieldToRows(
-                                        editRowsSnapshot,
-                                        modelData.key,
-                                        text)
-                                    editRowsSnapshot = []
-                                    touched = false
-                                    syncFromController()
-                                }
-
-                                Component.onCompleted: syncFromController()
-
-                                Connections {
-                                    target: root.tagEditorApi
-                                    ignoreUnknownSignals: true
-                                    function onSelectionChanged() { fieldEditor.syncFromController() }
-                                    function onBulkSummaryChanged() { fieldEditor.syncFromController() }
-                                }
-                            }
-
-                            Label {
-                                id: extraValuesNote
-                                objectName: "tagEditorExtraValuesNote_" + modelData.key
-                                width: parent.width
-                                visible: text.length > 0
-                                wrapMode: Text.WordWrap
-                                font: Kirigami.Theme.smallFont
-                                color: Kirigami.Theme.neutralTextColor
-                            }
-
-                            Popup {
-                                id: casePopup
-                                parent: root.contentItem
-                                width: 128
-                                padding: 6
-                                z: 1000
-                                closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-                                background: Rectangle {
-                                    radius: 4
-                                    color: root.uiSurfaceRaisedColor
-                                    border.color: root.uiBorderColor
-                                }
-
-                                contentItem: ColumnLayout {
-                                    spacing: 4
-
-                                    Button {
-                                        visible: modelData.allowTitleCase
-                                        text: I18n.i18nc("@action:button", "Title Case")
-                                        Layout.fillWidth: true
-                                        onClicked: {
-                                            root.tagEditorApi.applyEnglishTitleCase(modelData.key)
-                                            fieldEditor.syncFromController()
-                                            casePopup.close()
-                                        }
-                                    }
-
-                                    Button {
-                                        visible: modelData.allowCapitalize
-                                        text: I18n.i18nc("@action:button", "Capital Case")
-                                        Layout.fillWidth: true
-                                        onClicked: {
-                                            if (modelData.key === "genre") {
-                                                root.tagEditorApi.applyGenreCapitalize()
-                                            } else {
-                                                root.tagEditorApi.applyFinnishCapitalize(modelData.key)
-                                            }
-                                            fieldEditor.syncFromController()
-                                            casePopup.close()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                FieldRow { field: root.fieldAt("title") }
+                FieldRow { field: root.fieldAt("artist") }
+                FieldRow { field: root.fieldAt("album") }
+                FieldRow { field: root.fieldAt("albumArtist") }
+                FieldRow { field: root.fieldAt("genre") }
+                FieldRow { field: root.fieldAt("year") }
+                NumberPair { first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
+                NumberPair { first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
+                FieldRow { field: root.fieldAt("comment") }
             }
         }
 
-        Frame {
+        // The files, on the view colour, with the queue's header.
+        Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            padding: 0
-            background: Rectangle {
-                radius: 4
-                color: root.uiSurfaceColor
-                border.color: root.uiBorderColor
-            }
+            color: root.uiPalette.view
+            radius: 3
+            border.width: 1
+            border.color: Kirigami.ColorUtils.linearInterpolation(
+                root.uiPalette.view, root.uiPalette.text, Kirigami.Theme.frameContrast)
 
             // Only the visible rows have items, so thousands of rows open at
             // once. Selection is a role, so each row reads it once.
-            contentItem: ListView {
+            ListView {
                 id: tagEditorTable
                 objectName: "tagEditorTable"
+                anchors.fill: parent
+                anchors.margins: 1
                 clip: true
                 focus: true
                 activeFocusOnTab: true
@@ -899,6 +957,7 @@ Dialog {
                 flickableDirection: Flickable.AutoFlickIfNeeded
                 boundsBehavior: Flickable.StopAtBounds
                 headerPositioning: ListView.OverlayHeader
+                pixelAligned: true
                 ScrollBar.vertical: ScrollBar {}
                 ScrollBar.horizontal: ScrollBar {}
                 Accessible.role: Accessible.Table
@@ -907,35 +966,85 @@ Dialog {
                 Keys.onPressed: function(event) { root.handleTableKey(event) }
 
                 header: Rectangle {
+                    objectName: "tagEditorTableHeader"
                     z: 2
                     width: root.tableContentWidth
-                    height: root.tableRowHeight + 2
-                    color: root.uiColumnsColor
+                    height: root.tableRowHeight
+                    color: root.uiPalette.view
 
                     Row {
                         anchors.fill: parent
-                        anchors.leftMargin: 6
-                        anchors.rightMargin: 6
-                        spacing: 6
+                        anchors.leftMargin: root.tableInset
+                        anchors.rightMargin: root.tableInset
+                        anchors.bottomMargin: 1
 
                         Repeater {
                             model: root.tableColumns
-                            delegate: Label {
+                            delegate: Item {
+                                id: headerCell
                                 required property var modelData
-                                width: modelData.width
+                                required property int index
+                                readonly property bool editable: root.fieldAt(headerCell.modelData.key) !== null
+                                readonly property bool changed: headerCell.editable && root.summaryRevision >= 0
+                                    && root.tagEditorApi.fieldChanged(headerCell.modelData.key)
+                                objectName: "tagEditorColumn_" + headerCell.modelData.key
+                                width: root.columnWidth(headerCell.index)
                                 height: parent.height
-                                text: modelData.label
-                                font.pointSize: Kirigami.Theme.smallFont.pointSize
-                                font.weight: Font.DemiBold
-                                verticalAlignment: Text.AlignVCenter
-                                horizontalAlignment: Text.AlignLeft
-                                elide: Text.ElideRight
+
+                                Row {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: Kirigami.Units.largeSpacing
+                                    anchors.rightMargin: Kirigami.Units.largeSpacing
+                                    spacing: Kirigami.Units.smallSpacing
+                                    layoutDirection: headerCell.modelData.number ? Qt.RightToLeft : Qt.LeftToRight
+
+                                    Label {
+                                        objectName: "tagEditorColumnLabel"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.min(implicitWidth, parent.width
+                                            - (columnRevert.visible ? columnRevert.width + parent.spacing : 0))
+                                        text: headerCell.modelData.label
+                                        font.pointSize: root.uiPalette.smallPointSize
+                                        font.weight: headerCell.changed ? Font.DemiBold : Font.Normal
+                                        color: headerCell.changed ? root.uiPalette.text : root.uiPalette.textSecondary
+                                        elide: Text.ElideRight
+                                    }
+
+                                    ToolButton {
+                                        id: columnRevert
+                                        objectName: "tagEditorColumnRevert_" + headerCell.modelData.key
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        visible: headerCell.changed
+                                        enabled: !root.busy
+                                        width: Kirigami.Units.iconSizes.small + Kirigami.Units.smallSpacing
+                                        height: width
+                                        padding: 0
+                                        icon.name: "edit-undo"
+                                        icon.width: Kirigami.Units.iconSizes.small - 2
+                                        icon.height: Kirigami.Units.iconSizes.small - 2
+                                        display: AbstractButton.IconOnly
+                                        text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1 in Every File",
+                                            headerCell.modelData.label)
+                                        ToolTip.visible: hovered || visualFocus
+                                        ToolTip.delay: Kirigami.Units.toolTipDelay
+                                        ToolTip.text: text
+                                        onClicked: root.tagEditorApi.revertField(headerCell.modelData.key)
+                                    }
+                                }
                             }
                         }
                     }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 1
+                        color: root.uiPalette.hairline
+                    }
                 }
 
-                delegate: Rectangle {
+                delegate: Item {
                     id: tableRow
                     objectName: "tagEditorRow"
                     required property int index
@@ -957,26 +1066,25 @@ Dialog {
 
                     width: root.tableContentWidth
                     height: root.tableRowHeight
-                    color: tableRow.selected
-                        ? root.uiPalette.uiSelectionColor
-                        : (tableRow.index % 2 === 0
-                            ? root.uiPalette.uiSurfaceRaisedColor
-                            : root.uiPalette.uiSurfaceAltColor)
-                    border.color: tableRow.errorText.length > 0
-                        ? Kirigami.Theme.negativeTextColor
-                        : (tableRow.current
-                            ? Kirigami.Theme.focusColor
-                            : (tableRow.selected
-                                ? root.uiPalette.uiAccentColor
-                                : root.uiBorderColor))
-                    border.width: tableRow.errorText.length > 0 || tableRow.selected || tableRow.current ? 1 : 0
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
                     Accessible.selected: tableRow.selected
 
+                    Components.RowBackground {
+                        objectName: "tagEditorRowBackground"
+                        uiPalette: root.uiPalette
+                        scrollbarLane: 0
+                        hovered: rowMouse.containsMouse
+                        selected: tableRow.selected
+                        active: tagEditorTable.activeFocus
+                        focused: tableRow.current
+                    }
+
                     MouseArea {
+                        id: rowMouse
                         anchors.fill: parent
                         acceptedButtons: Qt.LeftButton
+                        hoverEnabled: true
                         onClicked: function(mouse) {
                             root.handleRowClick(tableRow.index, mouse.modifiers)
                         }
@@ -984,24 +1092,27 @@ Dialog {
 
                     Row {
                         anchors.fill: parent
-                        anchors.leftMargin: 6
-                        anchors.rightMargin: 6
-                        spacing: 6
+                        anchors.leftMargin: root.tableInset
+                        anchors.rightMargin: root.tableInset
 
                         Repeater {
                             model: root.tableColumns
                             delegate: Label {
                                 required property var modelData
-                                width: modelData.width
+                                required property int index
+                                width: root.columnWidth(index)
                                 height: parent.height
+                                leftPadding: Kirigami.Units.largeSpacing
+                                rightPadding: Kirigami.Units.largeSpacing
                                 text: root.cellText(modelData.key, tableRow)
+                                font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
                                 color: modelData.key === "status" && tableRow.errorText.length > 0
-                                    ? Kirigami.Theme.negativeTextColor
-                                    : (tableRow.selected
-                                        ? root.uiPalette.uiSelectionTextColor
-                                        : root.uiPalette.uiTextColor)
+                                    ? root.uiPalette.negative
+                                    : (modelData.number
+                                        ? root.uiPalette.textTertiaryOn(tableRow.selected)
+                                        : root.uiPalette.text)
                                 verticalAlignment: Text.AlignVCenter
-                                horizontalAlignment: Text.AlignLeft
+                                horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
                                 elide: Text.ElideRight
                             }
                         }
@@ -1009,5 +1120,80 @@ Dialog {
                 }
             }
         }
+    }
+
+    // The labels' column: as wide as the longest label, semibold.
+    readonly property real fieldLabelWidth: {
+        let widest = 0
+        for (let i = 0; i < root.editorFields.length; ++i) {
+            widest = Math.max(widest, boldLabelMetrics.advanceWidth(root.editorFields[i].formLabel))
+        }
+        return Math.ceil(widest)
+    }
+
+    FontMetrics {
+        id: boldLabelMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
+        font.weight: Font.DemiBold
+    }
+
+    // A field with its label on the left and, under it, the note on rows
+    // that hold several values.
+    component FieldRow: ColumnLayout {
+        id: fieldRow
+        required property var field
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.smallSpacing
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+            FieldLabel { field: fieldRow.field }
+            TagField { field: fieldRow.field }
+        }
+
+        Label {
+            objectName: "tagEditorExtraValuesNote_" + fieldRow.field.key
+            Layout.fillWidth: true
+            Layout.leftMargin: root.fieldLabelWidth + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+            visible: text.length > 0
+            text: root.extraValuesNotes[fieldRow.field.key] || ""
+            wrapMode: Text.WordWrap
+            font.pointSize: root.uiPalette.smallPointSize
+            color: root.uiPalette.textSecondary
+        }
+    }
+
+    // Track and Disc: the number, "of", and the total.
+    component NumberPair: RowLayout {
+        id: pair
+        required property var first
+        required property var second
+        Layout.fillWidth: true
+        spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+
+        FieldLabel { field: pair.first }
+
+        TagField {
+            field: pair.first
+            Layout.fillWidth: false
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 7
+        }
+
+        Label {
+            text: I18n.i18nc("@label track or disc number of the total", "of")
+            color: root.uiPalette.textSecondary
+            Accessible.ignored: true
+        }
+
+        TagField {
+            field: pair.second
+            Layout.fillWidth: false
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3 + Kirigami.Units.largeSpacing
+        }
+
+        Item { Layout.fillWidth: true }
     }
 }

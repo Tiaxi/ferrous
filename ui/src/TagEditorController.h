@@ -73,6 +73,18 @@ public:
     // Says which of the edited rows hold more than one value of `field`,
     // which an edit replaces; empty when none do.
     Q_INVOKABLE QString extraValuesNote(const QString &field) const;
+    // Whether the edited rows' `field` differs from what their files hold.
+    Q_INVOKABLE bool bulkFieldChanged(const QString &field) const;
+    // The value of `field` the edited rows' files hold, when they share
+    // one; empty when they hold different values, which
+    // bulkOriginalValueMixed() tells apart from an empty one.
+    Q_INVOKABLE QString bulkOriginalValue(const QString &field) const;
+    Q_INVOKABLE bool bulkOriginalValueMixed(const QString &field) const;
+    // Gives the edited rows' `field` back the values their files hold.
+    Q_INVOKABLE void revertBulkField(const QString &field);
+    // The same for every row of the table, for the column of `field`.
+    Q_INVOKABLE bool fieldChanged(const QString &field) const;
+    Q_INVOKABLE void revertField(const QString &field);
     Q_INVOKABLE void applyBulkField(const QString &field, const QString &value);
     Q_INVOKABLE void applyBulkFieldToRows(
         const QVariantList &rows,
@@ -156,6 +168,9 @@ private:
     QThreadPool *m_workerPool{nullptr};
     QStringList m_operationFiles;
     QVector<int> targetRows() const;
+    QVector<int> allRows() const;
+    bool anyFieldChanged(const QVector<int> &rows, const QString &field) const;
+    void revertRows(const QVector<int> &rows, const QString &field);
     void reportFailures(const QString &status, const QStringList &failureLines);
     void setStatusText(const QString &text, const QString &details = QString(),
                        bool isError = false);
