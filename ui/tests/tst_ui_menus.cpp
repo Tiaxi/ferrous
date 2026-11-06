@@ -10,6 +10,7 @@
 #include <QAccessible>
 #include <QApplication>
 #include <QColor>
+#include <QDesktopServices>
 #include <QFile>
 #include <QFont>
 #include <QIcon>
@@ -24,6 +25,7 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -399,6 +401,17 @@ void rightClick(QQuickWindow *window, QQuickItem *item) {
 
 } // namespace
 
+// Takes the URLs Qt.openUrlExternally would open, so no browser starts.
+class UrlRecorder : public QObject {
+    Q_OBJECT
+
+public:
+    QList<QUrl> urls;
+
+public slots:
+    void open(const QUrl &url) { urls.push_back(url); }
+};
+
 class UiMenusTest : public QObject {
     Q_OBJECT
 
@@ -425,6 +438,7 @@ private slots:
     void libraryContextMenuNamesWhatItActsOn();
     void menusHaveNoTransitionsOfTheirOwn();
     void settingsAndHelpOpenTheirPages();
+    void aboutKdeLinksTakeTheKeyboard();
 };
 
 void UiMenusTest::initTestCase() {
@@ -1171,7 +1185,7 @@ void UiMenusTest::settingsAndHelpOpenTheirPages() {
     QVERIFY(icon != nullptr && text != nullptr);
     QCOMPARE(icon->property("source").toString(), QStringLiteral("kde"));
     QVERIFY(icon->property("valid").toBool());
-    QVERIFY(text->property("text").toString().contains(QStringLiteral("href=\"https://kde.org/\"")));
+    QVERIFY(text->property("text").toString().startsWith(QStringLiteral("<b>KDE</b> is a world-wide community")));
     QTest::keyClick(aboutKde->property("contentItem").value<QQuickItem *>()->window(), Qt::Key_Escape);
     QTRY_VERIFY(!aboutKde->property("visible").toBool());
 
@@ -1179,6 +1193,75 @@ void UiMenusTest::settingsAndHelpOpenTheirPages() {
     // only reads where it goes.
     QCOMPARE(window->property("bugReportUrl").toString(),
              QStringLiteral("https://github.com/Tiaxi/ferrous/issues/new"));
+}
+
+void UiMenusTest::aboutKdeLinksTakeTheKeyboard() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    UrlRecorder opened;
+    QDesktopServices::setUrlHandler(QStringLiteral("https"), &opened, "open");
+    const auto unsetHandler = qScopeGuard([] { QDesktopServices::unsetUrlHandler(QStringLiteral("https")); });
+
+    QObject *dialog = child(window, "aboutKdeDialog");
+    QVERIFY(dialog != nullptr);
+    QMetaObject::invokeMethod(child(window, "aboutKdeAction"), "trigger");
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    const QStringList urls{QStringLiteral("https://www.gnu.org/philosophy/free-sw.html"),
+                           QStringLiteral("https://community.kde.org/Get_Involved"),
+                           QStringLiteral("https://kde.org/donate/"), QStringLiteral("https://kde.org/")};
+    QList<QQuickItem *> links;
+    for (int i = 0; i < 4; ++i) {
+        auto *link = dialog->findChild<QQuickItem *>(QStringLiteral("aboutKdeLink%1").arg(i));
+        QVERIFY(link != nullptr);
+        QCOMPARE(link->property("url").toString(), urls.at(i));
+        // A link to assistive technology, named as it reads.
+        QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(link);
+        QVERIFY(iface != nullptr);
+        QCOMPARE(iface->role(), QAccessible::Link);
+        QVERIFY(!link->property("text").toString().isEmpty());
+        QCOMPARE(iface->text(QAccessible::Name), link->property("text").toString());
+        links.push_back(link);
+    }
+    // In reading order: each link after the one before it.
+    for (int i = 1; i < 4; ++i) {
+        const QRectF before = sceneRect(links.at(i - 1));
+        const QRectF after = sceneRect(links.at(i));
+        QVERIFY(after.top() > before.top() || (after.top() == before.top() && after.left() > before.left()));
+    }
+
+    // Tab reaches every link, in that order, with the focus ring on it.
+    QQuickWindow *dialogWindow = links.first()->window();
+    QStringList reached;
+    for (int press = 0; press < 12 && reached.size() < 4; ++press) {
+        QTest::keyClick(dialogWindow, Qt::Key_Tab);
+        QQuickItem *focus = dialogWindow->activeFocusItem();
+        if (!links.contains(focus)) {
+            continue;
+        }
+        reached << focus->objectName();
+        for (QQuickItem *link : std::as_const(links)) {
+            QQuickItem *ring = itemsNamed(link, QStringLiteral("dialogLinkFocusRing")).value(0);
+            QVERIFY(ring != nullptr);
+            QCOMPARE(ring->isVisible(), link == focus);
+        }
+    }
+    QCOMPARE(reached, (QStringList{QStringLiteral("aboutKdeLink0"), QStringLiteral("aboutKdeLink1"),
+                                   QStringLiteral("aboutKdeLink2"), QStringLiteral("aboutKdeLink3")}));
+
+    // Enter and Space open the focused link.
+    links.at(2)->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(links.at(2)->hasActiveFocus());
+    QTest::keyClick(dialogWindow, Qt::Key_Return);
+    QTRY_COMPARE(opened.urls, (QList<QUrl>{QUrl(urls.at(2))}));
+    links.at(0)->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(links.at(0)->hasActiveFocus());
+    QTest::keyClick(dialogWindow, Qt::Key_Space);
+    QTRY_COMPARE(opened.urls, (QList<QUrl>{QUrl(urls.at(2)), QUrl(urls.at(0))}));
+    QVERIFY(dialog->property("visible").toBool());
+    QMetaObject::invokeMethod(dialog, "close");
+    QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
 int main(int argc, char **argv) {

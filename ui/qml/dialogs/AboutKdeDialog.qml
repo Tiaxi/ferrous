@@ -26,6 +26,30 @@ Dialog {
     width: Math.min(Kirigami.Units.gridUnit * 26,
                     (parent ? parent.width : Kirigami.Units.gridUnit * 28) - 2 * Kirigami.Units.gridUnit)
 
+    // A link as Kirigami draws one, announced as a link, with the focus
+    // ring of the window's other controls while the keyboard is on it.
+    component DialogLink: Kirigami.UrlButton {
+        id: link
+
+        Accessible.role: Accessible.Link
+
+        Rectangle {
+            objectName: "dialogLinkFocusRing"
+            visible: link.activeFocus
+            x: -3
+            y: -3
+            width: link.mouseArea.width + 6
+            height: link.height + 6
+            radius: 3
+            color: "transparent"
+            border.width: 2
+            border.color: root.uiPalette ? root.uiPalette.focusRing : Kirigami.Theme.focusColor
+        }
+    }
+
+    // The window's colours; the focus ring takes its token.
+    property var uiPalette: null
+
     contentItem: ColumnLayout {
         spacing: Kirigami.Units.largeSpacing
 
@@ -60,22 +84,43 @@ Dialog {
             textFormat: Text.StyledText
             text: I18n.i18nc("@info",
                 "<b>KDE</b> is a world-wide community of software engineers, artists, writers, "
-                + "translators and creators who are committed to <a href=\"%1\">Free Software</a> "
-                + "development. KDE produces the Plasma desktop environment, hundreds of applications, "
-                + "and the many software libraries that support them.<br/><br/>"
+                + "translators and creators who are committed to Free Software development. KDE "
+                + "produces the Plasma desktop environment, hundreds of applications, and the many "
+                + "software libraries that support them.<br/><br/>"
                 + "KDE is a cooperative enterprise: no single entity controls its direction or products. "
                 + "Instead, we work together to achieve the common goal of building the world's finest "
-                + "Free Software. Everyone is welcome to <a href=\"%2\">join and contribute</a> to KDE, "
-                + "including you.<br/><br/>"
+                + "Free Software. Everyone is welcome to join and contribute to KDE, including you."
+                + "<br/><br/>"
                 + "KDE software is and will always be available free of charge, however creating it is "
-                + "not free. You can support it with a <a href=\"%3\">donation</a>.<br/><br/>"
-                + "Visit <a href=\"%4\">%4</a> for more information about the KDE community and the "
-                + "software we produce.",
-                root.freeSoftwareUrl, root.getInvolvedUrl, root.donateUrl, root.kdeUrl)
-            onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                + "not free. Donations support it.")
+        }
 
-            HoverHandler {
-                cursorShape: parent.hoveredLink.length > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+        // The links, after the text they belong to and in its order: each a
+        // control that Tab reaches and Enter or Space opens.
+        Flow {
+            objectName: "aboutKdeLinks"
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing * 2
+
+            DialogLink {
+                objectName: "aboutKdeLink0"
+                text: I18n.i18nc("@action:button link", "What Free Software Is")
+                url: root.freeSoftwareUrl
+            }
+            DialogLink {
+                objectName: "aboutKdeLink1"
+                text: I18n.i18nc("@action:button link", "Join KDE")
+                url: root.getInvolvedUrl
+            }
+            DialogLink {
+                objectName: "aboutKdeLink2"
+                text: I18n.i18nc("@action:button link", "Donate to KDE")
+                url: root.donateUrl
+            }
+            DialogLink {
+                objectName: "aboutKdeLink3"
+                text: I18n.i18nc("@action:button link", "kde.org")
+                url: root.kdeUrl
             }
         }
     }

@@ -1167,6 +1167,7 @@ ApplicationWindow {
 
     Dialogs.AboutKdeDialog {
         id: aboutKdeDialog
+        uiPalette: root.uiPalette
     }
 
     Dialogs.AboutDialog {
