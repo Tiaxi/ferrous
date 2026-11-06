@@ -6,3 +6,7 @@
 .codex
 CMakeFiles/
 /po/*.pot
+
+# Python bytecode
+__pycache__/
+*.py[cod]
