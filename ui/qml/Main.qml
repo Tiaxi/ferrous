@@ -54,6 +54,7 @@ ApplicationWindow {
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
+    // The dialogs' and the viewers' transitions; menus take the style's.
     readonly property int uiPopupTransitionMs: 0
     // Whether the window is on screen: visible, not minimized, and exposed.
     readonly property bool visualFeedsEnabled: windowPresence.shown
@@ -107,6 +108,7 @@ ApplicationWindow {
 
     Controllers.GlobalSearchController {
         id: globalSearchController
+        objectName: "globalSearchController"
         uiBridge: root.uiBridge
         globalSearchModelApi: root.globalSearchModelApi
         requestLibraryRevealForSearchRow: libraryController.requestRevealForSearchRow
@@ -375,12 +377,12 @@ ApplicationWindow {
         function setDbRange(value) {}
         function setLogScale(value) {}
         function setSpectrogramFrequencyCap(value) {}
-        function setRepeatMode(mode) {}
-        function setShuffleEnabled(value) {}
+        function setRepeatMode(mode) { repeatMode = mode }
+        function setShuffleEnabled(value) { shuffleEnabled = value }
         function setShowFps(value) {}
         function setShowLevelMeter(value) { showLevelMeter = value }
         function setShowSpectrogramCrosshair(value) {}
-        function setShowSpectrogramScale(value) {}
+        function setShowSpectrogramScale(value) { showSpectrogramScale = value }
         function setSpectrogramZoomEnabled(value) {}
         function setSpectrogramZoomLevel(level) {}
         function setSpectrogramWidgetWidth(width) {}
@@ -527,21 +529,6 @@ ApplicationWindow {
         function autoNumber(startingTrack, startingDisc, writeDiscNumbers, writeTotals, resetOnFolder, resetOnDiscChange) {}
     }
 
-    function menuPopupWidth(items) {
-        let maxPx = 0
-        for (let i = 0; i < items.length; ++i) {
-            const item = items[i]
-            const label = FormatUtils.withoutMnemonic(item.label)
-            const shortcut = item.shortcut || ""
-            let px = menuFontMetrics.boundingRect(label).width + 72
-            if (shortcut.length > 0) {
-                px += menuFontMetrics.boundingRect(shortcut).width + 24
-            }
-            maxPx = Math.max(maxPx, px)
-        }
-        return Math.max(140, Math.ceil(maxPx))
-    }
-
     // The queue's number column: 26 px at the default font, as wide as a
     // row is tall, or as the widest number.
     readonly property int playlistOrderColumnWidth: Math.ceil(Math.max(
@@ -549,11 +536,6 @@ ApplicationWindow {
     readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
     // The queue's state glyph column: 28 px at the default font.
     readonly property int playlistIndicatorColumnWidth: Math.round(uiPalette.rowHeight * 28 / 26)
-
-    FontMetrics {
-        id: menuFontMetrics
-        font: root.font
-    }
 
     TextMetrics {
         id: playlistOrderTextMetrics
@@ -654,143 +636,225 @@ ApplicationWindow {
         pendingLibraryRootName = ""
     }
 
+    // The window's actions. Menus show them; their shortcuts work wherever
+    // the main window has focus. Titles are Title Case, and an item that
+    // opens a dialog ends in "…".
+
+    // File
     Action {
         id: openFilesAction
-        text: I18n.i18nc("@action:inmenu", "&Open File(s)...")
+        objectName: "openFilesAction"
+        text: I18n.i18nc("@action:inmenu", "&Open Files…")
+        icon.name: "document-open"
         shortcut: StandardKey.Open
         enabled: !root.viewerOpen
         onTriggered: root.openExternalFiles()
     }
     Action {
         id: addFilesAction
-        text: I18n.i18nc("@action:inmenu", "&Add File(s)...")
+        objectName: "addFilesAction"
+        text: I18n.i18nc("@action:inmenu", "&Add Files to Queue…")
+        icon.name: "media-playlist-append"
         onTriggered: root.addExternalFiles()
     }
     // The folder dialog picks one folder.
     Action {
         id: addFolderAction
-        text: I18n.i18nc("@action:inmenu", "Add &Folder to Queue...")
+        objectName: "addFolderAction"
+        text: I18n.i18nc("@action:inmenu", "Add &Folder to Queue…")
+        icon.name: "folder-add"
         onTriggered: root.addExternalFolder()
     }
-    // As Preferences > Library adds one.
+    // As Configure Ferrous › Library adds one.
     Action {
         id: addLibraryFolderAction
         objectName: "addLibraryFolderAction"
-        text: I18n.i18nc("@action:inmenu", "Add Library Fol&der...")
+        text: I18n.i18nc("@action:inmenu", "Add Library Fol&der…")
+        icon.name: "folder-music"
         onTriggered: root.promptAddLibraryRoot("add-library-root")
     }
     Action {
-        id: quitAction
-        objectName: "quitAction"
-        text: I18n.i18nc("@action:inmenu", "&Quit")
-        shortcut: StandardKey.Quit
-        // Closing the window, not quitting, runs onClosing, which saves the
-        // settings and the queue and stops the backend.
-        onTriggered: root.close()
-    }
-    Action {
-        id: playLibrarySelectionAction
-        text: I18n.i18nc("@action:inmenu", "&Play Library Selection")
-        enabled: libraryController.canPlaySelection()
-        onTriggered: libraryController.playSelection()
-    }
-    Action {
-        id: appendLibrarySelectionAction
-        text: I18n.i18nc("@action:inmenu", "Q&ueue Library Selection")
-        enabled: libraryController.canPlaySelection()
-        onTriggered: libraryController.appendSelection()
-    }
-    Action {
         id: playAllLibraryTracksAction
-        text: I18n.i18nc("@action:inmenu", "Play A&ll Library Tracks")
+        objectName: "playAllLibraryTracksAction"
+        text: I18n.i18nc("@action:inmenu", "&Play Whole Library")
+        icon.name: "media-playback-start"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.playAllTracks()
     }
     Action {
         id: appendAllLibraryTracksAction
-        text: I18n.i18nc("@action:inmenu", "Queue All Library &Tracks")
+        objectName: "appendAllLibraryTracksAction"
+        text: I18n.i18nc("@action:inmenu", "Queue &Whole Library")
+        icon.name: "media-playlist-append"
         enabled: libraryController.canPlayAllTracks()
         onTriggered: libraryController.appendAllTracks()
     }
     Action {
-        id: replaceFromItunesAction
-        text: I18n.i18nc("@action:inmenu", "Replace From iTunes...")
-        enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
-        onTriggered: root.openItunesArtworkDialog()
+        id: quitAction
+        objectName: "quitAction"
+        text: I18n.i18nc("@action:inmenu", "&Quit")
+        icon.name: "application-exit"
+        shortcut: StandardKey.Quit
+        // Closing the window, not quitting, runs onClosing, which saves the
+        // settings and the queue and stops the backend.
+        onTriggered: root.close()
     }
-    Action {
-        id: preferencesAction
-        text: I18n.i18nc("@action:inmenu", "P&references...")
-        shortcut: StandardKey.Preferences
-        enabled: !root.viewerOpen
-        onTriggered: preferencesDialog.open()
-    }
-    // Delete removes the selected tracks while the queue has focus; the
-    // queue view handles it, so it is not a window-wide shortcut.
-    Action {
-        id: removeSelectedTrackAction
-        text: I18n.i18nc("@action:inmenu", "&Remove Selected Track")
-        enabled: queueController.selectionCount() > 0 && !root.viewerOpen
-        onTriggered: queueController.removeSelectedTrack()
-    }
+
+    // Edit
     Action {
         id: undoQueueChangeAction
         objectName: "undoQueueChangeAction"
         text: {
             switch (uiBridge.queueUndoKind) {
             case 1:
-                return I18n.i18nc("@action:inmenu", "&Undo Clear Playlist")
+                return I18n.i18nc("@action:inmenu", "&Undo Clear Queue")
             case 2:
-                return I18n.i18nc("@action:inmenu", "&Undo Remove Tracks")
+                return I18n.i18nc("@action:inmenu", "&Undo Remove from Queue")
             case 3:
                 return I18n.i18nc("@action:inmenu", "&Undo Replace Queue")
             case 4:
-                return I18n.i18nc("@action:inmenu", "&Undo Move Tracks")
+                return I18n.i18nc("@action:inmenu", "&Undo Move in Queue")
             default:
                 return I18n.i18nc("@action:inmenu", "&Undo")
             }
         }
+        icon.name: "edit-undo"
         // Text fields keep Ctrl+Z for their own text.
         shortcut: StandardKey.Undo
         enabled: uiBridge.queueUndoId > 0 && !root.viewerOpen
         onTriggered: uiBridge.undoQueueChange()
     }
+    // Opens search. Text fields keep Ctrl+F; the search field takes it to
+    // edit its query.
+    Action {
+        id: globalSearchAction
+        objectName: "findAction"
+        text: I18n.i18nc("@action:inmenu", "&Find…")
+        icon.name: "edit-find"
+        shortcut: StandardKey.Find
+        enabled: !root.viewerOpen
+        onTriggered: globalSearchController.openDialog()
+    }
+    // The one menu item that clears the queue; Undo brings it back.
+    Action {
+        id: clearQueueAction
+        objectName: "clearQueueAction"
+        text: I18n.i18nc("@action:inmenu", "&Clear Queue")
+        icon.name: "edit-clear-list"
+        enabled: uiBridge.queueLength > 0 && !root.viewerOpen
+        onTriggered: uiBridge.clearQueue()
+    }
+    // Queue edits with no menu item of their own in the menu bar: the
+    // queue's context menu offers them for its rows.
+    Action {
+        id: moveTrackUpAction
+        objectName: "moveTrackUpAction"
+        text: I18n.i18nc("@action:inmenu", "Move Up")
+        shortcut: "Ctrl+Shift+Up"
+        enabled: !root.viewerOpen
+        onTriggered: queueController.moveSelected(-1)
+    }
+    Action {
+        id: moveTrackDownAction
+        objectName: "moveTrackDownAction"
+        text: I18n.i18nc("@action:inmenu", "Move Down")
+        shortcut: "Ctrl+Shift+Down"
+        enabled: !root.viewerOpen
+        onTriggered: queueController.moveSelected(1)
+    }
     Action {
         id: selectPreviousTrackAction
-        text: I18n.i18nc("@action:inmenu", "Select Pre&vious Track")
+        objectName: "selectPreviousTrackAction"
+        text: I18n.i18nc("@action:inmenu", "Select Previous Track")
         shortcut: "Ctrl+Up"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(-1)
     }
     Action {
         id: selectNextTrackAction
-        text: I18n.i18nc("@action:inmenu", "Select &Next Track")
+        objectName: "selectNextTrackAction"
+        text: I18n.i18nc("@action:inmenu", "Select Next Track")
         shortcut: "Ctrl+Down"
         enabled: uiBridge.queueLength > 0 && !root.viewerOpen
         onTriggered: queueController.selectRelative(1)
     }
+
+    // View
     Action {
-        id: globalSearchAction
-        text: I18n.i18nc("@action:inmenu", "&Global Search...")
-        shortcut: StandardKey.Find
-        enabled: !root.viewerOpen
-        onTriggered: globalSearchController.openDialog()
+        id: visualizationViewerAction
+        objectName: "visualizationViewerAction"
+        text: I18n.i18nc("@action:inmenu", "Open &Visualization Viewer")
+        icon.name: "view-media-visualization"
+        shortcut: "F11"
+        // Also closes it: the viewer repeats the shortcut.
+        onTriggered: viewerController.toggleSpectrogramViewer()
     }
     Action {
-        id: diagnosticsAction
-        text: I18n.i18nc("@action:inmenu", "&Diagnostics...")
-        onTriggered: root.openDiagnostics()
+        id: albumArtViewerAction
+        objectName: "albumArtViewerAction"
+        text: I18n.i18nc("@action:inmenu", "Open &Album Art Viewer")
+        icon.name: "view-preview"
+        shortcut: "Shift+F11"
+        enabled: viewerController.albumArtViewerOpen
+            || (uiBridge.currentTrackCoverPath || "").length > 0
+        onTriggered: viewerController.toggleAlbumArtViewer()
+    }
+    // The plot's two modes, as its mode switch offers them.
+    ActionGroup {
+        id: visualizationModeGroup
+        exclusive: true
+    }
+    Action {
+        id: spectrogramModeAction
+        objectName: "spectrogramModeAction"
+        text: I18n.i18nc("@action:inmenu visualization mode", "&Spectrogram")
+        shortcut: "Ctrl+1"
+        checkable: true
+        checked: viewerController.visualizationMode === 0
+        ActionGroup.group: visualizationModeGroup
+        onTriggered: viewerController.setVisualizationMode(0)
+    }
+    Action {
+        id: waveformModeAction
+        objectName: "waveformModeAction"
+        text: I18n.i18nc("@action:inmenu visualization mode", "&Waveform")
+        shortcut: "Ctrl+2"
+        checkable: true
+        checked: viewerController.visualizationMode === 1
+        ActionGroup.group: visualizationModeGroup
+        onTriggered: viewerController.setVisualizationMode(1)
+    }
+    Action {
+        id: showLevelMeterAction
+        objectName: "showLevelMeterAction"
+        text: I18n.i18nc("@action:inmenu", "Show &Level Meter")
+        checkable: true
+        checked: uiBridge.showLevelMeter
+        onTriggered: uiBridge.setShowLevelMeter(checked)
+    }
+    // The scale is the spectrogram's only: the waveform has none.
+    Action {
+        id: showScaleAction
+        objectName: "showScaleAction"
+        text: I18n.i18nc("@action:inmenu", "Show Frequency and &Time Scale")
+        checkable: true
+        checked: uiBridge.showSpectrogramScale
+        enabled: viewerController.visualizationMode === 0
+        onTriggered: uiBridge.setShowSpectrogramScale(checked)
     }
     Action {
         id: autoCenterSelectionAction
-        text: I18n.i18nc("@action:inmenu", "&Follow Current Track in Playlist")
+        objectName: "followCurrentTrackAction"
+        text: I18n.i18nc("@action:inmenu", "&Follow Current Track in Queue")
         checkable: true
         checked: queueController.autoCenterSelection
         onTriggered: queueController.autoCenterSelection = checked
     }
     Action {
         id: resetSpectrogramAction
+        objectName: "resetVisualizationAction"
         text: I18n.i18nc("@action:inmenu", "&Reset Visualization View")
+        icon.name: "zoom-original"
         onTriggered: {
             if (viewerController.visualizationMode === 0) {
                 spectrogramSurface.resetForCurrentMode()
@@ -799,63 +863,19 @@ ApplicationWindow {
             }
         }
     }
+
+    // Playback
     Action {
-        id: showFpsOverlayAction
-        text: I18n.i18nc("@action:inmenu", "Show Visualization FP&S")
-        checkable: true
-        checked: uiBridge.showFps
-        onTriggered: uiBridge.setShowFps(checked)
-    }
-    Action {
-        id: shuffleAction
-        text: I18n.i18nc("@action:inmenu", "S&huffle")
-        checkable: true
-        checked: uiBridge.shuffleEnabled
-        onTriggered: uiBridge.setShuffleEnabled(checked)
-    }
-    // Pauses scrobbling until the app quits, as the scrobble progress
-    // indicator does.
-    Action {
-        id: pauseScrobblingAction
-        objectName: "pauseScrobblingAction"
-        text: I18n.i18nc("@action:inmenu", "Pause Scrobbl&ing")
-        checkable: true
-        checked: uiBridge.lastFmScrobblingPaused
-        enabled: uiBridge.lastFmScrobblingEnabled && uiBridge.lastFmAuthState === 2
-        onTriggered: uiBridge.setLastFmScrobblingPaused(checked)
-    }
-    Action {
-        id: repeatOffAction
-        text: I18n.i18nc("@action:inmenu", "Repeat O&ff")
-        checkable: true
-        checked: uiBridge.repeatMode === 0
-        onTriggered: uiBridge.setRepeatMode(0)
-    }
-    Action {
-        id: repeatOneAction
-        text: I18n.i18nc("@action:inmenu", "Repeat &One")
-        checkable: true
-        checked: uiBridge.repeatMode === 1
-        onTriggered: uiBridge.setRepeatMode(1)
-    }
-    Action {
-        id: repeatAllAction
-        text: I18n.i18nc("@action:inmenu", "Repeat &All")
-        checkable: true
-        checked: uiBridge.repeatMode === 2
-        onTriggered: uiBridge.setRepeatMode(2)
-    }
-    Action {
-        id: aboutAction
-        text: I18n.i18nc("@action:inmenu", "&About Ferrous")
-        onTriggered: aboutDialog.open()
-    }
-    Action {
-        id: previousAction
-        text: I18n.i18nc("@action:inmenu", "P&revious")
-        icon.name: "media-skip-backward"
-        shortcut: "Ctrl+Left"
-        onTriggered: uiBridge.previous()
+        id: playPauseAction
+        objectName: "playPauseAction"
+        // What it does now: Pause while playing, Play otherwise.
+        text: playbackController.isPlaying
+            ? I18n.i18nc("@action:inmenu", "&Pause")
+            : I18n.i18nc("@action:inmenu", "&Play")
+        icon.name: playbackController.isPlaying ? "media-playback-pause" : "media-playback-start"
+        // Text fields take Space for typing before shortcuts see it.
+        shortcut: "Space"
+        onTriggered: playbackController.togglePlayPause()
     }
     Action {
         id: playAction
@@ -880,44 +900,26 @@ ApplicationWindow {
         onTriggered: uiBridge.stop()
     }
     Action {
+        id: previousAction
+        objectName: "previousAction"
+        text: I18n.i18nc("@action:inmenu", "P&revious")
+        icon.name: "media-skip-backward"
+        shortcut: "Ctrl+Left"
+        onTriggered: uiBridge.previous()
+    }
+    Action {
         id: nextAction
+        objectName: "nextAction"
         text: I18n.i18nc("@action:inmenu", "&Next")
         icon.name: "media-skip-forward"
         shortcut: "Ctrl+Right"
         onTriggered: uiBridge.next()
     }
     Action {
-        id: clearPlaylistAction
-        text: I18n.i18nc("@action:inmenu", "&Clear Playlist")
-        onTriggered: uiBridge.clearQueue()
-    }
-    Action {
-        id: moveTrackUpAction
-        text: I18n.i18nc("@action:inmenu", "Move Track &Up")
-        shortcut: "Ctrl+Shift+Up"
-        enabled: !root.viewerOpen
-        onTriggered: queueController.moveSelected(-1)
-    }
-    Action {
-        id: moveTrackDownAction
-        text: I18n.i18nc("@action:inmenu", "Move Track &Down")
-        shortcut: "Ctrl+Shift+Down"
-        enabled: !root.viewerOpen
-        onTriggered: queueController.moveSelected(1)
-    }
-
-    Action {
-        id: playPauseAction
-        objectName: "playPauseAction"
-        text: I18n.i18nc("@action:inmenu", "&Play/Pause")
-        // Text fields take Space for typing before shortcuts see it.
-        shortcut: "Space"
-        onTriggered: playbackController.togglePlayPause()
-    }
-    Action {
         id: seekBackwardAction
         objectName: "seekBackwardAction"
         text: I18n.i18nc("@action:inmenu", "Seek &Backward")
+        icon.name: "media-seek-backward"
         shortcut: "Shift+Left"
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(-root.keyboardSeekStepSeconds)
@@ -926,14 +928,57 @@ ApplicationWindow {
         id: seekForwardAction
         objectName: "seekForwardAction"
         text: I18n.i18nc("@action:inmenu", "Seek &Forward")
+        icon.name: "media-seek-forward"
         shortcut: "Shift+Right"
         enabled: playbackController.canSeek
         onTriggered: playbackController.seekBy(root.keyboardSeekStepSeconds)
     }
     Action {
+        id: shuffleAction
+        objectName: "shuffleAction"
+        text: I18n.i18nc("@action:inmenu", "S&huffle")
+        checkable: true
+        checked: uiBridge.shuffleEnabled
+        onTriggered: uiBridge.setShuffleEnabled(checked)
+    }
+    // Repeat: one of three, under the "Repeat" heading. The wording is
+    // the status bar's: "Repeat One Track", "Repeat Whole Queue".
+    ActionGroup {
+        id: repeatModeGroup
+        exclusive: true
+    }
+    Action {
+        id: repeatOffAction
+        objectName: "repeatOffAction"
+        text: I18n.i18nc("@action:inmenu repeat mode", "&Off")
+        checkable: true
+        checked: uiBridge.repeatMode === 0
+        ActionGroup.group: repeatModeGroup
+        onTriggered: uiBridge.setRepeatMode(0)
+    }
+    Action {
+        id: repeatOneAction
+        objectName: "repeatOneAction"
+        text: I18n.i18nc("@action:inmenu repeat mode", "One &Track")
+        checkable: true
+        checked: uiBridge.repeatMode === 1
+        ActionGroup.group: repeatModeGroup
+        onTriggered: uiBridge.setRepeatMode(1)
+    }
+    Action {
+        id: repeatAllAction
+        objectName: "repeatAllAction"
+        text: I18n.i18nc("@action:inmenu repeat mode", "&Whole Queue")
+        checkable: true
+        checked: uiBridge.repeatMode === 2
+        ActionGroup.group: repeatModeGroup
+        onTriggered: uiBridge.setRepeatMode(2)
+    }
+    Action {
         id: volumeUpAction
         objectName: "volumeUpAction"
         text: I18n.i18nc("@action:inmenu", "Volume &Up")
+        icon.name: "audio-volume-high"
         shortcut: "Alt+Up"
         onTriggered: playbackController.changeVolumeBy(root.keyboardVolumeStep)
     }
@@ -941,6 +986,7 @@ ApplicationWindow {
         id: volumeDownAction
         objectName: "volumeDownAction"
         text: I18n.i18nc("@action:inmenu", "Volume &Down")
+        icon.name: "audio-volume-low"
         shortcut: "Alt+Down"
         onTriggered: playbackController.changeVolumeBy(-root.keyboardVolumeStep)
     }
@@ -954,27 +1000,58 @@ ApplicationWindow {
         checked: playbackController.volumeMuted
         onTriggered: playbackController.toggleMutedVolume()
     }
+
+    // Settings
     Action {
-        id: visualizationViewerAction
-        objectName: "visualizationViewerAction"
-        text: I18n.i18nc("@action:inmenu", "&Visualization Viewer")
-        shortcut: "F11"
-        checkable: true
-        checked: viewerController.spectrogramViewerOpen
-        onTriggered: viewerController.toggleSpectrogramViewer()
-    }
-    Action {
-        id: albumArtViewerAction
-        objectName: "albumArtViewerAction"
-        text: I18n.i18nc("@action:inmenu", "&Album Art Viewer")
-        shortcut: "Shift+F11"
-        checkable: true
-        checked: viewerController.albumArtViewerOpen
-        enabled: viewerController.albumArtViewerOpen
-            || (uiBridge.currentTrackCoverPath || "").length > 0
-        onTriggered: viewerController.toggleAlbumArtViewer()
+        id: preferencesAction
+        objectName: "configureAction"
+        text: I18n.i18nc("@action:inmenu", "&Configure Ferrous…")
+        icon.name: "configure"
+        shortcut: StandardKey.Preferences
+        enabled: !root.viewerOpen
+        onTriggered: preferencesDialog.open()
     }
 
+    // Help
+    Action {
+        id: reportBugAction
+        objectName: "reportBugAction"
+        text: I18n.i18nc("@action:inmenu", "&Report Bug…")
+        icon.name: "tools-report-bug"
+        onTriggered: Qt.openUrlExternally(root.bugReportUrl)
+    }
+    Action {
+        id: diagnosticsAction
+        objectName: "diagnosticsAction"
+        text: I18n.i18nc("@action:inmenu", "&Diagnostics…")
+        icon.name: "view-list-details"
+        onTriggered: root.openDiagnostics()
+    }
+    Action {
+        id: aboutAction
+        objectName: "aboutAction"
+        text: I18n.i18nc("@action:inmenu", "&About Ferrous")
+        // The app icon's own 16 px drawing, which is built in.
+        icon.source: "qrc:/icons/hicolor/16x16/apps/ferrous.svg"
+        onTriggered: aboutDialog.open()
+    }
+    Action {
+        id: aboutKdeAction
+        objectName: "aboutKdeAction"
+        text: I18n.i18nc("@action:inmenu", "About &KDE")
+        icon.name: "kde"
+        onTriggered: aboutKdeDialog.open()
+    }
+
+    // The artwork of the current track, from the cover's menus.
+    Action {
+        id: replaceFromItunesAction
+        text: I18n.i18nc("@action:inmenu", "Replace from iTunes…")
+        enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
+        onTriggered: root.openItunesArtworkDialog()
+    }
+
+    readonly property string bugReportUrl: "https://github.com/Tiaxi/ferrous/issues/new"
     readonly property real keyboardSeekStepSeconds: 5
     readonly property real keyboardVolumeStep: 0.05
     readonly property bool viewerOpen: viewerController.spectrogramViewerOpen
@@ -985,121 +1062,63 @@ ApplicationWindow {
         playPauseAction, stopAction, previousAction, nextAction,
         seekBackwardAction, seekForwardAction,
         volumeUpAction, volumeDownAction, muteAction,
-        visualizationViewerAction, albumArtViewerAction, quitAction
+        visualizationViewerAction, albumArtViewerAction,
+        spectrogramModeAction, waveformModeAction, quitAction
     ]
+    // The menus take the style's size, icons and motion.
     menuBar: MenuBar {
-        Menu {
+        objectName: "mainMenuBar"
+
+        Components.AppMenu {
+            objectName: "fileMenu"
             title: I18n.i18nc("@title:menu", "&File")
-            width: root.menuPopupWidth([
-                { label: openFilesAction.text, shortcut: String(openFilesAction.shortcut || "") },
-                { label: addFilesAction.text, shortcut: String(addFilesAction.shortcut || "") },
-                { label: addFolderAction.text, shortcut: String(addFolderAction.shortcut || "") },
-                { label: addLibraryFolderAction.text, shortcut: String(addLibraryFolderAction.shortcut || "") },
-                { label: playLibrarySelectionAction.text, shortcut: String(playLibrarySelectionAction.shortcut || "") },
-                { label: appendLibrarySelectionAction.text, shortcut: String(appendLibrarySelectionAction.shortcut || "") },
-                { label: playAllLibraryTracksAction.text, shortcut: String(playAllLibraryTracksAction.shortcut || "") },
-                { label: appendAllLibraryTracksAction.text, shortcut: String(appendAllLibraryTracksAction.shortcut || "") },
-                { label: quitAction.text, shortcut: String(quitAction.shortcut || "") }
-            ])
-            enter: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
-            exit: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
             MenuItem { action: openFilesAction }
             MenuItem { action: addFilesAction }
             MenuItem { action: addFolderAction }
-            MenuItem { action: addLibraryFolderAction }
             MenuSeparator {}
-            MenuItem { action: playLibrarySelectionAction }
-            MenuItem { action: appendLibrarySelectionAction }
+            MenuItem { action: addLibraryFolderAction }
             MenuItem { action: playAllLibraryTracksAction }
             MenuItem { action: appendAllLibraryTracksAction }
             MenuSeparator {}
             MenuItem { action: quitAction }
         }
-        Menu {
+        Components.AppMenu {
+            objectName: "editMenu"
             title: I18n.i18nc("@title:menu", "&Edit")
-            width: root.menuPopupWidth([
-                { label: undoQueueChangeAction.text, shortcut: String(undoQueueChangeAction.shortcut || "") },
-                { label: removeSelectedTrackAction.text, shortcut: String(removeSelectedTrackAction.shortcut || "") },
-                { label: moveTrackUpAction.text, shortcut: String(moveTrackUpAction.shortcut || "") },
-                { label: moveTrackDownAction.text, shortcut: String(moveTrackDownAction.shortcut || "") },
-                { label: selectPreviousTrackAction.text, shortcut: String(selectPreviousTrackAction.shortcut || "") },
-                { label: selectNextTrackAction.text, shortcut: String(selectNextTrackAction.shortcut || "") },
-                { label: clearPlaylistAction.text, shortcut: String(clearPlaylistAction.shortcut || "") },
-                { label: preferencesAction.text, shortcut: String(preferencesAction.shortcut || "") }
-            ])
-            enter: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
-            exit: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
             MenuItem { action: undoQueueChangeAction }
             MenuSeparator {}
-            MenuItem { action: removeSelectedTrackAction }
-            MenuItem { action: moveTrackUpAction }
-            MenuItem { action: moveTrackDownAction }
-            MenuSeparator {}
-            MenuItem { action: selectPreviousTrackAction }
-            MenuItem { action: selectNextTrackAction }
-            MenuSeparator {}
-            MenuItem { action: clearPlaylistAction }
-            MenuSeparator {}
-            MenuItem { action: preferencesAction }
-        }
-        Menu {
-            title: I18n.i18nc("@title:menu", "&View")
-            width: root.menuPopupWidth([
-                { label: globalSearchAction.text, shortcut: String(globalSearchAction.shortcut || "") },
-                { label: visualizationViewerAction.text, shortcut: String(visualizationViewerAction.shortcut || "") },
-                { label: albumArtViewerAction.text, shortcut: String(albumArtViewerAction.shortcut || "") },
-                { label: autoCenterSelectionAction.text, shortcut: String(autoCenterSelectionAction.shortcut || "") },
-                { label: resetSpectrogramAction.text, shortcut: String(resetSpectrogramAction.shortcut || "") },
-                { label: showFpsOverlayAction.text, shortcut: String(showFpsOverlayAction.shortcut || "") }
-            ])
-            enter: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
-            exit: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
             MenuItem { action: globalSearchAction }
             MenuSeparator {}
+            MenuItem { action: clearQueueAction }
+        }
+        Components.AppMenu {
+            objectName: "viewMenu"
+            title: I18n.i18nc("@title:menu", "&View")
             MenuItem { action: visualizationViewerAction }
             MenuItem { action: albumArtViewerAction }
             MenuSeparator {}
+            Components.MenuHeading {
+                objectName: "visualizationHeading"
+                text: I18n.i18nc("@title:menu visualization modes", "Visualization")
+            }
+            MenuItem {
+                action: spectrogramModeAction
+                Accessible.description: I18n.i18nc("@info", "Visualization")
+            }
+            MenuItem {
+                action: waveformModeAction
+                Accessible.description: I18n.i18nc("@info", "Visualization")
+            }
+            MenuSeparator {}
+            MenuItem { action: showLevelMeterAction }
+            MenuItem { action: showScaleAction }
+            MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
             MenuItem { action: resetSpectrogramAction }
-            MenuItem { action: showFpsOverlayAction }
         }
-        Menu {
+        Components.AppMenu {
+            objectName: "playbackMenu"
             title: I18n.i18nc("@title:menu", "&Playback")
-            width: root.menuPopupWidth([
-                { label: playPauseAction.text, shortcut: String(playPauseAction.shortcut || "") },
-                { label: stopAction.text, shortcut: String(stopAction.shortcut || "") },
-                { label: previousAction.text, shortcut: String(previousAction.shortcut || "") },
-                { label: nextAction.text, shortcut: String(nextAction.shortcut || "") },
-                { label: seekBackwardAction.text, shortcut: String(seekBackwardAction.shortcut || "") },
-                { label: seekForwardAction.text, shortcut: String(seekForwardAction.shortcut || "") },
-                { label: volumeUpAction.text, shortcut: String(volumeUpAction.shortcut || "") },
-                { label: volumeDownAction.text, shortcut: String(volumeDownAction.shortcut || "") },
-                { label: muteAction.text, shortcut: String(muteAction.shortcut || "") },
-                { label: shuffleAction.text, shortcut: String(shuffleAction.shortcut || "") },
-                { label: repeatOffAction.text, shortcut: String(repeatOffAction.shortcut || "") },
-                { label: repeatOneAction.text, shortcut: String(repeatOneAction.shortcut || "") },
-                { label: repeatAllAction.text, shortcut: String(repeatAllAction.shortcut || "") },
-                { label: pauseScrobblingAction.text, shortcut: "" },
-                { label: clearPlaylistAction.text, shortcut: String(clearPlaylistAction.shortcut || "") }
-            ])
-            enter: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
-            exit: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
             MenuItem { action: playPauseAction }
             MenuItem { action: stopAction }
             MenuItem { action: previousAction }
@@ -1108,38 +1127,46 @@ ApplicationWindow {
             MenuItem { action: seekBackwardAction }
             MenuItem { action: seekForwardAction }
             MenuSeparator {}
+            MenuItem { action: shuffleAction }
+            Components.MenuHeading {
+                objectName: "repeatHeading"
+                text: I18n.i18nc("@title:menu repeat modes", "Repeat")
+            }
+            MenuItem {
+                action: repeatOffAction
+                Accessible.description: I18n.i18nc("@info", "Repeat")
+            }
+            MenuItem {
+                action: repeatOneAction
+                Accessible.description: I18n.i18nc("@info", "Repeat")
+            }
+            MenuItem {
+                action: repeatAllAction
+                Accessible.description: I18n.i18nc("@info", "Repeat")
+            }
+            MenuSeparator {}
             MenuItem { action: volumeUpAction }
             MenuItem { action: volumeDownAction }
             MenuItem { action: muteAction }
-            MenuSeparator {}
-            MenuItem { action: shuffleAction }
-            MenuItem { action: repeatOffAction }
-            MenuItem { action: repeatOneAction }
-            MenuItem { action: repeatAllAction }
-            MenuSeparator {}
-            MenuItem {
-                objectName: "pauseScrobblingMenuItem"
-                action: pauseScrobblingAction
-            }
-            MenuSeparator {}
-            MenuItem { action: clearPlaylistAction }
         }
-        Menu {
+        Components.AppMenu {
+            objectName: "settingsMenu"
+            title: I18n.i18nc("@title:menu", "&Settings")
+            MenuItem { action: preferencesAction }
+        }
+        Components.AppMenu {
+            objectName: "helpMenu"
             title: I18n.i18nc("@title:menu", "&Help")
-            width: root.menuPopupWidth([
-                { label: diagnosticsAction.text, shortcut: String(diagnosticsAction.shortcut || "") },
-                { label: aboutAction.text, shortcut: String(aboutAction.shortcut || "") }
-            ])
-            enter: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
-            exit: Transition {
-                NumberAnimation { properties: "opacity,scale,x,y"; duration: root.uiPopupTransitionMs }
-            }
+            MenuItem { action: reportBugAction }
             MenuItem { action: diagnosticsAction }
             MenuSeparator {}
             MenuItem { action: aboutAction }
+            MenuItem { action: aboutKdeAction }
         }
+    }
+
+    Dialogs.AboutKdeDialog {
+        id: aboutKdeDialog
     }
 
     Dialogs.AboutDialog {
@@ -1350,12 +1377,9 @@ ApplicationWindow {
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer
-                popupTransitionMs: root.uiPopupTransitionMs
                 snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                 snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                 stepScrollView: root.stepScrollView
-                playAllLibraryTracksAction: playAllLibraryTracksAction
-                appendAllLibraryTracksAction: appendAllLibraryTracksAction
                 addLibraryFolderAction: addLibraryFolderAction
                 errorController: errorController
             }
@@ -1390,8 +1414,8 @@ ApplicationWindow {
                     playlistOrderText: FormatUtils.playlistOrderText
                     libraryController: libraryController
                     stepScrollView: root.stepScrollView
-                    clearPlaylistAction: clearPlaylistAction
-                    popupTransitionMs: root.uiPopupTransitionMs
+                    moveUpKeyHint: String(moveTrackUpAction.shortcut)
+                    moveDownKeyHint: String(moveTrackDownAction.shortcut)
                     snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
                     snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
                     droppedExternalPaths: PathUtils.droppedExternalPaths

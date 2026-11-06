@@ -17,12 +17,9 @@ Rectangle {
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
-    required property int popupTransitionMs
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var stepScrollView
-    required property var playAllLibraryTracksAction
-    required property var appendAllLibraryTracksAction
     required property var addLibraryFolderAction
     // The tracks the playback failed to read, which the tree marks.
     property var errorController: null
@@ -58,10 +55,7 @@ Rectangle {
             uiPalette: root.uiPalette
             snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
             snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-            popupTransitionMs: root.popupTransitionMs
             stepScrollView: root.stepScrollView
-            playAllLibraryTracksAction: root.playAllLibraryTracksAction
-            appendAllLibraryTracksAction: root.appendAllLibraryTracksAction
             addLibraryFolderAction: root.addLibraryFolderAction
             narrow: nowPlaying.narrow
             errorController: root.errorController

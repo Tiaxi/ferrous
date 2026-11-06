@@ -1684,7 +1684,7 @@ private slots:
     void scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff();
     void scrobblePointFollowsThePlaybackClocksSeeks();
     void lastFmPageShowsTheScrobbleProgressSettingWhileConnected();
-    void playbackMenuPausesScrobbling();
+    void scrobbleIndicatorPausesScrobbling();
 };
 
 // The tag editor, renaming, and quitting with tag edits.
@@ -2080,10 +2080,7 @@ Item {
     Action { id: pauseAction }
     Action { id: stopAction }
     Action { id: nextAction }
-    Action { id: clearPlaylistAction }
     Action { id: replaceFromItunesAction }
-    Action { id: playAllLibraryTracksAction }
-    Action { id: appendAllLibraryTracksAction }
     Action { id: addLibraryFolderAction }
 
     Dialogs.PreferencesDialog {
@@ -2234,12 +2231,9 @@ Item {
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         openAlbumArtViewer: function() {}
-        popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        playAllLibraryTracksAction: playAllLibraryTracksAction
-        appendAllLibraryTracksAction: appendAllLibraryTracksAction
         addLibraryFolderAction: addLibraryFolderAction
     }
 
@@ -2258,8 +2252,6 @@ Item {
         playlistOrderText: function(index) { return String(index + 1) }
         libraryController: libraryController
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        clearPlaylistAction: clearPlaylistAction
-        popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         droppedExternalPaths: function(drop) { return [] }
@@ -4157,7 +4149,7 @@ void WindowSmokeTest::windowLayoutSurvivesARestart() {
         QObject *followAction = nullptr;
         for (QObject *object : window->findChildren<QObject *>()) {
             if (object->property("text").toString()
-                == QStringLiteral("&Follow Current Track in Playlist")) {
+                == QStringLiteral("&Follow Current Track in Queue")) {
                 followAction = object;
             }
         }
@@ -17413,8 +17405,6 @@ Window {
         windowRoot: harness
     }
 
-    Action { id: clearPlaylistAction }
-
     Controllers.QueueController {
         id: queueController
         objectName: "queueController"
@@ -17441,8 +17431,6 @@ Window {
         playlistOrderText: function(index) { return String(index + 1) }
         libraryController: libraryControllerStub
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        clearPlaylistAction: clearPlaylistAction
-        popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         droppedExternalPaths: function(drop) { return [] }
@@ -23914,7 +23902,7 @@ void TransportInputSmokeTest::spaceTypesIntoTextFields() {
     bridge->setProperty("durationSeconds", 100.0);
     QObject *search = nullptr;
     for (QObject *action : window->findChildren<QObject *>()) {
-        if (action->property("text").toString() == QStringLiteral("&Global Search...")) {
+        if (action->property("text").toString() == QStringLiteral("&Find…")) {
             search = action;
             break;
         }
@@ -25580,7 +25568,7 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
     // So does a text field.
     QObject *search = nullptr;
     for (QObject *action : window->findChildren<QObject *>()) {
-        if (action->property("text").toString() == QStringLiteral("&Global Search...")) {
+        if (action->property("text").toString() == QStringLiteral("&Find…")) {
             search = action;
             break;
         }
@@ -25603,17 +25591,17 @@ void LibraryQueueSmokeTest::deleteRemovesQueueTracksOnlyWhileTheQueueHasFocus() 
     QTRY_VERIFY(queueView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Delete);
     QCOMPARE(queueCommands(bridge), QStringList{QStringLiteral("remove 1")});
-    // The Edit menu's Remove acts on the queue's selection wherever the
-    // focus is, since the user chose it there.
-    QObject *remove = nullptr;
-    for (QObject *action : window->findChildren<QObject *>()) {
-        if (action->property("text").toString() == QStringLiteral("&Remove Selected Track")) {
-            remove = action;
-            break;
+    // No action takes Delete from the window: the queue's context menu
+    // shows it beside Remove from Queue without taking it.
+    for (QObject *object : window->findChildren<QObject *>()) {
+        if (object->inherits("QQuickAction")) {
+            QVERIFY2(object->property("shortcut").value<QKeySequence>() != QKeySequence(QKeySequence::Delete),
+                     qPrintable(object->property("text").toString()));
         }
     }
+    QObject *remove = window->findChild<QObject *>(QStringLiteral("queueRemoveItem"));
     QVERIFY(remove != nullptr);
-    QCOMPARE(remove->property("shortcut").value<QKeySequence>(), QKeySequence());
+    QVERIFY(qvariant_cast<QObject *>(remove->property("action")) == nullptr);
 }
 
 void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
@@ -25670,7 +25658,7 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     offerUndo(2, 7.0);
     expectNoNotice();
     QVERIFY(undoMenuItem->property("enabled").toBool());
-    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Remove Tracks"));
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Remove from Queue"));
     QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 7"));
     // The rows come back, and with them their highlight.
@@ -25686,7 +25674,7 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     offerUndo(1, 8.0);
     expectNoNotice();
     QVERIFY(undoMenuItem->property("enabled").toBool());
-    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Clear Playlist"));
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Clear Queue"));
     QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 8"));
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
@@ -25707,7 +25695,7 @@ void LibraryQueueSmokeTest::queueChangesShowNoNoticeAndEditUndoRestoresThem() {
     offerUndo(4, 10.0);
     expectNoNotice();
     QVERIFY(undoMenuItem->property("enabled").toBool());
-    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move in Queue"));
     QVERIFY(QMetaObject::invokeMethod(queueView, "forceActiveFocus"));
     QTRY_VERIFY(queueView->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
@@ -25738,7 +25726,7 @@ void LibraryQueueSmokeTest::editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows(
     bridge->setProperty("queueUndoKind", int(BinaryBridgeCodec::QueueUndoMoved));
     bridge->setProperty("queueUndoId", 10.0);
     QVERIFY(undoMenuItem->property("enabled").toBool());
-    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move Tracks"));
+    QCOMPARE(undoMenuItem->property("text").toString(), QStringLiteral("&Undo Move in Queue"));
     QVERIFY(QMetaObject::invokeMethod(undoAction, "trigger"));
     QCOMPARE(queueCommands(bridge).last(), QStringLiteral("undo 10"));
 
@@ -27937,7 +27925,7 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     // So does the File menu, beside the item that adds a folder to the queue.
     QObject *action = window->findChild<QObject *>(QStringLiteral("addLibraryFolderAction"));
     QVERIFY(action != nullptr);
-    QCOMPARE(action->property("text").toString(), QStringLiteral("Add Library Fol&der..."));
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Add Library Fol&der…"));
     QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
     chooseFolder(second);
     QTRY_COMPARE_WITH_TIMEOUT(bridge.property("libraryRootCount").toInt(), 2, 10000);
@@ -27949,7 +27937,7 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
     QCOMPARE(roots, (QStringList{first, second}));
     bool queueItemFound = false;
     for (QObject *object : window->findChildren<QObject *>()) {
-        if (object->property("text").toString() == QStringLiteral("Add &Folder to Queue...")) {
+        if (object->property("text").toString() == QStringLiteral("Add &Folder to Queue…")) {
             queueItemFound = true;
         }
     }
@@ -28015,8 +28003,6 @@ Window {
         windowRoot: harness
     }
 
-    Action { id: clearPlaylistAction }
-
     Controllers.QueueController {
         id: queueController
         objectName: "queueController"
@@ -28052,8 +28038,6 @@ Window {
         playlistOrderText: function(index) { return String(index + 1) }
         libraryController: libraryControllerStub
         stepScrollView: function(view, wheel, stepSize, stepsPerWheel) {}
-        clearPlaylistAction: clearPlaylistAction
-        popupTransitionMs: 0
         snappyScrollFlickDeceleration: 18000
         snappyScrollMaxFlickVelocity: 1400
         droppedExternalPaths: function(drop) { return [] }
@@ -29026,46 +29010,40 @@ ApplicationWindow {
     QTRY_VERIFY(!checkBox->isVisible());
 }
 
-void ScrobbleSmokeTest::playbackMenuPausesScrobbling() {
+void ScrobbleSmokeTest::scrobbleIndicatorPausesScrobbling() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    QObject *action = window->findChild<QObject *>(QStringLiteral("pauseScrobblingAction"));
-    QObject *menuItem = window->findChild<QObject *>(QStringLiteral("pauseScrobblingMenuItem"));
     auto *indicator = window->findChild<QQuickItem *>(QStringLiteral("scrobbleIndicator"));
-    QVERIFY(bridge != nullptr && action != nullptr && menuItem != nullptr && indicator != nullptr);
-    QCOMPARE(qvariant_cast<QObject *>(menuItem->property("action")), action);
-    // In the Playback menu.
-    QObject *menu = menuItem->parent();
-    while (menu != nullptr && menu->property("title").toString() != QStringLiteral("&Playback")) {
-        menu = menu->parent();
+    QObject *pauseItem = window->findChild<QObject *>(QStringLiteral("scrobbleIndicatorPauseItem"));
+    QVERIFY(bridge != nullptr && indicator != nullptr && pauseItem != nullptr);
+    // The Last.fm slot pauses scrobbling; the Playback menu does not.
+    QVERIFY(window->findChild<QObject *>(QStringLiteral("pauseScrobblingAction")) == nullptr);
+    for (QObject *object : window->findChildren<QObject *>()) {
+        QVERIFY(object->property("text").toString() != QStringLiteral("Pause Scrobbl&ing"));
     }
-    QVERIFY2(menu != nullptr, "the item is not in the Playback menu");
 
     // Without Last.fm, there is nothing to pause, and no indicator.
-    QVERIFY(!action->property("enabled").toBool());
     QVERIFY(!indicator->isVisible());
     bridge->setProperty("lastFmScrobblingEnabled", true);
     bridge->setProperty("lastFmAuthState", 2);
     bridge->setProperty("lastFmScrobbleState", 1);
-    QTRY_VERIFY(action->property("enabled").toBool());
     QTRY_VERIFY(indicator->isVisible());
-    QVERIFY(action->property("checkable").toBool());
-    QVERIFY(!action->property("checked").toBool());
+    QVERIFY(pauseItem->property("checkable").toBool());
+    QVERIFY(!pauseItem->property("checked").toBool());
 
-    QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
+    QVERIFY(QMetaObject::invokeMethod(pauseItem, "toggle"));
+    QVERIFY(QMetaObject::invokeMethod(pauseItem, "triggered"));
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
-    QVERIFY(action->property("checked").toBool());
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("paused"));
+    QTRY_VERIFY(pauseItem->property("checked").toBool());
 
-    // The indicator resumes it, and the menu item follows.
+    // A press on the slot resumes it, and the menu item follows.
     QVERIFY(QMetaObject::invokeMethod(indicator, "togglePaused"));
     QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
-    QTRY_VERIFY(!action->property("checked").toBool());
-    QVERIFY(QMetaObject::invokeMethod(action, "trigger"));
-    QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
+    QTRY_VERIFY(!pauseItem->property("checked").toBool());
 
     // Its menu's settings item opens the preferences on the Last.fm page.
     QObject *preferences = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
