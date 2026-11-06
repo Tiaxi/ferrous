@@ -128,7 +128,10 @@ const QColor kScaleOutlineColor(0x14, 0x06, 0x2e);
 // plotTick.
 const QColor kScaleTickColor(236, 232, 244, 191);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
-const QColor kPlayheadColor(0xe8, 0xe8, 0xe8);
+// The core is all but opaque, as the playhead has always been translucent:
+// with an opaque one, Qt's software renderer leaves a seam of background in
+// the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
+const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
 const QColor kPlayheadCasingColor(0, 0, 0, 153);
 // The crosshair: dashed white 35%.
 const QColor kCrosshairLineColor(255, 255, 255, 89);
