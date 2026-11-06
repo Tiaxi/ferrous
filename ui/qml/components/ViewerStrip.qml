@@ -2,7 +2,6 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
 import FerrousUi 1.0
 import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
@@ -79,50 +78,52 @@ Rectangle {
         }
     }
 
-    RowLayout {
+    // Each text at its own width while they fit; short of room, the time
+    // stays whole, the title keeps at least 60% of the rest, and the two
+    // others elide.
+    Row {
+        id: track
         objectName: "viewerStripTrack"
-        anchors.left: parent.left
-        anchors.leftMargin: 12
-        anchors.right: controls.left
-        anchors.rightMargin: 12
-        anchors.top: parent.top
+        readonly property real room: Math.max(0, controls.x - 12 - x)
+        readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
+            ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
+        readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
+        x: 12
         height: 32
         spacing: 12
 
         Label {
+            id: titleLabel
             objectName: "viewerStripTitle"
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth,
+                            Math.max(track.textRoom * 0.6, track.textRoom - track.contextNeed))
             text: root.titleText
             visible: text.length > 0
             font.weight: Font.DemiBold
             color: root.uiPalette.text
             elide: Text.ElideRight
-            Layout.fillWidth: true
-            Layout.maximumWidth: implicitWidth
-            Layout.alignment: Qt.AlignVCenter
         }
 
         Label {
+            id: contextLabel
             objectName: "viewerStripContext"
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.min(implicitWidth, Math.max(0, track.textRoom - titleLabel.width))
             text: root.artistAlbumText
             visible: text.length > 0 && root.titleText.length > 0
             color: root.uiPalette.textSecondary
             elide: Text.ElideRight
-            Layout.fillWidth: true
-            Layout.maximumWidth: implicitWidth
-            Layout.alignment: Qt.AlignVCenter
         }
 
         Label {
+            id: timeLabel
             objectName: "viewerStripTime"
+            anchors.verticalCenter: parent.verticalCenter
             text: root.timeText
             visible: text.length > 0
             color: root.uiPalette.textSecondary
             font.features: root.uiPalette.tabularFigures
-            Layout.alignment: Qt.AlignVCenter
-        }
-
-        Item {
-            Layout.fillWidth: true
         }
     }
 

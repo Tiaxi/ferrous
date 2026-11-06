@@ -24635,6 +24635,24 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(colorOf(time, "color"), colorOf(palette, "textSecondary"));
         QVERIFY(sceneRectOf(title).right() < sceneRectOf(context).left());
         QVERIFY(sceneRectOf(context).right() < sceneRectOf(time).left());
+        // With room for them, nothing is cut short.
+        QTRY_VERIFY(!context->property("truncated").toBool());
+        QVERIFY(!title->property("truncated").toBool());
+        QCOMPARE(context->width(), context->implicitWidth());
+
+        // Short of room, the time stays whole and the title elides, keeping
+        // clear of the context.
+        const QString longTitle = QStringLiteral("A Remarkably Long Track Title That Will Certainly "
+                                                 "Need Eliding Somewhere in the Strip, Again and Again");
+        bridge->setProperty("currentTrackTitle", longTitle + QStringLiteral(" ") + longTitle);
+        QTRY_VERIFY(title->property("truncated").toBool());
+        QTRY_VERIFY(sceneRectOf(title).right() < sceneRectOf(context).left()
+                    && sceneRectOf(context).right() < sceneRectOf(time).left());
+        QVERIFY(!time->property("truncated").toBool());
+        QCOMPARE(time->width(), time->implicitWidth());
+        QVERIFY(sceneRectOf(time).right() <= sceneRectOf(visibleItemNamed(fullscreen, shown.closeName)).left());
+        bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
+        QTRY_VERIFY(!title->property("truncated").toBool());
 
         // A flat 24 px Close at the right, 4 px in; the view starts under
         // the strip.
