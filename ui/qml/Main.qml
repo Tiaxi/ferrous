@@ -248,6 +248,7 @@ ApplicationWindow {
         property string currentTrackGenre: ""
         property var currentTrackYear: null
         property int currentTrackNumber: 0
+        property var currentTrackTreeKeys: []
         property string currentTrackFormatLabel: ""
         property string currentTrackChannelLayoutText: ""
         property string currentTrackChannelLayoutIconKey: ""

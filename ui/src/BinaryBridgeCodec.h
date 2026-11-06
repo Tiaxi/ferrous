@@ -365,7 +365,13 @@ struct DecodedMetadata {
     QString coverPath;
     quint64 coverStamp{0};
     int trackNumber{0};
+    // The keys of the library tree rows that hold the track.
+    QStringList treeKeys;
 };
+
+// The most tree rows a track is in: a library folder, an artist, an album
+// and a section. More marks a malformed metadata section.
+inline constexpr quint16 kMaxTrackTreeKeys = 4;
 
 struct DecodedSettings {
     bool present{false};

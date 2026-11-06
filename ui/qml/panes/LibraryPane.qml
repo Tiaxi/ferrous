@@ -47,6 +47,10 @@ Rectangle {
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
     readonly property string playbackState: root.uiBridge.playbackState || ""
+    // The keys of the rows that hold the playing track, as the backend
+    // groups the tree: one artist row can gather tracks from more than one
+    // folder, so the rows' paths cannot tell.
+    readonly property var currentTrackTreeKeys: root.uiBridge.currentTrackTreeKeys || []
 
     readonly property string totalsText: {
         const tracks = root.uiBridge.libraryTrackCount
@@ -72,24 +76,6 @@ Rectangle {
                                   Number(root.uiBridge.libraryScanDiscovered).toLocaleString(locale, "f", 0)))
         }
         return parts.join(" · ")
-    }
-
-    // Whether the folder row `rowPath` (an album, section, artist or
-    // library folder) holds `trackPath`. Artists are the first folder under
-    // a library folder, except that the files right in a library folder
-    // belong to the artist of their tag, whose row has the library folder's
-    // path.
-    function rowHoldsTrack(rowType, rowPath, rowArtist, trackPath) {
-        if (rowPath.length === 0 || trackPath.length === 0
-                || !trackPath.startsWith(rowPath + "/")) {
-            return false
-        }
-        if (rowType !== "artist" || (root.uiBridge.libraryRoots || []).indexOf(rowPath) < 0) {
-            return true
-        }
-        const inRootFolder = trackPath.lastIndexOf("/") === rowPath.length
-        const tagArtist = (root.uiBridge.currentTrackArtist || "").trim()
-        return inRootFolder && rowArtist === (tagArtist.length > 0 ? tagArtist : "Unknown Artist")
     }
 
     color: root.uiPalette.view
@@ -243,8 +229,7 @@ Rectangle {
                     // A collapsed row that holds the playing track.
                     readonly property bool holdsNow: hasChildren && !isExpanded
                         && root.playbackState !== "Stopped"
-                        && root.rowHoldsTrack(rowTypeResolved, openPathResolved, artistResolved,
-                                              root.currentTrackPath)
+                        && root.currentTrackTreeKeys.indexOf(key || "") >= 0
                     readonly property string stateGlyph: {
                         if (isNow || holdsNow) {
                             return root.playbackState === "Paused"

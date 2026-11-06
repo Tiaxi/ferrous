@@ -1647,6 +1647,57 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_name_the_tree_rows_that_hold_the_playing_track() {
+        // A loose file in the library folder tagged "A" and an album track
+        // in the folder "A" make one artist row, whichever came first.
+        for loose_first in [true, false] {
+            let root_path = p("/music");
+            let loose = LibraryTrack {
+                path: p("/music/single.flac"),
+                root_path: root_path.clone(),
+                artist: "A".to_string(),
+                ..LibraryTrack::default()
+            };
+            let in_album = LibraryTrack {
+                path: p("/music/A/Album/01.flac"),
+                root_path: root_path.clone(),
+                ..LibraryTrack::default()
+            };
+            let tracks = if loose_first {
+                vec![loose, in_album]
+            } else {
+                vec![in_album, loose]
+            };
+            let mut state = BridgeState {
+                library: Arc::new(LibrarySnapshot {
+                    roots: vec![LibraryRoot {
+                        path: root_path,
+                        name: String::new(),
+                    }],
+                    tracks: crate::library::shared_tracks(tracks),
+                    ..LibrarySnapshot::default()
+                }),
+                ..BridgeState::default()
+            };
+            assert!(state.snapshot(false).now_playing_tree_keys.is_empty());
+
+            state.metadata.source_path = Some("/music/single.flac".to_string());
+            assert_eq!(
+                state.snapshot(false).now_playing_tree_keys,
+                ["root|/music", "artist|/music|A"]
+            );
+            state.metadata.source_path = Some("/music/A/Album/01.flac".to_string());
+            assert_eq!(
+                state.snapshot(false).now_playing_tree_keys,
+                ["root|/music", "artist|/music|A", "album|/music|A|Album"]
+            );
+            // A file the library does not have is in no row.
+            state.metadata.source_path = Some("/elsewhere/01.flac".to_string());
+            assert!(state.snapshot(false).now_playing_tree_keys.is_empty());
+        }
+    }
+
+    #[test]
     fn show_external_track_in_library_is_a_no_op() {
         let mut state = BridgeState::default();
 

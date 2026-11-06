@@ -534,8 +534,20 @@ bool decodeMetadataSection(const QByteArray &payload, DecodedMetadata *out) {
             if (!reader.readUtf8(&label)) return false;
             out->channelLabels.append(label);
         }
-        if (!reader.atEnd()) return false;
     }
+    // The library tree rows that hold the track, outermost first: a library
+    // folder, an artist, an album and a section at most.
+    out->treeKeys.clear();
+    if (!reader.atEnd()) {
+        quint16 count = 0;
+        if (!reader.readU16(&count) || count > kMaxTrackTreeKeys) return false;
+        for (quint16 i = 0; i < count; ++i) {
+            QString key;
+            if (!reader.readUtf8(&key)) return false;
+            out->treeKeys.append(key);
+        }
+    }
+    if (!reader.atEnd()) return false;
     out->present = true;
     out->sampleRateHz = static_cast<int>(sampleRateHz);
     out->bitrateKbps = static_cast<int>(bitrateKbps);

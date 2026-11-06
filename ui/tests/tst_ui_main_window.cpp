@@ -185,9 +185,13 @@ void appendUtf8(QByteArray &out, const QString &value) {
 
 const QString kTrackPath = QStringLiteral("/music/Artist A/Album A/02.flac");
 
+const QString kArtistKey = QStringLiteral("artist|Artist A");
+const QString kAlbumKey = QStringLiteral("album|Artist A|Album A");
+
 // An artist with an album from 2005 of one track, number 2, in the bridge's
-// tree format.
-QByteArray artistAlbumTrackTree() {
+// tree format. The artist row's path is that of the folder of whichever of
+// its tracks the backend met first.
+QByteArray artistAlbumTrackTree(const QString &artistPath = QStringLiteral("/music/Artist A")) {
     struct Row {
         quint8 rowType;
         quint16 depth;
@@ -200,9 +204,8 @@ QByteArray artistAlbumTrackTree() {
         QString trackPath;
     };
     const QList<Row> rows{
-        {1, 0, 0, 1, 0, QStringLiteral("Artist A (1)"), QStringLiteral("artist|Artist A"),
-         QStringLiteral("/music/Artist A"), {}},
-        {2, 1, 0, 1, 2005, QStringLiteral("Album A"), QStringLiteral("album|Artist A|Album A"),
+        {1, 0, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, artistPath, {}},
+        {2, 1, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey,
          QStringLiteral("/music/Artist A/Album A"), {}},
         {4, 2, 2, 0, 0, QStringLiteral("Second"), QStringLiteral("track|") + kTrackPath, kTrackPath,
          kTrackPath},
@@ -231,12 +234,13 @@ QByteArray artistAlbumTrackTree() {
     return out;
 }
 
-void showTree(LibraryTreeModel &model, const QStringList &expanded) {
+void showTree(LibraryTreeModel &model, const QStringList &expanded,
+              const QString &artistPath = QStringLiteral("/music/Artist A")) {
     model.setExpandedKeys(expanded);
-    model.setLibraryTreeFromBinary(artistAlbumTrackTree());
+    model.setLibraryTreeFromBinary(artistAlbumTrackTree(artistPath));
 }
 
-const QStringList kAllExpanded{QStringLiteral("artist|Artist A"), QStringLiteral("album|Artist A|Album A")};
+const QStringList kAllExpanded{kArtistKey, kAlbumKey};
 
 QVariantList sampleQueueRows(int count) {
     QVariantList rows;
@@ -260,6 +264,8 @@ void playTrack(QObject *bridge, const QString &state = QStringLiteral("Playing")
     bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
     bridge->setProperty("currentTrackYear", 2005);
     bridge->setProperty("currentTrackNumber", 2);
+    // The rows that hold it, as the backend names them.
+    bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("root|/music"), kArtistKey, kAlbumKey});
     bridge->setProperty("playbackState", state);
 }
 
@@ -280,6 +286,7 @@ private slots:
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
+    void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
@@ -643,10 +650,48 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     QTRY_COMPARE(glyphName(artist), QStringLiteral("media-playback-pause"));
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QTRY_COMPARE(glyphName(artist), QString());
-    // Another track: nothing.
+    // Another track, in other rows: nothing.
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist B/Album/01.flac"));
+    bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("artist|Artist B")});
     QTRY_COMPARE(glyphName(artist), QString());
+}
+
+void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    const auto artistMark = [&]() {
+        QQuickItem *artist = libraryRow(window, QStringLiteral("artist"));
+        QQuickItem *glyph = artist != nullptr ? itemNamed(artist, QStringLiteral("libraryRowState")) : nullptr;
+        return shown(glyph) ? glyph->property("source").toString() : QString();
+    };
+    // One artist gathers a loose file right in the library folder, tagged
+    // with its name, and an album track in its own folder. Its row has the
+    // path of whichever the backend met first, which a rescan can change.
+    for (const QString &artistPath : {QStringLiteral("/music"), QStringLiteral("/music/Artist A")}) {
+        showTree(libraryModel, {}, artistPath);
+        QTRY_VERIFY(libraryRow(window, QStringLiteral("artist")) != nullptr);
+        QCOMPARE(libraryRow(window, QStringLiteral("artist"))->property("openPathResolved").toString(),
+                 artistPath);
+        // The loose file.
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/single.flac"));
+        bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("root|/music"), kArtistKey});
+        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        // The album track.
+        bridge->setProperty("currentTrackPath", kTrackPath);
+        bridge->setProperty("currentTrackTreeKeys",
+                            QStringList{QStringLiteral("root|/music"), kArtistKey, kAlbumKey});
+        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        // A track the library does not have: no rows hold it.
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/elsewhere.flac"));
+        bridge->setProperty("currentTrackTreeKeys", QStringList{});
+        QTRY_COMPARE(artistMark(), QString());
+    }
 }
 
 void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {

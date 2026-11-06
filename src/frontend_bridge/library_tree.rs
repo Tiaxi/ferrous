@@ -553,10 +553,18 @@ fn build_root_builders(
     builders
 }
 
-fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, track: &LibraryTrack) {
-    let Ok(rel) = track.path.strip_prefix(&root.path) else {
-        return;
-    };
+/// Where a track sits in the tree under its library folder: its artist,
+/// and its album and section folders when it has them. The tree groups
+/// tracks by this alone, so [`track_ancestor_keys`] names the same rows.
+struct TrackPlace {
+    artist_name: String,
+    artist_path: PathBuf,
+    album_folder: Option<String>,
+    section: Option<String>,
+}
+
+fn track_place(root: &LibraryRoot, track: &LibraryTrack) -> Option<TrackPlace> {
+    let rel = track.path.strip_prefix(&root.path).ok()?;
     let components = rel
         .components()
         .filter_map(|component| {
@@ -567,8 +575,60 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
         })
         .collect::<Vec<_>>();
     if components.is_empty() {
-        return;
+        return None;
     }
+    let (artist_name, artist_path) = artist_parts(root, track, &components);
+    let album_folder = (components.len() >= 3).then(|| components[1].clone());
+    let section = (components.len() >= 4).then(|| components[2].clone());
+    Some(TrackPlace {
+        artist_name,
+        artist_path,
+        album_folder,
+        section,
+    })
+}
+
+/// The keys of the tree rows that hold `track`, outermost first: its
+/// library folder's (a row only with several folders), its artist's, and
+/// its album's and section's when it has them. Empty for a track outside
+/// every library folder. The UI marks the collapsed ones that hold the
+/// playing track.
+pub(crate) fn track_ancestor_keys(roots: &[LibraryRoot], track: &LibraryTrack) -> Vec<String> {
+    let Some(root) = pick_root_for_track(roots, track) else {
+        return Vec::new();
+    };
+    let Some(place) = track_place(root, track) else {
+        return Vec::new();
+    };
+    let root_path = root.path.to_string_lossy();
+    let mut keys = vec![
+        root_row_key(&root_path),
+        artist_row_key(&root_path, &place.artist_name),
+    ];
+    if let Some(album_folder) = &place.album_folder {
+        keys.push(album_row_key(&root_path, &place.artist_name, album_folder));
+        if let Some(section) = &place.section {
+            keys.push(section_row_key(
+                &root_path,
+                &place.artist_name,
+                album_folder,
+                section,
+            ));
+        }
+    }
+    keys
+}
+
+fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, track: &LibraryTrack) {
+    let Some(TrackPlace {
+        artist_name,
+        artist_path,
+        album_folder,
+        section,
+    }) = track_place(root, track)
+    else {
+        return;
+    };
 
     let leaf = TrackLeaf {
         path: track.path.clone(),
@@ -583,7 +643,6 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
         year: track.year,
         track_no: track.track_no,
     };
-    let (artist_name, artist_path) = artist_parts(root, track, &components);
     let artist_entry = root_builder
         .artists
         .entry(artist_name.clone())
@@ -595,12 +654,10 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
             albums: BTreeMap::new(),
         });
 
-    if components.len() <= 2 {
+    let Some(album_folder) = album_folder else {
         artist_entry.loose_tracks.push(leaf);
         return;
-    }
-
-    let album_folder = components[1].clone();
+    };
     let album_path = root.path.join(&artist_name).join(&album_folder);
     let album_entry = artist_entry
         .albums
@@ -612,12 +669,8 @@ fn insert_track_leaf(root_builder: &mut RootNodeBuilder, root: &LibraryRoot, tra
             sections: BTreeMap::new(),
         });
 
-    if components.len() >= 4 {
-        album_entry
-            .sections
-            .entry(components[2].clone())
-            .or_default()
-            .push(leaf);
+    if let Some(section) = section {
+        album_entry.sections.entry(section).or_default().push(leaf);
     } else {
         album_entry.root_tracks.push(leaf);
     }
@@ -1716,6 +1769,102 @@ mod tests {
             .map(|row| (row.track_number, row.title.as_str(), row.year))
             .collect();
         assert_eq!(tracks, [(1, "One", 0), (2, "Two", 0), (1, "Three", 0)]);
+    }
+
+    /// A loose file right in the library folder, tagged "A", and an album
+    /// track in the folder "A": the tree merges them into one artist,
+    /// whose path is the folder of whichever track made it first.
+    fn merged_artist_library(loose_first: bool) -> LibrarySnapshot {
+        let mut loose = track("/music/single.flac", "", None, None, "Single");
+        loose.artist = "A".to_string();
+        let album = track("/music/A/Album/01.flac", "Album", None, Some(1), "One");
+        let tracks = if loose_first {
+            vec![loose, album]
+        } else {
+            vec![album, loose]
+        };
+        LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(tracks),
+            ..LibrarySnapshot::default()
+        }
+    }
+
+    #[test]
+    fn ancestor_keys_name_the_rows_that_hold_a_track_of_a_merged_artist() {
+        let mut artist_paths = Vec::new();
+        for loose_first in [true, false] {
+            let library = merged_artist_library(loose_first);
+            let rows = decode_rows(&build_library_tree_flat_binary::<
+                std::collections::hash_map::RandomState,
+            >(&library, LibrarySortMode::Year, None));
+            let artists: Vec<_> = rows
+                .iter()
+                .filter(|row| row.row_type == ROW_TYPE_ARTIST)
+                .collect();
+            assert_eq!(artists.len(), 1, "one merged artist");
+            artist_paths.push(artists[0].path.clone());
+            let album = rows
+                .iter()
+                .find(|row| row.row_type == ROW_TYPE_ALBUM)
+                .expect("the album row");
+            let track_at = |path: &str| {
+                library
+                    .tracks
+                    .iter()
+                    .find(|track| track.path == Path::new(path))
+                    .expect("the track")
+            };
+
+            // The loose track: its library folder and the merged artist.
+            let loose = track_ancestor_keys(&library.roots, track_at("/music/single.flac"));
+            assert_eq!(loose, [root_row_key("/music"), artists[0].key.clone()]);
+            // The album track: the same artist, then its album.
+            let in_album = track_ancestor_keys(&library.roots, track_at("/music/A/Album/01.flac"));
+            assert_eq!(
+                in_album,
+                [
+                    root_row_key("/music"),
+                    artists[0].key.clone(),
+                    album.key.clone()
+                ]
+            );
+        }
+        // A rescan that lists the tracks the other way round moves the
+        // artist row's path, but not its key.
+        assert_ne!(artist_paths[0], artist_paths[1]);
+    }
+
+    #[test]
+    fn ancestor_keys_include_a_section_and_follow_the_track_root() {
+        // A track of the inner of two nested library folders, in a section
+        // of its album.
+        let mut nested = track(
+            "/music/Inner/A/Album/Disc 1/01.flac",
+            "Album",
+            None,
+            Some(1),
+            "One",
+        );
+        nested.root_path = PathBuf::from("/music/Inner");
+        let library = LibrarySnapshot {
+            roots: vec![root("/music"), root("/music/Inner")],
+            tracks: crate::library::shared_tracks(vec![nested]),
+            ..LibrarySnapshot::default()
+        };
+        let keys = track_ancestor_keys(&library.roots, &library.tracks[0]);
+        let rows = decode_rows(&build_library_tree_flat_binary::<
+            std::collections::hash_map::RandomState,
+        >(&library, LibrarySortMode::Year, None));
+        let row_keys: Vec<_> = rows.iter().map(|row| row.key.clone()).collect();
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys[0], root_row_key("/music/Inner"));
+        for key in &keys {
+            assert!(row_keys.contains(key), "{key} is not a row of {row_keys:?}");
+        }
+        // A track outside every library folder has none.
+        let outside = track("/elsewhere/01.flac", "", None, None, "Outside");
+        assert!(track_ancestor_keys(&library.roots, &outside).is_empty());
     }
 
     #[test]
