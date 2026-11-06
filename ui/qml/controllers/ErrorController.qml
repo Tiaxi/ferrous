@@ -20,6 +20,19 @@ QtObject {
     // show it and the status bar stands out, until the user dismisses it or
     // opens the history.
     property bool latestUnseen: false
+    // How many entries arrived or repeated since the user last saw the
+    // history: the status bar's "2 new issues". They stay new while the
+    // history is open, and are seen when it closes; see markSeen().
+    readonly property int unseenCount: {
+        root.revision
+        let unseen = 0
+        for (let i = 0; i < root.entries.count; ++i) {
+            if (root.entries.get(i).unseen) {
+                ++unseen
+            }
+        }
+        return unseen
+    }
     // Bumped whenever an entry changes, for bindings to the newest one.
     property int revision: 0
     readonly property var latest: {
@@ -69,6 +82,7 @@ QtObject {
                 root.entries.setProperty(i, "count", entry.count + 1)
                 root.entries.setProperty(i, "lastSeenMs", now)
                 root.entries.setProperty(i, "severity", level)
+                root.entries.setProperty(i, "unseen", true)
                 if (i > 0) {
                     root.entries.move(i, 0, 1)
                 }
@@ -85,7 +99,8 @@ QtObject {
             message: text,
             count: 1,
             firstSeenMs: now,
-            lastSeenMs: now
+            lastSeenMs: now,
+            unseen: true
         })
         while (root.entries.count > Math.max(1, root.historyLimit)) {
             root.entries.remove(root.entries.count - 1)
@@ -98,6 +113,17 @@ QtObject {
     // Hide the banners until the next error; the history keeps it.
     function dismissLatest() {
         root.latestUnseen = false
+    }
+
+    // The user has seen the whole history: nothing in it is new any more.
+    function markSeen() {
+        root.latestUnseen = false
+        for (let i = 0; i < root.entries.count; ++i) {
+            if (root.entries.get(i).unseen) {
+                root.entries.setProperty(i, "unseen", false)
+            }
+        }
+        root.revision++
     }
 
     function remove(index) {

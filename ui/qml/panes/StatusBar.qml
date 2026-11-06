@@ -10,26 +10,37 @@ import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../components" as Components
 
+// The status bar (#373): 24 px of chrome with 12 px text. On the left the
+// playback state, repeat and shuffle, and the track's format; on the right
+// the library scan, the Last.fm slot and the issues. Groups are 16 px
+// apart, with middle dots only inside a group and no dividers.
 ToolBar {
     id: root
 
     required property var uiBridge
     required property var uiPalette
-    required property var channelStatusIconSource
     required property bool themeIsDark
-    // The app's ErrorController; the status bar shows how many errors it
+    // The app's ErrorController; the status bar shows how many issues it
     // keeps, and stands out until the user has seen the newest.
     property var errorController: null
-    property string positionText: "00:00"
+    // Whether the recent issues are open: the issues button shows it.
+    property bool issuesOpen: false
+    // The bridge's PlaybackClock, for where the Last.fm slot's track
+    // scrobbles.
+    property var playbackClock: null
 
-    // The scrobble progress indicator asked for the Last.fm preferences.
+    // The Last.fm slot asked for the Last.fm preferences.
     signal lastFmSettingsRequested()
 
-    implicitHeight: Math.max(contentItem.implicitHeight, 20) + topPadding + bottomPadding
-    leftPadding: 14
-    rightPadding: 10
-    topPadding: 2
-    bottomPadding: 2
+    // The narrow window's status bar: the format only, and the scan
+    // without its folder and bar.
+    readonly property bool narrow: root.width < 1200
+
+    implicitHeight: 25
+    leftPadding: 12
+    rightPadding: 6
+    topPadding: 1
+    bottomPadding: 0
 
     // Chrome, with the last of the main window's four seams along its top.
     background: Rectangle {
@@ -45,16 +56,18 @@ ToolBar {
     }
 
     readonly property int errorCount: root.errorController ? root.errorController.count : 0
-    readonly property bool hasUnseenError: root.errorController !== null
-        && root.errorController.latestUnseen
+    // New until the user has seen them in the history.
+    readonly property int unseenErrorCount: root.errorController
+        ? Math.max(0, Number(root.errorController.unseenCount) || 0)
+        : 0
+    readonly property bool hasUnseenError: root.unseenErrorCount > 0
     readonly property string backendFailure: root.uiBridge.backendFailure || ""
     readonly property bool backendStopped: root.backendFailure.length > 0
     readonly property bool isDisconnected: !root.uiBridge.connected && !root.backendStopped
     readonly property bool showTrackSections: !root.isDisconnected && !root.backendStopped
+    readonly property string playbackState: root.uiBridge.playbackState || "Stopped"
 
     readonly property string channelText: (root.uiBridge.currentTrackChannelLayoutText || "").trim()
-    readonly property string channelIconKey: (root.uiBridge.currentTrackChannelLayoutIconKey || "").trim()
-    readonly property string channelIconPath: root.channelStatusIconSource(root.channelIconKey)
     readonly property string formatLabel: (root.uiBridge.currentTrackFormatLabel || "").trim()
     readonly property string bitDepthSampleRateText: FormatUtils.formatBitDepthSampleRateText(
         root.uiBridge.currentTrackBitDepth, root.uiBridge.currentTrackSampleRateHz)
@@ -62,11 +75,53 @@ ToolBar {
         const v = Number(root.uiBridge.currentTrackCurrentBitrateKbps)
         return isFinite(v) && v > 0 ? Math.round(v) : 0
     }
-    readonly property string playlistSummary: {
-        const count = Math.max(0, Number(root.uiBridge.queueLength) || 0)
-        return I18n.i18ncp("@info:status queue length and total duration",
-            "%1 track (%2)", "%1 tracks (%2)",
-            count, root.uiBridge.queueDurationText || "00:00")
+    // "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps"; only "FLAC" when
+    // narrow. Nothing while stopped.
+    readonly property var formatParts: {
+        if (root.playbackState === "Stopped") {
+            return []
+        }
+        const parts = []
+        if (root.formatLabel.length > 0) {
+            parts.push(root.formatLabel)
+        }
+        if (root.narrow) {
+            return parts
+        }
+        if (root.bitDepthSampleRateText.length > 0) {
+            parts.push(root.bitDepthSampleRateText)
+        }
+        if (root.channelText.length > 0) {
+            parts.push(root.channelText)
+        }
+        if (root.bitrateKbps > 0) {
+            parts.push(I18n.i18nc("@info:status bitrate", "%1 kbps", root.bitrateKbps))
+        }
+        return parts
+    }
+
+    readonly property bool scanning: root.uiBridge.libraryScanInProgress === true
+    readonly property int scanProcessed: Math.max(0, Number(root.uiBridge.libraryScanProcessed) || 0)
+    readonly property int scanDiscovered: Math.max(root.scanProcessed,
+        Number(root.uiBridge.libraryScanDiscovered) || 0)
+    // The folder being scanned, by name: known when the library has one.
+    readonly property string scanFolderName: {
+        const entries = root.uiBridge.libraryRootEntries || []
+        if (entries.length !== 1) {
+            return ""
+        }
+        const entry = entries[0]
+        const name = String(entry.name || "").trim()
+        return name.length > 0 ? name : FormatUtils.basenameFromPath(String(entry.path || ""))
+    }
+    readonly property string scanCountText: root.scanDiscovered > 0
+        ? I18n.i18nc("@info:status files scanned of files found", "%1 / %2",
+            root.formatCount(root.scanProcessed), root.formatCount(root.scanDiscovered))
+        : ""
+
+    // A count with the locale's digit grouping: "1,204".
+    function formatCount(count) {
+        return Number(count).toLocaleString(Qt.locale(), "f", 0)
     }
 
     // The bridge's playback state is a code, not text to show.
@@ -81,168 +136,310 @@ ToolBar {
         }
     }
 
-    contentItem: RowLayout {
-        spacing: 6
+    // A 12 px label of the status bar.
+    component StatusLabel: Label {
+        font.pointSize: root.uiPalette.smallPointSize
+        font.features: root.uiPalette.tabularFigures
+        color: root.uiPalette.textSecondary
+        elide: Text.ElideRight
+    }
 
-        Label {
+    // A glyph of the status bar: a theme icon drawn in `color`.
+    component StatusGlyph: Kirigami.Icon {
+        property int size: 14
+        implicitWidth: size
+        implicitHeight: size
+        color: root.uiPalette.textSecondary
+        isMask: true
+    }
+
+    contentItem: RowLayout {
+        spacing: 16
+
+        StatusLabel {
             objectName: "statusBarBackendStoppedLabel"
             visible: root.backendStopped
             text: I18n.i18nc("@info:status", "Backend stopped")
-            color: ColorUtils.mixColor(
-                Kirigami.Theme.negativeTextColor,
-                root.uiPalette.uiTextColor,
-                root.themeIsDark ? 0.18 : 0.08)
+            color: root.uiPalette.negative
             font.weight: Font.DemiBold
         }
 
-        Label {
+        StatusLabel {
             visible: root.isDisconnected
             text: I18n.i18nc("@info:status", "Bridge disconnected")
-            color: root.uiPalette.uiTextColor
+            color: root.uiPalette.text
         }
 
-        Label {
+        // The neutral playback state: the play or pause glyph and the word.
+        Row {
+            objectName: "statusBarPlaybackState"
             visible: root.showTrackSections
-            objectName: "statusBarPlaybackStateLabel"
-            text: root.playbackStateText(root.uiBridge.playbackState)
-            color: root.uiPalette.uiTextColor
+            spacing: 6
+            Layout.alignment: Qt.AlignVCenter
+
+            StatusGlyph {
+                objectName: "statusBarPlaybackGlyph"
+                anchors.verticalCenter: parent.verticalCenter
+                size: 11
+                visible: root.playbackState !== "Stopped"
+                source: root.playbackState === "Playing" ? "media-playback-start" : "media-playback-pause"
+            }
+
+            StatusLabel {
+                objectName: "statusBarPlaybackStateLabel"
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.playbackStateText(root.playbackState)
+                color: root.playbackState === "Stopped" ? root.uiPalette.textSecondary : root.uiPalette.text
+            }
         }
 
-        Label {
-            visible: root.showTrackSections
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        Label {
-            visible: root.showTrackSections
-            text: I18n.i18nc("@info:status playback position of duration", "%1/%2",
-                root.positionText, root.uiBridge.durationText || "00:00")
-            color: root.uiPalette.uiTextColor
-        }
+        // Repeat, in words, and shuffle; nothing when both are off.
+        Row {
+            objectName: "statusBarRepeatShuffle"
+            visible: root.showTrackSections && (root.uiBridge.repeatMode === 1
+                || root.uiBridge.repeatMode === 2 || root.uiBridge.shuffleEnabled === true)
+            spacing: 16
+            Layout.alignment: Qt.AlignVCenter
 
-        Label {
-            visible: root.showTrackSections && root.formatLabel.length > 0
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        Label {
-            visible: root.showTrackSections && root.formatLabel.length > 0
-            text: root.formatLabel
-            color: root.uiPalette.uiTextColor
-        }
+            Row {
+                visible: root.uiBridge.repeatMode === 1 || root.uiBridge.repeatMode === 2
+                spacing: 6
+                anchors.verticalCenter: parent.verticalCenter
 
-        Label {
-            visible: root.showTrackSections && root.channelText.length > 0
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        RowLayout {
-            visible: root.showTrackSections && root.channelText.length > 0
-            spacing: root.channelIconPath.length > 0 ? 4 : 0
+                StatusGlyph {
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: root.uiBridge.repeatMode === 1 ? "media-playlist-repeat-song" : "media-playlist-repeat"
+                }
 
-            Item {
-                visible: root.channelIconPath.length > 0
-                Layout.preferredWidth: visible ? 22 : 0
-                Layout.preferredHeight: 20
-
-                Kirigami.Icon {
-                    anchors.fill: parent
-                    source: root.channelIconPath
-                    color: root.uiPalette.uiTextColor
-                    isMask: true
+                StatusLabel {
+                    objectName: "statusBarRepeatLabel"
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.uiBridge.repeatMode === 1
+                        ? I18n.i18nc("@info:status", "Repeat One Track")
+                        : I18n.i18nc("@info:status", "Repeat Whole Queue")
                 }
             }
 
-            Label {
-                text: root.channelText
-                color: root.uiPalette.uiTextColor
+            StatusGlyph {
+                objectName: "statusBarShuffleGlyph"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.uiBridge.shuffleEnabled === true
+                source: "media-playlist-shuffle"
+                Accessible.role: Accessible.StaticText
+                Accessible.name: I18n.i18nc("@info:status", "Shuffle On")
+
+                HoverHandler {
+                    id: shuffleHover
+                }
+                ToolTip.visible: shuffleHover.hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip", "Shuffle On")
             }
         }
 
-        Label {
-            visible: root.showTrackSections && root.bitDepthSampleRateText.length > 0
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        Label {
-            visible: root.showTrackSections && root.bitDepthSampleRateText.length > 0
-            text: root.bitDepthSampleRateText
-            color: root.uiPalette.uiTextColor
-        }
-
-        Label {
-            visible: root.showTrackSections && root.bitrateKbps > 0
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        Label {
-            visible: root.showTrackSections && root.bitrateKbps > 0
-            text: I18n.i18nc("@info:status bitrate", "%1 kbps", root.bitrateKbps)
-            color: root.uiPalette.uiTextColor
-        }
-
-        Label {
-            visible: root.showTrackSections
-            text: "|"
-            color: root.uiPalette.uiMutedTextColor
-        }
-        Label {
-            visible: root.showTrackSections
-            Layout.fillWidth: true
-            objectName: "statusBarQueueSummaryLabel"
-            text: root.playlistSummary
-            elide: Text.ElideRight
-            color: root.uiPalette.uiTextColor
-        }
-
+        // The format group: "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps".
+        // It fills the room left, and is cut at its end when there is too
+        // little.
         Item {
-            visible: !root.showTrackSections
+            objectName: "statusBarFormat"
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.fillHeight: true
+            clip: formatRow.implicitWidth > width
+            readonly property string text: root.formatParts.join(" · ")
+
+            Row {
+                id: formatRow
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.showTrackSections
+
+                Repeater {
+                    model: root.formatParts
+
+                    delegate: Row {
+                        required property int index
+                        required property string modelData
+
+                        StatusLabel {
+                            visible: index > 0
+                            text: "·"
+                            color: root.uiPalette.textTertiary
+                            leftPadding: 6
+                            rightPadding: 6
+                            Accessible.ignored: true
+                        }
+
+                        StatusLabel {
+                            text: modelData
+                        }
+                    }
+                }
+            }
+        }
+
+        // The library scan: "Scanning “Music” 412 / 1,204" and a bar that
+        // moves with the scan's batches; narrow: "Scanning 412 / 1,204".
+        Row {
+            id: scanGroup
+            objectName: "statusBarScan"
+            visible: root.scanning && root.showTrackSections
+            spacing: Kirigami.Units.largeSpacing
+            Layout.alignment: Qt.AlignVCenter
+            readonly property real fraction: root.scanDiscovered > 0
+                ? Math.min(1, root.scanProcessed / root.scanDiscovered)
+                : 0
+            Accessible.role: Accessible.StaticText
+            Accessible.name: scanToolTipText.text
+
+            StatusLabel {
+                objectName: "statusBarScanLabel"
+                anchors.verticalCenter: parent.verticalCenter
+                text: !root.narrow && root.scanFolderName.length > 0
+                    ? I18n.i18nc("@info:status %1 is a library folder", "Scanning “%1”", root.scanFolderName)
+                    : I18n.i18nc("@info:status", "Scanning")
+            }
+
+            StatusLabel {
+                objectName: "statusBarScanCount"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: text.length > 0
+                text: root.scanCountText
+            }
+
+            Rectangle {
+                objectName: "statusBarScanBar"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: !root.narrow
+                width: 72
+                height: 4
+                radius: 2
+                color: ColorUtils.withAlpha(root.uiPalette.text, 0.15)
+
+                Rectangle {
+                    objectName: "statusBarScanBarFill"
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    // Whole pixels: the bar moves with the batches.
+                    width: Math.round(parent.width * scanGroup.fraction)
+                    radius: 2
+                    color: root.uiPalette.textSecondary
+                }
+            }
+
+            HoverHandler {
+                id: scanHover
+            }
+            ToolTip.visible: scanHover.hovered
+            ToolTip.delay: Kirigami.Units.toolTipDelay
+            ToolTip.text: scanToolTipText.text
+
+            QtObject {
+                id: scanToolTipText
+                readonly property string text: {
+                    const files = root.scanDiscovered > 0
+                        ? I18n.i18ncp("@info:tooltip %2 and %3 are file counts",
+                            "%2 of %3 file", "%2 of %3 files", root.scanDiscovered,
+                            root.formatCount(root.scanProcessed), root.formatCount(root.scanDiscovered))
+                        : ""
+                    const folder = root.scanFolderName.length > 0
+                        ? I18n.i18nc("@info:tooltip %1 is a library folder", "Scanning “%1”",
+                            root.scanFolderName)
+                        : I18n.i18nc("@info:tooltip", "Scanning the library")
+                    return files.length > 0
+                        ? I18n.i18nc("@info:tooltip scan, then its files", "%1: %2", folder, files)
+                        : folder
+                }
+            }
         }
 
         Components.ScrobbleIndicator {
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
-            Layout.preferredHeight: 20
+            playbackClock: root.playbackClock
+            Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // Opens the recent errors. With none there is nothing to show.
+        // The issues: "2 new issues" with a negative warning glyph until
+        // the user has seen them, then "3 issues" in the secondary colour.
+        // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
+            id: issuesButton
             objectName: "statusBarErrorsButton"
             visible: root.errorCount > 0
-            Layout.preferredHeight: 20
+            Layout.alignment: Qt.AlignVCenter
+            implicitWidth: leftPadding + issuesRow.implicitWidth + rightPadding
+            implicitHeight: 22
             padding: 0
             leftPadding: 6
             rightPadding: 6
-            icon.name: "dialog-warning"
-            icon.width: 16
-            icon.height: 16
-            text: I18n.i18ncp("@action:button", "%1 error", "%1 errors", root.errorCount)
-            display: AbstractButton.TextBesideIcon
-            palette.buttonText: root.hasUnseenError
-                ? Kirigami.Theme.highlightedTextColor
-                : ColorUtils.mixColor(
-                    Kirigami.Theme.negativeTextColor,
-                    root.uiPalette.uiTextColor,
-                    root.themeIsDark ? 0.18 : 0.08)
-            Accessible.name: I18n.i18ncp("@action:button",
-                "%1 error: show recent errors", "%1 errors: show recent errors", root.errorCount)
-            // The status bar's only word on an error it has not shown yet.
+            flat: true
+            focusPolicy: Qt.TabFocus
+            text: root.hasUnseenError
+                ? I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", root.unseenErrorCount)
+                : I18n.i18ncp("@action:button", "%1 issue", "%1 issues", root.errorCount)
+            readonly property color glyphColor: root.hasUnseenError
+                ? root.uiPalette.negative
+                : root.uiPalette.textSecondary
+            readonly property color labelColor: root.hasUnseenError
+                ? root.uiPalette.text
+                : root.uiPalette.textSecondary
+            Accessible.name: I18n.i18nc("@action:button %1 is the issue count", "%1: show recent issues",
+                issuesButton.text)
+            // The status bar's only word on an issue it has not shown yet.
             Accessible.description: root.hasUnseenError
                 ? ErrorUtils.describe(root.errorController.latest)
                 : ""
-            ToolTip.visible: hovered
-            ToolTip.text: I18n.i18nc("@info:tooltip", "Show recent errors")
+            // Keyboard focus shows the same tooltip as hover.
+            ToolTip.visible: (hovered || visualFocus) && !root.issuesOpen
+            ToolTip.delay: Kirigami.Units.toolTipDelay
+            ToolTip.text: I18n.i18nc("@info:tooltip", "Show Recent Issues")
             onClicked: root.errorController.historyRequested()
 
-            Rectangle {
-                objectName: "statusBarNewErrorHighlight"
-                anchors.fill: parent
-                z: -2
-                visible: root.hasUnseenError
-                radius: Kirigami.Units.cornerRadius
-                color: Kirigami.Theme.negativeTextColor
+            background: Rectangle {
+                objectName: "statusBarErrorsBackground"
+                radius: 3
+                // A text-10% tint while the issues are open or pressed.
+                color: root.issuesOpen || issuesButton.down
+                    ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                    : (issuesButton.hovered ? root.uiPalette.hover : "transparent")
+                border.width: issuesButton.visualFocus ? 2 : 0
+                border.color: root.uiPalette.focusRing
+
+                Behavior on color {
+                    enabled: Kirigami.Units.shortDuration > 0
+                    ColorAnimation {
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
+            }
+
+            contentItem: Item {
+                implicitWidth: issuesRow.implicitWidth
+                implicitHeight: issuesRow.implicitHeight
+
+                Row {
+                    id: issuesRow
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+
+                    StatusGlyph {
+                        objectName: "statusBarErrorsGlyph"
+                        anchors.verticalCenter: parent.verticalCenter
+                        source: Qt.resolvedUrl("../assets/status-warning.svg")
+                        color: issuesButton.glyphColor
+                    }
+
+                    StatusLabel {
+                        objectName: "statusBarErrorsLabel"
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: issuesButton.text
+                        color: issuesButton.labelColor
+                        Accessible.ignored: true
+                    }
+                }
             }
         }
     }

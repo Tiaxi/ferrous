@@ -360,7 +360,6 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
 
     // The old names keep their colours until their users move.
     QVERIFY2(sameColor(colorOf(tokens, "uiTextColor"), text), qPrintable(colorOf(tokens, "uiTextColor").name(QColor::HexArgb) + QStringLiteral(" vs ") + text.name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(tokens, "uiWaveformColor"), colorOf(tokens, "wave")), qPrintable(colorOf(tokens, "uiWaveformColor").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "wave").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(tokens, "uiSurfaceRaisedColor"), view), qPrintable(colorOf(tokens, "uiSurfaceRaisedColor").name(QColor::HexArgb) + QStringLiteral(" vs ") + view.name(QColor::HexArgb)));
 }
 

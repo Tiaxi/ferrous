@@ -30,6 +30,7 @@
 #include <QQmlComponent>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlExpression>
 #include <QQmlIncubator>
 #include <QQmlProperty>
 #include <QJSValue>
@@ -1666,9 +1667,10 @@ public:
 
 private slots:
     void scrobbleIndicatorShowsEveryState();
-    void scrobbleIndicatorRedrawsOnlyWhenTheRingChangesVisibly();
+    void scrobbleIndicatorStaysStillWhileListening();
     void scrobbleIndicatorClickAndMenuPauseScrobbling();
     void scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff();
+    void scrobblePointFollowsThePlaybackClocksSeeks();
     void lastFmPageShowsTheScrobbleProgressSettingWhileConnected();
     void playbackMenuPausesScrobbling();
 };
@@ -2147,7 +2149,6 @@ Item {
         width: harness.width
         uiBridge: bridge
         uiPalette: palette
-        channelStatusIconSource: function(key) { return "" }
         themeIsDark: palette.themeIsDark
     }
 
@@ -3339,11 +3340,9 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
     QVERIFY(bridge != nullptr && errors != nullptr && dialog != nullptr);
     auto *statusButton = window->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
-    auto *highlight = window->findChild<QQuickItem *>(QStringLiteral("statusBarNewErrorHighlight"));
     auto *transport = window->findChild<QQuickItem *>(QStringLiteral("transportBar"));
     auto *mainSplit = window->findChild<QQuickItem *>(QStringLiteral("mainSplit"));
-    QVERIFY(statusButton != nullptr && highlight != nullptr && transport != nullptr
-            && mainSplit != nullptr);
+    QVERIFY(statusButton != nullptr && transport != nullptr && mainSplit != nullptr);
     QQuickItem *content = popupContent(dialog);
     QVERIFY(content != nullptr);
     QQuickItem *historyList = itemNamed(content, QStringLiteral("errorHistoryList"));
@@ -3365,9 +3364,8 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     // The status bar stands out and counts both; nothing else in the window
     // changes, as the main window has no banner.
     QCOMPARE(errorHistoryMessages(errors), (QStringList{scan, skipped}));
-    QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("2 errors"));
+    QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("2 new issues"));
     QVERIFY(statusButton->isVisible());
-    QTRY_VERIFY(highlight->isVisible());
     QVERIFY(window->findChild<QObject *>(QStringLiteral("mainErrorBanner")) == nullptr);
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(transport->mapToScene(QPointF(0, 0)).y(), transportBefore);
@@ -3389,15 +3387,18 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QCOMPARE(visibleTextItems(content, QStringLiteral("Playback")).size(), 1);
     QCOMPARE(visibleTextItems(content, QStringLiteral("Library")).size(), 1);
     QCOMPARE(visibleTextItems(content, QStringLiteral("/music/bad.flac")).size(), 1);
-    QTRY_VERIFY(!highlight->isVisible());
-    QCOMPARE(statusButton->property("text").toString(), QStringLiteral("2 errors"));
+    // They stay new while the dialog shows them, on the open button's tint.
+    QCOMPARE(statusButton->property("text").toString(), QStringLiteral("2 new issues"));
+    QObject *statusBar = window->findChild<QObject *>(QStringLiteral("statusBar"));
+    QVERIFY(statusBar != nullptr);
+    QVERIFY(statusBar->property("issuesOpen").toBool());
     // The dialog does not push the window's content.
     QCOMPARE(transport->mapToScene(QPointF(0, 0)).y(), transportBefore);
 
     // A new error joins the list while it is open.
     QVERIFY(sendBridgeError(bridge, QStringLiteral("Last.fm session expired."), 5, 1));
     QTRY_COMPARE(historyList->property("count").toInt(), 3);
-    QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("3 errors"));
+    QTRY_COMPARE(statusButton->property("text").toString(), QStringLiteral("3 new issues"));
 
     // Each entry goes on its own, by its row's button.
     const QList<QQuickItem *> removeButtons =
@@ -3417,6 +3418,7 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(errorHistoryMessages(errors).isEmpty());
     QTRY_VERIFY(!statusButton->isVisible());
+    QVERIFY(!statusBar->property("issuesOpen").toBool());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
@@ -3903,8 +3905,8 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
 
     // The playback controls stay whole and apart.
     QList<QQuickItem *> controls;
-    for (const char *name : {"transportButton_previous", "transportButton_play",
-                             "transportButton_pause", "transportButton_stop",
+    for (const char *name : {"transportButton_previous", "transportButton_playPause",
+                             "transportButton_stop",
                              "transportButton_next", "seekSlider", "muteButton",
                              "volumeSlider"}) {
         QQuickItem *control = shownItemNamed(window->contentItem(), QString::fromLatin1(name));
@@ -3913,7 +3915,7 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
     }
     const QString controlOverlap = overlapsInRow(controls, 8);
     QVERIFY2(controlOverlap.isEmpty(), qPrintable(controlOverlap));
-    QQuickItem *seek = controls.at(5);
+    QQuickItem *seek = controls.at(4);
     QVERIFY2(seek->width() >= 100, qPrintable(QString::number(seek->width())));
 
     // So do the queue's columns, with room for the titles: Album drops
@@ -5519,10 +5521,6 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
         bridge->setProperty("currentTrackChannelLabels", QStringList{});
         QTRY_COMPARE(label->property("text").toString(), QStringLiteral("1"));
     }
-    QVariant iconUrl;
-    QVERIFY(QMetaObject::invokeMethod(root, "channelStatusIconSource",
-        Q_RETURN_ARG(QVariant, iconUrl), Q_ARG(QVariant, QStringLiteral("5.1"))));
-    QVERIFY(iconUrl.toUrl().toString().endsWith(QStringLiteral("channel-5_1.svg")));
     // Every consumer reads the bridge's one clock.
     PlaybackClock clock;
     bridge->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock)));
@@ -28383,10 +28381,9 @@ ApplicationWindow {
     visible: true
 
     property int settingsRequests: 0
-    readonly property color accentColor: Kirigami.Theme.highlightColor
-    readonly property color positiveColor: Kirigami.Theme.positiveTextColor
-    readonly property color warningColor: Kirigami.Theme.neutralTextColor
-    readonly property color mutedColor: palette.uiMutedTextColor
+    readonly property color secondaryColor: palette.textSecondary
+    readonly property color tertiaryColor: palette.textTertiary
+    readonly property color negativeColor: palette.negative
 
     QtObject {
         id: bridge
@@ -28412,6 +28409,7 @@ ApplicationWindow {
         property int lastFmScrobbleListenedMs: 0
         property int lastFmScrobbleThresholdMs: 120000
         property string lastFmScrobbleMessage: ""
+        property int lastFmPendingScrobbleCount: 0
         property int pauseRequests: 0
         function setLastFmScrobblingPaused(value) {
             lastFmScrobblingPaused = value
@@ -28422,6 +28420,7 @@ ApplicationWindow {
     QtObject {
         id: errors
         property int count: 2
+        property int unseenCount: 0
         property bool latestUnseen: false
         property var latest: null
         signal historyRequested()
@@ -28436,7 +28435,6 @@ ApplicationWindow {
         objectName: "statusBar"
         uiBridge: bridge
         uiPalette: palette
-        channelStatusIconSource: function(key) { return "" }
         themeIsDark: palette.themeIsDark
         errorController: errors
         onLastFmSettingsRequested: harness.settingsRequests += 1
@@ -28466,42 +28464,12 @@ bool makeScrobbleHarness(ScrobbleHarness &harness, QString *error) {
     return harness.bridge != nullptr && harness.indicator != nullptr;
 }
 
-// The device pixels of `image`, grabbed from `window`, a logical one;
-// grabs do not always say.
-qreal grabRatio(const QImage &image, const QQuickWindow *window) {
-    return static_cast<qreal>(image.width()) / window->width();
-}
-
-// The colour of `image` at `point` of the window, in logical pixels.
-QColor pixelAt(const QImage &image, qreal ratio, QPointF point) {
-    return image.pixelColor(
-        QPoint(qRound(point.x() * ratio - 0.5), qRound(point.y() * ratio - 0.5)));
-}
-
-int colorDistance(const QColor &a, const QColor &b) {
-    return std::abs(a.red() - b.red()) + std::abs(a.green() - b.green())
-        + std::abs(a.blue() - b.blue());
-}
-
-// Whether `pixel` is nearer `expected` than `other`.
-bool nearer(const QColor &pixel, const QColor &expected, const QColor &other) {
-    return colorDistance(pixel, expected) < colorDistance(pixel, other);
-}
-
-// Saves the indicator, enlarged, to $FERROUS_SCROBBLE_SCREENSHOT_DIR, if set.
-void saveIndicatorScreenshot(const QImage &image, qreal ratio, QQuickItem *indicator,
-                             const QString &name) {
-    const QString dir = qEnvironmentVariable("FERROUS_SCROBBLE_SCREENSHOT_DIR");
-    if (dir.isEmpty()) {
-        return;
-    }
-    const QRectF rect = indicator->mapRectToScene(
-        QRectF(-4, -2, indicator->width() + 8, indicator->height() + 4));
-    const QImage crop = image.copy(QRect(
-        qFloor(rect.x() * ratio), qFloor(rect.y() * ratio),
-        qCeil(rect.width() * ratio), qCeil(rect.height() * ratio)));
-    crop.scaled(crop.size() * 6, Qt::IgnoreAspectRatio, Qt::FastTransformation)
-        .save(QDir(dir).filePath(name + QStringLiteral(".png")));
+// What `expression` evaluates to on `item`, or nothing.
+QVariant evaluateOn(QQuickItem *item, const QString &expression) {
+    QQmlExpression evaluated(qmlContext(item), item, expression);
+    bool undefined = false;
+    const QVariant value = evaluated.evaluate(&undefined);
+    return evaluated.hasError() || undefined ? QVariant() : value;
 }
 
 } // namespace
@@ -28514,134 +28482,112 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     QObject *bridge = harness.bridge;
     QObject *root = harness.root.data();
 
-    // At the right end of the status bar, left of the error indicator.
+    // At the right end of the status bar, 16 px left of the issues.
     auto *errorsButton = harness.root->findChild<QQuickItem *>(QStringLiteral("statusBarErrorsButton"));
     QVERIFY(errorsButton != nullptr);
     QTRY_VERIFY(indicator->isVisible() && errorsButton->isVisible());
     const qreal indicatorRight = indicator->mapToScene(QPointF(indicator->width(), 0)).x();
     const qreal errorsLeft = errorsButton->mapToScene(QPointF(0, 0)).x();
-    QVERIFY2(indicatorRight <= errorsLeft && errorsLeft - indicatorRight < 12,
+    QVERIFY2(std::abs(errorsLeft - indicatorRight - 16.0) < 0.5,
              qPrintable(QStringLiteral("%1 %2").arg(indicatorRight).arg(errorsLeft)));
 
-    const QColor accent = root->property("accentColor").value<QColor>();
-    const QColor positive = root->property("positiveColor").value<QColor>();
-    const QColor warning = root->property("warningColor").value<QColor>();
-    const QColor muted = root->property("mutedColor").value<QColor>();
+    const QColor secondary = root->property("secondaryColor").value<QColor>();
+    const QColor tertiary = root->property("tertiaryColor").value<QColor>();
+    const QColor negative = root->property("negativeColor").value<QColor>();
 
+    // The slot shows the glyph while listening, words and a glyph when the
+    // user should know, and nothing otherwise.
     struct Case {
         const char *name;
         int state;
-        int ineligibility;
         bool paused;
+        int pending;
         const char *look;
-        const char *badge;
-        double progress;
-        QColor ring;
+        QString label;
+        const char *glyph;
+        QColor glyphColor;
         QString tooltip;
     };
     const QList<Case> cases{
-        {"idle", 0, 0, false, "idle", "", 0.0, muted, QStringLiteral("Nothing is playing.")},
-        {"filling", 1, 0, false, "filling", "", 0.5, accent,
-         QStringLiteral("Scrobbles to Last.fm in 01:00.")},
-        {"sending", 2, 0, false, "filling", "", 1.0, accent,
-         QStringLiteral("Sending the scrobble to Last.fm…")},
-        {"accepted", 3, 0, false, "accepted", "", 1.0, positive,
-         QStringLiteral("Scrobbled to Last.fm.")},
-        {"failed", 4, 0, false, "failed", "", 1.0, warning,
-         QStringLiteral("The scrobble failed: refused for testing")},
-        {"waiting", 5, 0, false, "waiting", "clock", 1.0, muted,
-         QStringLiteral("Last.fm can't be reached (refused for testing). The scrobble is queued and sent later.")},
-        {"too-short", 6, 1, false, "ineligible", "", 0.0, muted,
-         QStringLiteral("Tracks of 30 seconds or less aren't scrobbled.")},
-        {"missing-tags", 6, 2, false, "ineligible", "", 0.0, muted,
-         QStringLiteral("Tracks without an artist and a title aren't scrobbled.")},
-        {"skipped", 7, 0, false, "paused", "pause", 0.0, muted,
-         QStringLiteral("Scrobbling was paused while this track played, so it won't be scrobbled. Scrobbling resumes with the next track.")},
-        {"paused", 1, 0, true, "paused", "pause", 0.0, muted,
-         QStringLiteral("Scrobbling is paused. This track won't be scrobbled.")},
+        {"idle", 0, false, 0, "empty", QString(), "", QColor(), QString()},
+        {"listening", 1, false, 0, "listening", QString(), "lastfm.svg", secondary,
+         QStringLiteral("Last.fm: scrobbles at 2:00")},
+        {"sending", 2, false, 0, "empty", QString(), "", QColor(), QString()},
+        {"accepted", 3, false, 0, "empty", QString(), "", QColor(), QString()},
+        {"failed", 4, false, 0, "failed", QStringLiteral("Scrobble failed"), "lastfm.svg", negative,
+         QStringLiteral("Last.fm didn't accept the scrobble: refused for testing")},
+        {"waiting", 5, false, 2, "queued", QStringLiteral("2 scrobbles waiting"), "status-offline.svg",
+         secondary,
+         QStringLiteral("Last.fm can't be reached (refused for testing). 2 scrobbles are waiting to be sent.")},
+        {"queued while listening", 1, false, 1, "queued", QStringLiteral("1 scrobble waiting"),
+         "status-offline.svg", secondary,
+         QStringLiteral("Last.fm can't be reached (refused for testing). 1 scrobble is waiting to be sent.")},
+        {"ineligible", 6, false, 0, "empty", QString(), "", QColor(), QString()},
+        {"skipped", 7, false, 0, "empty", QString(), "", QColor(), QString()},
+        {"paused", 1, true, 3, "paused", QString(), "lastfm.svg", tertiary,
+         QStringLiteral("Last.fm: scrobbling is paused")},
     };
-    bridge->setProperty("lastFmScrobbleListenedMs", 60000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
     bridge->setProperty("lastFmScrobbleMessage", QStringLiteral("refused for testing"));
+    QQuickItem *glyph = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorGlyph"));
+    QQuickItem *label = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorLabel"));
+    QVERIFY(glyph != nullptr && label != nullptr);
     for (const Case &c : cases) {
         bridge->setProperty("lastFmScrobblingPaused", c.paused);
+        bridge->setProperty("lastFmPendingScrobbleCount", c.pending);
         bridge->setProperty("lastFmScrobbleState", c.state);
-        bridge->setProperty("lastFmScrobbleIneligibility", c.ineligibility);
         QTRY_COMPARE(indicator->property("look").toString(), QString::fromLatin1(c.look));
-        QCOMPARE(indicator->property("badge").toString(), QString::fromLatin1(c.badge));
-        QCOMPARE(indicator->property("progress").toDouble(), c.progress);
-        QCOMPARE(indicator->property("ringColor").value<QColor>(), c.ring);
-        QVERIFY(indicator->isVisible());
-        QVariant text;
-        QVERIFY(QMetaObject::invokeMethod(indicator, "tooltipStateText", Q_RETURN_ARG(QVariant, text)));
-        QCOMPARE(text.toString(), c.tooltip);
-
-        // The ring, as drawn: at 12 o'clock it starts the fill, and at
-        // 9 o'clock a half filled ring is still its track.
-        const QImage image = harness.window->grabWindow();
-        const qreal ratio = grabRatio(image, harness.window);
-        saveIndicatorScreenshot(image, ratio, indicator, QString::fromLatin1(c.name));
-        QQuickItem *ring = qvariant_cast<QQuickItem *>(indicator->property("contentItem"));
-        QVERIFY(ring != nullptr);
-        const qreal radius = indicator->property("ringRadius").toReal();
-        const QPointF center = ring->mapToScene(QPointF(ring->width() / 2, ring->height() / 2));
-        const QColor top = pixelAt(image, ratio, center + QPointF(0.5, -radius));
-        const QColor left = pixelAt(image, ratio, center + QPointF(-radius, 0.5));
-        const QColor background = pixelAt(image, ratio, center + QPointF(0, -radius - 3));
-        if (c.progress > 0) {
-            QVERIFY2(nearer(top, c.ring, background),
-                     qPrintable(QStringLiteral("%1: %2 vs %3").arg(QString::fromLatin1(c.name),
-                         top.name(), c.ring.name())));
+        const bool shown = qstrlen(c.glyph) > 0;
+        QTRY_COMPARE(indicator->isVisible(), shown);
+        if (!shown) {
+            continue;
         }
-        if (c.progress == 1.0) {
-            QVERIFY2(nearer(left, c.ring, background), c.name);
-        } else if (c.progress > 0) {
-            QVERIFY2(!nearer(left, c.ring, muted) || colorDistance(c.ring, muted) < 30, c.name);
-        }
+        QVERIFY2(glyph->property("source").toString().endsWith(QString::fromLatin1(c.glyph)), c.name);
+        QCOMPARE(glyph->property("color").value<QColor>(), c.glyphColor);
+        QCOMPARE(label->isVisible(), !c.label.isEmpty());
+        QCOMPARE(label->property("text").toString(), c.label);
+        QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(), c.tooltip);
+        QCOMPARE(QAccessible::queryAccessibleInterface(indicator)->text(QAccessible::Name), c.tooltip);
     }
 }
 
-void ScrobbleSmokeTest::scrobbleIndicatorRedrawsOnlyWhenTheRingChangesVisibly() {
+// The listening glyph is still: snapshots of the listened time draw
+// nothing, and its tooltip keeps the scrobble point.
+void ScrobbleSmokeTest::scrobbleIndicatorStaysStillWhileListening() {
     ScrobbleHarness harness;
     QString error;
     QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
     QQuickItem *indicator = harness.indicator;
     QObject *bridge = harness.bridge;
     QTRY_VERIFY(indicator->isVisible());
-    harness.window->grabWindow();
-    QTRY_VERIFY(indicator->property("paintCount").toInt() > 0);
-    const int steps = indicator->property("progressSteps").toInt();
-    QVERIFY(steps >= 12);
+    const QString tooltip = evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString();
+    QCOMPARE(tooltip, QStringLiteral("Last.fm: scrobbles at 2:00"));
+    int frames = 0;
+    connect(harness.window, &QQuickWindow::frameSwapped, harness.window, [&frames]() { ++frames; });
+    // Lets the window draw what it has to.
+    const auto settle = [&frames]() {
+        int seen = -1;
+        for (int wait = 0; wait < 50 && seen != frames; ++wait) {
+            seen = frames;
+            QTest::qWait(100);
+        }
+        return seen == frames;
+    };
+    QVERIFY(settle());
 
-    // Ten seconds of 40 ms snapshots towards a 120 s scrobble point.
-    const int paintsBefore = indicator->property("paintCount").toInt();
-    int step = indicator->property("progressStep").toInt();
-    int stepChanges = 0;
-    int snapshots = 0;
+    // Ten seconds of 40 ms snapshots towards a 120 s scrobble point, as
+    // the listened time and the position move together.
+    frames = 0;
     for (int listened = 40; listened <= 10000; listened += 40) {
         bridge->setProperty("lastFmScrobbleListenedMs", listened);
-        harness.window->grabWindow();
-        ++snapshots;
-        const int now = indicator->property("progressStep").toInt();
-        if (now != step) {
-            ++stepChanges;
-            step = now;
-        }
+        QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(), tooltip);
     }
-    // A step is a device pixel of the ring: a few in ten seconds.
-    QCOMPARE(stepChanges, qFloor(steps * 10000.0 / 120000.0));
-    QVERIFY(stepChanges > 0);
-    QCOMPARE(indicator->property("paintCount").toInt() - paintsBefore, stepChanges);
-    QVERIFY(stepChanges * 20 < snapshots);
+    QVERIFY(settle());
+    QCOMPARE(frames, 0);
 
-    // A new state is drawn at once.
-    const int paintsBeforeAccepted = indicator->property("paintCount").toInt();
+    // Its scrobble leaves the slot at once, with no fade.
     bridge->setProperty("lastFmScrobbleState", 3);
-    harness.window->grabWindow();
-    QCOMPARE(indicator->property("paintCount").toInt(), paintsBeforeAccepted + 1);
-    // And not again while it stays.
-    bridge->setProperty("lastFmScrobbleListenedMs", 130000);
-    harness.window->grabWindow();
-    QCOMPARE(indicator->property("paintCount").toInt(), paintsBeforeAccepted + 1);
+    QVERIFY(!indicator->isVisible());
 }
 
 void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {
@@ -28729,6 +28675,44 @@ void ScrobbleSmokeTest::scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff() {
     QTRY_VERIFY(!indicator->isVisible());
     bridge->setProperty("lastFmShowScrobbleProgress", true);
     QTRY_VERIFY(indicator->isVisible());
+}
+
+// With the bridge's PlaybackClock, the scrobble point follows a seek
+// while paused, which changes nothing of the scrobbler's, and where it
+// lands.
+void ScrobbleSmokeTest::scrobblePointFollowsThePlaybackClocksSeeks() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    auto *statusBar = harness.root->findChild<QObject *>(QStringLiteral("statusBar"));
+    QVERIFY(statusBar != nullptr);
+    PlaybackClock clock;
+    PlaybackSample paused;
+    paused.positionSeconds = 30.0;
+    paused.advancing = false;
+    paused.durationSeconds = 229.0;
+    paused.trackToken = 1;
+    clock.applySample(paused, true);
+    bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    QVERIFY(statusBar->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock))));
+    QTRY_VERIFY(indicator->isVisible());
+    const auto tooltip = [indicator]() {
+        return evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString();
+    };
+    QTRY_COMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 1:55"));
+
+    // The seek is asked for: the clock holds its target.
+    clock.holdAt(90.0);
+    QCOMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 2:55"));
+    // It lands a second later than asked, still paused.
+    paused.positionSeconds = 91.0;
+    clock.applySample(paused, true);
+    QCOMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 2:56"));
+    // The clock goes before the harness.
+    statusBar->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(nullptr)));
 }
 
 void ScrobbleSmokeTest::lastFmPageShowsTheScrobbleProgressSettingWhileConnected() {
@@ -28832,6 +28816,7 @@ void ScrobbleSmokeTest::playbackMenuPausesScrobbling() {
     QVERIFY(!indicator->isVisible());
     bridge->setProperty("lastFmScrobblingEnabled", true);
     bridge->setProperty("lastFmAuthState", 2);
+    bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(action->property("enabled").toBool());
     QTRY_VERIFY(indicator->isVisible());
     QVERIFY(action->property("checkable").toBool());

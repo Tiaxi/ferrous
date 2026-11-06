@@ -493,25 +493,29 @@ void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
     QQuickItem *indicator = nullptr;
     QTRY_VERIFY((indicator = visibleItemNamed(window, QStringLiteral("scrobbleIndicator"))) != nullptr);
     QCOMPARE(accessibleRole(indicator), QAccessible::Button);
+    // The fallback bridge has no playback clock: the listened time stands
+    // in for the position, so the scrobble point is the threshold.
     QCOMPARE(accessibleText(indicator, QAccessible::Name),
-             QStringLiteral("Last.fm scrobble progress"));
+             QStringLiteral("Last.fm: scrobbles at 2:00"));
     QCOMPARE(accessibleText(indicator, QAccessible::Description),
-             QStringLiteral("Listening towards the scrobble point. Press to pause scrobbling."));
-    // Tab reaches it, its tooltip tells the time left, and Space pauses
-    // scrobbling rather than playback.
+             QStringLiteral("Press to pause scrobbling."));
+    // Tab reaches it, its tooltip tells where the track scrobbles, and
+    // Space pauses scrobbling rather than playback.
     QVERIFY(indicator->activeFocusOnTab());
     QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
     QVERIFY(playPause != nullptr);
     QSignalSpy playPauseTriggered(playPause, SIGNAL(triggered(QObject*)));
     indicator->forceActiveFocus(Qt::TabFocusReason);
     QTRY_COMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
-                 QStringLiteral("Scrobbles to Last.fm in 01:30.\nClick to pause scrobbling."));
+                 QStringLiteral("Last.fm: scrobbles at 2:00"));
+    QTRY_VERIFY(evaluateOn(indicator, QStringLiteral("ToolTip.visible")).toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());
     QCOMPARE(playPauseTriggered.count(), 0);
-    QTRY_COMPARE(accessibleText(indicator, QAccessible::Description),
-                 QStringLiteral("Scrobbling is paused. This track won't be scrobbled. "
-                                "Press to resume scrobbling."));
+    QTRY_COMPARE(accessibleText(indicator, QAccessible::Name),
+                 QStringLiteral("Last.fm: scrobbling is paused"));
+    QCOMPARE(accessibleText(indicator, QAccessible::Description),
+             QStringLiteral("Press to resume scrobbling."));
 }
 
 void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
@@ -526,8 +530,8 @@ void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
 
     const QList<QPair<QString, QString>> buttons{
         {QStringLiteral("transportButton_previous"), QStringLiteral("Previous")},
-        {QStringLiteral("transportButton_play"), QStringLiteral("Play")},
-        {QStringLiteral("transportButton_pause"), QStringLiteral("Pause")},
+        // One button, which shows the state: Pause while playing.
+        {QStringLiteral("transportButton_playPause"), QStringLiteral("Pause")},
         {QStringLiteral("transportButton_stop"), QStringLiteral("Stop")},
         {QStringLiteral("transportButton_next"), QStringLiteral("Next")},
         {QStringLiteral("muteButton"), QStringLiteral("Mute")},
@@ -543,7 +547,7 @@ void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
     // The tooltips name the shortcuts too.
     QCOMPARE(evaluateOn(visibleItemNamed(window, QStringLiteral("transportButton_stop")),
                         QStringLiteral("ToolTip.text")).toString(),
-             QStringLiteral("Stop (Ctrl+Shift+Space)"));
+             QStringLiteral("Stop · Ctrl+Shift+Space"));
 
     // Tab reaches the buttons, and Space presses the focused one instead
     // of playing or pausing.
@@ -578,7 +582,7 @@ void AccessibilityTest::slidersAndIconButtonsHaveNamesAndTooltips() {
     QVERIFY(seek != nullptr && volume != nullptr);
     QCOMPARE(accessibleRole(seek), QAccessible::Slider);
     QCOMPARE(accessibleText(seek, QAccessible::Name), QStringLiteral("Seek"));
-    QCOMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("00:00 of 03:20"));
+    QCOMPARE(accessibleText(seek, QAccessible::Description), QStringLiteral("0:00 of 3:20"));
     QAccessibleValueInterface *seekValue = QAccessible::queryAccessibleInterface(seek)->valueInterface();
     QVERIFY(seekValue != nullptr);
     QCOMPARE(seekValue->maximumValue().toDouble(), 200.0);
@@ -1221,11 +1225,60 @@ std::optional<SeekPoint> pointBetweenSteps(QQuickItem *seek, qreal fraction) {
     return std::nullopt;
 }
 
+// The seek bar's time: a native tooltip under the bar.
+struct SeekTimeBox {
+    QObject *box = nullptr;
+
+    bool find(QObject *root) {
+        box = root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+        return box != nullptr && box->inherits("QQuickToolTip");
+    }
+    // The time it shows, or an empty text when it is hidden.
+    QString shown() const {
+        return box->property("shown").toBool() ? box->property("shownText").toString() : QString();
+    }
+    // Its text while hidden: none.
+    QString hiddenText() const {
+        return box->property("shownText").toString();
+    }
+    qreal x() const {
+        return box->property("x").toReal();
+    }
+    qreal width() const {
+        return box->property("width").toReal();
+    }
+};
+
+// Why `box` is not centred on `anchorX` under the bar, in the slider's
+// coordinates, to within the device pixel it is rounded to, as drawn; or an
+// empty text.
+QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal anchorX, qreal dpr) {
+    auto *content = box.box->property("contentItem").value<QQuickItem *>();
+    QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
+    if (popup == nullptr) {
+        return QStringLiteral("not drawn");
+    }
+    const QRectF drawn = popup->mapRectToScene(QRectF(0, 0, popup->width(), popup->height()));
+    const QRectF bar = seek->mapRectToScene(QRectF(0, 0, seek->width(), seek->height()));
+    const qreal centre = drawn.center().x() - bar.left();
+    const qreal slack = 0.5 / dpr + 1e-6;
+    QStringList errors;
+    if (std::abs(centre - anchorX) > slack) {
+        errors.push_back(QStringLiteral("centred on %1, not %2").arg(centre).arg(anchorX));
+    }
+    if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
+        errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
+    }
+    if (drawn.top() < bar.bottom()) {
+        errors.push_back(QStringLiteral("over the bar"));
+    }
+    return errors.join(QStringLiteral("; "));
+}
+
 // `seconds` as the transport bar shows a time under an hour.
 QString minutesAndSeconds(double seconds) {
     const int whole = static_cast<int>(std::floor(seconds));
-    return QStringLiteral("%1:%2").arg(whole / 60, 2, 10, QLatin1Char('0'))
-        .arg(whole % 60, 2, 10, QLatin1Char('0'));
+    return QStringLiteral("%1:%2").arg(whole / 60).arg(whole % 60, 2, 10, QLatin1Char('0'));
 }
 
 } // namespace
@@ -1237,8 +1290,8 @@ void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
     QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
     QVERIFY2(window != nullptr, qPrintable(errorText));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-    QQuickItem *dragTime = itemsNamed(window->contentItem(), QStringLiteral("seekDragTime")).value(0);
-    QVERIFY(seek != nullptr && dragTime != nullptr);
+    SeekTimeBox dragTime;
+    QVERIFY(seek != nullptr && dragTime.find(window));
     const std::optional<SeekPoint> target = pointBetweenSteps(seek, 0.6);
     QVERIFY(target.has_value());
     const qreal y = seek->height() / 2;
@@ -1253,9 +1306,9 @@ void AccessibilityTest::seekDragShowsAndSeeksTheTimeUnderThePointer() {
     const double dragged = seek->property("value").toDouble();
     QVERIFY2(fuzzyEqual(dragged, target->seconds),
              qPrintable(QStringLiteral("%1 vs %2").arg(dragged).arg(target->seconds)));
-    QCOMPARE(dragTime->property("text").toString(), minutesAndSeconds(target->seconds));
+    QCOMPARE(dragTime.shown(), minutesAndSeconds(target->seconds));
     QCOMPARE(accessibleText(seek, QAccessible::Description),
-             QStringLiteral("%1 of 03:20").arg(minutesAndSeconds(target->seconds)));
+             QStringLiteral("%1 of 3:20").arg(minutesAndSeconds(target->seconds)));
 
     // The release seeks there.
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, target->scene);
@@ -1301,7 +1354,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QVERIFY2(window != nullptr, qPrintable(errorText));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
-    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(seek != nullptr && line != nullptr && progress != nullptr);
     int frames = 0;
     connect(window, &QQuickWindow::frameSwapped, window, [&frames]() { ++frames; });
@@ -1329,7 +1382,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
         bool operator==(const Drawn &) const = default;
     };
     const auto drawn = [&]() {
-        return Drawn{line->mapToItem(progress->parentItem(), QPointF()).x(), progress->width(),
+        return Drawn{line->mapToItem(progress->parentItem(), QPointF()).x(), progress->x(),
                      root->property("positionText").toString()};
     };
     Drawn previous = drawn();
@@ -1348,23 +1401,23 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     QVERIFY2(changes >= 3 && changes < steps / 4 && frames <= changes, qPrintable(counts));
 
     // The value stays exact, and the bar is within a device pixel of it:
-    // the fill ends at the playhead's line, which moves over the bar less
+    // the unplayed part starts at the playhead's line, which moves over the bar less
     // its own width.
     const double endSeconds = startSeconds + steps / 60.0;
     QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds));
     const qreal devicePixel = 1.0 / window->effectiveDevicePixelRatio();
     const qreal travel = progress->parentItem()->width() - line->width();
     const qreal exactWidth = travel * endSeconds / durationSeconds;
-    QVERIFY2(std::abs(progress->width() - exactWidth) <= devicePixel,
-             qPrintable(QStringLiteral("%1 vs %2").arg(progress->width()).arg(exactWidth)));
+    QVERIFY2(std::abs(progress->x() - exactWidth) <= devicePixel,
+             qPrintable(QStringLiteral("%1 vs %2").arg(progress->x()).arg(exactWidth)));
 
     // A held key draws its value to the nearest device pixel.
     QVERIFY(tabTo(window, seek));
     QTest::keyPress(window, Qt::Key_Right);
     QVERIFY(seek->property("adjusting").toBool());
     QVERIFY(fuzzyEqual(seek->property("value").toDouble(), endSeconds + 5.0));
-    QVERIFY2(std::abs(progress->width() - travel * (endSeconds + 5.0) / durationSeconds) <= devicePixel / 2,
-             qPrintable(QString::number(progress->width())));
+    QVERIFY2(std::abs(progress->x() - travel * (endSeconds + 5.0) / durationSeconds) <= devicePixel / 2,
+             qPrintable(QString::number(progress->x())));
     QTest::keyRelease(window, Qt::Key_Right);
     QVERIFY(sameValues(recordedValues(root.data(), "seeks"), {endSeconds + 5.0}));
 
@@ -1377,7 +1430,7 @@ void AccessibilityTest::playbackMovesTheSeekBarByWholePixels() {
     const QList<double> seeks = recordedValues(root.data(), "seeks");
     QVERIFY2(sameValues(seeks, {endSeconds + 5.0, endSeconds + 10.0}), qPrintable(describeValues(seeks)));
     root->setProperty("positionSeconds", endSeconds + 10.0);
-    QVERIFY(std::abs(progress->width() - travel * (endSeconds + 10.0) / durationSeconds) <= devicePixel);
+    QVERIFY(std::abs(progress->x() - travel * (endSeconds + 10.0) / durationSeconds) <= devicePixel);
 }
 
 namespace {
@@ -1386,7 +1439,7 @@ namespace {
 // to a logical one, or nothing. Its line is two logical pixels wide and its
 // outline one on each side where the bar has room, each a whole number of
 // device pixels; the line's left edge is on a whole device pixel of the bar,
-// and the played fill ends there. The line and its outline are on the bar.
+// and the unplayed part starts there. The line and its outline are on the bar.
 QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr) {
     QQuickItem *outline = line->parentItem();
     QQuickItem *bar = progress->parentItem();
@@ -1402,16 +1455,20 @@ QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr)
     if (!fuzzyEqual(lineX * dpr, std::round(lineX * dpr))) {
         errors.push_back(QStringLiteral("line at %1 device pixels").arg(lineX * dpr));
     }
-    if (!fuzzyEqual(progress->width(), lineX)) {
-        errors.push_back(QStringLiteral("fill ends at %1, line at %2").arg(progress->width()).arg(lineX));
+    if (!fuzzyEqual(progress->x(), lineX)
+        || !fuzzyEqual(progress->x() + progress->width(), bar->width())) {
+        errors.push_back(QStringLiteral("unplayed part from %1 to %2, line at %3")
+                             .arg(progress->x()).arg(progress->x() + progress->width()).arg(lineX));
     }
     if (!fuzzyEqual(outline->x(), outlineLeft) || !fuzzyEqual(outline->x() + outline->width(), outlineRight)) {
         errors.push_back(QStringLiteral("outline from %1 to %2, not %3 to %4")
                              .arg(outline->x()).arg(outline->x() + outline->width())
                              .arg(outlineLeft).arg(outlineRight));
     }
-    if (!fuzzyEqual(line->height(), bar->height()) || !fuzzyEqual(outline->height(), bar->height())) {
-        errors.push_back(QStringLiteral("not the bar's height"));
+    // 20 px, in the middle of the 28 px bar.
+    if (!fuzzyEqual(line->height(), 20.0) || !fuzzyEqual(outline->height(), 20.0)
+        || !fuzzyEqual(outline->y(), (bar->height() - 20.0) / 2)) {
+        errors.push_back(QStringLiteral("not the playhead's 20 px in the bar's middle"));
     }
     constexpr qreal kTolerance = 1e-6;
     const qreal lineRight = lineX + line->width();
@@ -1451,17 +1508,17 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
     QVERIFY2(harness != nullptr, qPrintable(errorText));
     harness->setParentItem(window.contentItem());
     control.polishItems();
-    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
+    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekUnplayed")).value(0);
     QQuickItem *line = itemsNamed(harness, QStringLiteral("seekPlayheadLine")).value(0);
     QVERIFY(progress != nullptr && line != nullptr && progress->parentItem()->width() > 500);
 
     // Each step the bar takes in five seconds of playback is one of the
     // window's device pixels, and the playhead keeps its device pixels' size
-    // and stays on whole ones, with the fill up to it.
+    // and stays on whole ones, with the unplayed part after it.
     const auto checkSteps = [&](double fromSeconds) {
         root->setProperty("positionSeconds", fromSeconds);
         QList<qreal> steps;
-        qreal width = progress->width();
+        qreal width = progress->x();
         for (int step = 1; step <= 250; ++step) {
             root->setProperty("positionSeconds", fromSeconds + step / 50.0);
             const QString geometryError =
@@ -1469,9 +1526,9 @@ void AccessibilityTest::seekBarStepsByTheWindowsDevicePixels() {
             QVERIFY2(geometryError.isEmpty(),
                      qPrintable(QStringLiteral("at %1: %2")
                                     .arg(window.effectiveDevicePixelRatio()).arg(geometryError)));
-            if (progress->width() != width) {
-                steps.push_back((progress->width() - width) * window.effectiveDevicePixelRatio());
-                width = progress->width();
+            if (progress->x() != width) {
+                steps.push_back((progress->x() - width) * window.effectiveDevicePixelRatio());
+                width = progress->x();
             }
         }
         QStringList stepsText;
@@ -1505,7 +1562,7 @@ void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
     QVERIFY2(window != nullptr, qPrintable(errorText));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(seek != nullptr && progress != nullptr);
 
     // One marker: a line in its outline. No other playhead or handle draws.
@@ -1530,7 +1587,7 @@ void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
     QCOMPARE(line->x(), 1.0);
     QCOMPARE(outline->width(), 4.0);
     const qreal travel = bar->width() - line->width();
-    QVERIFY(std::abs(progress->width() - travel * 50.0 / 200.0) <= 0.5);
+    QVERIFY(std::abs(progress->x() - travel * 50.0 / 200.0) <= 0.5);
 
     // The grab target is wider than the marker and centred on its line, and
     // it draws nothing.
@@ -1554,7 +1611,7 @@ void AccessibilityTest::seekBarPlayheadIsOneOutlinedLine() {
     QVERIFY2(geometryError.isEmpty(), qPrintable(geometryError));
     QCOMPARE(line->mapToItem(bar, QPointF()).x(), 0.0);
     QCOMPARE(outline->x(), 0.0);
-    QCOMPARE(progress->width(), 0.0);
+    QCOMPARE(progress->x(), 0.0);
     QCOMPARE(grab->mapToItem(seek, QPointF(grab->width() / 2, 0)).x(), lineCentre());
     root->setProperty("positionSeconds", 200.0);
     geometryError = playheadGeometryError(line, progress, dpr);
@@ -1584,7 +1641,7 @@ void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
     QVERIFY2(harness != nullptr, qPrintable(errorText));
     harness->setParentItem(window.contentItem());
     control.polishItems();
-    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekProgress")).value(0);
+    QQuickItem *progress = itemsNamed(harness, QStringLiteral("seekUnplayed")).value(0);
     QQuickItem *line = itemsNamed(harness, QStringLiteral("seekPlayheadLine")).value(0);
     QVERIFY(progress != nullptr && line != nullptr);
     QQuickItem *bar = progress->parentItem();
@@ -1629,44 +1686,6 @@ void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
 
 namespace {
 
-// The seek bar's time box and its text.
-struct SeekTimeBox {
-    QQuickItem *box = nullptr;
-    QQuickItem *text = nullptr;
-
-    bool find(QQuickItem *root) {
-        box = itemsNamed(root, QStringLiteral("seekTimeBox")).value(0);
-        text = itemsNamed(root, QStringLiteral("seekDragTime")).value(0);
-        return box != nullptr && text != nullptr;
-    }
-    // The time it shows, or an empty text when it is hidden.
-    QString shown() const {
-        return box->isVisible() ? text->property("text").toString() : QString();
-    }
-};
-
-// Why `box` is not beside `anchorX`, in the slider's coordinates, as the
-// time box is: 8 pixels to its left or, without room there, 8 to its right,
-// to within the device pixel it is rounded to, and inside the bar; or an
-// empty text.
-QString timeBoxPlacementError(QQuickItem *seek, QQuickItem *box, qreal anchorX, qreal dpr) {
-    const qreal left = box->mapToItem(seek, QPointF()).x();
-    const qreal right = left + box->width();
-    const qreal slack = 0.5 / dpr + 1e-6;
-    const bool roomOnTheLeft = anchorX - 8 - box->width() >= 2;
-    QStringList errors;
-    if (left < 0 || right > seek->width()) {
-        errors.push_back(QStringLiteral("box from %1 to %2 off the bar of %3").arg(left).arg(right).arg(seek->width()));
-    }
-    if (roomOnTheLeft && std::abs(right - (anchorX - 8)) > slack) {
-        errors.push_back(QStringLiteral("box ends at %1, not 8 left of %2").arg(right).arg(anchorX));
-    }
-    if (!roomOnTheLeft && std::abs(left - (anchorX + 8)) > slack) {
-        errors.push_back(QStringLiteral("box starts at %1, not 8 right of %2").arg(left).arg(anchorX));
-    }
-    return errors.join(QStringLiteral("; "));
-}
-
 // Sends a mouse event at `scene`, as the window system does; a move with
 // no button held hovers.
 void sendMouse(QQuickWindow *window, QEvent::Type type, QPointF scene, Qt::MouseButton button,
@@ -1687,26 +1706,26 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QVERIFY2(window != nullptr, qPrintable(errorText));
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
-    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
+    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && progress != nullptr && timeBox.find(window->contentItem()));
+    QVERIFY(seek != nullptr && progress != nullptr && timeBox.find(window));
     QCOMPARE(timeBox.shown(), QString());
-    const qreal playedWidth = progress->width();
+    const qreal playedWidth = progress->x();
     const qreal y = seek->height() / 2;
     const std::optional<SeekPoint> between = pointBetweenSteps(seek, 0.45);
     QVERIFY(between.has_value());
 
-    // Across the bar and at either end, the box shows the second under the
-    // pointer beside it; the left end's time has no room on the left.
+    // Across the bar and at either end, the tooltip shows the second under
+    // the pointer, centred under it.
     struct Expected {
         qreal x;
         QString time;
     };
     const qreal betweenX = seek->mapFromScene(QPointF(between->scene)).x();
-    for (const Expected &expected : {Expected{0, QStringLiteral("00:00")}, Expected{1, QString()},
+    for (const Expected &expected : {Expected{0, QStringLiteral("0:00")}, Expected{1, QString()},
                                      Expected{3, QString()}, Expected{betweenX, QString()},
                                      Expected{seek->width() * 0.8, QString()},
-                                     Expected{seek->width() - 1, QStringLiteral("03:20")}}) {
+                                     Expected{seek->width() - 1, QStringLiteral("3:20")}}) {
         const QPoint scene = seek->mapToScene(QPointF(expected.x, y)).toPoint();
         const qreal x = seek->mapFromScene(QPointF(scene)).x();
         QTest::mouseMove(window, scene);
@@ -1716,18 +1735,13 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
         if (!expected.time.isEmpty()) {
             QCOMPARE(time, expected.time);
         }
-        const QString placementError = timeBoxPlacementError(seek, timeBox.box, x, dpr);
+        const QString placementError = timeBoxPlacementError(seek, timeBox, x, dpr);
         QVERIFY2(placementError.isEmpty(), qPrintable(QStringLiteral("at %1: %2").arg(x).arg(placementError)));
-        if (x < 10) {
-            QVERIFY2(timeBox.box->x() > x, qPrintable(QString::number(timeBox.box->x())));
-        } else if (x > 200) {
-            QVERIFY2(timeBox.box->x() + timeBox.box->width() < x, qPrintable(QString::number(timeBox.box->x())));
-        }
     }
 
     // Hovering moves neither the slider nor the playhead, and seeks nothing.
     QCOMPARE(seek->property("value").toDouble(), 50.0);
-    QCOMPARE(progress->width(), playedWidth);
+    QCOMPARE(progress->x(), playedWidth);
     QVERIFY(!seek->property("adjusting").toBool());
     QVERIFY2(recordedValues(root.data(), "seeks").isEmpty(),
              qPrintable(describeValues(recordedValues(root.data(), "seeks"))));
@@ -1735,7 +1749,7 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     // Leaving the bar hides the box; coming back shows it again.
     QTest::mouseMove(window, centerOf(qvariant_cast<QQuickItem *>(root->property("startButton"))));
     QCOMPARE(timeBox.shown(), QString());
-    QCOMPARE(timeBox.text->property("text").toString(), QString());
+    QCOMPARE(timeBox.hiddenText(), QString());
     QTest::mouseMove(window, between->scene);
     QCOMPARE(timeBox.shown(), minutesAndSeconds(between->seconds));
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() + 4, y)).toPoint());
@@ -1751,7 +1765,7 @@ void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
     QVERIFY2(window != nullptr, qPrintable(errorText));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && timeBox.find(window->contentItem()));
+    QVERIFY(seek != nullptr && timeBox.find(window));
     const qreal y = seek->height() / 2;
 
     qsizetype clicks = 0;
@@ -1822,13 +1836,15 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
             QVERIFY2(timeBox.shown() == time, qPrintable(QStringLiteral("at %1, %2: %3, not %4")
                                                              .arg(dpr).arg(x).arg(timeBox.shown(), time)));
             if (x < 1) {
-                QCOMPARE(time, QStringLiteral("00:00"));
+                QCOMPARE(time, QStringLiteral("0:00"));
             } else if (x > width - 1) {
-                QCOMPARE(time, QStringLiteral("03:20"));
+                QCOMPARE(time, QStringLiteral("3:20"));
             }
-            const QString placementError = timeBoxPlacementError(seek, timeBox.box, x, dpr);
-            QVERIFY2(placementError.isEmpty(),
-                     qPrintable(QStringLiteral("at %1, %2: %3").arg(dpr).arg(x).arg(placementError)));
+            // It is centred on the pointer; seekHoverShowsTheTimeUnderThePointer
+            // checks where a window draws it.
+            QVERIFY2(fuzzyEqual(timeBox.box->property("anchorX").toReal(), x),
+                     qPrintable(QStringLiteral("at %1, %2: centred on %3")
+                                    .arg(dpr).arg(x).arg(timeBox.box->property("anchorX").toReal())));
             QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
 
             // A click there seeks to that time.
@@ -1845,8 +1861,8 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
         // A pointer's moves within a device pixel move the box by none, and
         // its text changes only with the second it shows.
         hover(width * 0.5);
-        QSignalSpy moves(timeBox.box, SIGNAL(xChanged()));
-        QSignalSpy texts(timeBox.text, SIGNAL(textChanged(QString)));
+        QSignalSpy moves(timeBox.box, SIGNAL(placedXChanged()));
+        QSignalSpy texts(timeBox.box, SIGNAL(shownTextChanged()));
         QSet<QString> times{timeBox.shown()};
         constexpr int kSteps = 100;
         constexpr qreal kStep = 0.05;
@@ -1879,7 +1895,7 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && line != nullptr && timeBox.find(window->contentItem()));
+    QVERIFY(seek != nullptr && line != nullptr && timeBox.find(window));
     const qreal y = seek->height() / 2;
     const auto lineCentre = [&]() { return line->mapToItem(seek, QPointF(line->width() / 2, 0)).x(); };
 
@@ -1890,8 +1906,8 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.7, y)).toPoint());
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() + 30, y)).toPoint());
     QVERIFY(seek->property("adjusting").toBool());
-    QCOMPARE(timeBox.shown(), QStringLiteral("03:20"));
-    QString placementError = timeBoxPlacementError(seek, timeBox.box, lineCentre(), dpr);
+    QCOMPARE(timeBox.shown(), QStringLiteral("3:20"));
+    QString placementError = timeBoxPlacementError(seek, timeBox, lineCentre(), dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
     QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier,
                         seek->mapToScene(QPointF(seek->width() + 30, y)).toPoint());
@@ -1914,7 +1930,7 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     const QString dragEndTime = minutesAndSeconds(secondsAtX(seek, dragEndX));
     QCOMPARE(minutesAndSeconds(recordedValues(root.data(), "seeks").constLast()), dragEndTime);
     QTRY_COMPARE(timeBox.shown(), dragEndTime);
-    placementError = timeBoxPlacementError(seek, timeBox.box, dragEndX, dpr);
+    placementError = timeBoxPlacementError(seek, timeBox, dragEndX, dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
 
     // Held arrow keys show their time beside the playhead while the mouse
@@ -1926,8 +1942,8 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     QCOMPARE(timeBox.shown(), hoverTime);
     sendKey(window, QEvent::KeyPress, Qt::Key_Right, false);
     QVERIFY(seek->property("adjusting").toBool());
-    QCOMPARE(timeBox.shown(), QStringLiteral("00:55"));
-    placementError = timeBoxPlacementError(seek, timeBox.box, lineCentre(), dpr);
+    QCOMPARE(timeBox.shown(), QStringLiteral("0:55"));
+    placementError = timeBoxPlacementError(seek, timeBox, lineCentre(), dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
     sendKey(window, QEvent::KeyRelease, Qt::Key_Right, false);
     QVERIFY(!seek->property("adjusting").toBool());
@@ -1945,7 +1961,7 @@ void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && bridge != nullptr && timeBox.find(window->contentItem()));
+    QVERIFY(seek != nullptr && bridge != nullptr && timeBox.find(window));
     const qreal y = seek->height() / 2;
     const QPoint middle = seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint();
     const QPoint later = seek->mapToScene(QPointF(seek->width() * 0.6, y)).toPoint();
@@ -1956,7 +1972,7 @@ void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
     QTest::mouseMove(window, middle);
     QTest::mouseMove(window, later);
     QCOMPARE(timeBox.shown(), QString());
-    QCOMPARE(timeBox.text->property("text").toString(), QString());
+    QCOMPARE(timeBox.hiddenText(), QString());
     QTest::mouseMove(window, away);
     bridge->setProperty("durationSeconds", 200.0);
     QTest::mouseMove(window, middle);
@@ -1984,7 +2000,7 @@ void AccessibilityTest::seekTouchShowsNoHoverTime() {
     QVERIFY2(window != nullptr, qPrintable(errorText));
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && timeBox.find(window->contentItem()));
+    QVERIFY(seek != nullptr && timeBox.find(window));
     QObject *hover = seek->findChild<QObject *>(QStringLiteral("seekHover"));
     QVERIFY(hover != nullptr);
     QPointingDevice *touchScreen = QTest::createTouchDevice();
@@ -2156,43 +2172,59 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QCOMPARE(palette->property("uiTextColor").value<QColor>(), QColor::fromString(text));
 
     QQuickItem *background = visibleItemNamed(quickWindow, QStringLiteral("seekBackground"));
-    QQuickItem *progress = visibleItemNamed(quickWindow, QStringLiteral("seekProgress"));
+    QQuickItem *unplayed = visibleItemNamed(quickWindow, QStringLiteral("seekUnplayed"));
     QQuickItem *outline = visibleItemNamed(quickWindow, QStringLiteral("seekPlayhead"));
     QQuickItem *line = visibleItemNamed(quickWindow, QStringLiteral("seekPlayheadLine"));
-    QVERIFY(background != nullptr && progress != nullptr && outline != nullptr && line != nullptr);
+    QVERIFY(background != nullptr && unplayed != nullptr && outline != nullptr && line != nullptr);
     WaveformItem *waveform = nullptr;
-    for (QQuickItem *sibling : progress->parentItem()->childItems()) {
+    for (QQuickItem *sibling : unplayed->parentItem()->childItems()) {
         waveform = waveform != nullptr ? waveform : qobject_cast<WaveformItem *>(sibling);
     }
     QVERIFY(waveform != nullptr);
 
-    // The line is the text's colour, outlined in black on light text and in
-    // white on dark.
+    // The line is the amber of `now`, cased in black on a dark theme and in
+    // white on a light one.
     const QColor lineColor = line->property("color").value<QColor>();
-    const QColor outlineColor = outline->property("color").value<QColor>();
-    QCOMPARE(lineColor, QColor::fromString(text));
-    QCOMPARE(outlineColor, dark ? QColor(Qt::black) : QColor(Qt::white));
+    const QColor casing = outline->property("color").value<QColor>();
+    QCOMPARE(lineColor, palette->property("now").value<QColor>());
+    QCOMPARE(casing.rgb() & 0xffffff, dark ? 0x000000u : 0xffffffu);
+    QVERIFY(casing.alphaF() > 0.5f && casing.alphaF() < 1.0f);
 
-    // One of them stands out against the empty bar, the waveform and the
-    // played fill over either.
-    const QColor emptyBar = background->property("color").value<QColor>();
-    const QColor waveformColor = waveform->property("barColor").value<QColor>();
-    const QColor fill = progress->property("color").value<QColor>();
-    QCOMPARE(emptyBar.alphaF(), 1.0f);
-    QCOMPARE(waveformColor.alphaF(), 1.0f);
-    QVERIFY(fill.alphaF() > 0.0f && fill.alphaF() < 1.0f);
+    // The bar is the chrome; the waveform is drawn on it, and the unplayed
+    // part is the chrome over it.
+    const QColor chrome = background->property("color").value<QColor>();
+    const QColor played = waveform->property("barColor").value<QColor>();
+    const QColor cover = unplayed->property("color").value<QColor>();
+    QCOMPARE(chrome, palette->property("chrome").value<QColor>());
+    QCOMPARE(waveform->property("bgColor").value<QColor>(), chrome);
+    QCOMPARE(chrome.alphaF(), 1.0f);
+    QCOMPARE(played.alphaF(), 1.0f);
+    QVERIFY(cover.alphaF() > 0.0f && cover.alphaF() < 1.0f);
+    const QColor unplayedWaveform = drawnOver(cover, played);
+    QVERIFY2(contrastRatio(unplayedWaveform, chrome) >= 3.0,
+             qPrintable(QStringLiteral("unplayed %1 on %2: %3:1")
+                            .arg(unplayedWaveform.name(), chrome.name())
+                            .arg(contrastRatio(unplayedWaveform, chrome))));
+
+    // The line stands out against its casing over the bar and the
+    // waveform, played or not; the line or the casing stands out against
+    // the bar and the played part, which the casing is there to separate
+    // it from by luminance.
     const QList<std::pair<QString, QColor>> behind{
-        {QStringLiteral("empty bar"), emptyBar},
-        {QStringLiteral("waveform"), waveformColor},
-        {QStringLiteral("played bar"), drawnOver(fill, emptyBar)},
-        {QStringLiteral("played waveform"), drawnOver(fill, waveformColor)},
+        {QStringLiteral("bar"), chrome},
+        {QStringLiteral("played waveform"), played},
+        {QStringLiteral("unplayed waveform"), unplayedWaveform},
     };
     for (const auto &[name, color] : behind) {
+        const QColor casingDrawn = drawnOver(casing, color);
         const double lineContrast = contrastRatio(lineColor, color);
-        const double outlineContrast = contrastRatio(outlineColor, color);
-        QVERIFY2(std::max(lineContrast, outlineContrast) >= 3.0,
-                 qPrintable(QStringLiteral("%1 %2: line %3:1, outline %4:1")
-                                .arg(name, color.name()).arg(lineContrast).arg(outlineContrast)));
+        const double casingContrast = contrastRatio(casingDrawn, color);
+        QVERIFY2(color == unplayedWaveform || std::max(lineContrast, casingContrast) >= 3.0,
+                 qPrintable(QStringLiteral("%1 %2: line %3:1, casing %4:1")
+                                .arg(name, color.name()).arg(lineContrast).arg(casingContrast)));
+        QVERIFY2(contrastRatio(lineColor, casingDrawn) >= 3.0,
+                 qPrintable(QStringLiteral("%1 %2: line on its casing %3:1")
+                                .arg(name, color.name()).arg(contrastRatio(lineColor, casingDrawn))));
     }
 }
 
@@ -2312,8 +2344,8 @@ void AccessibilityTest::playbackClockMovesTheSeekBarByPixelsAndItsTextsBySeconds
     QCOMPARE(texts.count(), 3);
     QCOMPARE(clock.positionText(), QStringLiteral("00:04"));
     QCOMPARE(descriptions,
-             (QStringList{QStringLiteral("00:01 of 00:20"), QStringLiteral("00:02 of 00:20"),
-                          QStringLiteral("00:03 of 00:20"), QStringLiteral("00:04 of 00:20")}));
+             (QStringList{QStringLiteral("0:01 of 0:20"), QStringLiteral("0:02 of 0:20"),
+                          QStringLiteral("0:03 of 0:20"), QStringLiteral("0:04 of 0:20")}));
     QVERIFY2(ticks <= pixels + texts.count(), qPrintable(counts));
 
     // Paused, the clock has no more to show.
@@ -2357,7 +2389,7 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     now = end;
     QStringList expected;
     for (int second = 100; second <= 110; ++second) {
-        expected.push_back(QStringLiteral("%1 of 1:00:00").arg(PlaybackClock::formatSeconds(second)));
+        expected.push_back(QStringLiteral("%1 of 1:00:00").arg(minutesAndSeconds(second)));
     }
     QCOMPARE(descriptions, expected);
     QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(110));
@@ -2368,7 +2400,7 @@ void AccessibilityTest::seekBarDescriptionFollowsTheSecondsBetweenPixels() {
     QTest::keyPress(harness.window, Qt::Key_Right);
     QVERIFY(harness.seek->property("adjusting").toBool());
     QCOMPARE(harness.description(),
-             QStringLiteral("%1 of 1:00:00").arg(PlaybackClock::formatSeconds(std::floor(110.2 + 5.0))));
+             QStringLiteral("%1 of 1:00:00").arg(minutesAndSeconds(std::floor(110.2 + 5.0))));
     QTest::keyRelease(harness.window, Qt::Key_Right);
     const QList<double> seeks = recordedValues(harness.root.data(), "seeks");
     QVERIFY2(sameValues(seeks, {115.2}), qPrintable(describeValues(seeks)));
@@ -3178,19 +3210,16 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     // The seek bar.
     QQuickItem *background = visibleItemNamed(window, QStringLiteral("seekBackground"));
     QVERIFY(background != nullptr);
-    QCOMPARE(background->property("color").value<QColor>(), QColor(QStringLiteral("#fffbf2")));
-    QCOMPARE(background->property("color").value<QColor>(), paletteColor("uiSurfaceRaisedColor"));
-    QCOMPARE(evaluateOn(background, QStringLiteral("border.color")).value<QColor>(),
-             paletteColor("uiBorderColor"));
-    QQuickItem *progress = visibleItemNamed(window, QStringLiteral("seekProgress"));
-    QVERIFY(progress != nullptr);
-    QVERIFY(sameRgb(progress->property("color").value<QColor>(), paletteColor("uiAccentColor")));
+    QCOMPARE(background->property("color").value<QColor>(), QColor(QStringLiteral("#f3eee4")));
+    QCOMPARE(background->property("color").value<QColor>(), paletteColor("chrome"));
+    QQuickItem *unplayed = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
+    QVERIFY(unplayed != nullptr);
+    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), paletteColor("chrome")));
     QQuickItem *playhead = visibleItemNamed(window, QStringLiteral("seekPlayhead"));
     QQuickItem *playheadLine = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QVERIFY(playhead != nullptr && playheadLine != nullptr);
-    QCOMPARE(playheadLine->property("color").value<QColor>(), paletteColor("uiPlayheadColor"));
-    QCOMPARE(paletteColor("uiPlayheadColor"), paletteColor("uiTextColor"));
-    QCOMPARE(playhead->property("color").value<QColor>(), paletteColor("uiPlayheadOutlineColor"));
+    QCOMPARE(playheadLine->property("color").value<QColor>(), paletteColor("now"));
+    QVERIFY(sameRgb(playhead->property("color").value<QColor>(), QColor(Qt::white)));
     QList<WaveformItem *> waveforms;
     const std::function<void(QQuickItem *)> findWaveforms = [&](QQuickItem *item) {
         if (auto *waveform = qobject_cast<WaveformItem *>(item)) {
@@ -3202,11 +3231,18 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     findWaveforms(window->contentItem());
     QCOMPARE(waveforms.size(), 1);
-    QCOMPARE(waveforms.first()->property("barColor").value<QColor>(), paletteColor("uiWaveformColor"));
-    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), paletteColor("uiSurfaceRaisedColor"));
+    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), paletteColor("chrome"));
+    // The theme's `wave`, mixed 20% toward the text on a light theme.
+    const QColor wave = paletteColor("wave");
+    const QColor text = paletteColor("text");
+    const QColor played = waveforms.first()->property("barColor").value<QColor>();
+    QVERIFY2(std::abs(played.redF() - (wave.redF() * 0.8 + text.redF() * 0.2)) < 0.01
+                 && std::abs(played.greenF() - (wave.greenF() * 0.8 + text.greenF() * 0.2)) < 0.01
+                 && std::abs(played.blueF() - (wave.blueF() * 0.8 + text.blueF() * 0.2)) < 0.01,
+             qPrintable(played.name()));
     QQuickItem *mute = visibleItemNamed(window, QStringLiteral("muteButton"));
     QVERIFY(mute != nullptr);
-    QCOMPARE(evaluateOn(mute, QStringLiteral("icon.color")).value<QColor>(), paletteColor("uiTextColor"));
+    QCOMPARE(evaluateOn(mute, QStringLiteral("icon.color")).value<QColor>(), paletteColor("text"));
 
     // The tag editor's rows and status.
     QObject *tagEditor = qvariant_cast<QObject *>(root->property("tagEditor"));

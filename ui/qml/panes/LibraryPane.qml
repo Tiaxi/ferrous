@@ -68,13 +68,7 @@ Rectangle {
                 parts.push(trackText)
             }
         }
-        if (root.uiBridge.libraryScanInProgress) {
-            const locale = Qt.locale()
-            parts.push(I18n.i18nc("@info:status files the library scan has read, of those it found",
-                                  "Scanning %1 / %2",
-                                  Number(root.uiBridge.libraryScanProcessed).toLocaleString(locale, "f", 0),
-                                  Number(root.uiBridge.libraryScanDiscovered).toLocaleString(locale, "f", 0)))
-        }
+        // A scan's progress is the status bar's.
         return parts.join(" · ")
     }
 

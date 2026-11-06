@@ -247,19 +247,18 @@ void TranslationTest::qmlMessagesComeFromTheCatalog() {
 }
 
 void TranslationTest::pluralsFollowTheCount() {
-    // The queue summary of `count` tracks, as the status bar shows it.
-    const auto queueSummary = [](QQmlEngine &engine, int count) {
+    // The new issues of the status bar, `count` of them.
+    const auto newIssues = [](QQmlEngine &engine, int count) {
         return evaluateQml(
             engine, {},
-            QStringLiteral(R"qml(I18n.i18ncp("@info:status queue length and total duration", )qml"
-                           R"qml("%1 track (%2)", "%1 tracks (%2)", )qml")
-                + QString::number(count) + QStringLiteral(R"qml(, "3:00"))qml"));
+            QStringLiteral(R"qml(I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues", )qml")
+                + QString::number(count) + QStringLiteral(")"));
     };
     {
         QQmlEngine engine;
-        QCOMPARE(queueSummary(engine, 1), pseudo(QStringLiteral("1 track (3:00)")));
-        QCOMPARE(queueSummary(engine, 5), pseudo(QStringLiteral("5 tracks (3:00)")));
-        QCOMPARE(queueSummary(engine, 0), pseudo(QStringLiteral("0 tracks (3:00)")));
+        QCOMPARE(newIssues(engine, 1), pseudo(QStringLiteral("1 new issue")));
+        QCOMPARE(newIssues(engine, 5), pseudo(QStringLiteral("5 new issues")));
+        QCOMPARE(newIssues(engine, 0), pseudo(QStringLiteral("0 new issues")));
         QCOMPARE(i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", 1),
                  pseudo(QStringLiteral("Saved 1 file.")));
         QCOMPARE(i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", 3),
@@ -269,8 +268,8 @@ void TranslationTest::pluralsFollowTheCount() {
     // In English, without a catalog, the same forms.
     KLocalizedString::setLanguages({QStringLiteral("en_US")});
     QQmlEngine engine;
-    QCOMPARE(queueSummary(engine, 1), QStringLiteral("1 track (3:00)"));
-    QCOMPARE(queueSummary(engine, 5), QStringLiteral("5 tracks (3:00)"));
+    QCOMPARE(newIssues(engine, 1), QStringLiteral("1 new issue"));
+    QCOMPARE(newIssues(engine, 5), QStringLiteral("5 new issues"));
     QCOMPARE(i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", 1), QStringLiteral("Saved 1 file."));
     QCOMPARE(i18ncp("@info:status", "Saved %1 file.", "Saved %1 files.", 3), QStringLiteral("Saved 3 files."));
 }
@@ -369,13 +368,13 @@ void TranslationTest::mainWindowShowsTranslatedText() {
     QCOMPARE(state->property("text").toString(), pseudo(QStringLiteral("Paused")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Stopped")));
 
-    QObject *summary = window->findChild<QObject *>(QStringLiteral("statusBarQueueSummaryLabel"));
-    QVERIFY(summary != nullptr);
-    QVERIFY(bridge->setProperty("queueDurationText", QStringLiteral("4:00")));
-    QVERIFY(bridge->setProperty("queueLength", 1));
-    QCOMPARE(summary->property("text").toString(), pseudo(QStringLiteral("1 track (4:00)")));
-    QVERIFY(bridge->setProperty("queueLength", 2));
-    QCOMPARE(summary->property("text").toString(), pseudo(QStringLiteral("2 tracks (4:00)")));
+    // Repeat, in words.
+    QObject *repeat = window->findChild<QObject *>(QStringLiteral("statusBarRepeatLabel"));
+    QVERIFY(repeat != nullptr);
+    QVERIFY(bridge->setProperty("repeatMode", 1));
+    QCOMPARE(repeat->property("text").toString(), pseudo(QStringLiteral("Repeat One Track")));
+    QVERIFY(bridge->setProperty("repeatMode", 2));
+    QCOMPARE(repeat->property("text").toString(), pseudo(QStringLiteral("Repeat Whole Queue")));
 }
 
 void TranslationTest::tagEditorTellsMixedValuesByAFlag() {

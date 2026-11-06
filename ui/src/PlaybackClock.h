@@ -144,6 +144,11 @@ public:
 signals:
     void stateChanged();
     void positionChanged();
+    // The position started over rather than advancing: a seek, a track
+    // change, a repeat of the track, or a sample far from the position
+    // shown. Whatever counts from the position, such as where a play
+    // scrobbles, counts again from here.
+    void positionJumped();
     void positionTextChanged();
     void frameUpdatesEnabledChanged();
     void positionStepSecondsChanged();
