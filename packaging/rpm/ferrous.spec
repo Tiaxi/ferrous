@@ -24,6 +24,8 @@ BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtdeclarative-devel
 BuildRequires:  rust
 BuildRequires:  kf6-kirigami-devel
+# The app's controls style: the shared components' tests draw in it.
+BuildRequires:  kf6-qqc2-desktop-style
 # KI18n translates the interface; the tests extract the translation template
 # and make a pseudo-translation with GNU gettext.
 BuildRequires:  kf6-ki18n-devel

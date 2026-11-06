@@ -13,7 +13,11 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QQuickStyle>
 #include <QQuickWindow>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QtTest/QtTest>
 
 #include <algorithm>
@@ -197,6 +201,34 @@ QQuickItem *itemNamed(QObject *root, const QString &name) {
 // The named child of `item`'s subtree.
 QQuickItem *childNamed(QQuickItem *item, const QString &name) {
     return item->findChild<QQuickItem *>(name);
+}
+
+// The plot tool button tests' icon, found by name as the app's Breeze icons
+// are, and drawn like them: an SVG whose shape takes the text colour of
+// the colour scheme, which KDE's icon loader replaces with the colour asked
+// for. It is a 10 px square in the middle of 16 px, in hicolor, which every
+// icon theme falls back to, under a data directory of the test's own; the
+// middle of the square is the glyph colour whatever the icon theme.
+bool installIconFixture(const QString &dataDirectory) {
+    const QDir icons(dataDirectory);
+    if (!icons.mkpath(QStringLiteral("icons/hicolor/16x16/actions"))) {
+        return false;
+    }
+    QFile icon(icons.filePath(QStringLiteral("icons/hicolor/16x16/actions/ferrous-fixture-square.svg")));
+    if (!icon.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+    icon.write("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\" viewBox=\"0 0 16 16\">\n"
+               "<style type=\"text/css\" id=\"current-color-scheme\">"
+               ".ColorScheme-Text { color: #232629; }</style>\n"
+               "<rect x=\"3\" y=\"3\" width=\"10\" height=\"10\" class=\"ColorScheme-Text\""
+               " style=\"fill:currentColor\"/>\n"
+               "</svg>\n");
+    icon.close();
+    const QByteArray dataDirs = qgetenv("XDG_DATA_DIRS");
+    qputenv("XDG_DATA_DIRS", QFile::encodeName(dataDirectory) + ':'
+                                 + (dataDirs.isEmpty() ? QByteArray("/usr/local/share:/usr/share") : dataDirs));
+    return true;
 }
 
 QColor pixelAt(const QImage &image, const QPointF &point) {
@@ -742,7 +774,7 @@ const QString kPlotItems = QStringLiteral(R"QML(
                     plotColors: plot.plotColors
                     uiPalette: tokens
                     text: "Spectrogram"
-                    icon.name: "view-media-visualization"
+                    icon.name: "ferrous-fixture-square"
                     checkable: true
                     checked: true
                 }
@@ -894,6 +926,7 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
     for (const State &state : states) {
         const QString name = QString::fromLatin1(state.name);
         button->setProperty("checked", state.checked);
+        iconButton->setProperty("checked", state.checked);
         if (state.focused) {
             button->forceActiveFocus(Qt::TabFocusReason);
         } else {
@@ -940,18 +973,44 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
         }
         QVERIFY2(contrastRatio(letterColor, drawnInside) >= 4.5,
                  qPrintable(describe(name + QStringLiteral(": the letter"), letterColor, drawnInside)));
+
+        // The letter is drawn: its most contrasting pixel is the letter's
+        // colour, within antialiasing, and stands out from the button.
+        const QRectF letterRect =
+            letter->mapRectToScene(QRectF(0, 0, letter->width(), letter->height()));
+        QColor letterPixel = drawnInside;
+        for (int y = static_cast<int>(letterRect.top() * scale); y < static_cast<int>(letterRect.bottom() * scale); ++y) {
+            for (int x = static_cast<int>(letterRect.left() * scale); x < static_cast<int>(letterRect.right() * scale);
+                 ++x) {
+                const QColor candidate = image.pixelColor(x, y);
+                if (contrastRatio(candidate, drawnInside) > contrastRatio(letterPixel, drawnInside)) {
+                    letterPixel = candidate;
+                }
+            }
+        }
+        QVERIFY2(channelDistance(letterPixel, letterColor) <= 24,
+                 qPrintable(QStringLiteral("%1: the letter's strongest pixel is %2, not %3")
+                                .arg(name, letterPixel.name(), letterColor.name())));
+        QVERIFY2(contrastRatio(letterPixel, drawnInside) >= 4.5,
+                 qPrintable(describe(name + QStringLiteral(": the drawn letter"), letterPixel, drawnInside)));
+
+        // The icon is drawn in the glyph colour: the middle of the fixture's
+        // square, against the button around it.
+        const QColor iconColor = colorOf(plotColors, state.checked ? "checkedGlyph" : "plotText");
+        QVERIFY(sameColor(colorOf(icon, "color"), iconColor));
+        const QPointF iconOrigin = iconButton->mapToScene(QPointF(0, 0)) * scale;
+        const QColor iconPixel = pixelAt(image, iconOrigin + QPointF(12 * scale, 12 * scale));
+        const QColor iconBehind = pixelAt(image, iconOrigin + QPointF(2.5 * scale, 12 * scale));
+        QVERIFY2(channelDistance(iconPixel, iconColor) <= 3,
+                 qPrintable(QStringLiteral("%1: the icon is %2, not %3").arg(name, iconPixel.name(), iconColor.name())));
+        QVERIFY2(contrastRatio(iconPixel, iconBehind) >= 4.5,
+                 qPrintable(describe(name + QStringLiteral(": the drawn icon"), iconPixel, iconBehind)));
         if (state.focused) {
             const QColor drawnRing = pixel(25.5);
             QVERIFY2(contrastRatio(drawnRing, drawnGap) >= 3.0,
                      qPrintable(describe(name + QStringLiteral(": the ring on the plate"), drawnRing, drawnGap)));
         }
     }
-
-    // The icon follows the same colours.
-    QVERIFY(iconButton->property("checked").toBool());
-    QVERIFY(sameColor(colorOf(icon, "color"), colorOf(plotColors, "checkedGlyph")));
-    iconButton->setProperty("checked", false);
-    QVERIFY(sameColor(colorOf(icon, "color"), colorOf(plotColors, "plotText")));
 
     // Space checks the focused button.
     button->setProperty("checked", false);
@@ -991,6 +1050,23 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+    // The app's controls style, which it needs to start (docs/INSTALL.md).
+    // With it, Kirigami draws theme icons in the colour asked for, as the
+    // plot tool buttons' glyphs need.
+    QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
+    // Settings, data and caches of the test's own: no developer's icon
+    // theme, colours or caches reach the tests.
+    QTemporaryDir fixtures;
+    if (!fixtures.isValid()) {
+        return 1;
+    }
+    qputenv("XDG_CONFIG_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("config"))));
+    qputenv("XDG_CONFIG_DIRS", QFile::encodeName(fixtures.filePath(QStringLiteral("config-dirs"))));
+    qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
+    qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
+    if (!installIconFixture(fixtures.filePath(QStringLiteral("data-dirs")))) {
+        return 1;
+    }
     QApplication app(argc, argv);
     UiFoundationsTest test;
     return QTest::qExec(&test, argc, argv);

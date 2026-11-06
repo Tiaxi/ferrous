@@ -226,6 +226,7 @@ jobs:
             qt6-qtquickcontrols2-devel \
             kf6-kirigami-devel \
             kf6-ki18n-devel \
+            kf6-qqc2-desktop-style \
             gettext \
             glibc-langpack-en \
             xorg-x11-server-Xvfb \
