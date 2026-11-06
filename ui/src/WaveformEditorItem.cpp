@@ -16,6 +16,7 @@
 #include <QPen>
 #include <QPointer>
 #include <QQuickWindow>
+#include <QScreen>
 #include <QSGRendererInterface>
 #include <QThreadPool>
 #include <QtConcurrent/QtConcurrentRun>
@@ -249,6 +250,8 @@ WaveformEditorItem::~WaveformEditorItem() {
     disconnect(m_frameSwappedConnection);
     disconnect(m_windowVisibilityConnection);
     disconnect(m_windowPresenceConnection);
+    disconnect(m_screenConnection);
+    disconnect(m_refreshRateConnection);
     cancelPlaybackFrame();
     if (m_decodeCancelled) m_decodeCancelled->store(true);
     {
@@ -802,6 +805,9 @@ void WaveformEditorItem::requestDetailWindow() {
         bool requestFollowup = false;
         bool stale = false;
         bool parseFailed = false;
+        // Whether the detail changes how the view is drawn, as a zoom
+        // does, rather than only adding to what playback shows.
+        bool presentationChanged = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
         const double profileDecodeMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - profileRequestStarted).count();
@@ -887,6 +893,9 @@ void WaveformEditorItem::requestDetailWindow() {
                 }
                 requestFollowup = !detailOrPendingRequestCoversLocked(
                     visibleStart, visibleEnd);
+                presentationChanged = firstDetail || channelsChanged || rateChanged
+                    || zoomChanged || pointsChanged || replaceOverviewFallback
+                    || deferredZoomStage || stageReplacement;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
                 profileStagedWidth = m_stagedCache.width();
                 profileStagedSecondsPerPixel = m_stagedCacheSecondsPerPixel;
@@ -932,7 +941,14 @@ void WaveformEditorItem::requestDetailWindow() {
         if (zoomChanged) emit zoomLevelChanged();
         if (pointsChanged) emit samplePointsVisibleChanged();
         if (requestFollowup) scheduleDetailRequest();
-        update();
+        // A zoom, a track's first detail or a change of how it is drawn
+        // shows at once; more of the same detail as playback moves on
+        // shows with the next frame of playback.
+        if (presentationChanged) {
+            update();
+        } else {
+            requestArrivalFrame();
+        }
     });
     watcher->setFuture(QtConcurrent::run(
         [decode = m_decodeWindow, path, requestStart, requestEnd, points, cancelled]() {
@@ -1421,15 +1437,20 @@ void WaveformEditorItem::bindWindowFrameLoop(QQuickWindow *window) {
     if (m_frameSwappedConnection) disconnect(m_frameSwappedConnection);
     if (m_windowVisibilityConnection) disconnect(m_windowVisibilityConnection);
     disconnect(m_windowPresenceConnection);
+    disconnect(m_screenConnection);
     m_frameSwappedConnection = {};
     m_windowVisibilityConnection = {};
     m_windowPresenceConnection = {};
+    m_screenConnection = {};
     m_windowPresence = WindowPresence::of(window);
     // The new window draws a frame of its own, which schedules the next
     // one with the new window's views.
     cancelPlaybackFrame();
     m_frameScheduler = nullptr;
+    updateRefreshRate();
     if (window == nullptr) return;
+    m_screenConnection = connect(
+        window, &QWindow::screenChanged, this, &WaveformEditorItem::updateRefreshRate);
     m_frameSwappedConnection = connect(
         window,
         &QQuickWindow::frameSwapped,
@@ -1604,7 +1625,83 @@ qint64 WaveformEditorItem::playbackFrameDelayNsLocked(qint64 nowNs) const {
     if (std::isinf(change)) return -1;
     const std::optional<qint64> changesAt = m_clockState.reachesAt(change);
     if (!changesAt) return -1;
-    return *changesAt > nowNs ? *changesAt - nowNs : 0;
+    // A view that scrolls too fast to follow waits for its next capped
+    // frame, however soon it changes.
+    return std::max(*changesAt > nowNs ? *changesAt - nowNs : 0, cappedFrameDelayNsLocked(nowNs));
+}
+
+int WaveformEditorItem::fastScrollRefreshDivisor(double refreshRateHz) {
+    if (!std::isfinite(refreshRateHz) || refreshRateHz <= 0.0) return 1;
+    return std::max(1, static_cast<int>(std::lround(refreshRateHz / kFastScrollFramesPerSecond)));
+}
+
+double WaveformEditorItem::scrollPixelsPerSecondLocked(int width) const {
+    const double span = visibleSpanForZoomLocked(m_presentedZoomLevel);
+    return span > 0.0 ? static_cast<double>(width) / span : 0.0;
+}
+
+bool WaveformEditorItem::fastScrollCappedLocked(int width) const {
+    const double speed = scrollPixelsPerSecondLocked(width);
+    return m_fastScrollCapped ? speed >= kFastScrollUncapPixelsPerSecond
+                              : speed > kFastScrollCapPixelsPerSecond;
+}
+
+qint64 WaveformEditorItem::cappedFrameIntervalNsLocked() const {
+    if (!m_fastScrollCapped || !m_playing || !m_clockState.advancing()) return 0;
+    const int divisor = fastScrollRefreshDivisor(m_refreshRateHz);
+    if (divisor <= 1) return 0;
+    return std::llround(divisor * 1e9 / m_refreshRateHz);
+}
+
+qint64 WaveformEditorItem::cappedFrameDelayNsLocked(qint64 nowNs) const {
+    // A zoom being handed over shows its frames at once.
+    if (m_zoomOutHandoffPending || !m_stagedCache.isNull()) return 0;
+    if (cappedFrameIntervalNsLocked() <= 0) return 0;
+    return std::max<qint64>(0, m_nextCappedFrameNs - nowNs);
+}
+
+void WaveformEditorItem::requestArrivalFrame() {
+    const qint64 nowNs = m_nowNs();
+    qint64 delayNs = 0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        delayNs = cappedFrameDelayNsLocked(nowNs);
+    }
+    if (delayNs <= 0 || !shownOnScreen()) {
+        update();
+        return;
+    }
+    // A frame asked for by then shows it too.
+    PlaybackFrameScheduler *scheduler = frameScheduler();
+    const qint64 dueNs = scheduler->dueNs(this);
+    if (dueNs < 0 || dueNs > nowNs + delayNs) scheduler->schedule(this, nowNs + delayNs, nowNs);
+}
+
+double WaveformEditorItem::screenRefreshRate(const QScreen &screen) {
+    return screen.refreshRate();
+}
+
+void WaveformEditorItem::updateRefreshRate() {
+    QQuickWindow *view = window();
+    QScreen *screen = view != nullptr ? view->screen() : nullptr;
+    disconnect(m_refreshRateConnection);
+    m_refreshRateConnection = {};
+    if (screen != nullptr) {
+        m_refreshRateConnection = connect(
+            screen, &QScreen::refreshRateChanged, this, &WaveformEditorItem::updateRefreshRate);
+    }
+    const double rate = screen != nullptr ? m_screenRefreshRate(*screen) : 0.0;
+    QMutexLocker lock(&m_stateMutex);
+    m_refreshRateHz = rate;
+}
+
+bool WaveformEditorItem::clipSampleChunksLocked(double column) const {
+    // A frame that moved on by the view's width or more shows none of the
+    // last frame's chunks, nor will the next frame its own.
+    const double moved = std::abs(column - m_lastSampleChunkColumn);
+    if (std::isnan(moved)) return false;
+    const double columns = deviceColumnsLocked();
+    return moved >= (m_sampleChunksClipped ? kSampleChunkWholeViewFraction * columns : columns);
 }
 
 void WaveformEditorItem::schedulePlaybackFrame(qint64 delayNs, qint64 nowNs) {
@@ -2087,22 +2184,25 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 || m_cachedViewportWidth != renderPixelWidthLocked()
                 || m_cachedViewportHeight != renderPixelHeightLocked());
 #endif
-        if (!directDetail) m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
+        if (!directDetail) {
+            m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
+            m_sampleChunksClipped = false;
+        }
         if (directDetail) {
             painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
             // The scene graph keeps the samples' geometry, in chunks; any
             // other painter draws them.
             const int lanes = displayedChannelCountLocked();
-            // A frame that moved on by the view's width or more shows none
-            // of the last frame's chunks, nor will the next frame its own.
             const double column = sampleChunkColumnLocked(visibleStart);
-            const bool clipToView = std::abs(column - m_lastSampleChunkColumn) >= deviceColumnsLocked();
+            const bool clipToView = clipSampleChunksLocked(column);
             const auto chunks = sampleChunksLocked(
                 visibleStart, canvasWidth, canvasHeight, lanes, clipToView);
             if (chunks && WaveformSceneGraph::drawChunks(*painter, *chunks)) {
                 m_lastSampleChunkColumn = column;
+                m_sampleChunksClipped = clipToView;
             } else {
                 m_lastSampleChunkColumn = std::numeric_limits<double>::quiet_NaN();
+                m_sampleChunksClipped = false;
                 drawDetailLocked(
                     *painter, canvasWidth, canvasHeight,
                     visibleStart, visibleEnd, lanes, 1.0,
@@ -2162,6 +2262,19 @@ void WaveformEditorItem::paint(QPainter *painter) {
         m_paintedFrameChangeSeconds = tilesContinue
             ? std::numeric_limits<double>::quiet_NaN()
             : frameChangeSecondsLocked(visibleStart, visibleEnd, position, canvasWidth);
+        m_fastScrollCapped = fastScrollCappedLocked(canvasWidth);
+        if (const qint64 interval = cappedFrameIntervalNsLocked(); interval > 0) {
+            // A frame drawn when the last one asked for it, or within a
+            // refresh after, as a timer wakes late, keeps to the grid;
+            // any other, such as one drawn at once for a seek or a zoom,
+            // starts it again from itself.
+            const qint64 refreshNs = interval / fastScrollRefreshDivisor(m_refreshRateHz);
+            const qint64 due = m_nextCappedFrameNs;
+            const bool onGrid = due > 0 && frameNs >= due && frameNs - due < refreshNs;
+            m_nextCappedFrameNs = (onGrid ? due : frameNs) + interval;
+        } else {
+            m_nextCappedFrameNs = 0;
+        }
         cacheStart = m_cacheStartSeconds;
         cacheSecondsPerPixel = m_cacheSecondsPerPixel;
         deviceColumns = deviceColumnsLocked();
@@ -2683,7 +2796,7 @@ void WaveformEditorItem::deliverPlaybackTile(
     if (!m_playbackTileWorkers->updateQueued.exchange(true)) {
         QMetaObject::invokeMethod(this, [this]() {
             m_playbackTileWorkers->updateQueued.store(false);
-            update();
+            requestArrivalFrame();
         }, Qt::QueuedConnection);
     }
 }
