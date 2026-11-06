@@ -22,6 +22,10 @@ QtObject {
     property string lastAutoCenterPlaybackState: ""
     property string lastAutoCenterTrackPath: ""
     property bool autoCenterSelection: true
+    // Whether the latest reorder the user made was a drag, whose displaced
+    // rows slide into place; reorders by the keyboard or the menu are
+    // instant, so repeated moves never lag (#373 Motion).
+    property bool movesSlide: false
     property int _pendingScrollIndex: -1
     property var _pendingScrollView: null
 
@@ -420,6 +424,7 @@ QtObject {
         if (root.selectedIndices.length === 0 || delta === 0) {
             return
         }
+        root.movesSlide = false
         root.uiBridge.shiftQueueRows(root.selectedIndices.slice(), delta)
     }
 
@@ -436,6 +441,7 @@ QtObject {
         if (index < 0 || index >= root.uiBridge.queueLength || delta === 0) {
             return
         }
+        root.movesSlide = false
         root.uiBridge.shiftQueueRows(root.rowsFor(index), delta)
     }
 
@@ -446,6 +452,7 @@ QtObject {
         if (from < 0 || from >= root.uiBridge.queueLength || insertIndex < 0) {
             return
         }
+        root.movesSlide = true
         root.uiBridge.moveQueueRows(root.rowsFor(from), insertIndex)
     }
 

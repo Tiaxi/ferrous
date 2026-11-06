@@ -20,6 +20,12 @@ Rectangle {
     property color placeholderColor: "transparent"
     property color placeholderGlyphColor: Kirigami.Theme.textColor
     readonly property bool hasCover: root.uiBridge.currentTrackCoverPath.length > 0
+    // The cover before, or its placeholder for none, over this one while it
+    // fades out: the now-playing panel's album change.
+    property bool outgoingShown: false
+    property string outgoingCoverPath: ""
+    property real outgoingOpacity: 0
+    readonly property real coverSourceSize: Math.max(256, root.width)
 
     implicitWidth: 320
     implicitHeight: 320
@@ -40,8 +46,8 @@ Rectangle {
         asynchronous: true
         cache: true
         retainWhileLoading: true
-        sourceSize.width: Math.max(256, width)
-        sourceSize.height: Math.max(256, height)
+        sourceSize.width: root.coverSourceSize
+        sourceSize.height: root.coverSourceSize
     }
 
     Kirigami.Icon {
@@ -53,6 +59,38 @@ Rectangle {
         isMask: true
         color: root.placeholderGlyphColor
         visible: !root.hasCover
+    }
+
+    // The cover before fades out over this one, which shows whole all along,
+    // so the panel never shows through between the two.
+    Rectangle {
+        objectName: "albumArtOutgoing"
+        anchors.fill: parent
+        visible: root.outgoingShown && root.outgoingOpacity > 0
+        opacity: root.outgoingOpacity
+        color: root.outgoingCoverPath.length > 0 ? "transparent" : root.placeholderColor
+
+        // The same size as the cover had, so the image cache still has it.
+        Image {
+            anchors.fill: parent
+            source: parent.visible ? root.outgoingCoverPath : ""
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            asynchronous: true
+            cache: true
+            sourceSize.width: root.coverSourceSize
+            sourceSize.height: root.coverSourceSize
+        }
+
+        Kirigami.Icon {
+            anchors.centerIn: parent
+            width: Math.round(Math.min(parent.width, parent.height) / 3)
+            height: width
+            source: "media-album-track"
+            isMask: true
+            color: root.placeholderGlyphColor
+            visible: root.outgoingCoverPath.length === 0
+        }
     }
 
     MouseArea {

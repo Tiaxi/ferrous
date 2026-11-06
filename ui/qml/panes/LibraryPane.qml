@@ -7,6 +7,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The library: its region header, then the tree, on the view colour.
 //
@@ -48,6 +49,41 @@ Rectangle {
     // groups the tree: one artist row can gather tracks from more than one
     // folder, so the rows' paths cannot tell.
     readonly property var currentTrackTreeKeys: root.uiBridge.currentTrackTreeKeys || []
+
+    // A track change: the rows that become now are amber at once, from
+    // their own state; the track row that was now, or the collapsed rows
+    // that held it, fade their amber out (#373 Motion). `nowTrack` is the
+    // track that is amber, with the rows that hold it, as last seen. The
+    // backend names the holding rows a moment after the track, so the
+    // last names it gave are kept until the track changes.
+    property var nowTrack: null
+    readonly property QtObject nowFade: treeNowFade
+
+    Components.NowFadeOut {
+        id: treeNowFade
+    }
+
+    function followNowTrack() {
+        const path = root.uiBridge.currentTrackPath || ""
+        const state = root.uiBridge.playbackState || "Stopped"
+        const keys = root.uiBridge.currentTrackTreeKeys || []
+        const was = root.nowTrack
+        if (was !== null && path !== was.path) {
+            root.nowFade.start(was)
+        }
+        root.nowTrack = state !== "Stopped" && path.length > 0
+            ? {
+                path: path,
+                keys: keys.length > 0 || was === null || was.path !== path ? keys : was.keys,
+                glyph: state === "Paused" ? "media-playback-pause" : "media-playback-start"
+            }
+            : null
+    }
+
+    onCurrentTrackPathChanged: root.followNowTrack()
+    onPlaybackStateChanged: root.followNowTrack()
+    onCurrentTrackTreeKeysChanged: root.followNowTrack()
+    Component.onCompleted: root.followNowTrack()
 
     readonly property string totalsText: {
         const tracks = root.uiBridge.libraryTrackCount
@@ -109,6 +145,67 @@ Rectangle {
                 pixelAligned: true
                 Accessible.role: Accessible.Tree
                 Accessible.name: I18n.i18nc("@label", "Library")
+
+                // Expanding a row opens its children downward: they are in
+                // place at once, under the rows below, which slide down and
+                // uncover them; collapsing slides those rows back up over
+                // the children as they fade. The toggled row and the rows
+                // above it stay put. Only a toggle moves: the controller
+                // sets `animatesToggle` while the view lays it out, so
+                // scans, searches and restores change the rows at once.
+                property bool animatesToggle: false
+                readonly property int toggleDuration: Kirigami.Units.shortDuration
+                readonly property bool togglesMove: libraryAlbumView.animatesToggle
+                    && libraryAlbumView.toggleDuration > 0
+                readonly property QtObject openAnimation: treeOpenAnimation
+                readonly property QtObject closeAnimation: treeCloseAnimation
+                readonly property QtObject closeFadeAnimation: treeCloseFadeAnimation
+                addDisplaced: Transition {
+                    objectName: "libraryOpenTransition"
+                    enabled: libraryAlbumView.togglesMove
+                    SequentialAnimation {
+                        PropertyAction { property: "z"; value: 2 }
+                        NumberAnimation {
+                            id: treeOpenAnimation
+                            objectName: "libraryOpenAnimation"
+                            property: "y"
+                            duration: libraryAlbumView.toggleDuration
+                            easing.type: Easing.OutCubic
+                        }
+                        PropertyAction { property: "z"; value: 1 }
+                    }
+                }
+                remove: Transition {
+                    objectName: "libraryCloseRemoveTransition"
+                    enabled: libraryAlbumView.togglesMove
+                    SequentialAnimation {
+                        NumberAnimation {
+                            id: treeCloseFadeAnimation
+                            objectName: "libraryCloseFadeAnimation"
+                            property: "opacity"
+                            to: 0
+                            duration: libraryAlbumView.toggleDuration
+                            easing.type: Easing.OutCubic
+                        }
+                        // Pooled for reuse, the row must come back whole.
+                        PropertyAction { property: "opacity"; value: 1 }
+                    }
+                }
+                removeDisplaced: Transition {
+                    objectName: "libraryCloseTransition"
+                    enabled: libraryAlbumView.togglesMove
+                    SequentialAnimation {
+                        PropertyAction { property: "z"; value: 2 }
+                        NumberAnimation {
+                            id: treeCloseAnimation
+                            objectName: "libraryCloseAnimation"
+                            property: "y"
+                            duration: libraryAlbumView.toggleDuration
+                            easing.type: Easing.OutCubic
+                        }
+                        PropertyAction { property: "z"; value: 1 }
+                    }
+                }
 
                 Component.onCompleted: root.controller.registerView(libraryAlbumView)
                 onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
@@ -221,6 +318,21 @@ Rectangle {
                     readonly property bool holdsNow: hasChildren && !isExpanded
                         && root.playbackState !== "Stopped"
                         && root.currentTrackTreeKeys.indexOf(key || "") >= 0
+                    // The amber left on the track row that was now, or on
+                    // a collapsed row that held it, fading out after a
+                    // track change; 0 on every other row.
+                    readonly property real amberLeft: {
+                        const fading = treeNowFade.target
+                        if (fading === null) {
+                            return 0
+                        }
+                        if (isTrackRow) {
+                            return !isNow && trackPathResolved === fading.path ? treeNowFade.level : 0
+                        }
+                        return hasChildren && !isExpanded && !holdsNow
+                            && fading.keys.indexOf(key || "") >= 0
+                            ? treeNowFade.level : 0
+                    }
                     readonly property string stateGlyph: {
                         if (isNow || holdsNow) {
                             return root.playbackState === "Paused"
@@ -265,6 +377,16 @@ Rectangle {
 
                     width: ListView.view.width
                     height: libraryAlbumView.rowHeight
+                    // The rows below a toggled row over its children; see
+                    // the view's transitions.
+                    z: 1
+
+                    // A pooled row comes back plain, whatever transition
+                    // it left in.
+                    ListView.onReused: {
+                        libraryRow.z = 1
+                        libraryRow.opacity = 1
+                    }
 
                     Accessible.role: Accessible.TreeItem
                     Accessible.name: rowTitle
@@ -283,6 +405,7 @@ Rectangle {
 
                     Components.RowBackground {
                         uiPalette: root.uiPalette
+                        opaque: true
                         hovered: libraryRowMouseArea.containsMouse
                         selected: libraryRow.rowSelected
                         active: libraryAlbumView.activeFocus
@@ -334,6 +457,21 @@ Rectangle {
                         }
                     }
 
+                    // The glyph the row had while it was now, or held
+                    // what was, fading out over whatever it shows next.
+                    Kirigami.Icon {
+                        objectName: "libraryRowFadingState"
+                        visible: libraryRow.amberLeft > 0
+                        x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
+                        y: Math.round((libraryRow.height - height) / 2)
+                        width: root.stateGlyphSize
+                        height: root.stateGlyphSize
+                        source: visible ? treeNowFade.target.glyph : ""
+                        isMask: true
+                        color: root.uiPalette.now
+                        opacity: libraryRow.amberLeft * (libraryRow.isTrackRow ? 1 : 0.6)
+                    }
+
                     Kirigami.ShadowedImage {
                         objectName: "libraryRowThumbnail"
                         visible: libraryRow.showsThumbnail
@@ -378,11 +516,15 @@ Rectangle {
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
                         font.weight: libraryRow.isNow ? Font.DemiBold : Font.Normal
+                        readonly property color plainColor: libraryRow.unreadableReason.length > 0
+                            ? root.uiPalette.textSecondary
+                            : root.uiPalette.text
+                        // A collapsed row's title is never amber.
                         color: libraryRow.isNow
                             ? root.uiPalette.now
-                            : (libraryRow.unreadableReason.length > 0
-                                ? root.uiPalette.textSecondary
-                                : root.uiPalette.text)
+                            : (libraryRow.isTrackRow && libraryRow.amberLeft > 0
+                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, libraryRow.amberLeft)
+                                : plainColor)
                     }
 
                     Text {

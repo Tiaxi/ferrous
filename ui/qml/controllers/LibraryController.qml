@@ -338,7 +338,18 @@ QtObject {
             root.pendingExpandFitAttempts = 0
         }
         root.pendingAnchorValid = false
+        // The view slides its rows for this change alone, which it lays
+        // out here rather than with the next frame.
+        const animates = !!root.view && root.view.animatesToggle !== undefined
+            && typeof root.view.forceLayout === "function"
+        if (animates) {
+            root.view.animatesToggle = true
+        }
         root.libraryModel.toggleKey(key)
+        if (animates) {
+            root.view.forceLayout()
+            root.view.animatesToggle = false
+        }
         // Rows a collapse hides leave the selection.
         root.syncSelectionToVisibleRows()
         if (expanding) {
