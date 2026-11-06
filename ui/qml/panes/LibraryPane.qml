@@ -293,12 +293,15 @@ Rectangle {
                     Accessible.role: Accessible.TreeItem
                     Accessible.name: rowTitle
                     // QML cannot set the expanded state, so the description
-                    // tells it.
+                    // tells it, and why an unreadable track is marked.
                     Accessible.description: hasChildren
                         ? (isExpanded
                             ? I18n.i18nc("@info %1 is a library row kind", "%1, expanded", rowKindText)
                             : I18n.i18nc("@info %1 is a library row kind", "%1, collapsed", rowKindText))
-                        : rowKindText
+                        : (unreadableReason.length > 0
+                            ? I18n.i18nc("@info %1 is a library row kind, %2 why its file cannot be read",
+                                         "%1, %2", rowKindText, unreadableReason)
+                            : rowKindText)
                     Accessible.selectable: true
                     Accessible.selected: rowSelected
 

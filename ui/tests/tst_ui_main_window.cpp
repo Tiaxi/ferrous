@@ -748,6 +748,8 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(treeGlyph->property("source").toString(), QStringLiteral("dialog-warning"));
     QCOMPARE(colorOf(treeGlyph), tokenHex(window, "textSecondary"));
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowTitle"))), tokenHex(window, "textSecondary"));
+    QCOMPARE(QQmlProperty(track, QStringLiteral("Accessible.description"), qmlContext(track)).read().toString(),
+             QStringLiteral("Track, The file cannot be read."));
     QQuickItem *queueRow = nullptr;
     QTRY_VERIFY(([&]() {
         for (QQuickItem *row : itemsNamed(named(window, "playlistView"), QStringLiteral("queueRow"))) {
@@ -762,6 +764,8 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(queueGlyph->property("source").toString(), QStringLiteral("dialog-warning"));
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_title"))), tokenHex(window, "textSecondary"));
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textSecondary"));
+    QVERIFY(QQmlProperty(queueRow, QStringLiteral("Accessible.name"), qmlContext(queueRow))
+                .read().toString().endsWith(QStringLiteral(", The file cannot be read.")));
     // Clearing the history clears the marks.
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_VERIFY(!treeGlyph->isVisible());
