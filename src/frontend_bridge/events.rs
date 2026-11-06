@@ -234,6 +234,7 @@ pub(super) fn process_playback_event(
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
+            state.analysis.waveform_ends_early = false;
             state.analysis_track_token = track_token;
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
@@ -291,6 +292,12 @@ pub(super) fn process_playback_event(
             SnapshotUrgency::None
         }
     }
+}
+
+/// The warning the user is shown for a file that is cut off, about the file:
+/// playback goes on to the next track at the cut.
+pub(super) fn file_ends_early(path: &std::path::Path, message: String) -> BridgeError {
+    BridgeError::warning(ErrorCategory::Playback, message).about(path.to_string_lossy())
 }
 
 /// The error the user is shown for `error`, about its file. A skipped file
@@ -368,6 +375,7 @@ fn process_playback_snapshot_event(
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
             state.analysis.waveform_complete = false;
+            state.analysis.waveform_ends_early = false;
             urgency = SnapshotUrgency::Immediate;
         }
         return urgency;
@@ -514,6 +522,7 @@ pub(super) fn process_analysis_event(
     state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
     state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
     state.analysis.waveform_complete = snapshot.waveform_complete;
+    state.analysis.waveform_ends_early = snapshot.waveform_ends_early;
     if !snapshot.waveform_peaks.is_empty() {
         state.analysis.waveform_peaks = snapshot.waveform_peaks;
     }
@@ -549,6 +558,12 @@ pub(super) fn drain_analysis_events(
                 let _ = try_send_event(
                     event_tx,
                     BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                );
+            }
+            AnalysisEvent::FileEndsEarly { path, message } => {
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(file_ends_early(&path, message)),
                 );
             }
         }

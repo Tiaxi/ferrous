@@ -83,6 +83,8 @@ constexpr quint8 kAnalysisFlagWaveform = 0x01;
 constexpr quint8 kAnalysisFlagReset = 0x02;
 constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
 constexpr quint8 kAnalysisFlagWaveformComplete = 0x08;
+// The file is cut off where the waveform's coverage ends.
+constexpr quint8 kAnalysisFlagWaveformEndsEarly = 0x10;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 constexpr int kMaxDiagnosticsLines = 2000;
 constexpr int kItunesArtworkSearchRequestLimit = 50;
@@ -1824,6 +1826,10 @@ double BridgeClient::waveformCoverageSeconds() const {
 
 bool BridgeClient::waveformComplete() const {
     return m_waveformComplete;
+}
+
+bool BridgeClient::waveformEndsEarly() const {
+    return m_waveformEndsEarly;
 }
 
 int BridgeClient::sampleRateHz() const {
@@ -4595,6 +4601,11 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         }
         if (m_waveformComplete != waveformComplete) {
             m_waveformComplete = waveformComplete;
+            changed = true;
+        }
+        const bool waveformEndsEarly = (flags & kAnalysisFlagWaveformEndsEarly) != 0;
+        if (m_waveformEndsEarly != waveformEndsEarly) {
+            m_waveformEndsEarly = waveformEndsEarly;
             changed = true;
         }
 

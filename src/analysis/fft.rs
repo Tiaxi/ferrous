@@ -239,6 +239,12 @@ pub(super) enum OverviewProgress {
     /// The decode stopped at an error before the end of the file. The peaks
     /// cover only the audio before it, and are not saved.
     Truncated,
+    /// The decode reached the end of the file, but the file ends before the
+    /// length its header gives: it was cut off. The peaks cover the audio
+    /// up to the cut, which playback also stops at, and are not saved, so
+    /// every play of the file finds the cut again. It holds the name of
+    /// the file's frames, such as `FLAC`, or `None` for PCM, which has none.
+    EndsEarly(Option<&'static str>),
     /// The decode reached the end of the file.
     Complete,
 }
@@ -369,6 +375,11 @@ impl WaveformAccumulator {
     }
 
     /// The seconds of audio pushed so far.
+    /// The frames pushed so far.
+    pub(super) fn covered_frames(&self) -> u64 {
+        self.covered_frames
+    }
+
     pub(super) fn coverage_seconds(&self) -> f32 {
         seconds_from_frames(self.covered_frames, self.sample_rate_hz)
     }

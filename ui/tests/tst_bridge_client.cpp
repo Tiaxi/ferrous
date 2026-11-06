@@ -386,6 +386,7 @@ private slots:
     void saveBeforeQuitReportsAFailedSaveAndSavesOnRetry();
     void saveBeforeQuitFailsWhenTheBackendHasStopped();
     void spectrogramOverlaySettingsApplyFromSnapshot();
+    void analysisFrameTellsAFileThatEndsEarly();
     void spectrogramOverlaySettingsDecodeFromBinaryPayload();
     void testSoloChannelCommandEncoding();
     void testSoloedChannelsDecoding();
@@ -6514,6 +6515,30 @@ void BridgeClientTest::saveBeforeQuitFailsWhenTheBackendHasStopped() {
         QStringLiteral("Settings and the queue could not be saved: the backend has stopped."));
 }
 
+void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(!client.waveformEndsEarly());
+    // [len u32][magic][rate u32][flags][waveform len u16][coverage ms u32]
+    // [rows u16][bins u16][seq u32][channels]: 21 bytes after the length.
+    const auto frame = [](quint8 flags, quint32 coverageMillis, quint32 seq) {
+        QByteArray bytes;
+        QDataStream out(&bytes, QIODevice::WriteOnly);
+        out.setByteOrder(QDataStream::LittleEndian);
+        out << quint32(21) << quint8(0xA1) << quint32(44100) << flags << quint16(0)
+            << coverageMillis << quint16(0) << quint16(0) << seq << quint8(0);
+        return bytes;
+    };
+    client.processAnalysisBytes(frame(0x10, 242000, 1));
+    QVERIFY(client.waveformEndsEarly());
+    QVERIFY(!client.waveformComplete());
+    QCOMPARE(client.waveformCoverageSeconds(), 242.0);
+    // A frame without flags, as for the next track, clears it.
+    client.processAnalysisBytes(frame(0x00, 0, 2));
+    QVERIFY(!client.waveformEndsEarly());
+    QCOMPARE(client.waveformCoverageSeconds(), 0.0);
+}
+
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -6522,7 +6547,8 @@ void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {
     QCOMPARE(client.showSpectrogramCrosshair(), false);
     QCOMPARE(client.showSpectrogramScale(), false);
     QCOMPARE(client.preventDisplaySleepInFullscreen(), true);
-    QCOMPARE(client.showLevelMeter(), true);
+    // Off by default, as in the Rust settings.
+    QCOMPARE(client.showLevelMeter(), false);
 
     // Apply a snapshot with both enabled.
     BinaryBridgeCodec::DecodedSnapshot snapshot;
@@ -7118,7 +7144,8 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
              qPrintable(error));
     QCOMPARE(decoded.settings.channelButtonsVisibility, 2);
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, true);
-    QCOMPARE(decoded.settings.showLevelMeter, true); // Older settings payloads default on.
+    // Without the field, the default the Rust settings have.
+    QCOMPARE(decoded.settings.showLevelMeter, false);
 }
 
 void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {

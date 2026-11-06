@@ -38,6 +38,8 @@ const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
+/// The file is cut off where the waveform's coverage ends.
+const ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY: u8 = 0x10;
 /// Errors waiting for the UI past this many give way, oldest first, to one
 /// entry that counts them.
 const MAX_PENDING_ERRORS: usize = 32;
@@ -109,6 +111,7 @@ struct AnalysisDelta {
     waveform_changed: bool,
     waveform_coverage_millis: u32,
     waveform_complete: bool,
+    waveform_ends_early: bool,
     waveform_peaks_u8: Vec<u8>,
 }
 
@@ -117,6 +120,7 @@ struct AnalysisEmitState {
     last_waveform_peaks: Vec<f32>,
     last_waveform_coverage_millis: u32,
     last_waveform_complete: bool,
+    last_waveform_ends_early: bool,
     analysis_frame_seq: u32,
 }
 
@@ -3263,7 +3267,8 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     let waveform_coverage_millis = waveform_coverage_millis(s.analysis.waveform_coverage_seconds);
     let waveform_meta_changed = waveform_coverage_millis
         != emit_state.last_waveform_coverage_millis
-        || s.analysis.waveform_complete != emit_state.last_waveform_complete;
+        || s.analysis.waveform_complete != emit_state.last_waveform_complete
+        || s.analysis.waveform_ends_early != emit_state.last_waveform_ends_early;
     let waveform_peaks_u8 = if waveform_changed {
         emit_state
             .last_waveform_peaks
@@ -3277,6 +3282,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     };
     emit_state.last_waveform_coverage_millis = waveform_coverage_millis;
     emit_state.last_waveform_complete = s.analysis.waveform_complete;
+    emit_state.last_waveform_ends_early = s.analysis.waveform_ends_early;
 
     let has_payload = waveform_changed || waveform_meta_changed;
     if has_payload {
@@ -3290,6 +3296,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         waveform_changed,
         waveform_coverage_millis,
         waveform_complete: s.analysis.waveform_complete,
+        waveform_ends_early: s.analysis.waveform_ends_early,
         waveform_peaks_u8,
     }
 }
@@ -3326,10 +3333,11 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     if delta.waveform_complete {
         flags |= ANALYSIS_FLAG_WAVEFORM_COMPLETE;
     }
-
-    if flags == 0 {
-        return Vec::new();
+    if delta.waveform_ends_early {
+        flags |= ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY;
     }
+    // A frame without flags still tells the UI that the coverage, the
+    // completeness or the cut changed, as when a track change clears them.
 
     let waveform_len_u16 = clamp_u16(waveform_len);
     // Streaming spectrogram fields are zero (rows=0, bins=0, channels=0).
@@ -3597,6 +3605,7 @@ mod tests {
                 waveform_peaks: vec![0.1, 0.5, 0.9],
                 waveform_coverage_seconds: 0.0,
                 waveform_complete: true,
+                waveform_ends_early: false,
                 sample_rate_hz: 48_000,
             },
             metadata: crate::metadata::TrackMetadata {
@@ -6268,6 +6277,37 @@ mod tests {
 
     fn packets_encoded() -> usize {
         PACKETS_ENCODED.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_cut_off_file_is_flagged_and_a_track_change_clears_it() {
+        let (command_tx, _command_rx) = crossbeam_channel::unbounded();
+        let mut runtime = FfiRuntime::new(command_tx, -1, -1);
+        let mut cut = snapshot_without_queue(0);
+        cut.analysis.waveform_complete = false;
+        cut.analysis.waveform_ends_early = true;
+        cut.analysis.waveform_coverage_seconds = 242.0;
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(cut.clone()))]);
+        let frame = runtime.pop_analysis_frame().expect("a frame for the cut");
+        assert_ne!(frame[9] & ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY, 0);
+        assert_eq!(frame[9] & ANALYSIS_FLAG_WAVEFORM_COMPLETE, 0);
+        assert_eq!(
+            u32::from_le_bytes(frame[12..16].try_into().expect("coverage")),
+            242_000
+        );
+
+        // The next track has no waveform yet: a frame without flags clears
+        // the cut, though it carries no peaks.
+        let mut next = cut;
+        next.analysis.waveform_peaks.clear();
+        next.analysis.waveform_ends_early = false;
+        next.analysis.waveform_coverage_seconds = 0.0;
+        runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(next))]);
+        let frame = runtime
+            .pop_analysis_frame()
+            .expect("a frame for the change");
+        assert_eq!(frame[9], 0);
+        assert!(runtime.pop_analysis_frame().is_none());
     }
 
     #[test]

@@ -84,6 +84,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QByteArray waveformPeaksPacked READ waveformPeaksPacked NOTIFY analysisChanged)
     Q_PROPERTY(double waveformCoverageSeconds READ waveformCoverageSeconds NOTIFY analysisChanged)
     Q_PROPERTY(bool waveformComplete READ waveformComplete NOTIFY analysisChanged)
+    // Whether the current track's file is cut off: it ends at
+    // waveformCoverageSeconds, before the length its header gives.
+    Q_PROPERTY(bool waveformEndsEarly READ waveformEndsEarly NOTIFY analysisChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY analysisChanged)
     Q_PROPERTY(int fftSize READ fftSize NOTIFY snapshotChanged)
     Q_PROPERTY(int spectrogramViewMode READ spectrogramViewMode NOTIFY snapshotChanged)
@@ -224,6 +227,7 @@ public:
     QByteArray waveformPeaksPacked() const;
     double waveformCoverageSeconds() const;
     bool waveformComplete() const;
+    bool waveformEndsEarly() const;
     int sampleRateHz() const;
     int fftSize() const;
     int spectrogramViewMode() const;
@@ -806,6 +810,7 @@ private:
     QByteArray m_waveformPeaksPacked;
     double m_waveformCoverageSeconds{0.0};
     bool m_waveformComplete{false};
+    bool m_waveformEndsEarly{false};
     int m_sampleRateHz{48000};
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};
@@ -820,7 +825,7 @@ private:
     quint64 m_soloedChannelsMask{0};
     int m_channelButtonsVisibility{1};
     bool m_showFps{false};
-    bool m_showLevelMeter{true};
+    bool m_showLevelMeter{false};
     bool m_showSpectrogramCrosshair{false};
     bool m_showSpectrogramScale{false};
     bool m_spectrogramZoomEnabled{true};

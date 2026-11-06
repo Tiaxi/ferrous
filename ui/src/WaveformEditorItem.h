@@ -70,6 +70,17 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelCountChanged)
     Q_PROPERTY(int sampleRateHz READ sampleRateHz NOTIFY sampleRateHzChanged)
     Q_PROPERTY(bool samplePointsVisible READ samplePointsVisible NOTIFY samplePointsVisibleChanged)
+    // The plot's colours (UiPalette's waveformPlot): its floor, the waveform,
+    // a muted channel's, each lane's centre line, the seams between lanes and
+    // the playhead's core and casing. The defaults are for tests that draw
+    // the item on its own; the view sets them all.
+    Q_PROPERTY(QColor backgroundColor READ backgroundColor WRITE setBackgroundColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor waveformColor READ waveformColor WRITE setWaveformColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor mutedWaveformColor READ mutedWaveformColor WRITE setMutedWaveformColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor centerLineColor READ centerLineColor WRITE setCenterLineColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor laneSeamColor READ laneSeamColor WRITE setLaneSeamColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor playheadColor READ playheadColor WRITE setPlayheadColor NOTIFY colorsChanged)
+    Q_PROPERTY(QColor playheadCasingColor READ playheadCasingColor WRITE setPlayheadCasingColor NOTIFY colorsChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
@@ -121,6 +132,20 @@ public:
     int channelCount() const;
     int sampleRateHz() const;
     bool samplePointsVisible() const;
+    QColor backgroundColor() const;
+    void setBackgroundColor(const QColor &value);
+    QColor waveformColor() const;
+    void setWaveformColor(const QColor &value);
+    QColor mutedWaveformColor() const;
+    void setMutedWaveformColor(const QColor &value);
+    QColor centerLineColor() const;
+    void setCenterLineColor(const QColor &value);
+    QColor laneSeamColor() const;
+    void setLaneSeamColor(const QColor &value);
+    QColor playheadColor() const;
+    void setPlayheadColor(const QColor &value);
+    QColor playheadCasingColor() const;
+    void setPlayheadCasingColor(const QColor &value);
 
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
@@ -151,6 +176,7 @@ signals:
     void channelCountChanged();
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
+    void colorsChanged();
     void seekRequested(double seconds);
 
 protected:
@@ -286,8 +312,22 @@ private:
         // Logical spacing below which samples are joined by straight
         // segments and their markers are whole device pixels.
         double straightSamplePixelsPerSample{kStraightSamplePixelsPerSample};
+        QColor background{5, 9, 7};
+        QColor waveform{54, 225, 161};
+        QColor mutedWaveform{74, 104, 92};
         bool muted(int channel) const;
+        QColor waveformOf(int channel) const { return muted(channel) ? mutedWaveform : waveform; }
     };
+    struct Colors {
+        QColor background{5, 9, 7};
+        QColor waveform{54, 225, 161};
+        QColor mutedWaveform{74, 104, 92};
+        QColor centerLine{108, 42, 45};
+        QColor laneSeam{79, 94, 86};
+        QColor playhead{190, 190, 200, 150};
+        QColor playheadCasing{8, 18, 14, 235};
+    };
+    void setColor(QColor Colors::*member, const QColor &value);
 
     // What the workers that make playback tiles share with the item: they
     // hand a tile over only while the item lives, and only for the tiles
@@ -484,7 +524,7 @@ private:
     void drawGridLocked(QPainter &painter, int width, int height,
                         double visibleStart, double visibleEnd, int channels) const;
     static void drawChannelSeparators(
-        QPainter &painter, int width, int height, int channels);
+        QPainter &painter, int width, int height, int channels, const QColor &color);
     static void drawContrastingLine(
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
@@ -576,6 +616,7 @@ private:
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     qulonglong m_soloedChannelsMask{0};
+    Colors m_colors;
     int m_channelCountHint{1};
     int m_channelCount{0};
     int m_sampleRateHz{0};

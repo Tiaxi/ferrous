@@ -155,8 +155,9 @@ struct SpectrogramRasterJob {
 // A small image an overlay places on the pane: a label, or a crosshair's
 // dotted line. The scene node keeps its texture while the overlay shows it.
 struct SpectrogramOverlayImage {
-    enum Kind { GridLabel, CrosshairLabel, DottedColumn, DottedRow };
-    Kind kind{GridLabel};
+    // A scale label: outlined text on the plot. The crosshair's dashed lines.
+    enum Kind { ScaleLabel, DashedColumn, DashedRow };
+    Kind kind{ScaleLabel};
     // A label's text, or a dotted line's length in device pixels.
     QString text;
     int length{0};
@@ -225,6 +226,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    // Where the hovered crosshair is, for its tooltip: "4.4 kHz, −62 dB",
+    // a line break and "1:46.0"; empty while the pointer is not on this pane.
+    Q_PROPERTY(QString crosshairReadout READ crosshairReadout NOTIFY crosshairReadoutChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
@@ -269,6 +273,7 @@ public:
     void setDisplayMode(int value);
 
     bool crosshairEnabled() const;
+    QString crosshairReadout() const { return m_crosshairReadout; }
     void setCrosshairEnabled(bool value);
 
     bool gridEnabled() const;
@@ -348,6 +353,7 @@ signals:
     void precomputedReadyChanged();
     void displayModeChanged();
     void crosshairEnabledChanged();
+    void crosshairReadoutChanged();
     void gridEnabledChanged();
     void showTimeLabelsChanged();
     void crosshairSharedXChanged();
@@ -945,8 +951,10 @@ private:
     int m_crosshairCachedBinsPerColumn{0};
     QRect m_crosshairVerticalLineRect;
     QRect m_crosshairHorizontalLineRect;
-    QRect m_crosshairFreqLabelRect;
-    QRect m_crosshairTimeLabelRect;
+    // The readout laid out with the crosshair, and the one the GUI thread
+    // shows (crosshairReadout).
+    QString m_crosshairLaidOutReadout;
+    QString m_crosshairReadout;
 
     // Grid overlay state — split into static frequency grid and dynamic time grid.
     bool m_gridEnabled{false};
