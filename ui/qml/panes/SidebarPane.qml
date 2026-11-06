@@ -24,8 +24,12 @@ Rectangle {
     required property var playAllLibraryTracksAction
     required property var appendAllLibraryTracksAction
     required property var addLibraryFolderAction
+    // The tracks the playback failed to read, which the tree marks.
+    property var errorController: null
 
-    color: root.uiPalette.uiPaneColor
+    // Content: the view colour, from the now-playing cover to the bottom
+    // of the library.
+    color: root.uiPalette.view
     SplitView.preferredWidth: root.splitPreferredWidth
     SplitView.minimumWidth: 250
 
@@ -33,10 +37,13 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        Components.AlbumArtTile {
+        Components.NowPlayingPanel {
+            id: nowPlaying
+            objectName: "nowPlayingPanel"
             Layout.fillWidth: true
-            Layout.preferredHeight: width
+            Layout.preferredHeight: implicitHeight
             uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
             replaceFromItunesAction: root.replaceFromItunesAction
             currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
             openAlbumArtViewer: root.openAlbumArtViewer
@@ -56,6 +63,8 @@ Rectangle {
             playAllLibraryTracksAction: root.playAllLibraryTracksAction
             appendAllLibraryTracksAction: root.appendAllLibraryTracksAction
             addLibraryFolderAction: root.addLibraryFolderAction
+            narrow: nowPlaying.narrow
+            errorController: root.errorController
         }
     }
 }

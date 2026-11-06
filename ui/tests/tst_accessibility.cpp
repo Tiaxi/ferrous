@@ -249,6 +249,7 @@ QByteArray artistAlbumTrackTree() {
         appendLe<qint32>(out, -1);
         appendLe<quint32>(out, 0);
         appendLe<quint32>(out, row.childCount);
+        appendLe<qint32>(out, 0);
         appendUtf8(out, row.title);
         appendUtf8(out, row.key);
         appendUtf8(out, QStringLiteral("Artist A"));
@@ -2583,17 +2584,15 @@ void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {
     QVERIFY(queue != nullptr && library != nullptr);
     QVERIFY(queueController != nullptr && libraryController != nullptr);
     QObject *tagEditor = nullptr;
-    QObject *metadataCard = nullptr;
+    QObject *nowPlaying = window->findChild<QObject *>(QStringLiteral("nowPlayingPanel"));
     for (QObject *object : window->findChildren<QObject *>()) {
         if (object->property("tableRowHeight").isValid()) {
             tagEditor = object;
         }
-        if (object->property("labelColumnWidth").isValid()) {
-            metadataCard = object;
-        }
     }
-    QVERIFY(tagEditor != nullptr && metadataCard != nullptr);
-    const qreal defaultLabelWidth = metadataCard->property("labelColumnWidth").toReal();
+    QVERIFY(tagEditor != nullptr && nowPlaying != nullptr);
+    const qreal defaultTitleSize = nowPlaying->property("titlePointSize").toReal();
+    QVERIFY(defaultTitleSize > 0);
 
     const auto check = [&](qreal expectedRowHeight) {
         QCOMPARE(queue->property("rowHeight").toReal(), expectedRowHeight);
@@ -2642,8 +2641,8 @@ void AccessibilityTest::rowHeightsAndScrollingFollowTheFont() {
     // The window keeps room for the wider columns.
     QTRY_VERIFY(window->minimumWidth() > defaultMinimumWidth);
     check(queue->property("rowHeight").toReal());
-    // The now-playing labels' column widens with them.
-    QTRY_VERIFY(metadataCard->property("labelColumnWidth").toReal() > defaultLabelWidth * 1.6);
+    // The now-playing title grows with them.
+    QTRY_VERIFY(nowPlaying->property("titlePointSize").toReal() > defaultTitleSize * 1.6);
     dropMinimumSizeWarnings();
 }
 
@@ -2695,18 +2694,42 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
 
     QList<qreal> defaults;
     QTRY_VERIFY2((defaults = alignedWidths()).size() == columns.size(), qPrintable(problem));
+    auto *pane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    QVERIFY(pane != nullptr);
+    // By default Artist and Album have a quarter of the table each, with the
+    // gap after them, and the title the rest: about 40% at the default
+    // font, where the glyph, number and length columns and the gaps take
+    // 130 px of a 1239 px table.
+    const auto checkShares = [&](const QList<qreal> &widths) {
+        const qreal table = pane->width();
+        const qreal gap = pane->property("columnGap").toReal();
+        QStringList all;
+        for (qreal width : widths) {
+            all << QString::number(width);
+        }
+        const QString described = QStringLiteral("%1 of %2").arg(all.join(QLatin1Char(' '))).arg(table);
+        for (int column : {3, 4}) {
+            QVERIFY2(std::abs(widths[column] + gap - table / 4) <= 1, qPrintable(described));
+        }
+        const qreal rest = table - widths[0] - widths[1] - pane->property("titleGap").toReal()
+            - widths[3] - widths[4] - widths[5] - 3 * gap - pane->property("rightPadding").toReal();
+        QVERIFY2(std::abs(widths[2] - rest) <= 1, qPrintable(described));
+        QVERIFY2(widths[2] >= pane->property("minimumTitleColumnWidth").toReal(), qPrintable(described));
+    };
+    checkShares(defaults);
 
-    // A larger font widens the columns, which stay aligned.
+    // A larger font widens the glyph, number and length columns, which stay
+    // aligned; Artist and Album keep their share.
     QFont larger = window->property("font").value<QFont>();
     larger.setPointSizeF((larger.pointSizeF() > 0 ? larger.pointSizeF() : 10.0) * 1.5);
     QVERIFY(window->setProperty("font", larger));
     QList<qreal> scaled;
     QTRY_VERIFY2((scaled = alignedWidths()).size() == columns.size()
-                     && scaled[3] > defaults[3] * 1.3,
+                     && scaled[1] > defaults[1] * 1.3,
                  qPrintable(problem));
-    QVERIFY(scaled[1] > defaults[1] * 1.3);
-    QVERIFY(scaled[4] > defaults[4] * 1.3);
+    QVERIFY(scaled[0] > defaults[0] * 1.3);
     QVERIFY(scaled[5] > defaults[5] * 1.3);
+    checkShares(scaled);
     dropMinimumSizeWarnings();
 }
 
@@ -2952,7 +2975,7 @@ void AccessibilityTest::queueColumnTextStaysInsideItsColumnAtTheMinimum() {
             {QStringLiteral("title"), QStringLiteral("A long title that does not fit %1").arg(i)},
             {QStringLiteral("artist"), QStringLiteral("A long artist name %1").arg(i)},
             {QStringLiteral("album"), QStringLiteral("A long album name")},
-            {QStringLiteral("lengthText"), QStringLiteral("02:34:56")},
+            {QStringLiteral("lengthText"), QStringLiteral("2:34:56")},
         });
     }
     bridge->setProperty("queueRows", rows);

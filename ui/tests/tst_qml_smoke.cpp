@@ -31,6 +31,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlIncubator>
+#include <QQmlProperty>
 #include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -493,6 +494,8 @@ struct BinaryTreeRow {
     QStringList playPaths;
     // Encoded after coverPath.
     quint64 coverStamp{0};
+    // Encoded after childCount.
+    qint32 year{0};
 };
 
 template <typename T>
@@ -516,6 +519,7 @@ QByteArray encodeRows(const QVector<BinaryTreeRow> &rows) {
         appendLe<qint32>(out, row.sourceIndex);
         appendLe<quint32>(out, row.trackNumber);
         appendLe<quint32>(out, row.childCount);
+        appendLe<qint32>(out, row.year);
         appendUtf8(out, row.title);
         appendUtf8(out, row.key);
         appendUtf8(out, row.artist);
@@ -2159,11 +2163,14 @@ Item {
         seekCommitted: playbackController.seekCommitted
     }
 
-    Components.TrackMetadataCard {
+    Components.NowPlayingPanel {
         parent: harness
         width: 420
         uiBridge: bridge
         uiPalette: palette
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        openAlbumArtViewer: function() {}
     }
 
     Viewers.AlbumArtViewerShell {
@@ -3902,10 +3909,13 @@ void WindowSmokeTest::theSmallestWindowFitsALaptopScreenAndShowsEveryControl() {
     QQuickItem *seek = controls.at(5);
     QVERIFY2(seek->width() >= 100, qPrintable(QString::number(seek->width())));
 
-    // So do the queue's columns, with room for the titles.
+    // So do the queue's columns, with room for the titles: Album drops
+    // first.
+    QCOMPARE(shownItemNamed(queue, QStringLiteral("queueHeader_album")), nullptr);
+    QCOMPARE(shownItemNamed(queue, QStringLiteral("queueColumnHandle_album")), nullptr);
     QList<QQuickItem *> columns;
     for (const char *name : {"queueHeader_indicator", "queueHeader_order", "queueHeader_title",
-                             "queueHeader_artist", "queueHeader_album", "queueHeader_length"}) {
+                             "queueHeader_artist", "queueHeader_length"}) {
         QQuickItem *column = shownItemNamed(queue, QString::fromLatin1(name));
         QVERIFY2(shownInside(window, column), name);
         columns.push_back(column);
@@ -4142,7 +4152,7 @@ void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
     QCOMPARE(header(window, "artist")->width(), 260.0);
     QCOMPARE(header(window, "album")->width(), album);
 
-    // In the narrowest window the widened columns give way, so the title
+    // In the narrowest window Album drops and Artist gives way, so the title
     // keeps its minimum, and they come back as the window grows again.
     auto *queue = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
     const QRect wide = window->geometry();
@@ -4151,8 +4161,7 @@ void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
     QTRY_VERIFY(header(window, "artist")->width() < 260.0);
     QVERIFY(header(window, "title")->width()
             >= queue->property("minimumTitleColumnWidth").toReal() - 1);
-    QVERIFY(header(window, "album")->width()
-            >= queue->property("minimumResizedColumnWidth").toReal());
+    QCOMPARE(header(window, "album"), nullptr);
     window->setGeometry(wide);
     QTRY_COMPARE(header(window, "artist")->width(), 260.0);
     QTRY_COMPARE(header(window, "album")->width(), album);
@@ -27227,8 +27236,12 @@ void LibraryQueueSmokeTest::emptyLibraryAndFileMenuAddALibraryFolder() {
         QTRY_VERIFY(!nameDialog->property("visible").toBool());
     };
 
-    // The empty library offers to add a folder.
-    QTRY_VERIFY(clickVisibleButton(window, QStringLiteral("libraryAddFolderButton")));
+    // The first run offers to add a folder, in the queue: the window's one
+    // message. The library shows its header with nothing under it.
+    QQuickItem *queuePane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
+    QVERIFY(queuePane != nullptr);
+    QTRY_VERIFY(shownItemNamed(queuePane, QStringLiteral("firstRunAddFolderButton")) != nullptr);
+    QTRY_VERIFY(clickVisibleButton(window, QStringLiteral("firstRunAddFolderButton")));
     QCOMPARE(folderDialog->property("title").toString(), QStringLiteral("Add Library Folder"));
     chooseFolder(first);
     QTRY_COMPARE_WITH_TIMEOUT(bridge.property("libraryRootCount").toInt(), 1, 10000);
@@ -27331,11 +27344,20 @@ Window {
         function showTrackInLibrary(path) {}
     }
 
+    // The tracks the playback could not read, as the error history has them.
+    QtObject {
+        id: errorControllerStub
+        objectName: "errorController"
+        property var unreadablePaths: ({})
+    }
+
     Panes.QueuePane {
+        objectName: "queuePane"
         anchors.fill: parent
         controller: queueController
         uiBridge: bridge
         uiPalette: palette
+        errorController: errorControllerStub
         preferredHeight: height
         playlistIndicatorColumnWidth: 22
         playlistOrderColumnWidth: 34
@@ -27420,6 +27442,8 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
         }
     }
     QVERIFY(controller != nullptr && bridge != nullptr && palette != nullptr);
+    QObject *errors = root->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(errors != nullptr);
     QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
     auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
     QTRY_VERIFY(!queueRowPoint(view, 5, 0.5).isNull());
@@ -27428,17 +27452,41 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
         QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, index));
         return item;
     };
-    const auto cell = [&row](int index, const QString &column) -> QQuickItem * {
+    // The first item named `name` in row `index`, at any depth.
+    const auto inRow = [&row](int index, const QString &name) -> QQuickItem * {
         QQuickItem *item = row(index);
         if (item == nullptr) {
             return nullptr;
         }
-        for (QQuickItem *child : item->childItems()) {
-            if (child->objectName() == QStringLiteral("queueCell_") + column) {
-                return child;
+        QList<QQuickItem *> pending{item};
+        while (!pending.isEmpty()) {
+            QQuickItem *next = pending.takeFirst();
+            if (next->objectName() == name) {
+                return next;
             }
+            pending.append(next->childItems());
         }
         return nullptr;
+    };
+    const auto cell = [&inRow](int index, const QString &column) {
+        return inRow(index, QStringLiteral("queueCell_") + column);
+    };
+    const auto glyph = [&inRow](int index) { return inRow(index, QStringLiteral("queueRowState")); };
+    const auto glyphName = [&glyph](int index) {
+        QQuickItem *item = glyph(index);
+        return item != nullptr && item->isVisible() ? item->property("source").toString() : QString();
+    };
+    // The selection tint and ring of a row, or a transparent colour.
+    const auto tint = [&inRow](int index) {
+        QQuickItem *item = inRow(index, QStringLiteral("rowBackgroundTint"));
+        return item != nullptr && item->isVisible()
+            ? item->property("color").value<QColor>().name(QColor::HexArgb)
+            : QStringLiteral("#00000000");
+    };
+    const auto ring = [&inRow](int index) {
+        QQuickItem *item = inRow(index, QStringLiteral("rowBackgroundTint"));
+        return item != nullptr && item->isVisible()
+            && QQmlProperty(item, QStringLiteral("border.width")).read().toReal() > 0;
     };
     // As 8-bit ARGB: the palette mixes its colours at a finer precision.
     const auto color = [](QObject *object) {
@@ -27447,70 +27495,100 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     const auto paletteColor = [palette](const char *name) {
         return palette->property(name).value<QColor>().name(QColor::HexArgb);
     };
+    const auto weight = [](QObject *text) { return text->property("font").value<QFont>().weight(); };
 
-    // The rows' data.
+    // The rows' data, in the tokens' colours, with no alternating rows.
     QCOMPARE(cell(0, "title")->property("text").toString(), QStringLiteral("Track 0"));
     QCOMPARE(cell(3, "order")->property("text").toString(), QStringLiteral("4"));
     QCOMPARE(cell(3, "length")->property("text").toString(), QStringLiteral("1:00"));
     QCOMPARE(cell(3, "artist")->property("text").toString(), QString());
-    QCOMPARE(cell(0, "indicator")->property("text").toString(), QString());
-    // Alternating rows, in the palette's colours.
-    QCOMPARE(color(row(0)), paletteColor("uiSurfaceRaisedColor"));
-    QCOMPARE(color(row(1)), paletteColor("uiSurfaceAltColor"));
-    QCOMPARE(color(cell(1, "title")), paletteColor("uiTextColor"));
-    QCOMPARE(cell(1, "title")->property("font").value<QFont>(),
-             palette->property("baseFont").value<QFont>());
-    QVERIFY(cell(1, "indicator")->property("font").value<QFont>().bold());
+    QCOMPARE(glyphName(0), QString());
+    QCOMPARE(tint(0), QStringLiteral("#00000000"));
+    QCOMPARE(tint(1), QStringLiteral("#00000000"));
+    QCOMPARE(color(cell(1, "title")), paletteColor("text"));
+    QCOMPARE(color(cell(1, "artist")), paletteColor("textColumn"));
+    QCOMPARE(color(cell(1, "album")), paletteColor("textColumn"));
+    QCOMPARE(color(cell(1, "order")), paletteColor("textTertiary"));
+    QCOMPARE(color(cell(1, "length")), paletteColor("textSecondary"));
+    QCOMPARE(cell(1, "title")->property("font").value<QFont>().family(),
+             palette->property("baseFont").value<QFont>().family());
+    QCOMPARE(weight(cell(1, "title")), QFont::Normal);
+    // Text sits on whole pixels.
+    QCOMPARE(cell(1, "title")->y(), std::round(cell(1, "title")->y()));
 
-    // The playing row shows its state.
+    // The playing row: an amber play glyph and a semibold amber title.
     bridge->setProperty("playingQueueIndex", 2);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
-    QTRY_COMPARE(cell(2, "indicator")->property("text").toString(), QStringLiteral("▶"));
-    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiActiveIndicatorColor"));
-    QCOMPARE(cell(1, "indicator")->property("text").toString(), QString());
+    QTRY_COMPARE(glyphName(2), QStringLiteral("media-playback-start"));
+    QCOMPARE(color(glyph(2)), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QCOMPARE(weight(cell(2, "title")), QFont::DemiBold);
+    QCOMPARE(glyphName(1), QString());
     QVERIFY(row(2)->property("isCurrentQueueRow").toBool());
+    // Paused: the pause glyph; amber stays.
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QTRY_COMPARE(cell(2, "indicator")->property("text").toString(), QStringLiteral("⏸"));
-    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiMutedTextColor"));
+    QTRY_COMPARE(glyphName(2), QStringLiteral("media-playback-pause"));
+    QCOMPARE(color(glyph(2)), paletteColor("now"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    // Stopped: a neutral stop mark, and the title as any other.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(glyphName(2), QStringLiteral("media-playback-stop"));
+    QCOMPARE(color(glyph(2)), paletteColor("textSecondary"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("text"));
+    QCOMPARE(weight(cell(2, "title")), QFont::Normal);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // Highlighted rows, the playing one among them, in the selection colours.
+    // An unreadable file: a neutral warning glyph and a quieter title.
+    QVERIFY(errors->setProperty("unreadablePaths",
+                                QVariantMap{{QStringLiteral("/music/3.flac"),
+                                             QStringLiteral("Cannot read the file")}}));
+    QTRY_COMPARE(glyphName(3), QStringLiteral("dialog-warning"));
+    QCOMPARE(color(glyph(3)), paletteColor("textSecondary"));
+    QCOMPARE(color(cell(3, "title")), paletteColor("textSecondary"));
+    QCOMPARE(row(3)->property("unreadableReason").toString(), QStringLiteral("Cannot read the file"));
+    QVERIFY(errors->setProperty("unreadablePaths", QVariantMap{}));
+    QTRY_COMPARE(glyphName(3), QString());
+
+    // Highlighted rows, the playing one among them: the inactive tint while
+    // the queue has no focus, and tertiary text steps up to secondary.
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{2, 4}))));
-    QTRY_COMPARE(color(row(4)), paletteColor("uiSelectionColor"));
-    QCOMPARE(color(row(2)), paletteColor("uiSelectionColor"));
-    QCOMPARE(color(row(3)), paletteColor("uiSurfaceAltColor"));
-    for (const QString &column : {QStringLiteral("indicator"), QStringLiteral("order"), QStringLiteral("title"),
-             QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("length")}) {
-        QCOMPARE(color(cell(2, column)), paletteColor("uiSelectionTextColor"));
-        QCOMPARE(color(cell(3, column)), paletteColor("uiTextColor"));
-    }
+    QTRY_COMPARE(tint(4), paletteColor("selectionInactive"));
+    QCOMPARE(tint(2), paletteColor("selectionInactive"));
+    QCOMPARE(tint(3), QStringLiteral("#00000000"));
+    QCOMPARE(color(cell(4, "order")), paletteColor("textSecondary"));
+    QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QVERIFY(!ring(4));
+    // With focus: the active tint, and a ring on the current row only.
+    bridge->setProperty("selectedQueueIndex", 4);
+    view->forceActiveFocus();
+    QTRY_VERIFY(view->hasActiveFocus());
+    QTRY_COMPARE(tint(4), paletteColor("selection"));
+    QCOMPARE(tint(2), paletteColor("selection"));
+    QVERIFY(ring(4));
+    QVERIFY(!ring(2));
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{4}))));
-    QTRY_COMPARE(color(row(2)), paletteColor("uiSurfaceRaisedColor"));
-    QCOMPARE(color(cell(2, "indicator")), paletteColor("uiMutedTextColor"));
+    QTRY_COMPARE(tint(2), QStringLiteral("#00000000"));
 
     // A palette change at runtime reaches the rows.
-    const QString oldBase = paletteColor("uiSurfaceRaisedColor");
-    const QString oldSelection = paletteColor("uiSelectionColor");
+    const QString oldSelection = paletteColor("selection");
     QObject *windowPalette = root->property("palette").value<QObject *>();
     QVERIFY(windowPalette != nullptr);
     QVERIFY(windowPalette->setProperty("base", QColor("#203040")));
-    QVERIFY(windowPalette->setProperty("alternateBase", QColor("#405060")));
     QVERIFY(windowPalette->setProperty("window", QColor("#102030")));
-    QTRY_COMPARE(paletteColor("uiSurfaceRaisedColor"), QStringLiteral("#ff203040"));
-    QVERIFY(paletteColor("uiSelectionColor") != oldSelection);
-    QVERIFY(oldBase != QStringLiteral("#ff203040"));
-    QTRY_COMPARE(color(row(0)), QStringLiteral("#ff203040"));
-    QCOMPARE(color(row(1)), QStringLiteral("#ff405060"));
-    QCOMPARE(color(row(4)), paletteColor("uiSelectionColor"));
+    QTRY_COMPARE(paletteColor("view"), QStringLiteral("#ff203040"));
+    QVERIFY(paletteColor("selection") != oldSelection);
+    QTRY_COMPARE(tint(4), paletteColor("selection"));
+    QCOMPARE(color(root->findChild<QQuickItem *>(QStringLiteral("queuePane"))),
+             QStringLiteral("#ff203040"));
 
     // So does a font change, and the cells stay in their header's columns.
     QFont larger = root->property("font").value<QFont>();
     larger.setPointSizeF((larger.pointSizeF() > 0 ? larger.pointSizeF() : 10.0) * 2);
     QVERIFY(root->setProperty("font", larger));
     QTRY_COMPARE(cell(1, "title")->property("font").value<QFont>().pointSizeF(), larger.pointSizeF());
-    QTRY_COMPARE(cell(1, "indicator")->property("font").value<QFont>().pointSizeF(), larger.pointSizeF());
-    QVERIFY(cell(1, "indicator")->property("font").value<QFont>().bold());
     QTRY_COMPARE(row(1)->height(), palette->property("rowHeight").toReal());
     QQuickItem *titleCell = cell(1, "title");
     QVERIFY(titleCell->y() >= 0 && titleCell->y() + titleCell->height() <= row(1)->height() + 0.5);

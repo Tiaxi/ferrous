@@ -13,6 +13,8 @@ QtObject {
     property var view: null
     property var selectedIndices: []
     property var selectedIndexLookup: ({})
+    // The row the keyboard is on: the queue rings it while it has focus.
+    readonly property int currentRowIndex: root.primarySelectedIndex()
     property int selectionAnchorIndex: -1
     property int lastSyncedBridgeSelectedIndex: -2
     property bool _rowsChangedSinceSync: false

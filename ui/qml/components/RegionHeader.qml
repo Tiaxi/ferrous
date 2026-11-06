@@ -42,7 +42,10 @@ Item {
             font.weight: Font.DemiBold
             color: root.uiPalette.text
             elide: Text.ElideRight
-            Layout.maximumWidth: implicitWidth
+            // Whole pixels: the layout rounds the width it gives, and a
+            // fraction short of the text's width elides it.
+            Layout.maximumWidth: Math.ceil(implicitWidth)
+            Layout.preferredWidth: Math.ceil(implicitWidth)
             Layout.fillWidth: true
             Accessible.ignored: true
         }

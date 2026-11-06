@@ -28,6 +28,7 @@ struct ParsedBinaryRow {
     int sourceIndex{-1};
     int trackNumber{0};
     int childCount{0};
+    int year{0};
     QString title;
     QString key;
     QString artist;
@@ -167,6 +168,7 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
         qint32 sourceIndex = -1;
         quint32 trackNumber = 0;
         quint32 childCount = 0;
+        qint32 year = 0;
         quint32 playPathCount = 0;
 
         if (!reader.readU8(&row.rowType)
@@ -174,6 +176,7 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
             || !reader.readI32(&sourceIndex)
             || !reader.readU32(&trackNumber)
             || !reader.readU32(&childCount)
+            || !reader.readI32(&year)
             || !reader.readUtf8(&row.title)
             || !reader.readUtf8(&row.key)
             || !reader.readUtf8(&row.artist)
@@ -189,6 +192,7 @@ bool parseRows(const QByteArray &treeBytes, QVector<ParsedBinaryRow> *rowsOut) {
         row.sourceIndex = static_cast<int>(sourceIndex);
         row.trackNumber = static_cast<int>(std::min<quint32>(trackNumber, INT_MAX));
         row.childCount = static_cast<int>(std::min<quint32>(childCount, INT_MAX));
+        row.year = static_cast<int>(year);
         // Each path takes at least its 4-byte length, which bounds the count.
         if (playPathCount > reader.remaining() / 4) {
             return false;
@@ -312,6 +316,9 @@ QVariant LibraryTreeModel::data(const QModelIndex &index, int role) const {
     if (role == TrackNumberRole) {
         return item.trackNumber;
     }
+    if (role == YearRole) {
+        return item.year;
+    }
     if (role == TrackPathRole) {
         return item.trackPath;
     }
@@ -359,6 +366,7 @@ QHash<int, QByteArray> LibraryTreeModel::roleNames() const {
         {OpenPathRole, "openPath"},
         {PlayPathsRole, "playPaths"},
         {SelectedRole, "selected"},
+        {YearRole, "year"},
     };
 }
 
@@ -914,6 +922,7 @@ bool LibraryTreeModel::rowsEqual(const FlatRow &a, const FlatRow &b) {
         && a.expanded == b.expanded
         && a.sourceIndex == b.sourceIndex
         && a.trackNumber == b.trackNumber
+        && a.year == b.year
         && a.trackPath == b.trackPath
         && a.openPath == b.openPath
         && a.coverPath == b.coverPath
@@ -964,6 +973,7 @@ QVector<LibraryTreeModel::TreeNode> LibraryTreeModel::parseTreeNodesFromBinary(c
         node.count = row.childCount;
         node.sourceIndex = row.sourceIndex;
         node.trackNumber = row.trackNumber;
+        node.year = row.year;
         node.trackPath = row.trackPath;
         node.openPath = row.path;
         node.coverPath = row.coverPath;
@@ -1069,6 +1079,7 @@ void LibraryTreeModel::appendFlatRows(
         row.count = node.count;
         row.sourceIndex = node.sourceIndex;
         row.trackNumber = node.trackNumber;
+        row.year = node.year;
         row.trackPath = node.trackPath;
         row.openPath = node.openPath;
         row.coverPath = node.coverPath;

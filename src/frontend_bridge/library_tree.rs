@@ -59,7 +59,7 @@ struct RootNodeBuilder {
 
 #[derive(Debug, Clone)]
 struct OrderedTrack {
-    label: String,
+    title: String,
     path: String,
     number: u32,
 }
@@ -96,6 +96,9 @@ struct FlatTreeRow {
     source_index: i32,
     track_number: u32,
     child_count: u32,
+    /// The year of an album or section, or 0 when it has none (or its
+    /// tracks disagree). The UI shows it beside the title.
+    year: i32,
     title: String,
     key: String,
     artist: String,
@@ -114,6 +117,7 @@ impl FlatTreeRow {
             source_index: -1,
             track_number: 0,
             child_count: clamp_u32(child_count),
+            year: 0,
             title: title.to_string(),
             key: root_row_key(path),
             artist: String::new(),
@@ -139,6 +143,7 @@ impl FlatTreeRow {
             source_index: -1,
             track_number: 0,
             child_count: clamp_u32(child_count),
+            year: 0,
             title: format!("{artist_name} ({album_count})"),
             key,
             artist: artist_name.to_string(),
@@ -154,7 +159,6 @@ impl FlatTreeRow {
         depth: u16,
         key: String,
         artist_name: &str,
-        album_title: &str,
         album_path: &str,
         album: &ResolvedAlbum,
         play_paths: Vec<String>,
@@ -165,7 +169,8 @@ impl FlatTreeRow {
             source_index: -1,
             track_number: 0,
             child_count: clamp_u32(album.root_tracks.len() + album.sections.len()),
-            title: album_title.to_string(),
+            year: album.year.unwrap_or(0),
+            title: album.title.clone(),
             key,
             artist: artist_name.to_string(),
             path: album_path.to_string(),
@@ -179,7 +184,7 @@ impl FlatTreeRow {
     fn section(
         depth: u16,
         key: String,
-        title: &str,
+        (title, year): (&str, Option<i32>),
         path: &str,
         (cover_path, cover_stamp): (&str, u64),
         play_paths: Vec<String>,
@@ -191,6 +196,7 @@ impl FlatTreeRow {
             source_index: -1,
             track_number: 0,
             child_count: clamp_u32(child_count),
+            year: year.unwrap_or(0),
             title: title.to_string(),
             key,
             artist: String::new(),
@@ -209,6 +215,7 @@ impl FlatTreeRow {
             source_index: -1,
             track_number,
             child_count: 0,
+            year: 0,
             title: title.to_string(),
             key: track_row_key(path),
             artist: artist_name.to_string(),
@@ -689,7 +696,7 @@ fn build_artist_rows_flat<S: BuildHasher>(
             out.push(FlatTreeRow::track(
                 track_depth,
                 &artist.artist_name,
-                &track.label,
+                &track.title,
                 &track.path,
                 track.number,
             ));
@@ -720,18 +727,12 @@ fn append_album_rows<S: BuildHasher>(
 ) {
     for album in resolved_albums {
         let album_path = album.folder_path.to_string_lossy().to_string();
-        let album_title = if let Some(year) = album.year {
-            format!("{} ({year})", album.title)
-        } else {
-            album.title.clone()
-        };
         let album_key = album_row_key(config.root_path, config.artist_name, &album.folder_name);
         let album_play_paths = album_play_paths(&album);
         out.push(FlatTreeRow::album(
             config.album_depth,
             album_key.clone(),
             config.artist_name,
-            &album_title,
             &album_path,
             &album,
             album_play_paths,
@@ -785,7 +786,7 @@ fn append_album_tracks(
         out.push(FlatTreeRow::track(
             section_depth,
             artist_name,
-            &track.label,
+            &track.title,
             &track.path,
             track.number,
         ));
@@ -798,16 +799,11 @@ fn append_album_tracks(
             .iter()
             .map(|track| track.path.clone())
             .collect::<Vec<_>>();
-        let section_title = if let Some(year) = section.year {
-            format!("{} ({year})", section.name)
-        } else {
-            section.name.clone()
-        };
         let section_cover = section.cover_path.as_deref().unwrap_or_default();
         out.push(FlatTreeRow::section(
             section_depth,
             section_row_key(root_path, artist_name, &album.folder_name, &section.name),
-            &section_title,
+            (&section.name, section.year),
             &section_path,
             (section_cover, section.cover_stamp),
             section_play_paths,
@@ -817,7 +813,7 @@ fn append_album_tracks(
             out.push(FlatTreeRow::track(
                 section_track_depth,
                 artist_name,
-                &track.label,
+                &track.title,
                 &track.path,
                 track.number,
             ));
@@ -834,6 +830,7 @@ fn encode_flat_rows(rows: &[FlatTreeRow]) -> Vec<u8> {
         push_i32(&mut out, row.source_index);
         push_u32(&mut out, row.track_number);
         push_u32(&mut out, row.child_count);
+        push_i32(&mut out, row.year);
         push_string(&mut out, &row.title);
         push_string(&mut out, &row.key);
         push_string(&mut out, &row.artist);
@@ -1031,18 +1028,10 @@ fn order_tracks(tracks: &[TrackLeaf]) -> Vec<OrderedTrack> {
         .collect::<Vec<_>>();
     let order = tree_track_order(&inputs);
 
-    let max_number = order.iter().map(|(_, number)| *number).max().unwrap_or(0);
-    let width = std::cmp::max(2, max_number.to_string().len());
-
     order
         .into_iter()
         .map(|(index, number)| OrderedTrack {
-            label: format!(
-                "{:0width$} - {}",
-                number,
-                tracks[index].title,
-                width = width
-            ),
+            title: tracks[index].title.clone(),
             path: inputs[index].path.to_string(),
             number,
         })
@@ -1384,6 +1373,7 @@ mod tests {
         source_index: i32,
         track_number: u32,
         child_count: u32,
+        year: i32,
         title: String,
         key: String,
         artist: String,
@@ -1472,6 +1462,9 @@ mod tests {
             let Some(child_count) = read_u32(bytes, &mut offset) else {
                 break;
             };
+            let Some(year) = read_i32(bytes, &mut offset) else {
+                break;
+            };
             let Some(title) = read_string(bytes, &mut offset) else {
                 break;
             };
@@ -1519,6 +1512,7 @@ mod tests {
                 source_index,
                 track_number,
                 child_count,
+                year,
                 title,
                 key,
                 artist,
@@ -1675,6 +1669,53 @@ mod tests {
         };
         let resolved = resolve_album(&album);
         assert_eq!(resolved.year, Some(2023));
+    }
+
+    #[test]
+    fn encoded_album_rows_carry_their_year_beside_a_bare_title() {
+        let library = LibrarySnapshot {
+            roots: vec![root("/music")],
+            tracks: crate::library::shared_tracks(vec![
+                track(
+                    "/music/Artist A/Album A/01.flac",
+                    "Album A",
+                    Some(2005),
+                    Some(1),
+                    "One",
+                ),
+                track(
+                    "/music/Artist A/Album A/02.flac",
+                    "Album A",
+                    Some(2005),
+                    Some(2),
+                    "Two",
+                ),
+                track(
+                    "/music/Artist A/Album B/01.flac",
+                    "Album B",
+                    None,
+                    Some(1),
+                    "Three",
+                ),
+            ]),
+            ..LibrarySnapshot::default()
+        };
+        let rows = decode_rows(&build_library_tree_flat_binary::<
+            std::collections::hash_map::RandomState,
+        >(&library, LibrarySortMode::Year, None));
+        let album = |title: &str| {
+            rows.iter()
+                .find(|row| row.row_type == ROW_TYPE_ALBUM && row.title == title)
+                .unwrap_or_else(|| panic!("no album row {title}"))
+        };
+        assert_eq!(album("Album A").year, 2005);
+        assert_eq!(album("Album B").year, 0);
+        let tracks: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row_type == ROW_TYPE_TRACK)
+            .map(|row| (row.track_number, row.title.as_str(), row.year))
+            .collect();
+        assert_eq!(tracks, [(1, "One", 0), (2, "Two", 0), (1, "Three", 0)]);
     }
 
     #[test]
@@ -2156,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn track_label_uses_zero_padded_number() {
+    fn track_rows_carry_the_number_apart_from_the_title() {
         let ordered = order_tracks(&[
             TrackLeaf {
                 path: PathBuf::from("/music/a/1.flac"),
@@ -2179,8 +2220,8 @@ mod tests {
                 track_no: Some(10),
             },
         ]);
-        assert_eq!(ordered[0].label, "01 - One");
-        assert_eq!(ordered[1].label, "10 - Ten");
+        assert_eq!(ordered[0].title, "One");
+        assert_eq!(ordered[1].title, "Ten");
         assert_eq!(ordered[0].number, 1);
         assert_eq!(ordered[1].number, 10);
     }
@@ -2626,7 +2667,7 @@ mod tests {
     }
 
     #[test]
-    fn section_year_appears_in_title_in_flat_rows() {
+    fn section_year_is_a_field_of_its_own_in_flat_rows() {
         let album = ResolvedAlbum {
             title: "Muut".to_string(),
             title_key: CollationKey::new("Muut"),
@@ -2644,7 +2685,7 @@ mod tests {
                 cover_stamp: 7,
                 year: Some(2000),
                 tracks: vec![OrderedTrack {
-                    label: "01 - Track".to_string(),
+                    title: "Track".to_string(),
                     path: "/music/PT/Muut/Lightbulb Sun/01.flac".to_string(),
                     number: 1,
                 }],
@@ -2656,7 +2697,12 @@ mod tests {
             .iter()
             .find(|r| r.row_type == ROW_TYPE_SECTION)
             .unwrap();
-        assert_eq!(section_row.title, "Lightbulb Sun (2000)");
+        assert_eq!(section_row.title, "Lightbulb Sun");
+        assert_eq!(section_row.year, 2000);
+        let track_row = rows.iter().find(|r| r.row_type == ROW_TYPE_TRACK).unwrap();
+        assert_eq!(track_row.title, "Track");
+        assert_eq!(track_row.track_number, 1);
+        assert_eq!(track_row.year, 0);
         assert_eq!(section_row.cover_path, "/cover.jpg");
         assert_eq!(section_row.cover_stamp, 7);
     }

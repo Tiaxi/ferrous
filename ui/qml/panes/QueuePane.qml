@@ -25,23 +25,47 @@ Rectangle {
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var droppedExternalPaths
+    // The tracks the playback failed to read, from the issue history.
+    property var errorController: null
+    // What the first-run message's button does.
+    property var addLibraryFolderAction: null
 
-    // The columns, which the header and the rows share; text that does not
+    // The columns, which the header and the rows share: the state glyph,
+    // the number, then Title, Artist, Album and Length. Text that does not
     // fit its column is elided, so it never runs into the next. The title
-    // takes the width the others leave. Artist, Album and Length have the widths the
-    // user dragged their handles to, which the settings keep, or defaults
-    // that follow the font size.
-    readonly property real columnMargin: 8
-    readonly property real columnSpacing: 6
-    readonly property real defaultArtistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 25)
-    readonly property real defaultAlbumColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 28)
-    readonly property real defaultLengthColumnWidth: Math.ceil(Math.max(
-        lengthHeaderMetrics.advanceWidth,
-        lengthValueMetrics.advanceWidth) + columnFontMetrics.averageCharacterWidth)
+    // takes the width the others leave, about 40% of the table by default,
+    // with Artist and Album about 25% each. Artist, Album and Length have
+    // the widths the user dragged their handles to, which the settings
+    // keep, or those defaults. A column's width is that of its text; the
+    // gaps between the columns come on top. Sizes are those of the design
+    // at the default font, and grow with it as the rows do.
+    readonly property real sizeScale: root.uiPalette.rowHeight / 26
+    // Between the number and the title, and between the other columns.
+    readonly property real titleGap: Math.round(12 * root.sizeScale)
+    readonly property real columnGap: Math.round(16 * root.sizeScale)
+    // From the length's right end to the queue's: the scrollbar lane and
+    // the inset.
+    readonly property real rightPadding: Math.round(24 * root.sizeScale)
+    // The table's share each of Artist and Album has by default.
+    readonly property real defaultTextColumnShare: 0.25
+    readonly property real defaultArtistColumnWidth: root.defaultTextColumnWidth()
+    readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth()
+    readonly property real defaultLengthColumnWidth: root.minimumLengthColumnWidth
     readonly property real artistColumnWidth: root.columnWidths.artist
     readonly property real albumColumnWidth: root.columnWidths.album
     readonly property real lengthColumnWidth: root.columnWidths.length
-    readonly property var resizableColumns: ["artist", "album", "length"]
+    // The width of the glyph, number and length columns and of every gap,
+    // with Album shown.
+    readonly property real fixedColumnsWidth: root.playlistIndicatorColumnWidth
+        + root.playlistOrderColumnWidth + root.titleGap + 3 * root.columnGap
+        + root.defaultLengthColumnWidth + root.rightPadding
+    // Album drops before the title would go under its minimum with the
+    // default widths, as in a narrow window.
+    readonly property bool albumColumnVisible: root.width * (1 - 2 * root.defaultTextColumnShare)
+        - root.fixedColumnsWidth + 2 * root.columnGap >= root.minimumTitleColumnWidth
+    readonly property var resizableColumns: root.albumColumnVisible
+        ? ["artist", "album", "length"]
+        : ["artist", "length"]
     // The narrowest Artist and Album can be dragged: a few characters, and
     // no narrower than the backend keeps. Length keeps room for its
     // heading and the longest length it shows.
@@ -50,6 +74,13 @@ Rectangle {
     readonly property real minimumLengthColumnWidth: Math.max(16, Math.ceil(Math.max(
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth)))
+
+    // Artist's or Album's default: its share of the table, less the gap
+    // before the next column.
+    function defaultTextColumnWidth() {
+        return Math.max(root.minimumResizedColumnWidth,
+                        Math.round(root.width * root.defaultTextColumnShare) - root.columnGap)
+    }
     // How far Left or Right moves a focused handle.
     readonly property real keyboardResizeStep: Math.max(
         1, Math.round(columnFontMetrics.averageCharacterWidth))
@@ -60,7 +91,8 @@ Rectangle {
     // minimum.
     readonly property real resizableColumnsRoom: Math.max(0, queueHeaderRow.width
         - root.playlistIndicatorColumnWidth - root.playlistOrderColumnWidth
-        - root.minimumTitleColumnWidth - 5 * root.columnSpacing)
+        - root.titleGap - root.minimumTitleColumnWidth
+        - root.resizableColumns.length * root.columnGap)
     // The column whose handle is being dragged, or moved with the keys; its
     // preferred width until the drag ends and the width is kept; and, from
     // when the drag started, its preferred width, its edge's distance from
@@ -129,10 +161,12 @@ Rectangle {
 
     readonly property var columnWidths: {
         const widths = root.fittedColumnWidths(root.resizableColumns.map(root.preferredColumnWidth))
+        const shown = {}
+        root.resizableColumns.forEach((column, i) => shown[column] = Math.round(widths[i]))
         return {
-            "artist": Math.round(widths[0]),
-            "album": Math.round(widths[1]),
-            "length": Math.round(widths[2])
+            "artist": shown.artist,
+            "album": shown.album !== undefined ? shown.album : 0,
+            "length": shown.length
         }
     }
 
@@ -246,16 +280,13 @@ Rectangle {
     // the window's minimum does not change as tracks are queued, and the
     // default widths of the others, so that it does not change as they are
     // resized either: narrower windows shrink resized columns.
-    readonly property real minimumTitleColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 12)
+    readonly property real minimumTitleColumnWidth: Math.ceil(240 * root.sizeScale)
     readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
-    readonly property real minimumContentWidth: Math.ceil(2 * root.columnMargin
-        + root.playlistIndicatorColumnWidth + root.minimumOrderColumnWidth
-        + root.minimumTitleColumnWidth + root.defaultArtistColumnWidth
-        + root.defaultAlbumColumnWidth + root.defaultLengthColumnWidth + 5 * root.columnSpacing
-        + root.scrollBarAllowance)
-    // Room for the scroll bar beside the rows, which some styles widen
-    // while it is used; see reservedRightPadding.
-    readonly property real scrollBarAllowance: 20
+    // Without Album, with Artist at its default share of the width.
+    readonly property real minimumContentWidth: Math.ceil((root.playlistIndicatorColumnWidth
+        + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
+        + root.columnGap + root.defaultLengthColumnWidth + root.rightPadding)
+        / (1 - root.defaultTextColumnShare))
 
     FontMetrics {
         id: columnFontMetrics
@@ -264,17 +295,29 @@ Rectangle {
 
     TextMetrics {
         id: lengthHeaderMetrics
-        font: root.uiPalette.baseFont
-        text: I18n.i18nc("@title:column", "Length")
+        font: lengthHeader.font
+        text: lengthHeader.text
     }
 
+    // The longest length the queue shows: an hour or more.
     TextMetrics {
         id: lengthValueMetrics
-        font: root.uiPalette.baseFont
-        text: "00:00:00"
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
+        font.features: root.uiPalette.tabularFigures
+        text: "0:00:00"
     }
 
-    color: root.uiPalette.uiSurfaceRaisedColor
+    // The queue's totals, for its region header.
+    readonly property string totalsText: root.uiBridge.queueLength > 0
+        ? I18n.i18ncp("@info queue length and total duration", "%1 track · %2", "%1 tracks · %2",
+                      root.uiBridge.queueLength, root.uiBridge.queueDurationText || "0:00")
+        : ""
+    // No library folder and nothing queued: the queue shows the first steps.
+    readonly property bool firstRun: root.uiBridge.queueLength === 0
+        && root.uiBridge.libraryRootCount === 0
+
+    color: root.uiPalette.view
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
     SplitView.minimumHeight: 220
@@ -283,89 +326,114 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        Rectangle {
+        // The region header: "Queue" and its totals where the Title label
+        // would be, then the labels of Artist, Album and Length, with their
+        // resize handles between the columns. The glyph and number columns
+        // have no label.
+        Item {
+            id: queueHeader
+            objectName: "queueHeader"
             Layout.fillWidth: true
-            implicitHeight: root.uiPalette.rowHeight + 2
-            color: root.uiPalette.uiHeaderColor
+            implicitHeight: root.uiPalette.rowHeight
 
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                height: 1
-                color: root.uiPalette.uiBorderColor
+            Components.RegionHeader {
+                anchors.fill: parent
+                uiPalette: root.uiPalette
+                leftInset: queueHeaderRow.x + titleHeader.x
+                rightInset: Math.max(0, parent.width - (queueHeaderRow.x + titleHeader.x + titleHeader.width))
+                title: I18n.i18nc("@title queue region", "Queue")
+                totals: root.totalsText
             }
 
             RowLayout {
                 id: queueHeaderRow
                 anchors.fill: parent
-                anchors.leftMargin: root.columnMargin
-                anchors.rightMargin: root.columnMargin
-                    + (playlistView ? playlistView.reservedRightPadding : 0)
-                spacing: root.columnSpacing
+                anchors.rightMargin: root.rightPadding
+                // Above the region header's hairline.
+                anchors.bottomMargin: 1
+                spacing: 0
+                // An empty queue shows only its name; the columns keep their
+                // places, so nothing moves when tracks arrive.
+                readonly property real labelOpacity: root.uiBridge.queueLength > 0 ? 1 : 0
 
-                Label {
+                Item {
                     id: indicatorHeader
                     objectName: "queueHeader_indicator"
-                    elide: Text.ElideRight
-                    text: "▶"
                     Layout.preferredWidth: root.playlistIndicatorColumnWidth
-                    horizontalAlignment: Text.AlignHCenter
-                    color: root.uiPalette.uiMutedTextColor
+                    Layout.fillHeight: true
+                    Accessible.role: Accessible.ColumnHeader
                     Accessible.name: I18n.i18nc("@title:column", "Playing")
                 }
 
-                Label {
+                Item {
                     id: orderHeader
                     objectName: "queueHeader_order"
-                    elide: Text.ElideRight
-                    text: "#"
                     Layout.preferredWidth: root.playlistOrderColumnWidth
-                    horizontalAlignment: Text.AlignRight
-                    color: root.uiPalette.uiMutedTextColor
+                    Layout.fillHeight: true
+                    Accessible.role: Accessible.ColumnHeader
                     Accessible.name: I18n.i18nc("@title:column", "Number")
                 }
 
-                Label {
+                // The title column, which the region's name and totals fill.
+                Item {
                     id: titleHeader
                     objectName: "queueHeader_title"
-                    elide: Text.ElideRight
-                    text: I18n.i18nc("@title:column", "Title")
+                    Layout.leftMargin: root.titleGap
                     Layout.fillWidth: true
-                    color: root.uiPalette.uiMutedTextColor
+                    Layout.fillHeight: true
+                    Accessible.role: Accessible.ColumnHeader
+                    Accessible.name: I18n.i18nc("@title:column", "Title")
                 }
+
                 Label {
                     id: artistHeader
+                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_artist"
                     text: I18n.i18nc("@title:column", "Artist")
+                    Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.artistColumnWidth
                     elide: Text.ElideRight
-                    color: root.uiPalette.uiMutedTextColor
+                    // Not Qt.font(), which rounds to whole points.
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.smallPointSize
+                    color: root.uiPalette.textSecondary
                 }
                 Label {
                     id: albumHeader
+                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_album"
+                    visible: root.albumColumnVisible
                     text: I18n.i18nc("@title:column", "Album")
+                    Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.albumColumnWidth
                     elide: Text.ElideRight
-                    color: root.uiPalette.uiMutedTextColor
+                    // Not Qt.font(), which rounds to whole points.
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.smallPointSize
+                    color: root.uiPalette.textSecondary
                 }
                 Label {
                     id: lengthHeader
+                    opacity: queueHeaderRow.labelOpacity
                     objectName: "queueHeader_length"
                     elide: Text.ElideRight
                     text: I18n.i18nc("@title:column", "Length")
+                    Layout.leftMargin: root.columnGap
                     Layout.preferredWidth: root.lengthColumnWidth
                     horizontalAlignment: Text.AlignRight
-                    color: root.uiPalette.uiMutedTextColor
+                    // Not Qt.font(), which rounds to whole points.
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.smallPointSize
+                    color: root.uiPalette.textSecondary
                 }
             }
 
-            // A handle on the left of each resizable column: the title
-            // fills the width the others leave, so dragging it left widens
-            // the column after it. Double-click, or Home, restores the
-            // column's default width; Left and Right move it from the
-            // keyboard.
+            // A handle on the left of each resizable column, in the gap
+            // before it: the title fills the width the others leave, so
+            // dragging it left widens the column after it. Double-click,
+            // or Home, restores the column's default width; Left and Right
+            // move it from the keyboard. It shows only under the pointer
+            // and with keyboard focus.
             Repeater {
                 model: [
                     { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
@@ -384,10 +452,12 @@ Rectangle {
                     // pane, which stays put as the columns move.
                     property real pressX: 0
 
-                    x: queueHeaderRow.x + modelData.header.x - root.columnSpacing / 2 - width / 2
-                    width: Math.max(8, root.columnSpacing + 2)
+                    visible: modelData.header.visible
+                    x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
+                    width: Kirigami.Units.largeSpacing
                     height: parent.height
-                    activeFocusOnTab: true
+                    // An empty queue's columns have no labels to resize.
+                    activeFocusOnTab: visible && root.uiBridge.queueLength > 0
 
                     Accessible.role: Accessible.Separator
                     Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
@@ -395,19 +465,23 @@ Rectangle {
                     Accessible.focusable: true
 
                     Rectangle {
+                        objectName: "queueColumnHandleLine"
                         anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: resizeHandle.highlighted ? 2 : 1
-                        height: parent.height * (resizeHandle.highlighted ? 1 : 0.5)
-                        color: resizeHandle.highlighted
-                            ? root.uiPalette.uiAccentColor
-                            : root.uiPalette.uiBorderColor
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        anchors.bottomMargin: Kirigami.Units.smallSpacing
+                        width: resizeHandle.activeFocus ? 2 : 1
+                        visible: resizeHandle.highlighted
+                        color: resizeHandle.activeFocus || resizeMouseArea.pressed
+                            ? root.uiPalette.focusRing
+                            : root.uiPalette.seam
                     }
 
                     MouseArea {
                         id: resizeMouseArea
                         anchors.fill: parent
-                        hoverEnabled: true
+                        hoverEnabled: root.uiBridge.queueLength > 0
                         preventStealing: true
                         cursorShape: Qt.SplitHCursor
 
@@ -486,9 +560,6 @@ Rectangle {
                 cacheBuffer: 480
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Queue")
-                property real reservedRightPadding: playlistVerticalScrollBar.visible
-                    ? (playlistVerticalScrollBar.width + 6)
-                    : 0
 
                 Component.onCompleted: root.controller.registerView(playlistView)
 
@@ -526,9 +597,10 @@ Rectangle {
                     }
                 }
 
-                ScrollBar.vertical: ScrollBar {
+                ScrollBar.vertical: Components.LaneScrollBar {
                     id: playlistVerticalScrollBar
-                    policy: ScrollBar.AsNeeded
+                    objectName: "queueScrollBar"
+                    uiPalette: root.uiPalette
                 }
 
                 MouseArea {
@@ -540,7 +612,7 @@ Rectangle {
                     }
                 }
 
-                delegate: Rectangle {
+                delegate: Item {
                     id: playlistRow
                     objectName: "queueRow"
                     // The row's roles, or its object in a list of objects. A
@@ -553,10 +625,22 @@ Rectangle {
                     readonly property string artistValue: rowValues.artist || ""
                     readonly property string albumValue: rowValues.album || ""
                     readonly property string lengthTextValue: rowValues.lengthText || "--:--"
+                    readonly property string pathValue: rowValues.path || ""
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
+                    // Playing or paused: amber marks only what is playing now.
+                    readonly property bool isNow: isCurrentQueueRow
+                        && root.uiBridge.playbackState !== "Stopped"
+                    readonly property string unreadableReason: root.errorController
+                        && pathValue.length > 0
+                        ? (root.errorController.unreadablePaths[pathValue] || "")
+                        : ""
+                    readonly property bool unreadable: unreadableReason.length > 0
                     readonly property bool draggableQueueItem: true
                     readonly property int queueRowIndex: index
                     readonly property bool rowSelected: root.controller.isIndexSelected(index)
+                    // The row the keyboard is on, in a queue with focus.
+                    readonly property bool rowCurrent: playlistView.activeFocus
+                        && index === root.controller.currentRowIndex
                     readonly property string playbackStateText: !isCurrentQueueRow
                         ? ""
                         : (root.uiBridge.playbackState === "Paused"
@@ -564,13 +648,15 @@ Rectangle {
                             : (root.uiBridge.playbackState === "Stopped"
                                 ? I18n.i18nc("@info accessible state of the current queue row", "stopped")
                                 : I18n.i18nc("@info accessible state of the current queue row", "playing")))
+                    readonly property string stateGlyph: isCurrentQueueRow
+                        ? (root.uiBridge.playbackState === "Paused"
+                            ? "media-playback-pause"
+                            : (root.uiBridge.playbackState === "Stopped"
+                                ? "media-playback-stop" : "media-playback-start"))
+                        : (unreadable ? "dialog-warning" : "")
 
-                    width: Math.max(0, ListView.view.width - (playlistView.reservedRightPadding || 0))
+                    width: ListView.view.width
                     height: playlistView.rowHeight
-                    color: rowSelected
-                        ? root.uiPalette.uiSelectionColor
-                        : (index % 2 === 0 ? root.uiPalette.uiSurfaceRaisedColor
-                                            : root.uiPalette.uiSurfaceAltColor)
 
                     Accessible.role: Accessible.ListItem
                     Accessible.name: [
@@ -579,108 +665,130 @@ Rectangle {
                         artistValue,
                         albumValue,
                         lengthTextValue,
-                        playbackStateText
+                        playbackStateText,
+                        unreadableReason
                     ].filter(function(part) { return part.length > 0 }).join(", ")
                     Accessible.selectable: true
                     Accessible.selected: rowSelected
 
-                    // The cells are plain Text where the header's columns
-                    // are, which the header lays out for every row; their
-                    // colours and fonts come from the shared palette.
-                    readonly property color cellTextColor: rowSelected
-                        ? root.uiPalette.uiSelectionTextColor
-                        : root.uiPalette.uiTextColor
+                    Components.RowBackground {
+                        uiPalette: root.uiPalette
+                        hovered: playlistRowMouseArea.containsMouse
+                        selected: playlistRow.rowSelected
+                        active: playlistView.activeFocus
+                        focused: playlistRow.rowCurrent
+                    }
 
-                    Text {
+                    // The cells are where the header's columns are, which
+                    // the header lays out for every row; plain Text and
+                    // icons in the shared palette's colours. They sit on
+                    // whole pixels.
+                    readonly property real cellY: Math.round((playlistRow.height - titleCell.implicitHeight) / 2)
+                    readonly property color columnTextColor: playlistRow.unreadable
+                        ? root.uiPalette.textSecondary
+                        : root.uiPalette.textColumn
+
+                    Item {
                         objectName: "queueCell_indicator"
-                        x: root.columnMargin + indicatorHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        x: queueHeaderRow.x + indicatorHeader.x
                         width: indicatorHeader.width
-                        font: root.uiPalette.boldFont
-                        elide: Text.ElideRight
-                        horizontalAlignment: Text.AlignHCenter
-                        text: {
-                            if (!playlistRow.isCurrentQueueRow) {
-                                return ""
+                        height: playlistRow.height
+
+                        Kirigami.Icon {
+                            objectName: "queueRowState"
+                            readonly property string glyph: playlistRow.stateGlyph
+                            visible: glyph.length > 0
+                            anchors.centerIn: parent
+                            width: 12
+                            height: 12
+                            source: glyph
+                            isMask: true
+                            color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
+
+                            ToolTip.visible: stateHover.hovered && playlistRow.unreadable
+                            ToolTip.delay: Kirigami.Units.toolTipDelay
+                            ToolTip.text: playlistRow.unreadableReason
+
+                            HoverHandler {
+                                id: stateHover
                             }
-                            if (root.uiBridge.playbackState === "Paused") {
-                                return "⏸"
-                            }
-                            if (root.uiBridge.playbackState === "Stopped") {
-                                return "■"
-                            }
-                            return "▶"
                         }
-                        color: playlistRow.rowSelected || !playlistRow.isCurrentQueueRow
-                            ? playlistRow.cellTextColor
-                            : (root.uiBridge.playbackState === "Playing"
-                                ? root.uiPalette.uiActiveIndicatorColor
-                                : root.uiPalette.uiMutedTextColor)
                     }
 
                     Text {
                         objectName: "queueCell_order"
-                        x: root.columnMargin + orderHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        x: queueHeaderRow.x + orderHeader.x
+                        y: playlistRow.cellY
                         width: orderHeader.width
-                        font: root.uiPalette.baseFont
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.features: root.uiPalette.tabularFigures
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: root.playlistOrderText(index)
-                        color: playlistRow.cellTextColor
+                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected)
                     }
 
                     Text {
+                        id: titleCell
                         objectName: "queueCell_title"
-                        x: root.columnMargin + titleHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        x: queueHeaderRow.x + titleHeader.x
+                        y: playlistRow.cellY
                         width: titleHeader.width
-                        font: root.uiPalette.baseFont
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: playlistRow.isNow ? Font.DemiBold : Font.Normal
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.titleValue
-                        color: playlistRow.cellTextColor
+                        color: playlistRow.isNow
+                            ? root.uiPalette.now
+                            : (playlistRow.unreadable ? root.uiPalette.textSecondary : root.uiPalette.text)
                     }
 
                     Text {
                         objectName: "queueCell_artist"
-                        x: root.columnMargin + artistHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        x: queueHeaderRow.x + artistHeader.x
+                        y: playlistRow.cellY
                         width: artistHeader.width
                         font: root.uiPalette.baseFont
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.artistValue
-                        color: playlistRow.cellTextColor
+                        color: playlistRow.columnTextColor
                     }
 
                     Text {
                         objectName: "queueCell_album"
-                        x: root.columnMargin + albumHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        visible: albumHeader.visible
+                        x: queueHeaderRow.x + albumHeader.x
+                        y: playlistRow.cellY
                         width: albumHeader.width
                         font: root.uiPalette.baseFont
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.albumValue
-                        color: playlistRow.cellTextColor
+                        color: playlistRow.columnTextColor
                     }
 
                     Text {
                         objectName: "queueCell_length"
-                        x: root.columnMargin + lengthHeader.x
-                        y: (playlistRow.height - implicitHeight) / 2
+                        x: queueHeaderRow.x + lengthHeader.x
+                        y: playlistRow.cellY
                         width: lengthHeader.width
-                        font: root.uiPalette.baseFont
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.features: root.uiPalette.tabularFigures
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: playlistRow.lengthTextValue
-                        color: playlistRow.cellTextColor
+                        color: root.uiPalette.textSecondary
                     }
 
                     MouseArea {
                         id: playlistRowMouseArea
                         anchors.fill: parent
+                        hoverEnabled: true
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         drag.target: (pressedButtons & Qt.LeftButton) ? playlistDragProxy : null
                         drag.smoothed: false
@@ -856,15 +964,70 @@ Rectangle {
                 }
             }
 
-            Label {
-                visible: root.uiBridge.queueLength === 0
-                text: I18n.i18nc("@label", "Playlist is empty")
-                color: Kirigami.Theme.disabledTextColor
+            // First run, with no library folder: the window's one message.
+            ColumnLayout {
+                id: firstRunMessage
+                objectName: "queueFirstRunMessage"
+                visible: root.firstRun
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 2 * Kirigami.Units.gridUnit,
+                                Math.max(implicitWidth, Kirigami.Units.gridUnit * 20))
+                spacing: Kirigami.Units.smallSpacing
+
+                Kirigami.Icon {
+                    objectName: "queueFirstRunIcon"
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.large
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.large
+                    source: "ferrous"
+                    fallback: "media-album-track"
+                }
+
+                Text {
+                    objectName: "queueFirstRunTitle"
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.largeSpacing
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder", "Start with your music folder")
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.basePointSize * 15 / 13
+                    font.weight: Font.DemiBold
+                    color: root.uiPalette.text
+                }
+
+                Text {
+                    objectName: "queueFirstRunExplanation"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder",
+                        "Ferrous reads the tags and watches the folder, so new music appears on its own.\nYou can also drop audio files here.")
+                    font: root.uiPalette.baseFont
+                    color: root.uiPalette.textSecondary
+                }
+
+                Button {
+                    objectName: "firstRunAddFolderButton"
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.topMargin: Kirigami.Units.largeSpacing
+                    visible: root.addLibraryFolderAction !== null
+                    action: root.addLibraryFolderAction
+                    highlighted: true
+                }
+            }
+
+            // Library folders but nothing queued: one quiet line.
+            Text {
+                objectName: "queueEmptyLabel"
+                visible: root.uiBridge.queueLength === 0 && !root.firstRun
+                anchors.centerIn: parent
+                width: Math.min(implicitWidth, parent.width - 2 * Kirigami.Units.gridUnit)
                 horizontalAlignment: Text.AlignHCenter
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.top
-                anchors.topMargin: 10
-                width: parent.width
+                elide: Text.ElideRight
+                text: I18n.i18nc("@info:placeholder", "The queue is empty")
+                font: root.uiPalette.baseFont
+                color: root.uiPalette.textSecondary
             }
 
             Connections {
@@ -980,26 +1143,15 @@ Rectangle {
                 }
             }
 
+            // Where a drop lands: a 2 px line in the focus colour between
+            // the rows, as wide as their tint.
             Rectangle {
-                x: playlistView.x + 4
-                width: Math.max(0, playlistView.width - (playlistView.reservedRightPadding || 0) - 8)
-                height: 2
                 objectName: "queueDropIndicator"
+                x: playlistView.x
+                width: Math.max(0, playlistView.width - Kirigami.Units.largeSpacing)
+                height: 2
                 y: playlistDropArea.queueDropIndicatorY
-                radius: 1
-                color: Kirigami.Theme.highlightColor
-                visible: playlistDropArea.containsDrag
-                    && playlistDropArea.queueDropAccepted
-                    && playlistDropArea.queueDropInsertIndex >= 0
-            }
-
-            Rectangle {
-                x: playlistView.x + 4
-                y: playlistDropArea.queueDropIndicatorY - 2
-                width: 6
-                height: 6
-                radius: 3
-                color: Kirigami.Theme.highlightColor
+                color: root.uiPalette.focusRing
                 visible: playlistDropArea.containsDrag
                     && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
