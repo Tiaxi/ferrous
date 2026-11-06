@@ -11,7 +11,12 @@ import "." as Components
 // a button to Recent Issues while there are new ones (the viewer covers
 // the status bar), the viewer's own buttons (declared inside) and Close.
 // They fade out as the viewer's controls auto-hide.
-Row {
+//
+// The items are placed by bindings rather than a Row: a positioner places
+// an item that has just appeared only when the window next draws, so the
+// readout and Reset would show where they were last until then. Hiding with
+// the auto-hide leaves the width as it is, so nothing beside them moves.
+Item {
     id: root
 
     required property var uiPalette
@@ -23,12 +28,20 @@ Row {
     property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Visualization View")
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
+    // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
+    readonly property real spacing: 4
+    // Which items take room, whatever the auto-hide does.
+    readonly property bool readoutShown: root.zoomed
+    readonly property bool resetShown: root.zoomed && root.resetView !== null
+    readonly property bool issuesShown: root.unseenIssueCount > 0
+    readonly property bool viewerControlsShown: viewerControlsRow.implicitWidth > 0
 
-    spacing: 4
+    implicitWidth: closeButton.x + closeButton.width
+    implicitHeight: 24
     opacity: root.controlsVisible ? 1 : 0
     // Shown at once, so the key that brings the controls back can move
     // focus to them; they fade out.
@@ -44,8 +57,10 @@ Row {
 
     // Quiet: only while the view is zoomed.
     Label {
+        id: readout
         objectName: "viewerZoomReadout"
-        visible: root.zoomed
+        x: 0
+        visible: root.readoutShown
         height: 24
         rightPadding: 4
         verticalAlignment: Text.AlignVCenter
@@ -57,8 +72,10 @@ Row {
     }
 
     Components.ViewerToolButton {
+        id: resetButton
         objectName: "viewerResetButton"
-        visible: root.zoomed && root.resetView !== null
+        x: readout.x + (root.readoutShown ? readout.width + root.spacing : 0)
+        visible: root.resetShown
         uiPalette: root.uiPalette
         display: AbstractButton.TextOnly
         text: I18n.i18nc("@action:button reset the view's zoom", "Reset")
@@ -67,8 +84,10 @@ Row {
     }
 
     Components.ViewerToolButton {
+        id: issuesButton
         objectName: "viewerIssuesButton"
-        visible: root.unseenIssueCount > 0
+        x: resetButton.x + (root.resetShown ? resetButton.width + root.spacing : 0)
+        visible: root.issuesShown
         uiPalette: root.uiPalette
         text: I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues",
             root.unseenIssueCount)
@@ -79,13 +98,20 @@ Row {
         onClicked: root.errorController.historyRequested()
     }
 
-    Row {
+    // The viewer's own button, such as the album art viewer's info toggle.
+    Item {
         id: viewerControlsRow
-        spacing: 4
+        x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
+        implicitWidth: childrenRect.width
+        implicitHeight: 24
+        width: implicitWidth
+        height: implicitHeight
     }
 
     Components.ViewerToolButton {
+        id: closeButton
         objectName: root.closeButtonName
+        x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
         uiPalette: root.uiPalette
         text: I18n.i18nc("@action:button", "Close")
         icon.name: "window-close"

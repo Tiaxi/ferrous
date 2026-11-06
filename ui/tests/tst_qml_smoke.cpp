@@ -3433,9 +3433,17 @@ QQuickItem *visibleItemNamed(QQuickWindow *window, const QString &objectName);
 QRectF sceneRectOf(const QQuickItem *item);
 
 // Whether the row of buttons that `button` is in has placed it clear of the
-// others: a button that has just appeared is in its place only after the
-// row's next layout.
+// others, inside the row and inside the window: a button that has just
+// appeared is in its place only after the row's next layout, and until then
+// the row keeps the width it had without it, and its other items where they
+// were the last time they showed.
 bool clearOfTheOtherButtons(QQuickItem *button) {
+    QQuickItem *parentRow = button->parentItem();
+    const QRectF own = sceneRectOf(button);
+    if (parentRow == nullptr || !sceneRectOf(parentRow).contains(own)
+        || own.left() < 0 || own.right() > button->window()->width()) {
+        return false;
+    }
     QQuickItem *row = button->parentItem();
     while (row != nullptr && row->parentItem() != nullptr
            && !row->objectName().contains(QStringLiteral("Controls"))
@@ -24803,6 +24811,9 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
         QQuickItem *readout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
         QQuickItem *reset = itemNamed(controls, QStringLiteral("viewerResetButton"));
         QVERIFY(readout != nullptr && reset != nullptr);
+        // The window has its size: the controls end 4 px from its right.
+        QTRY_COMPARE(sceneRectOf(controls).right(),
+                     fullscreenMode == 1 ? double(host->width()) : host->width() - 4.0);
 
         for (const int mode : {0, 1}) {
             viewer->setProperty("visualizationMode", mode);
@@ -24816,12 +24827,19 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             } else {
                 waveform->setZoomLevel(4.0);
             }
+            // In place at once, inside the window, without waiting for the
+            // window to draw.
+            QVERIFY(readout->isVisible() && reset->isVisible());
+            QVERIFY2(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+                         && sceneRectOf(readout).right() <= sceneRectOf(reset).left(),
+                     qPrintable(QStringLiteral("%1 %2").arg(sceneRectOf(readout).left())
+                                    .arg(sceneRectOf(reset).right())));
             QTRY_VERIFY(readout->isVisible());
             QCOMPARE(readout->property("text").toString(),
                      mode == 0 ? QStringLiteral("Zoom 200%") : QStringLiteral("Zoom 400%"));
             QVERIFY(reset->isVisible());
             // Laid out: the readout, then Reset beside it.
-            QTRY_VERIFY(clearOfTheOtherButtons(reset)
+            QTRY_VERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
                         && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
             // A double-click on the readout leaves the viewer open.
             QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(readout));
@@ -25422,9 +25440,13 @@ void TransportInputSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QVERIFY(readout != nullptr && reset != nullptr);
     QVERIFY(!readout->isVisible() && !reset->isVisible());
     surface->setProperty("zoom", 2.5);
+    // In place at once, without waiting for the window to draw.
+    QVERIFY(readout->isVisible() && reset->isVisible());
+    QVERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+            && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
     QTRY_VERIFY(readout->isVisible());
     QCOMPARE(readout->property("text").toString(), QStringLiteral("Zoom 250%"));
-    QTRY_VERIFY(clearOfTheOtherButtons(reset)
+    QTRY_VERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
                 && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
     QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(reset));
     QTRY_COMPARE(surface->property("zoom").toDouble(), 1.0);

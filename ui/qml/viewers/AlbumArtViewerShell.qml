@@ -168,17 +168,30 @@ Item {
 
         // The window's title names the viewer, so it has no title strip:
         // its controls are on a plate in the top right corner, on the art.
-        Components.PlotPlate {
+        // The plate is sized from the controls, which place themselves at
+        // once, rather than by the plate's Row, which would wait for the
+        // next frame.
+        Item {
             objectName: "albumArtPopupControls"
             z: 20
             anchors.top: parent.top
             anchors.right: parent.right
             anchors.margins: 4
-            plotColors: root.uiPalette.waveformPlot
-            uiPalette: root.uiPalette
-            takesPointer: true
+            implicitWidth: popupControls.implicitWidth + 4
+            implicitHeight: popupControls.implicitHeight + 4
+
+            Components.PlotPlate {
+                anchors.fill: parent
+                plotColors: root.uiPalette.waveformPlot
+                uiPalette: root.uiPalette
+                takesPointer: true
+                Accessible.ignored: true
+            }
 
             Components.ViewerControls {
+                id: popupControls
+                x: 2
+                y: 2
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
                 zoomLevel: root.zoomLevel
