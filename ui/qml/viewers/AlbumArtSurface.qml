@@ -173,22 +173,17 @@ Item {
 
         Item {
             id: albumArtTransform
-            readonly property real nativeWidth: albumArtImageFull.sourceSize.width > 0
-                ? albumArtImageFull.sourceSize.width
-                : albumArtViewport.width
-            readonly property real nativeHeight: albumArtImageFull.sourceSize.height > 0
-                ? albumArtImageFull.sourceSize.height
-                : albumArtViewport.height
-            readonly property real fitScale: {
-                const w = nativeWidth > 0 ? nativeWidth : 1
-                const h = nativeHeight > 0 ? nativeHeight : 1
-                const scaleX = albumArtViewport.width / w
-                const scaleY = albumArtViewport.height / h
-                return Math.min(1.0, scaleX, scaleY)
-            }
+            // The art's shape: its decoded size's, or the view's until it
+            // has loaded. The decode request is a size to fit in, not the
+            // art's size, so it says nothing of its shape.
+            readonly property real aspect: albumArtImageFull.implicitWidth > 0
+                    && albumArtImageFull.implicitHeight > 0
+                ? albumArtImageFull.implicitWidth / albumArtImageFull.implicitHeight
+                : Math.max(1, albumArtViewport.width) / Math.max(1, albumArtViewport.height)
 
-            width: Math.max(1, nativeWidth * fitScale)
-            height: Math.max(1, nativeHeight * fitScale)
+            // Fitted to the view at zoom 1, enlarged if it is smaller.
+            width: Math.max(1, Math.min(albumArtViewport.width, albumArtViewport.height * aspect))
+            height: Math.max(1, width / aspect)
             x: (albumArtViewport.width - width) / 2 + root.panX
             y: (albumArtViewport.height - height) / 2 + root.panY
             scale: root.zoom
@@ -198,6 +193,7 @@ Item {
             // Main.qml, which must keep the same image options.
             Image {
                 id: albumArtImageFull
+                objectName: "albumArtImage"
                 anchors.fill: parent
                 source: root.viewerSource
                 fillMode: Image.PreserveAspectFit

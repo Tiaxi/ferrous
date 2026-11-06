@@ -24975,6 +24975,18 @@ Window {
     QCOMPARE(sceneRectOf(seam), QRectF(720, 0, 1, 600));
     QCOMPARE(colorOf(seam, "color"), colorOf(palette, "seam"));
     QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 720, 600));
+    // The square art fits the view's height, centred in what the details
+    // leave, however the decode request is shaped.
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QVERIFY(image != nullptr);
+    const auto paintedArt = [image]() {
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        const QPointF topLeft = image->mapToScene(
+            QPointF((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2));
+        return QRectF(topLeft, painted);
+    };
+    QTRY_COMPARE(paintedArt(), QRectF(60, 0, 600, 600));
 
     // The file's name in semibold, then the rows: label, then value.
     QQuickItem *title = itemNamed(column, QStringLiteral("albumArtInfoTitle"));
@@ -25028,6 +25040,7 @@ Window {
     QTRY_VERIFY(!column->isVisible());
     QVERIFY(!seam->isVisible());
     QTRY_COMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
+    QTRY_COMPARE(paintedArt(), QRectF(200, 0, 600, 600));
 }
 
 void TransportInputSmokeTest::albumArtViewerShowsWhenItsImageCannotBeRead() {
