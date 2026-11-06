@@ -979,8 +979,8 @@ Rectangle {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.preferredWidth: Kirigami.Units.iconSizes.large
                     Layout.preferredHeight: Kirigami.Units.iconSizes.large
-                    source: "ferrous"
-                    fallback: "media-album-track"
+                    // The app icon's own 48 px drawing, built in.
+                    source: "qrc:/icons/hicolor/48x48/apps/ferrous.svg"
                 }
 
                 Text {

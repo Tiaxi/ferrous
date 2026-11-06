@@ -137,11 +137,25 @@ target_compile_definitions(ferrous PRIVATE FERROUS_APP_VERSION="${FERROUS_APP_VE
 add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
-qt_add_resources(ferrous ferrous_app_resources
-    PREFIX "/icons"
-    FILES
-        assets/ferrous.svg
+# The app icon: a drawing of its own for each size (src/AppIcon.h), installed
+# in the hicolor icon theme and built in, for the window icon and the queue's
+# first-run image. The QML that shows it is loaded from the source directory
+# by the tests, which link this library too.
+set(FERROUS_APP_ICON_DIRS 16x16 22x22 32x32 48x48 64x64 128x128 256x256 scalable)
+set(FERROUS_APP_ICON_FILES "")
+foreach(_icon_dir IN LISTS FERROUS_APP_ICON_DIRS)
+    list(APPEND FERROUS_APP_ICON_FILES assets/icons/hicolor/${_icon_dir}/apps/ferrous.svg)
+endforeach()
+qt_add_library(ferrous_app_icon STATIC src/AppIcon.cpp src/AppIcon.h)
+target_include_directories(ferrous_app_icon PUBLIC src)
+target_link_libraries(ferrous_app_icon PUBLIC Qt6::Core Qt6::Gui)
+ferrous_enable_strict_warnings(ferrous_app_icon)
+qt_add_resources(ferrous_app_icon ferrous_app_icon_resources
+    PREFIX "/"
+    BASE assets
+    FILES ${FERROUS_APP_ICON_FILES}
 )
+target_link_libraries(ferrous PRIVATE ferrous_app_icon)
 
 # The QML module is a library of its own, which the app and the test that
 # loads the module as the app does both link. They link the whole archive:
@@ -271,9 +285,14 @@ add_custom_target(extract-messages
 )
 
 install(TARGETS ferrous RUNTIME DESTINATION bin)
-install(FILES ferrous.desktop DESTINATION share/applications)
-install(FILES assets/ferrous.svg DESTINATION share/icons/hicolor/scalable/apps RENAME ferrous.svg)
-install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo)
+install(FILES ferrous.desktop DESTINATION share/applications COMPONENT desktop_integration)
+foreach(_icon_dir IN LISTS FERROUS_APP_ICON_DIRS)
+    install(FILES assets/icons/hicolor/${_icon_dir}/apps/ferrous.svg
+        DESTINATION share/icons/hicolor/${_icon_dir}/apps
+        COMPONENT desktop_integration
+    )
+endforeach()
+install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo COMPONENT desktop_integration)
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
@@ -438,6 +457,30 @@ if(BUILD_TESTING)
     )
     ferrous_add_default_platform_test(ferrous_level_meter_tests drawsOffscreenUnlessAPlatformIsChosen)
 
+    # The app icon: each size built in, and installed with the desktop file
+    # into a prefix of the test's own.
+    qt_add_executable(ferrous_app_icon_tests tests/tst_app_icon.cpp)
+    target_link_libraries(ferrous_app_icon_tests PRIVATE ferrous_app_icon Qt6::Core Qt6::Gui Qt6::Test)
+    ferrous_enable_strict_warnings(ferrous_app_icon_tests)
+    set(FERROUS_APP_ICON_INSTALL_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/app-icon-install")
+    add_test(NAME ferrous_app_icon_install
+        COMMAND "${CMAKE_COMMAND}"
+            -DBUILD_DIR=${CMAKE_BINARY_DIR}
+            -DPREFIX=${FERROUS_APP_ICON_INSTALL_PREFIX}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/install_desktop_integration.cmake"
+    )
+    set_tests_properties(ferrous_app_icon_install PROPERTIES
+        FIXTURES_SETUP ferrous_app_icon_installed
+        TIMEOUT 60
+    )
+    add_test(NAME ferrous_app_icon_tests COMMAND ferrous_app_icon_tests)
+    set_tests_properties(ferrous_app_icon_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_APP_ICON_INSTALL_PREFIX=${FERROUS_APP_ICON_INSTALL_PREFIX}"
+        FIXTURES_REQUIRED ferrous_app_icon_installed
+        FAIL_REGULAR_EXPRESSION "SKIP   :"
+        TIMEOUT 60
+    )
+
     # UiPalette's tokens and the shared components of #373.
     qt_add_executable(ferrous_ui_foundations_tests
         tests/tst_ui_foundations.cpp
@@ -514,6 +557,7 @@ if(BUILD_TESTING)
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_smoke_tests PRIVATE
+        ferrous_app_icon
         Qt6::Core
         Qt6::DBus
         Qt6::Gui
@@ -614,6 +658,7 @@ if(BUILD_TESTING)
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_accessibility_tests PRIVATE
+        ferrous_app_icon
         Qt6::Core
         Qt6::DBus
         Qt6::Gui
@@ -685,6 +730,7 @@ if(BUILD_TESTING)
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_ui_main_window_tests PRIVATE
+        ferrous_app_icon
         Qt6::Core
         Qt6::DBus
         Qt6::Gui
@@ -850,6 +896,7 @@ if(BUILD_TESTING)
         FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     target_link_libraries(ferrous_qml_module_tests PRIVATE
+        ferrous_app_icon
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,ferrous_ui_qml>"
         Qt6::Core
         Qt6::Gui
@@ -964,6 +1011,7 @@ if(BUILD_TESTING)
         FERROUS_PSEUDO_LOCALE_DIR="${FERROUS_PSEUDO_LOCALE_DIR}"
     )
     target_link_libraries(ferrous_i18n_tests PRIVATE
+        ferrous_app_icon
         Qt6::Core
         Qt6::DBus
         Qt6::Gui

@@ -87,6 +87,13 @@ podman run --rm \
         dnf -y -q --setopt=tsflags= install "/rpm/$1" appstream desktop-file-utils dbus-daemon
         for path in /usr/bin/ferrous \
             /usr/share/applications/ferrous.desktop \
+            /usr/share/icons/hicolor/16x16/apps/ferrous.svg \
+            /usr/share/icons/hicolor/22x22/apps/ferrous.svg \
+            /usr/share/icons/hicolor/32x32/apps/ferrous.svg \
+            /usr/share/icons/hicolor/48x48/apps/ferrous.svg \
+            /usr/share/icons/hicolor/64x64/apps/ferrous.svg \
+            /usr/share/icons/hicolor/128x128/apps/ferrous.svg \
+            /usr/share/icons/hicolor/256x256/apps/ferrous.svg \
             /usr/share/icons/hicolor/scalable/apps/ferrous.svg \
             /usr/share/metainfo/io.github.tiaxi.ferrous.metainfo.xml \
             /usr/share/licenses/ferrous/LICENSE \

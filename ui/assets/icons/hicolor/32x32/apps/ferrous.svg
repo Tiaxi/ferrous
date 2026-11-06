@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ferrous, 32 px. At 32 px the 64-unit drawing, snapped: a 3 px floor, a 3 px glide and its 1.8 px harmonic. -->
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <path id="tile" fill="#3a1490" d="M2 27 V4.5 A2.5 2.5 0 0 1 4.5 2 H27.5 A2.5 2.5 0 0 1 30 4.5 V27 Z"/>
+  <path id="floor" fill="#a6006e" d="M2 27 H30 V27.5 A2.5 2.5 0 0 1 27.5 30 H4.5 A2.5 2.5 0 0 1 2 27.5 Z"/>
+  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="1.8" stroke-linecap="round" d="M6 17.5 L20 5"/>
+  <path id="glide" fill="none" stroke="#ffb000" stroke-width="3" stroke-linecap="round" d="M6 22.5 L26 13.5"/>
+</svg>

@@ -921,7 +921,10 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QVERIFY(shown(message));
     QQuickItem *icon = named(window, "queueFirstRunIcon");
     QCOMPARE(icon->width(), 48.0);
-    QCOMPARE(icon->property("source").toString(), QStringLiteral("ferrous"));
+    // The app icon's own 48 px drawing, built in, so it shows whether or not
+    // the icon is installed.
+    QCOMPARE(icon->property("source").toUrl(), QUrl(QStringLiteral("qrc:/icons/hicolor/48x48/apps/ferrous.svg")));
+    QTRY_VERIFY(icon->property("valid").toBool());
     QQuickItem *title = named(window, "queueFirstRunTitle");
     QCOMPARE(title->property("text").toString(), QStringLiteral("Start with your music folder"));
     QCOMPARE(title->property("font").value<QFont>().weight(), QFont::DemiBold);
