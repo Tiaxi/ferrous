@@ -1670,6 +1670,7 @@ private slots:
     void scrobbleIndicatorStaysStillWhileListening();
     void scrobbleIndicatorClickAndMenuPauseScrobbling();
     void scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff();
+    void scrobblePointFollowsThePlaybackClocksSeeks();
     void lastFmPageShowsTheScrobbleProgressSettingWhileConnected();
     void playbackMenuPausesScrobbling();
 };
@@ -28674,6 +28675,44 @@ void ScrobbleSmokeTest::scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff() {
     QTRY_VERIFY(!indicator->isVisible());
     bridge->setProperty("lastFmShowScrobbleProgress", true);
     QTRY_VERIFY(indicator->isVisible());
+}
+
+// With the bridge's PlaybackClock, the scrobble point follows a seek
+// while paused, which changes nothing of the scrobbler's, and where it
+// lands.
+void ScrobbleSmokeTest::scrobblePointFollowsThePlaybackClocksSeeks() {
+    ScrobbleHarness harness;
+    QString error;
+    QVERIFY2(makeScrobbleHarness(harness, &error), qPrintable(error));
+    QQuickItem *indicator = harness.indicator;
+    QObject *bridge = harness.bridge;
+    auto *statusBar = harness.root->findChild<QObject *>(QStringLiteral("statusBar"));
+    QVERIFY(statusBar != nullptr);
+    PlaybackClock clock;
+    PlaybackSample paused;
+    paused.positionSeconds = 30.0;
+    paused.advancing = false;
+    paused.durationSeconds = 229.0;
+    paused.trackToken = 1;
+    clock.applySample(paused, true);
+    bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    QVERIFY(statusBar->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(&clock))));
+    QTRY_VERIFY(indicator->isVisible());
+    const auto tooltip = [indicator]() {
+        return evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString();
+    };
+    QTRY_COMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 1:55"));
+
+    // The seek is asked for: the clock holds its target.
+    clock.holdAt(90.0);
+    QCOMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 2:55"));
+    // It lands a second later than asked, still paused.
+    paused.positionSeconds = 91.0;
+    clock.applySample(paused, true);
+    QCOMPARE(tooltip(), QStringLiteral("Last.fm: scrobbles at 2:56"));
+    // The clock goes before the harness.
+    statusBar->setProperty("playbackClock", QVariant::fromValue(static_cast<QObject *>(nullptr)));
 }
 
 void ScrobbleSmokeTest::lastFmPageShowsTheScrobbleProgressSettingWhileConnected() {

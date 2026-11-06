@@ -22,9 +22,10 @@ AbstractButton {
 
     required property var uiBridge
     required property var uiPalette
-    // The playback position now, in seconds, for where the track scrobbles;
-    // see scrobbleAtSeconds. Without it, the listened time stands in.
-    property var currentPositionSeconds: null
+    // The bridge's PlaybackClock, for where the track scrobbles; see
+    // scrobbleAtSeconds. Without it, the listened time stands in for the
+    // position.
+    property var playbackClock: null
 
     // The Last.fm preferences were asked for.
     signal settingsRequested()
@@ -63,31 +64,57 @@ AbstractButton {
     readonly property bool occupied: root.look !== "hidden" && root.look !== "empty"
 
     // Where in the track the play scrobbles, in seconds of the track: the
-    // position plus the listening it still needs, or -1. It moves only
-    // when a seek or a new track moves the scrobble point, not with every
-    // snapshot of the listened time, which arrives a little apart from the
-    // position.
+    // position plus the listening it still needs, or -1. While the track
+    // plays, the position and the listened time advance together, so the
+    // point stays where it is; it is counted again only where it moves: a
+    // seek or a jump of the position (paused or not), a new track, a
+    // replay of the same track (Repeat One), and the scrobble point itself.
     property real scrobbleAtSeconds: -1
+    // The listened time of the latest snapshot: one that goes back starts
+    // a new play, whose count the scrobbler may send after the position's
+    // jump.
+    property int lastListenedMs: 0
 
-    function refreshScrobbleAt(force) {
+    function refreshScrobbleAt() {
         if (root.look !== "listening" || root.thresholdMs <= 0) {
             root.scrobbleAtSeconds = -1
             return
         }
         const remaining = Math.max(0, root.thresholdMs - root.listenedMs) / 1000
-        const position = typeof root.currentPositionSeconds === "function"
-            ? Number(root.currentPositionSeconds())
+        const position = root.playbackClock
+            ? Number(root.playbackClock.currentPositionSeconds())
             : root.listenedMs / 1000
-        const at = (isFinite(position) ? Math.max(0, position) : 0) + remaining
-        if (force || root.scrobbleAtSeconds < 0 || Math.abs(at - root.scrobbleAtSeconds) > 1.5) {
-            root.scrobbleAtSeconds = at
+        root.scrobbleAtSeconds = (isFinite(position) ? Math.max(0, position) : 0) + remaining
+    }
+
+    onLookChanged: root.refreshScrobbleAt()
+    onThresholdMsChanged: root.refreshScrobbleAt()
+    onListenedMsChanged: {
+        const newPlay = root.listenedMs < root.lastListenedMs
+        root.lastListenedMs = root.listenedMs
+        if (newPlay) {
+            root.refreshScrobbleAt()
+        }
+    }
+    Component.onCompleted: {
+        root.lastListenedMs = root.listenedMs
+        root.refreshScrobbleAt()
+    }
+
+    Connections {
+        target: root.playbackClock || null
+        function onPositionJumped() {
+            root.refreshScrobbleAt()
         }
     }
 
-    onLookChanged: root.refreshScrobbleAt(true)
-    onThresholdMsChanged: root.refreshScrobbleAt(true)
-    onListenedMsChanged: root.refreshScrobbleAt(false)
-    Component.onCompleted: root.refreshScrobbleAt(true)
+    Connections {
+        target: root.uiBridge
+        ignoreUnknownSignals: true
+        function onTrackIdentityChanged() {
+            root.refreshScrobbleAt()
+        }
+    }
 
     // The slot's words, before the glyph.
     readonly property string labelText: {

@@ -70,6 +70,7 @@ private slots:
     void seekHoldsTheTargetUntilTheEngineLands();
     void seekLandingElsewhereStartsOverFromTheLanding();
     void trackChangeStartsOverWithoutSmoothing();
+    void positionJumpedSignalsEachStartOver();
     void gaplessSuccessorWaitsForItsStart();
     void repeatedSamplesKeepTheGaplessSuccessorsStart();
     void sampleBeforeAScheduledStartStillChangesState();
@@ -191,6 +192,59 @@ void PlaybackClockTest::seekLandingElsewhereStartsOverFromTheLanding() {
     QCOMPARE(clock.state().epoch, quint64{3});
     QVERIFY(std::abs(clock.positionAt(m_now) - 58.52) < 1e-9);
     QCOMPARE(clock.state().rate, 1.0);
+}
+
+// positionJumped() tells what counts from the position, such as where a
+// play scrobbles, to count again: at a seek, a track change, a replay and
+// a sample far from the position, and not while playback advances, pauses
+// or resumes.
+void PlaybackClockTest::positionJumpedSignalsEachStartOver() {
+    PlaybackClock clock;
+    attach(clock);
+    QSignalSpy jumps(&clock, &PlaybackClock::positionJumped);
+    clock.applySample(sample(10.0, kStart, true), true);
+    QCOMPARE(jumps.count(), 1);
+
+    // Steady playback, a pause and a resume.
+    for (int tick = 1; tick <= 10; ++tick) {
+        const qint64 sampledAt = kStart + tick * 40 * kMs;
+        m_now = sampledAt + 3 * kMs;
+        clock.applySample(sample(10.0 + tick * 0.040, sampledAt, true), false);
+    }
+    m_now += 100 * kMs;
+    clock.applySample(sample(10.45, m_now, false), false);
+    m_now += 2'000 * kMs;
+    clock.applySample(sample(10.45, m_now, true), false);
+    QCOMPARE(jumps.count(), 1);
+
+    // A seek: when it is asked for, and not again when it lands there.
+    clock.holdAt(90.0);
+    QCOMPARE(jumps.count(), 2);
+    m_now += 100 * kMs;
+    clock.applySample(sample(90.0, m_now, true), true);
+    QCOMPARE(jumps.count(), 2);
+
+    // A paused seek of a second lands elsewhere than the clock showed.
+    m_now += 100 * kMs;
+    clock.applySample(sample(90.1, m_now, false), false);
+    m_now += 2'000 * kMs;
+    const int beforePausedSeek = jumps.count();
+    QCOMPARE(beforePausedSeek, 2);
+    clock.applySample(sample(91.1, m_now, false), true);
+    QCOMPARE(jumps.count(), beforePausedSeek + 1);
+
+    // A new track, and a replay of the same one as Repeat One plays it.
+    m_now += 100 * kMs;
+    clock.applySample(sample(0.0, m_now, true, 2), false);
+    QCOMPARE(jumps.count(), beforePausedSeek + 2);
+    m_now += 3'000 * kMs;
+    clock.applySample(sample(0.0, m_now, true, 3), false);
+    QCOMPARE(jumps.count(), beforePausedSeek + 3);
+
+    // A sample far from the position shown, unmarked.
+    m_now += 40 * kMs;
+    clock.applySample(sample(40.0, m_now, true, 3), false);
+    QCOMPARE(jumps.count(), beforePausedSeek + 4);
 }
 
 void PlaybackClockTest::trackChangeStartsOverWithoutSmoothing() {

@@ -1265,7 +1265,7 @@ ApplicationWindow {
         themeIsDark: root.themeIsDark
         errorController: errorController
         issuesOpen: recentErrorsDialog.visible
-        currentPositionSeconds: playbackController.currentPositionSeconds
+        playbackClock: playbackController.playbackClock
         onLastFmSettingsRequested: preferencesDialog.openLastFmPage()
     }
 

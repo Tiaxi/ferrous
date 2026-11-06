@@ -119,6 +119,7 @@ ApplicationWindow {
     property alias errors: errors
     property alias startButton: startButton
     property alias statusBar: statusBar
+    property alias clock: clock
     property real positionSeconds: 77
     property string positionText: "01:17"
     property var seeks: []
@@ -156,6 +157,7 @@ ApplicationWindow {
         property string lastFmScrobbleMessage: ""
         property int lastFmPendingScrobbleCount: 0
         function setLastFmScrobblingPaused(paused) { lastFmScrobblingPaused = paused }
+        signal trackIdentityChanged()
     }
 
     Action { id: previousAction; text: "P&revious"; icon.name: "media-skip-backward"; shortcut: "Ctrl+Left" }
@@ -166,6 +168,14 @@ ApplicationWindow {
 
     Controllers.ErrorController {
         id: errors
+    }
+
+    // The bridge's PlaybackClock, as the Last.fm slot uses it: the position
+    // now, and a signal when the position starts over.
+    QtObject {
+        id: clock
+        signal positionJumped()
+        function currentPositionSeconds() { return window.positionSeconds }
     }
 
     Item {
@@ -218,7 +228,7 @@ ApplicationWindow {
                 uiPalette: tokens
                 themeIsDark: tokens.themeIsDark
                 errorController: errors
-                currentPositionSeconds: function() { return window.positionSeconds }
+                playbackClock: clock
             }
         }
     }
@@ -401,7 +411,7 @@ private slots:
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarShowsTheScanWithItsBar();
     void lastFmSlotShowsEachState();
-    void lastFmSlotScrobblePointMovesOnlyWithASeek();
+    void lastFmSlotScrobblePointMovesWithSeeksAndNewPlays();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
@@ -1023,37 +1033,77 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(!slot->isVisible());
 }
 
-// The scrobble point is a time in the track: it follows a seek, and not
-// the small difference between the listened time's and the position's
-// updates.
-void TransportStatusTest::lastFmSlotScrobblePointMovesOnlyWithASeek() {
+// The scrobble point is a time in the track. Playback moves the position
+// and the listened time together, so it stays; a jump of the position, a
+// new track and a replay count it again, however small the jump and
+// whether or not the track plays.
+void TransportStatusTest::lastFmSlotScrobblePointMovesWithSeeksAndNewPlays() {
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
-    QVERIFY(slot != nullptr);
+    QObject *clock = harness.root->property("clock").value<QObject *>();
+    QVERIFY(slot != nullptr && clock != nullptr);
     QObject *bridge = harness.bridge;
+    const auto jump = [&](double seconds) {
+        harness.root->setProperty("positionSeconds", seconds);
+        QVERIFY(QMetaObject::invokeMethod(clock, "positionJumped"));
+    };
     harness.root->setProperty("positionSeconds", 30.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 30000);
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_COMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    // The next snapshot's listened time, a little ahead of the position.
+
+    // Playback: the snapshots of the listened time move nothing, though
+    // they arrive a little apart from the position.
     bridge->setProperty("lastFmScrobbleListenedMs", 30900);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
     harness.root->setProperty("positionSeconds", 31.4);
     bridge->setProperty("lastFmScrobbleListenedMs", 31000);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    // A seek to 2:00 moves it: 84 s of listening are left.
-    harness.root->setProperty("positionSeconds", 120.0);
-    bridge->setProperty("lastFmScrobbleListenedMs", 31200);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 3:24"));
-    // The next track, as Repeat One starts it again from its start.
-    harness.root->setProperty("positionSeconds", 0.0);
+
+    // A one-second seek while playing moves it by that second.
+    jump(32.4);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:56"));
+    bridge->setProperty("lastFmScrobbleListenedMs", 32000);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:56"));
+
+    // Paused at 0:30, a seek to 1:30: nothing of the scrobbler changes,
+    // and 85 s of listening are still needed.
+    jump(30.0);
+    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    jump(30.0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    jump(90.0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 2:55"));
+    QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: scrobbles at 2:55"));
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+
+    // Repeat One plays the track again from its start: the position jumps
+    // before the scrobbler's new play counts from zero.
+    bridge->setProperty("lastFmScrobbleListenedMs", 100000);
+    jump(0.0);
     bridge->setProperty("lastFmScrobbleListenedMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    // The same with the new play's count first.
+    bridge->setProperty("lastFmScrobbleListenedMs", 100000);
+    jump(100.0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 3:35"));
+    jump(0.0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+
+    // A new track with another scrobble point.
     bridge->setProperty("lastFmScrobbleThresholdMs", 100000);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:40"));
+    // A gapless successor with the same point, whose start the bridge
+    // tells as a new track.
+    harness.root->setProperty("positionSeconds", 5.0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "trackIdentityChanged"));
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:45"));
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {

@@ -493,10 +493,10 @@ void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
     QQuickItem *indicator = nullptr;
     QTRY_VERIFY((indicator = visibleItemNamed(window, QStringLiteral("scrobbleIndicator"))) != nullptr);
     QCOMPARE(accessibleRole(indicator), QAccessible::Button);
-    // Nothing plays in the fallback bridge: the scrobble point is the
-    // listening it still needs from the start.
+    // The fallback bridge has no playback clock: the listened time stands
+    // in for the position, so the scrobble point is the threshold.
     QCOMPARE(accessibleText(indicator, QAccessible::Name),
-             QStringLiteral("Last.fm: scrobbles at 1:30"));
+             QStringLiteral("Last.fm: scrobbles at 2:00"));
     QCOMPARE(accessibleText(indicator, QAccessible::Description),
              QStringLiteral("Press to pause scrobbling."));
     // Tab reaches it, its tooltip tells where the track scrobbles, and
@@ -507,7 +507,7 @@ void AccessibilityTest::scrobbleIndicatorIsNamedAndWorksByKeyboard() {
     QSignalSpy playPauseTriggered(playPause, SIGNAL(triggered(QObject*)));
     indicator->forceActiveFocus(Qt::TabFocusReason);
     QTRY_COMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
-                 QStringLiteral("Last.fm: scrobbles at 1:30"));
+                 QStringLiteral("Last.fm: scrobbles at 2:00"));
     QTRY_VERIFY(evaluateOn(indicator, QStringLiteral("ToolTip.visible")).toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(bridge->property("lastFmScrobblingPaused").toBool());

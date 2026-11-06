@@ -25,8 +25,9 @@ ToolBar {
     property var errorController: null
     // Whether the recent issues are open: the issues button shows it.
     property bool issuesOpen: false
-    // The playback position now, in seconds, for the Last.fm slot.
-    property var currentPositionSeconds: null
+    // The bridge's PlaybackClock, for where the Last.fm slot's track
+    // scrobbles.
+    property var playbackClock: null
 
     // The Last.fm slot asked for the Last.fm preferences.
     signal lastFmSettingsRequested()
@@ -355,7 +356,7 @@ ToolBar {
         Components.ScrobbleIndicator {
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
-            currentPositionSeconds: root.currentPositionSeconds
+            playbackClock: root.playbackClock
             Layout.alignment: Qt.AlignVCenter
             onSettingsRequested: root.lastFmSettingsRequested()
         }

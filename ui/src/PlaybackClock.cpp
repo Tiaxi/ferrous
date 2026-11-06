@@ -139,12 +139,15 @@ void PlaybackClock::setState(const PlaybackClockState &state) {
     const PlaybackClockState previous = m_state;
     m_state = state;
     emit stateChanged();
+    const bool jumped = state.epoch != previous.epoch || state.trackToken != previous.trackToken;
     // A correction of the advancing position moves positionSeconds by its
     // steps; anything else shows where the position is now.
-    update(state.epoch != previous.epoch
-           || state.trackToken != previous.trackToken
+    update(jumped
            || state.advancing() != previous.advancing()
            || state.durationSeconds != previous.durationSeconds);
+    if (jumped) {
+        emit positionJumped();
+    }
 }
 
 void PlaybackClock::setFrameUpdatesEnabled(bool enabled) {
