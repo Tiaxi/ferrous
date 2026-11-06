@@ -174,6 +174,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/AlbumArtTile.qml
         qml/components/AppMenu.qml
         qml/components/DialogButtons.qml
+        qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
         qml/components/DialogHeader.qml
         qml/components/DialogSurface.qml

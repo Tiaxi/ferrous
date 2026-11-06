@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QColor>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -24,7 +25,9 @@
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 #include <qqml.h>
+#include <algorithm>
 #include <functional>
+#include <limits>
 
 #include "../src/AboutComponents.h"
 #include "../src/LevelMeterItem.h"
@@ -313,6 +316,8 @@ private slots:
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
+    void theQueuesPathIndexFollowsEveryEdit();
+    void recentIssuesLookUpALargeQueueAtTheSameCost();
     void editTagsMarksAChangedFieldAndColumnAndReverts();
     void editTagsTableHeaderUsesTheQueuesHeaderStyle();
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
@@ -631,9 +636,28 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
         QTRY_VERIFY(!sortPopup->property("visible").toBool());
     }
     QVERIFY(dialog->property("visible").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    // Closed and not editable, the combo box leaves Enter to OK, which
+    // applies its choice, as in a KDE dialog.
+    QVERIFY(sort->setProperty("currentIndex", 1));
+    QVERIFY(QMetaObject::invokeMethod(sort, "activated", Q_ARG(int, 1)));
+    QTRY_VERIFY(sort->hasActiveFocus());
+    QVERIFY(!sortPopup->property("visible").toBool());
     QCOMPARE(bridge->property("librarySortMode").toInt(), 0);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(bridge->property("librarySortMode").toInt(), 1);
+    // So does every combo box of the pages.
+    for (const auto &[page, name] : QList<QPair<int, QString>>{
+             {1, QStringLiteral("spectrogramViewComboBox")}, {1, QStringLiteral("spectrogramDisplayComboBox")},
+             {1, QStringLiteral("spectrogramFftComboBox")}, {1, QStringLiteral("channelButtonsComboBox")},
+             {2, QStringLiteral("viewerFullscreenComboBox")}}) {
+        QVERIFY(openPreferences(window, page) != nullptr);
+        QQuickItem *combo = nullptr;
+        QTRY_VERIFY2((combo = visibleNamed(window, name)) != nullptr, qPrintable(name));
+        combo->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), qPrintable(name));
+    }
 
     // On Cancel, Enter presses Cancel.
     QVERIFY(openPreferences(window, 0) != nullptr);
@@ -1243,6 +1267,116 @@ void UiDialogsTest::recentIssuesFollowAQueueReplacedWithOneOfTheSameLength() {
     QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
     QCOMPARE(evaluate(object(window, QStringLiteral("queueController")), QStringLiteral("selectedIndices")).toList(),
              QVariantList{});
+}
+
+void UiDialogsTest::theQueuesPathIndexFollowsEveryEdit() {
+    const auto rowOf = [](const QString &path) {
+        QueueRowData row;
+        row.path = path;
+        return row;
+    };
+    const QString a = QStringLiteral("/music/a.flac");
+    const QString b = QStringLiteral("/music/b.flac");
+    const QString c = QStringLiteral("/music/c.flac");
+    QueueRowsModel model;
+    QVERIFY(!model.containsPath(a));
+    QVERIFY(model.setRows({rowOf(a), rowOf(b), rowOf(a)}));
+    QVERIFY(model.containsPath(a) && model.containsPath(b) && !model.containsPath(c));
+    // A path twice: removing one of its rows keeps it.
+    QVERIFY(model.removeRowsAt(0, 1));
+    QVERIFY(model.containsPath(a));
+    QVERIFY(model.removeRowsAt(1, 1));
+    QVERIFY(!model.containsPath(a));
+    QVERIFY(model.insertRowsAt(1, {rowOf(c), rowOf(a)}));
+    QVERIFY(model.containsPath(a) && model.containsPath(c));
+    // Moves change nothing; an edited row's path moves with it.
+    QVERIFY(model.moveRow(0, 2));
+    QVERIFY(model.moveRows(0, 2, 1));
+    QVERIFY(model.containsPath(a) && model.containsPath(b) && model.containsPath(c));
+    for (int i = 0; i < model.rowCount(); ++i) {
+        if (model.rowAt(i)->path == b) {
+            QVERIFY(model.updateRow(i, rowOf(QStringLiteral("/music/d.flac"))));
+        }
+    }
+    QVERIFY(!model.containsPath(b));
+    QVERIFY(model.containsPath(QStringLiteral("/music/d.flac")));
+    // Cleared, as a new empty queue or by removing every row.
+    QVERIFY(model.removeRowsAt(0, model.rowCount()));
+    QVERIFY(!model.containsPath(a) && !model.containsPath(c));
+    QVERIFY(model.setRows({rowOf(a)}));
+    QVERIFY(model.setRows({}));
+    QVERIFY(!model.containsPath(a));
+}
+
+void UiDialogsTest::recentIssuesLookUpALargeQueueAtTheSameCost() {
+    const auto rowsOf = [](int first, int count) {
+        QVector<QueueRowData> rows;
+        rows.reserve(count);
+        for (int i = first; i < first + count; ++i) {
+            QueueRowData row;
+            row.path = QStringLiteral("/music/%1.flac").arg(i);
+            row.title = QStringLiteral("Track %1").arg(i);
+            rows.push_back(std::move(row));
+        }
+        return rows;
+    };
+    QueueRowsModel model;
+    QVERIFY(model.setRows(rowsOf(0, 100)));
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&model)));
+    QVERIFY(bridge->setProperty("queueLength", model.rowCount()));
+    // As many issues as the history keeps, about files past the end of the
+    // queue, the worst case for a scan.
+    QObject *errors = object(window, QStringLiteral("errorController"));
+    const int limit = errors->property("historyLimit").toInt();
+    for (int i = 0; i < limit; ++i) {
+        report(window, 1, 1, QStringLiteral("/music/%1.flac").arg(20000 + i), QStringLiteral("Couldn't play it."));
+    }
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QVERIFY(QMetaObject::invokeMethod(popup, "open"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    // The best of a few refreshes, so that a busy machine does not decide.
+    const auto refreshTime = [&]() {
+        qint64 best = std::numeric_limits<qint64>::max();
+        for (int run = 0; run < 5; ++run) {
+            QElapsedTimer timer;
+            timer.start();
+            for (int repeat = 0; repeat < 20; ++repeat) {
+                QMetaObject::invokeMethod(popup, "refreshQueuedSubjects");
+            }
+            best = std::min(best, timer.nsecsElapsed());
+        }
+        return best;
+    };
+    const qint64 small = refreshTime();
+    QVERIFY(evaluate(popup, QStringLiteral("Object.keys(queuedSubjects).length")).toInt() == 0);
+
+    // 10,000 rows, then a bulk insert while the popup is open that brings in
+    // the issues' files.
+    QVERIFY(model.setRows(rowsOf(0, 10000)));
+    QVERIFY(bridge->setProperty("queueLength", model.rowCount()));
+    QVERIFY(model.insertRowsAt(5000, rowsOf(20000, limit)));
+    QVERIFY(bridge->setProperty("queueLength", model.rowCount()));
+    QTRY_COMPARE(evaluate(popup, QStringLiteral("Object.keys(queuedSubjects).length")).toInt(), limit);
+    QList<QQuickItem *> actions;
+    QTRY_VERIFY((actions = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryActionButton"))).size()
+                == limit);
+    for (QQuickItem *action : actions) {
+        QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
+    }
+    const qint64 large = refreshTime();
+    // A scan of the queue for each issue would take about a hundred times
+    // as long as with 100 rows; the index takes about the same time.
+    QVERIFY2(large < small * 10 + 2'000'000,
+             qPrintable(QStringLiteral("%1 ns with 100 rows, %2 ns with %3 rows")
+                            .arg(small).arg(large).arg(model.rowCount())));
+    // And they leave again, half of them.
+    QVERIFY(model.removeRowsAt(5000, limit / 2));
+    QTRY_COMPARE(evaluate(popup, QStringLiteral("Object.keys(queuedSubjects).length")).toInt(), limit - limit / 2);
 }
 
 void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {

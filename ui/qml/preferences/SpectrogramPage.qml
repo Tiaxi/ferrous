@@ -18,7 +18,7 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Spectrogram")
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "spectrogramViewComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
         Layout.preferredWidth: root.comboWidth
@@ -30,7 +30,7 @@ Preferences.PreferencesPage {
         onActivated: function(index) { root.settings.setValue("spectrogramViewMode", index) }
     }
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "spectrogramDisplayComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
         Layout.preferredWidth: root.comboWidth
@@ -42,7 +42,7 @@ Preferences.PreferencesPage {
         onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
     }
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "spectrogramFftComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
         Layout.preferredWidth: root.comboWidth
@@ -157,7 +157,7 @@ Preferences.PreferencesPage {
         text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
     }
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "channelButtonsComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
         Layout.preferredWidth: root.comboWidth

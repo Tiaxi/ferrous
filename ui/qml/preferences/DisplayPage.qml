@@ -14,7 +14,7 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Appearance")
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "viewerFullscreenComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Fullscreen viewers:")
         Layout.preferredWidth: Kirigami.Units.gridUnit * 11

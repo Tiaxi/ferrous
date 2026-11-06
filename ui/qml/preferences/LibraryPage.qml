@@ -325,7 +325,7 @@ Preferences.PreferencesPage {
             + "are rescanned every 30 minutes instead.")
     }
 
-    ComboBox {
+    Components.DialogComboBox {
         objectName: "librarySortComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Sort albums by:")
         Layout.preferredWidth: Kirigami.Units.gridUnit * 9

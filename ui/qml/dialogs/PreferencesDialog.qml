@@ -255,8 +255,12 @@ Dialog {
     }
 
     contentItem: RowLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        // Enter presses the default button, as in KDE's dialogs. The pages'
+        // combo boxes pass it on from here too.
+        function handleDialogEnter(event, focusItem) {
+            return dialogButtons.handleEnter(event, focusItem)
+        }
+        Keys.onPressed: function(event) { handleDialogEnter(event, Window.activeFocusItem) }
 
         spacing: 0
 
