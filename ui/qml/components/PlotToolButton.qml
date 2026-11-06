@@ -6,9 +6,10 @@ import org.kde.kirigami 2.20 as Kirigami
 
 // A 24 px tool button on a PlotPlate: a theme icon (`icon.name`), or short
 // text such as the M and S of a lane. Its `text` is the tooltip and the
-// accessible name. Checked is the plot's checked tint with the checked
-// glyph colour; keyboard focus is a separate 2 px accent ring inside it;
-// both show together.
+// accessible name. Checked is a solid fill with the glyph in the plot's
+// checked glyph colour. Keyboard focus is a separate 2 px ring 1 px
+// outside the button, with a 1 px gap in the plate's colour, so it reads
+// on the plate and around a checked fill alike; both show together.
 ToolButton {
     id: root
 
@@ -29,6 +30,8 @@ ToolButton {
     icon.height: Kirigami.Units.iconSizes.small
     icon.color: root.glyphColor
     focusPolicy: Qt.TabFocus
+    // The focus ring reaches over the plate's 2 px gap to the next button.
+    z: root.visualFocus ? 1 : 0
 
     Accessible.name: root.text
 
@@ -85,17 +88,30 @@ ToolButton {
             anchors.fill: parent
             radius: 3
             visible: root.checked
-            color: root.plotColors.checkedTint
+            color: root.plotColors.checkedFill
+        }
+
+        // The gap between the button and its focus ring: the plate, opaque.
+        Rectangle {
+            objectName: "plotToolButtonFocusGap"
+            anchors.fill: parent
+            anchors.margins: -1
+            radius: 4
+            visible: root.visualFocus
+            color: "transparent"
+            border.width: 1
+            border.color: Qt.tint(root.plotColors.plotBg, root.plotColors.plotPlate)
         }
 
         Rectangle {
             objectName: "plotToolButtonFocusRing"
             anchors.fill: parent
-            radius: 3
+            anchors.margins: -3
+            radius: 6
             visible: root.visualFocus
             color: "transparent"
             border.width: 2
-            border.color: root.uiPalette.accent
+            border.color: root.plotColors.plotFocusRing
         }
     }
 }

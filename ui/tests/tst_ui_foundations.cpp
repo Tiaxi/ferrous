@@ -428,7 +428,11 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#2b1f43"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#a39bb3"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#a39bb3")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterPeak"), fromHex(QStringLiteral("#f4f4f6"))), qPrintable(colorOf(spectrogram, "meterPeak").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#f4f4f6")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "checkedGlyph"), QColor(Qt::white)), qPrintable(colorOf(spectrogram, "checkedGlyph").name(QColor::HexArgb) + QStringLiteral(" vs ") + QColor(Qt::white).name(QColor::HexArgb)));
+    // A checked button: the accent, its glyph the floor; focus: the dark
+    // theme's focus ring.
+    QVERIFY(sameColor(colorOf(spectrogram, "checkedFill"), colorOf(tokens, "accent")));
+    QVERIFY(sameColor(colorOf(spectrogram, "checkedGlyph"), fromHex(QStringLiteral("#14062e"))));
+    QVERIFY(channelDistance(colorOf(spectrogram, "plotFocusRing"), fromHex(QStringLiteral("#6cc5f2"))) <= 2);
     QVERIFY(std::abs(colorOf(spectrogram, "plotPlate").alphaF() - 0.88) < 0.002);
     QCOMPARE(channelDistance(colorOf(spectrogram, "plotPlate"), fromHex(QStringLiteral("#14062e"))), 0);
     QVERIFY(std::abs(colorOf(spectrogram, "plotPlateEdge").alphaF() - 0.14) < 0.002);
@@ -449,24 +453,31 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(channelDistance(colorOf(waveform, "meterFill"),
                             fromHex(dark ? QStringLiteral("#7d8790") : QStringLiteral("#5b6670")))
             <= 3);
-    QVERIFY(channelDistance(colorOf(waveform, "checkedGlyph"),
-                            fromHex(dark ? QStringLiteral("#7cc8f0") : QStringLiteral("#1a74a8")))
+    // A checked button: the accent in dark, the focus ring's darker blue in
+    // light; its glyph the view in dark, white in light.
+    QVERIFY(channelDistance(colorOf(waveform, "checkedFill"),
+                            fromHex(dark ? QStringLiteral("#3daee9") : QStringLiteral("#1a74a8")))
             <= 2);
+    QVERIFY(sameColor(colorOf(waveform, "checkedGlyph"), dark ? view : QColor(Qt::white)));
+    QVERIFY(sameColor(colorOf(waveform, "plotFocusRing"), colorOf(tokens, "focusRing")));
 
     for (QObject *plot : {spectrogram, waveform}) {
         const QString name = plot == spectrogram ? QStringLiteral("spectrogram") : QStringLiteral("waveform");
         const QColor floor = colorOf(plot, "plotBg");
         const QColor plate = drawnOver(colorOf(plot, "plotPlate"), floor);
         const QColor trough = drawnOver(colorOf(plot, "meterTrough"), floor);
-        const QColor checked = drawnOver(colorOf(plot, "checkedTint"), plate);
-        QVERIFY(std::abs(colorOf(plot, "checkedTint").alphaF() - 0.45) < 0.002);
+        const QColor checked = colorOf(plot, "checkedFill");
+        QCOMPARE(checked.alphaF(), 1.0f);
+        QCOMPARE(colorOf(plot, "plotFocusRing").alphaF(), 1.0f);
         const QList<std::tuple<QString, QColor, QColor, double>> pairs{
             {QStringLiteral("text on the plot"), colorOf(plot, "plotText"), floor, 4.5},
             {QStringLiteral("text on a plate"), colorOf(plot, "plotText"), plate, 4.5},
             {QStringLiteral("secondary text on the plot"), drawnOver(colorOf(plot, "plotTextSecondary"), floor),
              floor, 4.5},
             {QStringLiteral("a link on the plot"), colorOf(plot, "plotLink"), floor, 4.5},
-            {QStringLiteral("the checked glyph"), colorOf(plot, "checkedGlyph"), checked, 3.0},
+            {QStringLiteral("the checked fill on a plate"), checked, plate, 3.0},
+            {QStringLiteral("the checked glyph or letter on the fill"), colorOf(plot, "checkedGlyph"), checked, 4.5},
+            {QStringLiteral("the focus ring on a plate"), colorOf(plot, "plotFocusRing"), plate, 3.0},
             {QStringLiteral("the meter's fill"), colorOf(plot, "meterFill"), trough, 3.0},
             {QStringLiteral("the meter's peak"), drawnOver(colorOf(plot, "meterPeak"), floor), trough, 3.0},
         };
@@ -816,8 +827,11 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {
     QTest::newRow("waveform, light") << false << 1;
 }
 
-// Checked is the tint with the checked glyph colour; keyboard focus is a
-// separate 2 px accent ring; checked and focused shows both.
+// Checked is a solid fill with the glyph or letter in the checked glyph
+// colour; keyboard focus is a separate 2 px ring 1 px outside the button,
+// with a 1 px gap in the plate's colour; checked and focused shows both.
+// Each state is drawn and measured: the fill on the plate (3:1), the glyph
+// or letter on the fill (4.5:1) and the ring on the plate (3:1).
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -829,103 +843,122 @@ void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart() {
     auto *window = qobject_cast<QQuickWindow *>(root.get());
     QVERIFY(window != nullptr);
     QVERIFY(QTest::qWaitForWindowExposed(window));
-    QObject *tokens = root->property("tokens").value<QObject *>();
     QQuickItem *plot = itemNamed(root.get(), QStringLiteral("plot"));
-    QVERIFY(tokens != nullptr && plot != nullptr);
+    QVERIFY(plot != nullptr);
     plot->setProperty("plotMode", plotMode);
     QObject *plotColors = plot->property("plotColors").value<QObject *>();
     QVERIFY(plotColors != nullptr);
-    QQuickItem *checkedButton = itemNamed(root.get(), QStringLiteral("firstButton"));
-    QQuickItem *plainButton = itemNamed(root.get(), QStringLiteral("secondButton"));
-    QVERIFY(checkedButton != nullptr && plainButton != nullptr);
-    QCOMPARE(checkedButton->size(), QSizeF(24, 24));
+    QQuickItem *iconButton = itemNamed(root.get(), QStringLiteral("firstButton"));
+    QQuickItem *button = itemNamed(root.get(), QStringLiteral("secondButton"));
+    QVERIFY(iconButton != nullptr && button != nullptr);
+    QCOMPARE(button->size(), QSizeF(24, 24));
+    QQuickItem *fill = childNamed(button, QStringLiteral("plotToolButtonChecked"));
+    QQuickItem *gap = childNamed(button, QStringLiteral("plotToolButtonFocusGap"));
+    QQuickItem *ring = childNamed(button, QStringLiteral("plotToolButtonFocusRing"));
+    QQuickItem *letter = childNamed(button, QStringLiteral("plotToolButtonGlyph"));
+    QQuickItem *icon = childNamed(iconButton, QStringLiteral("plotToolButtonIcon"));
+    QVERIFY(fill != nullptr && gap != nullptr && ring != nullptr && letter != nullptr && icon != nullptr);
+    QVERIFY(letter->isVisible());
+    QCOMPARE(letter->property("text").toString(), QStringLiteral("M"));
 
-    struct Parts {
-        QQuickItem *checked;
-        QQuickItem *ring;
-        QQuickItem *icon;
-        QQuickItem *glyph;
-    };
-    const auto partsOf = [](QQuickItem *button) {
-        return Parts{childNamed(button, QStringLiteral("plotToolButtonChecked")),
-                     childNamed(button, QStringLiteral("plotToolButtonFocusRing")),
-                     childNamed(button, QStringLiteral("plotToolButtonIcon")),
-                     childNamed(button, QStringLiteral("plotToolButtonGlyph"))};
-    };
-    const Parts checkedParts = partsOf(checkedButton);
-    const Parts plainParts = partsOf(plainButton);
-    for (const Parts &parts : {checkedParts, plainParts}) {
-        QVERIFY(parts.checked != nullptr && parts.ring != nullptr && parts.icon != nullptr && parts.glyph != nullptr);
-    }
-    const QColor accent = colorOf(tokens, "accent");
-
-    // At rest: neither tint nor ring, the glyph in the plot's text colour.
-    QVERIFY(!plainParts.checked->isVisible());
-    QVERIFY(!plainParts.ring->isVisible());
-    QVERIFY(plainParts.glyph->isVisible());
-    QVERIFY(!plainParts.icon->isVisible());
-    QCOMPARE(plainParts.glyph->property("text").toString(), QStringLiteral("M"));
-    QVERIFY2(sameColor(colorOf(plainParts.glyph, "color"), colorOf(plotColors, "plotText")), qPrintable(colorOf(plainParts.glyph, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(plotColors, "plotText").name(QColor::HexArgb)));
-
-    // Checked: the tint, and the checked glyph colour.
-    QVERIFY(checkedParts.checked->isVisible());
-    QVERIFY(!checkedParts.ring->isVisible());
-    QVERIFY(checkedParts.icon->isVisible());
-    QVERIFY2(sameColor(colorOf(checkedParts.checked, "color"), colorOf(plotColors, "checkedTint")), qPrintable(colorOf(checkedParts.checked, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(plotColors, "checkedTint").name(QColor::HexArgb)));
-    QCOMPARE(channelDistance(colorOf(checkedParts.icon, "color"), colorOf(plotColors, "checkedGlyph")), 0);
-
-    // Keyboard focus: a 2 px accent ring, and no tint.
-    plainButton->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(plainButton->property("visualFocus").toBool());
-    QVERIFY(plainParts.ring->isVisible());
-    QVERIFY(!plainParts.checked->isVisible());
-    QObject *ringBorder = plainParts.ring->property("border").value<QObject *>();
+    // The ring: 2 px, from 1 px to 3 px outside the button; the gap: the
+    // 1 px between, in the plate's colour.
+    QObject *ringBorder = ring->property("border").value<QObject *>();
+    QObject *gapBorder = gap->property("border").value<QObject *>();
     QCOMPARE(ringBorder->property("width").toReal(), 2.0);
-    QVERIFY2(sameColor(colorOf(ringBorder, "color"), accent), qPrintable(colorOf(ringBorder, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + accent.name(QColor::HexArgb)));
-    QCOMPARE(colorOf(plainParts.ring, "color").alphaF(), 0.0f);
-    QCOMPARE(plainParts.ring->size(), plainButton->size());
+    QCOMPARE(ring->mapRectToItem(button, QRectF(0, 0, ring->width(), ring->height())), QRectF(-3, -3, 30, 30));
+    QCOMPARE(gapBorder->property("width").toReal(), 1.0);
+    QCOMPARE(gap->mapRectToItem(button, QRectF(0, 0, gap->width(), gap->height())), QRectF(-1, -1, 26, 26));
+    QCOMPARE(colorOf(ring, "color").alphaF(), 0.0f);
+    QCOMPARE(colorOf(gap, "color").alphaF(), 0.0f);
 
-    // Space checks it.
-    QTest::keyClick(window, Qt::Key_Space);
-    QTRY_VERIFY(plainButton->property("checked").toBool());
-    QVERIFY(plainParts.checked->isVisible());
-    QCOMPARE(channelDistance(colorOf(plainParts.glyph, "color"), colorOf(plotColors, "checkedGlyph")), 0);
-
-    // Checked and focused: both.
-    checkedButton->forceActiveFocus(Qt::TabFocusReason);
-    QTRY_VERIFY(checkedButton->property("visualFocus").toBool());
-    QVERIFY(checkedParts.checked->isVisible());
-    QVERIFY(checkedParts.ring->isVisible());
-
-    // Drawn: the ring at the edge, the tint inside it, over the plate on
-    // the plot.
-    const QImage image = window->grabWindow();
-    QVERIFY(!image.isNull());
-    const qreal scale = image.devicePixelRatio();
     const QColor floor = colorOf(plotColors, "plotBg");
     const QColor plate = drawnOver(colorOf(plotColors, "plotPlate"), floor);
-    const QColor tint = drawnOver(colorOf(plotColors, "checkedTint"), plate);
-    const QPointF origin = checkedButton->mapToScene(QPointF(0, 0)) * scale;
-    const auto expectPixel = [&](const QPointF &point, const QColor &wanted, const char *what) {
-        const QColor actual = pixelAt(image, point);
-        QVERIFY2(channelDistance(actual, wanted) <= 3,
-                 qPrintable(QStringLiteral("%1 at %2,%3 is %4, not %5")
-                                .arg(QLatin1String(what))
-                                .arg(point.x())
-                                .arg(point.y())
-                                .arg(actual.name(), wanted.name())));
+    const QColor plateEdge = drawnOver(colorOf(plotColors, "plotPlateEdge"), floor);
+    const QColor checkedFill = colorOf(plotColors, "checkedFill");
+    const QColor focusRing = colorOf(plotColors, "plotFocusRing");
+    QVERIFY(channelDistance(colorOf(gapBorder, "color"), plate) <= 1);
+    QVERIFY(sameColor(colorOf(ringBorder, "color"), focusRing));
+
+    struct State {
+        const char *name;
+        bool checked;
+        bool focused;
     };
-    expectPixel(origin + QPointF(0.5, 12 * scale), accent, "the focus ring");
-    expectPixel(origin + QPointF(1.5 * scale, 12 * scale), accent, "the focus ring's second pixel");
-    expectPixel(origin + QPointF(2.5 * scale, 12 * scale), tint, "the checked tint inside the ring");
-    // Between the buttons: the plate.
-    expectPixel(origin + QPointF(25 * scale, 12 * scale), plate, "the plate between the buttons");
-    // Outside the plate: its edge, then the plot.
-    const QPointF plateOrigin =
-        itemNamed(root.get(), QStringLiteral("switchPlate"))->mapToScene(QPointF(0, 0)) * scale;
-    expectPixel(plateOrigin + QPointF(-0.5 * scale, 14 * scale), drawnOver(colorOf(plotColors, "plotPlateEdge"), floor),
-                "the plate's edge");
-    expectPixel(plateOrigin + QPointF(-1.5 * scale, 14 * scale), floor, "the plot");
+    const QList<State> states{
+        {"at rest", false, false},
+        {"checked", true, false},
+        {"focused", false, true},
+        {"checked and focused", true, true},
+    };
+    for (const State &state : states) {
+        const QString name = QString::fromLatin1(state.name);
+        button->setProperty("checked", state.checked);
+        if (state.focused) {
+            button->forceActiveFocus(Qt::TabFocusReason);
+        } else {
+            plot->forceActiveFocus(Qt::OtherFocusReason);
+        }
+        QTRY_COMPARE(button->property("visualFocus").toBool(), state.focused);
+        QCOMPARE(fill->isVisible(), state.checked);
+        QCOMPARE(ring->isVisible(), state.focused);
+        QCOMPARE(gap->isVisible(), state.focused);
+        QVERIFY(sameColor(colorOf(fill, "color"), checkedFill));
+        const QColor letterColor = colorOf(letter, "color");
+        QVERIFY2(sameColor(letterColor, colorOf(plotColors, state.checked ? "checkedGlyph" : "plotText")),
+                 qPrintable(name));
+
+        const QImage image = window->grabWindow();
+        QVERIFY(!image.isNull());
+        const qreal scale = image.devicePixelRatio();
+        const QPointF origin = button->mapToScene(QPointF(0, 0)) * scale;
+        const auto pixel = [&](qreal x) { return pixelAt(image, origin + QPointF(x * scale, 12 * scale)); };
+        const auto expect = [&](qreal x, const QColor &wanted, const QString &what) {
+            const QColor actual = pixel(x);
+            QVERIFY2(channelDistance(actual, wanted) <= 3,
+                     qPrintable(QStringLiteral("%1, %2 at x %3 is %4, not %5")
+                                    .arg(name, what)
+                                    .arg(x)
+                                    .arg(actual.name(), wanted.name())));
+        };
+        // Inside the button, clear of its letter; then, on its right: the
+        // gap, the ring's two pixels (the second over the plate's edge),
+        // and the plot.
+        const QColor inside = state.checked ? checkedFill : plate;
+        expect(2.5, inside, QStringLiteral("inside"));
+        expect(24.5, plate, QStringLiteral("the gap"));
+        expect(25.5, state.focused ? focusRing : plate, QStringLiteral("the ring"));
+        expect(26.5, state.focused ? focusRing : plateEdge, QStringLiteral("the ring's outer pixel"));
+        expect(27.5, floor, QStringLiteral("the plot"));
+
+        // Measured on what was drawn.
+        const QColor drawnInside = pixel(2.5);
+        const QColor drawnGap = pixel(24.5);
+        if (state.checked) {
+            QVERIFY2(contrastRatio(drawnInside, drawnGap) >= 3.0,
+                     qPrintable(describe(name + QStringLiteral(": the fill on the plate"), drawnInside, drawnGap)));
+        }
+        QVERIFY2(contrastRatio(letterColor, drawnInside) >= 4.5,
+                 qPrintable(describe(name + QStringLiteral(": the letter"), letterColor, drawnInside)));
+        if (state.focused) {
+            const QColor drawnRing = pixel(25.5);
+            QVERIFY2(contrastRatio(drawnRing, drawnGap) >= 3.0,
+                     qPrintable(describe(name + QStringLiteral(": the ring on the plate"), drawnRing, drawnGap)));
+        }
+    }
+
+    // The icon follows the same colours.
+    QVERIFY(iconButton->property("checked").toBool());
+    QVERIFY(sameColor(colorOf(icon, "color"), colorOf(plotColors, "checkedGlyph")));
+    iconButton->setProperty("checked", false);
+    QVERIFY(sameColor(colorOf(icon, "color"), colorOf(plotColors, "plotText")));
+
+    // Space checks the focused button.
+    button->setProperty("checked", false);
+    button->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(button->property("visualFocus").toBool());
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(button->property("checked").toBool());
 }
 
 void UiFoundationsTest::plotToolButtonIsAnAccessibleCheckableButton() {

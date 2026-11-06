@@ -113,14 +113,18 @@ QtObject {
         required property color meterFill
         required property color meterPeak
         required property color meterClipOff
-        // A checked tool button on a plate: the tint and its glyph.
-        required property color checkedTint
+        // A checked tool button on a plate: a solid fill, at least 3:1 on
+        // the plate, and its glyph or letter, at least 4.5:1 on the fill.
+        required property color checkedFill
         required property color checkedGlyph
+        // A tool button's keyboard focus ring, at least 3:1 on the plate.
+        required property color plotFocusRing
     }
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed.
     readonly property PlotColors spectrogramPlot: PlotColors {
+        id: spectrogramColors
         plotBg: "#14062e"
         plotPlate: Qt.rgba(20 / 255, 6 / 255, 46 / 255, 0.88)
         plotPlateEdge: Qt.rgba(1, 1, 1, 0.14)
@@ -134,8 +138,10 @@ QtObject {
         meterFill: "#a39bb3"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
-        checkedTint: ColorUtils.withAlpha(root.accent, 0.45)
-        checkedGlyph: "#ffffff"
+        checkedFill: root.accent
+        checkedGlyph: spectrogramColors.plotBg
+        // The dark theme's focus ring, as the plot is dark in both.
+        plotFocusRing: root._withHslLightness(root.accent, 1.03, 0.686)
     }
 
     // The waveform is drawn on the view colour, so its set follows the
@@ -157,8 +163,11 @@ QtObject {
             : ColorUtils.mixColor(root._inactiveText, root.text, 0.267)
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
-        checkedTint: ColorUtils.withAlpha(root.accent, 0.45)
-        checkedGlyph: root.themeIsDark ? root.spectrogramPlot.plotLink : root.link
+        // The accent is 2.4:1 on white: the light fill is the focus ring's
+        // darker blue. #3daee9 / #1a74a8.
+        checkedFill: root.themeIsDark ? root.accent : root.focusRing
+        checkedGlyph: root.themeIsDark ? root.view : "#ffffff"
+        plotFocusRing: root.focusRing
     }
 
     // The plot set for a visualization mode: 0 is the spectrogram, 1 the
