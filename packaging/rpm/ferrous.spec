@@ -24,6 +24,10 @@ BuildRequires:  qt6-qtbase-devel
 BuildRequires:  qt6-qtdeclarative-devel
 BuildRequires:  rust
 BuildRequires:  kf6-kirigami-devel
+# The app's controls style and Breeze's icons: the shared components'
+# tests draw in that style, with icons recoloured as Breeze's are.
+BuildRequires:  kf6-qqc2-desktop-style
+BuildRequires:  breeze-icon-theme
 # KI18n translates the interface; the tests extract the translation template
 # and make a pseudo-translation with GNU gettext.
 BuildRequires:  kf6-ki18n-devel

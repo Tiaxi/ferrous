@@ -9,6 +9,7 @@ Item {
     id: root
 
     required property var windowRoot
+    required property var uiPalette
     required property bool viewerOpen
     required property bool useWholeScreenViewerMode
     required property int popupTransitionMs
@@ -181,8 +182,9 @@ Item {
         }
 
         Rectangle {
+            objectName: "spectrogramPopupFloor"
             anchors.fill: parent
-            color: "#0b0b0f"
+            color: root.uiPalette.spectrogramPlot.plotBg
             border.color: Qt.rgba(1, 1, 1, 0.12)
 
             MouseArea {
@@ -230,7 +232,7 @@ Item {
                 visibility: root.viewerOpen && root.useWholeScreenViewerMode
                     ? Window.FullScreen
                     : Window.Hidden
-                color: "#000000"
+                color: root.uiPalette.spectrogramPlot.plotBg
                 title: root.titleText
 
                 onVisibilityChanged: function() {
@@ -311,7 +313,7 @@ Item {
 
                 Rectangle {
                     anchors.fill: parent
-                    color: "#0b0b0f"
+                    color: root.uiPalette.spectrogramPlot.plotBg
 
                     MouseArea {
                         anchors.fill: parent

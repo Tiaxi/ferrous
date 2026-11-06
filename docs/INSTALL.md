@@ -31,7 +31,7 @@ Install these tools and development libraries:
 - The D-Bus development library (libdbus), which the Last.fm keyring support links
 - GStreamer runtime codec plugins for the formats you want to play
 
-To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it. Plasma desktops include it.
+To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it, and the UI tests of the shared components use it too, with the Breeze icon theme (`breeze-icon-theme`). Plasma desktops include both.
 
 Although CMake declares a Qt 6.6 minimum, it unconditionally enables [QTP0004, introduced in Qt 6.8](https://doc.qt.io/qt-6/qt-cmake-policy-qtp0004.html), so source builds need Qt 6.8 or newer. See [UI CI](../.github/workflows/ci.yml) for the reference distribution and Rust toolchain.
 
@@ -42,7 +42,8 @@ sudo dnf install git rust cargo cmake ninja-build gcc-c++ \
   pkgconf-pkg-config dbus-devel glib2-devel gstreamer1-devel \
   gstreamer1-plugins-base-devel qt6-qtbase-devel \
   qt6-qtdeclarative-devel qt6-qtquickcontrols2-devel kf6-kirigami-devel \
-  kf6-ki18n-devel gettext glibc-langpack-en
+  kf6-ki18n-devel kf6-qqc2-desktop-style breeze-icon-theme gettext \
+  glibc-langpack-en
 ```
 
 ## Run from source
