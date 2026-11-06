@@ -1216,6 +1216,8 @@ private slots:
     void spectrogramFrameSchedulerWakesDueFramesTogether();
     void spectrogramFrameSchedulerWakesEveryFrameDueByALateTimer();
     void spectrogramDecodedEndMovesTheCenteredViewAtOnce();
+    void spectrogramPaintedCenteredViewFollowsASmallEndCorrection_data();
+    void spectrogramPaintedCenteredViewFollowsASmallEndCorrection();
     void spectrogramPanesShareTheirWindowsFrameSchedule();
     void spectrogramPaneNoOneSeesAsksForNoPlaybackFrames();
     void spectrogramClockCourseCorrectionWaitsButJumpsShowAtOnce();
@@ -1305,6 +1307,8 @@ private slots:
     void spectrogramSeekShowsThePlayheadFirstAndFillsTheLeftIn();
     void spectrogramZoomFreezeWaitsForTheBackfill();
     void spectrogramZoomNearTheEndWaitsForTheLeftAndKeepsTheEnd();
+    void spectrogramZoomFillWaitsForTheCanvasColumnsAtFractionalScales_data();
+    void spectrogramZoomFillWaitsForTheCanvasColumnsAtFractionalScales();
     void spectrogramRingGrowthKeepsRollingHistory();
     void spectrogramRingChangeBenchmark();
     void spectrogramRollingModeKeepsViewportHeadroomBeyondLookahead();
@@ -15823,6 +15827,96 @@ void SpectrogramSmokeTest::spectrogramDecodedEndMovesTheCenteredViewAtOnce() {
     delete node;
 }
 
+void SpectrogramSmokeTest::spectrogramPaintedCenteredViewFollowsASmallEndCorrection_data() {
+    QTest::addColumn<int>("correction");
+    QTest::newRow("a column") << 1;
+    QTest::newRow("two columns") << 2;
+}
+
+void SpectrogramSmokeTest::spectrogramPaintedCenteredViewFollowsASmallEndCorrection() {
+    // Near the end, a centered view ends where the session's views end,
+    // which its chunks reckon from the file's frames until its last chunk
+    // says where its decode ended (issue 441). A painted view moves with
+    // that correction at once, however small: a view does not step back a
+    // column or two as the playhead's position wobbles, but one ending at
+    // the end does not follow the playhead, and held, it showed the columns
+    // past the new end blank at its right edge.
+    QFETCH(int, correction);
+    SpectrogramItem item;
+    item.setWidth(1'200);
+    item.setHeight(16);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int hop = 171;
+    constexpr int fftSize = 2'048;
+    constexpr quint64 frames = 120 * rate;
+    constexpr qint64 window = 1'200;
+    // 120 s: see spectrogramCenteredViewEndsAtTheDecodedEndNotTheEstimate.
+    constexpr int predictedEnd = 5'609;
+    constexpr int estimate = (120 * rate / 1'024 + 64) * 1'024 / hop + 1;
+    const int end = predictedEnd - correction;
+    // 3 s before the end: the view ends at the end.
+    constexpr double position = 117.0;
+    QVERIFY(static_cast<qint64>(position * rate / hop) + window / 2 > predictedEnd);
+
+    // Every column the session decodes is in; its chunks carry the end
+    // reckoned from the file's frames.
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, 0, estimate, rate, hop,
+        false, true, 1, false, 1, 0, fftSize, frames, predictedEnd);
+    item.feedPrecomputedChunk(QByteArray(qsizetype(end) * bins, '\x80'), bins, 0, end, 0,
+        estimate, rate, hop, false, false, 1, false, 1, 0, fftSize, frames, predictedEnd);
+    setTestPosition(item, position);
+    QSGNode *node = paintSettled(item, nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, predictedEnd - window);
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, qint64(predictedEnd - 1));
+    }
+
+    // The session's last chunk: its decode ended a column or two short.
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, end, end, rate, hop,
+        /*complete=*/true, /*bufferReset=*/false, 1, /*clearHistoryOnReset=*/false, 1, 0,
+        fftSize, frames, end);
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedEndColumn, end);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, end - window);
+        QCOMPARE(item.m_precomputedCanvasDisplayRight, qint64(end - 1));
+        for (qint64 column = end - window; column < end; ++column) {
+            QVERIFY(item.ringSlotForDisplayIndexLocked(column, false) >= 0);
+        }
+    }
+    // None of the canvas's columns is blank, at its right edge or elsewhere.
+    const QImage shown = canvasInViewOrder(item);
+    QCOMPARE(shown.width(), static_cast<int>(window));
+    for (int x = 0; x < shown.width(); ++x) {
+        QVERIFY2(shown.pixel(x, shown.height() / 2) != qRgb(0, 0, 0),
+                 qPrintable(QStringLiteral("x %1 is blank").arg(x)));
+    }
+
+    // Mid-track, where the view follows the playhead, it still does not
+    // step back a column with it.
+    constexpr double midTrack = 60.0;
+    setTestPosition(item, midTrack);
+    node = paintSettled(item, node);
+    qint64 midLeft = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        midLeft = item.m_precomputedCanvasDisplayLeft;
+        QCOMPARE(midLeft, static_cast<qint64>(midTrack * rate / hop) - window / 2);
+    }
+    setTestPosition(item, midTrack - 1.0 * hop / rate);
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, midLeft);
+    }
+    delete node;
+}
+
 void SpectrogramSmokeTest::spectrogramPanesShareTheirWindowsFrameSchedule() {
     // The channels' panes of a window scroll alike: they wait for the same
     // frame, which one timer asks for for both. A pane in another window,
@@ -20015,6 +20109,139 @@ void SpectrogramSmokeTest::spectrogramZoomNearTheEndWaitsForTheLeftAndKeepsTheEn
     item.feedPrecomputedChunk({}, bins, 0, 0, end, end, 48'000, hop, true, false, 7, false, 2);
     QCOMPARE(item.m_precomputedTotalColumnsEstimate, end);
     QVERIFY(!item.m_zoomFillActive);
+}
+
+void SpectrogramSmokeTest::spectrogramZoomFillWaitsForTheCanvasColumnsAtFractionalScales_data() {
+    // Panes of an 8 kHz file zoomed in from 0.5 (columns of 342 frames) to
+    // 0.57 (300 frames), which the canvas draws at 0.9999999999999999 of a
+    // column a device pixel. 501 logical pixels at 1.5x are 751 device
+    // ones, and at 1.25x 626: the canvas shows 501 columns, and 501
+    // logical pixels at that zoom would be 502.
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("window");
+    // Issue 441's example.
+    QTest::newRow("1.5x") << 1.5 << 501 << 501;
+    QTest::newRow("1.25x") << 1.25 << 501 << 501;
+}
+
+void SpectrogramSmokeTest::spectrogramZoomFillWaitsForTheCanvasColumnsAtFractionalScales() {
+    // A centered zoom keeps its preview until the ring holds the view's
+    // columns, those left of the playhead included. It waits for the
+    // columns the canvas will show, in device columns at the canvas's zoom
+    // (issue 441): reckoned in logical pixels, its view was a column wider
+    // at fractional scales, and mid-track it waited for the column left of
+    // the canvas's view, which the canvas does not show.
+    QFETCH(double, scale);
+    QFETCH(int, width);
+    QFETCH(int, window);
+    QQuickWindow quickWindow;
+    if (!showOnScreen(quickWindow, scale)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    quickWindow.resize(width + 40, 160);
+    SpectrogramItem &item = *new SpectrogramItem(quickWindow.contentItem());
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 4;
+    constexpr int rate = 8'000;
+    constexpr int fftSize = 2'048;
+    constexpr int referenceHop = 171;
+    constexpr int startHop = 342;
+    constexpr int hop = 300;
+    constexpr double zoom = 0.57;
+    // 70.08 s, of which the 300-frame columns end at 1867.
+    constexpr quint64 frames = 560'640;
+    constexpr int end = 1'867;
+    // Column 1024 of 300 frames, mid-track.
+    constexpr double position = 38.4;
+    constexpr qint64 playhead = 1'024;
+    const auto estimateAt = [](int columnHop) {
+        return static_cast<int>(std::ceil(
+            (static_cast<double>(frames / 1'024) + 64.0) * 1'024.0 / columnHop));
+    };
+    const auto endAt = [](int columnHop) {
+        const int rowHop = std::min(fftSize / 8, columnHop);
+        const int rows = static_cast<int>((frames - fftSize / 2) / rowHop) + 1;
+        return (rows * rowHop + columnHop - 1) / columnHop;
+    };
+    QCOMPARE(endAt(hop), end);
+
+    // The pane at zoom 0.5, with all its columns in.
+    item.feedPrecomputedChunk(QByteArray(64 * bins, '\x40'), bins, 0, 64, 0,
+        estimateAt(referenceHop), rate, referenceHop, false, true, 1, false, 1, 0, fftSize,
+        frames, endAt(referenceHop));
+    item.setZoomLevel(0.5);
+    QVERIFY(sendPendingBackendZoom(item));
+    const int startEnd = endAt(startHop);
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, 0, estimateAt(startHop), rate,
+        startHop, false, true, 1, false, 2, 0, fftSize, frames, startEnd);
+    item.feedPrecomputedChunk(QByteArray(qsizetype(startEnd) * bins, '\x40'), bins, 0,
+        startEnd, 0, estimateAt(startHop), rate, startHop, false, false, 1, false, 2, 0,
+        fftSize, frames, startEnd);
+    setTestPosition(item, position);
+    QSGNode *node = paintSettled(item, nullptr);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_canvasScale, scale);
+        QCOMPARE(item.m_precomputedHopSize, startHop);
+    }
+
+    // Zoomed in: the canvas is shown scaled until the zoom's data covers
+    // the view, of `window` columns centered on the playhead's.
+    item.setZoomLevel(zoom);
+    QVERIFY(sendPendingBackendZoom(item));
+    node = paintSettled(item, node);
+    const qint64 left = playhead - window / 2;
+    const auto feed = [&](qint64 first, qint64 last) {
+        const int count = static_cast<int>(last - first);
+        item.feedPrecomputedChunk(QByteArray(qsizetype(count) * bins, '\x40'), bins, 0, count,
+            static_cast<int>(first), estimateAt(hop), rate, hop, false, false, 1, false, 3, 0,
+            fftSize, frames, end);
+    };
+    // The session starts 2 s of warm-up left of the view, and decodes the
+    // playhead's column first, then the right, then the left.
+    item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, static_cast<int>(left - 53),
+        estimateAt(hop), rate, hop, false, true, 1, false, 3, 0, fftSize, frames, end);
+    feed(playhead, playhead + 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_precomputedHopSize, hop);
+        QVERIFY(!item.m_awaitingZoomData);
+        QVERIFY(item.m_zoomFillActive);
+        QVERIFY(item.canvasZoomLocked() < scale);
+        // The view the canvas will show, and the one logical pixels made.
+        const SpectrogramItem::CenteredView view = item.centeredViewLocked(position,
+            item.canvasWidthLocked(), item.canvasHeightLocked(), item.canvasZoomLocked(),
+            static_cast<double>(rate) / hop);
+        QCOMPARE(view.left, left);
+        QCOMPARE(view.right, left + window - 1);
+        QCOMPARE(static_cast<int>(std::ceil(width / item.effectiveZoomLocked())), window + 1);
+    }
+    feed(playhead + 1, end);
+    QVERIFY(item.m_zoomFillActive);
+    // All of the left but its first column.
+    feed(left + 1, playhead);
+    QVERIFY2(item.m_zoomFillActive, "the view's first column is missing");
+    // Its first column, and not the one before it.
+    feed(left, left + 1);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.ringSlotForDisplayIndexLocked(left - 1, false) < 0);
+    }
+    QVERIFY2(!item.m_zoomFillActive, "the ring holds every column of the view");
+
+    // The canvas then shows those columns.
+    node = paintSettled(item, node);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_zoomPreviewShown);
+        QCOMPARE(item.m_precomputedCanvasDisplayLeft, left);
+        QCOMPARE(item.m_precomputedCanvasViewRight, left + window - 1);
+    }
+    delete node;
 }
 
 void SpectrogramSmokeTest::spectrogramRingGrowthKeepsRollingHistory() {
