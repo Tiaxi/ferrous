@@ -1477,23 +1477,8 @@ fn build_search_results_frame(
 ) -> SearchBuildOutcome {
     let seq = query.seq;
     let query_text = query.query.trim();
-    if query_text.is_empty() {
+    if split_search_terms(query_text).is_empty() {
         return empty_search_results_frame(seq);
-    }
-    let query_terms = split_search_terms(query_text);
-    if query_terms.is_empty() {
-        return empty_search_results_frame(seq);
-    }
-    let mut limits = search_result_limits(query_text);
-    if query.limit > 0 {
-        let limit = usize::try_from(query.limit)
-            .unwrap_or(2_000)
-            .clamp(20, 2_000);
-        limits = SearchResultLimits {
-            artist: limit,
-            album: limit,
-            track: limit,
-        };
     }
     let library = query.library.as_ref();
     if library.roots.is_empty() {
@@ -1504,32 +1489,18 @@ fn build_search_results_frame(
             Ok(prepared) => prepared,
             Err(next) => return SearchBuildOutcome::Cancelled(next),
         };
-    let buckets = match search_tracks_prepared(
+    let (totals, rows) = match search_rows(
         query_text,
+        query.limit,
         prepared.as_ref(),
         &library.roots,
-        limits.track,
         query_rx,
     ) {
-        PreparedSearchOutcome::Hits(rows) => rows,
-        PreparedSearchOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+        Ok(found) => found,
+        Err(next) => return SearchBuildOutcome::Cancelled(next),
     };
-    let totals = [
-        u32::try_from(buckets.artist_groups.len()).unwrap_or(u32::MAX),
-        u32::try_from(buckets.album_groups.len()).unwrap_or(u32::MAX),
-        buckets.track_count,
-    ];
-    let rows = finalize_search_rows(
-        &prepared,
-        &limits,
-        &buckets.album_cover_paths,
-        buckets.artist_groups,
-        buckets.album_groups,
-        &buckets.album_hit_stats,
-        buckets.track_rows,
-    );
     let suggestion = if rows.is_empty() {
-        match search_suggestion(query_text, prepared.as_ref(), query_rx) {
+        match search_suggestion(query_text, prepared.as_ref(), &library.roots, query_rx) {
             Ok(suggestion) => suggestion,
             Err(next) => return SearchBuildOutcome::Cancelled(next),
         }
@@ -1544,11 +1515,52 @@ fn build_search_results_frame(
     })
 }
 
-/// A spelling correction of `query_text`, which found nothing, that finds
-/// something, or an empty string. Stops with a newer query.
+/// The totals and the rows `query_text` shows: up to `limit` of each type,
+/// or the default limits when it is 0. Stops with a newer query.
+fn search_rows(
+    query_text: &str,
+    limit: u32,
+    prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> Result<([u32; 3], Vec<BridgeSearchResultRow>), SearchWorkerQuery> {
+    let mut limits = search_result_limits(query_text);
+    if limit > 0 {
+        let limit = usize::try_from(limit).unwrap_or(2_000).clamp(20, 2_000);
+        limits = SearchResultLimits {
+            artist: limit,
+            album: limit,
+            track: limit,
+        };
+    }
+    let buckets = match search_tracks_prepared(query_text, prepared, roots, limits.track, query_rx)
+    {
+        PreparedSearchOutcome::Hits(rows) => rows,
+        PreparedSearchOutcome::Cancelled(next) => return Err(next),
+    };
+    let totals = [
+        u32::try_from(buckets.artist_groups.len()).unwrap_or(u32::MAX),
+        u32::try_from(buckets.album_groups.len()).unwrap_or(u32::MAX),
+        buckets.track_count,
+    ];
+    let rows = finalize_search_rows(
+        prepared,
+        &limits,
+        &buckets.album_cover_paths,
+        buckets.artist_groups,
+        buckets.album_groups,
+        &buckets.album_hit_stats,
+        buckets.track_rows,
+    );
+    Ok((totals, rows))
+}
+
+/// A spelling correction of `query_text`, which found nothing, that shows
+/// results when searched, or an empty string. Stops with a newer query.
 fn search_suggestion(
     query_text: &str,
     prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
     query_rx: &Receiver<SearchWorkerQuery>,
 ) -> Result<String, SearchWorkerQuery> {
     let vocabulary = if let Some(vocabulary) = prepared.vocabulary.get() {
@@ -1560,23 +1572,20 @@ fn search_suggestion(
         )?);
         Arc::clone(prepared.vocabulary.get_or_init(|| built))
     };
-    let Some(suggestion) = corrected_query(query_text, &vocabulary) else {
+    let Some(suggestion) = corrected_query(query_text, &vocabulary, &mut || {
+        poll_latest_search_query(query_rx)
+    })?
+    else {
         return Ok(String::new());
     };
-    // Offer it only if it finds something.
-    let query = SearchQuery::parse(&suggestion);
-    let poll_rows = search_cancel_poll_rows();
-    for (index, entry) in prepared.tracks.iter().enumerate() {
-        if index % poll_rows == 0 {
-            if let Some(next) = poll_latest_search_query(query_rx) {
-                return Err(next);
-            }
-        }
-        if query.matches(&entry.fields) {
-            return Ok(suggestion);
-        }
-    }
-    Ok(String::new())
+    // Offer it only if searching it shows results: the same search, with
+    // its type filters and the rules of which artists and albums show.
+    let (_, rows) = search_rows(&suggestion, 0, prepared, roots, query_rx)?;
+    Ok(if rows.is_empty() {
+        String::new()
+    } else {
+        suggestion
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2453,6 +2462,41 @@ mod tests {
             search("merdian type:album").suggestion,
             "meridian type:album"
         );
+        // A suggestion is offered only if searching it shows results, with
+        // its type filters: "lantern" is a title, not an artist.
+        assert_eq!(search("lantrn type:artist").suggestion, "");
+        assert_eq!(search("lantrn type:track").suggestion, "lantern type:track");
+        // "afterglow" is a track's title: no album shows for it.
+        assert_eq!(search("afterglw type:album").suggestion, "");
+        assert_eq!(
+            search("afterimge type:album").suggestion,
+            "afterimage type:album"
+        );
+        assert_eq!(search("merdian type:podcast").suggestion, "");
+        assert_eq!(search("merdian type:album type:track").suggestion, "");
+        // Whatever is suggested shows results when it is searched.
+        for query in [
+            "lantrn",
+            "lantrn type:artist",
+            "lantrn type:album",
+            "lantrn type:track",
+            "merdian type:artist",
+            "merdian type:album",
+            "merdian type:track",
+            "afterglw type:artist",
+            "afterglw type:album",
+            "afterglw type:track",
+            "lumen drft type:album",
+            "afterimge type:track",
+        ] {
+            let suggestion = search(query).suggestion;
+            if !suggestion.is_empty() {
+                assert!(
+                    !search(&suggestion).rows.is_empty(),
+                    "{query} suggests {suggestion}, which shows nothing"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2475,13 +2519,13 @@ mod tests {
         };
         let prepared = cache.prepared_for(&library, || None).expect("prepared");
         tx.send(query(3, "song 1")).expect("send");
-        let next =
-            search_suggestion("sonx", &prepared, &rx).expect_err("stops for the newer query");
+        let next = search_suggestion("sonx", &prepared, &library.roots, &rx)
+            .expect_err("stops for the newer query");
         assert_eq!(next.seq, 3);
         // What was left half made is not kept: the next suggestion is whole.
         assert!(prepared.vocabulary.get().is_none());
         assert_eq!(
-            search_suggestion("sonx", &prepared, &rx).expect("whole"),
+            search_suggestion("sonx", &prepared, &library.roots, &rx).expect("whole"),
             "song"
         );
         assert!(prepared.vocabulary.get().is_some());
