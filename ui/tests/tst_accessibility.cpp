@@ -3524,6 +3524,8 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
     for (const int mode : {0, 1}) {
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
+        // The mode's plot gives the layer its lanes again: two, labelled.
+        QVERIFY(showStereoLanes(layer));
         const QString what = mode == 0 ? QStringLiteral("spectrogram") : QStringLiteral("waveform");
         // A level of -12 dB in the first lane; paused, it decays from there.
         meter->m_channels.assign(2, {});
@@ -3536,7 +3538,11 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *checked = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(mode));
         QVERIFY(tabTo(window, unchecked));
         QTRY_VERIFY(unchecked->property("visualFocus").toBool());
-        QQuickItem *label = visibleItemNamed(window, QStringLiteral("plotLaneLabel"));
+        QQuickItem *label = nullptr;
+        for (QQuickItem *candidate : itemsNamed(layer, QStringLiteral("plotLaneLabel"))) {
+            if (label == nullptr && candidate->isVisible()) label = candidate;
+        }
+        QVERIFY(label != nullptr);
         QQuickItem *labelText = label->findChild<QQuickItem *>(QStringLiteral("plotPlateLabel"));
         QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
         QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);

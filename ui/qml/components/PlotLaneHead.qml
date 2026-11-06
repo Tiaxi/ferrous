@@ -9,7 +9,7 @@ import org.kde.kirigami 2.20 as Kirigami
 // plate. The buttons show while the pointer is on the lane or the plate, and
 // while keyboard focus is on either of them; hidden, they stay Tab stops,
 // so the keyboard reveals them.
-Row {
+Item {
     id: root
 
     required property var plotColors
@@ -30,11 +30,16 @@ Row {
         || (root.buttonsVisibility === 1
             && (root.laneHovered || buttonsHover.hovered || root.focusInside))
 
-    spacing: 8
+    // The label's box: the buttons' plate, taller, is centred on it and
+    // overhangs it above and below.
+    implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
+    implicitHeight: labelPlate.height
+    width: implicitWidth
+    height: implicitHeight
 
     Components.PlotPlate {
+        id: labelPlate
         objectName: "plotLaneLabel"
-        anchors.verticalCenter: parent.verticalCenter
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         text: root.label
@@ -43,7 +48,8 @@ Row {
     Components.PlotPlate {
         id: buttons
         objectName: "plotLaneButtons"
-        anchors.verticalCenter: parent.verticalCenter
+        x: labelPlate.width + 8
+        anchors.verticalCenter: labelPlate.verticalCenter
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         visible: root.buttonsVisibility !== 0

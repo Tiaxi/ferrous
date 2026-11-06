@@ -2870,6 +2870,23 @@ ApplicationWindow {
     QObject *popupFloor = root->findChild<QObject *>(QStringLiteral("spectrogramPopupFloor"));
     QVERIFY(popupFloor != nullptr);
     QCOMPARE(popupFloor->property("color").value<QColor>(), floor);
+
+    // As drawn: full bleed, with no border; the empty plot, the item's own
+    // canvas included, is the floor; the lanes meet at a 1 px seam.
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QTest::qWait(100);
+    const QImage image = window->grabWindow();
+    const double scale = double(image.width()) / window->width();
+    const auto drawn = [&](double x, double y) {
+        return image.pixelColor(int(x * scale), int(y * scale));
+    };
+    QCOMPARE(drawn(0.5, 50), floor);
+    QCOMPARE(drawn(319.5, 50), floor);
+    QCOMPARE(drawn(160, 0.5), floor);
+    QCOMPARE(drawn(160, 50), floor);
+    QCOMPARE(drawn(160, 150), floor);
+    QCOMPARE(drawn(160, 100.5), QColor(QStringLiteral("#0a0318")));
 }
 
 void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {
@@ -3087,6 +3104,16 @@ Item {
     QTRY_COMPARE(waveform->channelCount(), 2);
     // The scale is the spectrogram's: none on the waveform.
     QVERIFY(!waveform->gridEnabled());
+    // The waveform's plot set: on the view colour, in the seek bar's wave
+    // colour, with the theme's seams; no green on black.
+    QObject *plotColors = surface->property("plotColors").value<QObject *>();
+    QObject *palette = surface->property("uiPalette").value<QObject *>();
+    QVERIFY(plotColors != nullptr && palette != nullptr);
+    QCOMPARE(waveform->backgroundColor(), plotColors->property("plotBg").value<QColor>());
+    QCOMPARE(waveform->backgroundColor(), palette->property("view").value<QColor>());
+    QCOMPARE(waveform->waveformColor(), palette->property("wave").value<QColor>());
+    QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
+    QCOMPARE(waveform->playheadColor().alpha(), 255);
     QTRY_VERIFY(waveform->crosshairEnabled());
     QTRY_VERIFY(waveform->showFpsOverlay());
     QVERIFY(!waveform->playing());
