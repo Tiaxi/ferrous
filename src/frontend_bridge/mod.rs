@@ -46,6 +46,7 @@ mod queue_undo;
 mod queue_validation;
 mod search;
 mod search_query;
+mod search_suggest;
 mod tree_worker;
 mod window_layout;
 mod workers;
@@ -469,6 +470,9 @@ pub struct BridgeSearchResultsFrame {
     pub seq: u32,
     pub totals: [u32; 3],
     pub rows: Vec<BridgeSearchResultRow>,
+    /// When the query found nothing: a spelling correction of it that finds
+    /// something, or empty.
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

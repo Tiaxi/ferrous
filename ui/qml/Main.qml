@@ -546,7 +546,6 @@ ApplicationWindow {
     // row is tall, or as the widest number.
     readonly property int playlistOrderColumnWidth: Math.ceil(Math.max(
         uiPalette.rowHeight, playlistOrderTextMetrics.advanceWidth))
-    readonly property bool globalSearchShowsRootColumn: (uiBridge.libraryRootCount || 0) >= 2
     // The queue's state glyph column: 28 px at the default font.
     readonly property int playlistIndicatorColumnWidth: Math.round(uiPalette.rowHeight * 28 / 26)
 
@@ -1179,10 +1178,9 @@ ApplicationWindow {
         controller: globalSearchController
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
+        anchorItem: transportBar
         snappyScrollFlickDeceleration: root.snappyScrollFlickDeceleration
         snappyScrollMaxFlickVelocity: root.snappyScrollMaxFlickVelocity
-        globalSearchShowsRootColumn: root.globalSearchShowsRootColumn
     }
 
     Dialogs.DiagnosticsDialog {

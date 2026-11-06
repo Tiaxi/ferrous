@@ -551,6 +551,9 @@ struct DecodedSearchRow {
 struct DecodedSearchResults {
     quint32 seq{0};
     quint32 totals[3]{0, 0, 0};
+    // Version 6: when the query found nothing, a spelling correction of it
+    // that finds something, or empty.
+    QString suggestion;
     QVector<DecodedSearchRow> rows;
 };
 

@@ -11,7 +11,6 @@
 
 class GlobalSearchResultsModel : public QAbstractListModel {
     Q_OBJECT
-    Q_PROPERTY(QString resultFilter READ resultFilter WRITE setResultFilter NOTIFY searchRowsChanged)
 
 public:
     struct SearchDisplayRow {
@@ -38,6 +37,9 @@ public:
         int count{0};
         float lengthSeconds{-1.0f};
         QString lengthText;
+        // A "more" or "truncated" row: how many of its section's results
+        // show; `count` is how many there are.
+        int shownCount{0};
 
         bool operator==(const SearchDisplayRow &other) const {
             return matchDetail == other.matchDetail && kind == other.kind
@@ -61,7 +63,8 @@ public:
                 && trackNumber == other.trackNumber
                 && count == other.count
                 && lengthSeconds == other.lengthSeconds
-                && lengthText == other.lengthText;
+                && lengthText == other.lengthText
+                && shownCount == other.shownCount;
         }
 
         bool operator!=(const SearchDisplayRow &other) const {
@@ -89,7 +92,8 @@ public:
                 && trackNumber == other.trackNumber
                 && count == other.count
                 && lengthSeconds == other.lengthSeconds
-                && lengthText == other.lengthText;
+                && lengthText == other.lengthText
+                && shownCount == other.shownCount;
         }
     };
 
@@ -118,6 +122,7 @@ public:
         LengthTextRole,
         DelegateTypeRole,
         ShowRootRole,
+        ShownCountRole,
     };
     Q_ENUM(Role)
 
@@ -127,10 +132,20 @@ public:
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
     QHash<int, QByteArray> roleNames() const override;
 
-    void presentSearchRows(QVector<SearchDisplayRow> rows);
-    QString resultFilter() const { return m_resultFilter; }
-    void setResultFilter(const QString &filter);
+    // The most results of a type a search shows; see
+    // BridgeClient::expandGlobalSearch.
+    static constexpr int kMaxShownPerType = 2000;
+
+    // Shows the result rows of a search in sections, one per result type,
+    // in the order of their best match. `totals` are how many artists,
+    // albums and tracks the search found; a section that shows fewer ends
+    // in a "more" row, or a "truncated" note when `canShowMore` is false.
+    void presentSearchRows(QVector<SearchDisplayRow> rows, const QVector<int> &totals = {},
+                           bool canShowMore = false);
     Q_INVOKABLE QString highlightText(const QString &text, const QString &query) const;
+    // `text` cut where the query's matches start and end: a list of
+    // {text, match} maps, in order, that join to `text`.
+    Q_INVOKABLE QVariantList highlightSegments(const QString &text, const QString &query) const;
     void replaceRows(QVector<SearchDisplayRow> rows);
     void replaceRowsBatched(QVector<SearchDisplayRow> rows, int batchSize = 10);
     void cancelBatchedInsertion();
@@ -138,14 +153,19 @@ public:
     Q_INVOKABLE QVariantMap rowDataAt(int index) const;
     Q_INVOKABLE bool isSelectableIndex(int index) const;
     Q_INVOKABLE int nextSelectableIndex(int startIndex, int step, bool wrap) const;
+    // The row of the `ordinal`th (from 0) result of `rowType`, or -1.
+    Q_INVOKABLE int indexOfResult(const QString &rowType, int ordinal) const;
 
 signals:
     void searchRowsChanged();
 
 private:
     void rebuildSearchRows();
-    QString m_resultFilter{QStringLiteral("all")};
+    // Which characters of `text` the query matches.
+    QVector<bool> matchedCharacters(const QString &text, const QString &query) const;
     QVector<SearchDisplayRow> m_sourceSearchRows;
+    QVector<int> m_sourceTotals;
+    bool m_canShowMore{false};
     QVector<SearchDisplayRow> m_rows;
 
     QVector<SearchDisplayRow> m_pendingBatchRows;

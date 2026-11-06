@@ -10,6 +10,7 @@
 
 namespace {
 constexpr auto kItemKind = "item";
+constexpr auto kMoreKind = "more";
 }
 
 GlobalSearchResultsModel::GlobalSearchResultsModel(QObject *parent)
@@ -85,7 +86,7 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
         }
         return row.trackNumber;
     case CountRole:
-        if (row.kind != QLatin1String(kItemKind)) {
+        if (row.kind == QLatin1String("section") || row.kind == QLatin1String("columns")) {
             return {};
         }
         return row.count;
@@ -96,6 +97,8 @@ QVariant GlobalSearchResultsModel::data(const QModelIndex &index, int role) cons
         return row.lengthSeconds;
     case LengthTextRole:
         return row.lengthText;
+    case ShownCountRole:
+        return row.shownCount;
     case DelegateTypeRole:
         if (row.kind == QLatin1String("section"))
             return QStringLiteral("section");
@@ -133,6 +136,7 @@ QHash<int, QByteArray> GlobalSearchResultsModel::roleNames() const {
         {LengthSecondsRole, "lengthSeconds"},
         {LengthTextRole, "lengthText"},
         {DelegateTypeRole, "delegateType"},
+        {ShownCountRole, "shownCount"},
     };
 }
 
@@ -380,6 +384,10 @@ QVariantMap GlobalSearchResultsModel::rowDataAt(int index) const {
     if (!row.sectionTitle.isEmpty()) {
         out.insert(QStringLiteral("sectionTitle"), row.sectionTitle);
     }
+    if (row.kind == QLatin1String(kMoreKind)) {
+        out.insert(QStringLiteral("count"), row.count);
+        out.insert(QStringLiteral("shownCount"), row.shownCount);
+    }
     if (row.kind != QLatin1String(kItemKind)) {
         return out;
     }
@@ -415,7 +423,7 @@ bool GlobalSearchResultsModel::isSelectableIndex(int index) const {
         return false;
     }
     const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(index)];
-    return row.kind == QLatin1String(kItemKind);
+    return row.kind == QLatin1String(kItemKind) || row.kind == QLatin1String(kMoreKind);
 }
 
 int GlobalSearchResultsModel::nextSelectableIndex(int startIndex, int step, bool wrap) const {
@@ -439,44 +447,92 @@ int GlobalSearchResultsModel::nextSelectableIndex(int startIndex, int step, bool
     return -1;
 }
 
-void GlobalSearchResultsModel::presentSearchRows(QVector<SearchDisplayRow> rows) {
+int GlobalSearchResultsModel::indexOfResult(const QString &rowType, int ordinal) const {
+    if (ordinal < 0) {
+        return -1;
+    }
+    int seen = 0;
+    for (int i = 0; i < static_cast<int>(m_rows.size()); ++i) {
+        const SearchDisplayRow &row = m_rows[static_cast<qsizetype>(i)];
+        if (row.kind == QLatin1String(kItemKind) && row.rowType == rowType && seen++ == ordinal) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void GlobalSearchResultsModel::presentSearchRows(QVector<SearchDisplayRow> rows, const QVector<int> &totals,
+                                                 bool canShowMore) {
     m_sourceSearchRows.clear();
     for (auto &row : rows) {
         if (row.kind == QStringLiteral("item")) m_sourceSearchRows.push_back(std::move(row));
     }
-    rebuildSearchRows();
-}
-
-void GlobalSearchResultsModel::setResultFilter(const QString &filter) {
-    if (filter == m_resultFilter || !QStringList{"all", "artist", "album", "track"}.contains(filter)) return;
-    m_resultFilter = filter;
+    m_sourceTotals = totals;
+    m_canShowMore = canShowMore;
     rebuildSearchRows();
 }
 
 void GlobalSearchResultsModel::rebuildSearchRows() {
-    QVector<SearchDisplayRow> candidates;
+    static const QStringList types{QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("track")};
+    QVector<SearchDisplayRow> sections[3];
     for (const auto &row : m_sourceSearchRows) {
-        if (m_resultFilter == QStringLiteral("all") || row.rowType == m_resultFilter) candidates.push_back(row);
+        const auto type = types.indexOf(row.rowType);
+        if (type >= 0) sections[type].push_back(row);
     }
-    std::stable_sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
-        if (a.score != b.score) return a.score < b.score;
-        // Prefer an album when name relevance is equal; weak album matches
-        // never jump ahead of stronger tracks merely because of their type.
-        if (a.rowType != b.rowType) return a.rowType == "album" || (a.rowType == "track" && b.rowType == "artist");
-        return QString::compare(a.label, b.label, Qt::CaseInsensitive) < 0;
-    });
     const auto identity = [](const SearchDisplayRow &row) {
         return QStringList{row.rowType.toCaseFolded(), row.label.toCaseFolded(),
                            row.artist.toCaseFolded(), row.album.toCaseFolded()};
     };
     QHash<QStringList, QSet<QString>> roots;
-    for (const auto &row : candidates) roots[identity(row)].insert(row.rootLabel);
-    for (auto &row : candidates) row.showRoot = roots.value(identity(row)).size() > 1;
-    replaceRowsBatched(std::move(candidates));
+    for (const auto &section : sections) {
+        for (const auto &row : section) roots[identity(row)].insert(row.rootLabel);
+    }
+    for (auto &section : sections) {
+        for (auto &row : section) row.showRoot = roots.value(identity(row)).size() > 1;
+        std::stable_sort(section.begin(), section.end(), [](const auto &a, const auto &b) {
+            if (a.score != b.score) return a.score < b.score;
+            return QString::compare(a.label, b.label, Qt::CaseInsensitive) < 0;
+        });
+    }
+    // The sections in the order of their best match. On a tie, albums come
+    // first, then tracks: a weak album or artist never goes before a
+    // stronger track merely because of its type.
+    static constexpr int kTieOrder[3] = {2, 0, 1};
+    int order[3] = {0, 1, 2};
+    std::stable_sort(std::begin(order), std::end(order), [&sections](int a, int b) {
+        const float bestA = sections[a].isEmpty() ? std::numeric_limits<float>::max() : sections[a].first().score;
+        const float bestB = sections[b].isEmpty() ? std::numeric_limits<float>::max() : sections[b].first().score;
+        if (bestA != bestB) return bestA < bestB;
+        return kTieOrder[a] < kTieOrder[b];
+    });
+    static const QString titles[3] = {QStringLiteral("Artists"), QStringLiteral("Albums"), QStringLiteral("Tracks")};
+    QVector<SearchDisplayRow> displayRows;
+    for (const int type : order) {
+        auto &section = sections[type];
+        if (section.isEmpty()) continue;
+        SearchDisplayRow heading;
+        heading.kind = QStringLiteral("section");
+        heading.rowType = types[type];
+        heading.sectionTitle = titles[type];
+        displayRows.push_back(std::move(heading));
+        const int shown = static_cast<int>(section.size());
+        const int total = type < m_sourceTotals.size() ? m_sourceTotals[type] : shown;
+        for (auto &row : section) displayRows.push_back(std::move(row));
+        if (total > shown) {
+            SearchDisplayRow more;
+            more.kind = m_canShowMore && shown < kMaxShownPerType ? QString::fromLatin1(kMoreKind)
+                                                                  : QStringLiteral("truncated");
+            more.rowType = types[type];
+            more.count = total;
+            more.shownCount = shown;
+            displayRows.push_back(std::move(more));
+        }
+    }
+    replaceRowsBatched(std::move(displayRows));
     emit searchRowsChanged();
 }
 
-QString GlobalSearchResultsModel::highlightText(const QString &text, const QString &query) const {
+QVector<bool> GlobalSearchResultsModel::matchedCharacters(const QString &text, const QString &query) const {
     // Folds as the Rust search does (crate::collation::fold): base letters,
     // with the letters that have no decomposition spelled out.
     const auto fold = [](const QString &value) {
@@ -542,6 +598,11 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
             offset = end;
         }
     }
+    return matched;
+}
+
+QString GlobalSearchResultsModel::highlightText(const QString &text, const QString &query) const {
+    const auto matched = matchedCharacters(text, query);
     QString result;
     bool bold = false;
     for (qsizetype i = 0; i < text.size(); ++i) {
@@ -550,4 +611,18 @@ QString GlobalSearchResultsModel::highlightText(const QString &text, const QStri
     }
     if (bold) result += "</b>";
     return result;
+}
+
+QVariantList GlobalSearchResultsModel::highlightSegments(const QString &text, const QString &query) const {
+    const auto matched = matchedCharacters(text, query);
+    QVariantList segments;
+    qsizetype start = 0;
+    for (qsizetype i = 1; i <= text.size(); ++i) {
+        if (i == text.size() || matched[i] != matched[start]) {
+            segments.push_back(QVariantMap{{QStringLiteral("text"), text.mid(start, i - start)},
+                                           {QStringLiteral("match"), bool(matched[start])}});
+            start = i;
+        }
+    }
+    return segments;
 }

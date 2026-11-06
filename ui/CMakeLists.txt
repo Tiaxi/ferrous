@@ -172,7 +172,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/ActionShortcuts.qml
         qml/components/AlbumArtTile.qml
         qml/components/ErrorBanner.qml
-        qml/components/SearchResultIcon.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
         qml/components/LaneScrollBar.qml
@@ -238,7 +237,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/KeyUtils.js
         qml/logic/PathUtils.js
         qml/logic/PlotLanes.js
-        qml/logic/SearchIcons.js
         qml/logic/WheelUtils.js
 )
 
@@ -525,6 +523,29 @@ if(BUILD_TESTING)
         TIMEOUT 120
     )
     ferrous_add_default_platform_test(ferrous_transport_status_tests drawsOffscreenUnlessAPlatformIsChosen)
+
+    # The search palette of #373, from the QML sources and the results model.
+    qt_add_executable(ferrous_search_palette_tests
+        tests/tst_search_palette.cpp
+        src/GlobalSearchResultsModel.cpp
+        src/Localization.cpp
+    )
+    set_target_properties(ferrous_search_palette_tests PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+    target_include_directories(ferrous_search_palette_tests PRIVATE src)
+    target_compile_definitions(ferrous_search_palette_tests PRIVATE
+        FERROUS_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(ferrous_search_palette_tests PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets Qt6::Test
+        KF6::I18n KF6::I18nQml
+    )
+    ferrous_enable_strict_warnings(ferrous_search_palette_tests)
+    add_test(NAME ferrous_search_palette_tests COMMAND ferrous_search_palette_tests)
+    set_tests_properties(ferrous_search_palette_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        TIMEOUT 120
+    )
+    ferrous_add_default_platform_test(ferrous_search_palette_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp

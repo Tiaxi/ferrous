@@ -2,57 +2,140 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import QtQuick.Layouts 1.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/SearchIcons.js" as SearchIcons
 
+// The search palette (#373): an 800 px palette 32 px under the transport,
+// over a dim that covers the whole window. The field, then the results in
+// sections in the order of their best match, then the keys for the
+// selected row.
 Dialog {
     id: root
     objectName: "globalSearchDialog"
     required property var controller
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
+    // The transport: the palette opens 32 px under it (and the seam after
+    // it). Without one, 32 px under the top of the window.
+    property Item anchorItem: null
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
-    required property bool globalSearchShowsRootColumn
+    // How long the palette and the dim fade in and out: none when Plasma's
+    // animations are off.
+    property int fadeDuration: Kirigami.Units.shortDuration
     property var contextRowData: ({})
     readonly property bool searching: !!root.controller.uiBridge.globalSearchBusy
-    readonly property string resultFilter: root.controller.globalSearchModelApi.resultFilter || "all"
+    readonly property bool retained: !!root.controller.uiBridge.globalSearchModelRetained
+    readonly property string queryText: queryField.text.trim()
+    readonly property string suggestion: root.controller.uiBridge.globalSearchSuggestion || ""
+    readonly property bool resultsShown: root.queryText.length > 0 && !root.retained && resultsView.count > 0
+    readonly property bool noResults: root.queryText.length > 0 && !root.searching && !root.retained
+        && resultsView.count === 0
+    // The rows outside the results: the recent searches before typing, and
+    // a suggested spelling when nothing was found. One is selected, as a
+    // result would be.
+    readonly property var auxRows: {
+        if (root.queryText.length === 0) {
+            return root.controller.recentQueries.map(function(query) { return { kind: "recent", text: query } })
+        }
+        if (root.noResults && root.suggestion.length > 0) {
+            return [{ kind: "suggestion", text: root.suggestion }]
+        }
+        return []
+    }
+    property int auxIndex: 0
+    onAuxRowsChanged: root.auxIndex = root.auxRows.length > 0 ? 0 : -1
+    readonly property var selectedAuxRow: root.auxIndex >= 0 && root.auxIndex < root.auxRows.length
+        ? root.auxRows[root.auxIndex] : null
+
+    // The amber of the playing glyph over a cover's scrim.
+    readonly property color nowOnScrim: "#f2b035"
+    // The palette's sizes at 1×.
+    readonly property real fieldHeight: 44
+    readonly property real headingHeight: 28
+    readonly property real resultHeight: 32
+    readonly property real footerHeight: 28
+    readonly property real sideInset: 16
+    readonly property real leadSize: 24
+    readonly property real titleX: root.sideInset + root.leadSize + 12
+    readonly property real titleWidth: 300
+    readonly property real contextX: root.titleX + root.titleWidth + 12
+    readonly property real lengthWidth: 44
+    // Where the palette's top is: set when it opens, from where the
+    // transport is then.
+    property real paletteTop: 32
+    function updatePlacement() {
+        root.paletteTop = root.anchorItem && root.parent
+            ? Math.round(root.anchorItem.mapToItem(root.parent, 0, root.anchorItem.height).y) + 1 + 32
+            : 32
+    }
+    // Counts the result rows' changes, for what depends on the selected
+    // row's data rather than on its index.
+    property int rowsRevision: 0
 
     modal: true
-    title: I18n.i18nc("@title:window", "Search library")
-    standardButtons: Dialog.NoButton
-    padding: 10
-    width: Math.min(1000, root.windowRoot.width - 64)
-    height: Math.min(720, root.windowRoot.height - 80)
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
+    dim: true
+    focus: true
+    parent: Overlay.overlay
+    // Placed by x and y, not centred as the style's dialogs are; kept
+    // inside the window.
+    anchors.centerIn: undefined
+    margins: 0
+    title: I18n.i18nc("@title:window", "Search Library")
+    padding: 0
+    topPadding: 0
+    bottomPadding: 0
+    leftPadding: 0
+    rightPadding: 0
+    width: Math.min(800, (root.parent ? root.parent.width : 800) - 2 * root.sideInset)
+    height: Math.min(contentColumn.implicitHeight, root.maximumHeight)
+    readonly property real maximumHeight: Math.max(root.fieldHeight + root.footerHeight + 2,
+        (root.parent ? root.parent.height : 600) - root.paletteTop - 32)
+    x: Math.round(((root.parent ? root.parent.width : root.width) - root.width) / 2)
+    y: Math.round(root.paletteTop)
+    header: null
+    footer: null
+    onAboutToShow: root.updatePlacement()
+
+    background: Kirigami.ShadowedRectangle {
+        objectName: "globalSearchBackground"
+        color: root.uiPalette.view
+        radius: 6
+        border.width: 1
+        border.color: Kirigami.ColorUtils.linearInterpolation(root.uiPalette.view, root.uiPalette.text,
+                                                              Kirigami.Theme.frameContrast)
+        shadow.xOffset: 0
+        shadow.yOffset: 4
+        shadow.size: 8
+        shadow.color: Qt.rgba(0, 0, 0, 0.3)
+    }
+
+    // The dim over the whole window, the pane too, fading with the palette.
+    Overlay.modal: Rectangle {
+        objectName: "globalSearchDim"
+        color: root.uiPalette.dim
+        Behavior on opacity {
+            enabled: root.fadeDuration > 0
+            NumberAnimation { duration: root.fadeDuration; easing.type: Easing.OutCubic }
+        }
+    }
+    enter: Transition {
+        NumberAnimation {
+            property: "opacity"; from: 0; to: 1
+            duration: root.fadeDuration; easing.type: Easing.OutCubic
+        }
+    }
+    exit: Transition {
+        NumberAnimation {
+            property: "opacity"; from: 1; to: 0
+            duration: root.fadeDuration; easing.type: Easing.OutCubic
+        }
+    }
+
     Component.onCompleted: root.controller.registerRefs(root, queryField, resultsView)
     onOpened: root.controller.handleDialogOpened(queryField.text || "")
     onClosed: root.controller.endOpen(true)
-
-    header: Item {
-        implicitHeight: 32
-        Label {
-            anchors.left: parent.left
-            anchors.leftMargin: 10
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.title
-            color: root.uiPalette.uiTextColor
-        }
-        ToolButton {
-            anchors.right: parent.right
-            anchors.rightMargin: 4
-            anchors.verticalCenter: parent.verticalCenter
-            width: 28; height: 28
-            text: "×"
-            Accessible.name: I18n.i18nc("@action:button", "Close search")
-            onClicked: root.close()
-        }
-    }
-    footer: Item { implicitHeight: 0 }
 
     function escaped(value) {
         return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -65,11 +148,20 @@ Dialog {
     function queryMatches(value) {
         return !!value && root.highlighted(value) !== root.escaped(value)
     }
+    // A result's details after its title: who and where it is from, and
+    // what else matched.
     function rowContext(row, full) {
         let parts = []
-        if (row.rowType === "track") parts.push(row.artist || "", row.album || "")
-        else if (row.rowType === "album") parts.push(row.artist || "")
-        if (row.year !== undefined && row.year !== null && row.year > 0) parts.push(String(row.year))
+        if (row.rowType === "track") {
+            const artistAlbum = [row.artist || "", row.album || ""].filter(function(value) { return value.length > 0 })
+            parts.push(artistAlbum.join(" — "))
+        } else if (row.rowType === "album") {
+            parts.push(row.artist || "")
+            if (row.year !== undefined && row.year !== null && row.year > 0) parts.push(String(row.year))
+        } else if (row.rowType === "artist") {
+            const count = row.count || 0
+            if (count > 0) parts.push(I18n.i18ncp("@info:status", "%1 album", "%1 albums", count))
+        }
         if (row.genre && (full || root.queryMatches(row.genre))) parts.push(row.genre)
         if (row.rootLabel && (full || row.showRoot || root.queryMatches(row.rootLabel))) parts.push(row.rootLabel)
         if (row.matchDetail) parts.push(row.matchDetail)
@@ -81,58 +173,127 @@ Dialog {
         artist: I18n.i18nc("@label search result type", "Artist"),
         track: I18n.i18nc("@label search result type", "Track")
     })
-    // The result types' icons in the rows' two text colours, made once
-    // rather than in every row.
-    readonly property var resultIcons: SearchIcons.sources(root.uiPalette.uiTextColor)
-    readonly property var selectedResultIcons: SearchIcons.sources(root.uiPalette.uiSelectionTextColor)
-    // The result row under the pointer, whose tooltip shows.
-    property Item hoveredResultRow: null
+    readonly property var sectionTitles: ({
+        album: I18n.i18nc("@title:group search results", "Albums"),
+        artist: I18n.i18nc("@title:group search results", "Artists"),
+        track: I18n.i18nc("@title:group search results", "Tracks")
+    })
     function typeLabel(rowType) {
-        if (rowType === "album") return root.typeLabels.album
-        if (rowType === "artist") return root.typeLabels.artist
-        return root.typeLabels.track
+        return root.typeLabels[rowType] || root.typeLabels.track
     }
-    // How many results of a type there are, and how many of them show.
-    function countText(type, shown, total) {
-        if (shown === total) {
-            if (type === "artist") return I18n.i18ncp("@info:status", "%1 artist", "%1 artists", total)
-            if (type === "album") return I18n.i18ncp("@info:status", "%1 album", "%1 albums", total)
-            return I18n.i18ncp("@info:status", "%1 track", "%1 tracks", total)
-        }
-        if (type === "artist") return I18n.i18ncp("@info:status", "%2 of %1 artist", "%2 of %1 artists", total, shown)
-        if (type === "album") return I18n.i18ncp("@info:status", "%2 of %1 album", "%2 of %1 albums", total, shown)
-        return I18n.i18ncp("@info:status", "%2 of %1 track", "%2 of %1 tracks", total, shown)
-    }
-    function resultSummary() {
-        const b = root.controller.uiBridge
-        const shown = [b.globalSearchArtistCount || 0, b.globalSearchAlbumCount || 0, b.globalSearchTrackCount || 0]
-        const totals = b.globalSearchTotals || shown
-        const types = ["artist", "album", "track"]
-        let parts = []
-        for (let i = 0; i < 3; ++i) {
-            if ((root.resultFilter === "all" && totals[i] > 0) || root.resultFilter === types[i]) {
-                parts.push(root.countText(types[i], shown[i], totals[i]))
+    // "Show all 26 tracks", or "Showing 2,000 of 5,312 tracks".
+    function moreText(kind, rowType, shown, total) {
+        if (kind === "more") {
+            if (total <= 2000) {
+                if (rowType === "artist") return I18n.i18ncp("@action:button", "Show all %1 artist", "Show all %1 artists", total)
+                if (rowType === "album") return I18n.i18ncp("@action:button", "Show all %1 album", "Show all %1 albums", total)
+                return I18n.i18ncp("@action:button", "Show all %1 track", "Show all %1 tracks", total)
             }
+            const most = Number(2000).toLocaleString(Qt.locale(), "f", 0)
+            if (rowType === "artist") return I18n.i18ncp("@action:button", "Show %2 of %1 artist", "Show %2 of %1 artists", total, most)
+            if (rowType === "album") return I18n.i18ncp("@action:button", "Show %2 of %1 album", "Show %2 of %1 albums", total, most)
+            return I18n.i18ncp("@action:button", "Show %2 of %1 track", "Show %2 of %1 tracks", total, most)
         }
-        return parts.length ? parts.join(" · ") : I18n.i18nc("@info:status", "0 results")
+        const shownText = Number(shown).toLocaleString(Qt.locale(), "f", 0)
+        if (rowType === "artist") return I18n.i18ncp("@info:status", "Showing %2 of %1 artist. Add words to narrow the search.", "Showing %2 of %1 artists. Add words to narrow the search.", total, shownText)
+        if (rowType === "album") return I18n.i18ncp("@info:status", "Showing %2 of %1 album. Add words to narrow the search.", "Showing %2 of %1 albums. Add words to narrow the search.", total, shownText)
+        return I18n.i18ncp("@info:status", "Showing %2 of %1 track. Add words to narrow the search.", "Showing %2 of %1 tracks. Add words to narrow the search.", total, shownText)
     }
-    function filterHasMore() {
-        const b = root.controller.uiBridge
-        const shown = [b.globalSearchArtistCount || 0, b.globalSearchAlbumCount || 0, b.globalSearchTrackCount || 0]
-        const totals = b.globalSearchTotals || shown
-        const types = ["artist", "album", "track"]
-        return types.some(function(type, i) { return (root.resultFilter === "all" || root.resultFilter === type) && shown[i] < totals[i] })
+
+    // The title of a result in up to five runs, the matches semibold: the
+    // text of each, where it starts and how wide it may be. A run that does
+    // not fit is elided and the runs after it are left out.
+    readonly property int maxTitleRuns: 5
+    function titleRuns(label, allEmphasized) {
+        const text = String(label || "")
+        let segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
+            ? [{ text: text, match: allEmphasized }]
+            : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
+        if (segments.length > root.maxTitleRuns) {
+            // Matches past the fourth run stay regular.
+            const tail = segments.slice(root.maxTitleRuns - 1).map(function(segment) { return segment.text }).join("")
+            segments = segments.slice(0, root.maxTitleRuns - 1).concat([{ text: tail, match: false }])
+        }
+        let runs = []
+        let x = 0
+        for (let i = 0; i < segments.length; ++i) {
+            const metrics = segments[i].match ? semiboldMetrics : regularMetrics
+            const advance = metrics.advanceWidth(segments[i].text)
+            const room = Math.max(0, root.titleWidth - x)
+            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x), width: Math.min(advance, room) })
+            x += advance
+        }
+        return runs
     }
+    FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
+    FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
+
+    // What the keys act on: the selected result's type, "more", "recent",
+    // "suggestion", or "none".
+    readonly property string selectionKind: {
+        if (root.resultsShown) {
+            const kind = resultsView.selectedRow ? (resultsView.selectedRow.kind || "") : ""
+            if (kind === "item") return resultsView.selectedRow.rowType || "track"
+            return kind === "more" ? "more" : "none"
+        }
+        return root.selectedAuxRow ? root.selectedAuxRow.kind : "none"
+    }
+    // What Enter, Ctrl+Enter and Alt+Enter do for the selected row, as
+    // {key, action} pairs, with Esc last.
+    readonly property var keyHints: {
+        const kind = root.selectionKind
+        const close = { key: I18n.i18nc("@info:shortcut key name", "Esc"), action: I18n.i18nc("@info:shortcut action", "Close") }
+        const enter = I18n.i18nc("@info:shortcut key name", "Enter")
+        if (kind === "artist" || kind === "album" || kind === "track") {
+            return [
+                { key: enter, action: kind === "artist" ? I18n.i18nc("@info:shortcut action", "Play Artist")
+                    : (kind === "album" ? I18n.i18nc("@info:shortcut action", "Play Album")
+                                        : I18n.i18nc("@info:shortcut action", "Play Track")) },
+                { key: I18n.i18nc("@info:shortcut key name", "Ctrl+Enter"), action: I18n.i18nc("@info:shortcut action", "Add to Queue") },
+                { key: I18n.i18nc("@info:shortcut key name", "Alt+Enter"), action: I18n.i18nc("@info:shortcut action", "Show in Library") },
+                close
+            ]
+        }
+        if (kind === "more") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Show All") }, close]
+        if (kind === "recent") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search") }, close]
+        if (kind === "suggestion") return [{ key: enter, action: I18n.i18nc("@info:shortcut action", "Search Instead") }, close]
+        return [close]
+    }
+
+    function moveAuxSelection(step, wrap) {
+        const count = root.auxRows.length
+        if (count === 0) return
+        let next = root.auxIndex + step
+        if (wrap) next = (next + count) % count
+        root.auxIndex = Math.max(0, Math.min(count - 1, next))
+    }
+    function activateAuxRow(index) {
+        const row = index >= 0 && index < root.auxRows.length ? root.auxRows[index] : null
+        if (row) root.controller.searchInstead(row.text)
+    }
+    // The keys of the field and the results.
     function handleResultKeys(event) {
+        const enterKey = event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+        const upDown = event.key === Qt.Key_Down || event.key === Qt.Key_Up
+        const page = event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp
         if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_F) {
             root.controller.focusQueryField(true)
-        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (event.modifiers & Qt.ControlModifier) root.controller.navigateSelectionToLibrary()
+        } else if (!root.resultsShown && root.auxRows.length > 0 && (enterKey || upDown || page)) {
+            if (enterKey && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier))) {
+                root.activateAuxRow(root.auxIndex)
+            } else if (upDown) {
+                root.moveAuxSelection(event.key === Qt.Key_Down ? 1 : -1, true)
+            } else if (page) {
+                root.moveAuxSelection(event.key === Qt.Key_PageDown ? root.auxRows.length : -root.auxRows.length, false)
+            }
+        } else if (enterKey) {
+            if (event.modifiers & Qt.AltModifier) root.controller.navigateSelectionToLibrary()
+            else if (event.modifiers & Qt.ControlModifier) root.controller.queueSelection()
             else root.controller.activateSelection()
-        } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) {
+        } else if (upDown) {
             const next = root.controller.nextSelectableIndex(root.controller.selectedDisplayIndex, event.key === Qt.Key_Down ? 1 : -1, true)
             if (next >= 0) root.controller.selectDisplayIndex(next)
-        } else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_PageUp) {
+        } else if (page) {
             root.controller.moveSelectionByPage(event.key === Qt.Key_PageDown ? 1 : -1)
         } else return false
         event.accepted = true
@@ -142,98 +303,158 @@ Dialog {
         target: root.controller.globalSearchModelApi
         ignoreUnknownSignals: true
         function onSearchRowsChanged() {
-            root.controller.selectFirstItem()
+            root.rowsRevision += 1
             resultsView.cancelFlick()
-            resultsView.positionViewAtBeginning()
+            if (!root.controller.selectAfterRowsChanged()) {
+                resultsView.positionViewAtBeginning()
+            }
         }
     }
 
-    contentItem: ColumnLayout {
-        spacing: 6
-        TextField {
-            id: queryField
-            objectName: "globalSearchQueryField"
-            Layout.fillWidth: true
-            placeholderText: I18n.i18nc("@info:placeholder", "Search music, tags, or filenames")
-            onTextChanged: {
-                root.controller.selectedDisplayIndex = -1
-                root.controller.uiBridge.setGlobalSearchQuery(text)
-                if (!root.searching) root.controller.selectFirstItem()
+    contentItem: Item {
+        id: contentColumn
+        implicitWidth: 800
+        implicitHeight: root.fieldHeight + 1 + body.implicitHeight + 1 + root.footerHeight
+
+        // The field: a search glyph, the query, and the clear and help
+        // buttons.
+        Item {
+            id: fieldRow
+            width: parent.width
+            height: root.fieldHeight
+
+            Kirigami.Icon {
+                objectName: "globalSearchFieldIcon"
+                x: root.sideInset
+                y: Math.round((parent.height - height) / 2)
+                width: 16
+                height: 16
+                source: "search"
+                isMask: true
+                color: root.uiPalette.textSecondary
             }
-            Keys.onPressed: function(event) { root.handleResultKeys(event) }
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 4
-            Repeater {
-                model: [
-                    {title: I18n.i18nc("@option:radio search result filter", "All"), type: "all"},
-                    {title: I18n.i18nc("@option:radio search result filter", "Albums"), type: "album"},
-                    {title: I18n.i18nc("@option:radio search result filter", "Tracks"), type: "track"},
-                    {title: I18n.i18nc("@option:radio search result filter", "Artists"), type: "artist"}
-                ]
-                Button {
-                    text: modelData.title
-                    implicitWidth: 64
-                    implicitHeight: 28
-                    checkable: true
-                    checked: root.resultFilter === modelData.type
-                    onClicked: root.controller.globalSearchModelApi.resultFilter = modelData.type
+            TextField {
+                id: queryField
+                objectName: "globalSearchQueryField"
+                x: root.titleX
+                width: Math.max(0, (clearButton.visible ? clearButton.x : helpButton.x) - x - 4)
+                height: parent.height
+                leftPadding: 0
+                rightPadding: 0
+                topPadding: 0
+                bottomPadding: 0
+                verticalAlignment: TextInput.AlignVCenter
+                background: null
+                font.family: root.uiPalette.baseFont.family
+                font.pointSize: root.uiPalette.basePointSize
+                color: root.uiPalette.text
+                placeholderTextColor: root.uiPalette.textSecondary
+                placeholderText: I18n.i18nc("@info:placeholder", "Search artists, albums, tracks, tags or file names")
+                Accessible.name: I18n.i18nc("@label accessible name of the search field", "Search")
+                onTextChanged: {
+                    root.controller.pendingExpansion = null
+                    root.controller.selectedDisplayIndex = -1
+                    root.controller.uiBridge.setGlobalSearchQuery(text)
+                    if (!root.searching) root.controller.selectFirstItem()
+                }
+                Keys.onPressed: function(event) { root.handleResultKeys(event) }
+            }
+            ToolButton {
+                id: clearButton
+                objectName: "globalSearchClearButton"
+                x: helpButton.x - width
+                y: Math.round((parent.height - height) / 2)
+                width: 28
+                height: 28
+                visible: queryField.text.length > 0
+                display: AbstractButton.IconOnly
+                icon.name: "edit-clear"
+                icon.width: 16
+                icon.height: 16
+                text: I18n.i18nc("@action:button clear the search field", "Clear")
+                Accessible.name: text
+                ToolTip.visible: hovered || visualFocus
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: text
+                onClicked: {
+                    queryField.clear()
+                    root.controller.focusQueryField(false)
                 }
             }
-            Label {
-                Layout.fillWidth: true
-                Layout.minimumWidth: 0
-                horizontalAlignment: Text.AlignRight
-                text: root.searching ? I18n.i18nc("@info:status", "Searching…") : root.resultSummary()
-                color: root.uiPalette.uiMutedTextColor
-                elide: Text.ElideRight
-            }
-            Button {
-                objectName: "globalSearchShowMoreButton"
-                text: I18n.i18nc("@action:button", "Show more")
-                implicitHeight: 28
-                visible: !!root.controller.uiBridge.globalSearchCanExpand && root.filterHasMore()
-                onClicked: root.controller.uiBridge.expandGlobalSearch()
-            }
-            BusyIndicator { running: root.searching; visible: running; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
             ToolButton {
+                id: helpButton
                 objectName: "globalSearchHelpButton"
-                text: "?"
-                implicitWidth: 28; implicitHeight: 28
-                Accessible.name: I18n.i18nc("@action:button", "Search syntax and keyboard help")
+                x: parent.width - 8 - width
+                y: Math.round((parent.height - height) / 2)
+                width: 28
+                height: 28
+                display: AbstractButton.IconOnly
+                icon.name: "help-contextual"
+                icon.width: 16
+                icon.height: 16
+                text: I18n.i18nc("@action:button", "Search Syntax and Keys")
+                Accessible.name: text
+                ToolTip.visible: hovered || visualFocus
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: text
                 onClicked: searchHelp.open()
-                ToolTip.visible: hovered
-                ToolTip.text: I18n.i18nc("@info:tooltip", "Search syntax and keyboard help")
             }
         }
         Rectangle {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            color: "transparent"
-            border.color: root.uiPalette.uiBorderColor
+            objectName: "globalSearchFieldSeam"
+            y: root.fieldHeight
+            width: parent.width
+            height: 1
+            color: root.uiPalette.seam
+        }
+
+        // The results, or the rows and messages without them.
+        Item {
+            id: body
+            objectName: "globalSearchBody"
+            y: root.fieldHeight + 1
+            width: parent.width
+            height: Math.max(0, contentColumn.height - y - 1 - root.footerHeight)
+            clip: true
+            implicitHeight: root.resultsShown
+                ? resultsView.contentHeight + 6
+                : (noResultsMessage.visible ? noResultsMessage.height : 0) + auxColumn.implicitHeight
+                    + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
+
             ListView {
                 id: resultsView
                 objectName: "globalSearchResultsView"
-                anchors.fill: parent
-                anchors.margins: 1
+                width: parent.width
+                height: parent.height
+                visible: root.resultsShown
                 clip: true
                 model: root.controller.uiBridge.globalSearchModel || []
                 reuseItems: true
                 // Each query makes only the rows in view; rows scrolled in
                 // come from the reuse pool.
                 cacheBuffer: 0
-                readonly property real resultRowHeight: Math.max(34, rowFont.height + 10)
+                bottomMargin: 6
+                readonly property real resultRowHeight: root.resultHeight
+                // The selected row's data, for the key hints.
+                readonly property var selectedRow: {
+                    const index = root.controller.selectedDisplayIndex
+                    return root.rowsRevision >= 0 && index >= 0 && count > index
+                        ? root.controller.globalSearchModelApi.rowDataAt(index) : null
+                }
                 currentIndex: root.controller.selectedDisplayIndex
                 highlightFollowsCurrentItem: false
                 keyNavigationEnabled: false
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: root.snappyScrollFlickDeceleration
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
-                opacity: root.controller.uiBridge.globalSearchModelRetained ? 0 : (root.searching ? 0.5 : 1)
-                enabled: !root.searching && !root.controller.uiBridge.globalSearchModelRetained
-                FontMetrics { id: rowFont; font: queryField.font }
-                ScrollBar.vertical: ScrollBar { id: resultScrollBar }
+                opacity: root.searching ? 0.5 : 1
+                enabled: !root.searching
+                ScrollBar.vertical: ScrollBar {
+                    id: resultScrollBar
+                    policy: ScrollBar.AsNeeded
+                }
+                // The lane the rows leave for the scrollbar, when it shows.
+                readonly property real scrollbarLane: resultScrollBar.size < 1 ? Kirigami.Units.largeSpacing : 0
                 Keys.onPressed: function(event) {
                     if (root.handleResultKeys(event)) return
                     if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
@@ -242,164 +463,432 @@ Dialog {
                         event.accepted = true
                     }
                 }
-                // The rows' columns, shared by every row: the type, its
-                // icon, the cover, the name, the details and the summary.
-                readonly property real rowWidth: width - (resultScrollBar.visible ? resultScrollBar.width : 0)
-                readonly property real rowMargin: 6
-                readonly property real columnSpacing: 8
-                readonly property real typeColumnWidth: Math.max(72, rowFont.advanceWidth(root.typeLabels.artist.toUpperCase()) + 24)
-                readonly property real coverColumnX: rowMargin + typeColumnWidth + columnSpacing
-                readonly property real nameColumnX: coverColumnX + 24 + columnSpacing
-                readonly property real nameColumnWidth: rowWidth * 0.30
-                readonly property real summaryColumnWidth: Math.max(74, rowFont.advanceWidth(root.countText("track", 999, 999)),
-                    rowFont.advanceWidth(root.countText("album", 999, 999)))
-                readonly property real summaryColumnX: rowWidth - rowMargin - summaryColumnWidth
-                readonly property real contextColumnX: nameColumnX + nameColumnWidth + columnSpacing
-                readonly property real contextColumnWidth: Math.max(0, summaryColumnX - columnSpacing - contextColumnX)
                 // The rows are plain Text and Rectangles with the shared
-                // palette's colours, rather than styled controls, which
+                // palette's colours rather than styled controls, which
                 // each set up a Kirigami theme of their own.
-                delegate: Rectangle {
+                delegate: Item {
                     id: resultRow
-                    readonly property bool selected: index === root.controller.selectedDisplayIndex
-                    readonly property color foreground: selected ? root.uiPalette.uiSelectionTextColor : root.uiPalette.uiTextColor
-                    readonly property color mutedForeground: selected ? foreground : root.uiPalette.uiMutedTextColor
+                    required property int index
+                    required property var model
+                    readonly property string kind: model.kind || ""
                     readonly property string rowType: model.rowType || "track"
-                    readonly property string context: root.rowContext(model, false)
-                    readonly property bool hovered: rowMouse.containsMouse
+                    readonly property bool isResult: kind === "item"
+                    readonly property bool isMore: kind === "more"
+                    readonly property bool selectable: isResult || isMore
+                    readonly property bool selected: selectable && index === root.controller.selectedDisplayIndex
+                    readonly property bool hovered: selectable && rowMouse.containsMouse
+                    // The more link underlines on hover rather than taking
+                    // the hover tint, on which the light link is under
+                    // 4.5:1.
+                    // The track that plays or is paused now.
+                    readonly property bool isNow: isResult && rowType === "track"
+                        && (model.trackPath || "").length > 0
+                        && model.trackPath === (root.controller.uiBridge.currentTrackPath || "")
+                        && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
+                    readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
+                    readonly property string context: isResult ? root.rowContext(model, false) : ""
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return model.label + "\n" + root.rowContext(model, true)
                     }
-                    width: resultsView.rowWidth
-                    height: resultsView.resultRowHeight
-                    color: selected ? root.uiPalette.uiSelectionColor
-                        : (index % 2 ? root.uiPalette.uiSurfaceRaisedColor : root.uiPalette.uiSurfaceAltColor)
-                    Accessible.role: Accessible.ListItem
-                    Accessible.name: I18n.i18nc("@info accessible name of a search result: type, name, details",
-                        "%1: %2, %3", root.typeLabel(model.rowType), model.label, root.rowContext(model, true))
+                    width: ListView.view.width
+                    height: kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    Accessible.role: isResult ? Accessible.ListItem : (isMore ? Accessible.Link : Accessible.StaticText)
+                    Accessible.name: isResult
+                        ? I18n.i18nc("@info accessible name of a search result: type, name, details",
+                                     "%1: %2, %3", root.typeLabel(rowType), model.label || "", root.rowContext(model, true))
+                        : (kind === "section" ? (root.sectionTitles[rowType] || "")
+                                              : root.moreText(kind, rowType, model.shownCount || 0, model.count || 0))
+                    Accessible.selectable: selectable
+                    Accessible.selected: selected
                     ListView.onPooled: {
                         if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
                     }
-                    Components.SearchResultIcon {
-                        x: resultsView.rowMargin
-                        y: (resultRow.height - height) / 2
-                        width: 16; height: 16
-                        resultType: resultRow.rowType
-                        foreground: resultRow.foreground
-                        iconSource: (resultRow.selected ? root.selectedResultIcons : root.resultIcons)[resultRow.rowType] || ""
+
+                    Components.RowBackground {
+                        uiPalette: root.uiPalette
+                        visible: resultRow.selectable
+                        hovered: resultRow.hovered && resultRow.isResult
+                        selected: resultRow.selected
+                        active: true
+                        focused: false
+                        scrollbarLane: resultsView.scrollbarLane
                     }
+
+                    // A section's heading.
                     Text {
-                        objectName: "globalSearchResultType"
-                        x: resultsView.rowMargin + 20
-                        y: (resultRow.height - implicitHeight) / 2
-                        width: resultsView.typeColumnWidth - 20
-                        font: root.font
-                        horizontalAlignment: Text.AlignLeft
-                        text: root.typeLabel(model.rowType)
-                        color: resultRow.mutedForeground
+                        objectName: "globalSearchSectionHeading"
+                        visible: resultRow.kind === "section"
+                        x: root.titleX
+                        width: parent.width - x - root.sideInset
+                        height: parent.height
+                        bottomPadding: 5
+                        verticalAlignment: Text.AlignBottom
+                        text: visible ? (root.sectionTitles[resultRow.rowType] || "") : ""
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: Font.DemiBold
+                        color: root.uiPalette.textSecondary
+                        elide: Text.ElideRight
                     }
-                    Image {
-                        x: resultsView.coverColumnX
-                        y: (resultRow.height - height) / 2
-                        width: 24; height: 24
-                        source: model.coverUrl || ""
-                        sourceSize.width: 48; sourceSize.height: 48
-                        fillMode: Image.PreserveAspectFit
+
+                    // "Show all 26 tracks", or how many of them show.
+                    Text {
+                        objectName: resultRow.isMore ? "globalSearchMoreLink" : "globalSearchTruncatedNote"
+                        visible: resultRow.isMore || resultRow.kind === "truncated"
+                        x: root.titleX
+                        width: parent.width - x - root.sideInset - resultsView.scrollbarLane
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: visible ? root.moreText(resultRow.kind, resultRow.rowType, model.shownCount || 0, model.count || 0) : ""
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.underline: resultRow.isMore && resultRow.hovered
+                        // The link colour, but the text colour on the
+                        // selection, where the light link is under 4.5:1.
+                        color: !resultRow.isMore ? root.uiPalette.textSecondary
+                            : (resultRow.selected ? root.uiPalette.text : root.uiPalette.link)
+                        elide: Text.ElideRight
+                    }
+
+                    // The lead: an artist's glyph, or the cover, with the
+                    // amber glyph over it while its track plays.
+                    Kirigami.Icon {
+                        objectName: "globalSearchArtistGlyph"
+                        visible: resultRow.isResult && resultRow.rowType === "artist"
+                        x: root.sideInset + (root.leadSize - width) / 2
+                        y: Math.round((parent.height - height) / 2)
+                        width: 16
+                        height: 16
+                        source: visible ? "view-media-artist" : ""
+                        isMask: true
+                        color: root.uiPalette.textSecondary
+                    }
+                    Kirigami.Icon {
+                        objectName: "globalSearchCoverPlaceholder"
+                        visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length === 0
+                            && !resultRow.isNow
+                        x: root.sideInset + (root.leadSize - width) / 2
+                        y: Math.round((parent.height - height) / 2)
+                        width: 16
+                        height: 16
+                        source: visible ? (resultRow.rowType === "album" ? "media-optical-audio" : "audio-x-generic") : ""
+                        isMask: true
+                        color: root.uiPalette.textSecondary
+                    }
+                    Kirigami.ShadowedImage {
+                        id: thumbnail
+                        objectName: "globalSearchThumbnail"
+                        visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length > 0
+                        x: root.sideInset
+                        y: Math.round((parent.height - height) / 2)
+                        width: root.leadSize
+                        height: root.leadSize
+                        radius: 2
+                        color: "transparent"
+                        source: visible ? model.coverUrl : ""
+                        fillMode: Image.PreserveAspectCrop
                         asynchronous: true
+                        sourceSize.width: Math.ceil(root.leadSize * Screen.devicePixelRatio)
+                        sourceSize.height: Math.ceil(root.leadSize * Screen.devicePixelRatio)
                     }
-                    Text {
-                        objectName: "globalSearchResultName"
-                        x: resultsView.nameColumnX
-                        y: (resultRow.height - implicitHeight) / 2
-                        width: resultsView.nameColumnWidth
-                        font: root.font
-                        horizontalAlignment: Text.AlignLeft
-                        text: root.highlighted(model.label)
-                        textFormat: Text.StyledText
-                        elide: Text.ElideRight
-                        color: resultRow.foreground
+                    Rectangle {
+                        objectName: "globalSearchNowScrim"
+                        visible: resultRow.isNow && thumbnail.visible
+                        x: thumbnail.x
+                        y: thumbnail.y
+                        width: root.leadSize
+                        height: root.leadSize
+                        radius: 2
+                        color: Qt.rgba(0, 0, 0, 0.55)
                     }
-                    Text {
-                        x: resultsView.contextColumnX
-                        y: (resultRow.height - implicitHeight) / 2
-                        width: resultsView.contextColumnWidth
-                        font: root.font
-                        horizontalAlignment: Text.AlignLeft
-                        text: root.highlighted(resultRow.context)
-                        textFormat: Text.StyledText
-                        elide: Text.ElideRight
-                        color: resultRow.mutedForeground
+                    Kirigami.Icon {
+                        objectName: "globalSearchNowGlyph"
+                        visible: resultRow.isNow
+                        x: root.sideInset + (root.leadSize - width) / 2
+                        y: Math.round((parent.height - height) / 2)
+                        width: 12
+                        height: 12
+                        source: visible
+                            ? ((root.controller.uiBridge.playbackState || "") === "Paused" ? "media-playback-pause" : "media-playback-start")
+                            : ""
+                        isMask: true
+                        // Over the cover's dark scrim, the colour map's
+                        // bright amber in both themes (fixed, like the
+                        // plot's colours): the light theme's darker amber
+                        // is under 3:1 there.
+                        color: thumbnail.visible ? root.nowOnScrim : root.uiPalette.now
                     }
-                    Text {
-                        objectName: "globalSearchResultSummary"
-                        x: resultsView.summaryColumnX
-                        y: (resultRow.height - implicitHeight) / 2
-                        width: resultsView.summaryColumnWidth
-                        font: root.font
-                        horizontalAlignment: Text.AlignRight
-                        text: {
-                            if (model.rowType === "track") return model.lengthText || ""
-                            const count = model.count || 0
-                            return root.countText(model.rowType === "artist" ? "album" : "track", count, count)
+
+                    // The title in runs, the matches semibold; all amber
+                    // and semibold while it plays. A fixed number of runs,
+                    // made once per row and reused.
+                    Repeater {
+                        model: root.maxTitleRuns
+                        delegate: Text {
+                            required property int index
+                            readonly property var run: index < resultRow.titleRuns.length ? resultRow.titleRuns[index] : null
+                            objectName: "globalSearchResultTitle"
+                            visible: !!run && run.width > 0
+                            x: root.titleX + (run ? run.x : 0)
+                            width: run ? run.width : 0
+                            height: resultRow.height
+                            verticalAlignment: Text.AlignVCenter
+                            text: run ? run.text : ""
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            font.family: root.uiPalette.baseFont.family
+                            font.pointSize: root.uiPalette.basePointSize
+                            font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                            color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                         }
-                        color: resultRow.foreground
                     }
+
+                    Text {
+                        objectName: "globalSearchResultContext"
+                        visible: resultRow.isResult
+                        x: root.contextX
+                        width: Math.max(0, (lengthText.visible ? lengthText.x - 12 : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: resultRow.context
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        id: lengthText
+                        objectName: "globalSearchResultLength"
+                        visible: resultRow.isResult && resultRow.rowType === "track"
+                        x: parent.width - root.sideInset - resultsView.scrollbarLane - width
+                        width: root.lengthWidth
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        horizontalAlignment: Text.AlignRight
+                        text: visible ? (model.lengthText || "") : ""
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.features: root.uiPalette.tabularFigures
+                        color: root.uiPalette.textSecondary
+                    }
+
                     MouseArea {
                         id: rowMouse
                         anchors.fill: parent
+                        enabled: resultRow.selectable
                         hoverEnabled: true
+                        cursorShape: resultRow.isMore ? Qt.PointingHandCursor : Qt.ArrowCursor
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                         onContainsMouseChanged: {
-                            if (containsMouse) root.hoveredResultRow = resultRow
+                            if (containsMouse && resultRow.isResult) root.hoveredResultRow = resultRow
                             else if (root.hoveredResultRow === resultRow) root.hoveredResultRow = null
                         }
                         onClicked: function(mouse) {
-                            root.controller.selectDisplayIndex(index)
-                            if (mouse.button === Qt.RightButton) {
-                                root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(index)
+                            root.controller.selectDisplayIndex(resultRow.index)
+                            if (resultRow.isMore && mouse.button === Qt.LeftButton) {
+                                root.controller.activateSelection()
+                            } else if (mouse.button === Qt.RightButton && resultRow.isResult) {
+                                root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(resultRow.index)
                                 resultMenu.popup()
                             } else resultsView.forceActiveFocus()
                         }
                         onDoubleClicked: function(mouse) {
-                            if (mouse.button === Qt.LeftButton) root.controller.activateSelection()
+                            if (mouse.button === Qt.LeftButton && resultRow.isResult) root.controller.activateSelection()
                         }
                     }
                 }
             }
-            // One tooltip for the row under the pointer, rather than one for
-            // each row.
-            ToolTip {
-                id: resultToolTip
-                objectName: "globalSearchResultToolTip"
-                parent: root.hoveredResultRow || resultsView
-                visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
-                delay: 700
-                text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
+
+            // When nothing was found: what was searched, and a suggested
+            // spelling or a hint.
+            Item {
+                id: noResultsMessage
+                objectName: "globalSearchNoResults"
+                visible: root.noResults
+                y: 8
+                width: parent.width
+                height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + 20
+                Text {
+                    objectName: "globalSearchNoResultsTitle"
+                    x: root.titleX
+                    width: parent.width - x - root.sideInset
+                    height: root.resultHeight
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                    text: I18n.i18nc("@info", "No matches for “%1”", root.queryText)
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.basePointSize
+                    color: root.uiPalette.text
+                }
+                Text {
+                    objectName: "globalSearchNoResultsHint"
+                    visible: root.suggestion.length === 0
+                    x: root.titleX
+                    y: root.resultHeight - 6
+                    width: parent.width - x - root.sideInset
+                    height: 20
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                    text: I18n.i18nc("@info", "Check the spelling, or try fewer words.")
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.smallPointSize
+                    color: root.uiPalette.textSecondary
+                }
             }
-            Label {
-                anchors.centerIn: parent
-                visible: !root.searching && (root.controller.uiBridge.globalSearchModelRetained || resultsView.count === 0)
-                text: queryField.text.trim().length === 0
-                    ? I18n.i18nc("@info", "Type to search your library")
-                    : I18n.i18nc("@info", "No matches. Try fewer words or another result type.")
-                color: root.uiPalette.uiMutedTextColor
+
+            // The recent searches, or the suggested spelling.
+            Column {
+                id: auxColumn
+                objectName: "globalSearchAuxRows"
+                visible: !root.resultsShown && root.auxRows.length > 0
+                y: noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0
+                width: parent.width
+
+                Text {
+                    objectName: "globalSearchRecentHeading"
+                    visible: root.queryText.length === 0
+                    x: root.titleX
+                    width: parent.width - x - root.sideInset
+                    height: visible ? root.headingHeight : 0
+                    bottomPadding: 5
+                    verticalAlignment: Text.AlignBottom
+                    text: I18n.i18nc("@title:group search palette", "Recent Searches")
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.smallPointSize
+                    font.weight: Font.DemiBold
+                    color: root.uiPalette.textSecondary
+                }
+                Repeater {
+                    model: auxColumn.visible ? root.auxRows : []
+                    delegate: Item {
+                        id: auxRow
+                        objectName: modelData.kind === "recent" ? "globalSearchRecentRow" : "globalSearchSuggestionRow"
+                        required property var modelData
+                        required property int index
+                        readonly property bool selected: index === root.auxIndex
+                        width: auxColumn.width
+                        height: root.resultHeight
+                        Accessible.role: Accessible.ListItem
+                        Accessible.name: auxTitle.text
+                        Accessible.selectable: true
+                        Accessible.selected: selected
+
+                        Components.RowBackground {
+                            uiPalette: root.uiPalette
+                            hovered: auxMouse.containsMouse
+                            selected: auxRow.selected
+                            active: true
+                            focused: false
+                            scrollbarLane: 0
+                        }
+                        Kirigami.Icon {
+                            x: root.sideInset + (root.leadSize - width) / 2
+                            y: Math.round((parent.height - height) / 2)
+                            width: 16
+                            height: 16
+                            source: auxRow.modelData.kind === "recent" ? "document-open-recent" : "search"
+                            isMask: true
+                            color: root.uiPalette.textSecondary
+                        }
+                        Text {
+                            id: auxTitle
+                            objectName: "globalSearchAuxTitle"
+                            x: root.titleX
+                            width: parent.width - x - root.sideInset
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                            text: auxRow.modelData.kind === "recent"
+                                ? auxRow.modelData.text
+                                : I18n.i18nc("@action:button %1 is a search query", "Search ‘%1’ instead", auxRow.modelData.text)
+                            font.family: root.uiPalette.baseFont.family
+                            font.pointSize: root.uiPalette.basePointSize
+                            color: root.uiPalette.text
+                        }
+                        MouseArea {
+                            id: auxMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                root.auxIndex = auxRow.index
+                                root.activateAuxRow(auxRow.index)
+                            }
+                        }
+                    }
+                }
             }
         }
-        Label {
-            Layout.fillWidth: true
-            visible: !root.searching && root.filterHasMore() && !root.controller.uiBridge.globalSearchCanExpand
-            text: I18n.i18nc("@info", "More matches exist. Refine your search to narrow the results.")
-            color: root.uiPalette.uiMutedTextColor
-            wrapMode: Text.Wrap
+
+        // The keys for the selected row.
+        Rectangle {
+            objectName: "globalSearchFooterHairline"
+            y: footerBar.y - 1
+            width: parent.width
+            height: 1
+            color: root.uiPalette.hairline
         }
+        Item {
+            id: footerBar
+            objectName: "globalSearchFooter"
+            y: parent.height - height
+            width: parent.width
+            height: root.footerHeight
+            Row {
+                x: root.titleX
+                height: parent.height
+                spacing: 18
+                Repeater {
+                    model: root.keyHints
+                    delegate: Row {
+                        required property var modelData
+                        objectName: "globalSearchKeyHint"
+                        readonly property string keyText: modelData.key
+                        readonly property string actionText: modelData.action
+                        height: footerBar.height
+                        spacing: 4
+                        Text {
+                            objectName: "globalSearchKeyHintKey"
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            text: modelData.key
+                            font.family: root.uiPalette.baseFont.family
+                            font.pointSize: root.uiPalette.smallPointSize
+                            color: root.uiPalette.text
+                        }
+                        Text {
+                            objectName: "globalSearchKeyHintAction"
+                            height: parent.height
+                            verticalAlignment: Text.AlignVCenter
+                            text: modelData.action
+                            font.family: root.uiPalette.baseFont.family
+                            font.pointSize: root.uiPalette.smallPointSize
+                            color: root.uiPalette.textSecondary
+                        }
+                    }
+                }
+            }
+        }
+
+        // One tooltip for the result under the pointer, rather than one for
+        // each row.
+        ToolTip {
+            id: resultToolTip
+            objectName: "globalSearchResultToolTip"
+            parent: root.hoveredResultRow || resultsView
+            visible: !!root.hoveredResultRow && root.hoveredResultRow.hovered
+            delay: Kirigami.Units.toolTipDelay
+            text: root.hoveredResultRow ? root.hoveredResultRow.toolTipText() : ""
+        }
+
         Popup {
             id: searchHelp
             objectName: "globalSearchHelp"
             focus: true
-            width: Math.min(480, root.availableWidth)
-            x: root.availableWidth - width
-            y: queryField.height + 34
+            width: Math.min(480, root.width - 2 * root.sideInset)
+            x: root.width - width - 8
+            y: root.fieldHeight
             padding: 12
             contentItem: Label {
                 // The filter names are search syntax, the same in every language.
@@ -411,17 +900,19 @@ Dialog {
                     + I18n.i18nc("@info search help; keep the query as it is", "Example: %1", "signify year:1996 type:album")
                     + '\n\n'
                     + I18n.i18nc("@info search help",
-                        "↑/↓: select · Page Up/Down: move by page\nEnter: play and replace queue\nCtrl+Enter: show in library · Ctrl+F: edit query · Esc: close")
+                        "Up/Down: select · Page Up/Down: move by page\nEnter: play · Ctrl+Enter: add to the queue · Alt+Enter: show in the library\nCtrl+F: edit the query · Esc: close")
                 wrapMode: Text.Wrap
             }
         }
         Menu {
             id: resultMenu
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Play and replace queue"); onTriggered: root.controller.activateRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu add to the queue", "Queue"); onTriggered: root.controller.queueRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in library"); onTriggered: root.controller.navigateSelectionToLibrary() }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); onTriggered: root.controller.navigateSelectionToLibrary() }
             MenuSeparator {}
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Open containing folder"); onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
         }
     }
+    // The result row under the pointer, whose tooltip shows.
+    property Item hoveredResultRow: null
 }

@@ -170,6 +170,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool globalSearchBusy MEMBER m_globalSearchBusy NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QVariantList globalSearchTotals MEMBER m_globalSearchTotals NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(bool globalSearchCanExpand READ globalSearchCanExpand NOTIFY globalSearchResultsChanged)
+    // When the shown search found nothing: a spelling correction of its
+    // query that finds something, or empty.
+    Q_PROPERTY(QString globalSearchSuggestion MEMBER m_globalSearchSuggestion NOTIFY globalSearchResultsChanged)
     Q_PROPERTY(QObject* globalSearchModel READ globalSearchModel CONSTANT)
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
@@ -428,7 +431,10 @@ public:
     Q_INVOKABLE void showTrackInLibrary(const QString &path);
     Q_INVOKABLE void setLibrarySortMode(int mode);
     Q_INVOKABLE void setGlobalSearchQuery(const QString &query);
-    Q_INVOKABLE void expandGlobalSearch();
+    // Shows every result of `rowType` ("artist", "album" or "track"), up to
+    // GlobalSearchResultsModel::kMaxShownPerType; with no type, of the
+    // type with the most.
+    Q_INVOKABLE void expandGlobalSearch(const QString &rowType = QString());
     bool globalSearchCanExpand() const;
     Q_INVOKABLE void searchCurrentTrackArtworkSuggestions();
     Q_INVOKABLE void clearItunesArtworkSuggestions();
@@ -517,6 +523,7 @@ private:
         int albumCount{0};
         int trackCount{0};
         QVector<GlobalSearchResultsModel::SearchDisplayRow> displayRows;
+        QString suggestion;
         QString decodeError;
         qint64 ffiPoppedAtMs{0};
         qint64 ffiPopMs{0};
@@ -973,6 +980,8 @@ private:
     int m_searchApplyDispatchMs{12};
     QTimer m_searchModelApplyTimer;
     QVector<GlobalSearchResultsModel::SearchDisplayRow> m_deferredSearchDisplayRows;
+    QString m_deferredSearchSuggestion;
+    QString m_globalSearchSuggestion;
     QVector<SpectrogramRoute> m_spectrogramRoutes;
     QSet<QQuickWindow *> m_spectrogramWindows;
     bool m_spectrogramActivityPending{false};

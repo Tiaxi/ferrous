@@ -402,6 +402,7 @@ private slots:
     void searchExtendedMatchDetailsDecodeAndHighlight();
     void searchResultsRankFilterAndHighlight();
     void searchProtocolTotalsAndExpansion();
+    void searchSuggestionAndMoreRowsArriveWithTheirResults();
     void searchDeferredResultsRejectSupersededQuery();
     void searchModelDelegateTypeRoleIsExposed();
     void searchModelDelegateTypeValuesCorrect();
@@ -7454,7 +7455,9 @@ void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     client.m_latestGlobalSearchSeqSent = 9;
     QVERIFY(client.processSearchResultsFrame(decoded));
     client.applyDeferredSearchDisplayRows();
-    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(0), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
+    // Row 0 is the Tracks heading.
+    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(0), GlobalSearchResultsModel::KindRole).toString(), QStringLiteral("section"));
+    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
     QCOMPARE(client.m_globalSearchModel.highlightText("Comment: anniversary remaster", "comment:\"anniversary remaster\""), QStringLiteral("Comment: <b>anniversary remaster</b>"));
     QCOMPARE(client.m_globalSearchModel.highlightText("live:oslo", "live:oslo"), QStringLiteral("<b>live:oslo</b>"));
     bytes.chop(1);
@@ -7481,20 +7484,54 @@ void BridgeClientTest::searchResultsRankFilterAndHighlight() {
     rows[1].rootLabel = "Stereo";
     rows.push_back(copy);
     model.presentSearchRows(rows);
-    QCOMPARE(model.rowDataAt(0).value("rowType").toString(), QStringLiteral("album"));
-    QCOMPARE(model.rowDataAt(1).value("rowType").toString(), QStringLiteral("album"));
-    QVERIFY(model.rowDataAt(0).value("showRoot").toBool());
+    // One section per type, in the order of their best match; on a tie,
+    // albums first, then tracks, then artists. Within a section, by score.
+    const auto kindAndType = [&model](int index) {
+        return model.rowDataAt(index).value("kind").toString() + QLatin1Char(':') + model.rowDataAt(index).value("rowType").toString();
+    };
+    // A first list arrives in batches.
+    QTRY_COMPARE(model.rowCount(), 13); // Three headings, no repeated results.
+    QCOMPARE(kindAndType(0), QStringLiteral("section:album"));
+    QCOMPARE(kindAndType(1), QStringLiteral("item:album"));
+    QCOMPARE(kindAndType(2), QStringLiteral("item:album"));
     QVERIFY(model.rowDataAt(1).value("showRoot").toBool());
-    QCOMPARE(model.rowCount(), 10); // No section rows or repeated results.
-    QCOMPARE(model.rowDataAt(9).value("label").toString(), QStringLiteral("Weak album"));
-    QVERIFY(!model.rowDataAt(9).value("showRoot").toBool());
-    model.setResultFilter("album");
-    QCOMPARE(model.rowCount(), 3);
-    QCOMPARE(model.rowDataAt(0).value("rowType").toString(), QStringLiteral("album"));
-    model.setResultFilter("invalid");
-    QCOMPARE(model.resultFilter(), QStringLiteral("album"));
-    model.setResultFilter("all");
-    QCOMPARE(model.rowCount(), 10);
+    QVERIFY(model.rowDataAt(2).value("showRoot").toBool());
+    QCOMPARE(model.rowDataAt(3).value("label").toString(), QStringLiteral("Weak album"));
+    QVERIFY(!model.rowDataAt(3).value("showRoot").toBool());
+    QCOMPARE(kindAndType(4), QStringLiteral("section:track"));
+    QCOMPARE(model.rowDataAt(5).value("label").toString(), QStringLiteral("Blue"));
+    QCOMPARE(model.rowDataAt(10).value("label").toString(), QStringLiteral("Track 4"));
+    QCOMPARE(kindAndType(11), QStringLiteral("section:artist"));
+    QCOMPARE(kindAndType(12), QStringLiteral("item:artist"));
+    QVERIFY(!model.isSelectableIndex(0));
+    QCOMPARE(model.nextSelectableIndex(-1, 1, false), 1);
+    QCOMPARE(model.nextSelectableIndex(10, 1, false), 12);
+    QCOMPARE(model.indexOfResult(QStringLiteral("track"), 2), 7);
+    QCOMPARE(model.indexOfResult(QStringLiteral("track"), 6), -1);
+    QCOMPARE(model.indexOfResult(QStringLiteral("artist"), 0), 12);
+    // A weak album section goes after stronger tracks.
+    auto weakOnly = rows;
+    weakOnly.removeIf([](const auto &row) { return row.rowType == QStringLiteral("album") && row.label != QStringLiteral("Weak album"); });
+    model.presentSearchRows(weakOnly);
+    QTRY_COMPARE(model.rowCount(), 11);
+    QCOMPARE(kindAndType(0), QStringLiteral("section:track"));
+    QCOMPARE(kindAndType(model.rowCount() - 2), QStringLiteral("section:album"));
+    // The match's runs, for the title's emphasis.
+    const auto segments = [&model](const QString &text, const QString &query) {
+        QStringList out;
+        for (const QVariant &segment : model.highlightSegments(text, query)) {
+            const auto map = segment.toMap();
+            out << (map.value("match").toBool() ? QStringLiteral("[%1]") : QStringLiteral("%1")).arg(map.value("text").toString());
+        }
+        return out;
+    };
+    QCOMPARE(segments(QStringLiteral("Meridian Line"), QStringLiteral("meridian")),
+             (QStringList{QStringLiteral("[Meridian]"), QStringLiteral(" Line")}));
+    QCOMPARE(segments(QStringLiteral("The Quiet Meridian"), QStringLiteral("quiet merid")),
+             (QStringList{QStringLiteral("The "), QStringLiteral("[Quiet]"), QStringLiteral(" "), QStringLiteral("[Merid]"), QStringLiteral("ian")}));
+    QCOMPARE(segments(QString::fromUtf8("Björk"), QStringLiteral("bjork")), QStringList{QString::fromUtf8("[Björk]")});
+    QCOMPARE(segments(QStringLiteral("Grey Lines"), QStringLiteral("blue")), QStringList{QStringLiteral("Grey Lines")});
+    QVERIFY(model.highlightSegments(QString(), QStringLiteral("blue")).isEmpty());
     QCOMPARE(model.highlightText("Album: Signify", "type:album signify"), QStringLiteral("Album: <b>Signify</b>"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Björk & <Blue>"), "bjork blue"), QString::fromUtf8("<b>Björk</b> &amp; &lt;<b>Blue</b>&gt;"));
     QCOMPARE(model.highlightText(QString::fromUtf8("Cafe\xcc\x81"), "cafe"), QString::fromUtf8("<b>Cafe\xcc\x81</b>"));
@@ -7532,12 +7569,38 @@ void BridgeClientTest::searchProtocolTotalsAndExpansion() {
     client.m_globalSearchTrackCount = 20;
     client.m_pendingGlobalSearchQuery = "blue";
     QVERIFY(client.globalSearchCanExpand());
-    client.expandGlobalSearch();
+    // A section's "Show all": every result of its type, at least 40.
+    client.expandGlobalSearch(QStringLiteral("artist"));
     QCOMPARE(client.m_globalSearchLimit, 40u);
     QVERIFY(client.m_globalSearchBusy);
     QVERIFY(!client.globalSearchCanExpand());
+    client.m_globalSearchBusy = false;
+    client.expandGlobalSearch(QStringLiteral("track"));
+    QCOMPARE(client.m_globalSearchLimit, 500u);
+    // Never fewer of another type than already shown.
+    client.m_globalSearchBusy = false;
+    client.expandGlobalSearch(QStringLiteral("album"));
+    QCOMPARE(client.m_globalSearchLimit, 500u);
+    // Without a type, the type with the most; at most 2,000.
+    client.m_globalSearchBusy = false;
+    client.m_globalSearchLimit = 0;
+    client.m_globalSearchTotals = {7, 12, 5000};
+    client.expandGlobalSearch();
+    QCOMPARE(client.m_globalSearchLimit, 2000u);
     client.setGlobalSearchQuery("new query");
     QCOMPARE(client.m_globalSearchLimit, 0u);
+
+    // Version 6 carries the suggestion after the totals.
+    QByteArray suggested;
+    const auto appendTo = [&suggested](auto value) { auto le = qToLittleEndian(value); suggested.append(reinterpret_cast<const char *>(&le), sizeof(le)); };
+    appendTo(quint8('S')); appendTo(quint8(6)); appendTo(quint16(0)); appendTo(quint32(10));
+    appendTo(quint32(0)); appendTo(quint32(0)); appendTo(quint32(0));
+    appendTo(quint32(8)); suggested.append("meridian");
+    QVERIFY2(BinaryBridgeCodec::decodeSearchResultsFrame(suggested, &decoded, &error), qPrintable(error));
+    QCOMPARE(decoded.suggestion, QStringLiteral("meridian"));
+    suggested.chop(1);
+    QVERIFY(!BinaryBridgeCodec::decodeSearchResultsFrame(suggested, &decoded, &error));
+
 }
 
 void BridgeClientTest::searchDeferredResultsRejectSupersededQuery() {
@@ -7555,6 +7618,58 @@ void BridgeClientTest::searchDeferredResultsRejectSupersededQuery() {
     client.applyDeferredSearchDisplayRows();
     QCOMPARE(client.m_globalSearchModel.rowCount(), 0);
     QVERIFY(client.m_globalSearchBusy);
+}
+
+void BridgeClientTest::searchSuggestionAndMoreRowsArriveWithTheirResults() {
+    BridgeClient client; isolateBridgeClient(client);
+    const auto present = [&client](quint32 seq, const QVariantList &totals, const QString &suggestion, bool withRow) {
+        client.m_latestGlobalSearchSeqSent = seq;
+        BridgeClient::SearchWorkerOutputFrame frame; frame.seq = seq;
+        frame.totals = totals;
+        frame.suggestion = suggestion;
+        if (withRow) {
+            GlobalSearchResultsModel::SearchDisplayRow row; row.kind = "item"; row.rowType = "track"; row.label = "Blue";
+            frame.trackCount = 1;
+            frame.displayRows.push_back(row);
+        }
+        return client.applyPreparedSearchResultsFrame(std::move(frame));
+    };
+    QVERIFY(present(3, {0, 0, 0}, QStringLiteral("meridian"), false));
+    // It shows with its rows, not before them.
+    QCOMPARE(client.property("globalSearchSuggestion").toString(), QString());
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.property("globalSearchSuggestion").toString(), QStringLiteral("meridian"));
+    QCOMPARE(client.m_globalSearchModel.rowCount(), 0);
+
+    // Results replace it; a section that shows fewer than were found ends
+    // in a selectable "more" row.
+    QVERIFY(present(4, {0, 0, 30}, QString(), true));
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.property("globalSearchSuggestion").toString(), QString());
+    QCOMPARE(client.m_globalSearchModel.rowCount(), 3);
+    QVariantMap more = client.m_globalSearchModel.rowDataAt(2);
+    QCOMPARE(more.value("kind").toString(), QStringLiteral("more"));
+    QCOMPARE(more.value("rowType").toString(), QStringLiteral("track"));
+    QCOMPARE(more.value("count").toInt(), 30);
+    QCOMPARE(more.value("shownCount").toInt(), 1);
+    QVERIFY(client.m_globalSearchModel.isSelectableIndex(2));
+    QCOMPARE(client.m_globalSearchModel.nextSelectableIndex(1, 1, false), 2);
+
+    // At the most a search shows, a note that cannot be selected.
+    client.m_globalSearchLimit = GlobalSearchResultsModel::kMaxShownPerType;
+    QVERIFY(present(5, {0, 0, 5000}, QString(), true));
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.m_globalSearchModel.rowDataAt(2).value("kind").toString(), QStringLiteral("truncated"));
+    QVERIFY(!client.m_globalSearchModel.isSelectableIndex(2));
+
+    // Clearing the query drops the suggestion.
+    client.setGlobalSearchQuery(QStringLiteral("merdian"));
+    client.m_globalSearchDebounceTimer.stop();
+    QVERIFY(present(6, {0, 0, 0}, QStringLiteral("meridian"), false));
+    client.applyDeferredSearchDisplayRows();
+    QCOMPARE(client.property("globalSearchSuggestion").toString(), QStringLiteral("meridian"));
+    client.setGlobalSearchQuery(QString());
+    QCOMPARE(client.property("globalSearchSuggestion").toString(), QString());
 }
 
 void BridgeClientTest::searchModelDelegateTypeRoleIsExposed() {

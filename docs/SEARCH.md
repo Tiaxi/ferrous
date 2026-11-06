@@ -4,22 +4,24 @@ Open global search with Ctrl+F. Search matches titles, artists (including repeat
 
 Exact entity names rank first, followed by whole-word and prefix matches, substrings, and supporting metadata. Name ranking treats punctuation as word separators, so `you lose` recognizes You Lose! as an exact name. All name words together outrank a shorter name plus incidental album metadata. Matching year and library-root terms provide context: `1997 signify` ranks Signify with year 1997 ahead of Intro/Signify with 1997 in its album name, while `anesthetiz surround` keeps the album's name relevance when Surround is its library root. Matching the spelling typed ranks ahead of accent-folded alternatives of otherwise equal relevance; accent-insensitive matches remain available. Comments and lyrics rank below name matches; path-only matches rank last.
 
-The All view is one relevance-sorted list. Albums precede tracks and artists when their relevance is equal. A weak album match cannot jump ahead of a stronger track. Artists and albums follow the library's folder grouping, including separate copies in different library roots.
+Search opens as a palette under the transport, over a dimmed window. Results come in sections, Artists, Albums and Tracks, in the order of each section's best match. Albums go before tracks, and tracks before artists, when their best matches are equal, so a weak album match cannot jump ahead of a stronger track. Within a section, results follow their relevance. Artists and albums follow the library's folder grouping, including separate copies in different library roots.
 
-Each result appears once in a compact single-line row, with its type and icon on the left. Use Albums, Tracks, or Artists to focus the list; highlighted text shows the matching words. Rows show name, artist/album context, year, and track length, album track count, or artist album count. Artist album counts include all album groups in that library root, regardless of the search result limit. Genre and other tag details appear when they explain a match; library roots appear when they match the query or distinguish copies. Full result context is available in hover details. Matches in fields that are not normally displayed include a short explanation, such as `Album artist: orchestra` or `Comment: remaster`.
+Each result appears once in a single-line row: the album cover (or the artist glyph), the name with the matching text in semibold, and its context in one column: artist and year for albums, artist and album for tracks, album count for artists. Tracks show their length. Artist album counts include all album groups in that library root, regardless of the search result limit. Genre and other tag details appear when they explain a match; library roots appear when they match the query or distinguish copies. Full result context is available in hover details. Matches in fields that are not normally displayed include a short explanation, such as `Album artist: orchestra` or `Comment: remaster`. The track that is playing shows the play glyph over its cover and an amber title.
 
-The first result is selected automatically. Enter plays the selected album, track, or artist and replaces the queue. The ? button opens search syntax and keyboard help.
+The first result is selected automatically, and the bar at the bottom names what the keys do for the selected row. The help button opens search syntax and keyboard help.
 
-Counts show displayed results out of total matching artists, albums, and tracks. Show more, beside the counts, increases the result budget. Results are bounded at 2,000 per type to keep interaction responsive; if more matches remain, refine the query. Initial budgets default to 5 artists, 10 albums, and 20 tracks.
+A section that shows fewer results than were found ends in a link, such as "Show all 26 tracks"; Enter or a click shows them, and the selection moves to the first one revealed. Initial budgets default to 5 artists, 10 albums, and 20 tracks. Results are bounded at 2,000 per type to keep interaction responsive; past that, a note says how many show, and refining the query narrows them.
+
+When a search finds nothing and a misspelled word has a close match in the library's titles, artists and albums, the palette offers "Search ‘meridian’ instead" as a selected row; Enter or a click searches it. A correction is offered only when it finds something. Before typing, the palette lists the searches whose results were used in this session.
 
 | Action | Control |
 | --- | --- |
-| Move through results | Up/Down; Page Up/Page Down |
+| Move through results | Up/Down; Page Up/Page Down; Home/End in the results |
 | Edit the query at its beginning/end | Home/End while typing |
 | Move keyboard focus | Tab/Shift+Tab |
 | Play the selection and replace the queue | Enter or double-click |
-| Show the selection in the library | Ctrl+Enter or the context menu |
-| Append to the queue | Queue in the context menu |
+| Add the selection to the queue | Ctrl+Enter or Add to Queue in the context menu |
+| Show the selection in the library | Alt+Enter or Show in Library in the context menu |
 | Return to the query | Ctrl+F |
 | Close search | Esc |
 
@@ -41,7 +43,7 @@ Put double quotes around words that must occur together. All terms and filters a
 | `track:1 disc:2` | Track 1 on disc 2 |
 | `root:classical` | Music in the library root named Classical |
 
-Available fields: `type`, `title`, `artist`, `album`, `albumartist`, `genre`, `year`, `date`, `composer`, `conductor`, `performer`, `label`, `comment`, `lyrics`, `path`, `root`, `track`, and `disc`. `album_artist`/`album-artist`, `publisher`, and `filename` are aliases for `albumartist`, `label`, and `path`. Type accepts `album`, `track`, or `artist`; conflicting or unknown types return no results. A type-only query lists that result type. Bare words such as `album` retain their literal meaning. Year, track, and disc filters match complete numbers. Unknown prefixes are treated as ordinary text, so filenames containing colons remain searchable. Unclosed quotes are accepted while typing. Boolean operators, numeric ranges, and typo correction are not supported.
+Available fields: `type`, `title`, `artist`, `album`, `albumartist`, `genre`, `year`, `date`, `composer`, `conductor`, `performer`, `label`, `comment`, `lyrics`, `path`, `root`, `track`, and `disc`. `album_artist`/`album-artist`, `publisher`, and `filename` are aliases for `albumartist`, `label`, and `path`. Type accepts `album`, `track`, or `artist`; conflicting or unknown types return no results. A type-only query lists that result type. Bare words such as `album` retain their literal meaning. Year, track, and disc filters match complete numbers. Unknown prefixes are treated as ordinary text, so filenames containing colons remain searchable. Unclosed quotes are accepted while typing. Boolean operators and numeric ranges are not supported; typo correction is only the suggestion offered when nothing matches.
 
 Album results can also match genre, dates, credits, and other metadata from main-album tracks and recognized disc folders. Bonus-folder matches appear as tracks. Lyrics alone return matching tracks, without adding unrelated parent albums; lyrics may still narrow a query that also matches the album name. Playing an album still plays the main album, not only its matching tracks. Artist results represent library folders; searching a guest artist or performer may therefore return tracks/albums without an artist-folder result.
 
