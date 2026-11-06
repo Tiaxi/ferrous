@@ -2409,7 +2409,12 @@ mod tests {
         let library = Arc::new(LibrarySnapshot {
             roots: vec![library_root(&p("/music"))],
             tracks: crate::library::shared_tracks(vec![
-                fixture_track("Morning Tide Field", "The Quiet Meridian", "Small Hours", "01"),
+                fixture_track(
+                    "Morning Tide Field",
+                    "The Quiet Meridian",
+                    "Small Hours",
+                    "01",
+                ),
                 fixture_track("Lantern Signal", "The Quiet Meridian", "Small Hours", "02"),
                 fixture_track("Afterglow", "Lumen Drift", "Afterimage", "01"),
             ]),
@@ -2444,7 +2449,10 @@ mod tests {
         // The corrected query would still find nothing.
         assert_eq!(search("merdian afterglow").suggestion, "");
         assert_eq!(search("zzzzzzzz").suggestion, "");
-        assert_eq!(search("merdian type:album").suggestion, "meridian type:album");
+        assert_eq!(
+            search("merdian type:album").suggestion,
+            "meridian type:album"
+        );
     }
 
     #[test]
@@ -2465,15 +2473,17 @@ mod tests {
             library: Arc::clone(&library),
             limit: 0,
         };
-        let prepared = cache
-            .prepared_for(&library, || None)
-            .expect("prepared");
+        let prepared = cache.prepared_for(&library, || None).expect("prepared");
         tx.send(query(3, "song 1")).expect("send");
-        let next = search_suggestion("sonx", &prepared, &rx).expect_err("stops for the newer query");
+        let next =
+            search_suggestion("sonx", &prepared, &rx).expect_err("stops for the newer query");
         assert_eq!(next.seq, 3);
         // What was left half made is not kept: the next suggestion is whole.
         assert!(prepared.vocabulary.get().is_none());
-        assert_eq!(search_suggestion("sonx", &prepared, &rx).expect("whole"), "song");
+        assert_eq!(
+            search_suggestion("sonx", &prepared, &rx).expect("whole"),
+            "song"
+        );
         assert!(prepared.vocabulary.get().is_some());
     }
 

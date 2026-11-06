@@ -62,7 +62,11 @@ impl SearchVocabulary {
                     return Err(next);
                 }
             }
-            for name in [track.title.as_str(), track.artist.as_str(), track.album.as_str()] {
+            for name in [
+                track.title.as_str(),
+                track.artist.as_str(),
+                track.album.as_str(),
+            ] {
                 if name.is_empty() || !seen.insert(name) {
                     continue;
                 }
@@ -200,9 +204,7 @@ pub(super) fn corrected_query(query: &str, vocabulary: &SearchVocabulary) -> Opt
             tokens.push(token.to_string());
             continue;
         }
-        let Some(word) = vocabulary.nearest(&folded) else {
-            return None;
-        };
+        let word = vocabulary.nearest(&folded)?;
         corrected_any = true;
         tokens.push(match prefix {
             Some(name) => format!("{name}:{}", word.spelling),
@@ -252,20 +254,40 @@ mod tests {
     #[test]
     fn corrects_a_misspelt_word_to_the_closest_name_word() {
         let words = vocabulary(&fixture());
-        assert_eq!(corrected_query("merdian", &words).as_deref(), Some("meridian"));
+        assert_eq!(
+            corrected_query("merdian", &words).as_deref(),
+            Some("meridian")
+        );
         // A swap of neighbours is one edit.
-        assert_eq!(corrected_query("meirdian", &words).as_deref(), Some("meridian"));
-        assert_eq!(corrected_query("quiet merdian", &words).as_deref(), Some("quiet meridian"));
-        assert_eq!(corrected_query("artist:merdian", &words).as_deref(), Some("artist:meridian"));
+        assert_eq!(
+            corrected_query("meirdian", &words).as_deref(),
+            Some("meridian")
+        );
+        assert_eq!(
+            corrected_query("quiet merdian", &words).as_deref(),
+            Some("quiet meridian")
+        );
+        assert_eq!(
+            corrected_query("artist:merdian", &words).as_deref(),
+            Some("artist:meridian")
+        );
     }
 
     #[test]
     fn suggests_nothing_for_known_words_far_words_and_other_filters() {
         let words = vocabulary(&fixture());
         assert_eq!(corrected_query("meridian", &words), None);
-        assert_eq!(corrected_query("merid", &words), None, "a prefix of a word is known");
+        assert_eq!(
+            corrected_query("merid", &words),
+            None,
+            "a prefix of a word is known"
+        );
         assert_eq!(corrected_query("xylophone", &words), None);
-        assert_eq!(corrected_query("merdian zzzzzz", &words), None, "every unknown word needs a correction");
+        assert_eq!(
+            corrected_query("merdian zzzzzz", &words),
+            None,
+            "every unknown word needs a correction"
+        );
         assert_eq!(corrected_query("genre:merdian", &words), None);
         assert_eq!(corrected_query("\"merdian\"", &words), None);
         assert_eq!(corrected_query("mx", &words), None, "too short to correct");
@@ -274,9 +296,16 @@ mod tests {
     #[test]
     fn keeps_the_library_spelling_with_its_accents() {
         let words = vocabulary(&fixture());
-        assert_eq!(corrected_query("ornul", &words), None, "a prefix of ørnulf, folded");
+        assert_eq!(
+            corrected_query("ornul", &words),
+            None,
+            "a prefix of ørnulf, folded"
+        );
         assert_eq!(corrected_query("ornulv", &words).as_deref(), Some("ørnulf"));
-        assert_eq!(corrected_query("lumiere cafx", &words).as_deref(), Some("lumiere café"));
+        assert_eq!(
+            corrected_query("lumiere cafx", &words).as_deref(),
+            Some("lumiere café")
+        );
     }
 
     #[test]
@@ -284,7 +313,10 @@ mod tests {
         let words = vocabulary(&[track("Fjord", "Hour", "Eventide")]);
         assert_eq!(corrected_query("hoxr", &words).as_deref(), Some("hour"));
         assert_eq!(corrected_query("hxxr", &words), None);
-        assert_eq!(corrected_query("evxntxde", &words).as_deref(), Some("eventide"));
+        assert_eq!(
+            corrected_query("evxntxde", &words).as_deref(),
+            Some("eventide")
+        );
         assert_eq!(corrected_query("exxntxde", &words), None);
     }
 
@@ -300,7 +332,9 @@ mod tests {
 
     #[test]
     fn the_build_stops_for_a_newer_query() {
-        let tracks: Vec<_> = (0..3000).map(|i| track(&format!("Song {i}"), "A", "B")).collect();
+        let tracks: Vec<_> = (0..3000)
+            .map(|i| track(&format!("Song {i}"), "A", "B"))
+            .collect();
         let mut polls = 0;
         let result = SearchVocabulary::build(tracks.iter(), || {
             polls += 1;

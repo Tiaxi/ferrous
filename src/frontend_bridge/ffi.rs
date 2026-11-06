@@ -4643,7 +4643,11 @@ mod tests {
         assert_eq!(&bytes[16..20], &500u32.to_le_bytes());
         let mut suggestion = Vec::new();
         push_string(&mut suggestion, "meridian");
-        assert_eq!(&bytes[20..], suggestion.as_slice(), "the suggestion follows the totals");
+        assert_eq!(
+            &bytes[20..],
+            suggestion.as_slice(),
+            "the suggestion follows the totals"
+        );
         let row = crate::frontend_bridge::BridgeSearchResultRow {
             match_detail: "Comment: remaster".into(),
             row_type: BridgeSearchResultRowType::Track,
