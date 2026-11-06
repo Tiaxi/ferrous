@@ -1444,6 +1444,9 @@ private slots:
     void waveformSceneGraphClipsSampleChunksToFastViews();
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
+    void waveformEditorDeferredZoomOutLandsWhilePlaying();
+    void waveformEditorLateDetailDrawsNoRasterEachFrame_data();
+    void waveformEditorLateDetailDrawsNoRasterEachFrame();
     void waveformSceneGraphMatchesRaster_data();
     void waveformSceneGraphMatchesRaster();
     void waveformSceneGraphBenchmark();
@@ -12108,6 +12111,218 @@ void WaveformSmokeTest::waveformEditorDetailStaysAheadOfSamplePlayback() {
     QVERIFY(requests >= 2);
     QVERIFY2(uncovered.isEmpty(), qPrintable(QStringLiteral("frames without detail: ")
         + uncovered.mid(0, 6).join(QStringLiteral(", "))));
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying() {
+    // A zoom out while playing at a deep zoom waits for the detail of the
+    // wider view, holding the deeper one, and must show once that detail
+    // comes, whatever playback does meanwhile. Here frames come too slowly
+    // for a raster of the view to be drawn, a part a frame, before
+    // playback leaves it: as in a wide view, on a slow machine, or with a
+    // busy render thread.
+    constexpr int kRate = 96'000;
+    constexpr int kChannels = 6;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.m_playbackTilesInline = true;
+    item.setWidth(1000);
+    item.setHeight(240);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kChannels);
+    auto gate = std::make_shared<QSemaphore>();
+    auto held = std::make_shared<std::atomic_bool>(false);
+    item.m_decodeWindow = [gate, held](const QString &, double start, double end, int points,
+                                       const std::shared_ptr<std::atomic_bool> &) {
+        if (held->load()) gate->tryAcquire(1, 5000);
+        return sampleDetailWindow(kRate, kChannels, start, end, points);
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/surround.flac"));
+    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    // Eight steps out from the deepest zoom, drawn in playback tiles while
+    // playing and in a raster while paused.
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, 8));
+    const auto viewHasSamples = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
+            && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    // Detail of little more than the view, as when playback has nearly
+    // used up its window, so that the wider view has none.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        giveSampleDetail(item, kRate, kChannels, start - 0.001, end + 0.001, true);
+    }
+    QImage canvas(1000, 240, QImage::Format_RGB32);
+    const auto paintFrame = [&item, &canvas]() {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    };
+    // Paused, the view is drawn in a raster, which then holds it while
+    // the wider zoom's detail is decoded.
+    paintFrame();
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    held->store(true);
+    const double deeperZoom = item.zoomLevel();
+    // Two steps out: the view moves on by about two thirds of its width a
+    // frame, and a raster of three views' width takes 24 frames to draw.
+    item.setZoomLevel(deeperZoom / std::pow(1.25, 2));
+    const double target = item.zoomLevel();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomOutHandoffPending);
+        QCOMPARE(item.m_presentedZoomLevel, deeperZoom);
+    }
+    // Frames 1/120 s apart. The wider zoom's window comes in the second.
+    int landedAt = -1;
+    for (int frame = 0; frame < 60 && landedAt < 0; ++frame) {
+        time.advance(1.0 / 120.0);
+        item.handleWindowFrameSwapped();
+        QCoreApplication::processEvents();
+        if (frame == 1) {
+            QVERIFY(item.m_decodeActive);
+            held->store(false);
+            gate->release();
+            QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+        }
+        paintFrame();
+        QMutexLocker lock(&item.m_stateMutex);
+        if (!item.m_zoomOutHandoffPending && item.m_presentedZoomLevel == target) landedAt = frame;
+    }
+    QVERIFY2(landedAt >= 0, "the zoom out never showed");
+    // Shown in the frame its detail came for.
+    QCOMPARE(landedAt, 1);
+    // And it stays shown as playback goes on.
+    for (int frame = 0; frame < 30; ++frame) {
+        time.advance(1.0 / 120.0);
+        item.handleWindowFrameSwapped();
+        QCoreApplication::processEvents();
+        paintFrame();
+        QMutexLocker lock(&item.m_stateMutex);
+        QCOMPARE(item.m_presentedZoomLevel, target);
+    }
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame_data() {
+    QTest::addColumn<int>("stepsOut");
+    QTest::addColumn<int>("viewMode");
+    // Samples with markers, drawn directly, and samples in playback tiles,
+    // in a lane each and mixed into one over the track's overview.
+    QTest::addRow("5out-split") << 5 << 1;
+    QTest::addRow("8out-split") << 8 << 1;
+    QTest::addRow("8out-mixed") << 8 << 0;
+}
+
+void WaveformSmokeTest::waveformEditorLateDetailDrawsNoRasterEachFrame() {
+    // Playing at a deep zoom, the view moves on by more than its width a
+    // frame. When detail windows take longer to come than playback takes
+    // to use one up, the view has none for a while: it shows what it has
+    // until the next comes, rather than drawing a raster of the view for
+    // every frame, which the scene graph would upload as new textures.
+    QFETCH(int, stepsOut);
+    QFETCH(int, viewMode);
+    constexpr int kRate = 96'000;
+    constexpr int kChannels = 6;
+    // A window comes this long after it is asked for: longer than playback
+    // takes to use up the margin ahead of the view.
+    constexpr qint64 kReplyNs = 800'000'000;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.m_playbackTilesInline = true;
+    item.setWidth(1000);
+    item.setHeight(240);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(viewMode);
+    item.setChannelCountHint(kChannels);
+    item.setOverviewComplete(true);
+    item.setOverviewData(QByteArray(8192, static_cast<char>(160)));
+    auto gate = std::make_shared<QSemaphore>();
+    auto held = std::make_shared<std::atomic_bool>(false);
+    item.m_decodeWindow = [gate, held](const QString &, double start, double end, int points,
+                                       const std::shared_ptr<std::atomic_bool> &) {
+        if (held->load()) gate->tryAcquire(1, 5000);
+        return sampleDetailWindow(kRate, kChannels, start, end, points);
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/surround.flac"));
+    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    item.setZoomLevel(item.maximumZoomLevel() / std::pow(1.25, stepsOut));
+    const auto viewHasSamples = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
+            && item.detailResolutionCoversLocked(start, end) && item.m_detail.framesPerPoint == 1;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(viewHasSamples(), kSlowBuildTimeoutMs);
+    held->store(true);
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+
+    QImage canvas(1000, 240, QImage::Format_RGB32);
+    // Three seconds at 120 frames a second.
+    qint64 askedAtNs = -1;
+    int arrivals = 0;
+    int framesWithoutDetail = 0;
+    // The rasters drawn since the last window came, and the most of them
+    // between two windows.
+    int rasters = 0;
+    int mostRasters = 0;
+    QStringList misplacedRequests;
+    for (int frame = 0; frame < 360; ++frame) {
+        time.advance(1.0 / 120.0);
+        item.handleWindowFrameSwapped();
+        QCoreApplication::processEvents();
+        if (item.m_decodeActive && askedAtNs < 0) {
+            askedAtNs = time.nowNs;
+            // The window asked for holds the playhead, and what playback
+            // reaches next.
+            QMutexLocker lock(&item.m_stateMutex);
+            const double position = item.displayedPositionSecondsLocked();
+            if (position < item.m_requestedStartSeconds || position >= item.m_requestedEndSeconds) {
+                misplacedRequests << QStringLiteral("%1 at %2..%3").arg(position, 0, 'f', 3)
+                    .arg(item.m_requestedStartSeconds, 0, 'f', 3).arg(item.m_requestedEndSeconds, 0, 'f', 3);
+            }
+        }
+        if (askedAtNs >= 0 && time.nowNs - askedAtNs >= kReplyNs) {
+            gate->release();
+            QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+            askedAtNs = -1;
+            ++arrivals;
+            rasters = 0;
+        }
+        qint64 rasterBefore = 0;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            rasterBefore = item.m_cache.cacheKey();
+            const auto [start, end] = item.visibleRangeLocked();
+            if (!item.detailCoversRangeLocked(start, end)) ++framesWithoutDetail;
+        }
+        {
+            QPainter painter(&canvas);
+            item.paint(&painter);
+        }
+        QMutexLocker lock(&item.m_stateMutex);
+        if (item.m_cache.cacheKey() != rasterBefore) mostRasters = std::max(mostRasters, ++rasters);
+    }
+    // The case this is about: windows came, and the view went without
+    // detail between them.
+    QVERIFY(arrivals >= 2);
+    QVERIFY(framesWithoutDetail >= 30);
+    QVERIFY2(misplacedRequests.isEmpty(), qPrintable(misplacedRequests.join(QStringLiteral(", "))));
+    QVERIFY2(mostRasters <= 1, qPrintable(QStringLiteral("%1 rasters between two windows").arg(mostRasters)));
     item.setSourcePath(QString());
     gate->release(4);
     QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);

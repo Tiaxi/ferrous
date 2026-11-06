@@ -389,6 +389,14 @@ private:
         double visibleStart, double visibleEnd, bool commitsDeferredZoom);
     bool advanceStagedCacheLocked(qint64 nowNs);
     bool advanceStagedCacheLocked();
+    // Whether, at nowNs, playback would draw the zoom that a zoom out
+    // waits to show from the detail there is, in playback tiles or
+    // samples, which follow the view as it moves, so that no raster need
+    // be drawn for it first.
+    bool deferredZoomDrawnByPlaybackLocked(qint64 nowNs) const;
+    // Whether playback, moving the view out of the cache, may have the
+    // cache drawn again for it; see m_cacheDetailArrivals.
+    bool playbackRedrawsCacheLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
         bool notifySamplePointsChanged, bool requestRepaint);
     void rebuildCacheLocked(
@@ -544,6 +552,14 @@ private:
     double m_cacheSecondsPerPixel{0.0};
     quint32 m_cacheFramesPerPoint{0};
     int m_cacheDisplayedChannels{0};
+    // The detail windows that have come, or failed to, and how many had
+    // when the cache was drawn. While the view has no detail, playback
+    // that leaves the cache has it drawn again only once another has
+    // come: with nothing new to draw it from, it would be drawn, and
+    // uploaded, again for every frame at a deep zoom. The part of the view
+    // it still covers shows until then.
+    quint64 m_detailArrivals{0};
+    quint64 m_cacheDetailArrivals{0};
     QImage m_stagedCache;
     double m_stagedCacheStartSeconds{0.0};
     double m_stagedCacheEndSeconds{0.0};
