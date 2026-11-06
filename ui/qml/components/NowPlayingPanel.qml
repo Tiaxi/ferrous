@@ -87,23 +87,32 @@ Item {
     // album fades its lines in over the old ones over shortDuration; a
     // track of another album, or with another cover, fades the cover and
     // the lines together on one curve over longDuration. A cover that
-    // changes later, also for the same track, fades the same way: during a
-    // fade of the lines it joins them on the long curve; after one, the
-    // cover fades alone. What shows is always the playing track's; what
-    // the panel showed before only fades out over it. Other metadata
-    // arriving or changing later changes the lines in place. Nothing fades
-    // into or out of "Nothing playing", and with animations off every
-    // change is instant.
+    // changes later for the same track fades too: during a fade of the
+    // lines it joins them, and every layer goes on from the opacity it has
+    // onto the long curve; after one, the cover fades alone. What shows is
+    // always the playing track's; what the panel showed before only fades
+    // out over it. Other metadata arriving or changing later changes the
+    // lines in place. Nothing fades into or out of "Nothing playing": the
+    // first track after it settles its cover and lines together, whatever
+    // order the bridge tells them in. With animations off every change is
+    // instant.
     readonly property string trackKey: root.hasTrack
         ? root._trimmed(root.uiBridge.currentTrackPath) : ""
     readonly property string coverPath: root.uiBridge.currentTrackCoverPath || ""
     // The playing track as last seen.
     property var shown: null
-    // What fades out: the lines and the cover the panel showed before, and
-    // which of the two fade (`linesFade`, `coverFade`), or null.
+    // Whether the track has just left "Nothing playing" and has had no
+    // cover since: the first one it gets is part of that change.
+    property bool settling: false
+    // Whether a cover came while "Nothing playing" showed: the next
+    // track's, told before its path.
+    property bool coverCameWhileEmpty: false
+    // What fades out: the lines and the cover the panel showed before,
+    // which of the two fade (`linesFade`, `coverFade`), and the opacity
+    // each had when this fade started (`linesFrom`, `coverFrom`); or null.
     property var outgoing: null
-    // How far the playing track has come in: 0 when a fade starts, 1 once
-    // it alone shows.
+    // How far the fade has come: 0 when it starts, 1 once the playing
+    // track alone shows.
     property real handover: 1
     readonly property NumberAnimation handoverAnimation: NumberAnimation {
         objectName: "nowPlayingHandoverAnimation"
@@ -114,6 +123,14 @@ Item {
         easing.type: Easing.OutCubic
         onFinished: root.outgoing = null
     }
+    // The layers' opacities: the lines and the cover before go from where
+    // they started to 0, on the one curve; the playing track's lines make
+    // up the rest. The playing track's cover shows whole under the one
+    // before.
+    readonly property real outgoingLinesOpacity: root.outgoing !== null && root.outgoing.linesFade
+        ? root.outgoing.linesFrom * (1 - root.handover) : 0
+    readonly property real outgoingCoverOpacity: root.outgoing !== null && root.outgoing.coverFade
+        ? root.outgoing.coverFrom * (1 - root.handover) : 0
 
     function _sameLines(a, b) {
         return a.title === b.title && a.artistAlbum === b.artistAlbum && a.details === b.details
@@ -133,49 +150,90 @@ Item {
         if (was === null || was.trackKey.length === 0 || next.trackKey.length === 0) {
             // Into or out of "Nothing playing", whose layout differs: at once.
             root.endHandover()
+            const wasEmpty = was !== null && was.trackKey.length === 0
+            if (next.trackKey.length === 0) {
+                root.settling = false
+                if (!wasEmpty) {
+                    root.coverCameWhileEmpty = false
+                } else if (was.coverPath !== next.coverPath) {
+                    root.coverCameWhileEmpty = next.coverPath.length > 0
+                }
+            } else {
+                // The track's cover is yet to come, unless it came first.
+                root.settling = !root.coverCameWhileEmpty
+                root.coverCameWhileEmpty = false
+            }
+            return
+        }
+        if (was.trackKey !== next.trackKey) {
+            root.settling = false
+            root.startHandover(was, next)
+            return
+        }
+        const coverChange = was.coverPath !== next.coverPath
+        if (root.settling) {
+            // The first track's metadata, in place.
+            if (coverChange) {
+                root.settling = false
+            }
             return
         }
         const fading = root.outgoing
-        if (was.trackKey !== next.trackKey || was.coverPath !== next.coverPath
-                || (fading !== null && !fading.coverFade && fading.album !== next.album)) {
-            // Another track, a cover that changed, or an album named after
-            // the track itself while only its lines fade.
-            root.startHandover(was, next, was.trackKey !== next.trackKey)
+        if (coverChange || (fading !== null && !fading.coverFade && fading.album !== next.album)) {
+            // A cover that changed, or an album named after the track
+            // itself while only its lines fade.
+            root.joinHandover(was, next)
         }
     }
 
-    // What the panel shows of `was`, the track it showed: during a fade,
-    // whichever of the two shows more.
-    function onScreen(was) {
+    // Another track: fades from what the panel shows, during a fade
+    // whichever of the two shows more, to `next`'s lines, and to its cover
+    // on the long curve when the cover or the album differ.
+    function startHandover(was, next) {
         const fading = root.outgoing
-        const before = fading !== null && root.handover < 0.5
-        return {
-            lines: before && fading.linesFade ? fading.lines : was.lines,
-            coverPath: before && fading.coverFade ? fading.coverPath : was.coverPath,
-            album: before ? fading.album : was.album
-        }
+        const linesBefore = fading !== null && root.outgoingLinesOpacity > 0.5
+        const coverBefore = fading !== null && root.outgoingCoverOpacity > 0.5
+        const coverPath = coverBefore ? fading.coverPath : was.coverPath
+        const album = coverBefore ? fading.album : was.album
+        root.fade({
+            lines: linesBefore ? fading.lines : was.lines,
+            coverPath: coverPath,
+            album: album,
+            linesFade: true,
+            coverFade: coverPath !== next.coverPath || album !== next.album,
+            linesFrom: 1,
+            coverFrom: 1
+        })
     }
 
-    // Fades from what the panel shows to `next`: its lines when they
-    // differ, or for another track; the cover, on the long curve, when it
-    // or the album differ.
-    function startHandover(was, next, trackChange) {
-        const screen = root.onScreen(was)
-        const linesFade = trackChange || !root._sameLines(screen.lines, next.lines)
-        const coverFade = screen.coverPath !== next.coverPath || screen.album !== next.album
-        const duration = coverFade ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
-        if ((!linesFade && !coverFade) || duration <= 0) {
+    // The same track's cover or album changed: the cover fades on the long
+    // curve, from the one that shows, and lines still fading go on from
+    // their opacity onto it, so no layer jumps.
+    function joinHandover(was, next) {
+        const fading = root.outgoing
+        const linesFrom = root.outgoingLinesOpacity
+        const coverFading = fading !== null && fading.coverFade && root.outgoingCoverOpacity > 0
+        const coverPath = coverFading ? fading.coverPath : was.coverPath
+        const album = coverFading ? fading.album : was.album
+        root.fade({
+            lines: linesFrom > 0 ? fading.lines : next.lines,
+            coverPath: coverPath,
+            album: album,
+            linesFade: linesFrom > 0,
+            coverFade: coverPath !== next.coverPath || album !== next.album,
+            linesFrom: linesFrom,
+            coverFrom: coverFading ? root.outgoingCoverOpacity : 1
+        })
+    }
+
+    function fade(out) {
+        const duration = out.coverFade ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
+        if ((!out.linesFade && !out.coverFade) || duration <= 0) {
             root.endHandover()
             return
         }
         root.handoverAnimation.stop()
-        root.outgoing = {
-            lines: screen.lines,
-            coverPath: screen.coverPath,
-            album: screen.album,
-            linesFade: linesFade,
-            coverFade: coverFade
-        }
+        root.outgoing = out
         root.handoverAnimation.duration = duration
         root.handover = 0
         root.handoverAnimation.start()
@@ -386,7 +444,7 @@ Item {
         // The cover before, over this one while it fades out.
         outgoingShown: root.outgoing !== null && root.outgoing.coverFade
         outgoingCoverPath: cover.outgoingShown ? root.outgoing.coverPath : ""
-        outgoingOpacity: 1 - root.handover
+        outgoingOpacity: root.outgoingCoverOpacity
     }
 
     // The playing track's lines, which fade in over a track change.
@@ -395,7 +453,7 @@ Item {
         visible: root.layoutMode !== "empty"
         lines: root.trackLines
         namePrefix: "nowPlaying"
-        opacity: root.outgoing !== null && root.outgoing.linesFade ? root.handover : 1
+        opacity: 1 - root.outgoingLinesOpacity
     }
 
     // The lines before, fading out.
@@ -405,7 +463,7 @@ Item {
         visible: outgoingText.fades && root.layoutMode !== "empty"
         lines: outgoingText.fades ? root.outgoing.lines : root.noLines
         namePrefix: "nowPlayingOutgoing"
-        opacity: 1 - root.handover
+        opacity: root.outgoingLinesOpacity
         Accessible.ignored: true
     }
 
