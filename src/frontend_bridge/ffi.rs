@@ -2765,13 +2765,15 @@ fn encode_failure_event(message: &str) -> Vec<u8> {
 fn encode_search_results_frame(frame: &BridgeSearchResultsFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + frame.rows.len() * 128);
     push_u8(&mut out, b'S');
-    // Version 5 added each row's cover stamp.
-    push_u8(&mut out, 5);
+    // Version 5 added each row's cover stamp; version 6 the suggestion
+    // after the totals.
+    push_u8(&mut out, 6);
     push_u16(&mut out, clamp_u16(frame.rows.len()));
     push_u32(&mut out, frame.seq);
     for total in frame.totals {
         push_u32(&mut out, total);
     }
+    push_string(&mut out, &frame.suggestion);
     for row in &frame.rows {
         let row_type = match row.row_type {
             BridgeSearchResultRowType::Artist => 1u8,
@@ -4633,11 +4635,19 @@ mod tests {
             seq: 9,
             totals: [7, 12, 500],
             rows: Vec::new(),
+            suggestion: "meridian".into(),
         });
-        assert_eq!(&bytes[..8], &[b'S', 5, 0, 0, 9, 0, 0, 0]);
+        assert_eq!(&bytes[..8], &[b'S', 6, 0, 0, 9, 0, 0, 0]);
         assert_eq!(&bytes[8..12], &7u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &12u32.to_le_bytes());
         assert_eq!(&bytes[16..20], &500u32.to_le_bytes());
+        let mut suggestion = Vec::new();
+        push_string(&mut suggestion, "meridian");
+        assert_eq!(
+            &bytes[20..],
+            suggestion.as_slice(),
+            "the suggestion follows the totals"
+        );
         let row = crate::frontend_bridge::BridgeSearchResultRow {
             match_detail: "Comment: remaster".into(),
             row_type: BridgeSearchResultRowType::Track,
@@ -4663,6 +4673,7 @@ mod tests {
             seq: 9,
             totals: [0, 0, 1],
             rows: vec![row],
+            suggestion: String::new(),
         });
         let mut suffix = Vec::new();
         push_string(&mut suffix, "Comment: remaster");

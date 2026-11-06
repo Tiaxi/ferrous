@@ -19,6 +19,13 @@ QtObject {
     property var resultsView: null
     property string pendingPrefillText: ""
     property string openInitialText: ""
+    // The searches whose results were used this session, newest first,
+    // shown before typing. Kept in memory only.
+    property var recentQueries: []
+    readonly property int maxRecentQueries: 5
+    // A section being expanded: its type and how many of its results
+    // showed, so that the selection moves to the first one revealed.
+    property var pendingExpansion: null
     readonly property bool dialogVisible: !!root.dialog && root.dialog.visible
     readonly property bool dialogHasActiveInputFocus: root.dialogVisible
         && ((root.queryField && root.queryField.activeFocus)
@@ -81,7 +88,7 @@ QtObject {
         const pageRows = Math.max(
             1,
             Math.floor((root.resultsView ? root.resultsView.height : 240)
-                / (root.resultsView ? root.resultsView.resultRowHeight : 34)) - 1)
+                / (root.resultsView ? root.resultsView.resultRowHeight : 32)) - 1)
         let index = root.selectedDisplayIndex
         if (!root.isSearchRowSelectable(index)) {
             index = stepDir > 0 ? root.searchFirstSelectableIndex() : root.searchLastSelectableIndex()
@@ -269,6 +276,48 @@ QtObject {
         return true
     }
 
+    // Puts `query` first in the recent searches.
+    function rememberQuery(query) {
+        const text = String(query || "").trim()
+        if (text.length === 0) {
+            return
+        }
+        const folded = text.toLowerCase()
+        const kept = root.recentQueries.filter(function(value) { return value.toLowerCase() !== folded })
+        root.recentQueries = [text].concat(kept).slice(0, root.maxRecentQueries)
+    }
+
+    function rememberCurrentQuery() {
+        root.rememberQuery(root.queryField ? root.queryField.text : "")
+    }
+
+    // Shows every result of a "more" row's section.
+    function expandRow(row) {
+        if (!row || row.kind !== "more" || !root.uiBridge.globalSearchCanExpand) {
+            return
+        }
+        root.pendingExpansion = { rowType: row.rowType || "", shown: row.shownCount || 0 }
+        root.uiBridge.expandGlobalSearch(row.rowType || "")
+    }
+
+    // After new rows: the first result an expansion revealed, or the first
+    // result.
+    function selectAfterRowsChanged() {
+        const expansion = root.pendingExpansion
+        root.pendingExpansion = null
+        if (expansion && root.globalSearchModelApi && root.globalSearchModelApi.indexOfResult) {
+            let index = root.globalSearchModelApi.indexOfResult(expansion.rowType, expansion.shown)
+            if (index < 0) {
+                index = root.globalSearchModelApi.indexOfResult(expansion.rowType, 0)
+            }
+            if (index >= 0 && root.selectDisplayIndex(index)) {
+                return true
+            }
+        }
+        root.selectFirstItem()
+        return false
+    }
+
     function navigateSelectionToLibrary() {
         if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
         let row = root.selectedRow()
@@ -279,9 +328,10 @@ QtObject {
                 row = root.selectedRow()
             }
         }
-        if (!row) {
+        if (!row || row.kind !== "item") {
             return
         }
+        root.rememberCurrentQuery()
         root.requestLibraryRevealForSearchRow(row)
         if (root.dialog) {
             root.dialog.close()
@@ -291,9 +341,14 @@ QtObject {
 
     function activateRow(row) {
         if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        if (row && row.kind === "more") {
+            root.expandRow(row)
+            return
+        }
         if (!row || row.kind !== "item") {
             return
         }
+        root.rememberCurrentQuery()
         const rowType = row.rowType || ""
         if (rowType === "track") {
             root.uiBridge.replaceWithPaths([row.trackPath || ""])
@@ -316,6 +371,7 @@ QtObject {
         if (!row || row.kind !== "item") {
             return
         }
+        root.rememberCurrentQuery()
         const rowType = row.rowType || ""
         if (rowType === "track") {
             root.uiBridge.appendTrack(row.trackPath || "")
@@ -343,5 +399,24 @@ QtObject {
         if (row) {
             root.activateRow(row)
         }
+    }
+
+    // Adds the selected result to the queue; the palette stays open for
+    // more.
+    function queueSelection() {
+        if (root.uiBridge.globalSearchBusy || root.uiBridge.globalSearchModelRetained) return
+        const row = root.selectedRow()
+        if (row) {
+            root.queueRow(row)
+        }
+    }
+
+    // Searches `query` instead: a recent search or a suggested spelling.
+    function searchInstead(query) {
+        if (!root.queryField) {
+            return
+        }
+        root.queryField.text = String(query || "")
+        root.focusQueryField(false)
     }
 }

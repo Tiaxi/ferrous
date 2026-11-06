@@ -1383,6 +1383,7 @@ void BridgeClient::searchApplyWorkerLoop() {
 
         SearchWorkerOutputFrame out;
         out.seq = decoded.seq;
+        out.suggestion = decoded.suggestion;
         out.decodeError = decodedOk ? QString{} : decodeError;
         out.ffiPoppedAtMs = input.ffiPoppedAtMs;
         out.ffiPopMs = input.ffiPopMs;
@@ -3424,15 +3425,26 @@ void BridgeClient::setLibrarySortMode(int mode) {
 }
 
 bool BridgeClient::globalSearchCanExpand() const {
-    return !m_globalSearchBusy && m_globalSearchLimit < 2000
+    return !m_globalSearchBusy && m_globalSearchLimit < static_cast<quint32>(GlobalSearchResultsModel::kMaxShownPerType)
         && (m_globalSearchArtistCount < m_globalSearchTotals.value(0).toInt()
             || m_globalSearchAlbumCount < m_globalSearchTotals.value(1).toInt()
             || m_globalSearchTrackCount < m_globalSearchTotals.value(2).toInt());
 }
 
-void BridgeClient::expandGlobalSearch() {
+void BridgeClient::expandGlobalSearch(const QString &rowType) {
     if (!globalSearchCanExpand() || m_pendingGlobalSearchQuery.isEmpty()) return;
-    m_globalSearchLimit = std::min(2000u, std::max(40u, m_globalSearchLimit * 2));
+    // The search shows up to the limit of each type: enough for every
+    // result of this type, without showing fewer of another.
+    const int type = QStringList{QStringLiteral("artist"), QStringLiteral("album"), QStringLiteral("track")}
+                         .indexOf(rowType);
+    int wanted = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (type < 0 || i == type) wanted = std::max(wanted, m_globalSearchTotals.value(i).toInt());
+    }
+    const auto maxLimit = static_cast<quint32>(GlobalSearchResultsModel::kMaxShownPerType);
+    // Below 40, Rust's own limits (5 artists, 10 albums, 20 tracks) can be
+    // larger than the one sent.
+    m_globalSearchLimit = std::min(maxLimit, std::max({40u, m_globalSearchLimit, static_cast<quint32>(wanted)}));
     m_globalSearchBusy = true;
     emit globalSearchResultsChanged();
     flushGlobalSearchQuery();
@@ -3500,6 +3512,8 @@ void BridgeClient::setGlobalSearchQuery(const QString &query) {
             emit globalSearchResultsChanged();
         }
         m_globalSearchTotals = {0, 0, 0};
+        m_globalSearchSuggestion.clear();
+        m_deferredSearchSuggestion.clear();
         emit globalSearchResultsChanged();
         m_globalSearchSentAtMs.clear();
         if (m_profileUiEnabled) {
@@ -4187,6 +4201,7 @@ QString BridgeClient::resolveDiagnosticsLogPath() {
 bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSearchResults &frame) {
     SearchWorkerOutputFrame out;
     out.seq = frame.seq;
+    out.suggestion = frame.suggestion;
     for (auto total : frame.totals) out.totals.push_back(total);
     QHash<QString, QString> coverUrlCache;
     coverUrlCache.reserve(frame.rows.size());
@@ -4434,6 +4449,7 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
     // giving latest-wins coalescing for free.
     m_deferredSearchSeq = frame.seq;
     m_deferredSearchDisplayRows = std::move(frame.displayRows);
+    m_deferredSearchSuggestion = std::move(frame.suggestion);
     m_searchModelApplyTimer.start();
     m_searchFramesApplied++;
 
@@ -4473,7 +4489,12 @@ bool BridgeClient::applyPreparedSearchResultsFrame(SearchWorkerOutputFrame frame
 
 void BridgeClient::applyDeferredSearchDisplayRows() {
     if (m_globalSearchDebounceTimer.isActive() || m_deferredSearchSeq != m_latestGlobalSearchSeqSent) return;
-    m_globalSearchModel.presentSearchRows(std::move(m_deferredSearchDisplayRows));
+    QVector<int> totals;
+    for (const auto &total : std::as_const(m_globalSearchTotals)) totals.push_back(total.toInt());
+    m_globalSearchSuggestion = std::move(m_deferredSearchSuggestion);
+    m_deferredSearchSuggestion.clear();
+    m_globalSearchModel.presentSearchRows(std::move(m_deferredSearchDisplayRows), totals,
+                                          m_globalSearchLimit < static_cast<quint32>(GlobalSearchResultsModel::kMaxShownPerType));
     m_globalSearchBusy = false;
     emit globalSearchResultsChanged();
 }

@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -14,6 +14,7 @@ use crate::library::{KeyedText, LibraryRoot, LibrarySearchTrack, LibrarySnapshot
 
 use super::library_tree::{album_row_key, artist_row_key, section_row_key, track_row_key};
 use super::search_query::{SearchFields, SearchQuery};
+use super::search_suggest::{corrected_query, SearchVocabulary};
 
 use super::{
     BridgeSearchResultRow, BridgeSearchResultRowType, BridgeSearchResultsFrame, BridgeState,
@@ -266,6 +267,9 @@ struct PreparedSearchLibrary {
     tracks: Vec<Arc<PreparedTrackEntry>>,
     album_inventory: HashMap<String, AlbumInventoryAcc>,
     artist_album_counts: HashMap<String, u32>,
+    /// The words of the library's names, for spelling suggestions: made
+    /// the first time a search of this library finds nothing.
+    vocabulary: OnceLock<Arc<SearchVocabulary>>,
 }
 
 /// The album group a track belongs to, for the album inventory.
@@ -812,6 +816,7 @@ fn empty_search_results_frame(seq: u32) -> SearchBuildOutcome {
         seq,
         rows: Vec::new(),
         totals: [0; 3],
+        suggestion: String::new(),
     })
 }
 
@@ -1096,6 +1101,7 @@ fn prepare_search_library_with(
             tracks,
             album_inventory,
             artist_album_counts,
+            vocabulary: OnceLock::new(),
         }),
         prepared_count,
     )
@@ -1471,23 +1477,8 @@ fn build_search_results_frame(
 ) -> SearchBuildOutcome {
     let seq = query.seq;
     let query_text = query.query.trim();
-    if query_text.is_empty() {
+    if split_search_terms(query_text).is_empty() {
         return empty_search_results_frame(seq);
-    }
-    let query_terms = split_search_terms(query_text);
-    if query_terms.is_empty() {
-        return empty_search_results_frame(seq);
-    }
-    let mut limits = search_result_limits(query_text);
-    if query.limit > 0 {
-        let limit = usize::try_from(query.limit)
-            .unwrap_or(2_000)
-            .clamp(20, 2_000);
-        limits = SearchResultLimits {
-            artist: limit,
-            album: limit,
-            track: limit,
-        };
     }
     let library = query.library.as_ref();
     if library.roots.is_empty() {
@@ -1498,15 +1489,54 @@ fn build_search_results_frame(
             Ok(prepared) => prepared,
             Err(next) => return SearchBuildOutcome::Cancelled(next),
         };
-    let buckets = match search_tracks_prepared(
+    let (totals, rows) = match search_rows(
         query_text,
+        query.limit,
         prepared.as_ref(),
         &library.roots,
-        limits.track,
         query_rx,
     ) {
+        Ok(found) => found,
+        Err(next) => return SearchBuildOutcome::Cancelled(next),
+    };
+    let suggestion = if rows.is_empty() {
+        match search_suggestion(query_text, prepared.as_ref(), &library.roots, query_rx) {
+            Ok(suggestion) => suggestion,
+            Err(next) => return SearchBuildOutcome::Cancelled(next),
+        }
+    } else {
+        String::new()
+    };
+    SearchBuildOutcome::Frame(BridgeSearchResultsFrame {
+        seq,
+        totals,
+        rows,
+        suggestion,
+    })
+}
+
+/// The totals and the rows `query_text` shows: up to `limit` of each type,
+/// or the default limits when it is 0. Stops with a newer query.
+fn search_rows(
+    query_text: &str,
+    limit: u32,
+    prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> Result<([u32; 3], Vec<BridgeSearchResultRow>), SearchWorkerQuery> {
+    let mut limits = search_result_limits(query_text);
+    if limit > 0 {
+        let limit = usize::try_from(limit).unwrap_or(2_000).clamp(20, 2_000);
+        limits = SearchResultLimits {
+            artist: limit,
+            album: limit,
+            track: limit,
+        };
+    }
+    let buckets = match search_tracks_prepared(query_text, prepared, roots, limits.track, query_rx)
+    {
         PreparedSearchOutcome::Hits(rows) => rows,
-        PreparedSearchOutcome::Cancelled(next) => return SearchBuildOutcome::Cancelled(next),
+        PreparedSearchOutcome::Cancelled(next) => return Err(next),
     };
     let totals = [
         u32::try_from(buckets.artist_groups.len()).unwrap_or(u32::MAX),
@@ -1514,7 +1544,7 @@ fn build_search_results_frame(
         buckets.track_count,
     ];
     let rows = finalize_search_rows(
-        &prepared,
+        prepared,
         &limits,
         &buckets.album_cover_paths,
         buckets.artist_groups,
@@ -1522,7 +1552,40 @@ fn build_search_results_frame(
         &buckets.album_hit_stats,
         buckets.track_rows,
     );
-    SearchBuildOutcome::Frame(BridgeSearchResultsFrame { seq, totals, rows })
+    Ok((totals, rows))
+}
+
+/// A spelling correction of `query_text`, which found nothing, that shows
+/// results when searched, or an empty string. Stops with a newer query.
+fn search_suggestion(
+    query_text: &str,
+    prepared: &PreparedSearchLibrary,
+    roots: &[LibraryRoot],
+    query_rx: &Receiver<SearchWorkerQuery>,
+) -> Result<String, SearchWorkerQuery> {
+    let vocabulary = if let Some(vocabulary) = prepared.vocabulary.get() {
+        Arc::clone(vocabulary)
+    } else {
+        let built = Arc::new(SearchVocabulary::build(
+            prepared.tracks.iter().map(|entry| entry.track.as_ref()),
+            || poll_latest_search_query(query_rx),
+        )?);
+        Arc::clone(prepared.vocabulary.get_or_init(|| built))
+    };
+    let Some(suggestion) = corrected_query(query_text, &vocabulary, &mut || {
+        poll_latest_search_query(query_rx)
+    })?
+    else {
+        return Ok(String::new());
+    };
+    // Offer it only if searching it shows results: the same search, with
+    // its type filters and the rules of which artists and albums show.
+    let (_, rows) = search_rows(&suggestion, 0, prepared, roots, query_rx)?;
+    Ok(if rows.is_empty() {
+        String::new()
+    } else {
+        suggestion
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2348,6 +2411,124 @@ mod tests {
         assert_eq!(matches[0].label, "Ala puhu poika");
         assert_eq!(matches[1].label, "Älä puhu poika");
         assert_eq!(matches[2].label, "Alabama");
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_suggests_a_correction_that_finds_something() {
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks: crate::library::shared_tracks(vec![
+                fixture_track(
+                    "Morning Tide Field",
+                    "The Quiet Meridian",
+                    "Small Hours",
+                    "01",
+                ),
+                fixture_track("Lantern Signal", "The Quiet Meridian", "Small Hours", "02"),
+                fixture_track("Afterglow", "Lumen Drift", "Afterimage", "01"),
+            ]),
+            ..LibrarySnapshot::default()
+        });
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let mut cache = SearchWorkerPreparedCache::default();
+        let mut search = |query: &str| {
+            let SearchBuildOutcome::Frame(frame) = build_search_results_frame(
+                &SearchWorkerQuery {
+                    seq: 1,
+                    query: query.into(),
+                    library: Arc::clone(&library),
+                    limit: 0,
+                },
+                &mut cache,
+                &rx,
+            ) else {
+                panic!("unexpected cancellation")
+            };
+            frame
+        };
+        let frame = search("merdian");
+        assert!(frame.rows.is_empty());
+        assert_eq!(frame.suggestion, "meridian");
+        // Results: no suggestion.
+        let frame = search("meridian");
+        assert!(!frame.rows.is_empty());
+        assert_eq!(frame.suggestion, "");
+        // Each word is known, but not together; no word to correct.
+        assert_eq!(search("lantern afterglow").suggestion, "");
+        // The corrected query would still find nothing.
+        assert_eq!(search("merdian afterglow").suggestion, "");
+        assert_eq!(search("zzzzzzzz").suggestion, "");
+        assert_eq!(
+            search("merdian type:album").suggestion,
+            "meridian type:album"
+        );
+        // A suggestion is offered only if searching it shows results, with
+        // its type filters: "lantern" is a title, not an artist.
+        assert_eq!(search("lantrn type:artist").suggestion, "");
+        assert_eq!(search("lantrn type:track").suggestion, "lantern type:track");
+        // "afterglow" is a track's title: no album shows for it.
+        assert_eq!(search("afterglw type:album").suggestion, "");
+        assert_eq!(
+            search("afterimge type:album").suggestion,
+            "afterimage type:album"
+        );
+        assert_eq!(search("merdian type:podcast").suggestion, "");
+        assert_eq!(search("merdian type:album type:track").suggestion, "");
+        // Whatever is suggested shows results when it is searched.
+        for query in [
+            "lantrn",
+            "lantrn type:artist",
+            "lantrn type:album",
+            "lantrn type:track",
+            "merdian type:artist",
+            "merdian type:album",
+            "merdian type:track",
+            "afterglw type:artist",
+            "afterglw type:album",
+            "afterglw type:track",
+            "lumen drft type:album",
+            "afterimge type:track",
+        ] {
+            let suggestion = search(query).suggestion;
+            if !suggestion.is_empty() {
+                assert!(
+                    !search(&suggestion).rows.is_empty(),
+                    "{query} suggests {suggestion}, which shows nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_suggestion_stops_for_a_newer_query() {
+        let tracks: Vec<_> = (0..3000)
+            .map(|i| fixture_track(&format!("Song {i}"), "Artist", "Album", &format!("{i:04}")))
+            .collect();
+        let library = Arc::new(LibrarySnapshot {
+            roots: vec![library_root(&p("/music"))],
+            tracks: crate::library::shared_tracks(tracks),
+            ..LibrarySnapshot::default()
+        });
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut cache = SearchWorkerPreparedCache::default();
+        let query = |seq: u32, query: &str| SearchWorkerQuery {
+            seq,
+            query: query.into(),
+            library: Arc::clone(&library),
+            limit: 0,
+        };
+        let prepared = cache.prepared_for(&library, || None).expect("prepared");
+        tx.send(query(3, "song 1")).expect("send");
+        let next = search_suggestion("sonx", &prepared, &library.roots, &rx)
+            .expect_err("stops for the newer query");
+        assert_eq!(next.seq, 3);
+        // What was left half made is not kept: the next suggestion is whole.
+        assert!(prepared.vocabulary.get().is_none());
+        assert_eq!(
+            search_suggestion("sonx", &prepared, &library.roots, &rx).expect("whole"),
+            "song"
+        );
+        assert!(prepared.vocabulary.get().is_some());
     }
 
     #[test]

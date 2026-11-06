@@ -1206,7 +1206,7 @@ bool decodeSearchResultsFrame(
         }
         return false;
     }
-    if (version < 2 || version > 5) {
+    if (version < 2 || version > 6) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("unsupported search frame version: %1").arg(version);
         }
@@ -1220,6 +1220,10 @@ bool decodeSearchResultsFrame(
                 return false;
             }
         }
+    }
+    if (version >= 6 && !reader.readUtf8(&out->suggestion)) {
+        if (errorMessage) *errorMessage = QStringLiteral("search suggestion truncated");
+        return false;
     }
     QVector<DecodedSearchRow> rows;
     rows.reserve(static_cast<int>(rowCount));
