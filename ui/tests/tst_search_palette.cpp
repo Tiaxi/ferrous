@@ -1251,6 +1251,9 @@ void SearchPaletteTest::clearUsesTheBreezeIconAndNoTextGlyphs() {
     QQmlExpression helpIcon(qmlContext(help), help, QStringLiteral("icon.name"));
     QCOMPARE(helpIcon.evaluate().toString(), QStringLiteral("question"));
     QCOMPARE(clear->property("display").toInt(), 0); // AbstractButton.IconOnly
+    // Quiet glyphs, as the field's: the secondary text colour.
+    QQmlExpression clearColor(qmlContext(clear), clear, QStringLiteral("icon.color"));
+    QCOMPARE(hex(clearColor.evaluate().value<QColor>()), hex(harness.token("textSecondary")));
     QCOMPARE(QAccessible::queryAccessibleInterface(clear)->text(QAccessible::Name), QStringLiteral("Clear"));
     // No text glyphs drawn as icons.
     visit(harness.palette(), [&](QQuickItem *item) {

@@ -371,6 +371,7 @@ Dialog {
                 icon.name: "edit-clear"
                 icon.width: 16
                 icon.height: 16
+                icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
                 ToolTip.visible: hovered || visualFocus
@@ -392,6 +393,7 @@ Dialog {
                 icon.name: "question"
                 icon.width: 16
                 icon.height: 16
+                icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button", "Search Syntax and Keys")
                 Accessible.name: text
                 ToolTip.visible: hovered || visualFocus
