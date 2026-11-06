@@ -391,10 +391,14 @@ void WaveformEditorItem::clockStateChanged() {
         const bool rangeMoved = std::abs(previousRange.first - start) > 0.0001
             || std::abs(previousRange.second - end) > 0.0001;
         const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
-        cacheNeedsUpdate = !m_zoomOutHandoffPending
-            && !tiledPlayback
+        // A jump, a pause or a resume redraws a cache that does not cover
+        // the view at once; playback moving it on, as cacheRedrawDueLocked
+        // says.
+        cacheNeedsUpdate = !tiledPlayback
             && rangeMoved
-            && !cacheCoversRangeLocked(start, end);
+            && (courseCorrection
+                ? cacheRedrawDueLocked(start, end)
+                : !m_zoomOutHandoffPending && !cacheCoversRangeLocked(start, end));
         if (cacheNeedsUpdate) invalidateCacheLocked();
         if (courseCorrection) frameDelayNs = playbackFrameDelayNsLocked(nowNs);
     }
@@ -822,6 +826,7 @@ void WaveformEditorItem::requestDetailWindow() {
             if (!stale) {
                 clearPendingRequestLocked();
                 parseFailed = !parsed;
+                ++m_detailArrivals;
             }
             if (!stale && !parseFailed) {
                 const bool oldPointsVisible = samplePointsVisibleLocked();
@@ -845,8 +850,17 @@ void WaveformEditorItem::requestDetailWindow() {
                 const bool deferredZoomStage = m_zoomOutHandoffPending
                     && detailReady;
                 if (deferredZoomStage) {
-                    beginStagedCacheForRangeLocked(
-                        visibleStart, visibleEnd, true);
+                    if (deferredZoomDrawnByPlaybackLocked(m_nowNs())) {
+                        // Shown now, as playback draws any frame: a raster
+                        // drawn for it first, a part a frame, would be left
+                        // behind by a view that moves on by its width in a
+                        // few frames, and drawn again, and again.
+                        invalidateCacheLocked();
+                        pointsChanged = oldPointsVisible != samplePointsVisibleLocked();
+                    } else {
+                        beginStagedCacheForRangeLocked(
+                            visibleStart, visibleEnd, true);
+                    }
                 }
                 const auto [presentedStart, presentedEnd] = visibleRangeLocked();
                 const bool cacheCoversViewport = cacheCoversRangeLocked(
@@ -1285,10 +1299,22 @@ bool WaveformEditorItem::sampleCurveVisibleLocked() const {
 
 bool WaveformEditorItem::renderDetailDirectlyLocked(
     double visibleStart, double visibleEnd) const {
-    if (!detailCoversRangeLocked(visibleStart, visibleEnd)) return false;
-    return sampleSpacingPixelsLocked() + kGridAlignmentEpsilon
-            >= kDirectSamplePixelsPerSample
-        && detailResolutionCoversLocked(visibleStart, visibleEnd);
+    // The frame's own view: it reads the clock once.
+    const int pixelWidth = std::max(1, static_cast<int>(std::floor(width())));
+    if (sampleSpacingPixelsLocked(pixelWidth, visibleStart, visibleEnd) + kGridAlignmentEpsilon
+            < kDirectSamplePixelsPerSample
+        || !detailResolutionCoversLocked(visibleStart, visibleEnd)) {
+        return false;
+    }
+    if (detailCoversRangeLocked(visibleStart, visibleEnd)) return true;
+    // Playback can move the view on past its detail before the next window
+    // comes. The samples the detail holds are drawn until it does, the
+    // rest of the view left empty, as playback tiles are kept (see
+    // playbackTilesEligibleLocked): a raster of the view in their place
+    // would be drawn and uploaded for every frame.
+    return m_playing
+        && visibleStart < m_detail.endSeconds
+        && visibleEnd > m_detail.startSeconds;
 }
 
 bool WaveformEditorItem::detailResultRequiresImmediateCacheRefreshLocked(
@@ -1490,10 +1516,7 @@ void WaveformEditorItem::handleWindowFrameSwapped() {
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
         const bool direct = renderDetailDirectlyLocked(start, end);
         const bool tiledPlayback = playbackTilesEligibleLocked(start, end);
-        if (!m_zoomOutHandoffPending
-            && !direct
-            && !tiledPlayback
-            && !cacheCoversRangeLocked(start, end)) {
+        if (!direct && !tiledPlayback && cacheRedrawDueLocked(start, end)) {
             invalidateCacheLocked();
         }
         // Detail arriving asks for its own frame.
@@ -1627,6 +1650,34 @@ bool WaveformEditorItem::cacheCoversRangeLocked(double start, double end) const 
         && rasterCoversRange(m_cacheStartSeconds, m_cacheEndSeconds, start, end);
 }
 
+bool WaveformEditorItem::cacheRedrawDueLocked(
+    double visibleStart, double visibleEnd) const {
+    if (m_zoomOutHandoffPending || cacheCoversRangeLocked(visibleStart, visibleEnd)) {
+        return false;
+    }
+    // Only playback moving the view on past the cache waits for another
+    // window: paused, or with the clock held, the view stays where it is,
+    // and the cache is drawn for it at once, from the overview if nothing
+    // better comes.
+    if (!m_playing || !m_clockState.advancing()) return true;
+    return m_cacheDetailArrivals != m_detailArrivals
+        // No window will come.
+        || m_sourcePath.isEmpty()
+        || (detailCoversRangeLocked(visibleStart, visibleEnd)
+            && detailResolutionCoversLocked(visibleStart, visibleEnd));
+}
+
+bool WaveformEditorItem::deferredZoomDrawnByPlaybackLocked(qint64 nowNs) const {
+    // As playbackTilesEligibleLocked and renderDetailDirectlyLocked take
+    // the zoom once it shows; the whole track is drawn in a raster, which
+    // playback does not move.
+    if (!m_zoomOutHandoffPending || !m_playing || m_zoomLevel <= 1.0001) return false;
+    const auto [start, end] = visibleRangeForZoomLocked(m_zoomLevel, nowNs);
+    return detailCoversRangeLocked(start, end)
+        && detailResolutionCoversLocked(start, end)
+        && m_detail.framesPerPoint > 0;
+}
+
 void WaveformEditorItem::invalidateCacheLocked() {
     if (m_zoomOutHandoffPending) {
         const auto [targetStart, targetEnd] = visibleRangeForZoomLocked(
@@ -1697,6 +1748,12 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
     const auto profileStageStarted = std::chrono::steady_clock::now();
 #endif
     if (m_stagedCache.isNull()) return false;
+    if (m_stagedCacheCommitsDeferredZoom && deferredZoomDrawnByPlaybackLocked(nowNs)) {
+        // Playback started while the zoom's raster was drawn: it draws
+        // the zoom now, and the view would move on past the raster.
+        invalidateCacheLocked();
+        return true;
+    }
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     int processedColumns = 0;
 #endif
@@ -1760,6 +1817,7 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
         // next paint draws a cache at that one.
         m_cachedViewportWidth = m_stagedCacheViewportWidth;
         m_cachedViewportHeight = m_stagedCacheViewportHeight;
+        m_cacheDetailArrivals = m_detailArrivals;
         m_cacheDirty = false;
         if (commitsDeferredZoom) {
             m_presentedZoomLevel = m_zoomLevel;
@@ -2080,6 +2138,12 @@ void WaveformEditorItem::paint(QPainter *painter) {
                         visibleStart, visibleEnd, canvasWidth);
                 }
             } else {
+                // A cache that playback left while the view had no detail
+                // is drawn again once the view stops moving, or another
+                // window comes: whatever the frame that asked for this one.
+                if (!m_cacheDirty && cacheRedrawDueLocked(visibleStart, visibleEnd)) {
+                    invalidateCacheLocked();
+                }
                 rebuildCacheLocked(
                     renderPixelWidthLocked(), renderPixelHeightLocked(),
                     visibleStart, visibleEnd);
@@ -2815,6 +2879,7 @@ void WaveformEditorItem::rebuildCacheLocked(
     m_cacheSecondsPerPixel = grid.secondsPerPixel;
     m_cacheFramesPerPoint = detailReady ? m_detail.framesPerPoint : 0;
     m_cacheDisplayedChannels = channels;
+    m_cacheDetailArrivals = m_detailArrivals;
     m_cacheDirty = false;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (m_profile.enabled) {
