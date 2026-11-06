@@ -11,15 +11,19 @@
 #include <QFile>
 #include <QFont>
 #include <QIcon>
+#include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
+#include <QQmlListReference>
 #include <QQmlContext>
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QUrl>
 #include <QtEndian>
 #include <QtTest/QtTest>
 #include <qqml.h>
@@ -292,6 +296,7 @@ private slots:
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
     void firstRunShowsOneMessage();
+    void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
 
 void UiMainWindowTest::initTestCase() {
@@ -1006,6 +1011,68 @@ int main(int argc, char **argv) {
     QIcon::setThemeName(QStringLiteral("breeze"));
     UiMainWindowTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+// The viewers in the main window open and close with the controls style's
+// own popup transition, as every popup does (instant with animations off),
+// and show at once rather than after a delay.
+void UiMainWindowTest::viewersInTheWindowFadeAsTheStylesPopupsDo() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(16, 16, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    QVERIFY(cover.save(coverPath));
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+
+    // The style's popup, for its transitions.
+    QQmlComponent stylePopup(&engine);
+    stylePopup.setData("import QtQuick.Controls\nPopup {}\n", QUrl());
+    QScopedPointer<QObject> reference(stylePopup.create());
+    QVERIFY2(reference != nullptr, qPrintable(stylePopup.errorString()));
+    const auto fadeDuration = [](QObject *popup, const char *transition) {
+        auto *object = qvariant_cast<QObject *>(popup->property(transition));
+        if (object == nullptr) {
+            return -1;
+        }
+        QQmlListReference animations(object, "animations");
+        return animations.count() > 0 ? animations.at(0)->property("duration").toInt() : -1;
+    };
+    // A popup makes its transitions as it first opens and closes.
+    reference->setProperty("parent", QVariant::fromValue(window->contentItem()));
+    QVERIFY(QMetaObject::invokeMethod(reference.data(), "open"));
+    QTRY_VERIFY(reference->property("opened").toBool());
+    QVERIFY(QMetaObject::invokeMethod(reference.data(), "close"));
+    QTRY_VERIFY(!reference->property("visible").toBool());
+    const int enterDuration = fadeDuration(reference.data(), "enter");
+    const int exitDuration = fadeDuration(reference.data(), "exit");
+    QVERIFY(enterDuration >= 0 && exitDuration >= 0);
+
+    const QList<std::pair<const char *, const char *>> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerPopup"},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerPopup"},
+    };
+    for (const auto &[open, popupName] : viewers) {
+        QObject *popup = window->findChild<QObject *>(QLatin1String(popupName));
+        QVERIFY2(popup != nullptr, popupName);
+
+        // Shown in the same turn of the event loop as the request.
+        QVERIFY(QMetaObject::invokeMethod(viewer, open));
+        QCoreApplication::processEvents();
+        QVERIFY2(popup->property("visible").toBool(), popupName);
+        QTRY_VERIFY2(popup->property("opened").toBool(), popupName);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY2(!popup->property("visible").toBool(), popupName);
+        QCOMPARE(fadeDuration(popup, "enter"), enterDuration);
+        QCOMPARE(fadeDuration(popup, "exit"), exitDuration);
+    }
 }
 
 #include "tst_ui_main_window.moc"

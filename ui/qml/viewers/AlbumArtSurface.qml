@@ -282,6 +282,7 @@ Item {
 
         Menu {
             id: albumArtViewerContextMenu
+            objectName: "albumArtViewerContextMenu"
 
             MenuItem { action: root.replaceFromItunesAction }
             MenuItem {

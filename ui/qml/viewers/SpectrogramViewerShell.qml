@@ -12,7 +12,6 @@ Item {
     required property var uiPalette
     required property bool viewerOpen
     required property bool useWholeScreenViewerMode
-    required property int popupTransitionMs
     required property string titleText
     required property var closeViewer
     property int visualizationMode: 0
@@ -80,12 +79,36 @@ Item {
         ? (root.fullscreenWindow ? root.fullscreenWindow.activeFocusItem : null)
         : (root.windowRoot ? root.windowRoot.activeFocusItem : null)
 
+    // The focus scope that holds the whole viewer, its view and controls,
+    // and the item in it that has focus while the view has it.
+    readonly property Item viewerScope: root.wholeScreenOpen
+        ? (root.fullscreenWindow ? root.fullscreenWindow.focusScope : null)
+        : spectrogramPopupFocusScope
+    readonly property Item viewFocus: root.wholeScreenOpen
+        ? (root.fullscreenWindow ? root.fullscreenWindow.viewFocus : null)
+        : spectrogramPopupViewFocus
+
+    // Whether `item` is inside `scope`, and not the scope itself.
+    function isInside(item, scope) {
+        if (item === null || scope === null || item === scope) {
+            return false
+        }
+        for (let parentItem = item.parent; parentItem; parentItem = parentItem.parent) {
+            if (parentItem === scope) {
+                return true
+            }
+        }
+        return false
+    }
+
     Components.FullscreenControlsAutoHide {
         id: fullscreenControlsAutoHide
         objectName: "spectrogramFullscreenControlsAutoHide"
         active: root.viewerOpen
-        // A control with keyboard focus stays shown.
-        held: root.focusedItem !== null && root.focusedItem.visualFocus === true
+        // The controls stay while one of them has focus, however it got it:
+        // the keyboard, a click, or assistive technology.
+        held: root.focusedItem !== root.viewFocus
+            && root.isInside(root.focusedItem, root.viewerScope)
     }
 
     readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
@@ -149,8 +172,7 @@ Item {
         padding: 0
         closePolicy: Popup.CloseOnEscape
         visible: root.viewerOpen && !root.useWholeScreenViewerMode
-        enter: Components.PopupTransition { duration: root.popupTransitionMs }
-        exit: Components.PopupTransition { duration: root.popupTransitionMs }
+        // The style's own transitions.
         onClosed: {
             if (root.viewerOpen && !root.useWholeScreenViewerMode) {
                 root.closeViewer()
@@ -172,6 +194,12 @@ Item {
             anchors.fill: parent
             focus: true
 
+            // Takes focus from the controls when the view is pressed.
+            Item {
+                id: spectrogramPopupViewFocus
+                objectName: "spectrogramPopupViewFocus"
+            }
+
             // A key brings the controls back, so Tab reaches them.
             Keys.onPressed: function(event) {
                 fullscreenControlsAutoHide.wake()
@@ -186,7 +214,6 @@ Item {
                 MouseArea {
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton
-                    onPressed: spectrogramPopupFocusScope.forceActiveFocus()
                     onDoubleClicked: function(mouse) {
                         if (mouse.button === Qt.LeftButton) {
                             root.closeViewer()
@@ -197,6 +224,18 @@ Item {
                 Item {
                     id: spectrogramPopupHost
                     anchors.fill: parent
+                }
+
+                // A press anywhere on the view takes the focus from the
+                // controls, so they can hide again, then goes on to the view.
+                MouseArea {
+                    anchors.fill: parent
+                    z: 1
+                    acceptedButtons: Qt.AllButtons
+                    onPressed: function(mouse) {
+                        spectrogramPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
+                        mouse.accepted = false
+                    }
                 }
             }
 
@@ -232,6 +271,8 @@ Item {
                 objectName: "spectrogramFullscreenWindow"
                 readonly property Item host: spectrogramWindowHost
                 readonly property Item strip: spectrogramStrip
+                readonly property Item focusScope: spectrogramFullscreenFocusSink
+                readonly property Item viewFocus: spectrogramFullscreenViewFocus
                 screen: root.windowRoot.screen
                 transientParent: root.windowRoot
                 modality: Qt.ApplicationModal
@@ -255,40 +296,22 @@ Item {
                     }
                 }
 
-                // The view, under the title strip. The strip never hides, so
-                // the view keeps its size as the controls auto-hide.
-                Rectangle {
-                    anchors.fill: parent
-                    anchors.topMargin: spectrogramStrip.height
-                    color: root.uiPalette.plotColors(root.visualizationMode).plotBg
-
-                    MouseArea {
-                        anchors.fill: parent
-                        acceptedButtons: Qt.LeftButton
-                        onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-                        onDoubleClicked: function(mouse) {
-                            if (mouse.button === Qt.LeftButton) {
-                                root.closeViewer()
-                            }
-                        }
-                    }
-
-                    Item {
-                        id: spectrogramWindowHost
-                        anchors.fill: parent
-                    }
-                }
-
+                // The whole viewer: its keys reach every control in it, in
+                // the strip and in the view alike.
                 FocusScope {
                     id: spectrogramFullscreenFocusSink
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    height: spectrogramStrip.height
+                    objectName: "spectrogramFullscreenFocusScope"
+                    anchors.fill: parent
                     focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
 
-                    // Escape closes the viewer, also while one of the strip's
-                    // buttons has focus; any key brings the controls back.
+                    // Takes focus from the controls when the view is pressed.
+                    Item {
+                        id: spectrogramFullscreenViewFocus
+                        objectName: "spectrogramFullscreenViewFocus"
+                    }
+
+                    // Escape closes the viewer, whichever control has focus;
+                    // any key brings the controls back.
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Escape) {
                             event.accepted = true
@@ -298,10 +321,48 @@ Item {
                         fullscreenControlsAutoHide.wake()
                     }
 
+                    // The view, under the title strip. The strip never hides,
+                    // so the view keeps its size as the controls auto-hide.
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.topMargin: spectrogramStrip.height
+                        color: root.uiPalette.plotColors(root.visualizationMode).plotBg
+
+                        MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.LeftButton
+                            onDoubleClicked: function(mouse) {
+                                if (mouse.button === Qt.LeftButton) {
+                                    root.closeViewer()
+                                }
+                            }
+                        }
+
+                        Item {
+                            id: spectrogramWindowHost
+                            anchors.fill: parent
+                        }
+
+                        // A press anywhere on the view takes the focus from
+                        // the controls, so they can hide again, then goes on
+                        // to the view.
+                        MouseArea {
+                            anchors.fill: parent
+                            z: 1
+                            acceptedButtons: Qt.AllButtons
+                            onPressed: function(mouse) {
+                                spectrogramFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
+                                mouse.accepted = false
+                            }
+                        }
+                    }
+
                     Components.ViewerStrip {
                         id: spectrogramStrip
                         objectName: "spectrogramFullscreenStrip"
-                        anchors.fill: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
                         uiPalette: root.uiPalette
                         uiBridge: root.uiBridge
                         positionText: root.positionText

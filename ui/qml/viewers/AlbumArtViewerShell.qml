@@ -12,7 +12,6 @@ Item {
     required property var windowRoot
     required property bool viewerOpen
     required property bool useWholeScreenViewerMode
-    required property int popupTransitionMs
     required property string titleText
     required property var closeViewer
     required property var toggleInfoVisible
@@ -116,8 +115,7 @@ Item {
         padding: 0
         closePolicy: Popup.CloseOnEscape
         visible: root.viewerOpen && !root.useWholeScreenViewerMode
-        enter: Components.PopupTransition { duration: root.popupTransitionMs }
-        exit: Components.PopupTransition { duration: root.popupTransitionMs }
+        // The style's own transitions.
 
         Components.ActionShortcuts {
             actions: root.viewerActions
@@ -237,27 +235,14 @@ Item {
                     onActivated: root.toggleInfoVisible()
                 }
 
-                // The art, under the title strip.
-                Item {
-                    anchors.fill: parent
-                    anchors.topMargin: albumArtStrip.height
-
-                    Item {
-                        id: albumArtWindowHost
-                        anchors.fill: parent
-                    }
-                }
-
+                // The whole viewer: its keys reach every control in it, in
+                // the strip and in the details beside the art alike.
                 FocusScope {
                     id: albumArtFullscreenFocusSink
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    height: albumArtStrip.height
+                    objectName: "albumArtFullscreenFocusScope"
+                    anchors.fill: parent
                     focus: albumArtFullscreenWindow.visibility === Window.FullScreen
 
-                    // The viewer's keys, also while one of the strip's
-                    // buttons has focus.
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Escape) {
                             event.accepted = true
@@ -272,10 +257,23 @@ Item {
                         }
                     }
 
+                    // The art, under the title strip.
+                    Item {
+                        anchors.fill: parent
+                        anchors.topMargin: albumArtStrip.height
+
+                        Item {
+                            id: albumArtWindowHost
+                            anchors.fill: parent
+                        }
+                    }
+
                     Components.ViewerStrip {
                         id: albumArtStrip
                         objectName: "albumArtFullscreenStrip"
-                        anchors.fill: parent
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
                         uiPalette: root.uiPalette
                         uiBridge: root.uiBridge
                         positionText: root.positionText

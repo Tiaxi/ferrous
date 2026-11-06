@@ -1613,7 +1613,6 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
-        popupTransitionMs: root.uiPopupTransitionMs
         titleText: root.titleFor(root.visualizationViewerName)
         closeViewer: viewerController.closeSpectrogramViewer
         visualizationMode: viewerController.visualizationMode
@@ -1644,7 +1643,6 @@ ApplicationWindow {
         windowRoot: root
         viewerOpen: viewerController.albumArtViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
-        popupTransitionMs: root.uiPopupTransitionMs
         titleText: root.titleFor(root.albumArtViewerName)
         closeViewer: viewerController.closeAlbumArtViewer
         toggleInfoVisible: function() {
