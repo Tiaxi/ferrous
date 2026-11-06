@@ -90,8 +90,13 @@ Dialog {
     rightPadding: 0
     width: Math.min(800, (root.parent ? root.parent.width : 800) - 2 * root.sideInset)
     height: Math.min(contentColumn.implicitHeight, root.maximumHeight)
+    // At most 16 result rows tall, as a palette rather than a page (and
+    // as many rows as a query has to bind as it changes), and 32 px clear
+    // of the window's bottom.
+    readonly property real maximumBodyHeight: 16 * root.resultHeight
     readonly property real maximumHeight: Math.max(root.fieldHeight + root.footerHeight + 2,
-        (root.parent ? root.parent.height : 600) - root.paletteTop - 32)
+        Math.min(root.fieldHeight + 1 + root.maximumBodyHeight + 1 + root.footerHeight,
+                 (root.parent ? root.parent.height : 600) - root.paletteTop - 32))
     x: Math.round(((root.parent ? root.parent.width : root.width) - root.width) / 2)
     y: Math.round(root.paletteTop)
     header: null
@@ -555,29 +560,23 @@ Dialog {
                     }
 
                     // The lead: an artist's glyph, or the cover, with the
-                    // amber glyph over it while its track plays.
-                    Kirigami.Icon {
-                        objectName: "globalSearchArtistGlyph"
-                        visible: resultRow.isResult && resultRow.rowType === "artist"
-                        x: root.sideInset + (root.leadSize - width) / 2
-                        y: Math.round((parent.height - height) / 2)
-                        width: 16
-                        height: 16
-                        source: visible ? "view-media-artist" : ""
-                        isMask: true
-                        color: root.uiPalette.textSecondary
+                    // amber glyph over it while its track plays. The glyphs
+                    // are loaded only for the rows that show one, each with
+                    // a source that never changes: a Kirigami icon looks its
+                    // file up again on the GUI thread whenever its source
+                    // changes, which recycled rows would do on every query.
+                    Loader {
+                        x: root.sideInset + (root.leadSize - 16) / 2
+                        y: Math.round((parent.height - 16) / 2)
+                        active: resultRow.isResult && resultRow.rowType === "artist"
+                        sourceComponent: artistGlyph
                     }
-                    Kirigami.Icon {
-                        objectName: "globalSearchCoverPlaceholder"
-                        visible: resultRow.isResult && resultRow.rowType !== "artist" && (model.coverUrl || "").length === 0
-                            && !resultRow.isNow
-                        x: root.sideInset + (root.leadSize - width) / 2
-                        y: Math.round((parent.height - height) / 2)
-                        width: 16
-                        height: 16
-                        source: visible ? (resultRow.rowType === "album" ? "media-optical-audio" : "audio-x-generic") : ""
-                        isMask: true
-                        color: root.uiPalette.textSecondary
+                    Loader {
+                        x: root.sideInset + (root.leadSize - 16) / 2
+                        y: Math.round((parent.height - 16) / 2)
+                        active: resultRow.isResult && resultRow.rowType !== "artist"
+                            && (model.coverUrl || "").length === 0 && !resultRow.isNow
+                        sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
                     }
                     Kirigami.ShadowedImage {
                         id: thumbnail
@@ -605,48 +604,109 @@ Dialog {
                         radius: 2
                         color: Qt.rgba(0, 0, 0, 0.55)
                     }
-                    Kirigami.Icon {
-                        objectName: "globalSearchNowGlyph"
-                        visible: resultRow.isNow
-                        x: root.sideInset + (root.leadSize - width) / 2
-                        y: Math.round((parent.height - height) / 2)
-                        width: 12
-                        height: 12
-                        source: visible
-                            ? ((root.controller.uiBridge.playbackState || "") === "Paused" ? "media-playback-pause" : "media-playback-start")
-                            : ""
-                        isMask: true
-                        // Over the cover's dark scrim, the colour map's
-                        // bright amber in both themes (fixed, like the
-                        // plot's colours): the light theme's darker amber
-                        // is under 3:1 there.
-                        color: thumbnail.visible ? root.nowOnScrim : root.uiPalette.now
-                    }
-
-                    // The title in runs, the matches semibold; all amber
-                    // and semibold while it plays. A fixed number of runs,
-                    // made once per row and reused.
-                    Repeater {
-                        model: root.maxTitleRuns
-                        delegate: Text {
-                            required property int index
-                            readonly property var run: index < resultRow.titleRuns.length ? resultRow.titleRuns[index] : null
-                            objectName: "globalSearchResultTitle"
-                            visible: !!run && run.width > 0
-                            x: root.titleX + (run ? run.x : 0)
-                            width: run ? run.width : 0
-                            height: resultRow.height
-                            verticalAlignment: Text.AlignVCenter
-                            text: run ? run.text : ""
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            font.family: root.uiPalette.baseFont.family
-                            font.pointSize: root.uiPalette.basePointSize
-                            font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                            color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    Loader {
+                        x: root.sideInset + (root.leadSize - 12) / 2
+                        y: Math.round((parent.height - 12) / 2)
+                        active: resultRow.isNow
+                        sourceComponent: Kirigami.Icon {
+                            objectName: "globalSearchNowGlyph"
+                            width: 12
+                            height: 12
+                            source: (root.controller.uiBridge.playbackState || "") === "Paused"
+                                ? "media-playback-pause" : "media-playback-start"
+                            isMask: true
+                            // Over the cover's dark scrim, the colour map's
+                            // bright amber in both themes (fixed, like the
+                            // plot's colours): the light theme's darker
+                            // amber is under 3:1 there.
+                            color: thumbnail.visible ? root.nowOnScrim : root.uiPalette.now
                         }
                     }
 
+                    // The title in runs (root.maxTitleRuns of them), the
+                    // matches semibold; all amber and semibold while it
+                    // plays. Plain items rather than a Repeater, which
+                    // would make each row slower to create.
+                    Text {
+                        readonly property var run: resultRow.titleRuns.length > 0 ? resultRow.titleRuns[0] : null
+                        objectName: "globalSearchResultTitle"
+                        visible: !!run && run.width > 0
+                        x: root.titleX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    }
+                    Text {
+                        readonly property var run: resultRow.titleRuns.length > 1 ? resultRow.titleRuns[1] : null
+                        objectName: "globalSearchResultTitle"
+                        visible: !!run && run.width > 0
+                        x: root.titleX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    }
+                    Text {
+                        readonly property var run: resultRow.titleRuns.length > 2 ? resultRow.titleRuns[2] : null
+                        objectName: "globalSearchResultTitle"
+                        visible: !!run && run.width > 0
+                        x: root.titleX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    }
+                    Text {
+                        readonly property var run: resultRow.titleRuns.length > 3 ? resultRow.titleRuns[3] : null
+                        objectName: "globalSearchResultTitle"
+                        visible: !!run && run.width > 0
+                        x: root.titleX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    }
+                    Text {
+                        readonly property var run: resultRow.titleRuns.length > 4 ? resultRow.titleRuns[4] : null
+                        objectName: "globalSearchResultTitle"
+                        visible: !!run && run.width > 0
+                        x: root.titleX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.basePointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
+                    }
                     Text {
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
@@ -920,4 +980,38 @@ Dialog {
     }
     // The result row under the pointer, whose tooltip shows.
     property Item hoveredResultRow: null
+    // The lead glyphs of the rows without a cover.
+    Component {
+        id: artistGlyph
+        Kirigami.Icon {
+            objectName: "globalSearchArtistGlyph"
+            width: 16
+            height: 16
+            source: "view-media-artist"
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+    }
+    Component {
+        id: albumPlaceholder
+        Kirigami.Icon {
+            objectName: "globalSearchCoverPlaceholder"
+            width: 16
+            height: 16
+            source: "media-optical-audio"
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+    }
+    Component {
+        id: trackPlaceholder
+        Kirigami.Icon {
+            objectName: "globalSearchCoverPlaceholder"
+            width: 16
+            height: 16
+            source: "audio-x-generic"
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+    }
 }

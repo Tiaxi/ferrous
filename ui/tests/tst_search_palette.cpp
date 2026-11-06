@@ -1038,6 +1038,8 @@ void SearchPaletteTest::keyboardSelectsAndActs() {
     }
     harness.search(QStringLiteral("meridian"), rows);
     QTRY_VERIFY(harness.view()->isVisible());
+    // Many results: at most 16 result rows tall.
+    QTRY_COMPARE(sceneRect(harness.palette()).height(), 44.0 + 1 + 16 * 32 + 1 + 28);
     QCOMPARE(harness.selection(), 1);
     const int first = harness.selection();
     QTest::keyClick(harness.window, Qt::Key_Up); // Wraps to the last.
