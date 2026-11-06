@@ -7,6 +7,7 @@
 #include <QAccessible>
 #include <QApplication>
 #include <QColor>
+#include <QIcon>
 #include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
@@ -14,6 +15,7 @@
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
+#include <QStandardPaths>
 #include <QQuickWindow>
 #include <QDir>
 #include <QFile>
@@ -269,6 +271,10 @@ private slots:
 
 void UiFoundationsTest::initTestCase() {
     previousHandler() = qInstallMessageHandler(recordWarnings);
+    QVERIFY2(!QStandardPaths::locate(QStandardPaths::GenericDataLocation,
+                                     QStringLiteral("icons/breeze/index.theme"))
+                  .isEmpty(),
+             "The Breeze icon theme is missing: install breeze-icon-theme (docs/INSTALL.md)");
 }
 
 void UiFoundationsTest::cleanup() {
@@ -1074,7 +1080,16 @@ int main(int argc, char **argv) {
     if (!installIconFixture(fixtures.filePath(QStringLiteral("data-dirs")))) {
         return 1;
     }
+    // The same platform whatever the desktop the tests run in: without a
+    // desktop, Qt loads no desktop's platform theme.
+    qunsetenv("XDG_CURRENT_DESKTOP");
+    qunsetenv("QT_QPA_PLATFORMTHEME");
     QApplication app(argc, argv);
+    // Breeze, as a KDE session's platform theme sets it: KDE's icon loader
+    // recolours an icon by name when the theme follows the colour scheme,
+    // as Breeze does. Without a theme, it looks for the Breeze that an app
+    // can embed, which this one does not.
+    QIcon::setThemeName(QStringLiteral("breeze"));
     UiFoundationsTest test;
     return QTest::qExec(&test, argc, argv);
 }
