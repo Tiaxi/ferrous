@@ -1447,6 +1447,7 @@ private slots:
     void waveformSceneGraphSplitsLargeSampleChunks();
     void waveformSceneGraphClipsSampleChunksToFastViews_data();
     void waveformSceneGraphClipsSampleChunksToFastViews();
+    void waveformSceneGraphSampleChunkClipKeepsItsSide();
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
     void waveformEditorDeferredZoomOutLandsWhilePlaying();
@@ -1466,6 +1467,12 @@ private slots:
     void waveformEditorMovedBetweenWindowsFollowsTheirPresence();
     void waveformEditorReadsItsFileOnlyWhileShown();
     void waveformEditorLateFrameCallbackDrawsAtOnce();
+    void waveformEditorCapsOnlyFastScrolling();
+    void waveformEditorCapsAtAWholeNumberOfRefreshes_data();
+    void waveformEditorCapsAtAWholeNumberOfRefreshes();
+    void waveformEditorFastScrollRedrawsChangesAtOnce();
+    void waveformEditorFastScrollShowsArrivalsWithItsNextFrame();
+    void waveformEditorFastScrollFollowsTheScreensRefreshRate();
     void waveformEditorIdleViewDrawsOnlyFramesThatDiffer();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps_data();
     void waveformEditorFollowingViewDrawsOnlyAtPixelSteps();
@@ -11958,8 +11965,7 @@ void WaveformSmokeTest::waveformSceneGraphClipsSampleChunksToFastViews() {
             QMutexLocker lock(&item.m_stateMutex);
             const auto [start, end] = item.visibleRangeLocked();
             QVERIFY(item.renderDetailDirectlyLocked(start, end));
-            clip = std::abs(item.sampleChunkColumnLocked(start) - item.m_lastSampleChunkColumn)
-                >= item.deviceColumnsLocked();
+            clip = item.clipSampleChunksLocked(item.sampleChunkColumnLocked(start));
         }
         QCOMPARE(clip, step > 1.0 / 360);
         // As the window draws it.
@@ -13330,6 +13336,457 @@ void WaveformSmokeTest::waveformEditorLateFrameCallbackDrawsAtOnce() {
     const quint64 corrected = item.m_playbackFrameRequests;
     clock.applySample(sample, false);
     QCOMPARE(item.m_playbackFrameRequests, corrected + 1);
+}
+
+namespace {
+
+// A 1000-pixel view of a 10 s track of 1000 Hz samples, playing from 5 s,
+// on the test's time and a display of `refreshRateHz`: at zoom z it
+// scrolls by 100 z logical pixels a second, and its samples are drawn
+// directly from zoom 20.
+struct FastScrollView {
+    TestTime time;
+    WaveformEditorItem item;
+    QImage canvas{1000, 100, QImage::Format_RGB32};
+
+    explicit FastScrollView(double refreshRateHz) {
+        time.drive(item);
+        item.setWidth(1000);
+        item.setHeight(100);
+        item.setDurationSeconds(10.0);
+        giveSampleDetail(item, 1000, 1, 0.0, 10.0);
+        item.m_refreshRateHz = refreshRateHz;
+        setTestPosition(item, 5.0);
+        item.setPlaying(true);
+        setTestPosition(item, 5.0);
+    }
+    // A frame as the window draws it: painted, then on screen.
+    void frame() {
+        {
+            QPainter painter(&canvas);
+            item.paint(&painter);
+        }
+        item.handleWindowFrameSwapped();
+    }
+    // How long until the frame the item asked for, rounded up to the
+    // scheduler's milliseconds; -1 for none.
+    qint64 dueInNs() const {
+        const qint64 due = item.m_frameScheduler != nullptr ? item.m_frameScheduler->dueNs(&item) : -1;
+        return due >= 0 ? due - time.nowNs : -1;
+    }
+    bool capped() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_fastScrollCapped;
+    }
+    qint64 nextCappedFrameNs() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_nextCappedFrameNs;
+    }
+    // Whether the next frame is asked for when playback reaches the next
+    // device column, as on every refresh: at once, or that soon, rounded
+    // up to the scheduler's milliseconds.
+    bool dueAtNextColumn(quint64 requestedBefore) const {
+        const qint64 column = std::llround(1e9 * 10.0 / item.zoomLevel() / 1000.0);
+        return item.m_playbackFrameRequests > requestedBefore
+            || (dueInNs() >= 0 && dueInNs() <= column + 1'000'000);
+    }
+};
+
+// The time from one capped frame to the next on a display of `rate`.
+qint64 cappedIntervalNs(double rate) {
+    return std::llround(WaveformEditorItem::fastScrollRefreshDivisor(rate) * 1e9 / rate);
+}
+
+} // namespace
+
+void WaveformSmokeTest::waveformEditorCapsOnlyFastScrolling() {
+    // On a 360 Hz display, a view that scrolls faster than 4,000 logical
+    // pixels a second is drawn on every 3rd refresh; one slower, whenever
+    // playback moves it on, up to every refresh. The cap comes on above
+    // 4,000 px/s and goes off below 3,200 px/s, so a zoom between them
+    // keeps what it had.
+    FastScrollView view(360.0);
+    struct Step {
+        double zoom;
+        bool capped;
+    };
+    const Step steps[] = {
+        {30.0, false}, {39.0, false}, {41.0, true}, {35.0, true}, {33.0, true},
+        {31.0, false}, {35.0, false}, {39.0, false}, {41.0, true}, {80.0, true},
+    };
+    const qint64 interval = cappedIntervalNs(360.0);
+    QCOMPARE(interval, 8'333'333);
+    for (const Step &step : steps) {
+        view.item.setZoomLevel(step.zoom);
+        QCOMPARE(view.item.zoomLevel(), step.zoom);
+        view.time.advance(0.02);
+        const quint64 requested = view.item.m_playbackFrameRequests;
+        view.frame();
+        const QString where = QStringLiteral("zoom %1, %2 px/s, due in %3 ns")
+            .arg(step.zoom).arg(step.zoom * 100.0).arg(view.dueInNs());
+        QVERIFY2(view.capped() == step.capped, qPrintable(where));
+        if (step.capped) {
+            // 1/120 s from the frame, rounded up to whole milliseconds.
+            QVERIFY2(view.item.m_playbackFrameRequests == requested, qPrintable(where));
+            QVERIFY2(view.dueInNs() >= interval && view.dueInNs() < interval + 1'000'000, qPrintable(where));
+        } else {
+            QVERIFY2(view.dueAtNextColumn(requested), qPrintable(where));
+        }
+    }
+    // Paused, nothing is capped; playing again, the first frame shows at
+    // once and the cap holds from it.
+    view.item.setPlaying(false);
+    PlaybackClock &clock = testClock(view.item);
+    PlaybackSample sample;
+    sample.positionSeconds = clock.positionAt(view.time.nowNs);
+    sample.sampledAtNs = view.time.nowNs;
+    sample.trackToken = clock.state().trackToken;
+    clock.applySample(sample, false);
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), 0);
+    QCOMPARE(view.dueInNs(), -1);
+    {
+        QMutexLocker lock(&view.item.m_stateMutex);
+        QCOMPARE(view.item.cappedFrameIntervalNsLocked(), 0);
+    }
+    view.item.setPlaying(true);
+    const quint64 resumed = view.item.m_playbackFrameRequests;
+    sample.advancing = true;
+    clock.applySample(sample, false);
+    QCOMPARE(view.item.m_playbackFrameRequests, resumed + 1);
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), view.time.nowNs + interval);
+}
+
+void WaveformSmokeTest::waveformEditorCapsAtAWholeNumberOfRefreshes_data() {
+    QTest::addColumn<double>("rate");
+    QTest::addColumn<int>("divisor");
+    QTest::newRow("480 Hz") << 480.0 << 4;
+    QTest::newRow("360 Hz") << 360.0 << 3;
+    QTest::newRow("359.98 Hz") << 359.98 << 3;
+    QTest::newRow("300 Hz") << 300.0 << 3;
+    QTest::newRow("240 Hz") << 240.0 << 2;
+    QTest::newRow("165 Hz") << 165.0 << 1;
+    QTest::newRow("144 Hz") << 144.0 << 1;
+    QTest::newRow("120 Hz") << 120.0 << 1;
+    QTest::newRow("60 Hz") << 60.0 << 1;
+    QTest::newRow("unknown") << 0.0 << 1;
+}
+
+void WaveformSmokeTest::waveformEditorCapsAtAWholeNumberOfRefreshes() {
+    // The cap draws every n-th refresh, the whole number nearest 120
+    // frames a second, so that the frames are evenly spaced. Frames keep to
+    // a grid of that interval from the first: one the timer wakes a little
+    // late for does not move the ones after it.
+    QFETCH(double, rate);
+    QFETCH(int, divisor);
+    QCOMPARE(WaveformEditorItem::fastScrollRefreshDivisor(rate), divisor);
+    FastScrollView view(rate);
+    view.item.setZoomLevel(60.0);
+    const quint64 requested = view.item.m_playbackFrameRequests;
+    view.frame();
+    QVERIFY(view.capped());
+    if (divisor == 1) {
+        // Every refresh: when playback reaches the next device column.
+        QCOMPARE(view.nextCappedFrameNs(), 0);
+        QVERIFY(view.dueAtNextColumn(requested));
+        return;
+    }
+    const qint64 interval = std::llround(divisor * 1e9 / rate);
+    const qint64 refresh = std::llround(1e9 / rate);
+    const qint64 first = view.time.nowNs;
+    QCOMPARE(view.nextCappedFrameNs(), first + interval);
+    QCOMPARE(view.item.m_playbackFrameRequests, requested);
+    QVERIFY(view.dueInNs() >= interval && view.dueInNs() < interval + 1'000'000);
+    // On time, and a little under a refresh late: the grid holds.
+    view.time.nowNs = first + interval;
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), first + 2 * interval);
+    view.time.nowNs = first + 2 * interval + refresh - 100'000;
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), first + 3 * interval);
+    // The frame due next waits for its place on the grid.
+    const qint64 wait = first + 3 * interval - view.time.nowNs;
+    QVERIFY(view.dueInNs() >= wait && view.dueInNs() < wait + 1'000'000);
+    // A refresh or more late, it starts again from the frame.
+    view.time.nowNs = first + 3 * interval + refresh;
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), view.time.nowNs + interval);
+}
+
+void WaveformSmokeTest::waveformEditorFastScrollRedrawsChangesAtOnce() {
+    // Capped, a pause, a resume, a seek, a jump back to the start as
+    // Repeat-One makes, and a gapless change to the next track each ask
+    // for a frame at once rather than waiting for the next capped one. A
+    // zoom, a resize or an edit is drawn in the window's next frame, and
+    // the capped frames start again from it.
+    FastScrollView view(360.0);
+    const qint64 interval = cappedIntervalNs(360.0);
+    view.item.setZoomLevel(60.0);
+    view.frame();
+    QVERIFY(view.capped());
+    QVERIFY(view.dueInNs() >= interval);
+    PlaybackClock &clock = testClock(view.item);
+    const auto sampleAt = [&view, &clock](double seconds, bool advancing, quint64 trackToken) {
+        PlaybackSample sample;
+        sample.positionSeconds = seconds;
+        sample.sampledAtNs = view.time.nowNs;
+        sample.advancing = advancing;
+        sample.trackToken = trackToken;
+        return sample;
+    };
+    // A course correction waits with the frames it corrects.
+    view.time.advance(0.002);
+    quint64 requested = view.item.m_playbackFrameRequests;
+    clock.applySample(sampleAt(clock.positionAt(view.time.nowNs) + 0.001, true, clock.state().trackToken), false);
+    QCOMPARE(view.item.m_playbackFrameRequests, requested);
+    QVERIFY(view.dueInNs() > 0 && view.dueInNs() <= interval);
+    const auto checkAtOnce = [&view, &requested, interval](const char *what) {
+        QVERIFY2(view.item.m_playbackFrameRequests == requested + 1, what);
+        QVERIFY2(view.dueInNs() < 0, what);
+        // The frame drawn for it starts the capped frames again.
+        view.frame();
+        QVERIFY2(view.nextCappedFrameNs() == view.time.nowNs + interval, what);
+        requested = view.item.m_playbackFrameRequests;
+        view.time.advance(0.002);
+    };
+    clock.applySample(sampleAt(2.0, true, clock.state().trackToken), true);
+    checkAtOnce("seek");
+    // Repeat-One: the same track again from its start.
+    clock.applySample(sampleAt(0.0, true, clock.state().trackToken), true);
+    checkAtOnce("repeat one");
+    clock.applySample(sampleAt(0.0, true, clock.state().trackToken + 1), false);
+    checkAtOnce("gapless track change");
+    view.item.setPlaying(false);
+    QCOMPARE(view.dueInNs(), -1);
+    clock.applySample(sampleAt(clock.positionAt(view.time.nowNs), false, clock.state().trackToken), false);
+    QCOMPARE(view.item.m_playbackFrameRequests, requested + 1);
+    view.frame();
+    QCOMPARE(view.nextCappedFrameNs(), 0);
+    view.item.setPlaying(true);
+    requested = view.item.m_playbackFrameRequests;
+    clock.applySample(sampleAt(clock.positionAt(view.time.nowNs), true, clock.state().trackToken), false);
+    checkAtOnce("resume");
+    // The window draws a zoom, a resize or an edit in its next frame,
+    // whenever the capped frames are due; the capped frames follow it.
+    const auto drawnAtOnce = [&view, interval](const char *what) {
+        view.frame();
+        QVERIFY2(view.capped(), what);
+        QVERIFY2(view.nextCappedFrameNs() == view.time.nowNs + interval, what);
+        view.time.advance(0.002);
+    };
+    view.item.setZoomLevel(70.0);
+    drawnAtOnce("zoom");
+    view.item.setWidth(900.0);
+    drawnAtOnce("resize");
+    view.item.setViewMode(1);
+    drawnAtOnce("view mode");
+    view.item.setMutedChannels({true});
+    drawnAtOnce("mute");
+}
+
+void WaveformSmokeTest::waveformEditorFastScrollShowsArrivalsWithItsNextFrame() {
+    // Capped, a playback tile or detail window that comes between frames
+    // shows with the next capped frame, which draws the view again anyway,
+    // rather than in a frame of its own; uncapped, it shows at once.
+    constexpr int kRate = 1000;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.setWidth(1000);
+    item.setHeight(100);
+    item.setDurationSeconds(10.0);
+    item.m_refreshRateHz = 360.0;
+    item.m_decodeWindow = [](const QString &, double start, double end, int points,
+                             const std::shared_ptr<std::atomic_bool> &) {
+        return sampleDetailWindow(kRate, 1, start, end, points);
+    };
+    setTestPosition(item, 5.0);
+    item.setSourcePath(QStringLiteral("/fixture/fast.flac"));
+    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    item.setZoomLevel(60.0);
+    const auto idle = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && !item.m_requestTimer.isActive()
+            && item.detailCoversRangeLocked(start, end) && item.m_detail.framesPerPoint == 1;
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(idle(), kSlowBuildTimeoutMs);
+    item.setPlaying(true);
+    setTestPosition(item, 5.0);
+    QImage canvas(1000, 100, QImage::Format_RGB32);
+    const auto frame = [&item, &canvas]() {
+        {
+            QPainter painter(&canvas);
+            item.paint(&painter);
+        }
+        item.handleWindowFrameSwapped();
+    };
+    const auto nextCapped = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_nextCappedFrameNs;
+    };
+    // The capped frame's millisecond, as the scheduler holds it.
+    const auto dueMs = [](qint64 ns) { return (ns + 999'999) / 1'000'000 * 1'000'000; };
+    frame();
+    // The detail playback asks for ahead of the view, if any, has come.
+    QTRY_VERIFY_WITH_TIMEOUT(idle(), kSlowBuildTimeoutMs);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_fastScrollCapped);
+    }
+    PlaybackFrameScheduler *scheduler = item.m_frameScheduler;
+    QVERIFY(scheduler != nullptr);
+    // With no frame asked for, as when nothing playback shows would change.
+    time.advance(0.002);
+    item.cancelPlaybackFrame();
+    const quint64 requested = item.m_playbackFrameRequests;
+    item.requestArrivalFrame();
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QCOMPARE(scheduler->dueNs(&item), dueMs(nextCapped()));
+    // A frame already asked for by then shows it.
+    item.requestArrivalFrame();
+    QCOMPARE(scheduler->dueNs(&item), dueMs(nextCapped()));
+
+    // The next capped frame far away, so that the scheduler does not wake
+    // it while the test waits for what comes.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_nextCappedFrameNs = time.nowNs + 60'000'000'000;
+    }
+    // A detail window for where playback goes, the same file's.
+    item.cancelPlaybackFrame();
+    const quint64 arrivals = item.m_detailArrivals;
+    item.requestDetailWindow();
+    QTRY_VERIFY_WITH_TIMEOUT(item.m_detailArrivals > arrivals, kSlowBuildTimeoutMs);
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+    QCOMPARE(scheduler->dueNs(&item), dueMs(nextCapped()));
+
+    // A playback tile, from the workers.
+    item.cancelPlaybackFrame();
+    WaveformEditorItem::PlaybackTile tile;
+    tile.strips.emplace_back(8, 8, QImage::Format_ARGB32_Premultiplied);
+    quint64 generation = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        generation = item.m_playbackTileGeneration;
+    }
+    item.deliverPlaybackTile(generation, 0, std::move(tile));
+    QTRY_COMPARE(scheduler->dueNs(&item), dueMs(nextCapped()));
+    QCOMPARE(item.m_playbackFrameRequests, requested);
+
+    // Uncapped, an arrival asks for no capped frame: it is drawn at once.
+    item.setZoomLevel(20.0);
+    frame();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_fastScrollCapped);
+        QCOMPARE(item.cappedFrameDelayNsLocked(time.nowNs), 0);
+    }
+    item.cancelPlaybackFrame();
+    item.requestArrivalFrame();
+    QCOMPARE(scheduler->dueNs(&item), -1);
+}
+
+void WaveformSmokeTest::waveformEditorFastScrollFollowsTheScreensRefreshRate() {
+    // The cap counts refreshes of the screen the window is on: moved to
+    // another screen, or the screen's rate changing, it follows.
+    QScreen *other = hiDpiTestScreen(2.0);
+    if (other == nullptr) QSKIP("Needs the offscreen platform's HiDPI test screens");
+    QQuickWindow window;
+    window.resize(64, 64);
+    auto rates = std::make_shared<QHash<QString, double>>();
+    rates->insert(other->name(), 240.0);
+    WaveformEditorItem item;
+    item.m_screenRefreshRate = [rates](const QScreen &screen) {
+        return rates->value(screen.name(), 360.0);
+    };
+    item.setParentItem(window.contentItem());
+    const auto rate = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        return item.m_refreshRateHz;
+    };
+    QVERIFY(window.screen() != other);
+    QCOMPARE(rate(), 360.0);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    QVERIFY(moveWindowToScreen(window, other));
+    QTRY_COMPARE(rate(), 240.0);
+    QCOMPARE(WaveformEditorItem::fastScrollRefreshDivisor(rate()), 2);
+    rates->insert(other->name(), 144.0);
+    emit other->refreshRateChanged(144.0);
+    QCOMPARE(rate(), 144.0);
+    QCOMPARE(WaveformEditorItem::fastScrollRefreshDivisor(rate()), 1);
+    // Out of the window, it counts none.
+    item.setParentItem(nullptr);
+    QCOMPARE(rate(), 0.0);
+    emit other->refreshRateChanged(144.0);
+    QCOMPARE(rate(), 0.0);
+}
+
+void WaveformSmokeTest::waveformSceneGraphSampleChunkClipKeepsItsSide() {
+    // A frame that moves on by the view's width or more since the last
+    // clips its chunks to the view; the frames after keep clipping them
+    // until one moves on by less than 80% of the width, and then keep
+    // building them whole until one moves on by the whole width again. A
+    // view that moves on by about its width a frame does not switch from
+    // frame to frame.
+    QQuickWindow window;
+    QVERIFY(showSampleWindow(window, 1.0));
+    const QSize size(1720, 300);
+    TestTime time;
+    WaveformEditorItem item;
+    item.setParentItem(window.contentItem());
+    item.setVisible(false);
+    time.drive(item);
+    item.setWidth(size.width());
+    item.setHeight(size.height());
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(2);
+    giveSampleDetail(item, 96'000, 2, 29.9, 30.1);
+    item.setZoomLevel(item.maximumZoomLevel());
+    setTestPosition(item, 30.0);
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    double span = 0.0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        span = item.visibleSpanForZoomLocked(item.m_presentedZoomLevel);
+    }
+    struct Step {
+        double views;
+        bool clipped;
+    };
+    const Step steps[] = {
+        {0.0, false}, {1.05, true}, {0.95, true}, {0.85, true}, {0.75, false},
+        {0.95, false}, {0.85, false}, {1.05, true}, {0.7, false},
+    };
+    QSGNode *painted = nullptr;
+    for (const Step &step : steps) {
+        time.advance(step.views * span);
+        bool clip = false;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            const auto [start, end] = item.visibleRangeLocked();
+            QVERIFY(item.renderDetailDirectlyLocked(start, end));
+            clip = item.clipSampleChunksLocked(item.sampleChunkColumnLocked(start));
+        }
+        QVERIFY2(clip == step.clipped, qPrintable(QStringLiteral("%1 views").arg(step.views)));
+        painted = WaveformSceneGraph::render(painted, &window, size,
+            [&item](QPainter *painter) { item.paint(painter); }, false,
+            WaveformSceneGraph::Primitives::Geometry);
+        QVERIFY(painted != nullptr);
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            QCOMPARE(item.m_sampleChunksClipped, step.clipped);
+        }
+        if (step.clipped) {
+            const auto stats = WaveformSceneGraph::statistics(painted);
+            QCOMPARE(stats.chunksBuilt, stats.chunks);
+        }
+    }
+    delete painted;
 }
 
 void WaveformSmokeTest::waveformEditorIdleViewDrawsOnlyFramesThatDiffer() {

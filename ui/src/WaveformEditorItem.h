@@ -40,6 +40,7 @@ class QThreadPool;
 class QMouseEvent;
 class QPainter;
 class QQuickWindow;
+class QScreen;
 class QWheelEvent;
 
 class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Client {
@@ -247,6 +248,28 @@ private:
     // cost little where every frame shows new ones, and large enough that
     // the context each chunk draws its segments' joins from does too.
     static constexpr int kSampleChunkColumns = 512;
+    // Frames drawn in chunks clipped to the view (see sampleChunksLocked)
+    // stay so until a frame moves on by less than this part of the view's
+    // width since the last; they start once one moves on by the whole
+    // width. A view that moves on by about its width a frame, the timer
+    // waking a little early or late, would otherwise switch from frame to
+    // frame, and build every chunk again each time.
+    static constexpr double kSampleChunkWholeViewFraction = 0.8;
+    // While playing, a view that scrolls faster than this, in logical
+    // pixels a second, is drawn at most about kFastScrollFramesPerSecond
+    // times a second rather than on every refresh: the eye follows motion
+    // that fast no better at a higher rate, and it is a moving texture
+    // rather than detail to read. It stays capped until it scrolls slower
+    // than kFastScrollUncapPixelsPerSecond, so that a zoom near the
+    // threshold does not switch back and forth.
+    static constexpr double kFastScrollCapPixelsPerSecond = 4000.0;
+    static constexpr double kFastScrollUncapPixelsPerSecond = 3200.0;
+    static constexpr double kFastScrollFramesPerSecond = 120.0;
+    // The refreshes from one capped frame to the next on a display of
+    // `refreshRateHz`: a whole number, so that the frames are evenly
+    // spaced, nearest kFastScrollFramesPerSecond. Every 3rd at 360 Hz,
+    // every 2nd at 240 Hz, every one at 144 Hz and below.
+    static int fastScrollRefreshDivisor(double refreshRateHz);
     // The samples a chunk owns: their markers and the segments from them
     // to the next, by frame of the track.
     struct SampleOwnership {
@@ -368,6 +391,30 @@ private:
     // Asks for the next frame of playback, now or once it would differ,
     // delayNs from nowNs; see playbackFrameDelayNsLocked.
     void schedulePlaybackFrame(qint64 delayNs, qint64 nowNs);
+    // The logical pixels a second a view `width` wide at the presented
+    // zoom scrolls by while playing: its pixels a sample times the
+    // track's sample rate.
+    double scrollPixelsPerSecondLocked(int width) const;
+    // Whether playback frames of a view `width` wide are capped, from
+    // whether they were; see kFastScrollCapPixelsPerSecond.
+    bool fastScrollCappedLocked(int width) const;
+    // The time from one capped frame to the next, or 0 while frames are
+    // not capped: paused, slower, or on a display at 144 Hz or below.
+    qint64 cappedFrameIntervalNsLocked() const;
+    // How long from nowNs until the next capped frame may be drawn: 0 for
+    // now, also while frames are not capped or a zoom is handed over.
+    qint64 cappedFrameDelayNsLocked(qint64 nowNs) const;
+    // Asks for a frame that shows what has come, such as a playback tile
+    // or detail for where playback is: now, or with the next capped frame,
+    // which would draw the view again anyway.
+    void requestArrivalFrame();
+    // Takes the refresh rate of the window's screen, as the window moves
+    // to another screen or the screen's rate changes.
+    void updateRefreshRate();
+    // Whether a frame drawn in chunks, the view starting on `column` (see
+    // sampleChunkColumnLocked), clips them to the view; see
+    // kSampleChunkWholeViewFraction.
+    bool clipSampleChunksLocked(double column) const;
     void requestPlaybackFrame() override;
     void cancelPlaybackFrame();
     // Whether anyone would see the view: the item is visible, and its
@@ -542,6 +589,18 @@ private:
     // The column the last frame drawn in chunks started on; NaN after one
     // that was not.
     double m_lastSampleChunkColumn{std::numeric_limits<double>::quiet_NaN()};
+    // Whether the last frame drawn in chunks clipped them to its view.
+    bool m_sampleChunksClipped{false};
+    // Whether the last frame drawn found playback frames capped; see
+    // kFastScrollCapPixelsPerSecond.
+    bool m_fastScrollCapped{false};
+    // The refresh rate of the window's screen; 0 if unknown.
+    double m_refreshRateHz{0.0};
+    // When the next capped frame is due. Frames keep to a grid of the
+    // cap's interval from the first, so that a timer that wakes a little
+    // late delays only its own frame, not the ones after it; 0 while
+    // frames are not capped.
+    qint64 m_nextCappedFrameNs{0};
     bool m_zoomFallbackToOverview{false};
     // The cache, the staged cache and the playback tiles are in device
     // pixels.
@@ -610,6 +669,11 @@ private:
     QMetaObject::Connection m_windowVisibilityConnection;
     QPointer<WindowPresence> m_windowPresence;
     QMetaObject::Connection m_windowPresenceConnection;
+    QMetaObject::Connection m_screenConnection;
+    QMetaObject::Connection m_refreshRateConnection;
+    // A screen's refresh rate; tests set their own.
+    std::function<double(const QScreen &)> m_screenRefreshRate{screenRefreshRate};
+    static double screenRefreshRate(const QScreen &screen);
     QTimer m_requestTimer;
     WaveformReaderLease m_readerLease{WaveformReaderLease::Kind::View};
     // Wakes the next playback frame, with the other views of the window.
