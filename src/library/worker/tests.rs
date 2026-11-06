@@ -768,6 +768,15 @@ fn a_rescan_publishes_only_the_rows_that_changed() {
         .collect();
     assert_eq!(upserted, [fixture.track("new.mp3")]);
     assert_eq!(removed, [fixture.track("08.mp3")]);
+    // The changed file is reported in the state it was read in, so the
+    // bridge can read the playing track's tags again; new files are not.
+    let changed_files: Vec<_> = rescan
+        .iter()
+        .flat_map(|event| event.changes.changed_files.iter().cloned())
+        .collect();
+    let changed = fixture.track("07.mp3");
+    let read_state = crate::library::track_file_fingerprint(&changed).expect("changed file");
+    assert_eq!(changed_files, [(changed, read_state)]);
     assert!(rescan.iter().all(|event| event.changes.roots.is_none()));
     assert_eq!(events.mirror.paths(), fixture.indexed());
 }

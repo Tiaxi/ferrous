@@ -367,6 +367,9 @@ struct DecodedMetadata {
     int trackNumber{0};
     // The keys of the library tree rows that hold the track.
     QStringList treeKeys;
+    // The tracks on the track's album when the backend knows them surely,
+    // or 0.
+    int trackTotal{0};
 };
 
 // The most tree rows a track is in: a library folder, an artist, an album

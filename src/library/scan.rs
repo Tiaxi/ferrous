@@ -831,6 +831,9 @@ fn scan_result(problems: &[String]) -> Result<(), String> {
 trait ScanSink {
     fn progress(&mut self, conn: &Connection, progress: RootScanProgress);
     fn committed(&mut self, root: &Path, rows: Vec<(MetadataTask, IndexedTrack)>);
+    /// Indexed files that were found changed on disk and read again, in the
+    /// state they were read in; see `LibraryChanges::changed_files`.
+    fn files_changed(&mut self, _files: Vec<(PathBuf, TrackFileFingerprint)>) {}
     /// Whether the scan of the root must stop now.
     fn should_stop(&mut self, conn: &Connection) -> bool;
 }
@@ -940,6 +943,10 @@ impl ScanSink for SnapshotSink<'_> {
                 duration_secs: indexed.duration_secs,
             });
         }
+    }
+
+    fn files_changed(&mut self, files: Vec<(PathBuf, TrackFileFingerprint)>) {
+        self.library.files_changed(files);
     }
 
     fn should_stop(&mut self, conn: &Connection) -> bool {
@@ -3764,7 +3771,26 @@ impl RootScan<'_> {
         let results = std::mem::take(&mut self.batch);
         let seen = SeenRows::new(self.existing, &self.found);
         let written = write_batch(self.conn, self.root_str, self.now, &seen, results)?;
+        // The files indexed before whose size or time changed.
+        let changed = written
+            .iter()
+            .filter(|(task, _)| {
+                seen.get(&task.path_string).is_some_and(|row| {
+                    row.mtime_ns != task.mtime_ns || row.size_bytes != task.size_bytes
+                })
+            })
+            .map(|(task, _)| {
+                (
+                    task.path.clone(),
+                    TrackFileFingerprint {
+                        mtime_ns: task.mtime_ns,
+                        size_bytes: task.size_bytes,
+                    },
+                )
+            })
+            .collect();
         sink.committed(self.root, written);
+        sink.files_changed(changed);
         Ok(())
     }
 }

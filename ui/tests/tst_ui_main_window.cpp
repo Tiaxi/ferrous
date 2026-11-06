@@ -268,6 +268,7 @@ void playTrack(QObject *bridge, const QString &state = QStringLiteral("Playing")
     bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
     bridge->setProperty("currentTrackYear", 2005);
     bridge->setProperty("currentTrackNumber", 2);
+    bridge->setProperty("currentTrackTotal", 8);
     // The rows that hold it, as the backend names them.
     bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("root|/music"), kArtistKey, kAlbumKey});
     bridge->setProperty("playbackState", state);
@@ -436,7 +437,12 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(sceneRect(title).top() - sceneRect(cover).bottom(), 12.0);
     QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
     QCOMPARE(artistAlbum->property("text").toString(), QStringLiteral("The Quiet Meridian — Small Hours"));
-    QCOMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2"));
+    QCOMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2 of 8"));
+    // Without a total the backend is sure of, the number alone.
+    bridge->setProperty("currentTrackTotal", 0);
+    QTRY_COMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2"));
+    bridge->setProperty("currentTrackTotal", 8);
+    QTRY_COMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2 of 8"));
     const QFont titleFont = title->property("font").value<QFont>();
     QCOMPARE(titleFont.weight(), QFont::DemiBold);
     QCOMPARE(titleFont.pointSizeF(), palette->property("basePointSize").toReal() * 15 / 13);
@@ -451,7 +457,7 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // Missing values are left out, not shown as dashes.
     bridge->setProperty("currentTrackGenre", QString());
     bridge->setProperty("currentTrackYear", QVariant());
-    QTRY_COMPARE(details->property("text").toString(), QStringLiteral("Track 2"));
+    QTRY_COMPARE(details->property("text").toString(), QStringLiteral("Track 2 of 8"));
 
     // A title that does not fit is elided, with the whole of it in the
     // tooltip; nothing scrolls.
@@ -473,6 +479,19 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(narrowTitle->property("font").value<QFont>().pointSizeF(),
              palette->property("basePointSize").toReal() * 14 / 13);
     QTRY_COMPARE(sceneRect(header).top() - sceneRect(cover).bottom(), 12.0);
+
+    // The narrow lines have the year with the album and the total with the
+    // number, or the number alone without a total.
+    bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
+    bridge->setProperty("currentTrackYear", 2005);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(),
+                 QStringLiteral("Classical · Track 2 of 8"));
+    QCOMPARE(panel->property("narrowAlbumText").toString(), QStringLiteral("Small Hours (2005)"));
+    bridge->setProperty("currentTrackTotal", 0);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
+    // Nor is a total below the number shown.
+    bridge->setProperty("currentTrackTotal", 1);
+    QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {

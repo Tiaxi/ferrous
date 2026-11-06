@@ -68,6 +68,7 @@ fn applying_changes_replaces_in_place_appends_and_removes() {
                 shared("/m/c", "C"),
             ],
             removed: Vec::new(),
+            changed_files: Vec::new(),
         },
     );
     assert!(first.changed);
@@ -113,6 +114,7 @@ fn applying_changes_replaces_in_place_appends_and_removes() {
             roots: None,
             upserted: Vec::new(),
             removed: vec![PathBuf::from("/m/a"), PathBuf::from("/m/missing")],
+            changed_files: Vec::new(),
         },
     );
     assert!(removal.changed);
@@ -197,6 +199,7 @@ fn merged_changes_apply_as_the_changes_in_order() {
             }]),
             upserted: vec![shared("/m/b", "B again"), shared("/m/c", "C2")],
             removed: vec![PathBuf::from("/m/a")],
+            changed_files: Vec::new(),
         },
         LibraryChanges {
             upserted: vec![shared("/m/a", "A3")],

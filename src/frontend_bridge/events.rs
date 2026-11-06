@@ -918,6 +918,9 @@ pub(super) mod test_hooks {
         /// How often this thread looked up the current track's number in
         /// the library.
         pub(in super::super) static LIBRARY_TRACK_NUMBER_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        /// How often this thread copied the bridge's library to apply
+        /// changes to it.
+        pub(in super::super) static LIBRARY_COPIES: Cell<usize> = const { Cell::new(0) };
     }
 }
 
@@ -968,7 +971,10 @@ pub(super) fn apply_library_events(
         status_changed: state.library_status != status,
     };
     state.library_status = status;
-    if changes.is_empty() {
+    note_reported_playing_file(state, &changes.changed_files);
+    // Files reported changed with their rows as they were leave the
+    // library alone, so it is not copied for them.
+    if changes.roots.is_none() && !changes.has_rows() {
         return applied;
     }
 
@@ -982,6 +988,68 @@ pub(super) fn apply_library_events(
         super::sync_queue_details(state);
     }
     applied
+}
+
+/// The state a scan last reported the playing file in, while metadata
+/// read in that state has yet to arrive; see [`metadata_to_read_again`].
+#[derive(Debug, Clone)]
+pub(super) struct ReportedPlayingFile {
+    path: PathBuf,
+    state: TrackFileFingerprint,
+    /// Whether the metadata was asked for again since the report.
+    read_requested: bool,
+}
+
+/// Keeps the latest state that `changed`, files a scan found changed on
+/// disk and read again, has the playing file in. Its row may be as it was,
+/// since a row holds only some of the tags, so only the file's state tells
+/// whether the metadata shown is out of date.
+fn note_reported_playing_file(
+    state: &mut BridgeState,
+    changed: &[(PathBuf, TrackFileFingerprint)],
+) {
+    let Some(current) = state.playback.current.as_deref() else {
+        return;
+    };
+    let Some((path, reported)) = changed.iter().rev().find(|(path, _)| path == current) else {
+        return;
+    };
+    let known = state
+        .reported_playing_file
+        .as_ref()
+        .is_some_and(|known| known.path == *path && known.state == *reported);
+    if !known {
+        state.reported_playing_file = Some(ReportedPlayingFile {
+            path: path.clone(),
+            state: *reported,
+            read_requested: false,
+        });
+    }
+}
+
+/// The playing file, when its metadata is to be read again: the metadata
+/// shown was read in another state than a scan last reported the file in.
+/// Asks once per report, since the read asked for comes after any read
+/// still on its way, and forgets the report once metadata read in its
+/// state arrives. Metadata still to arrive for the track waits until it
+/// does, as it may have been read before the change.
+pub(super) fn metadata_to_read_again(state: &mut BridgeState) -> Option<PathBuf> {
+    let report = state.reported_playing_file.as_mut()?;
+    if state.playback.current.as_ref() != Some(&report.path) {
+        state.reported_playing_file = None;
+        return None;
+    }
+    if state.metadata.source_path.as_deref().map(Path::new) != Some(report.path.as_path()) {
+        return None;
+    }
+    if state.metadata.file_fingerprint == Some(report.state) {
+        state.reported_playing_file = None;
+        return None;
+    }
+    if std::mem::replace(&mut report.read_requested, true) {
+        return None;
+    }
+    Some(report.path.clone())
 }
 
 /// Shows the cover that a scan chose for the current track, such as after
@@ -1959,9 +2027,156 @@ mod tests {
                 roots: None,
                 upserted: upserted.into_iter().map(Arc::new).collect(),
                 removed,
+                changed_files: Vec::new(),
             },
             ..LibraryEvent::default()
         }
+    }
+
+    fn file_state(mtime_ns: i64) -> TrackFileFingerprint {
+        TrackFileFingerprint {
+            mtime_ns,
+            size_bytes: 100,
+        }
+    }
+
+    fn scanned(files: Vec<(PathBuf, TrackFileFingerprint)>) -> LibraryEvent {
+        let mut event = library_event(Vec::new(), Vec::new());
+        event.changes.changed_files = files;
+        event
+    }
+
+    fn loaded(path: &Path, read_in: TrackFileFingerprint) -> MetadataEvent {
+        MetadataEvent::Loaded(crate::metadata::TrackMetadata {
+            source_path: Some(path.to_string_lossy().into_owned()),
+            file_fingerprint: Some(read_in),
+            ..crate::metadata::TrackMetadata::default()
+        })
+    }
+
+    #[test]
+    fn a_scan_that_read_the_playing_file_in_another_state_asks_for_its_metadata() {
+        let playing = p("/music/A/Album/02.flac");
+        let (read_state, changed_state) = (file_state(1), file_state(2));
+        let mut state = BridgeState::default();
+        state.playback.current = Some(playing.clone());
+        process_metadata_event(loaded(&playing, read_state), &mut state);
+        let mut apply = |events: Vec<LibraryEvent>| {
+            apply_library_events(events, &mut state);
+            metadata_to_read_again(&mut state)
+        };
+
+        // The state its metadata was read in, another file, or no file:
+        // nothing to read.
+        assert_eq!(
+            apply(vec![scanned(vec![(playing.clone(), read_state)])]),
+            None
+        );
+        assert_eq!(
+            apply(vec![scanned(vec![(
+                p("/music/A/Album/03.flac"),
+                changed_state
+            )])]),
+            None
+        );
+        assert_eq!(apply(vec![library_event(Vec::new(), Vec::new())]), None);
+        // The latest state a batch of events read counts.
+        assert_eq!(
+            apply(vec![
+                scanned(vec![(playing.clone(), changed_state)]),
+                scanned(vec![(playing.clone(), read_state)]),
+            ]),
+            None
+        );
+        // Another state of the playing file: read it again, once.
+        assert_eq!(
+            apply(vec![scanned(vec![(playing.clone(), changed_state)])]),
+            Some(playing.clone())
+        );
+        assert_eq!(
+            apply(vec![scanned(vec![(playing.clone(), changed_state)])]),
+            None
+        );
+        // Metadata read in that state settles it.
+        process_metadata_event(loaded(&playing, changed_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        assert!(state.reported_playing_file.is_none());
+    }
+
+    #[test]
+    fn a_scan_report_waits_for_metadata_on_its_way_and_rereads_if_it_is_older() {
+        let playing = p("/music/A/Album/02.flac");
+        let (read_state, changed_state) = (file_state(1), file_state(2));
+        let mut state = BridgeState::default();
+        state.playback.current = Some(playing.clone());
+        state.metadata.source_path = Some("/music/A/Album/01.flac".to_string());
+
+        // The report comes while the track's first metadata is on its way.
+        apply_library_events(
+            vec![scanned(vec![(playing.clone(), changed_state)])],
+            &mut state,
+        );
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        // That metadata was read before the change: read it again, once,
+        // whichever of its stages arrive.
+        process_metadata_event(loaded(&playing, read_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
+        process_metadata_event(loaded(&playing, read_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        process_metadata_event(loaded(&playing, changed_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        assert!(state.reported_playing_file.is_none());
+
+        // Metadata on its way that was read after the change needs no read.
+        state.metadata.source_path = Some("/music/A/Album/01.flac".to_string());
+        apply_library_events(
+            vec![scanned(vec![(playing.clone(), file_state(3))])],
+            &mut state,
+        );
+        process_metadata_event(loaded(&playing, file_state(3)), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+
+        // A report about a track no longer playing is dropped.
+        apply_library_events(
+            vec![scanned(vec![(playing.clone(), file_state(4))])],
+            &mut state,
+        );
+        state.playback.current = Some(p("/music/A/Album/03.flac"));
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        assert!(state.reported_playing_file.is_none());
+    }
+
+    #[test]
+    fn files_reported_changed_without_row_changes_do_not_copy_the_library() {
+        let mut state = BridgeState {
+            library: Arc::new(LibrarySnapshot {
+                tracks: crate::library::shared_tracks(vec![
+                    library_track("/music/a.flac", "A"),
+                    library_track("/music/b.flac", "B"),
+                ]),
+                ..LibrarySnapshot::default()
+            }),
+            ..BridgeState::default()
+        };
+        let copies = || test_hooks::LIBRARY_COPIES.with(std::cell::Cell::get);
+        let before = copies();
+        let library = Arc::clone(&state.library);
+        let applied = apply_library_events(
+            vec![scanned(vec![(p("/music/a.flac"), file_state(2))])],
+            &mut state,
+        );
+        assert_eq!(applied.rows_changed, 0);
+        assert_eq!(copies(), before);
+        assert!(Arc::ptr_eq(&library, &state.library));
+        // A row change still copies it.
+        apply_library_events(
+            vec![library_event(
+                vec![library_track("/music/c.flac", "C")],
+                Vec::new(),
+            )],
+            &mut state,
+        );
+        assert_eq!(copies(), before + 1);
     }
 
     fn library_track(path: &str, title: &str) -> crate::library::LibraryTrack {

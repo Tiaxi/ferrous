@@ -482,6 +482,7 @@ mod tests {
                 })
                 .collect(),
             removed: removed.iter().map(PathBuf::from).collect(),
+            changed_files: Vec::new(),
         }
     }
 

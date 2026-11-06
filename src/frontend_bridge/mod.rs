@@ -747,6 +747,8 @@ pub(super) struct BridgeState {
     library_album_count: usize,
     library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
+    /// See [`events::ReportedPlayingFile`].
+    reported_playing_file: Option<events::ReportedPlayingFile>,
     expanded_keys: HashSet<String>,
     library_view_selection_key: String,
     library_view_anchor_key: String,
@@ -860,6 +862,8 @@ impl BridgeState {
         &mut self,
         changes: &crate::library::LibraryChanges,
     ) -> crate::library::AppliedChanges {
+        #[cfg(test)]
+        events::test_hooks::LIBRARY_COPIES.with(|copies| copies.set(copies.get() + 1));
         let previous = Arc::clone(&self.library);
         let mut next = (*previous).clone();
         let applied = next.apply_changes(changes, |path| {
@@ -958,6 +962,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         genre: metadata.genre.clone(),
         year: metadata.year,
         track_number: metadata.track_number,
+        track_total: metadata.track_total,
         sample_rate_hz: metadata.sample_rate_hz,
         bitrate_kbps: metadata.bitrate_kbps,
         channels: metadata.channels,
@@ -969,6 +974,7 @@ fn metadata_for_snapshot(metadata: &TrackMetadata) -> TrackMetadata {
         cover_art_path: metadata.cover_art_path.clone(),
         cover_art_stamp: metadata.cover_art_stamp,
         cover_read_at: metadata.cover_read_at,
+        file_fingerprint: metadata.file_fingerprint,
     }
 }
 
@@ -2154,7 +2160,17 @@ impl BridgeLoopRuntime {
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
+        self.read_metadata_again_if_reported();
         urgency
+    }
+
+    /// Ask for the playing file's metadata again when a scan reported the
+    /// file in another state than the metadata shown was read in; see
+    /// [`events::metadata_to_read_again`].
+    fn read_metadata_again_if_reported(&mut self) {
+        if let Some(path) = events::metadata_to_read_again(&mut self.state) {
+            self.metadata.request(path);
+        }
     }
 
     /// Apply `first` and the library events after it as one change.
@@ -2175,6 +2191,7 @@ impl BridgeLoopRuntime {
             self.edit_refreshes.forget_applied();
         }
         let applied = apply_library_events(events, &mut self.state);
+        self.read_metadata_again_if_reported();
         self.handle_library_refresh(applied);
         applied.urgency()
     }
@@ -2385,6 +2402,7 @@ impl BridgeLoopRuntime {
         );
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
+        self.read_metadata_again_if_reported();
         let library_urgency = self.handle_library_events(None);
         let apply_album_art_urgency = drain_apply_album_art_events(
             &self.apply_album_art_rx,
@@ -4422,6 +4440,109 @@ mod tests {
             artist: "Artist".to_string(),
             album: "Album".to_string(),
         })
+    }
+
+    /// Reads the metadata events of `runtime`'s metadata worker into its
+    /// state until one has a track total.
+    fn apply_metadata_until_total(runtime: &mut BridgeLoopRuntime, total: u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = runtime
+                .metadata_rx
+                .recv_deadline(deadline)
+                .expect("metadata event");
+            runtime.handle_metadata_event(event);
+            if runtime.state.metadata.track_total == Some(total) {
+                return;
+            }
+        }
+    }
+
+    /// A wave file numbered 2 of 8 in a directory of its own, and a runtime
+    /// playing it.
+    fn rescan_fixture(name: &str) -> (PathBuf, PathBuf, BridgeLoopRuntime, Sender<BridgeEvent>) {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-rescan-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let track = dir.join("02.wav");
+        crate::metadata::write_numbered_test_wave(&track, 2, 8);
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        runtime.state.playback.current = Some(track.clone());
+        (dir, track, runtime, event_tx)
+    }
+
+    /// Renumbers `track` 2 of 10, with a later time whatever the file
+    /// system's clock resolution, and returns the scan's report of it.
+    fn renumber_and_report(track: &Path) -> LibraryEvent {
+        let read_at = std::fs::metadata(track)
+            .and_then(|metadata| metadata.modified())
+            .expect("fixture time");
+        crate::metadata::write_numbered_test_wave(track, 2, 10);
+        std::fs::File::options()
+            .write(true)
+            .open(track)
+            .and_then(|file| file.set_modified(read_at + Duration::from_secs(1)))
+            .expect("fixture time");
+        let changed = crate::library::track_file_fingerprint(track).expect("changed file");
+        let mut event = LibraryEvent::default();
+        event.changes.changed_files = vec![(track.to_path_buf(), changed)];
+        event
+    }
+
+    #[test]
+    fn a_rescan_of_the_playing_file_changed_on_disk_reads_its_tags_again() {
+        let _guard = test_guard();
+        let (dir, track, mut runtime, event_tx) = rescan_fixture("shown");
+        runtime.metadata.request(track.clone());
+        apply_metadata_until_total(&mut runtime, 8);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(8));
+
+        // Changed outside Ferrous, then found by a scan, whose row of the
+        // file stays the same.
+        let report = renumber_and_report(&track);
+        let changed = report.changes.changed_files[0].1;
+        assert_ne!(runtime.state.metadata.file_fingerprint, Some(changed));
+        runtime.handle_wake(BridgeLoopWake::Library(report), &event_tx);
+        apply_metadata_until_total(&mut runtime, 10);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
+        assert_eq!(runtime.state.metadata.file_fingerprint, Some(changed));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rescan_reported_before_older_metadata_arrives_reads_the_tags_again() {
+        let _guard = test_guard();
+        let (dir, track, mut runtime, _event_tx) = rescan_fixture("pending");
+        // The track's first metadata is read before the change, but arrives
+        // after the scan reported it.
+        runtime.metadata.request(track.clone());
+        let older = runtime
+            .metadata_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("metadata event");
+        let MetadataEvent::Loaded(older_metadata) = &older;
+        assert_eq!(older_metadata.track_total, Some(8));
+        // Handled one by one, so nothing else of the read arrives between.
+        let report = renumber_and_report(&track);
+        runtime.handle_library_events(Some(report));
+        assert_eq!(runtime.state.metadata.track_total, None);
+        runtime.handle_metadata_event(older);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(8));
+
+        // It was read in an older state, so the tags are read again.
+        apply_metadata_until_total(&mut runtime, 10);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
+        assert!(runtime.state.reported_playing_file.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A track file for imports, which expand and canonicalize their paths.
@@ -6498,6 +6619,7 @@ mod tests {
                     })
                     .collect(),
                 removed: removed.iter().map(|path| (*path).clone()).collect(),
+                changed_files: Vec::new(),
             },
             status: crate::library::LibraryStatus::default(),
             read_after,
