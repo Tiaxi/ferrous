@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
 #include <QByteArray>
 #include <QString>
 #include <QVector>
@@ -95,6 +96,10 @@ public:
     bool updateRow(int index, QueueRowData row);
     const QueueRowData *rowAt(int index) const;
     QVariant trackNumberAt(int index) const;
+    // Whether a row holds `path`, from an index of the rows' paths kept in
+    // step with every change, so it costs the same whatever the queue's
+    // length. Recent Issues asks it on every change of the rows.
+    Q_INVOKABLE bool containsPath(const QString &path) const;
 
     // Hand rows the model drops, from kReleaseThreshold on, to `releaser`
     // instead of freeing them on the model's thread. None frees them here.
@@ -102,8 +107,14 @@ public:
 
 private:
     void release(QVector<QueueRowData> &&rows);
+    // Counts the paths of `count` rows of `rows` from `from` in (step 1) or
+    // out (step -1) of m_pathCounts.
+    void countPaths(const QVector<QueueRowData> &rows, qsizetype from, qsizetype count, int step);
+    void countPath(const QString &path, int step);
 
     QVector<QueueRowData> m_rows;
+    // How many rows hold each path; a path appears once per row.
+    QHash<QString, int> m_pathCounts;
     RowReleaser m_releaser;
 };
 

@@ -420,8 +420,11 @@ public:
     Q_INVOKABLE QString libraryThumbnailSource(
         const QString &path, const QString &stamp = QString()) const;
     Q_INVOKABLE QString queuePathAt(int index) const;
-    // The first row of the queue that holds `path`, or -1.
+    // The first row of the queue that holds `path`, or -1. It reads the
+    // rows; queueContainsPath answers from an index.
     Q_INVOKABLE int queueIndexOfPath(const QString &path) const;
+    // Whether a row of the queue holds `path`, whatever the queue's length.
+    Q_INVOKABLE bool queueContainsPath(const QString &path) const;
     Q_INVOKABLE QVariant queueTrackNumberAt(int index) const;
     Q_INVOKABLE void addLibraryRoot(const QString &path, const QString &name = QString());
     Q_INVOKABLE void setLibraryRootName(const QString &path, const QString &name);

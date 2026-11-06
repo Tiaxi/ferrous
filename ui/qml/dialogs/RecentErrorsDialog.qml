@@ -38,8 +38,15 @@ Popup {
     readonly property real statusBarClearance: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing + 2
     // The files of the entries that are in the queue now, by path. It is
     // worked out again whenever the queue's rows change, whatever their
-    // count, and whenever an entry arrives, only while the popup shows.
+    // count, and whenever an entry arrives, only while the popup shows. The
+    // bridge answers each file from an index of the queue's paths, so this
+    // costs the same whatever the queue's length.
     property var queuedSubjects: ({})
+
+    function inQueue(path) {
+        return path.length > 0 && root.uiBridge.queueContainsPath
+            && root.uiBridge.queueContainsPath(path)
+    }
 
     function refreshQueuedSubjects() {
         if (!root.visible) {
@@ -49,12 +56,16 @@ Popup {
         const entries = root.errorController.entries
         for (let i = 0; i < entries.count; ++i) {
             const subject = entries.get(i).subject
-            if (subject.length > 0 && root.uiBridge.queueIndexOfPath
-                    && root.uiBridge.queueIndexOfPath(subject) >= 0) {
+            if (root.inQueue(subject)) {
                 queued[subject] = true
             }
         }
         root.queuedSubjects = queued
+    }
+
+    // A burst of row changes, such as a bulk insert, refreshes once.
+    function scheduleQueueRefresh() {
+        Qt.callLater(root.refreshQueuedSubjects)
     }
 
     // The action of an entry, as { kind, text }, or null.
@@ -77,8 +88,7 @@ Popup {
     function runAction(kind, subject) {
         // The queue may have changed since the row was made: a file that has
         // left it gets the action that fits, and the popup stays.
-        if (kind === "queue" && !(root.uiBridge.queueIndexOfPath
-                && root.uiBridge.queueIndexOfPath(subject) >= 0)) {
+        if (kind === "queue" && !root.inQueue(subject)) {
             root.refreshQueuedSubjects()
             return
         }
@@ -158,19 +168,19 @@ Popup {
             ? root.uiBridge.queueRows
             : null
         ignoreUnknownSignals: true
-        function onModelReset() { root.refreshQueuedSubjects() }
-        function onRowsInserted() { root.refreshQueuedSubjects() }
-        function onRowsRemoved() { root.refreshQueuedSubjects() }
-        function onRowsMoved() { root.refreshQueuedSubjects() }
-        function onDataChanged() { root.refreshQueuedSubjects() }
-        function onLayoutChanged() { root.refreshQueuedSubjects() }
+        function onModelReset() { root.scheduleQueueRefresh() }
+        function onRowsInserted() { root.scheduleQueueRefresh() }
+        function onRowsRemoved() { root.scheduleQueueRefresh() }
+        function onRowsMoved() { root.scheduleQueueRefresh() }
+        function onDataChanged() { root.scheduleQueueRefresh() }
+        function onLayoutChanged() { root.scheduleQueueRefresh() }
     }
 
     // A bridge whose rows are a list rather than a model replaces the list.
     Connections {
         target: root.visible ? root.uiBridge : null
         ignoreUnknownSignals: true
-        function onQueueRowsChanged() { root.refreshQueuedSubjects() }
+        function onQueueRowsChanged() { root.scheduleQueueRefresh() }
     }
 
     contentItem: ColumnLayout {

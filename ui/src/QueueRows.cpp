@@ -138,6 +138,31 @@ void QueueRowsModel::release(QVector<QueueRowData> &&rows) {
     rows = QVector<QueueRowData>();
 }
 
+void QueueRowsModel::countPath(const QString &path, int step) {
+    auto it = m_pathCounts.find(path);
+    if (it == m_pathCounts.end()) {
+        if (step > 0) {
+            m_pathCounts.insert(path, step);
+        }
+        return;
+    }
+    *it += step;
+    if (*it <= 0) {
+        m_pathCounts.erase(it);
+    }
+}
+
+void QueueRowsModel::countPaths(const QVector<QueueRowData> &rows, qsizetype from, qsizetype count,
+                                int step) {
+    for (qsizetype i = from; i < from + count; ++i) {
+        countPath(rows.at(i).path, step);
+    }
+}
+
+bool QueueRowsModel::containsPath(const QString &path) const {
+    return m_pathCounts.contains(path);
+}
+
 bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
     if (m_rows == rows) {
         release(std::move(rows));
@@ -145,6 +170,9 @@ bool QueueRowsModel::setRows(QVector<QueueRowData> rows) {
     }
     beginResetModel();
     std::swap(m_rows, rows);
+    m_pathCounts.clear();
+    m_pathCounts.reserve(m_rows.size());
+    countPaths(m_rows, 0, m_rows.size(), 1);
     endResetModel();
     // The rows the model had.
     release(std::move(rows));
@@ -159,6 +187,7 @@ bool QueueRowsModel::insertRowsAt(int at, QVector<QueueRowData> rows) {
         return true;
     }
     beginInsertRows(QModelIndex(), at, at + static_cast<int>(rows.size()) - 1);
+    countPaths(rows, 0, rows.size(), 1);
     if (m_rows.isEmpty()) {
         std::swap(m_rows, rows);
     } else {
@@ -177,6 +206,7 @@ bool QueueRowsModel::removeRowsAt(int start, int count) {
         return true;
     }
     beginRemoveRows(QModelIndex(), start, start + count - 1);
+    countPaths(m_rows, start, count, -1);
     QVector<QueueRowData> removed;
     if (count == m_rows.size()) {
         std::swap(removed, m_rows);
@@ -239,6 +269,10 @@ bool QueueRowsModel::updateRow(int index, QueueRowData row) {
     }
     if (m_rows.at(index) == row) {
         return true;
+    }
+    if (m_rows.at(index).path != row.path) {
+        countPath(m_rows.at(index).path, -1);
+        countPath(row.path, 1);
     }
     m_rows[index] = std::move(row);
     const QModelIndex changed = this->index(index, 0);

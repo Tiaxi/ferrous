@@ -3295,8 +3295,12 @@ QString BridgeClient::queuePathAt(int index) const {
     return row != nullptr ? row->path : QString{};
 }
 
+bool BridgeClient::queueContainsPath(const QString &path) const {
+    return m_queueRowsModel.containsPath(path);
+}
+
 int BridgeClient::queueIndexOfPath(const QString &path) const {
-    if (path.isEmpty()) {
+    if (path.isEmpty() || !m_queueRowsModel.containsPath(path)) {
         return -1;
     }
     const int count = m_queueRowsModel.rowCount();

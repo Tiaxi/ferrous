@@ -447,6 +447,14 @@ ApplicationWindow {
         function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
+        // As BridgeClient::queueContainsPath: a QueueRowsModel answers from
+        // its index of paths.
+        function queueContainsPath(path) {
+            const rows = queueRows
+            return rows && typeof rows.containsPath === "function"
+                ? rows.containsPath(path)
+                : queueIndexOfPath(path) >= 0
+        }
         // As BridgeClient::queueIndexOfPath, over the rows tests set: a list
         // of rows, or a QueueRowsModel, whose PathRole is Qt.UserRole + 7.
         function queueIndexOfPath(path) {

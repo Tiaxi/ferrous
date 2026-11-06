@@ -2332,6 +2332,8 @@ void BridgeClientTest::thousandsOfAppendedPathsReachTheBackendInOrder() {
     }
     // Recent Issues finds a file's row by its path.
     QCOMPARE(bridge.queueIndexOfPath(paths[4321]), 4321);
+    QVERIFY(bridge.queueContainsPath(paths[4321]));
+    QVERIFY(!bridge.queueContainsPath(base + QStringLiteral("/missing.flac")));
     QCOMPARE(bridge.queueIndexOfPath(base + QStringLiteral("/missing.flac")), -1);
     QCOMPARE(bridge.queueIndexOfPath(QString()), -1);
     QVERIFY2(errors.isEmpty(), qPrintable(errors.isEmpty() ? QString() : errors.first().first().toString()));
