@@ -296,6 +296,19 @@ int readEnvMillis(const char *key, int fallback) {
     return std::clamp(value, 8, 1000);
 }
 
+// Whether `canonicalPath` is in the backend's cache of the art that tracks
+// embed: `$XDG_CACHE_HOME/ferrous/embedded_covers` (src/paths.rs and
+// src/metadata/cover_cache.rs), which Qt's generic cache location follows.
+bool isEmbeddedCoverCachePath(const QString &canonicalPath) {
+    const QString cacheRoot = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+    if (cacheRoot.isEmpty()) {
+        return false;
+    }
+    const QString cacheDir =
+        QDir(cacheRoot + QStringLiteral("/ferrous/embedded_covers")).canonicalPath();
+    return !cacheDir.isEmpty() && canonicalPath.startsWith(cacheDir + QLatin1Char('/'));
+}
+
 QVariantMap readImageFileDetails(const QString &path) {
     QVariantMap out;
 
@@ -314,6 +327,7 @@ QVariantMap readImageFileDetails(const QString &path) {
         : info.canonicalFilePath();
     out.insert(QStringLiteral("path"), resolvedPath);
     out.insert(QStringLiteral("fileName"), info.fileName());
+    out.insert(QStringLiteral("embeddedCover"), isEmbeddedCoverCachePath(resolvedPath));
 
     const qint64 sizeBytes = info.size();
     if (sizeBytes >= 0) {

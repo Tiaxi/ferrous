@@ -55,6 +55,14 @@ Item {
     property double _crosshairSharedX: -1.0
     property double _widgetZoomLevel: 1.0
     property double _viewerZoomLevel: 1.0
+    // The zoom shown: the viewer keeps one of its own. 1 is the default.
+    readonly property real zoomLevel: root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
+
+    // Both zooms back to the default, as a middle click does.
+    function resetZoom() {
+        root._widgetZoomLevel = 1.0
+        root._viewerZoomLevel = 1.0
+    }
 
     // Debounced backend restart after significant width changes
     // (entering/exiting fullscreen).  The timer lets the geometry
@@ -314,7 +322,7 @@ Item {
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
-                    zoomLevel: root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
+                    zoomLevel: root.zoomLevel
                     onZoomRequested: (newZoomLevel) => {
                         const minZoom = spectrogramPaneItem.minimumZoomLevel()
                         const clamped = Math.max(minZoom,
@@ -325,10 +333,7 @@ Item {
                             root._widgetZoomLevel = clamped
                         }
                     }
-                    onZoomResetRequested: {
-                        root._widgetZoomLevel = 1.0
-                        root._viewerZoomLevel = 1.0
-                    }
+                    onZoomResetRequested: root.resetZoom()
                     onBackendZoomRequested: (level) => {
                         if (index === 0) {
                             // The restart decodes for the width it is for.

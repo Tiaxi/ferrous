@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import QtCore
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
+import "../logic/PathUtils.js" as PathUtils
 import "../logic/WheelUtils.js" as WheelUtils
 
+// The album art viewer's view: the art on the view colour, fitted, zoomed
+// and panned; while `infoVisible`, a 280 px column of the image's details
+// behind a 1 px seam on the right.
 Item {
     id: root
 
@@ -15,14 +22,22 @@ Item {
     required property int initialViewToken
     required property int viewerDecodeWidth
     required property int viewerDecodeHeight
-    required property string infoOverlayText
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var closeViewer
-    required property var toggleInfoVisible
     required property var focusFullscreen
-    required property string comparisonLabel
     required property bool comparisonModeAvailable
+    required property var uiPalette
+    // The image's details, from BridgeClient.cachedImageFileDetails: path,
+    // fileName, width, height, fileSizeText, format, embeddedCover.
+    property var fileInfo: ({})
+    // Where the image is from: "folder", "embedded" or "itunes".
+    property string sourceKind: "folder"
+    property var switchComparisonImage: function() {}
+    // How far the details keep below the top, clear of controls over them.
+    property real infoTopInset: 0
+    readonly property alias imageStatus: albumArtImageFull.status
+    readonly property bool zoomed: root.zoom > 1.0
 
     property real zoom: 1.0
     // One wheel notch zooms by this factor; smaller steps by part of it.
@@ -31,6 +46,29 @@ Item {
     property real panX: 0.0
     property real panY: 0.0
     property bool pendingInitialView: false
+
+    // Fits the art again: the viewer's Reset, and a double-click.
+    function resetView() {
+        root.zoom = 1.0
+        root.panX = 0.0
+        root.panY = 0.0
+    }
+
+    // The folder's path with the home folder as "~".
+    function displayPath(path) {
+        const home = PathUtils.urlToLocalPath(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+        if (home.length > 1 && (path === home || path.indexOf(home + "/") === 0)) {
+            return "~" + path.substring(home.length)
+        }
+        return path
+    }
+
+    function copyText(text) {
+        clipboardText.text = text
+        clipboardText.selectAll()
+        clipboardText.copy()
+        clipboardText.text = ""
+    }
 
     function requestInitialView() {
         root.zoom = 1.0
@@ -102,11 +140,33 @@ Item {
     onWidthChanged: root.applyInitialView()
     onHeightChanged: root.applyInitialView()
 
+    readonly property string infoPath: (root.fileInfo && root.fileInfo.path) || ""
+    readonly property string folderPath: root.sourceKind === "folder" && root.infoPath.length > 0
+        ? root.infoPath.substring(0, Math.max(1, root.infoPath.lastIndexOf("/")))
+        : ""
+
     clip: true
+
+    Rectangle {
+        objectName: "albumArtFloor"
+        anchors.fill: parent
+        color: root.uiPalette.view
+    }
+
+    // Holds the text Copy Path puts on the clipboard.
+    TextEdit {
+        id: clipboardText
+        visible: false
+        textFormat: TextEdit.PlainText
+    }
 
     Item {
         id: albumArtViewport
-        anchors.fill: parent
+        objectName: "albumArtViewport"
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.infoVisible ? Math.max(0, parent.width - infoColumn.width - 1) : parent.width
         clip: true
         onWidthChanged: root.applyInitialView()
         onHeightChanged: root.applyInitialView()
@@ -195,9 +255,7 @@ Item {
                     return
                 }
                 if (root.zoom > 1.0) {
-                    root.zoom = 1.0
-                    root.panX = 0.0
-                    root.panY = 0.0
+                    root.resetView()
                 } else {
                     root.zoomAbout(mouse.x, mouse.y, 2.0)
                 }
@@ -238,109 +296,192 @@ Item {
         }
     }
 
+    // A file it cannot read: the view's own state, in place of the art.
     Column {
-        z: 30
+        objectName: "albumArtErrorState"
+        anchors.centerIn: albumArtViewport
+        width: Math.min(implicitWidth, albumArtViewport.width - 24)
+        spacing: 6
+        visible: albumArtImageFull.status === Image.Error
+
+        Kirigami.Icon {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 16
+            height: 16
+            source: "image-missing"
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+
+        Label {
+            objectName: "albumArtErrorText"
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(implicitWidth, parent.width)
+            text: I18n.i18nc("@info", "Couldn't load this image.")
+            color: root.uiPalette.textSecondary
+            elide: Text.ElideMiddle
+        }
+    }
+
+    Rectangle {
+        objectName: "albumArtInfoSeam"
+        visible: root.infoVisible
+        x: infoColumn.x - 1
+        width: 1
+        height: parent.height
+        color: root.uiPalette.seam
+    }
+
+    // The details: the file's name, then label and value rows; the folder
+    // on its own line, then its path, elided in the middle, with Copy Path.
+    Item {
+        id: infoColumn
+        objectName: "albumArtInfoColumn"
+        visible: root.infoVisible
+        anchors.right: parent.right
         anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.margins: 12
-        spacing: 8
+        anchors.bottom: parent.bottom
+        width: 279
 
-        Rectangle {
-            visible: root.comparisonLabel.length > 0
-            color: Qt.rgba(0, 0, 0, 0.58)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
-            radius: 10
-            width: comparisonLabelRow.implicitWidth + 20
-            height: comparisonLabelRow.implicitHeight + 12
-
-            Row {
-                id: comparisonLabelRow
-                anchors.centerIn: parent
-                spacing: 6
-
-                Text {
-                    visible: root.comparisonModeAvailable
-                    text: "\u25C0 \u25B6"
-                    color: Qt.rgba(1, 1, 1, 0.45)
-                    font: Kirigami.Theme.defaultFont
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Text {
-                    text: root.comparisonLabel
-                    color: "#ffffff"
-                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.05
-                    font.weight: Font.DemiBold
-                    anchors.verticalCenter: parent.verticalCenter
-                }
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
-                hoverEnabled: true
-                preventStealing: true
-                onPressed: root.focusFullscreen()
-                onWheel: function(wheel) {
-                    root.focusFullscreen()
-                    wheel.accepted = true
-                }
-            }
+        // Presses on the details stay on them.
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+            onPressed: root.focusFullscreen()
+            onWheel: function(wheel) { wheel.accepted = true }
         }
 
-        Rectangle {
-            width: 40
-            height: 40
-            radius: 8
-            color: Qt.rgba(1, 1, 1, 0.16)
-            border.color: Qt.rgba(1, 1, 1, 0.52)
+        ColumnLayout {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            anchors.topMargin: 12 + root.infoTopInset
+            spacing: 0
 
-            ToolButton {
-                anchors.fill: parent
-                Accessible.name: I18n.i18nc("@action:button", "Album art information")
+            Label {
+                objectName: "albumArtInfoTitle"
+                Layout.fillWidth: true
+                Layout.bottomMargin: 8
+                text: root.sourceKind === "embedded"
+                    ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
+                    : ((root.fileInfo && root.fileInfo.fileName)
+                        || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
+                font.weight: Font.DemiBold
+                color: root.uiPalette.text
+                elide: Text.ElideMiddle
+            }
+
+            Repeater {
+                model: [
+                    { name: I18n.i18nc("@label image width and height", "Dimensions"),
+                      value: root.fileInfo && root.fileInfo.width > 0 && root.fileInfo.height > 0
+                          ? I18n.i18nc("@info image size, width × height", "%1 × %2 px",
+                              Number(root.fileInfo.width).toLocaleString(Qt.locale(), "f", 0),
+                              Number(root.fileInfo.height).toLocaleString(Qt.locale(), "f", 0))
+                          : "" },
+                    { name: I18n.i18nc("@label", "File size"),
+                      value: (root.fileInfo && root.fileInfo.fileSizeText) || "" },
+                    { name: I18n.i18nc("@label image file format", "Format"),
+                      value: (root.fileInfo && (root.fileInfo.format || root.fileInfo.extension)) || "" },
+                    { name: I18n.i18nc("@label where the album art is from", "Source"),
+                      value: root.sourceKind === "embedded"
+                          ? I18n.i18nc("@info album art source", "Embedded in the track")
+                          : (root.sourceKind === "itunes"
+                              ? I18n.i18nc("@info album art source", "iTunes")
+                              : I18n.i18nc("@info album art source", "Folder image")) }
+                ]
+
+                delegate: RowLayout {
+                    required property var modelData
+                    objectName: "albumArtInfoRow"
+                    Layout.fillWidth: true
+                    Layout.topMargin: 5
+                    Layout.bottomMargin: 5
+                    visible: modelData.value.length > 0
+                    spacing: 12
+
+                    Label {
+                        Layout.preferredWidth: 76
+                        Layout.alignment: Qt.AlignTop
+                        text: modelData.name
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: root.uiPalette.textSecondary
+                        elide: Text.ElideRight
+                    }
+
+                    Label {
+                        objectName: "albumArtInfoValue"
+                        Layout.fillWidth: true
+                        text: modelData.value
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.features: root.uiPalette.tabularFigures
+                        color: root.uiPalette.text
+                        wrapMode: Text.Wrap
+                    }
+                }
+            }
+
+            Label {
+                objectName: "albumArtFolderLabel"
+                visible: root.folderPath.length > 0
+                Layout.topMargin: 5
+                text: I18n.i18nc("@label the folder the image is in", "Folder")
+                font.pointSize: root.uiPalette.smallPointSize
+                color: root.uiPalette.textSecondary
+            }
+
+            RowLayout {
+                visible: root.folderPath.length > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: 24
+                spacing: 4
+
+                Label {
+                    id: folderPathLabel
+                    objectName: "albumArtFolderPath"
+                    Layout.fillWidth: true
+                    text: root.displayPath(root.folderPath)
+                    font.pointSize: root.uiPalette.smallPointSize
+                    color: root.uiPalette.text
+                    elide: Text.ElideMiddle
+                    // The whole path, however it is elided.
+                    ToolTip.text: root.folderPath
+                    ToolTip.visible: folderPathHover.hovered
+                    ToolTip.delay: Kirigami.Units.toolTipDelay
+
+                    HoverHandler {
+                        id: folderPathHover
+                    }
+                }
+
+                Components.ViewerToolButton {
+                    objectName: "albumArtCopyPathButton"
+                    uiPalette: root.uiPalette
+                    text: I18n.i18nc("@action:button", "Copy Path")
+                    icon.name: "edit-copy"
+                    glyphColor: root.uiPalette.textSecondary
+                    Accessible.description: root.folderPath
+                    onClicked: root.copyText(root.folderPath)
+                }
+            }
+
+            // From the iTunes artwork dialog: the other image to compare.
+            Button {
+                objectName: "albumArtCompareButton"
+                visible: root.comparisonModeAvailable
+                Layout.topMargin: 12
+                flat: true
+                focusPolicy: Qt.TabFocus
+                icon.name: "view-refresh"
+                text: root.sourceKind === "itunes"
+                    ? I18n.i18nc("@action:button", "Show Current Album Art")
+                    : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
+                ToolTip.text: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
                 ToolTip.visible: hovered || visualFocus
-                ToolTip.delay: Qt.styleHints.mousePressAndHoldInterval
-                ToolTip.text: Accessible.name
-                contentItem: Text {
-                    text: "i"
-                    color: "#ffffff"
-                    font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.2
-                    font.weight: Font.DemiBold
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                }
-                onClicked: root.toggleInfoVisible()
-            }
-        }
-
-        Rectangle {
-            visible: root.infoVisible && albumArtInfoLabel.text.length > 0
-            width: Math.min(540, root.width - 24)
-            color: Qt.rgba(0, 0, 0, 0.58)
-            border.color: Qt.rgba(1, 1, 1, 0.24)
-            radius: 10
-            implicitHeight: albumArtInfoLabel.implicitHeight + 20
-
-            Text {
-                id: albumArtInfoLabel
-                anchors.fill: parent
-                anchors.margins: 10
-                color: "#f2f2f2"
-                text: root.infoOverlayText
-                wrapMode: Text.WrapAnywhere
-                textFormat: Text.PlainText
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
-                hoverEnabled: true
-                preventStealing: true
-                onPressed: root.focusFullscreen()
-                onWheel: function(wheel) {
-                    root.focusFullscreen()
-                    wheel.accepted = true
-                }
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                onClicked: root.switchComparisonImage()
             }
         }
     }

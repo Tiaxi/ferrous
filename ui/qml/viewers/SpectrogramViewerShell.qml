@@ -22,9 +22,21 @@ Item {
     property bool playbackPlaying: false
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
-    // The app's errors; the viewer shows the newest error, as it hides the
-    // main window's status bar, such as a screen it cannot keep awake.
+    // The app's errors. The viewer covers the main window's status bar, so
+    // new ones, such as a screen it cannot keep awake, show as a button
+    // that opens Recent Issues.
     property var errorController: null
+    // The playing track and the playback clock's position text, for the
+    // title strip.
+    property var uiBridge: null
+    property string positionText: "00:00"
+    // The view's zoom, 1 at the default, and what resets it: the same as
+    // View › Reset Visualization View.
+    property real zoomLevel: 1.0
+    property var resetView: null
+    // How far the corner controls keep from the right edge, clear of the
+    // level meter's column.
+    property real cornerRightMargin: 4
 
     property alias popupHost: spectrogramPopupHost
     // The window of the viewer over the whole screen, and the item in it
@@ -32,12 +44,15 @@ Item {
     readonly property Window fullscreenWindow: spectrogramFullscreenWindowLoader.item
     readonly property Item windowHost: root.fullscreenWindow ? root.fullscreenWindow.host : null
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
-    // What the visualization keeps clear of in its top right corner for the
-    // close button; the plot layer's mode switch sits left of it. Both
-    // viewers lay it out alike, and it does not change as it auto-hides.
-    readonly property size reservedCorner: Qt.size(
-        popupCloseButton.anchors.rightMargin + popupCloseButton.width,
-        popupCloseButton.anchors.topMargin + popupCloseButton.height)
+    // What the visualization keeps clear of in its top right corner: in the
+    // main window, the viewer's controls, with the plot layer's mode switch
+    // 4 px left of them; over the whole screen nothing, as the controls are
+    // in the title strip above the view. It does not change as they
+    // auto-hide.
+    readonly property size reservedCorner: root.useWholeScreenViewerMode
+        ? Qt.size(0, 0)
+        : Qt.size(popupControls.width + 4,
+                  popupControls.anchors.topMargin + popupControls.height)
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
@@ -60,10 +75,17 @@ Item {
         fullscreenControlsAutoHide.pointerMoved(x, y)
     }
 
+    // The item with keyboard focus in the viewer's window.
+    readonly property Item focusedItem: root.wholeScreenOpen
+        ? (root.fullscreenWindow ? root.fullscreenWindow.activeFocusItem : null)
+        : (root.windowRoot ? root.windowRoot.activeFocusItem : null)
+
     Components.FullscreenControlsAutoHide {
         id: fullscreenControlsAutoHide
         objectName: "spectrogramFullscreenControlsAutoHide"
         active: root.viewerOpen
+        // A control with keyboard focus stays shown.
+        held: root.focusedItem !== null && root.focusedItem.visualFocus === true
     }
 
     readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
@@ -143,60 +165,59 @@ Item {
             active: spectrogramViewer.visible
         }
 
-        MouseArea {
+        // The window's title names the viewer, so it has no title strip:
+        // its controls are on a plate in the top right corner.
+        FocusScope {
+            id: spectrogramPopupFocusScope
             anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onClicked: root.closeViewer()
-        }
+            focus: true
 
-        Components.ViewerCloseButton {
-            id: popupCloseButton
-            objectName: "spectrogramPopupCloseButton"
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            visible: root.fullscreenControlsVisible
-            fillColor: Qt.rgba(0, 0, 0, 0.45)
-            borderColor: Qt.rgba(1, 1, 1, 0.24)
-            onClicked: root.closeViewer()
-
-            HoverHandler {
-                onPointChanged: root.noteFullscreenPointerActivity(
-                    point.scenePosition.x, point.scenePosition.y)
+            // A key brings the controls back, so Tab reaches them.
+            Keys.onPressed: function(event) {
+                fullscreenControlsAutoHide.wake()
+                event.accepted = false
             }
-        }
 
-        Rectangle {
-            objectName: "spectrogramPopupFloor"
-            anchors.fill: parent
-            color: root.uiPalette.plotColors(root.visualizationMode).plotBg
-
-            MouseArea {
+            Rectangle {
+                objectName: "spectrogramPopupFloor"
                 anchors.fill: parent
-                acceptedButtons: Qt.LeftButton
-                onDoubleClicked: function(mouse) {
-                    if (mouse.button === Qt.LeftButton) {
-                        root.closeViewer()
+                color: root.uiPalette.plotColors(root.visualizationMode).plotBg
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton
+                    onPressed: spectrogramPopupFocusScope.forceActiveFocus()
+                    onDoubleClicked: function(mouse) {
+                        if (mouse.button === Qt.LeftButton) {
+                            root.closeViewer()
+                        }
                     }
+                }
+
+                Item {
+                    id: spectrogramPopupHost
+                    anchors.fill: parent
                 }
             }
 
-            Item {
-                id: spectrogramPopupHost
-                anchors.fill: parent
+            Components.ViewerCornerControls {
+                id: popupControls
+                objectName: "spectrogramPopupControls"
+                z: 20
+                anchors.top: parent.top
+                anchors.right: parent.right
+                anchors.topMargin: 4
+                anchors.rightMargin: root.cornerRightMargin
+                plotColors: root.uiPalette.plotColors(root.visualizationMode)
+                uiPalette: root.uiPalette
+                closeButtonName: "spectrogramPopupCloseButton"
+                controlsVisible: root.fullscreenControlsVisible
+                pointerActivity: root.noteFullscreenPointerActivity
+                zoomLevel: root.zoomLevel
+                resetView: root.resetView
+                errorController: root.errorController
+                closeViewer: root.closeViewer
             }
-        }
-
-        Components.ErrorBanner {
-            objectName: "spectrogramPopupErrorBanner"
-            z: 30
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottomMargin: 24
-            width: Math.min(parent.width - 48, 720)
-            errorController: root.errorController
-            active: root.viewerOpen && !root.useWholeScreenViewerMode
         }
     }
 
@@ -210,6 +231,7 @@ Item {
                 id: spectrogramFullscreenWindow
                 objectName: "spectrogramFullscreenWindow"
                 readonly property Item host: spectrogramWindowHost
+                readonly property Item strip: spectrogramStrip
                 screen: root.windowRoot.screen
                 transientParent: root.windowRoot
                 modality: Qt.ApplicationModal
@@ -233,59 +255,11 @@ Item {
                     }
                 }
 
-                FocusScope {
-                    id: spectrogramFullscreenFocusSink
-                    anchors.fill: parent
-                    focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
-                    // Above the viewer, and inside the scope that handles the
-                    // viewer's keys, so they work while the error's buttons have focus.
-                    z: 30
-
-                    Keys.onPressed: function(event) {
-                        if (event.key === Qt.Key_Escape) {
-                            event.accepted = true
-                            root.closeViewer()
-                        }
-                    }
-
-                    Components.ErrorBanner {
-                        objectName: "spectrogramFullscreenErrorBanner"
-                        anchors.bottom: parent.bottom
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottomMargin: 24
-                        width: Math.min(parent.width - 48, 720)
-                        errorController: root.errorController
-                        active: root.viewerOpen && root.useWholeScreenViewerMode
-                    }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.LeftButton
-                    onPressed: spectrogramFullscreenFocusSink.forceActiveFocus()
-                    onClicked: root.closeViewer()
-                }
-
-                Components.ViewerCloseButton {
-                    id: fullscreenCloseButton
-                    objectName: "spectrogramFullscreenCloseButton"
-                    z: 20
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.margins: 12
-                    visible: root.fullscreenControlsVisible
-                    fillColor: Qt.rgba(0, 0, 0, 0.45)
-                    borderColor: Qt.rgba(1, 1, 1, 0.24)
-                    onClicked: root.closeViewer()
-
-                    HoverHandler {
-                        onPointChanged: root.noteFullscreenPointerActivity(
-                            point.scenePosition.x, point.scenePosition.y)
-                    }
-                }
-
+                // The view, under the title strip. The strip never hides, so
+                // the view keeps its size as the controls auto-hide.
                 Rectangle {
                     anchors.fill: parent
+                    anchors.topMargin: spectrogramStrip.height
                     color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
                     MouseArea {
@@ -302,6 +276,42 @@ Item {
                     Item {
                         id: spectrogramWindowHost
                         anchors.fill: parent
+                    }
+                }
+
+                FocusScope {
+                    id: spectrogramFullscreenFocusSink
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: spectrogramStrip.height
+                    focus: spectrogramFullscreenWindow.visibility === Window.FullScreen
+
+                    // Escape closes the viewer, also while one of the strip's
+                    // buttons has focus; any key brings the controls back.
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Escape) {
+                            event.accepted = true
+                            root.closeViewer()
+                            return
+                        }
+                        fullscreenControlsAutoHide.wake()
+                    }
+
+                    Components.ViewerStrip {
+                        id: spectrogramStrip
+                        objectName: "spectrogramFullscreenStrip"
+                        anchors.fill: parent
+                        uiPalette: root.uiPalette
+                        uiBridge: root.uiBridge
+                        positionText: root.positionText
+                        closeButtonName: "spectrogramFullscreenCloseButton"
+                        controlsVisible: root.fullscreenControlsVisible
+                        pointerActivity: root.noteFullscreenPointerActivity
+                        zoomLevel: root.zoomLevel
+                        resetView: root.resetView
+                        errorController: root.errorController
+                        closeViewer: root.closeViewer
                     }
                 }
             }

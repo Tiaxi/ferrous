@@ -17,6 +17,9 @@ Item {
     property real horizontalPadding: root.isLabel ? 6 : 2
     property real verticalPadding: root.isLabel ? 0 : 2
     property real radius: root.isLabel ? 3 : 4
+    // Whether presses, clicks and double-clicks on the plate, between its
+    // buttons too, stay on it rather than reach the view under it.
+    property bool takesPointer: false
     default property alias contentData: content.data
 
     implicitWidth: Math.max(20, content.implicitWidth + 2 * root.horizontalPadding)
@@ -43,6 +46,17 @@ Item {
         anchors.fill: parent
         radius: root.radius
         color: root.plotColors.plotPlate
+    }
+
+    MouseArea {
+        objectName: "plotPlatePointerArea"
+        anchors.fill: parent
+        anchors.margins: -1
+        enabled: root.takesPointer
+        visible: root.takesPointer
+        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+        // Taken, so a double-click on the plate never reaches the view's.
+        onDoubleClicked: function(mouse) { mouse.accepted = true }
     }
 
     Row {

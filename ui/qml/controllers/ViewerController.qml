@@ -24,6 +24,12 @@ QtObject {
     property string comparisonCandidateInfoSource: ""
     property string comparisonLabel: ""
     property bool spectrogramViewerOpen: false
+    // Where the album art viewer's image is from: "itunes" for a candidate
+    // from the iTunes artwork search, "embedded" for art the track's file
+    // holds, "folder" for an image beside the music.
+    readonly property string albumArtSourceKind: !root.albumArtViewerShowsCurrentTrack
+        ? "itunes"
+        : ((root.albumArtViewerFileInfo || ({})).embeddedCover === true ? "embedded" : "folder")
     property int visualizationMode: 0
 
     function setVisualizationMode(mode) {
@@ -83,32 +89,6 @@ QtObject {
         }
         root.uiBridge.requestImageFileDetails(infoSource)
         root.albumArtViewerFileInfo = root.uiBridge.cachedImageFileDetails(infoSource) || ({})
-    }
-
-    function albumArtInfoOverlayText() {
-        const info = root.albumArtViewerFileInfo || ({})
-        const lines = []
-
-        if ((info.fileName || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art file name", "File: %1", info.fileName))
-        }
-        if ((info.resolutionText || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art image size", "Resolution: %1", info.resolutionText))
-        }
-        if ((info.fileSizeText || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art file size", "Size: %1", info.fileSizeText))
-        }
-        if ((info.fileType || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art file type", "Type: %1", info.fileType))
-        }
-        if ((info.mimeType || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art MIME type", "MIME: %1", info.mimeType))
-        }
-        if ((info.path || "").length > 0) {
-            lines.push(I18n.i18nc("@info album art file path", "Path: %1", info.path))
-        }
-
-        return lines.join("\n")
     }
 
     function openAlbumArtViewer() {

@@ -27,12 +27,25 @@ ApplicationWindow {
     // Shown by windowLayoutController once the saved layout is applied.
     visible: false
     readonly property string appDisplayName: "Ferrous"
-    title: {
+    // A viewer has no title strip in the main window, so the window's title
+    // names it: "Morning Tide Field — Ferrous Visualization".
+    readonly property string visualizationViewerName: I18n.i18nc(
+        "@title:window the visualization viewer; %1 is the application name", "%1 Visualization",
+        root.appDisplayName)
+    readonly property string albumArtViewerName: I18n.i18nc(
+        "@title:window the album art viewer; %1 is the application name", "%1 Album Art",
+        root.appDisplayName)
+    function titleFor(name) {
         const context = playbackController.windowTitleContext()
         return context.length > 0
-            ? I18n.i18nc("@title:window now playing, application name", "%1 \u2014 %2", context, root.appDisplayName)
-            : root.appDisplayName
+            ? I18n.i18nc("@title:window now playing, application name", "%1 \u2014 %2", context, name)
+            : name
     }
+    title: root.titleFor(root.useWholeScreenViewerMode
+        ? root.appDisplayName
+        : (viewerController.spectrogramViewerOpen
+            ? root.visualizationViewerName
+            : (viewerController.albumArtViewerOpen ? root.albumArtViewerName : root.appDisplayName)))
     readonly property int albumArtViewerDecodeWidth: Math.max(
         1024,
         Math.ceil(Math.max(
@@ -918,13 +931,7 @@ ApplicationWindow {
         objectName: "resetVisualizationAction"
         text: I18n.i18nc("@action:inmenu", "&Reset Visualization View")
         icon.name: "zoom-original"
-        onTriggered: {
-            if (viewerController.visualizationMode === 0) {
-                spectrogramSurface.resetForCurrentMode()
-            } else {
-                waveformSurface.waveformItem.resetZoom()
-            }
-        }
+        onTriggered: visualizationSurface.resetView()
     }
 
     // Playback
@@ -1513,13 +1520,28 @@ ApplicationWindow {
         visible: parent !== null
         anchors.fill: parent
         // What the plot keeps clear of in its top right corner: the mode
-        // switch, and in a viewer the close button beside it.
+        // switch, and in the viewer in the main window its controls beside it.
         readonly property size reservedCorner: Qt.size(
             plotLayer.reservedCorner.width - plotLayer.meterWidth,
             Math.max(plotLayer.reservedCorner.height,
                      viewerController.spectrogramViewerOpen
                          ? spectrogramViewerShell.reservedCorner.height : 0))
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
+        // The shown plot's zoom, 1 at the default.
+        readonly property real zoomLevel: visualizationSurface.spectrogramShown
+            ? spectrogramSurface.zoomLevel
+            : waveformSurface.waveformItem.zoomLevel
+
+        // View › Reset Visualization View, and the viewers' Reset: the
+        // shown plot at its default zoom, the spectrogram drawn afresh.
+        function resetView() {
+            if (visualizationSurface.spectrogramShown) {
+                spectrogramSurface.resetZoom()
+                spectrogramSurface.resetForCurrentMode()
+            } else {
+                waveformSurface.waveformItem.resetZoom()
+            }
+        }
 
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
@@ -1592,7 +1614,7 @@ ApplicationWindow {
         viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         popupTransitionMs: root.uiPopupTransitionMs
-        titleText: root.title
+        titleText: root.titleFor(root.visualizationViewerName)
         closeViewer: viewerController.closeSpectrogramViewer
         visualizationMode: viewerController.visualizationMode
         setVisualizationMode: viewerController.setVisualizationMode
@@ -1601,6 +1623,11 @@ ApplicationWindow {
         playbackPlaying: root.uiBridge.playbackState === "Playing"
         viewerActions: root.viewerActions
         errorController: errorController
+        uiBridge: root.uiBridge
+        positionText: playbackController.positionText
+        zoomLevel: visualizationSurface.zoomLevel
+        resetView: visualizationSurface.resetView
+        cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1618,7 +1645,7 @@ ApplicationWindow {
         viewerOpen: viewerController.albumArtViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         popupTransitionMs: root.uiPopupTransitionMs
-        titleText: root.title
+        titleText: root.titleFor(root.albumArtViewerName)
         closeViewer: viewerController.closeAlbumArtViewer
         toggleInfoVisible: function() {
             viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
@@ -1627,6 +1654,12 @@ ApplicationWindow {
         openContextMenu: function() { albumArtSurface.openContextMenu() }
         viewerActions: root.viewerActions
         errorController: errorController
+        uiPalette: root.uiPalette
+        uiBridge: root.uiBridge
+        positionText: playbackController.positionText
+        infoVisible: viewerController.albumArtInfoVisible
+        zoomLevel: albumArtSurface.zoom
+        resetView: albumArtSurface.resetView
     }
 
     Viewers.AlbumArtSurface {
@@ -1645,16 +1678,17 @@ ApplicationWindow {
         initialViewToken: viewerController.albumArtViewResetToken
         viewerDecodeWidth: root.albumArtViewerDecodeWidth
         viewerDecodeHeight: root.albumArtViewerDecodeHeight
-        infoOverlayText: viewerController.albumArtInfoOverlayText()
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
         closeViewer: viewerController.closeAlbumArtViewer
-        toggleInfoVisible: function() {
-            viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
-        }
         focusFullscreen: albumArtViewerShell.focusFullscreen
-        comparisonLabel: viewerController.comparisonLabel
         comparisonModeAvailable: viewerController.comparisonModeAvailable
+        switchComparisonImage: viewerController.switchComparisonImage
+        uiPalette: root.uiPalette
+        fileInfo: viewerController.albumArtViewerFileInfo
+        sourceKind: viewerController.albumArtSourceKind
+        // In the main window, clear of the viewer's controls over the art.
+        infoTopInset: root.useWholeScreenViewerMode ? 0 : 32
     }
 
     Item {

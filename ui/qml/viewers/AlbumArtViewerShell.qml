@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import FerrousUi 1.0
 import "../components" as Components
 
 Item {
@@ -17,11 +18,21 @@ Item {
     required property var toggleInfoVisible
     required property var switchComparisonImage
     required property var openContextMenu
+    required property var uiPalette
     // Actions whose shortcuts also work in the viewer.
     property var viewerActions: []
-    // The app's errors; the viewer shows the newest error, as it hides the
-    // main window's status bar.
+    // The app's errors. The viewer covers the main window's status bar, so
+    // new ones show as a button that opens Recent Issues.
     property var errorController: null
+    // The playing track and the playback clock's position text, for the
+    // title strip.
+    property var uiBridge: null
+    property string positionText: "00:00"
+    // Whether the image's details show, for the info button.
+    property bool infoVisible: false
+    // The art's zoom, 1 when it fits, and what fits it again.
+    property real zoomLevel: 1.0
+    property var resetView: null
 
     property alias popupHost: albumArtPopupHost
     // The window of the viewer over the whole screen, and the item in it
@@ -76,6 +87,20 @@ Item {
             albumArtFullscreenWindowLoader.active = true
         }
         Qt.callLater(root.syncPresentation)
+    }
+
+    // The info toggle: the tint while the details show, the ring only for
+    // keyboard focus.
+    component InfoButton: Components.ViewerToolButton {
+        uiPalette: root.uiPalette
+        // Checked follows the viewer, which the I key toggles too.
+        checked: root.infoVisible
+        text: I18n.i18nc("@action:button", "Image Details")
+        toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Image Details (%1)", "I")
+        icon.name: "documentinfo"
+        Accessible.checkable: true
+        Accessible.checked: root.infoVisible
+        onClicked: root.toggleInfoVisible()
     }
 
     Popup {
@@ -133,25 +158,9 @@ Item {
             }
         }
 
+        // The art on the view colour.
         background: Rectangle {
-            color: "#000000"
-            opacity: 0.87
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.LeftButton
-            onClicked: root.closeViewer()
-        }
-
-        Components.ViewerCloseButton {
-            z: 20
-            anchors.top: parent.top
-            anchors.right: parent.right
-            anchors.margins: 12
-            fillColor: Qt.rgba(1, 1, 1, 0.16)
-            borderColor: Qt.rgba(1, 1, 1, 0.52)
-            onClicked: root.closeViewer()
+            color: root.uiPalette.view
         }
 
         Item {
@@ -159,15 +168,31 @@ Item {
             anchors.fill: parent
         }
 
-        Components.ErrorBanner {
-            objectName: "albumArtPopupErrorBanner"
-            z: 30
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottomMargin: 24
-            width: Math.min(parent.width - 48, 720)
-            errorController: root.errorController
-            active: root.viewerOpen && !root.useWholeScreenViewerMode
+        // The window's title names the viewer, so it has no title strip:
+        // its controls are on a plate in the top right corner, on the art.
+        Components.PlotPlate {
+            objectName: "albumArtPopupControls"
+            z: 20
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: 4
+            plotColors: root.uiPalette.waveformPlot
+            uiPalette: root.uiPalette
+            takesPointer: true
+
+            Components.ViewerControls {
+                uiPalette: root.uiPalette
+                closeButtonName: "albumArtPopupCloseButton"
+                zoomLevel: root.zoomLevel
+                resetView: root.resetView
+                resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Window")
+                errorController: root.errorController
+                closeViewer: root.closeViewer
+
+                InfoButton {
+                    objectName: "albumArtPopupInfoButton"
+                }
+            }
         }
     }
 
@@ -189,7 +214,7 @@ Item {
                 visibility: root.viewerOpen && root.useWholeScreenViewerMode
                     ? Window.FullScreen
                     : Window.Hidden
-                color: "#000000"
+                color: root.uiPalette.view
                 title: root.titleText
 
                 onVisibilityChanged: function() {
@@ -205,14 +230,34 @@ Item {
                     }
                 }
 
+                Shortcut {
+                    sequence: "I"
+                    context: Qt.WindowShortcut
+                    enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
+                    onActivated: root.toggleInfoVisible()
+                }
+
+                // The art, under the title strip.
+                Item {
+                    anchors.fill: parent
+                    anchors.topMargin: albumArtStrip.height
+
+                    Item {
+                        id: albumArtWindowHost
+                        anchors.fill: parent
+                    }
+                }
+
                 FocusScope {
                     id: albumArtFullscreenFocusSink
-                    anchors.fill: parent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: albumArtStrip.height
                     focus: albumArtFullscreenWindow.visibility === Window.FullScreen
-                    // Above the viewer, and inside the scope that handles the
-                    // viewer's keys, so they work while the error's buttons have focus.
-                    z: 30
 
+                    // The viewer's keys, also while one of the strip's
+                    // buttons has focus.
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Escape) {
                             event.accepted = true
@@ -227,47 +272,23 @@ Item {
                         }
                     }
 
-                    Components.ErrorBanner {
-                        objectName: "albumArtFullscreenErrorBanner"
-                        anchors.bottom: parent.bottom
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottomMargin: 24
-                        width: Math.min(parent.width - 48, 720)
-                        errorController: root.errorController
-                        active: root.viewerOpen && root.useWholeScreenViewerMode
-                    }
-                }
-
-                Shortcut {
-                    sequence: "I"
-                    context: Qt.WindowShortcut
-                    enabled: albumArtFullscreenWindow.visibility === Window.FullScreen
-                    onActivated: root.toggleInfoVisible()
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.LeftButton
-                    onPressed: root.focusFullscreen()
-                    onClicked: root.closeViewer()
-                }
-
-                Components.ViewerCloseButton {
-                    z: 20
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.margins: 12
-                    fillColor: Qt.rgba(1, 1, 1, 0.16)
-                    borderColor: Qt.rgba(1, 1, 1, 0.52)
-                    onClicked: root.closeViewer()
-                }
-
-                Item {
-                    anchors.fill: parent
-
-                    Item {
-                        id: albumArtWindowHost
+                    Components.ViewerStrip {
+                        id: albumArtStrip
+                        objectName: "albumArtFullscreenStrip"
                         anchors.fill: parent
+                        uiPalette: root.uiPalette
+                        uiBridge: root.uiBridge
+                        positionText: root.positionText
+                        closeButtonName: "albumArtFullscreenCloseButton"
+                        zoomLevel: root.zoomLevel
+                        resetView: root.resetView
+                        resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Screen")
+                        errorController: root.errorController
+                        closeViewer: root.closeViewer
+
+                        InfoButton {
+                            objectName: "albumArtFullscreenInfoButton"
+                        }
                     }
                 }
             }
