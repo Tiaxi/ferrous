@@ -296,6 +296,7 @@ private slots:
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesAreSeenWhenThePopupCloses();
+    void thePanesEndsEarlyLinkOpensItsIssue();
     void editTagsMarksAChangedFieldAndColumnAndReverts();
     void editTagsTableHeaderUsesTheQueuesHeaderStyle();
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
@@ -1008,6 +1009,54 @@ void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {
     for (QQuickItem *heading : itemsNamed(window->contentItem(), QStringLiteral("errorHistoryHeading"))) {
         QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::Normal);
     }
+}
+
+void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("queuePaths", QStringList{QStringLiteral("/music/a.flac"), kStaticPath}));
+    QVERIFY(bridge->setProperty("queueLength", 2));
+    // The backend's warning for a cut-off file, as the analysis reports it.
+    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, kEndsEarly), Q_ARG(int, 1),
+                                      Q_ARG(int, 0), Q_ARG(QString, kStaticPath)));
+    // The pane's message after the cut, and its way to Recent Issues.
+    QVERIFY(bridge->setProperty("currentTrackPath", kStaticPath));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QVERIFY(bridge->setProperty("waveformCoverageSeconds", 242.6));
+    QVERIFY(bridge->setProperty("waveformEndsEarly", true));
+    QQuickItem *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(layer != nullptr);
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    QQuickItem *text = nullptr;
+    QTRY_VERIFY((text = visibleNamed(window, QStringLiteral("plotEndsEarlyText"))) != nullptr);
+    QCOMPARE(text->property("text").toString(), QStringLiteral("The file ends at 4:02."));
+    QQuickItem *link = visibleNamed(window, QStringLiteral("plotEndsEarlyLink"));
+    QVERIFY(link != nullptr);
+    link->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Return);
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
+    // The spec's title and description, with the time the pane gives in it.
+    QCOMPARE(itemsNamed(rows[0], QStringLiteral("errorHistoryHeading")).at(0)->property("text").toString(),
+             QStringLiteral("04 - Static.flac ends early"));
+    QCOMPARE(itemsNamed(rows[0], QStringLiteral("errorHistoryMessage")).at(0)->property("text").toString(),
+             QStringLiteral("The last FLAC frame is cut off, so playback stops at 4:02."));
+    QCOMPARE(hex(itemsNamed(rows[0], QStringLiteral("errorHistoryGlyph")).at(0)->property("color").value<QColor>()),
+             hex(tokenOf(window, "negative")));
+    // One action.
+    QList<QQuickItem *> actions;
+    for (QQuickItem *action : itemsNamed(rows[0], QStringLiteral("errorHistoryActionButton"))) {
+        if (action->isVisible()) {
+            actions.push_back(action);
+        }
+    }
+    QCOMPARE(actions.size(), 1);
+    QCOMPARE(actions.first()->property("text").toString(), QStringLiteral("Show in Queue"));
 }
 
 void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
