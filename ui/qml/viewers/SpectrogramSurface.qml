@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import QtQuick.Layouts 1.15
+import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ChannelLabels.js" as ChannelLabels
+import "../logic/PlotLanes.js" as PlotLanes
 
 Item {
     id: root
@@ -17,6 +18,33 @@ Item {
     property var seekCommitted: null
 
     property bool viewerMode: false
+    // The plot's width: the level meter's column takes the rest.
+    property real plotWidth: root.width
+    // A time of the track to follow, such as where its file is cut off, or
+    // -1; markerX is where the plot draws it, NaN while it does not.
+    property real markerSeconds: -1
+    readonly property real markerX: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return first && first.spectrogramItem ? first.spectrogramItem.markerX : NaN
+    }
+    // The lanes, each one's label ("" for none) and the one under the pointer.
+    readonly property int laneCount: Math.max(1, root.channelDescriptors.length)
+    readonly property var laneLabels: {
+        const labels = []
+        for (let i = 0; i < root.channelDescriptors.length; ++i) {
+            labels.push(root.channelDescriptors[i].showLabel
+                ? ChannelLabels.label(root.channelDescriptors.length, i,
+                                      root.uiBridge.currentTrackChannelLabels || [])
+                : "")
+        }
+        return labels
+    }
+    property int hoveredLane: -1
+    // Whether the plot waits for the track's first columns.
+    readonly property bool awaitingData: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return !(first && first.spectrogramItem && first.spectrogramItem.precomputedReady)
+    }
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
@@ -102,13 +130,6 @@ Item {
         if (root.pointerActivity) {
             root.pointerActivity(x, y)
         }
-    }
-
-    function channelButtonsVisible(paneHovered, controlsHovered) {
-        const visibility = root.uiBridge.channelButtonsVisibility
-        return root.interactiveOverlaysVisible
-            && (visibility === 2
-                || (visibility === 1 && (paneHovered || controlsHovered)))
     }
 
     function sameDescriptors(next) {
@@ -239,9 +260,17 @@ Item {
         }
     }
 
-    ColumnLayout {
-        anchors.fill: parent
-        spacing: root.channelDescriptors.length > 1 ? 2 : 0
+    // The seams between the lanes.
+    Rectangle {
+        objectName: "spectrogramLaneSeams"
+        width: root.plotWidth
+        height: root.height
+        color: root.uiPalette.spectrogramPlot.plotLaneSeam
+    }
+
+    Item {
+        width: root.plotWidth
+        height: root.height
 
         Repeater {
             id: spectrogramRepeater
@@ -250,10 +279,9 @@ Item {
             delegate: Item {
                 property alias spectrogramItem: spectrogramPaneItem
 
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                Layout.preferredHeight: 1
-                Layout.minimumHeight: 0
+                width: root.plotWidth
+                y: PlotLanes.top(index, spectrogramRepeater.count, root.height)
+                height: PlotLanes.laneHeight(index, spectrogramRepeater.count, root.height)
 
                 Rectangle {
                     objectName: "spectrogramLaneFloor"
@@ -280,7 +308,9 @@ Item {
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
                         && root.interactiveOverlaysVisible
                     gridEnabled: root.uiBridge.showSpectrogramScale
-                    showTimeLabels: index === spectrogramRepeater.count - 1
+                    // The time scale runs along the top of the first lane.
+                    showTimeLabels: index === 0
+                    markerSeconds: index === 0 ? root.markerSeconds : -1
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
@@ -343,130 +373,25 @@ Item {
                     HoverHandler {
                         id: paneHover
                         cursorShape: root.pointerCursorShape
-                        onPointChanged: root.notePointerActivity(
-                            point.scenePosition.x, point.scenePosition.y)
-                    }
-                }
-
-                Row {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.margins: 8
-                    spacing: 4
-                    visible: modelData.showLabel
-                    z: 1
-
-                    HoverHandler {
-                        id: channelControlsHover
-                        cursorShape: root.pointerCursorShape
+                        onHoveredChanged: {
+                            if (hovered) {
+                                root.hoveredLane = index
+                            } else if (root.hoveredLane === index) {
+                                root.hoveredLane = -1
+                            }
+                        }
                         onPointChanged: root.notePointerActivity(
                             point.scenePosition.x, point.scenePosition.y)
                     }
 
-                    // Channel label (always visible).
-                    Rectangle {
-                        objectName: "spectrogramChannelMarker"
-                        width: labelText.implicitWidth + 8
-                        height: labelText.implicitHeight + 2
-                        radius: 4
-                        color: spectrogramPaneItem.channelMuted
-                            ? Qt.rgba(0.4, 0.0, 0.0, 0.35)
-                            : Qt.rgba(0.0, 0.0, 0.0, 0.18)
-
-                        Text {
-                            id: labelText
-                            objectName: "spectrogramChannelLabel"
-                            anchors.centerIn: parent
-                            // Late metadata updates labels without replacing the
-                            // channel delegates and losing their spectral history.
-                            text: ChannelLabels.label(root.channelDescriptors.length, index,
-                                                      root.uiBridge.currentTrackChannelLabels || [])
-                            color: spectrogramPaneItem.channelMuted
-                                ? Qt.rgba(0.65, 0.35, 0.35, 0.9)
-                                : Qt.rgba(0.90, 0.93, 0.98, 0.74)
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize
-                            font.weight: Font.Medium
-                            font.strikeout: spectrogramPaneItem.channelMuted
-                        }
-                    }
-
-                    // M (mute) button.
-                    Rectangle {
-                        objectName: "spectrogramMuteButton"
-                        // The pane also greys out when a solo leaves it out.
-                        property bool active: (root.uiBridge.mutedChannels || [])[modelData.channelIndex] === true
-                        visible: root.channelButtonsVisible(
-                            paneHover.hovered, channelControlsHover.hovered)
-                        width: muteText.implicitWidth + 10
-                        height: muteText.implicitHeight + 2
-                        radius: 3
-                        color: active
-                            ? Qt.rgba(0.78, 0.24, 0.24, 0.5)
-                            : Qt.rgba(0.0, 0.0, 0.0, 0.35)
-
-                        Text {
-                            id: muteText
-                            anchors.centerIn: parent
-                            text: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
-                            color: parent.active
-                                ? Qt.rgba(1.0, 0.78, 0.78, 0.95)
-                                : Qt.rgba(0.71, 0.71, 0.78, 0.8)
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.9
-                            font.weight: Font.DemiBold
-                            font.letterSpacing: 0.5
-                        }
-
-                        MouseArea {
-                            objectName: "spectrogramMuteMouseArea"
-                            anchors.fill: parent
-                            acceptedButtons: Qt.AllButtons
-                            hoverEnabled: true
-                            preventStealing: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: function(mouse) {
-                                if (mouse.button === Qt.LeftButton)
-                                    root.uiBridge.toggleChannelMute(modelData.channelIndex)
-                            }
-                        }
-                    }
-
-                    // S (solo) button.
-                    Rectangle {
-                        objectName: "spectrogramSoloButton"
-                        property bool active: (root.uiBridge.soloedChannels || [])[modelData.channelIndex] === true
-                        visible: root.channelButtonsVisible(
-                            paneHover.hovered, channelControlsHover.hovered)
-                        width: soloText.implicitWidth + 10
-                        height: soloText.implicitHeight + 2
-                        radius: 3
-                        color: active
-                            ? Qt.rgba(0.71, 0.63, 0.16, 0.55)
-                            : Qt.rgba(0.0, 0.0, 0.0, 0.35)
-
-                        Text {
-                            id: soloText
-                            anchors.centerIn: parent
-                            text: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
-                            color: parent.active
-                                ? Qt.rgba(1.0, 0.94, 0.55, 0.95)
-                                : Qt.rgba(0.71, 0.71, 0.78, 0.8)
-                            font.pointSize: Kirigami.Theme.smallFont.pointSize * 0.9
-                            font.weight: Font.DemiBold
-                            font.letterSpacing: 0.5
-                        }
-
-                        MouseArea {
-                            objectName: "spectrogramSoloMouseArea"
-                            anchors.fill: parent
-                            acceptedButtons: Qt.AllButtons
-                            hoverEnabled: true
-                            preventStealing: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: function(mouse) {
-                                if (mouse.button === Qt.LeftButton)
-                                    root.uiBridge.soloChannel(modelData.channelIndex)
-                            }
-                        }
+                    // The crosshair's readout, beside the pointer.
+                    ToolTip {
+                        objectName: "spectrogramCrosshairToolTip"
+                        x: paneHover.point.position.x + 14
+                        y: paneHover.point.position.y - height - 4
+                        visible: paneHover.hovered && spectrogramPaneItem.crosshairEnabled
+                            && spectrogramPaneItem.crosshairReadout.length > 0
+                        text: spectrogramPaneItem.crosshairReadout
                     }
                 }
             }

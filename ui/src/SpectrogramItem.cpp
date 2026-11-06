@@ -8,6 +8,7 @@
 #include "ViewCorner.h"
 
 #include <KLocalizedString>
+#include <QGuiApplication>
 #include <QFont>
 #include <QFontMetrics>
 #include <QDateTime>
@@ -117,8 +118,23 @@ constexpr qint64 kSeekTraceWindowMs = 1800;
 constexpr qint64 kSmoothnessWindowMs = 2000;
 constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
-const QColor kBackgroundColor(0, 0, 0);
+// The spectrogram's plot set (UiPalette.spectrogramPlot), the same in both
+// themes: plotBg, the floor of its colour map, and what is drawn on it.
+const QColor kBackgroundColor(0x14, 0x06, 0x2e);
 const QColor kOverlayColor(190, 190, 200, 150);
+// Scale text, 12 px plotText, in a 1 px outline of plotOutline.
+const QColor kScaleTextColor(0xec, 0xe8, 0xf4);
+const QColor kScaleOutlineColor(0x14, 0x06, 0x2e);
+// plotTick.
+const QColor kScaleTickColor(236, 232, 244, 191);
+// The playhead: a 1 px light core cased in 1 px of black 60% on each side.
+// The core is all but opaque, as the playhead has always been translucent:
+// with an opaque one, Qt's software renderer leaves a seam of background in
+// the canvas fragments a zoom preview scales (spectrogramSceneGraphDrawsTheCanvas).
+const QColor kPlayheadColor(0xe8, 0xe8, 0xe8, 254);
+const QColor kPlayheadCasingColor(0, 0, 0, 153);
+// The crosshair: dashed white 35%.
+const QColor kCrosshairLineColor(255, 255, 255, 89);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
 std::atomic<quint64> g_lastLoggedSeekProfileIncidentGeneration{0};
 std::atomic<quint64> g_lastLoggedSeekProfileSummaryGeneration{0};
@@ -455,11 +471,13 @@ struct SpectrogramSceneNode final : public QSGNode {
         background = new QSGSimpleRectNode();
         tilesRoot = new QSGNode();
         latest = new QSGSimpleTextureNode();
+        playheadCasing = new QSGSimpleRectNode();
         playhead = new QSGSimpleRectNode();
         overlay = new QSGSimpleTextureNode();
         appendChildNode(background);
         appendChildNode(tilesRoot);
         appendChildNode(latest);
+        appendChildNode(playheadCasing);
         appendChildNode(playhead);
         appendChildNode(freqGridLayer.root);
         appendChildNode(timeGridLayer.root);
@@ -682,6 +700,7 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGSimpleRectNode *background{nullptr};
     QSGNode *tilesRoot{nullptr};
     QSGSimpleTextureNode *latest{nullptr};
+    QSGSimpleRectNode *playheadCasing{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
     SpectrogramOverlayLayer freqGridLayer;
     SpectrogramOverlayLayer timeGridLayer;
@@ -833,7 +852,7 @@ QString formatFrequencyLabel(double hz) {
     }
     if (hz >= 1000.0) {
         const double kHz = hz / 1000.0;
-        if (kHz >= 10.0) {
+        if (kHz >= 10.0 || std::abs(kHz - std::round(kHz)) < 1e-6) {
             return kilohertzFormat().arg(qRound(kHz));
         }
         return kilohertzFormat().arg(kHz, 0, 'f', 1);
@@ -858,38 +877,6 @@ QString formatTimeLabel(double seconds) {
     return QStringLiteral("%1:%2")
         .arg(m)
         .arg(s, 2, 10, QLatin1Char('0'));
-}
-
-// Precise frequency label for crosshair: always 1 Hz resolution.
-QString formatFrequencyLabelPrecise(double hz) {
-    if (hz < 0.0) {
-        return {};
-    }
-    return hertzFormat().arg(qRound(hz));
-}
-
-// Precise time label for crosshair: (HH:)MM:SS.mmm with milliseconds.
-QString formatTimeLabelPrecise(double seconds) {
-    if (seconds < 0.0) {
-        return {};
-    }
-    const int totalMs = static_cast<int>(std::round(seconds * 1000.0));
-    const int ms = totalMs % 1000;
-    const int totalSec = totalMs / 1000;
-    const int h = totalSec / 3600;
-    const int m = (totalSec % 3600) / 60;
-    const int s = totalSec % 60;
-    if (h > 0) {
-        return QStringLiteral("%1:%2:%3.%4")
-            .arg(h)
-            .arg(m, 2, 10, QLatin1Char('0'))
-            .arg(s, 2, 10, QLatin1Char('0'))
-            .arg(ms, 3, 10, QLatin1Char('0'));
-    }
-    return QStringLiteral("%1:%2.%3")
-        .arg(m)
-        .arg(s, 2, 10, QLatin1Char('0'))
-        .arg(ms, 3, 10, QLatin1Char('0'));
 }
 
 // Convert widget pixel X to track time, accounting for sub-pixel scroll phase.
@@ -1333,13 +1320,23 @@ QString fpsCounterText(int fps) {
     return format.arg(fps);
 }
 
-constexpr int kGridLabelPadding = 2;
-constexpr int kCrosshairLabelPadding = 3;
-
-QFont overlayLabelFont(SpectrogramOverlayImage::Kind kind) {
-    QFont font;
-    font.setPixelSize(kind == SpectrogramOverlayImage::CrosshairLabel ? 10 : 9);
+// The scale's text: the small text of the design, 12 px at the default
+// 10 pt font (UiPalette.smallPointSize).
+QFont scaleLabelFont() {
+    QFont font = QGuiApplication::font();
+    const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
+    font.setPointSizeF(points * 0.9);
     return font;
+}
+
+// A scale label's outline, around its text on every side.
+constexpr int kScaleLabelOutline = 1;
+
+// The logical size of a scale label of `text`, with its outline.
+QSize scaleLabelSize(const QString &text) {
+    const QFontMetrics metrics(scaleLabelFont());
+    return {metrics.horizontalAdvance(text) + 2 * kScaleLabelOutline,
+            metrics.height() + 2 * kScaleLabelOutline};
 }
 
 // The name of an overlay image's texture.
@@ -1356,9 +1353,9 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
     const int lineWidth = deviceLineWidth(scale);
     const int length = std::max(1, image.length);
     switch (image.kind) {
-    case SpectrogramOverlayImage::DottedColumn:
+    case SpectrogramOverlayImage::DashedColumn:
         return {lineWidth, length};
-    case SpectrogramOverlayImage::DottedRow:
+    case SpectrogramOverlayImage::DashedRow:
         return {length, lineWidth};
     default:
         return {
@@ -1369,48 +1366,78 @@ QSize overlayImagePixels(const SpectrogramOverlayImage &image, double scale) {
 
 // An overlay image at `scale` device pixels to a logical one.
 QImage renderOverlayImage(const SpectrogramOverlayImage &image, double scale) {
-    const bool dottedColumn = image.kind == SpectrogramOverlayImage::DottedColumn;
-    if (dottedColumn || image.kind == SpectrogramOverlayImage::DottedRow) {
-        // In device pixels, as the crosshair has always been drawn.
+    const bool dashedColumn = image.kind == SpectrogramOverlayImage::DashedColumn;
+    if (dashedColumn || image.kind == SpectrogramOverlayImage::DashedRow) {
         const int lineWidth = deviceLineWidth(scale);
         const int length = std::max(1, image.length);
         QImage line(overlayImagePixels(image, scale), QImage::Format_ARGB32_Premultiplied);
         line.fill(Qt::transparent);
         QPainter painter(&line);
         painter.setRenderHint(QPainter::Antialiasing, false);
-        QPen dotPen(QColor(255, 255, 255, 140));
-        dotPen.setStyle(Qt::DotLine);
-        dotPen.setWidth(lineWidth);
-        painter.setPen(dotPen);
+        QPen dashPen(kCrosshairLineColor);
+        dashPen.setWidth(lineWidth);
+        dashPen.setCapStyle(Qt::FlatCap);
+        // Dashes of 4 logical pixels, 3 apart.
+        dashPen.setDashPattern({4.0 * scale / lineWidth, 3.0 * scale / lineWidth});
+        painter.setPen(dashPen);
         // A one-pixel pen draws the pixels at its coordinates, a wider one
         // the pixels around them.
         const double offset = lineWidth > 1 ? lineWidth * 0.5 : 0.0;
-        if (dottedColumn) {
-            painter.drawLine(QPointF(offset, 0.0), QPointF(offset, length - 1.0));
+        if (dashedColumn) {
+            painter.drawLine(QPointF(offset, 0.0), QPointF(offset, length));
         } else {
-            painter.drawLine(QPointF(0.0, offset), QPointF(length - 1.0, offset));
+            painter.drawLine(QPointF(0.0, offset), QPointF(length, offset));
         }
         return line;
     }
-    // A label: its rounded background and text, at device resolution.
-    const bool crosshair = image.kind == SpectrogramOverlayImage::CrosshairLabel;
-    const int pad = crosshair ? kCrosshairLabelPadding : kGridLabelPadding;
-    const QSizeF size = image.rect.size();
+    // A scale label: its text in a 1 px outline, at device resolution, as
+    // Text.Outline draws it.
     QImage label(overlayImagePixels(image, scale), QImage::Format_ARGB32_Premultiplied);
     label.setDevicePixelRatio(scale);
     label.fill(Qt::transparent);
     QPainter painter(&label);
-    painter.setRenderHint(QPainter::Antialiasing, false);
-    const QFont font = overlayLabelFont(image.kind);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    const QFont font = scaleLabelFont();
     painter.setFont(font);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(crosshair ? QColor(0, 0, 10, 160) : QColor(0, 0, 10, 180));
-    const int radius = crosshair ? 3 : 2;
-    painter.drawRoundedRect(QRectF(QPointF(0.0, 0.0), size), radius, radius);
-    painter.setPen(crosshair ? QColor(255, 255, 255, 220) : QColor(220, 220, 235, 240));
-    painter.drawText(QPointF(pad, pad + QFontMetrics(font).ascent()), image.text);
+    const QPointF origin(kScaleLabelOutline, kScaleLabelOutline + QFontMetrics(font).ascent());
+    painter.setPen(kScaleOutlineColor);
+    for (int dx = -kScaleLabelOutline; dx <= kScaleLabelOutline; ++dx) {
+        for (int dy = -kScaleLabelOutline; dy <= kScaleLabelOutline; ++dy) {
+            if (dx != 0 || dy != 0) painter.drawText(origin + QPointF(dx, dy), image.text);
+        }
+    }
+    painter.setPen(kScaleTextColor);
+    painter.drawText(origin, image.text);
     painter.end();
     return label;
+}
+
+// The crosshair's readout of a level: "−62 dB", or "−∞ dB" for silence.
+QString crosshairDecibels(double db) {
+    static const QString format = i18nc("@info:tooltip level in decibels; %1 is a number", "%1 dB");
+    if (!std::isfinite(db)) return format.arg(QStringLiteral("\u2212\u221e"));
+    const long rounded = std::lround(db);
+    return format.arg(rounded < 0 ? QStringLiteral("\u2212%1").arg(-rounded) : QString::number(rounded));
+}
+
+// The crosshair's readout of a frequency: "4.4 kHz", or "440 Hz".
+QString crosshairFrequency(double hz) {
+    if (hz >= 1000.0) return kilohertzFormat().arg(hz / 1000.0, 0, 'f', 1);
+    return hertzFormat().arg(qRound(hz));
+}
+
+// The crosshair's readout of a time in the track: "1:46.0".
+QString crosshairTime(double seconds) {
+    const long tenths = std::lround(std::max(0.0, seconds) * 10.0);
+    const long whole = tenths / 10;
+    const long hours = whole / 3600;
+    const QString rest = QStringLiteral("%1.%2")
+        .arg(whole % 60, 2, 10, QLatin1Char('0'))
+        .arg(tenths % 10);
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3").arg(hours).arg((whole / 60) % 60, 2, 10, QLatin1Char('0')).arg(rest);
+    }
+    return QStringLiteral("%1:%2").arg(whole / 60).arg(rest);
 }
 
 } // namespace
@@ -2127,6 +2154,34 @@ void SpectrogramItem::setDisplayMode(int value) {
     if (redraw) {
         update();
     }
+}
+
+double SpectrogramItem::markerSeconds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_markerSeconds;
+}
+
+void SpectrogramItem::setMarkerSeconds(double value) {
+    if (!std::isfinite(value) || value < 0.0) value = -1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_markerSeconds == value) return;
+        m_markerSeconds = value;
+    }
+    emit markerSecondsChanged();
+    update();
+}
+
+void SpectrogramItem::publishMarkerX(double x) {
+    // NaN, the marker not drawn, is not equal to itself: compare by kind.
+    if ((std::isnan(x) && std::isnan(m_markerXLaidOut)) || x == m_markerXLaidOut) return;
+    m_markerXLaidOut = x;
+    // Laid out on the render thread; the view binds on the GUI thread.
+    QMetaObject::invokeMethod(this, [this, x] {
+        if ((std::isnan(x) && std::isnan(m_markerX)) || x == m_markerX) return;
+        m_markerX = x;
+        emit markerXChanged();
+    }, Qt::QueuedConnection);
 }
 
 bool SpectrogramItem::crosshairEnabled() const {
@@ -3998,6 +4053,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
     SpectrogramOverlayFrame freqGridFrame;
     SpectrogramOverlayFrame timeGridFrame;
+    // Where markerSeconds is drawn; NaN if it is not.
+    double markerX = std::numeric_limits<double>::quiet_NaN();
     SpectrogramOverlayFrame crosshairFrame;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
@@ -4429,12 +4486,17 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const QRectF pane(0.0, 0.0, cw / scale, ch / scale);
             const auto placeOverlay = [&](const SpectrogramOverlayLayout &layout,
                                           int shift,
-                                          SpectrogramOverlayFrame &frame) {
-                // `shift` moves it that many device pixels left.
+                                          SpectrogramOverlayFrame &frame,
+                                          QRectF shown = QRectF()) {
+                // `shift` moves it that many device pixels left. With
+                // `shown`, lines that start outside it are left out, and
+                // so are images centred outside it.
+                if (shown.isNull()) shown = pane;
                 for (const QRect &line : layout.lines) {
                     const QRectF rect((line.x() - shift) / scale, line.y() / scale,
                         line.width() / scale, line.height() / scale);
-                    if (rect.intersects(pane)) {
+                    if (rect.intersects(pane) && rect.left() >= shown.left()
+                        && rect.left() <= shown.right()) {
                         frame.lines.push_back(rect);
                     }
                 }
@@ -4446,7 +4508,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                         std::round(image.rect.y() * scale) / scale,
                         pixels.width() / scale,
                         pixels.height() / scale);
-                    if (!rect.intersects(pane)) {
+                    if (!rect.intersects(pane) || rect.center().x() < shown.left()
+                        || rect.center().x() > shown.right()) {
                         continue;
                     }
                     SpectrogramPlacedOverlayImage placed{image.key, rect, QImage()};
@@ -4477,7 +4540,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // laid out again only when the shift exhausts the padding.
             // The time grid and the crosshair's readout follow the data,
             // not the scaled preview, so they wait for the data.
-            if (m_gridEnabled && m_binsPerColumn > 1 && !zoomPreviewShown) {
+            if (m_gridEnabled && m_showTimeLabels && m_binsPerColumn > 1 && !zoomPreviewShown) {
                 const int timeGridPadding = devicePixels(400.0, scale);
                 // The pixel shift accounts for both displayLeft advancement
                 // and drawX changes (critical in rolling mode where drawX
@@ -4498,7 +4561,22 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                     updateTimeGridOverlayLocked(cw, ch, timeGridPadding, displayLeft, rollingMode, cps, drawX);
                     shift = 0;
                 }
-                placeOverlay(m_timeGrid, shift, timeGridFrame);
+                // Within 48 px of the left edge, and of the mode switch and
+                // 40 px beside it on the right, the time scale shows nothing.
+                const double clearRight = static_cast<double>(w) - m_reservedCorner.width() - 40.0;
+                placeOverlay(m_timeGrid, shift, timeGridFrame,
+                             QRectF(48.0, 0.0, std::max(0.0, clearRight - 48.0), static_cast<double>(h)));
+            }
+
+            // Where the marker's time is, for the view: a time of the track
+            // like the time scale's.
+            if (m_markerSeconds >= 0.0 && m_precomputedHopSize > 0) {
+                const double cps = static_cast<double>(m_precomputedSampleRateHz)
+                    / static_cast<double>(m_precomputedHopSize);
+                const double deviceX = timeToPixelX(
+                    m_markerSeconds + m_gaplessPositionOffset, displayLeft, rollingMode,
+                    m_rollingEpoch, cps, drawX, canvasZoomLocked());
+                markerX = std::round(deviceX / scale);
             }
 
             // Crosshair overlay — laid out again on mouse move or display
@@ -4671,19 +4749,27 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     }
 
     if (showPlayhead) {
+        // The casing: a line as wide as the core on each side of it, within
+        // the item.
+        const double casingLeft = std::max(0.0, playheadRect.left() - playheadRect.width());
+        const double casingRight = std::min(static_cast<double>(w), playheadRect.right() + playheadRect.width());
+        node->playheadCasing->setRect(QRectF(casingLeft, playheadRect.top(),
+                                             casingRight - casingLeft, playheadRect.height()));
+        node->playheadCasing->setColor(kPlayheadCasingColor);
         node->playhead->setRect(playheadRect);
-        node->playhead->setColor(QColor(255, 255, 255, 128));
+        node->playhead->setColor(kPlayheadColor);
     } else {
+        node->playheadCasing->setRect(QRectF());
         node->playhead->setRect(QRectF());
     }
 
-    // The grids and the crosshair: lines, and small images one texel to a
+    // The scale and the crosshair: ticks, and small images one texel to a
     // device pixel.
-    const QColor gridLineColor(255, 255, 255, 50);
-    node->showOverlay(node->freqGridLayer, freqGridFrame, gridLineColor, currentWindow);
-    node->showOverlay(node->timeGridLayer, timeGridFrame, gridLineColor, currentWindow);
+    node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow);
+    node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
+    publishMarkerX(markerX);
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {
         const QRectF target = ViewCorner::fpsCounterRect(
@@ -5043,16 +5129,13 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     int width, int height,
     qint64 displayLeft, bool rollingMode,
     double columnsPerSecond, double drawX) {
-    // width, height and drawX are in device pixels; the labels are laid out
-    // in logical ones.
+    // width, height and drawX are in device pixels.
     const double scale = m_canvasScale;
     const double logicalDrawX = drawX / scale;
     m_crosshair = SpectrogramOverlayLayout{};
     m_crosshair.size = QSize(width, height);
     m_crosshairVerticalLineRect = QRect();
     m_crosshairHorizontalLineRect = QRect();
-    m_crosshairFreqLabelRect = QRect();
-    m_crosshairTimeLabelRect = QRect();
     m_crosshairDirty = false;
     m_crosshairCachedDisplayLeft = displayLeft;
     m_crosshairCachedDrawX = logicalDrawX;
@@ -5063,8 +5146,20 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     // use the shared X coordinate propagated from the hovered pane.
     const bool localHover = m_hoverActive;
     const bool hasSharedX = m_crosshairSharedX >= 0.0;
+    QString readout;
+    const auto publishReadout = [this](const QString &text) {
+        if (text == m_crosshairLaidOutReadout) return;
+        m_crosshairLaidOutReadout = text;
+        // Laid out on the render thread; the tooltip binds on the GUI thread.
+        QMetaObject::invokeMethod(this, [this, text] {
+            if (m_crosshairReadout == text) return;
+            m_crosshairReadout = text;
+            emit crosshairReadoutChanged();
+        }, Qt::QueuedConnection);
+    };
     if (!m_crosshairEnabled || (!localHover && !hasSharedX)
         || width <= 0 || height <= 0) {
+        publishReadout(readout);
         return;
     }
 
@@ -5072,63 +5167,50 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     const int deviceX = crosshairDeviceColumnLocked(
         localHover ? m_hoverPosition.x() : m_crosshairSharedX, width);
     const int deviceY = crosshairDeviceColumnLocked(m_hoverPosition.y(), height);
-    const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
-    const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
     const int lineWidth = deviceLineWidth(scale);
-    const QFontMetrics fm(overlayLabelFont(SpectrogramOverlayImage::CrosshairLabel));
-    constexpr int pad = kCrosshairLabelPadding;
     m_crosshair.valid = true;
 
-    // Dotted lines: full height on all panes (spanning them visually), and
+    // Dashed lines: full height on all panes (spanning them visually), and
     // full width on the hovered pane.
     m_crosshairVerticalLineRect = QRect(deviceX, 0, lineWidth, height);
-    m_crosshair.images.push_back({SpectrogramOverlayImage::DottedColumn, QString(), height,
+    m_crosshair.images.push_back({SpectrogramOverlayImage::DashedColumn, QString(), height,
         QRectF(deviceX / scale, 0.0, lineWidth / scale, height / scale), QString()});
     if (localHover) {
         m_crosshairHorizontalLineRect = QRect(0, deviceY, width, lineWidth);
-        m_crosshair.images.push_back({SpectrogramOverlayImage::DottedRow, QString(), width,
+        m_crosshair.images.push_back({SpectrogramOverlayImage::DashedRow, QString(), width,
             QRectF(0.0, deviceY / scale, width / scale, lineWidth / scale), QString()});
-    }
-
-    // Frequency label at the right edge, aligned to the pointer.
-    if (localHover) {
-        const int mouseY = std::clamp(static_cast<int>(m_hoverPosition.y()), 0, logicalHeight - 1);
+        // The readout of the hovered pane, for its tooltip: the frequency
+        // and level at the pointer, then the time in the track. Without the
+        // gapless offset, it is the track's own time.
         const double freqHz = pixelToFrequencyHzLocked(deviceY, height);
-        if (freqHz >= 0.0) {
-            const QString text = formatFrequencyLabelPrecise(freqHz);
-            const int textW = fm.horizontalAdvance(text);
-            const int textH = fm.height();
-            const int labelY = std::clamp(mouseY - textH / 2, 0, logicalHeight - textH - 2 * pad);
-            const int labelX = ViewCorner::labelXClearOfCorner(
-                logicalWidth - textW - 2 * pad - 2, labelY, textW + 2 * pad, textH + 2 * pad,
-                logicalWidth, m_reservedCorner);
-            m_crosshairFreqLabelRect = QRect(labelX, labelY, textW + 2 * pad, textH + 2 * pad);
-            m_crosshair.images.push_back({SpectrogramOverlayImage::CrosshairLabel, text, 0,
-                QRectF(m_crosshairFreqLabelRect), QString()});
-        }
-    }
-
-    // Time label at the bottom edge — only on the bottom-most pane, shown
-    // whenever any pane is hovered (via the shared X). Without the gapless
-    // offset, it is the track's own time.
-    if (m_showTimeLabels) {
         const double lineX = static_cast<double>(deviceX) / scale;
         const double continuousTime = pixelToTimeSeconds(
             lineX, displayLeft, rollingMode,
             m_rollingEpoch, columnsPerSecond, logicalDrawX, effectiveZoomLocked());
         const double trackTime = continuousTime - m_gaplessPositionOffset;
-        if (trackTime >= 0.0) {
-            const QString text = formatTimeLabelPrecise(trackTime);
-            const int textW = fm.horizontalAdvance(text);
-            const int textH = fm.height();
-            const int labelX = std::clamp(
-                static_cast<int>(lineX) - textW / 2, 0, logicalWidth - textW - 2 * pad);
-            m_crosshairTimeLabelRect = QRect(
-                labelX, logicalHeight - textH - 2 * pad - 2, textW + 2 * pad, textH + 2 * pad);
-            m_crosshair.images.push_back({SpectrogramOverlayImage::CrosshairLabel, text, 0,
-                QRectF(m_crosshairTimeLabelRect), QString()});
+        if (freqHz >= 0.0 && trackTime >= 0.0) {
+            const double columnF = static_cast<double>(displayLeft)
+                + (lineX - logicalDrawX) / std::max(1e-9, effectiveZoomLocked());
+            const qint64 displayIndex = static_cast<qint64>(std::floor(columnF));
+            const quint8 *bins = ringColumnLocked(displayIndex, rollingMode);
+            const int row = height - 1 - deviceY;
+            QString text = crosshairFrequency(freqHz);
+            if (bins != nullptr && row >= 0 && row < static_cast<int>(m_iToBin.size())) {
+                const int bin = m_iToBin[static_cast<size_t>(row)];
+                if (bin >= 0 && bin < m_ring.bins()) {
+                    // 1..255 spans -150..0 dBFS; 0 is silence.
+                    const int value = bins[bin];
+                    const double db = value == 0
+                        ? -std::numeric_limits<double>::infinity()
+                        : (static_cast<double>(value - 1) / 254.0) * 150.0 - 150.0;
+                    text = i18nc("@info:tooltip %1 is a frequency, %2 a level", "%1, %2",
+                                 text, crosshairDecibels(db));
+                }
+            }
+            readout = text + QLatin1Char('\n') + crosshairTime(trackTime);
         }
     }
+    publishReadout(readout);
     nameOverlayImagesLocked(m_crosshair);
 }
 
@@ -5154,20 +5236,29 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     }
     m_freqGrid.valid = true;
 
-    // Lines on the canvas's device rows; labels laid out in logical pixels.
+    // The frequency scale, inside the plot on its right: a 6 px tick at the
+    // edge for each label, and the label 10 px from the edge, centred on
+    // its tick. Ticks on the canvas's device rows; labels laid out in
+    // logical pixels.
     const double scale = m_canvasScale;
     const int logicalWidth = std::max(1, static_cast<int>(std::floor(width / scale + 1e-6)));
     const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
     const int lineWidth = deviceLineWidth(scale);
-    const QFontMetrics fm(overlayLabelFont(SpectrogramOverlayImage::GridLabel));
-    constexpr int pad = kGridLabelPadding;
-    constexpr int minPixelSpacing = 50;
+    const int tickWidth = devicePixels(6.0, scale);
+    constexpr int kLabelGap = 10;
+    // Labels this close to the lane's top, where its label and the mode
+    // switch are, are left out.
+    constexpr int kTopClearance = 34;
+    // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
+    const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
 
     // Nyquist, or with the frequency cap, the cap.
     const double topHz = topFrequencyHzLocked();
 
+    // Round numbers of kilohertz go 1, 5, 10: a taller lane keeps 5 kHz
+    // steps rather than crowding its edge with 2 kHz ones.
     static constexpr double kFreqCandidates[] = {
-        50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000
+        50, 100, 200, 500, 1000, 5000, 10000, 20000
     };
     const double hzPerPixel = topHz / static_cast<double>(logicalHeight);
     const double freqInterval = selectGridInterval(
@@ -5186,19 +5277,17 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
             && std::abs(pixelY - prevPixelY) < minPixelSpacing * scale) {
             continue;
         }
-        prevPixelY = pixelY;
-        m_freqGrid.lines.push_back(QRect(0, pixelY, width, lineWidth));
-
         const QString label = formatFrequencyLabel(freq);
-        const int textW = fm.horizontalAdvance(label);
-        const int textH = fm.height();
-        const int labelY = std::clamp(
-            static_cast<int>(pixelY / scale) - textH / 2, 0, logicalHeight - textH - 2 * pad);
-        const int labelX = ViewCorner::labelXClearOfCorner(
-            logicalWidth - textW - 2 * pad - 2, labelY, textW + 2 * pad, textH + 2 * pad,
-            logicalWidth, m_reservedCorner);
-        m_freqGrid.images.push_back({SpectrogramOverlayImage::GridLabel, label, 0,
-            QRectF(labelX, labelY, textW + 2 * pad, textH + 2 * pad), QString()});
+        const QSize size = scaleLabelSize(label);
+        const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
+        if (labelY < kTopClearance || labelY + size.height() > logicalHeight) {
+            continue;
+        }
+        prevPixelY = pixelY;
+        m_freqGrid.lines.push_back(QRect(width - tickWidth, pixelY, tickWidth, lineWidth));
+        m_freqGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
+            QRectF(logicalWidth - kLabelGap - size.width(), labelY, size.width(), size.height()),
+            QString()});
     }
     nameOverlayImagesLocked(m_freqGrid);
 }
@@ -5215,20 +5304,26 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     m_timeGridRenderDrawX = drawX;
     m_timeGridCachedRollingMode = rollingMode;
     m_timeGridPadding = padding;
-    if (!m_gridEnabled || width <= 0 || height <= 0 || columnsPerSecond <= 0.0) {
+    if (!m_gridEnabled || !m_showTimeLabels || width <= 0 || height <= 0
+        || columnsPerSecond <= 0.0) {
         m_timeGridPadding = 0;
         return;
     }
     m_timeGrid.valid = true;
 
+    // The time scale, along the top edge of the first lane, where the
+    // spectrogram is darkest: a 5 px tick down from the top and its label
+    // under it. Each frame leaves out the ticks near the edges; see
+    // timeScaleClearance().
     const double scale = m_canvasScale;
-    const int logicalHeight = std::max(1, static_cast<int>(std::floor(height / scale + 1e-6)));
     const int lineWidth = deviceLineWidth(scale);
+    const int tickHeight = devicePixels(5.0, scale);
     // Laid out wider than the widget so that each frame can shift it
-    // instead of laying it out again.
+    // instead of laying it out again; the frame clips what it shifts out.
     const int renderWidth = width + padding;
-    const double logicalRenderWidth = renderWidth / scale;
-    constexpr int minPixelSpacing = 50;
+    // At zoom 1, a label every 10 s, about 430 px apart; closer labels as
+    // the view zooms in, and further ones as it zooms out.
+    constexpr int minPixelSpacing = 240;
 
     static constexpr double kTimeCandidates[] = {
         1, 2, 5, 10, 15, 30, 60, 120, 300, 600
@@ -5259,9 +5354,6 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     const double startTrackTime = std::max(0.0,
         std::ceil(std::max(0.0, trackTimeLeft) / timeInterval) * timeInterval);
 
-    const QFontMetrics fm(overlayLabelFont(SpectrogramOverlayImage::GridLabel));
-    constexpr int pad = kGridLabelPadding;
-
     for (double trackT = startTrackTime; trackT <= trackTimeRight; trackT += timeInterval) {
         // Convert per-track time back to continuous time for pixel positioning.
         const double continuousT = trackT + m_gaplessPositionOffset;
@@ -5272,20 +5364,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
         if (pixelX < 0 || pixelX >= renderWidth) {
             continue;
         }
-        m_timeGrid.lines.push_back(QRect(pixelX, 0, lineWidth, height));
-
-        if (m_showTimeLabels) {
-            const QString label = formatTimeLabel(trackT);
-            const int textW = fm.horizontalAdvance(label);
-            const int textH = fm.height();
-            const int labelX = std::clamp(
-                static_cast<int>(pixelX / scale) - textW / 2,
-                0,
-                static_cast<int>(logicalRenderWidth) - textW - 2 * pad);
-            m_timeGrid.images.push_back({SpectrogramOverlayImage::GridLabel, label, 0,
-                QRectF(labelX, logicalHeight - textH - 2 * pad - 2,
-                    textW + 2 * pad, textH + 2 * pad), QString()});
-        }
+        m_timeGrid.lines.push_back(QRect(pixelX, 0, lineWidth, tickHeight));
+        const QString label = formatTimeLabel(trackT);
+        const QSize size = scaleLabelSize(label);
+        m_timeGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
+            QRectF(std::round(pixelX / scale) - size.width() / 2, 5.0,
+                   size.width(), size.height()), QString()});
     }
     nameOverlayImagesLocked(m_timeGrid);
 }
@@ -5583,7 +5667,7 @@ void SpectrogramItem::ensureCanvas(int width, int height) {
     ensureMapping(height);
     if (m_canvas.width() != cols || m_canvas.height() != height || m_canvas.format() != QImage::Format_RGB32) {
         m_canvas = QImage(cols, height, QImage::Format_RGB32);
-        m_canvas.fill(Qt::black);
+        m_canvas.fill(kBackgroundColor);
         m_rasterTiles.clear();
         m_canvasDirty = true;
         markCanvasDirtyLocked();
@@ -5597,7 +5681,7 @@ void SpectrogramItem::rebuildCanvasFromColumns() {
     if (m_canvas.isNull()) {
         return;
     }
-    m_canvas.fill(Qt::black);
+    m_canvas.fill(kBackgroundColor);
     m_rasterTiles.clear();
     m_canvasWriteX = 0;
     m_canvasFilledCols = 0;

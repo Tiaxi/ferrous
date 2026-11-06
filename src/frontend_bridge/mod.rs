@@ -696,7 +696,10 @@ impl Default for BridgeSettings {
             display: BridgeDisplaySettings {
                 log_scale: false,
                 show_fps,
-                show_level_meter: true,
+                // Off for a new install. A settings file of a build that
+                // turned it on by default keeps it on; see
+                // `config::parse_settings_text`.
+                show_level_meter: false,
                 prevent_display_sleep_in_fullscreen: true,
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
@@ -1139,7 +1142,9 @@ impl FrontendBridgeHandle {
             AnalysisEvent::PrecomputedSpectrogramChunk(chunk) => {
                 Some(BridgeEvent::PrecomputedSpectrogramChunk(chunk))
             }
-            AnalysisEvent::Snapshot(_) | AnalysisEvent::WorkerFailed(_) => None,
+            AnalysisEvent::Snapshot(_)
+            | AnalysisEvent::WorkerFailed(_)
+            | AnalysisEvent::FileEndsEarly { .. } => None,
         }
     }
 
@@ -2127,6 +2132,13 @@ impl BridgeLoopRuntime {
                 let _ = try_send_event(
                     event_tx,
                     BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                );
+                SnapshotUrgency::None
+            }
+            AnalysisEvent::FileEndsEarly { path, message } => {
+                let _ = try_send_event(
+                    event_tx,
+                    BridgeEvent::Error(events::file_ends_early(&path, message)),
                 );
                 SnapshotUrgency::None
             }
@@ -3692,6 +3704,29 @@ mod tests {
             assert_eq!(runtime.state.settings.display.show_level_meter, enabled);
             assert!(runtime.flags.settings_dirty);
         }
+    }
+
+    #[test]
+    fn a_cut_off_file_is_a_playback_warning_about_the_file() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(32);
+        let message = "04 - Static.flac ends early. The last FLAC frame is cut off, so \
+                       playback stops at 4:02.";
+        runtime.handle_analysis_event(
+            AnalysisEvent::FileEndsEarly {
+                path: PathBuf::from("/music/04 - Static.flac"),
+                message: message.to_string(),
+            },
+            &event_tx,
+        );
+        let Ok(BridgeEvent::Error(error)) = event_rx.try_recv() else {
+            panic!("no error was reported");
+        };
+        assert_eq!(error.category, ErrorCategory::Playback);
+        assert_eq!(error.severity, errors::ErrorSeverity::Warning);
+        assert_eq!(error.subject, "/music/04 - Static.flac");
+        assert_eq!(error.message, message);
     }
 
     #[test]

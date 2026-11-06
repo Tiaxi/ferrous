@@ -147,6 +147,7 @@ QtObject {
     // The waveform is drawn on the view colour, so its set follows the
     // theme.
     readonly property PlotColors waveformPlot: PlotColors {
+        id: waveformColors
         plotBg: root.view
         plotPlate: ColorUtils.withAlpha(root.view, 0.94)
         plotPlateEdge: root.seam
@@ -157,10 +158,13 @@ QtObject {
         plotTick: root.textSecondary
         plotLink: root.link
         meterTrough: ColorUtils.withAlpha(root.text, 0.10)
-        // #7d8790 / #5b6670.
-        meterFill: root.themeIsDark
-            ? ColorUtils.mixColor(root._inactiveText, root.view, 0.231)
-            : ColorUtils.mixColor(root._inactiveText, root.text, 0.267)
+        // #7d8790 / #5b6670: the inactive text, toward the view or the text.
+        // A theme whose inactive text is too close to its view to reach 3:1
+        // on the trough gets the text toward the view instead.
+        meterFill: ColorUtils.contrastRatio(root._waveformMeterFill,
+                                            ColorUtils.drawnOver(waveformColors.meterTrough, root.view)) >= 3
+            ? root._waveformMeterFill
+            : ColorUtils.mixColor(root.text, root.view, root.themeIsDark ? 0.45 : 0.27)
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
         // The accent is 2.4:1 on white: the light fill is the focus ring's
@@ -169,6 +173,10 @@ QtObject {
         checkedGlyph: root.themeIsDark ? root.view : "#ffffff"
         plotFocusRing: root.focusRing
     }
+
+    readonly property color _waveformMeterFill: root.themeIsDark
+        ? ColorUtils.mixColor(root._inactiveText, root.view, 0.231)
+        : ColorUtils.mixColor(root._inactiveText, root.text, 0.267)
 
     // The plot set for a visualization mode: 0 is the spectrogram, 1 the
     // waveform.

@@ -3,24 +3,49 @@
 import QtQuick 2.15
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
+import "../components" as Components
 import "../logic/ChannelLabels.js" as ChannelLabels
+import "../logic/ColorUtils.js" as ColorUtils
+import "../logic/PlotLanes.js" as PlotLanes
 
 Item {
     id: root
 
     required property var uiBridge
+    required property var uiPalette
     // Where playback is; see PlaybackClock.
     property var clock: null
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
+    // The plot's width: the level meter's column takes the rest.
+    property real plotWidth: root.width
+    // A time of the track to follow, such as where its file is cut off, or
+    // -1; markerX is where the plot draws it, NaN while it does not.
+    property real markerSeconds: -1
+    readonly property real markerX: waveform.markerX
     readonly property alias waveformItem: waveform
-    // The channel row the pointer is on, or -1.
-    readonly property int hoveredChannel: waveformHover.hovered
-        ? Math.floor(waveformHover.point.position.y * waveform.channelCount
-                     / Math.max(1, root.height))
+    readonly property var plotColors: root.uiPalette.waveformPlot
+    // The lanes: one per channel in the per-channel view, one otherwise.
+    readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
+    readonly property var laneLabels: {
+        const labels = []
+        for (let i = 0; i < root.laneCount; ++i) {
+            labels.push(waveform.viewMode === 1 ? root.channelLabel(i) : "")
+        }
+        return labels
+    }
+    // The lane the pointer is on, or -1.
+    readonly property int hoveredLane: waveformHover.hovered
+        ? PlotLanes.laneAt(waveformHover.point.position.y, root.laneCount, root.height)
         : -1
+    // Kept for the tests and the per-channel lanes: the channel row the
+    // pointer is on, or -1.
+    readonly property int hoveredChannel: waveform.viewMode === 1 ? root.hoveredLane : -1
+    // Whether the plot waits for the track's overview.
+    readonly property bool awaitingData: !root.uiBridge.waveformComplete
+        && root.uiBridge.waveformCoverageSeconds <= 0
 
     Accessible.role: Accessible.Graphic
     Accessible.name: I18n.i18nc("@label", "Waveform")
@@ -32,14 +57,16 @@ Item {
     }
 
     Rectangle {
+        objectName: "waveformFloor"
         anchors.fill: parent
-        color: "#050907"
+        color: root.plotColors.plotBg
     }
 
     WaveformEditorItem {
         id: waveform
         objectName: "waveformEditorItem"
-        anchors.fill: parent
+        width: root.plotWidth
+        height: root.height
         sourcePath: root.visible ? root.uiBridge.currentTrackPath : ""
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
@@ -48,16 +75,30 @@ Item {
         durationSeconds: root.uiBridge.durationSeconds
         playing: (root.uiBridge.playbackState || "") === "Playing"
         zoomEnabled: root.uiBridge.spectrogramZoomEnabled
-        gridEnabled: root.uiBridge.showSpectrogramScale
+        // The scale is the spectrogram's: on the waveform, time and level
+        // labels collide with the data.
+        gridEnabled: false
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
             && root.interactiveOverlaysVisible
         showFpsOverlay: root.uiBridge.showFps
         reservedCorner: root.reservedCorner
         viewMode: root.uiBridge.spectrogramViewMode
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
+        markerSeconds: root.markerSeconds
         // Per channel: a 64-bit mask loses its low bits as a QML number.
         mutedChannels: root.uiBridge.mutedChannels || []
         soloedChannels: root.uiBridge.soloedChannels || []
+        // The waveform plot set: on the view colour, in the seek bar's
+        // waveform colour.
+        backgroundColor: root.plotColors.plotBg
+        waveformColor: root.uiPalette.wave
+        mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.wave, root.plotColors.plotBg, 0.65)
+        centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
+        laneSeamColor: root.plotColors.plotLaneSeam
+        // Dark: a light core in a black casing; light: a dark core in white.
+        playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
+        playheadCasingColor: root.uiPalette.themeIsDark
+            ? Qt.rgba(0, 0, 0, 0.6) : Qt.rgba(1, 1, 1, 0.85)
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
@@ -86,123 +127,16 @@ Item {
         }
     }
 
-    Repeater {
-        model: waveform.viewMode === 1 ? waveform.channelCount : 0
-
-        delegate: Item {
-            required property int index
-            width: root.width
-            height: root.height / Math.max(1, waveform.channelCount)
-            y: index * height
-
-            Row {
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.margins: 8
-                spacing: 4
-
-                Rectangle {
-                    objectName: "waveformChannelLabel"
-                    width: channelText.implicitWidth + 8
-                    height: channelText.implicitHeight + 2
-                    radius: 3
-                    color: Qt.rgba(0, 0, 0, 0.46)
-                    Text {
-                        id: channelText
-                        anchors.centerIn: parent
-                        text: root.channelLabel(index)
-                        color: "#d6ded9"
-                        font: Kirigami.Theme.smallFont
-                    }
-                }
-
-                Rectangle {
-                    objectName: "waveformChannelMuteButton"
-                    readonly property int channelIndex: index
-                    // mutedChannels notifies when it changes.
-                    property bool active: waveform.mutedChannels[index] === true
-                    visible: root.interactiveOverlaysVisible
-                        && (root.uiBridge.channelButtonsVisibility === 2
-                            || (root.uiBridge.channelButtonsVisibility === 1
-                                && root.hoveredChannel === index))
-                    width: Math.max(muteText.implicitWidth + 10, height * 4 / 3)
-                    height: muteText.implicitHeight + 4
-                    radius: 3
-                    color: active ? "#7d3434" : Qt.rgba(0, 0, 0, 0.5)
-                    border.color: Qt.rgba(1, 1, 1, 0.16)
-                    Accessible.role: Accessible.CheckBox
-                    Accessible.name: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.channelLabel(index))
-                    Accessible.checkable: true
-                    Accessible.checked: active
-                    Accessible.onPressAction: root.uiBridge.toggleChannelMute(index)
-                    Text {
-                        id: muteText
-                        anchors.centerIn: parent
-                        text: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
-                        color: "#e2e5e3"
-                        font: Kirigami.Theme.smallFont
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.uiBridge.toggleChannelMute(index)
-                    }
-                }
-
-                Rectangle {
-                    objectName: "waveformChannelSoloButton"
-                    readonly property int channelIndex: index
-                    property bool active: waveform.soloedChannels[index] === true
-                    visible: root.interactiveOverlaysVisible
-                        && (root.uiBridge.channelButtonsVisibility === 2
-                            || (root.uiBridge.channelButtonsVisibility === 1
-                                && root.hoveredChannel === index))
-                    width: Math.max(soloText.implicitWidth + 10, height * 4 / 3)
-                    height: soloText.implicitHeight + 4
-                    radius: 3
-                    color: active ? "#706522" : Qt.rgba(0, 0, 0, 0.5)
-                    border.color: Qt.rgba(1, 1, 1, 0.16)
-                    Accessible.role: Accessible.CheckBox
-                    Accessible.name: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.channelLabel(index))
-                    Accessible.checkable: true
-                    Accessible.checked: active
-                    Accessible.onPressAction: root.uiBridge.soloChannel(index)
-                    Text {
-                        id: soloText
-                        anchors.centerIn: parent
-                        text: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
-                        color: "#e2e5e3"
-                        font: Kirigami.Theme.smallFont
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.uiBridge.soloChannel(index)
-                    }
-                }
-            }
-        }
-    }
-
-    Rectangle {
+    // How much of the track a zoomed view shows.
+    Components.PlotPlate {
         objectName: "waveformViewportDurationIndicator"
         anchors.left: parent.left
         anchors.bottom: parent.bottom
-        anchors.margins: 8
+        anchors.margins: 5
         visible: root.interactiveOverlaysVisible && waveform.zoomLevel > 1.001
-        width: zoomText.implicitWidth + 10
-        height: zoomText.implicitHeight + 5
-        radius: 3
-        color: Qt.rgba(0, 0, 0, 0.62)
-        border.color: Qt.rgba(1, 1, 1, 0.14)
-        Text {
-            id: zoomText
-            objectName: "waveformViewportDurationText"
-            anchors.centerIn: parent
-            text: waveform.formatViewportDuration(
-                waveform.durationSeconds / Math.max(1, waveform.zoomLevel))
-            color: "#c8d0cb"
-            font: Kirigami.Theme.smallFont
-        }
+        plotColors: root.plotColors
+        uiPalette: root.uiPalette
+        text: waveform.formatViewportDuration(
+            waveform.durationSeconds / Math.max(1, waveform.zoomLevel))
     }
 }

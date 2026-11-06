@@ -71,7 +71,7 @@ ScrollView {
 
                 CheckBox {
                     objectName: "showLevelMeterCheckBox"
-                    text: I18n.i18nc("@option:check", "Show level meter below the main visualization")
+                    text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
                     checked: root.uiBridge.showLevelMeter
                     onToggled: root.uiBridge.setShowLevelMeter(checked)
                 }

@@ -524,6 +524,11 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
     // also has `volume_cubic`, the level itself.
     let mut legacy_volume_gain = None;
     let mut volume_level = None;
+    // The level meter was on by default until it moved into the pane, so a
+    // settings file without its key is from a build that showed it.
+    if text.lines().any(|line| line.contains('=')) {
+        settings.display.show_level_meter = true;
+    }
     settings.unknown_lines.clear();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
@@ -719,10 +724,35 @@ mod tests {
     }
 
     #[test]
-    fn level_meter_setting_defaults_on_and_roundtrips_both_values() {
+    fn level_meter_is_off_for_a_new_install() {
         let mut settings = BridgeSettings::default();
-        parse_settings_text(&mut settings, "volume=0.5\n");
+        assert!(!settings.display.show_level_meter);
+        // No settings file, or an empty one, is a new install.
+        parse_settings_text(&mut settings, "");
+        assert!(!settings.display.show_level_meter);
+    }
+
+    #[test]
+    fn level_meter_keeps_an_existing_users_value() {
+        // A file from before the default changed, without the key, kept the
+        // meter on by default.
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\nfft_size=4096\n");
         assert!(settings.display.show_level_meter);
+        // A saved value stays what it was.
+        for (text, enabled) in [
+            ("show_level_meter=0\n", false),
+            ("show_level_meter=1\n", true),
+        ] {
+            let mut settings = BridgeSettings::default();
+            parse_settings_text(&mut settings, &format!("volume=0.5\n{text}"));
+            assert_eq!(settings.display.show_level_meter, enabled, "{text}");
+        }
+    }
+
+    #[test]
+    fn level_meter_setting_roundtrips_both_values() {
+        let mut settings = BridgeSettings::default();
         for enabled in [false, true] {
             settings.display.show_level_meter = enabled;
             let mut parsed = BridgeSettings::default();

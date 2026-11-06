@@ -47,3 +47,9 @@ function opacityForContrast(foreground, background, opacity, ratio) {
     }
     return 1
 }
+
+// `colorValue` drawn over the opaque `background`.
+function drawnOver(colorValue, background) {
+    return mixColor(Qt.rgba(background.r, background.g, background.b, 1),
+                    Qt.rgba(colorValue.r, colorValue.g, colorValue.b, 1), colorValue.a)
+}

@@ -32,12 +32,11 @@ Item {
     readonly property Window fullscreenWindow: spectrogramFullscreenWindowLoader.item
     readonly property Item windowHost: root.fullscreenWindow ? root.fullscreenWindow.host : null
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
-    // What the visualization keeps clear of in its top right corner: the
-    // close button, the switch beside it and the gap beside that. Both
-    // viewers lay them out alike, and it does not change as they auto-hide.
+    // What the visualization keeps clear of in its top right corner for the
+    // close button; the plot layer's mode switch sits left of it. Both
+    // viewers lay it out alike, and it does not change as it auto-hides.
     readonly property size reservedCorner: Qt.size(
-        popupCloseButton.anchors.rightMargin + popupCloseButton.width
-            + 2 * popupModeSwitch.anchors.rightMargin + popupModeSwitch.width,
+        popupCloseButton.anchors.rightMargin + popupCloseButton.width,
         popupCloseButton.anchors.topMargin + popupCloseButton.height)
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     readonly property bool fullscreenDisplayActive:
@@ -136,8 +135,7 @@ Item {
             }
         }
         background: Rectangle {
-            color: "#000000"
-            opacity: 0.87
+            color: root.uiPalette.plotColors(root.visualizationMode).plotBg
         }
 
         Components.ActionShortcuts {
@@ -169,23 +167,10 @@ Item {
             }
         }
 
-        Components.VisualizationModeSwitch {
-            id: popupModeSwitch
-            z: 20
-            anchors.top: parent.top
-            anchors.right: popupCloseButton.left
-            anchors.margins: 12
-            controlsVisible: root.fullscreenControlsVisible
-            selectedMode: root.visualizationMode
-            setMode: root.setVisualizationMode
-            pointerActivity: root.noteFullscreenPointerActivity
-        }
-
         Rectangle {
             objectName: "spectrogramPopupFloor"
             anchors.fill: parent
-            color: root.uiPalette.spectrogramPlot.plotBg
-            border.color: Qt.rgba(1, 1, 1, 0.12)
+            color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
             MouseArea {
                 anchors.fill: parent
@@ -232,7 +217,7 @@ Item {
                 visibility: root.viewerOpen && root.useWholeScreenViewerMode
                     ? Window.FullScreen
                     : Window.Hidden
-                color: root.uiPalette.spectrogramPlot.plotBg
+                color: root.uiPalette.plotColors(root.visualizationMode).plotBg
                 title: root.titleText
 
                 onVisibilityChanged: function() {
@@ -299,21 +284,9 @@ Item {
                     }
                 }
 
-
-                Components.VisualizationModeSwitch {
-                    z: 20
-                    anchors.top: parent.top
-                    anchors.right: fullscreenCloseButton.left
-                    anchors.margins: 12
-                    controlsVisible: root.fullscreenControlsVisible
-                    selectedMode: root.visualizationMode
-                    setMode: root.setVisualizationMode
-                    pointerActivity: root.noteFullscreenPointerActivity
-                }
-
                 Rectangle {
                     anchors.fill: parent
-                    color: root.uiPalette.spectrogramPlot.plotBg
+                    color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
                     MouseArea {
                         anchors.fill: parent

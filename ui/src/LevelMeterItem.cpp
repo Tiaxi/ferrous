@@ -6,12 +6,9 @@
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
-#include <QImage>
-#include <QLinearGradient>
-#include <QPainter>
+#include <QAccessible>
 #include <QQuickWindow>
 #include <QSGSimpleRectNode>
-#include <QSGSimpleTextureNode>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
 #include <algorithm>
@@ -21,59 +18,99 @@
 #include <optional>
 
 namespace {
-constexpr double kFloorDb = -60.0;
-constexpr double kReleaseDbPerSecond = 60.0;
-constexpr double kPeakReleaseDbPerSecond = 12.0;
-constexpr double kPeakHoldSeconds = 1.5;
-constexpr int kGradientWidth = 512;
 // A new window is requested this long before the current one runs out.
 constexpr double kRequestLeadSeconds = 0.5;
 // How far ahead an idle meter looks for a bin that changes the bars. It then
 // wakes to look further, and for new windows.
 constexpr double kLookaheadSeconds = 0.5;
+// How often readers of the levels hear of new ones.
+constexpr int kReadoutIntervalMs = 250;
+// The scale's gaps, in dB.
+constexpr double kGapsDb[] = {-6.0, -12.0, -24.0};
+// Per lane: the column's floor, the trough, the lamp, the gap under it, the
+// fill, the three gaps of the scale and the peak tick.
+constexpr int kNodesPerLane = 9;
+
+using Self = LevelMeterItem;
 
 struct MeterNode : QSGNode {
-    QSGTexture *gradient{nullptr};
-    int channels{-1};
-    ~MeterNode() override {
-        // Child nodes borrow the shared texture. Release them before its owner.
-        while (auto *child = firstChild()) {
-            removeChildNode(child);
-            delete child;
-        }
-        delete gradient;
-    }
+    int lanes{-1};
 };
 
-double fraction(double db) { return std::clamp((db - kFloorDb) / -kFloorDb, 0.0, 1.0); }
-
-int fillPixels(double level, double deviceWidth) {
-    return static_cast<int>(std::lround(deviceWidth * fraction(level)));
+int fillPixels(double level, double scalePixels) {
+    return static_cast<int>(std::lround(Self::meterPosition(level, scalePixels)));
 }
 
-// -1 while the marker is hidden.
-int peakPixels(double peak, double deviceWidth) {
-    return peak > kFloorDb ? static_cast<int>(std::lround(deviceWidth * fraction(peak))) : -1;
+// -1 while the tick is hidden.
+int peakPixels(double peak, double scalePixels) {
+    return peak > Self::kFloorDb
+        ? static_cast<int>(std::lround(Self::meterPosition(peak, scalePixels))) : -1;
 }
 
-// Seconds of decay without new data until the channel's fill or marker moves
-// by a device pixel; infinity if it never does.
-template <typename Channel> double secondsUntilChange(const Channel &channel, double deviceWidth) {
+// The level `pixels` device pixels up a scale `scalePixels` tall: the inverse
+// of LevelMeterItem::meterPosition.
+double levelAt(double pixels, double scalePixels) {
+    if (scalePixels <= 0.0 || pixels <= 0.0) return Self::kFloorDb;
+    const double position = std::clamp(pixels / scalePixels, 0.0, 1.0);
+    // The listed levels are a fifth of the height apart.
+    static constexpr double kLevels[] = {-60.0, -48.0, -24.0, -12.0, -6.0, 0.0};
+    const double step = position * 5.0;
+    const int below = std::min(4, static_cast<int>(std::floor(step)));
+    return kLevels[below] + (kLevels[below + 1] - kLevels[below]) * (step - below);
+}
+
+// Seconds of decay without new data until the channel's fill, tick or lamp
+// changes by a device pixel on a scale `scalePixels` tall; infinity if it
+// never does.
+template <typename Channel> double secondsUntilChange(const Channel &channel, double scalePixels) {
     double seconds = std::numeric_limits<double>::infinity();
     // A rounded position changes once it falls below its pixel's lower half.
     const auto threshold = [&](int pixels) {
-        return std::max(kFloorDb, kFloorDb - kFloorDb * (pixels - 0.5) / deviceWidth);
+        return std::max(Self::kFloorDb, levelAt(pixels - 0.5, scalePixels));
     };
-    if (const int fill = fillPixels(channel.level, deviceWidth); fill > 0) {
-        seconds = (channel.level - threshold(fill)) / kReleaseDbPerSecond;
+    if (const int fill = fillPixels(channel.level, scalePixels); fill > 0) {
+        seconds = (channel.level - threshold(fill)) / Self::kReleaseDbPerSecond;
     }
-    if (const int peak = peakPixels(channel.peak, deviceWidth); peak >= 0) {
-        // At the floor the marker hides.
+    if (const int peak = peakPixels(channel.peak, scalePixels); peak >= 0) {
+        // At the floor the tick hides.
         seconds = std::min(seconds, channel.hold
-            + (channel.peak - threshold(peak)) / kPeakReleaseDbPerSecond);
+            + (channel.peak - threshold(peak)) / Self::kPeakReleaseDbPerSecond);
     }
+    if (channel.clip > 0.0) seconds = std::min(seconds, channel.clip);
     return std::max(0.0, seconds);
 }
+
+void setRect(QSGNode *node, const QRectF &rect, const QColor &color) {
+    auto *rectNode = static_cast<QSGSimpleRectNode *>(node);
+    if (rectNode->rect() != rect) rectNode->setRect(rect);
+    if (rectNode->color() != color) rectNode->setColor(color);
+}
+}
+
+double LevelMeterItem::meterPosition(double db, double height) {
+    if (!(db > kFloorDb) || height <= 0.0) return 0.0;
+    // The listed levels are evenly spaced: 0, -6, -12, -24, -48 and -60 dB
+    // at 5/5 to 0/5 of the height.
+    static constexpr std::pair<double, double> kPoints[] = {
+        {0.0, 1.0}, {-6.0, 0.8}, {-12.0, 0.6}, {-24.0, 0.4}, {-48.0, 0.2}, {-60.0, 0.0}};
+    db = std::min(db, 0.0);
+    for (std::size_t i = 0; i + 1 < std::size(kPoints); ++i) {
+        const auto [upperDb, upper] = kPoints[i];
+        const auto [lowerDb, lower] = kPoints[i + 1];
+        if (db >= lowerDb) {
+            return height * (lower + (upper - lower) * (db - lowerDb) / (upperDb - lowerDb));
+        }
+    }
+    return 0.0;
+}
+
+std::pair<double, double> LevelMeterItem::laneRows(int lane, int count, double height) {
+    count = std::max(1, count);
+    // The seams are on the rows at k * height / count, as the waveform draws
+    // them; each lane starts on the row after its seam.
+    const double top = lane > 0 ? std::round(lane * height / count) + 1.0 : 0.0;
+    const double bottom = lane + 1 < count ? std::round((lane + 1) * height / count) : height;
+    return {top, std::max(top, bottom)};
 }
 
 void LevelMeterItem::Channel::decay(double seconds) {
@@ -81,12 +118,14 @@ void LevelMeterItem::Channel::decay(double seconds) {
     level = std::max(kFloorDb, level - kReleaseDbPerSecond * seconds);
     peak = std::max(kFloorDb, peak - kPeakReleaseDbPerSecond * std::max(0.0, seconds - hold));
     hold = std::max(0.0, hold - seconds);
+    clip = std::max(0.0, clip - seconds);
 }
 
 void LevelMeterItem::Channel::observe(double db, double ageSeconds) {
     if (!std::isfinite(db)) return;
-    db = std::clamp(db, kFloorDb, 0.0);
     const double age = std::max(0.0, ageSeconds);
+    if (db >= kClipDb) clip = std::max(clip, kClipHoldSeconds - age);
+    db = std::clamp(db, kFloorDb, 0.0);
     level = std::max(level, db - kReleaseDbPerSecond * age);
     const double held = db - kPeakReleaseDbPerSecond * std::max(0.0, age - kPeakHoldSeconds);
     if (held >= peak && db > kFloorDb) {
@@ -98,7 +137,10 @@ void LevelMeterItem::Channel::observe(double db, double ageSeconds) {
 
 LevelMeterItem::LevelMeterItem(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(ItemHasContents, true);
-    setImplicitHeight(20);
+    setImplicitWidth(kColumnWidth);
+    m_readoutTimer.setSingleShot(true);
+    m_readoutTimer.setInterval(kReadoutIntervalMs);
+    connect(&m_readoutTimer, &QTimer::timeout, this, &LevelMeterItem::announceReadout);
     connect(this, &QQuickItem::windowChanged, this, &LevelMeterItem::bindWindow);
     connect(this, &QQuickItem::visibleChanged, this, &LevelMeterItem::visibilityChanged);
     m_wakeTimer.setSingleShot(true);
@@ -200,6 +242,101 @@ void LevelMeterItem::setChannelCountHint(int value) {
     update();
 }
 
+void LevelMeterItem::setLaneCount(int value) {
+    value = std::clamp(value, 1, 64);
+    if (m_laneCount == value) return;
+    m_laneCount = value;
+    emit laneCountChanged();
+    update();
+    noteReadout();
+}
+
+void LevelMeterItem::setActive(bool value) {
+    if (m_active == value) return;
+    m_active = value;
+    emit activeChanged();
+    update();
+    // An inactive meter reads nothing: its readers hear of it.
+    noteReadout();
+}
+
+void LevelMeterItem::setReadoutWanted(bool value) {
+    if (m_readoutWanted == value) return;
+    m_readoutWanted = value;
+    emit readoutWantedChanged();
+    if (value) announceReadout();
+}
+
+void LevelMeterItem::announceReadout() {
+    ++m_readoutRevision;
+    emit readoutChanged();
+}
+
+void LevelMeterItem::setColor(QColor &member, const QColor &value) {
+    if (member == value) return;
+    member = value;
+    emit colorsChanged();
+    update();
+}
+
+void LevelMeterItem::noteReadout() {
+    // Only for a reader: an idle meter tells nobody.
+    if ((m_readoutWanted || QAccessible::isActive()) && !m_readoutTimer.isActive()) {
+        m_readoutTimer.start();
+    }
+}
+
+LevelMeterItem::Channel LevelMeterItem::laneChannel(const std::vector<Channel> &channels, int lane) const {
+    if (m_laneCount == 1 && channels.size() > 1) {
+        Channel loudest;
+        for (const auto &channel : channels) {
+            if (channel.level > loudest.level) loudest.level = channel.level;
+            // The highest peak, with its hold.
+            if (channel.peak > loudest.peak
+                || (channel.peak == loudest.peak && channel.hold > loudest.hold)) {
+                loudest.peak = channel.peak;
+                loudest.hold = channel.hold;
+            }
+            loudest.clip = std::max(loudest.clip, channel.clip);
+        }
+        return loudest;
+    }
+    return lane >= 0 && static_cast<std::size_t>(lane) < channels.size()
+        ? channels[static_cast<std::size_t>(lane)] : Channel{};
+}
+
+double LevelMeterItem::scalePixels(int lane) const {
+    if (!window()) return 0.0;
+    const auto [top, bottom] = laneRows(lane, m_laneCount, height());
+    // The lane's insets, the lamp and the gap under it.
+    const double scale = bottom - top - 2 * kInset - kLampHeight - 1.0;
+    return std::max(0.0, scale) * window()->effectiveDevicePixelRatio();
+}
+
+std::vector<LevelMeterItem::Painted> LevelMeterItem::painted(const std::vector<Channel> &channels) const {
+    std::vector<Painted> result(static_cast<std::size_t>(m_laneCount));
+    if (!m_active) return result;
+    for (int lane = 0; lane < m_laneCount; ++lane) {
+        const Channel channel = laneChannel(channels, lane);
+        const double pixels = scalePixels(lane);
+        result[static_cast<std::size_t>(lane)] = {
+            fillPixels(channel.level, pixels), peakPixels(channel.peak, pixels), channel.clip > 0.0};
+    }
+    return result;
+}
+
+QVariantMap LevelMeterItem::laneReadout(int lane) const {
+    const Channel channel = laneChannel(m_shown, lane);
+    const auto db = [](double value) {
+        return value > kFloorDb ? value : -std::numeric_limits<double>::infinity();
+    };
+    return {
+        {QStringLiteral("level"), m_active ? db(channel.level) : -std::numeric_limits<double>::infinity()},
+        {QStringLiteral("peak"), m_active ? db(channel.peak) : -std::numeric_limits<double>::infinity()},
+        {QStringLiteral("clipping"), m_active && channel.clip > 0.0},
+    };
+}
+
 bool LevelMeterItem::visibleForPlayback() const {
     return isVisible() && window() && WindowPresence::of(window())->shown();
 }
@@ -248,17 +385,8 @@ void LevelMeterItem::showCurrent() {
     m_shownAt = std::numeric_limits<double>::quiet_NaN();
 }
 
-double LevelMeterItem::deviceWidth() const {
-    return window() ? width() * window()->effectiveDevicePixelRatio() : 0.0;
-}
-
-bool LevelMeterItem::showsPainted(const std::vector<Channel> &channels, double deviceWidth) const {
-    if (m_paintedPixels.size() != channels.size() * 2) return false;
-    for (std::size_t ch = 0; ch < channels.size(); ++ch) {
-        if (m_paintedPixels[ch * 2] != fillPixels(channels[ch].level, deviceWidth)
-            || m_paintedPixels[ch * 2 + 1] != peakPixels(channels[ch].peak, deviceWidth)) return false;
-    }
-    return true;
+bool LevelMeterItem::showsPainted(const std::vector<Channel> &channels) const {
+    return m_painted == painted(channels);
 }
 
 double LevelMeterItem::advanceTo(Clock::time_point now) {
@@ -273,20 +401,25 @@ void LevelMeterItem::tick() {
     m_wakeTimer.stop();
     if (!visibleForPlayback()) return;
     const bool moving = m_playing || std::any_of(m_channels.begin(), m_channels.end(),
-        [](const Channel &channel) { return channel.peak > kFloorDb || channel.level > kFloorDb; });
+        [](const Channel &channel) {
+            return channel.peak > kFloorDb || channel.level > kFloorDb || channel.clip > 0.0;
+        });
     if (!moving) return;
     const auto now = m_now();
     const double position = advanceTo(now);
     if (m_playing) requestWindow(position);
+    noteReadout();
     // A frame that would draw the same pixels is skipped. The frame after a
     // change ticks again; otherwise the meter sleeps until its next change.
-    if (!showsPainted(m_shown, deviceWidth())) update();
+    if (!showsPainted(m_shown)) update();
     else scheduleWake(now, position);
 }
 
 void LevelMeterItem::scheduleWake(Clock::time_point now, double position) {
-    const double widthPixels = deviceWidth();
-    if (widthPixels <= 0.0) return;
+    // The tallest scale changes first.
+    double scaleHeight = 0.0;
+    for (int lane = 0; lane < m_laneCount; ++lane) scaleHeight = std::max(scaleHeight, scalePixels(lane));
+    if (scaleHeight <= 0.0 || !m_active) return;
     const qint64 nowNs = monotonicNs(now);
     std::optional<qint64> wakeNs;
     const auto wakeAt = [&](qint64 ns) {
@@ -315,7 +448,7 @@ void LevelMeterItem::scheduleWake(Clock::time_point now, double position) {
                 channels[static_cast<std::size_t>(ch)].observe(
                     data.peaksDb[static_cast<std::size_t>(point * data.channels + ch)], at - end);
             }
-            if (!showsPainted(channels, widthPixels)) {
+            if (!showsPainted(channels)) {
                 target = end;
                 break;
             }
@@ -326,7 +459,7 @@ void LevelMeterItem::scheduleWake(Clock::time_point now, double position) {
         if (const auto ns = clock.reachesAt(target)) wakeAt(*ns);
     } else {
         double seconds = std::numeric_limits<double>::infinity();
-        for (const auto &channel : m_shown) seconds = std::min(seconds, secondsUntilChange(channel, widthPixels));
+        for (const auto &channel : m_shown) seconds = std::min(seconds, secondsUntilChange(channel, scaleHeight));
         if (std::isfinite(seconds)) wakeAt(nowNs + static_cast<qint64>(std::ceil(seconds * 1e9)));
     }
     if (m_playing && !m_requestActive && m_retryAt > now) wakeAt(monotonicNs(m_retryAt));
@@ -475,69 +608,55 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     // are delivered to that thread and never mutate render state directly.
     auto *node = static_cast<MeterNode *>(oldNode);
     if (!node) node = new MeterNode;
-    if (!node->gradient) {
-        QImage image(kGradientWidth, 1, QImage::Format_ARGB32_Premultiplied);
-        QPainter painter(&image);
-        QLinearGradient gradient(0, 0, kGradientWidth, 0);
-        gradient.setColorAt(0, QColor("#2b6546"));
-        gradient.setColorAt(fraction(-30), QColor("#4c9460"));
-        gradient.setColorAt(fraction(-16), QColor("#849e59"));
-        gradient.setColorAt(fraction(-12), QColor("#b2ab62"));
-        gradient.setColorAt(fraction(-3), QColor("#c59456"));
-        gradient.setColorAt(1, QColor("#c57f50"));
-        painter.fillRect(image.rect(), gradient);
-        painter.end();
-        node->gradient = window()->createTextureFromImage(image);
-    }
-    const int count = static_cast<int>(m_shown.size());
-    if (node->channels != count) {
+    if (node->lanes != m_laneCount) {
         while (auto *child = node->firstChild()) {
             node->removeChildNode(child);
             delete child;
         }
-        node->appendChildNode(new QSGSimpleRectNode(boundingRect(), QColor("#202427")));
-        for (int ch = 0; ch < count; ++ch) {
-            node->appendChildNode(new QSGSimpleRectNode({}, QColor("#090c0e")));
-            auto *fill = new QSGSimpleTextureNode;
-            fill->setTexture(node->gradient);
-            fill->setFiltering(QSGTexture::Linear);
-            node->appendChildNode(fill);
-            node->appendChildNode(new QSGSimpleRectNode({}, QColor("#d6d3b9")));
-        }
-        node->channels = count;
+        // The seam: the column's left edge and the rows between lanes.
+        node->appendChildNode(new QSGSimpleRectNode);
+        for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) node->appendChildNode(new QSGSimpleRectNode);
+        node->lanes = m_laneCount;
     }
-    auto *background = static_cast<QSGSimpleRectNode *>(node->firstChild());
-    background->setRect(boundingRect());
+    setRect(node->firstChild(), boundingRect(), m_seamColor);
     const double dpr = window()->effectiveDevicePixelRatio();
-    const double widthPixels = width() * dpr;
-    m_paintedPixels.resize(static_cast<std::size_t>(count) * 2);
-    const double row = height() / std::max(1, count);
-    const double gap = std::min(count == 2 ? 2.0 : 1.0, row * 0.4);
-    const double barHeight = (height() - gap * (count - 1)) / std::max(1, count);
-    auto *child = background->nextSibling();
-    for (int ch = 0; ch < count; ++ch) {
-        const double top = std::round(ch * (barHeight + gap) * dpr) / dpr;
-        const double bottom = std::round((ch * (barHeight + gap) + barHeight) * dpr) / dpr;
-        const QRectF track(0, top, width(), std::max(0.0, bottom - top));
-        static_cast<QSGSimpleRectNode *>(child)->setRect(track);
+    const auto snap = [dpr](double value) { return std::round(value * dpr) / dpr; };
+    m_painted = painted(m_shown);
+    const double left = 1.0;
+    const double meterWidth = std::max(0.0, width() - left);
+    QSGNode *child = node->firstChild()->nextSibling();
+    const auto next = [&child](const QRectF &rect, const QColor &color) {
+        setRect(child, rect, color);
         child = child->nextSibling();
-        const auto &channel = m_shown[static_cast<std::size_t>(ch)];
-        // Fill and marker end on device pixels; frames are drawn only when these change.
-        const int fillPixel = fillPixels(channel.level, widthPixels);
-        const int peakPixel = peakPixels(channel.peak, widthPixels);
-        m_paintedPixels[static_cast<std::size_t>(ch) * 2] = fillPixel;
-        m_paintedPixels[static_cast<std::size_t>(ch) * 2 + 1] = peakPixel;
-        const double amount = widthPixels > 0.0 ? fillPixel / widthPixels : 0.0;
-        auto *fill = static_cast<QSGSimpleTextureNode *>(child);
-        fill->setRect(QRectF(0, top, width() * amount, track.height()));
-        fill->setSourceRect(QRectF(0, 0, kGradientWidth * amount, 1));
-        child = child->nextSibling();
-        // Keep the marker a single physical pixel, including on scaled displays.
-        const double markerWidth = std::min(width(), 1.0 / dpr);
-        const double peakX = std::clamp(peakPixel / dpr, 0.0, std::max(0.0, width() - markerWidth));
-        static_cast<QSGSimpleRectNode *>(child)->setRect(peakPixel >= 0
-            ? QRectF(peakX, top, markerWidth, track.height()) : QRectF());
-        child = child->nextSibling();
+    };
+    for (int lane = 0; lane < m_laneCount; ++lane) {
+        const auto [top, bottom] = laneRows(lane, m_laneCount, height());
+        next(QRectF(left, top, meterWidth, bottom - top), m_backgroundColor);
+        const double meterTop = top + kInset;
+        const double meterBottom = std::max(meterTop, bottom - kInset);
+        next(QRectF(left, meterTop, meterWidth, meterBottom - meterTop), m_troughColor);
+        const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
+        const double scaleTop = meterTop + kLampHeight + 1.0;
+        const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
+        if (!m_active || scaleHeight <= 0.0) {
+            for (int i = 2; i < kNodesPerLane; ++i) next(QRectF(), m_backgroundColor);
+            continue;
+        }
+        next(QRectF(left, meterTop, meterWidth, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
+        next(QRectF(left, meterTop + kLampHeight, meterWidth, 1.0), m_backgroundColor);
+        // The fill and the tick end on device pixels; frames are drawn only
+        // when these change.
+        const double fill = shown.fill / dpr;
+        next(QRectF(left, meterBottom - fill, meterWidth, fill), m_fillColor);
+        const bool shortLane = bottom - top < kFullScaleLaneHeight;
+        for (const double gapDb : kGapsDb) {
+            const bool shown = !(shortLane && gapDb == -12.0);
+            const double y = snap(meterBottom - meterPosition(gapDb, scaleHeight));
+            next(shown ? QRectF(left, y, meterWidth, 1.0) : QRectF(), m_backgroundColor);
+        }
+        // The 2 px tick is centred on its level, inside the scale.
+        const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
+        next(shown.peak >= 0 ? QRectF(left, tickY, meterWidth, 2.0) : QRectF(), m_peakColor);
     }
     return node;
 }

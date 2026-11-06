@@ -78,8 +78,6 @@ ApplicationWindow {
         ? libraryModel
         : null
     readonly property var spectrogramFftChoices: [512, 1024, 2048, 4096, 8192]
-    readonly property int levelMeterHeight: 20
-    readonly property int embeddedLevelMeterHeight: uiBridge.showLevelMeter ? levelMeterHeight : 0
     readonly property var uiPalette: uiPaletteObject
     readonly property var overlayHost: Overlay.overlay
     readonly property bool themeIsDark: uiPalette.themeIsDark
@@ -181,7 +179,7 @@ ApplicationWindow {
         (root.menuBar ? root.menuBar.implicitHeight : 0)
         + transportBar.implicitHeight
         + queuePane.SplitView.minimumHeight
-        + root.visualizationMinimumHeight + root.levelMeterHeight
+        + root.visualizationMinimumHeight
         + root.splitHandleAllowance + transportSeam.height
         + (root.footer ? root.footer.implicitHeight : 0))
 
@@ -260,6 +258,8 @@ ApplicationWindow {
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
+        property bool waveformEndsEarly: false
+        property var mutedChannels: []
         property real dbRange: 132
         property int fftSize: 8192
         property int spectrogramViewMode: 0
@@ -271,7 +271,7 @@ ApplicationWindow {
         property int repeatMode: 0
         property bool shuffleEnabled: false
         property bool showFps: false
-        property bool showLevelMeter: true
+        property bool showLevelMeter: false
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
@@ -1384,7 +1384,7 @@ ApplicationWindow {
                         rightSplit.height,
                         queuePane.SplitView.minimumHeight,
                         spectrogramPane.SplitView.minimumHeight + root.splitHandleAllowance,
-                        Math.max(220, root.height * 0.58 - root.embeddedLevelMeterHeight))
+                        Math.max(220, root.height * 0.58))
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText
@@ -1404,11 +1404,10 @@ ApplicationWindow {
                     objectName: "spectrogramPane"
                     SplitView.fillWidth: true
                     SplitView.fillHeight: true
-                    SplitView.minimumHeight: root.visualizationMinimumHeight + root.embeddedLevelMeterHeight
+                    SplitView.minimumHeight: root.visualizationMinimumHeight
                     openViewer: viewerController.openSpectrogramViewer
                     uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
-                    setVisualizationMode: viewerController.setVisualizationMode
                 }
             }
         }
@@ -1427,9 +1426,14 @@ ApplicationWindow {
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
-        readonly property size reservedCorner: viewerController.spectrogramViewerOpen
-            ? spectrogramViewerShell.reservedCorner
-            : spectrogramPane.reservedCorner
+        // What the plot keeps clear of in its top right corner: the mode
+        // switch, and in a viewer the close button beside it.
+        readonly property size reservedCorner: Qt.size(
+            plotLayer.reservedCorner.width - plotLayer.meterWidth,
+            Math.max(plotLayer.reservedCorner.height,
+                     viewerController.spectrogramViewerOpen
+                         ? spectrogramViewerShell.reservedCorner.height : 0))
+        readonly property bool spectrogramShown: viewerController.visualizationMode === 0
 
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
@@ -1438,12 +1442,13 @@ ApplicationWindow {
             Accessible.name: I18n.i18nc("@label", "Spectrogram")
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
-            anchors.bottomMargin: levelMeter.height
-            visible: viewerController.visualizationMode === 0
+            plotWidth: plotLayer.plotWidth
+            visible: visualizationSurface.spectrogramShown
             viewerMode: viewerController.spectrogramViewerOpen
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
+            markerSeconds: plotLayer.cutSeconds
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
@@ -1454,31 +1459,43 @@ ApplicationWindow {
             id: waveformSurface
             objectName: "mainWaveformSurface"
             anchors.fill: parent
-            anchors.bottomMargin: levelMeter.height
-            visible: viewerController.visualizationMode === 1
+            plotWidth: plotLayer.plotWidth
+            visible: !visualizationSurface.spectrogramShown
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
+            markerSeconds: plotLayer.cutSeconds
             uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
             clock: playbackController.playbackClock
             seekCommitted: playbackController.seekCommitted
         }
 
-        LevelMeterItem {
-            id: levelMeter
-            objectName: "levelMeter"
-            Accessible.role: Accessible.Graphic
-            Accessible.name: I18n.i18nc("@label", "Level meter")
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            visible: root.uiBridge.showLevelMeter && !viewerController.spectrogramViewerOpen
-            height: visible ? root.levelMeterHeight : 0
-            sourcePath: visible && root.uiBridge.playbackState !== "Stopped" ? root.uiBridge.currentTrackPath : ""
+        // The labels, the mode switch, the level meter and the states, over
+        // whichever plot shows, in its colours.
+        Viewers.PlotLayer {
+            id: plotLayer
+            anchors.fill: parent
+            uiBridge: root.uiBridge
+            uiPalette: root.uiPalette
             clock: playbackController.playbackClock
-            durationSeconds: root.uiBridge.durationSeconds
-            playing: root.uiBridge.connected && root.uiBridge.playbackState === "Playing"
-            channelCountHint: root.uiBridge.currentTrackChannels > 0 ? root.uiBridge.currentTrackChannels : 2
+            visualizationMode: viewerController.visualizationMode
+            setVisualizationMode: viewerController.setVisualizationMode
+            controlsVisible: spectrogramViewerShell.fullscreenControlsVisible
+            pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
+            trailingInset: viewerController.spectrogramViewerOpen
+                ? spectrogramViewerShell.reservedCorner.width : 0
+            laneCount: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.laneCount : waveformSurface.laneCount
+            laneLabels: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
+            hoveredLane: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
+            analysing: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
+            markerX: visualizationSurface.spectrogramShown
+                ? spectrogramSurface.markerX : waveformSurface.markerX
+            openIssues: function() { errorController.historyRequested() }
         }
     }
 

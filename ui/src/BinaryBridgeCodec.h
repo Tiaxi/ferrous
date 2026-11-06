@@ -383,7 +383,7 @@ struct DecodedSettings {
     float dbRange{132.0f};
     bool logScale{false};
     bool showFps{false};
-    bool showLevelMeter{true};
+    bool showLevelMeter{false};
     int librarySortMode{0};
     bool systemMediaControlsEnabled{true};
     bool preventDisplaySleepInFullscreen{true};

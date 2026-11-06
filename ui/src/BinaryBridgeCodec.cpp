@@ -615,7 +615,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&preventDisplaySleepInFullscreen)) {
         return false;
     }
-    quint8 showLevelMeter = 1;
+    quint8 showLevelMeter = 0;
     if (!reader.atEnd() && !reader.readU8(&showLevelMeter)) {
         return false;
     }

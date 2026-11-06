@@ -83,6 +83,11 @@ constexpr quint8 kAnalysisFlagWaveform = 0x01;
 constexpr quint8 kAnalysisFlagReset = 0x02;
 constexpr quint8 kAnalysisFlagSpectrogram = 0x04;
 constexpr quint8 kAnalysisFlagWaveformComplete = 0x08;
+// The file is cut off where the waveform's coverage ends.
+constexpr quint8 kAnalysisFlagWaveformEndsEarly = 0x10;
+// The bytes of an analysis frame before its peaks: ffi.rs's
+// ANALYSIS_FRAME_HEADER, with the waveform state's track token last.
+constexpr qsizetype kAnalysisFrameHeaderBytes = 29;
 constexpr quint32 kMaxAnalysisFrameBytes = 8 * 1024 * 1024;
 constexpr int kMaxDiagnosticsLines = 2000;
 constexpr int kItunesArtworkSearchRequestLimit = 50;
@@ -1824,6 +1829,10 @@ double BridgeClient::waveformCoverageSeconds() const {
 
 bool BridgeClient::waveformComplete() const {
     return m_waveformComplete;
+}
+
+bool BridgeClient::waveformEndsEarly() const {
+    return m_waveformEndsEarly;
 }
 
 int BridgeClient::sampleRateHz() const {
@@ -4547,7 +4556,7 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const auto *data = base + readOffset + sizeof(quint32);
         readOffset += totalBytes;
 
-        if (frameBytes < 21) {
+        if (frameBytes < kAnalysisFrameHeaderBytes) {
             continue;
         }
         if (data[0] != kAnalysisFrameMagic) {
@@ -4561,11 +4570,12 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         const quint16 binCount = qFromLittleEndian<quint16>(data + 14);
         const quint32 frameSeq = qFromLittleEndian<quint32>(data + 16);
         const quint8 channelCount = data[20];
+        const quint64 waveformTrackToken = qFromLittleEndian<quint64>(data + 21);
         const qsizetype labelBytes =
             (((flags & kAnalysisFlagSpectrogram) != 0 || (flags & kAnalysisFlagReset) != 0)
                 ? static_cast<qsizetype>(channelCount)
                 : 0);
-        const qsizetype expected = 21 + static_cast<qsizetype>(waveformLen) + labelBytes
+        const qsizetype expected = kAnalysisFrameHeaderBytes + static_cast<qsizetype>(waveformLen) + labelBytes
             + static_cast<qsizetype>(rowCount) * static_cast<qsizetype>(channelCount)
                 * static_cast<qsizetype>(binCount);
         if (static_cast<qsizetype>(frameBytes) < expected) {
@@ -4579,7 +4589,16 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         m_hasAnalysisFrameSeq = true;
         m_lastAnalysisFrameSeq = frameSeq;
 
-        const uchar *cursor = data + 21;
+        const uchar *cursor = data + kAnalysisFrameHeaderBytes;
+        // The waveform state of a track before the one playback has told of
+        // since, sent before the bridge heard of the change: not this
+        // track's. Tokens grow with every track, a replay of the same file
+        // too.
+        if (m_currentTrackToken != 0 && waveformTrackToken != 0
+            && waveformTrackToken < m_currentTrackToken) {
+            continue;
+        }
+        m_waveformTrackToken = waveformTrackToken;
 
         if (sampleRate > 0 && m_sampleRateHz != static_cast<int>(sampleRate)) {
             m_sampleRateHz = static_cast<int>(sampleRate);
@@ -4595,6 +4614,11 @@ void BridgeClient::processAnalysisBytes(const QByteArray &chunk) {
         }
         if (m_waveformComplete != waveformComplete) {
             m_waveformComplete = waveformComplete;
+            changed = true;
+        }
+        const bool waveformEndsEarly = (flags & kAnalysisFlagWaveformEndsEarly) != 0;
+        if (m_waveformEndsEarly != waveformEndsEarly) {
+            m_waveformEndsEarly = waveformEndsEarly;
             changed = true;
         }
 
@@ -5299,6 +5323,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         && !currentPath.isEmpty();
     if (snapshot.playback.present) {
         m_currentTrackToken = snapshot.playback.trackToken;
+        // The cut of the track before is not this one's; this track's
+        // comes with its analysis frame.
+        if (trackTokenChanged && m_waveformEndsEarly
+            && m_waveformTrackToken != m_currentTrackToken) {
+            m_waveformEndsEarly = false;
+            scheduleAnalysisChanged();
+        }
     }
     const QString previousPlaybackState = m_playbackState;
     const QString previousTrackPath = m_currentTrackPath;

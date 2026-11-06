@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import "../components" as Components
 
+// The visualization's place in the main window: full bleed, on the plot's
+// floor, with no border. Main.qml puts the visualization and its plot layer
+// in `hostItem` while no viewer shows them.
 Rectangle {
     id: root
 
@@ -10,16 +12,8 @@ Rectangle {
     required property var openViewer
     required property var uiPalette
     property int visualizationMode: 0
-    property var setVisualizationMode: function(mode) {}
 
-    // What the visualization keeps clear of in its top right corner: the
-    // switch and the gap beside it.
-    readonly property size reservedCorner: Qt.size(
-        2 * modeSwitch.anchors.rightMargin + modeSwitch.width,
-        modeSwitch.anchors.topMargin + modeSwitch.height)
-
-    color: root.uiPalette.spectrogramPlot.plotBg
-    border.color: Qt.rgba(0, 0, 0, 0.25)
+    color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
     MouseArea {
         anchors.fill: parent
@@ -34,15 +28,5 @@ Rectangle {
     Item {
         id: spectrogramMainHost
         anchors.fill: parent
-    }
-
-    Components.VisualizationModeSwitch {
-        id: modeSwitch
-        z: 20
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 8
-        selectedMode: root.visualizationMode
-        setMode: root.setVisualizationMode
     }
 }

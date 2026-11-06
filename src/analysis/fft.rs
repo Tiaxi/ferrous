@@ -239,8 +239,32 @@ pub(super) enum OverviewProgress {
     /// The decode stopped at an error before the end of the file. The peaks
     /// cover only the audio before it, and are not saved.
     Truncated,
+    /// The decode reached the end of the file, but the file ends before the
+    /// length its header gives: it was cut off. The peaks cover the audio
+    /// up to the cut, which playback also stops at, and are not saved, so
+    /// every play of the file finds the cut again.
+    EndsEarly(CutOff),
     /// The decode reached the end of the file.
     Complete,
+}
+
+/// Where a file cut off before the length its header gives ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CutOff {
+    /// What the file's frames are called, such as `FLAC`; `None` for PCM,
+    /// which has none.
+    pub(super) frames: Option<&'static str>,
+    /// The frame after the last one the decode reached, on the file's
+    /// timeline: a damaged packet before it does not move it.
+    pub(super) end_frame: u64,
+    pub(super) sample_rate_hz: u64,
+}
+
+impl CutOff {
+    /// Where playback stops, in seconds.
+    pub(super) fn seconds(&self) -> f32 {
+        seconds_from_frames(self.end_frame, self.sample_rate_hz)
+    }
 }
 
 /// The fewest peaks an overview preview has: the analysis thread shows

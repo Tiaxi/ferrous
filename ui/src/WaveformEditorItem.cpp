@@ -63,15 +63,7 @@ constexpr int kPlaybackTilePrefetch = 2;
 // How far ahead of the view, in playback, workers make playback tiles.
 constexpr double kPlaybackTileLookaheadSeconds = 0.05;
 constexpr double kGridAlignmentEpsilon = 1.0e-9;
-constexpr QColor kBackground(5, 9, 7);
-constexpr QColor kWaveform(54, 225, 161);
-constexpr QColor kMutedWaveform(74, 104, 92);
 constexpr QColor kGrid(20, 82, 49);
-constexpr QColor kCenterLine(108, 42, 45);
-constexpr QColor kCenterLineContrast(8, 18, 14, 235);
-constexpr QColor kChannelSeparator(79, 94, 86);
-constexpr QColor kPlayhead(190, 190, 200, 150);
-constexpr QColor kPlayheadContrast(8, 18, 14, 235);
 constexpr QColor kOverlay(190, 190, 200, 180);
 
 QFont fpsCounterFont() {
@@ -528,6 +520,59 @@ void WaveformEditorItem::setShowFpsOverlay(bool value) {
     emit showFpsOverlayChanged();
     update();
 }
+QColor WaveformEditorItem::backgroundColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.background; }
+void WaveformEditorItem::setBackgroundColor(const QColor &value) { setColor(&Colors::background, value); }
+QColor WaveformEditorItem::waveformColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.waveform; }
+void WaveformEditorItem::setWaveformColor(const QColor &value) { setColor(&Colors::waveform, value); }
+QColor WaveformEditorItem::mutedWaveformColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.mutedWaveform; }
+void WaveformEditorItem::setMutedWaveformColor(const QColor &value) { setColor(&Colors::mutedWaveform, value); }
+QColor WaveformEditorItem::centerLineColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.centerLine; }
+void WaveformEditorItem::setCenterLineColor(const QColor &value) { setColor(&Colors::centerLine, value); }
+QColor WaveformEditorItem::laneSeamColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.laneSeam; }
+void WaveformEditorItem::setLaneSeamColor(const QColor &value) { setColor(&Colors::laneSeam, value); }
+QColor WaveformEditorItem::playheadColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.playhead; }
+void WaveformEditorItem::setPlayheadColor(const QColor &value) { setColor(&Colors::playhead, value); }
+QColor WaveformEditorItem::playheadCasingColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.playheadCasing; }
+void WaveformEditorItem::setPlayheadCasingColor(const QColor &value) { setColor(&Colors::playheadCasing, value); }
+
+double WaveformEditorItem::markerSeconds() const { QMutexLocker lock(&m_stateMutex); return m_markerSeconds; }
+
+void WaveformEditorItem::setMarkerSeconds(double value) {
+    if (!std::isfinite(value) || value < 0.0) value = -1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_markerSeconds == value) return;
+        m_markerSeconds = value;
+    }
+    emit markerSecondsChanged();
+    update();
+}
+
+void WaveformEditorItem::publishMarkerX(double x) {
+    QMutexLocker lock(&m_stateMutex);
+    // NaN, the marker not drawn, is not equal to itself: compare by kind.
+    if ((std::isnan(x) && std::isnan(m_markerXLaidOut)) || x == m_markerXLaidOut) return;
+    m_markerXLaidOut = x;
+    // Drawn on the render thread; the view binds on the GUI thread.
+    QMetaObject::invokeMethod(this, [this, x] {
+        if ((std::isnan(x) && std::isnan(m_markerX)) || x == m_markerX) return;
+        m_markerX = x;
+        emit markerXChanged();
+    }, Qt::QueuedConnection);
+}
+
+void WaveformEditorItem::setColor(QColor Colors::*member, const QColor &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_colors.*member == value) return;
+        m_colors.*member = value;
+        // The cached rasters and tiles are drawn in the old colours.
+        invalidateCacheLocked();
+    }
+    emit colorsChanged();
+    update();
+}
+
 void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); update(); }
 void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsChanged(); update(); }
 
@@ -1862,7 +1907,7 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
             m_stagedCache.width(), firstX + kStagedCacheColumnsPerPaint);
         painter.fillRect(
             QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
-            kBackground);
+            m_colors.background);
         painter.setClipRect(
             QRect(firstX, 0, lastX - firstX, m_stagedCache.height()),
             Qt::ReplaceClip);
@@ -1985,7 +2030,8 @@ bool WaveformEditorItem::LaneStyle::muted(int channel) const {
 
 WaveformEditorItem::LaneStyle WaveformEditorItem::laneStyleLocked() const {
     return {m_viewMode, m_mutedChannelsMask, m_soloedChannelsMask,
-        m_straightSamplePixelsPerSample};
+        m_straightSamplePixelsPerSample, m_colors.background, m_colors.waveform,
+        m_colors.mutedWaveform};
 }
 
 bool WaveformEditorItem::channelIsMutedLocked(int channel) const {
@@ -2037,7 +2083,7 @@ std::optional<WaveformSceneGraph::Chunks> WaveformEditorItem::sampleChunksLocked
         stream << quint8(1) << width << height << scale << span << channels << style.viewMode
                << quint64{style.mutedMask} << quint64{style.soloedMask}
                << style.straightSamplePixelsPerSample << phase << kSampleChunkColumns
-               << kWaveform.rgba() << kMutedWaveform.rgba() << rate << m_detail.channelCount
+               << style.waveform.rgba() << style.mutedWaveform.rgba() << rate << m_detail.channelCount
                << m_detail.framesPerPoint << !m_detail.downmixExtrema.empty() << m_detailSourceEpoch
                << m_clockState.trackToken << m_clockState.epoch;
     }
@@ -2154,6 +2200,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
     bool presentationCommitted = false;
     bool stagingContinues = false;
     double scale = 1.0;
+    Colors colors;
+    double markerSeconds = -1.0;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     // Replace body pixels rather than blending with the previous raster; the
@@ -2164,6 +2212,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
         // One time for the whole frame: the view and the playhead move with
         // the clock, and must not move apart while the frame is drawn.
         const qint64 frameNs = m_nowNs();
+        colors = m_colors;
+        markerSeconds = m_markerSeconds;
         presentationCommitted = advanceStagedCacheLocked(frameNs);
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked(frameNs);
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
@@ -2189,7 +2239,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
             m_sampleChunksClipped = false;
         }
         if (directDetail) {
-            painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+            painter->fillRect(QRect(0, 0, canvasWidth, canvasHeight), colors.background);
             // The scene graph keeps the samples' geometry, in chunks; any
             // other painter draws them.
             const int lanes = displayedChannelCountLocked();
@@ -2290,7 +2340,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         bool cachePainted = false;
         if (tiledPlayback) {
             painter->fillRect(
-                QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+                QRect(0, 0, canvasWidth, canvasHeight), colors.background);
             cachePaintCoversCanvas = true;
             cachePainted = true;
         } else if (cacheSecondsPerPixel > 0.0 && visibleEnd > visibleStart) {
@@ -2322,7 +2372,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 cachePaintCoversCanvas = clippedSource == requestedSource;
                 if (!cachePaintCoversCanvas) {
                     painter->fillRect(
-                        QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+                        QRect(0, 0, canvasWidth, canvasHeight), colors.background);
                 }
                 const QRectF destination(
                     (clippedSource.left() - sourceX) * destinationScale,
@@ -2335,7 +2385,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
         if (!cachePainted) {
             painter->fillRect(
-                QRect(0, 0, canvasWidth, canvasHeight), kBackground);
+                QRect(0, 0, canvasWidth, canvasHeight), colors.background);
         }
         for (const PlaybackTilePaint &tile : playbackTilePaints) {
             painter->drawImage(tile.target, tile.image, tile.source);
@@ -2353,16 +2403,27 @@ void WaveformEditorItem::paint(QPainter *painter) {
         QMutexLocker lock(&m_stateMutex);
         drawGridLocked(
             *painter, canvasWidth, canvasHeight, visibleStart, visibleEnd, channels);
-        drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels);
+        drawChannelSeparators(*painter, canvasWidth, canvasHeight, channels, colors.laneSeam);
     }
+    publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
+        ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
+        : std::numeric_limits<double>::quiet_NaN());
     if (visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
         const double x = axis.x(axis.columnOf(position));
-        drawContrastingLine(
-            *painter,
-            QLineF(x, 0.0, x, canvasHeight - 1.0),
-            kPlayhead,
-            kPlayheadContrast);
+        // A device pixel's core cased in one on each side: the column's
+        // left edge is on one, and cosmetic pens draw a device pixel wide.
+        const double pixel = 1.0 / scale;
+        const auto line = [&](double at, const QColor &color) {
+            QPen pen(color);
+            pen.setWidth(0);
+            pen.setCapStyle(Qt::FlatCap);
+            painter->setPen(pen);
+            painter->drawLine(QLineF(at, 0.0, at, canvasHeight - 1.0));
+        };
+        line(x - pixel, colors.playheadCasing);
+        line(x + pixel, colors.playheadCasing);
+        line(x, colors.playhead);
     }
     if (crosshair && hoverActive) {
         QMutexLocker lock(&m_stateMutex);
@@ -2608,7 +2669,7 @@ WaveformEditorItem::PlaybackTile WaveformEditorItem::renderPlaybackTile(
     for (int top = 0; top < height; top += WaveformSceneGraph::kTextureSize) {
         QImage strip(kPlaybackTileWidth, std::min(WaveformSceneGraph::kTextureSize, height - top),
             QImage::Format_RGB32);
-        strip.fill(kBackground);
+        strip.fill(style.background);
         QPainter painter(&strip);
         painter.setRenderHint(QPainter::Antialiasing, false);
         painter.translate(0, -top);
@@ -2966,7 +3027,7 @@ void WaveformEditorItem::rebuildCacheLocked(
         || m_cache.format() != QImage::Format_RGB32) {
         m_cache = QImage(grid.width, height, QImage::Format_RGB32);
     }
-    m_cache.fill(kBackground);
+    m_cache.fill(m_colors.background);
     QPainter painter(&m_cache);
     painter.setRenderHint(QPainter::Antialiasing, false);
     const int channels = displayedChannelCountLocked();
@@ -3013,9 +3074,9 @@ void WaveformEditorItem::rebuildCacheLocked(int width, int height) {
 }
 
 void WaveformEditorItem::drawChannelSeparators(
-    QPainter &painter, int width, int height, int channels) {
+    QPainter &painter, int width, int height, int channels, const QColor &color) {
     if (channels < 2) return;
-    painter.setPen(QPen(kChannelSeparator, 1.0));
+    painter.setPen(QPen(color, 1.0));
     for (int channel = 1; channel < channels; ++channel) {
         const int y = static_cast<int>(std::round(
             static_cast<double>(channel) * height / channels));
@@ -3095,11 +3156,8 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
         const double top = static_cast<double>(channel) * height / channels;
         const double bottom = static_cast<double>(channel + 1) * height / channels;
         const int y = static_cast<int>((top + bottom) * 0.5);
-        drawContrastingLine(
-            painter,
-            QLine(0, y, width - 1, y),
-            kCenterLine,
-            kCenterLineContrast);
+        painter.setPen(QPen(m_colors.centerLine, 0.0));
+        painter.drawLine(QLine(0, y, width - 1, y));
     }
     if (!m_gridEnabled) return;
 
@@ -3181,7 +3239,7 @@ void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int he
         const double bottom = static_cast<double>(channel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
         const double half = (bottom - top) * 0.5 - pixelScale;
-        painter.setPen(QPen(channelIsMutedLocked(channel) ? kMutedWaveform : kWaveform, 1.0));
+        painter.setPen(QPen(laneStyleLocked().waveformOf(channel), 1.0));
         for (int x = 0; x < width; ++x) {
             const double start = std::max(0.0, visibleStart + x * secondsPerPixel);
             const double end = std::min(coverage, visibleStart + (x + 1) * secondsPerPixel);
@@ -3281,7 +3339,7 @@ void WaveformEditorItem::drawDetailSlice(
         const double bottom = static_cast<double>(displayChannel + 1) * height / channels;
         const double center = (top + bottom) * 0.5;
         const double half = (bottom - top) * 0.5 - pixelScale;
-        const QColor color = style.muted(displayChannel) ? kMutedWaveform : kWaveform;
+        const QColor color = style.waveformOf(displayChannel);
         // Columns are a pixel wide; curves keep their logical width.
         painter.setPen(QPen(color, sampleCurve ? (sampleMarkers ? 1.2 : 1.0) * pixelScale : 1.0));
         QPolygonF polyline;
@@ -3484,7 +3542,7 @@ void WaveformEditorItem::drawDetailEnvelope(
             columns.append(QRectF(x, top, 1.0, bottom - top + 1.0));
         }
         painter.setPen(Qt::NoPen);
-        painter.setBrush(style.muted(displayChannel) ? kMutedWaveform : kWaveform);
+        painter.setBrush(style.waveformOf(displayChannel));
         // One call: the scene graph makes one geometry of a batch of them.
         if (!columns.isEmpty()) {
             painter.drawRects(columns.constData(), static_cast<int>(columns.size()));

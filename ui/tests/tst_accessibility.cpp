@@ -15,6 +15,7 @@
 #include <QQmlContext>
 #include <QQmlExpression>
 #include <QQuickItem>
+#include <QQuickItemGrabResult>
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickStyle>
@@ -30,9 +31,13 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <tuple>
 
 #include "../src/BridgeClient.h"
+// The plot layer's tests give the meter levels to draw.
+#define private public
 #include "../src/LevelMeterItem.h"
+#undef private
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
 #include "../src/PlaybackClock.h"
@@ -321,6 +326,10 @@ private slots:
     void tagEditorCaseButtonsAreBesideTheScrollBar();
     void modeSwitchIconFollowsTheMode();
     void visualizationsHaveAccessibleRoles();
+    void laneButtonsAreTabStopsThatRevealThemselves();
+    void levelMeterReservesItsColumnAndReadsOut();
+    void plotLayerDrawsWithContrast();
+    void plotLayerShowsThePaneStates();
     void drawsOffscreenUnlessAPlatformIsChosen();
 };
 
@@ -407,12 +416,13 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 2);
     QQuickItem *levelMeterBox = visibleItemNamed(window, QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(levelMeterBox != nullptr);
-    QVERIFY(levelMeterBox->property("checked").toBool());
+    // Off by default.
+    QVERIFY(!levelMeterBox->property("checked").toBool());
     QVERIFY(tabTo(levelMeterBox));
     QTest::keyClick(window, Qt::Key_Space);
-    QTRY_VERIFY(!levelMeterBox->property("checked").toBool());
+    QTRY_VERIFY(levelMeterBox->property("checked").toBool());
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    QVERIFY(!bridge->property("showLevelMeter").toBool());
+    QVERIFY(bridge->property("showLevelMeter").toBool());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("preferencesPages")) == nullptr);
 }
@@ -3299,24 +3309,38 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
-    QVERIFY(viewer != nullptr && waveformButton != nullptr);
-    QObject *stroke = waveformButton->findChild<QObject *>(
-        QStringLiteral("visualizationModeWaveformStroke"));
-    QVERIFY2(stroke != nullptr, "The waveform icon is not drawn from a bound colour");
-    const QColor unselected = stroke->property("strokeColor").value<QColor>();
-    QCOMPARE(unselected, waveformButton->property("iconColor").value<QColor>());
-
-    QJSValue setMode = qvariant_cast<QJSValue>(
-        waveformButton->parentItem()->property("setMode"));
-    QVERIFY(setMode.isCallable());
-    setMode.call(QJSValueList{QJSValue(1)});
+    QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
+    // Real tool buttons with Breeze icons, tooltips and accessible names.
+    for (const auto &[button, name, icon] : {
+             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("view-statistics")},
+             std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
+        QVERIFY(button->inherits("QQuickToolButton"));
+        QCOMPARE(accessibleRole(button), QAccessible::RadioButton);
+        QCOMPARE(accessibleText(button, QAccessible::Name), name);
+        // The tool button's text is its tooltip.
+        QCOMPARE(button->property("text").toString(), name);
+        QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+    }
+    // The checked one is the mode: a solid fill, not a tint.
+    const auto checkedFill = [](QQuickItem *button) {
+        return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonChecked"));
+    };
+    QVERIFY(spectrogramButton->property("checked").toBool());
+    QVERIFY(checkedFill(spectrogramButton)->isVisible());
+    QVERIFY(!checkedFill(waveformButton)->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      waveformButton->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
-    QTRY_VERIFY(stroke->property("strokeColor").value<QColor>() != unselected);
-    QCOMPARE(stroke->property("strokeColor").value<QColor>(),
-             waveformButton->property("iconColor").value<QColor>());
-    setMode.call(QJSValueList{QJSValue(0)});
-    QTRY_COMPARE(stroke->property("strokeColor").value<QColor>(), unselected);
+    QTRY_VERIFY(waveformButton->property("checked").toBool());
+    QVERIFY(!spectrogramButton->property("checked").toBool());
+    QVERIFY(checkedFill(waveformButton)->isVisible());
+    // Space on the focused button sets the mode rather than playing.
+    QVERIFY(tabTo(window, spectrogramButton));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QVERIFY(spectrogramButton->property("checked").toBool());
 }
 
 void AccessibilityTest::visualizationsHaveAccessibleRoles() {
@@ -3335,6 +3359,313 @@ void AccessibilityTest::visualizationsHaveAccessibleRoles() {
         QCOMPARE(accessibleRole(item), QAccessible::Graphic);
         QCOMPARE(accessibleText(item, QAccessible::Name), name);
     }
+}
+
+namespace {
+// The pixel of `image` at the scene point of `item`'s `point`.
+QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item, QPointF point) {
+    const double scale = double(image.width()) / window->width();
+    const QPointF scene = item->mapToScene(point) * scale;
+    return image.pixelColor(int(std::floor(scene.x())), int(std::floor(scene.y())));
+}
+
+// The pixel in `item`'s `rect` that contrasts most with `background`.
+QColor mostContrasting(const QImage &image, const QQuickWindow *window, QQuickItem *item,
+                       const QRectF &rect, const QColor &background) {
+    QColor best = background;
+    for (double y = rect.top(); y < rect.bottom(); y += 0.5) {
+        for (double x = rect.left(); x < rect.right(); x += 0.5) {
+            const QColor candidate = drawnAt(image, window, item, QPointF(x, y));
+            if (contrastRatio(candidate, background) > contrastRatio(best, background)) best = candidate;
+        }
+    }
+    return best;
+}
+
+QQuickItem *plotLayerOf(QQuickWindow *window) {
+    return window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+}
+
+// Two labelled lanes on the plot layer, as a stereo track's.
+bool showStereoLanes(QQuickItem *layer) {
+    return layer->setProperty("laneCount", 2)
+        && layer->setProperty("laneLabels", QVariantList{QStringLiteral("L"), QStringLiteral("R")});
+}
+}
+
+void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QVERIFY(layer != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    QList<QQuickItem *> plates;
+    QTRY_COMPARE((plates = itemsNamed(layer, QStringLiteral("plotLaneButtons"))).size(), 2);
+    const QList<QQuickItem *> mutes = itemsNamed(layer, QStringLiteral("plotLaneMuteButton"));
+    const QList<QQuickItem *> solos = itemsNamed(layer, QStringLiteral("plotLaneSoloButton"));
+    QCOMPARE(mutes.size(), 2);
+    QCOMPARE(solos.size(), 2);
+    // Hidden until wanted, but in the scene: Tab reaches them.
+    for (QQuickItem *plate : plates) {
+        QVERIFY(plate->isVisible());
+        QCOMPARE(plate->opacity(), 0.0);
+    }
+    QCOMPARE(accessibleText(mutes[0], QAccessible::Name), QStringLiteral("Mute L"));
+    QCOMPARE(accessibleText(solos[1], QAccessible::Name), QStringLiteral("Solo R"));
+    QCOMPARE(accessibleRole(mutes[0]), QAccessible::CheckBox);
+    // The tool button's text is its tooltip.
+    QCOMPARE(solos[0]->property("text").toString(), QStringLiteral("Solo L"));
+    // After the mode switch, each lane's Mute and Solo, in order.
+    QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(tabTo(window, waveformButton));
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(mutes[0]->hasActiveFocus());
+    // Focus in the lane shows its buttons, and only its.
+    QTRY_COMPARE(plates[0]->opacity(), 1.0);
+    QCOMPARE(plates[1]->opacity(), 0.0);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(solos[0]->hasActiveFocus());
+    QCOMPARE(plates[0]->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(mutes[1]->hasActiveFocus());
+    QTRY_COMPARE(plates[0]->opacity(), 0.0);
+    QTRY_COMPARE(plates[1]->opacity(), 1.0);
+    // The pointer on a lane shows its buttons too.
+    QVERIFY(layer->setProperty("hoveredLane", 0));
+    QTRY_COMPARE(plates[0]->opacity(), 1.0);
+    QVERIFY(layer->setProperty("hoveredLane", -1));
+    QTRY_COMPARE(plates[0]->opacity(), 0.0);
+    // With the buttons set never to show, they are no Tab stops either.
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge->setProperty("channelButtonsVisibility", 0));
+    QTRY_VERIFY(!plates[0]->isVisible());
+    QVERIFY(!mutes[0]->isVisible());
+}
+
+void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QQuickItem *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *meter = window->findChild<LevelMeterItem *>(QStringLiteral("levelMeter"));
+    QVERIFY(layer != nullptr && surface != nullptr && bridge != nullptr && meter != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    // Off: the plot is the pane's whole width.
+    QVERIFY(!meter->isVisible());
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width());
+    QVERIFY(itemsNamed(layer, QStringLiteral("levelMeterLane")).isEmpty());
+    // On: a 10 px column at the end of each lane, also with nothing playing.
+    QVERIFY(bridge->setProperty("showLevelMeter", true));
+    QTRY_VERIFY(meter->isVisible());
+    QCOMPARE(meter->width(), 10.0);
+    QCOMPARE(meter->laneCount(), 2);
+    QVERIFY(!meter->active());
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    // Play and stop leave the plot's width alone.
+    for (const QString &state : {QStringLiteral("Playing"), QStringLiteral("Paused"), QStringLiteral("Stopped")}) {
+        QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
+        QVERIFY(bridge->setProperty("playbackState", state));
+        QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    }
+    // Each lane's column: its channel and level for assistive technology,
+    // and the exact levels in its tooltip.
+    const QList<QQuickItem *> lanes = itemsNamed(layer, QStringLiteral("levelMeterLane"));
+    QCOMPARE(lanes.size(), 2);
+    QCOMPARE(accessibleRole(lanes[0]), QAccessible::ProgressBar);
+    QCOMPARE(accessibleText(lanes[0], QAccessible::Name), QStringLiteral("Level of L"));
+    QCOMPARE(accessibleText(lanes[1], QAccessible::Name), QStringLiteral("Level of R"));
+    QVERIFY(accessibleText(lanes[0], QAccessible::Description).contains(QStringLiteral("−∞ dB")));
+    QVERIFY(bridge->setProperty("connected", true));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QTRY_VERIFY(meter->active());
+    // Held levels: the meter neither plays nor decays them while the
+    // test reads them, and no clock of playback's clears them.
+    meter->setPlaying(false);
+    meter->setClock(nullptr);
+    meter->m_channels.assign(2, {});
+    meter->m_shown.assign(2, {});
+    meter->m_shown[0].observe(-12.34, 0);
+    meter->m_shown[1].observe(0.0, 0);
+    meter->setReadoutWanted(true);
+    QTRY_VERIFY(accessibleText(lanes[0], QAccessible::Description).contains(QStringLiteral("−12.3 dB")));
+    QAccessibleInterface *value = QAccessible::queryAccessibleInterface(lanes[0]);
+    QVERIFY(value != nullptr && value->valueInterface() != nullptr);
+    QCOMPARE(value->valueInterface()->currentValue().toDouble(), -12.3);
+    QCOMPARE(value->valueInterface()->minimumValue().toDouble(), -60.0);
+    QCOMPARE(value->valueInterface()->maximumValue().toDouble(), 0.0);
+    // Clipping is said, not only drawn.
+    QVERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
+    QCOMPARE(evaluateOn(lanes[1], QStringLiteral("ToolTip.text")).toString(),
+             QStringLiteral("R: Level 0.0 dB, peak 0.0 dB, clipping"));
+    // Paused, the column is an empty trough, as when stopped, and still
+    // reserved; playing again, the meter comes back.
+    const auto lampRow = [&]() {
+        const QSharedPointer<QQuickItemGrabResult> grab = meter->grabToImage();
+        QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
+        const QImage image = ready.wait(5000) ? grab->image() : QImage();
+        const double scale = image.isNull() ? 1.0 : double(image.width()) / meter->width();
+        // The lamp's rows and the gap under it, 3 to 7 px into the lane.
+        return QPair<QColor, QColor>(image.pixelColor(int(5 * scale), int(4.5 * scale)),
+                                     image.pixelColor(int(5 * scale), int(6.5 * scale)));
+    };
+    const QColor trough = layer->property("plotColors").value<QObject *>()
+        ->property("meterTrough").value<QColor>();
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
+    QTRY_VERIFY(!meter->active());
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QVERIFY(meter->isVisible());
+    auto [lamp, gap] = lampRow();
+    QCOMPARE(lamp, trough);
+    QCOMPARE(gap, trough);
+    QTRY_VERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("\u2212\u221e dB")));
+    QVERIFY(!accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QTRY_VERIFY(meter->active());
+    std::tie(lamp, gap) = lampRow();
+    QVERIFY(lamp != trough);
+    QVERIFY(gap != trough);
+    // Off again: the plot takes the column back.
+    QVERIFY(bridge->setProperty("showLevelMeter", false));
+    QTRY_COMPARE(surface->property("plotWidth").toReal(), layer->width());
+}
+
+void AccessibilityTest::plotLayerDrawsWithContrast() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *meter = window->findChild<LevelMeterItem *>(QStringLiteral("levelMeter"));
+    QVERIFY(layer != nullptr && bridge != nullptr && viewer != nullptr && meter != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    QVERIFY(bridge->setProperty("showLevelMeter", true));
+    QVERIFY(bridge->setProperty("connected", true));
+    QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QTRY_VERIFY(meter->active());
+    // The levels the test gives it decay, rather than play on, and no
+    // clock of playback's clears them.
+    meter->setPlaying(false);
+    meter->setClock(nullptr);
+    for (const int mode : {0, 1}) {
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
+        QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
+        // The mode's plot gives the layer its lanes again: two, labelled.
+        QVERIFY(showStereoLanes(layer));
+        const QString what = mode == 0 ? QStringLiteral("spectrogram") : QStringLiteral("waveform");
+        // A level of -12 dB in the first lane; it decays from there.
+        meter->m_channels.assign(2, {});
+        meter->m_channels[0].observe(-12, 0);
+        meter->m_shown = meter->m_channels;
+        meter->update();
+        // Keyboard focus on the unchecked mode button.
+        QQuickItem *unchecked = visibleItemNamed(
+            window, QStringLiteral("visualizationModeButton%1").arg(mode == 0 ? 1 : 0));
+        QQuickItem *checked = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(mode));
+        QVERIFY(tabTo(window, unchecked));
+        QTRY_VERIFY(unchecked->property("visualFocus").toBool());
+        QQuickItem *label = nullptr;
+        for (QQuickItem *candidate : itemsNamed(layer, QStringLiteral("plotLaneLabel"))) {
+            if (label == nullptr && candidate->isVisible()) label = candidate;
+        }
+        QVERIFY(label != nullptr);
+        QQuickItem *labelText = label->findChild<QQuickItem *>(QStringLiteral("plotPlateLabel"));
+        QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
+        QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        // The label's text on its plate.
+        const QColor plate = drawnAt(image, window, label, QPointF(1.5, 1.5));
+        const QColor text = mostContrasting(image, window, labelText,
+                                            QRectF(0, 0, labelText->width(), labelText->height()), plate);
+        QVERIFY2(contrastRatio(text, plate) >= 4.5,
+                 qPrintable(QStringLiteral("%1 label: %2").arg(what).arg(contrastRatio(text, plate))));
+        // The checked fill on the switch's plate, and the focus ring.
+        const QColor switchFill = drawnAt(image, window, switchPlate, QPointF(1.0, switchPlate->height() / 2));
+        const QColor fill = drawnAt(image, window, checked, QPointF(2.5, 2.5));
+        QVERIFY2(contrastRatio(fill, switchFill) >= 3.0,
+                 qPrintable(QStringLiteral("%1 checked: %2").arg(what).arg(contrastRatio(fill, switchFill))));
+        const QColor ring = drawnAt(image, window, unchecked, QPointF(unchecked->width() / 2, -2.5));
+        QVERIFY2(contrastRatio(ring, switchFill) >= 3.0,
+                 qPrintable(QStringLiteral("%1 ring: %2").arg(what).arg(contrastRatio(ring, switchFill))));
+        // The meter's fill against its trough, above the fill, as the meter
+        // draws them: grabbed alone, as a window grab offscreen leaves the
+        // right end of this wide window's pane undrawn.
+        const QSharedPointer<QQuickItemGrabResult> meterGrab = meter->grabToImage();
+        QVERIFY(meterGrab != nullptr);
+        QSignalSpy ready(meterGrab.data(), &QQuickItemGrabResult::ready);
+        QVERIFY(ready.wait(5000));
+        const QImage meterImage = meterGrab->image();
+        const double meterScale = double(meterImage.width()) / meter->width();
+        const auto meterPixel = [&](double x, double y) {
+            return meterImage.pixelColor(int(x * meterScale), int(y * meterScale));
+        };
+        const auto [top, bottom] = LevelMeterItem::laneRows(0, 2, meter->height());
+        const QColor meterFill = meterPixel(5.5, bottom - 5);
+        const QColor trough = meterPixel(5.5, top + 9);
+        QVERIFY2(contrastRatio(meterFill, trough) >= 3.0,
+                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4").arg(what, meterFill.name(), trough.name())
+                                .arg(contrastRatio(meterFill, trough))));
+    }
+}
+
+void AccessibilityTest::plotLayerShowsThePaneStates() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QVERIFY(layer != nullptr && bridge != nullptr && errors != nullptr);
+    QQuickItem *analysing = layer->findChild<QQuickItem *>(QStringLiteral("plotAnalysingText"));
+    QQuickItem *endsEarly = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarly"));
+    QVERIFY(analysing != nullptr && endsEarly != nullptr);
+    // Before any audio: the plot's floor, no message; the switch shows.
+    QVERIFY(!analysing->isVisible());
+    QVERIFY(!endsEarly->isVisible());
+    QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);
+    QQuickItem *pane = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPane"));
+    QVERIFY(pane != nullptr);
+    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#14062e")));
+    // A track without its analysis yet: Analysing…, after a moment.
+    QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QVERIFY(layer->property("analysing").toBool());
+    QVERIFY(!analysing->isVisible());
+    QTRY_VERIFY(analysing->isVisible());
+    QCOMPARE(analysing->property("text").toString(), QStringLiteral("Analysing…"));
+    // The file ends early: its message, in the empty part after the cut,
+    // as Recent Issues says it, with the way there.
+    QVERIFY(bridge->setProperty("waveformCoverageSeconds", 242.6));
+    QVERIFY(bridge->setProperty("waveformEndsEarly", true));
+    QTRY_VERIFY(!analysing->isVisible());
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    QTRY_VERIFY(endsEarly->isVisible());
+    QCOMPARE(endsEarly->x(), 201.0);
+    QQuickItem *text = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarlyText"));
+    QQuickItem *link = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarlyLink"));
+    QVERIFY(text != nullptr && link != nullptr);
+    QCOMPARE(text->property("text").toString(), QStringLiteral("The file ends at 4:02."));
+    QCOMPARE(accessibleRole(link), QAccessible::Link);
+    QSignalSpy issues(errors, SIGNAL(historyRequested()));
+    link->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(issues.count(), 1);
+    // No room after the cut: no message over the plot.
+    QVERIFY(layer->setProperty("markerX", layer->width() - 40.0));
+    QTRY_VERIFY(!endsEarly->isVisible());
+    // The next track clears it.
+    QVERIFY(bridge->setProperty("waveformEndsEarly", false));
+    QVERIFY(layer->setProperty("markerX", 200.0));
+    QTRY_VERIFY(!endsEarly->isVisible());
 }
 
 void AccessibilityTest::drawsOffscreenUnlessAPlatformIsChosen() {
