@@ -178,7 +178,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/DialogFooter.qml
         qml/components/DialogHeader.qml
         qml/components/DialogSurface.qml
-        qml/components/ErrorBanner.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
@@ -190,12 +189,14 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
-        qml/components/PopupTransition.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
         qml/components/UiPalette.qml
-        qml/components/ViewerCloseButton.qml
+        qml/components/ViewerControls.qml
+        qml/components/ViewerCornerControls.qml
+        qml/components/ViewerStrip.qml
+        qml/components/ViewerToolButton.qml
         qml/controllers/ErrorController.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml

@@ -2,6 +2,7 @@
 
 #include <QAccessible>
 #include <QApplication>
+#include <QClipboard>
 #include <QFont>
 #include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
@@ -1594,6 +1595,15 @@ private slots:
     void visualizationModeSwitchTakesKeyboardFocus();
     void visualizationModeSwitchStaysClearOfTheCornerOverlays();
     void visualizationModeSwitchLeavesTheCornerToTheView();
+    void viewersShowTheTrackInATitleStripOverTheWholeScreen();
+    void viewersInTheMainWindowAreNamedInItsTitle();
+    void viewerZoomShowsAReadoutAndAResetButton();
+    void viewerControlsComeBackForTheKeyboard();
+    void viewerKeysWorkFromEveryControl();
+    void viewerControlsStayWhileOneHasFocus();
+    void albumArtDetailsShowBesideTheArt();
+    void albumArtViewerShowsWhenItsImageCannotBeRead();
+    void albumArtInfoButtonIsTintedOnlyWhileChecked();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -1648,13 +1658,11 @@ private slots:
     void repeatedErrorsAreCounted();
     void errorHistoryKeepsTheLatestErrors();
     void aLongErrorIsShownWhole();
-    void aLongMultiLineErrorKeepsTheControlsInTheWindow();
-    void escapeClosesFullscreenViewersWhileTheirErrorHasFocus();
-    void fullscreenErrorTextScrollsWithTheKeyboard();
+    void escapeClosesFullscreenViewersWhileTheirControlsHaveFocus();
     void quitTimeErrorClosesAFullscreenViewerFirst();
     void displaySleepFailureShowsInTheFullscreenViewer();
     void recentErrorsWorkByKeyboardAtTheSmallestWindow();
-    void viewerBannersOpenRecentErrorsAboveTheViewer();
+    void viewerIssuesButtonsOpenRecentErrorsAboveTheViewer();
     void recentErrorsFollowAFullscreenViewerThatCloses();
     void stoppedBackendShowsMessageAndDisablesControls();
     void quitActionClosesTheWindowThroughItsCloseHandler();
@@ -2181,9 +2189,9 @@ Item {
     Viewers.AlbumArtViewerShell {
         parent: harness
         windowRoot: viewerWindowRoot
+        uiPalette: palette
         viewerOpen: false
         useWholeScreenViewerMode: false
-        popupTransitionMs: 0
         titleText: "Ferrous"
         closeViewer: function() {}
         toggleInfoVisible: function() {}
@@ -2203,14 +2211,12 @@ Item {
         initialViewToken: 0
         viewerDecodeWidth: 1024
         viewerDecodeHeight: 1024
-        infoOverlayText: ""
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         closeViewer: function() {}
-        toggleInfoVisible: function() {}
         focusFullscreen: function() {}
-        comparisonLabel: ""
         comparisonModeAvailable: false
+        uiPalette: palette
     }
 
     Panes.SidebarPane {
@@ -2290,7 +2296,6 @@ ApplicationWindow {
         uiPalette: Components.UiPalette { windowRoot: windowRoot }
         viewerOpen: true
         useWholeScreenViewerMode: true
-        popupTransitionMs: 0
         titleText: "Ferrous"
         closeViewer: function() {}
     }
@@ -2312,6 +2317,13 @@ ApplicationWindow {
 
     auto *hideTimer = autoHide->property("hideTimer").value<QObject *>();
     QVERIFY(hideTimer != nullptr);
+    // The pointer where the test reports it, below the title strip, whose
+    // hover reports where the pointer is as its controls come and go.
+    auto *fullscreen = qobject_cast<QQuickWindow *>(
+        root->findChild<QObject *>(QStringLiteral("spectrogramFullscreenWindow")));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
+    QTest::mouseMove(fullscreen, QPoint(100, 80));
     autoHide->setProperty("hideDelay", 40);
     const auto reportPointerPosition = [autoHide](double x, double y) {
         return QMetaObject::invokeMethod(
@@ -2382,7 +2394,6 @@ ApplicationWindow {
         uiPalette: Components.UiPalette { windowRoot: windowRoot }
         viewerOpen: false
         useWholeScreenViewerMode: true
-        popupTransitionMs: 0
         titleText: "Ferrous"
         closeViewer: function() {}
         displaySleepInhibitor: sleepInhibitor
@@ -2814,7 +2825,6 @@ ApplicationWindow {
         uiPalette: tokens
         viewerOpen: false
         useWholeScreenViewerMode: false
-        popupTransitionMs: 0
         titleText: "Ferrous"
         closeViewer: function() {}
     }
@@ -3417,6 +3427,51 @@ QQuickItem *popupContent(QObject *popup) {
     return qvariant_cast<QQuickItem *>(popup->property("contentItem"));
 }
 
+// The first item named `objectName` that is visible in `window`, and an
+// item's rectangle in its window; see below.
+QQuickItem *visibleItemNamed(QQuickWindow *window, const QString &objectName);
+QRectF sceneRectOf(const QQuickItem *item);
+
+// Whether the row of buttons that `button` is in has placed it clear of the
+// others, inside the row and inside the window: a button that has just
+// appeared is in its place only after the row's next layout, and until then
+// the row keeps the width it had without it, and its other items where they
+// were the last time they showed.
+bool clearOfTheOtherButtons(QQuickItem *button) {
+    QQuickItem *parentRow = button->parentItem();
+    const QRectF own = sceneRectOf(button);
+    if (parentRow == nullptr || !sceneRectOf(parentRow).contains(own)
+        || own.left() < 0 || own.right() > button->window()->width()) {
+        return false;
+    }
+    QQuickItem *row = button->parentItem();
+    while (row != nullptr && row->parentItem() != nullptr
+           && !row->objectName().contains(QStringLiteral("Controls"))
+           && !row->objectName().contains(QStringLiteral("Strip"))) {
+        row = row->parentItem();
+    }
+    if (row == nullptr) {
+        return false;
+    }
+    const QRectF rect = sceneRectOf(button);
+    const std::function<bool(QQuickItem *)> overlaps = [&](QQuickItem *item) {
+        if (!item->isVisible()) {
+            return false;
+        }
+        if (item != button && item->property("flat").isValid()
+            && sceneRectOf(item).intersects(rect)) {
+            return true;
+        }
+        for (QQuickItem *child : item->childItems()) {
+            if (overlaps(child)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return !overlaps(row);
+}
+
 // The middle of `item`, in its window.
 QPoint centerInWindow(QQuickItem *item) {
     return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
@@ -3610,10 +3665,9 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-    auto *viewerBanner =
-        window->findChild<QQuickItem *>(QStringLiteral("spectrogramPopupErrorBanner"));
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
-    QVERIFY(bridge != nullptr && viewer != nullptr && viewerBanner != nullptr && dialog != nullptr);
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr && popup != nullptr);
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
     QString message = QStringLiteral(
@@ -3627,20 +3681,10 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
 
     QVERIFY(sendBridgeError(bridge, message, 2, 0));
 
-    const QString shown = QStringLiteral("Library: ") + message;
-    auto *banner = qvariant_cast<QQuickItem *>(viewerBanner->property("message"));
-    QQuickItem *text = itemNamed(viewerBanner, QStringLiteral("errorBannerText"));
-    QVERIFY(banner != nullptr && text != nullptr);
-    QTRY_VERIFY(banner->isVisible());
-    QCOMPARE(banner->property("text").toString(), shown);
-    // The whole message wraps over lines rather than being cut off; past
-    // the banner's lines it scrolls.
-    QCOMPARE(text->property("text").toString(), shown);
-    QVERIFY(!text->property("truncated").toBool());
-    QTRY_VERIFY(text->property("lineCount").toInt() > 1);
-    QVERIFY(text->property("contentWidth").toReal() <= text->width() + 1);
-    QVERIFY(text->width() <= window->width());
-    // And the history shows it whole too.
+    // The viewer has no banner: its button to Recent Issues shows, and the
+    // history shows the message whole.
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("viewerIssuesButton")) != nullptr);
     QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
     QVERIFY(errors != nullptr);
     QCOMPARE(errorHistoryMessages(errors), QStringList{message});
@@ -3712,55 +3756,6 @@ void WindowSmokeTest::draggedSplitSizesSurviveAWindowResize() {
     QVERIFY(finishIncubation(engine));
 }
 
-void ErrorsSmokeTest::aLongMultiLineErrorKeepsTheControlsInTheWindow() {
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    // The smallest window Ferrous allows.
-    window->resize(window->minimumWidth(), window->minimumHeight());
-    QTRY_COMPARE(window->height(), window->minimumHeight());
-    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-    auto *viewerBanner =
-        window->findChild<QQuickItem *>(QStringLiteral("spectrogramPopupErrorBanner"));
-    QVERIFY(bridge != nullptr && viewer != nullptr && viewerBanner != nullptr);
-    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
-    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
-    QQuickItem *body = itemNamed(viewerBanner, QStringLiteral("errorBannerBody"));
-    QQuickItem *text = itemNamed(viewerBanner, QStringLiteral("errorBannerText"));
-    QQuickItem *dismiss = itemNamed(viewerBanner, QStringLiteral("errorBannerDismissButton"));
-    QVERIFY(body != nullptr && text != nullptr && dismiss != nullptr);
-    const int maximumLines = viewerBanner->property("maximumLines").toInt();
-    QVERIFY(maximumLines > 0);
-
-    // A batch tag save that failed for ten files with long paths, as the tag
-    // editor reports it.
-    QStringList lines{QStringLiteral("Saved 0 files; 10 failed.")};
-    for (int file = 0; file < 10; ++file) {
-        lines.push_back(QStringLiteral(
-            "/music/Some Artist With A Long Name/Some Album With An Even Longer Name (Deluxe "
-            "Edition, Remastered)/%1 A Track Title That Goes On For Quite A While.flac: "
-            "Permission denied (os error 13)").arg(file + 1, 2, 10, QLatin1Char('0')));
-    }
-    QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
-
-    // The banner keeps to its lines; the rest of the text scrolls.
-    QTRY_VERIFY(viewerBanner->isVisible());
-    QTRY_VERIFY(text->property("lineCount").toInt() > maximumLines);
-    const QFontMetricsF metrics(qvariant_cast<QFont>(text->property("font")));
-    QTRY_VERIFY(body->height() <= metrics.lineSpacing() * maximumLines + 1);
-    QVERIFY(body->height() < text->height());
-    QVERIFY(viewerBanner->height() <= metrics.lineSpacing() * (maximumLines + 3));
-
-    // Its buttons stay inside the window.
-    QTRY_VERIFY(shownInsideItsWindow(dismiss));
-    QVERIFY(QMetaObject::invokeMethod(dismiss, "clicked"));
-    QTRY_VERIFY(!viewerBanner->isVisible());
-    QVERIFY(finishIncubation(engine));
-    QCOMPARE(takeCapturedMessagesText().count(QStringLiteral("error [Tags]:")), 1);
-}
-
 void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     // Stands in for a desktop without org.freedesktop.ScreenSaver.
     class FailingBackend final : public DisplaySleepInhibitorBackend {
@@ -3791,25 +3786,35 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QQuickWindow *fullscreen = surface->window();
     QTRY_VERIFY(inhibitor.inhibited());
 
-    // Shown where the user is looking: over the viewer.
-    auto *viewerBanner =
-        fullscreen->findChild<QQuickItem *>(QStringLiteral("spectrogramFullscreenErrorBanner"));
-    QVERIFY(viewerBanner != nullptr);
-    QTRY_VERIFY(viewerBanner->isVisible());
+    // Shown where the user is looking: in the viewer's title strip, as a
+    // button to Recent Issues, with no banner over the view.
+    QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) != nullptr);
+    QQuickItem *issuesButton = visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton"));
+    QCOMPARE(issuesButton->property("text").toString(), QStringLiteral("1 new issue"));
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+    QQuickItem *close = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCloseButton"));
+    QVERIFY(strip != nullptr && close != nullptr);
+    QVERIFY(strip->isAncestorOf(issuesButton));
+    // Laid out beside Close.
+    QTRY_VERIFY(clearOfTheOtherButtons(issuesButton));
+    QVERIFY(sceneRectOf(issuesButton).right() <= sceneRectOf(close).left());
     const QStringList messages = errorHistoryMessages(errors);
     QCOMPARE(messages.size(), 1);
     QVERIFY2(messages.first().contains(QStringLiteral("Couldn't keep the screen awake")),
              qPrintable(messages.first()));
     QVERIFY(messages.first().contains(QStringLiteral("no idle service")));
-    auto *message = qvariant_cast<QQuickItem *>(viewerBanner->property("message"));
-    QVERIFY(message != nullptr);
-    QCOMPARE(message->property("text").toString(), QStringLiteral("System: ") + messages.first());
 
-    // A click on the message does not close the viewer.
-    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier,
-                      viewerBanner->mapToScene(QPointF(4, 4)).toPoint());
-    QCoreApplication::processEvents();
+    // A click on it opens Recent Issues over the viewer, which stays open.
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
+    QVERIFY(dialog != nullptr);
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(issuesButton));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QCOMPARE(popupContent(dialog)->window(), fullscreen);
     QVERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    // Seen, it goes.
+    QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) == nullptr);
 
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!inhibitor.inhibited());
@@ -5918,13 +5923,10 @@ Item {
         })
     }
 
-    function overlayText() {
-        return viewerController.albumArtInfoOverlayText()
-    }
-
     QtObject {
         id: bridge
         property string currentTrackCoverPath: "image://covers//tmp/Front%20Cover.png#w=600&r=4"
+        property bool embedded: false
         signal imageFileDetailsChanged(string path)
 
         function requestImageFileDetails(path) {
@@ -5940,6 +5942,7 @@ Item {
                 fileName: "Front Cover.png",
                 resolutionText: "300 x 200",
                 fileSizeText: "12 KiB",
+                embeddedCover: bridge.embedded,
                 path: path
             })
         }
@@ -5968,11 +5971,23 @@ Item {
     QCOMPARE(controller->property("albumArtInfoVisible").toBool(), true);
     QCOMPARE(root->property("focusCalled").toBool(), true);
 
-    QVariant overlayText;
-    QVERIFY(QMetaObject::invokeMethod(root.data(), "overlayText", Q_RETURN_ARG(QVariant, overlayText)));
-    QVERIFY2(
-        overlayText.toString().contains(QStringLiteral("Front Cover.png")),
-        qPrintable(overlayText.toString()));
+    // The details the info column shows, and where the image is from.
+    const QVariantMap info = controller->property("albumArtViewerFileInfo").toMap();
+    QCOMPARE(info.value(QStringLiteral("fileName")).toString(), QStringLiteral("Front Cover.png"));
+    QCOMPARE(info.value(QStringLiteral("path")).toString(), QStringLiteral("/tmp/Front Cover.png"));
+    QCOMPARE(controller->property("albumArtSourceKind").toString(), QStringLiteral("folder"));
+
+    // Art the track's file embeds is cached by the backend: no folder of its own.
+    QObject *bridge = nullptr;
+    for (QObject *child : root->children()) {
+        if (child->property("embedded").isValid()) {
+            bridge = child;
+        }
+    }
+    QVERIFY(bridge != nullptr);
+    bridge->setProperty("embedded", true);
+    QVERIFY(QMetaObject::invokeMethod(controller, "refreshAlbumArtFileInfo"));
+    QCOMPARE(controller->property("albumArtSourceKind").toString(), QStringLiteral("embedded"));
 }
 
 void TagEditorSmokeTest::tagEditorLibrarySupportGateMatchesSupportedRows() {
@@ -22239,9 +22254,11 @@ void TransportInputSmokeTest::albumArtZoomFollowsTheWheelDelta() {
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Window {
+    id: surfaceWindow
     width: 400
     height: 400
     visible: true
@@ -22258,14 +22275,12 @@ Window {
         initialViewToken: 0
         viewerDecodeWidth: 400
         viewerDecodeHeight: 400
-        infoOverlayText: ""
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         closeViewer: function() {}
-        toggleInfoVisible: function() {}
         focusFullscreen: function() {}
-        comparisonLabel: ""
         comparisonModeAvailable: false
+        uiPalette: Components.UiPalette { windowRoot: surfaceWindow }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -22336,9 +22351,11 @@ void TransportInputSmokeTest::albumArtZoomKeepsTheImagePointUnderThePointer() {
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import "components" as Components
 import "viewers" as Viewers
 
 Window {
+    id: surfaceWindow
     width: testViewportWidth
     height: 400
     visible: true
@@ -22356,14 +22373,12 @@ Window {
         initialViewToken: 0
         viewerDecodeWidth: 400
         viewerDecodeHeight: 400
-        infoOverlayText: ""
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         closeViewer: function() { closeCount += 1 }
-        toggleInfoVisible: function() {}
         focusFullscreen: function() {}
-        comparisonLabel: ""
         comparisonModeAvailable: false
+        uiPalette: Components.UiPalette { windowRoot: surfaceWindow }
     }
 }
 )QML"), baseUrl, &errorText));
@@ -22538,9 +22553,11 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
 import "components" as Components
+import "components" as Components
 import "viewers" as Viewers
 
 Window {
+    id: surfaceWindow
     width: 1200
     height: 600
     visible: true
@@ -22562,14 +22579,12 @@ Window {
         initialViewToken: 0
         viewerDecodeWidth: 1200
         viewerDecodeHeight: 600
-        infoOverlayText: ""
         replaceFromItunesAction: replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: function() { return "" }
         closeViewer: function() {}
-        toggleInfoVisible: function() {}
         focusFullscreen: function() {}
-        comparisonLabel: ""
         comparisonModeAvailable: false
+        uiPalette: Components.UiPalette { windowRoot: surfaceWindow }
     }
 
     Components.AlbumArtTile {
@@ -24027,7 +24042,15 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     QQuickWindow *fullscreen = spectrogramSurface->window();
     QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
     QTRY_VERIFY(qFuzzyCompare(spectrogramSurface->width(), fullscreen->contentItem()->width()));
-    checkLayouts(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCloseButton"));
+    // Over the whole screen, the viewer's controls are in the title strip
+    // above the view, so the switch has the corner to itself.
+    QQuickItem *strip =
+        firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QCOMPARE(sceneRectOf(spectrogramSurface).top(), sceneRectOf(strip).bottom());
+    QVERIFY(sceneRectOf(strip).contains(sceneRectOf(firstVisibleItemNamed(
+        fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCloseButton")))));
+    checkLayouts(fullscreen->contentItem(), QString());
     if (QTest::currentTestFailed()) {
         return;
     }
@@ -24464,7 +24487,9 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
             QVERIFY(popup != nullptr);
             QTRY_VERIFY(popup->property("opened").toBool());
         }
-        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(), host->contentItem()->height()));
+        // Over the whole screen, under the 33 px title strip.
+        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(),
+                                  host->contentItem()->height() - (fullscreen == 1 ? 33 : 0)));
         QVERIFY(autoHide->property("active").toBool());
 
         for (const int visualization : {1, 0}) {
@@ -24512,6 +24537,923 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
         QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
         QTRY_VERIFY(waveformSurface->window() == window);
     }
+}
+
+namespace {
+
+// Gives the fallback bridge a playing track, as the viewers' boards show it.
+void setPlayingTrack(QObject *bridge) {
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian"));
+    bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours"));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Morning Tide Field.flac"));
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+}
+
+QString savedCover(const QTemporaryDir &dir, int width = 64, int height = 64) {
+    const QString path = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(width, height, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    return cover.save(path) ? path : QString();
+}
+
+// The colour property `name` of `object`, as 8-bit RGBA, as it is drawn.
+QRgb colorOf(QObject *object, const char *name) {
+    return object->property(name).value<QColor>().rgba();
+}
+
+} // namespace
+
+void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && palette != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+    const QString mainTitle = QStringLiteral("Morning Tide Field — Ferrous");
+    QTRY_COMPARE(window->title(), mainTitle);
+
+    struct Viewer {
+        const char *open;
+        const char *openProperty;
+        QString windowName;
+        QString stripName;
+        QString closeName;
+        QString surfaceName;
+        QString title;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen",
+         QStringLiteral("spectrogramFullscreenWindow"), QStringLiteral("spectrogramFullscreenStrip"),
+         QStringLiteral("spectrogramFullscreenCloseButton"), QStringLiteral("mainSpectrogramSurface"),
+         QStringLiteral("Morning Tide Field — Ferrous Visualization")},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
+         QStringLiteral("albumArtFullscreenWindow"), QStringLiteral("albumArtFullscreenStrip"),
+         QStringLiteral("albumArtFullscreenCloseButton"), QStringLiteral("albumArtSurface"),
+         QStringLiteral("Morning Tide Field — Ferrous Album Art")},
+    };
+    for (const Viewer &shown : viewers) {
+        const QByteArray name = shown.windowName.toUtf8();
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, shown.windowName);
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        // The viewer's window names it; the main window keeps its title.
+        QCOMPARE(fullscreen->title(), shown.title);
+        QCOMPARE(window->title(), mainTitle);
+
+        // 32 px of chrome with a hairline under it, at the top.
+        QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
+        QVERIFY2(strip != nullptr, name.constData());
+        QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
+        QCOMPARE(colorOf(strip, "color"), colorOf(palette, "chrome"));
+        QQuickItem *hairline = itemNamed(strip, QStringLiteral("viewerStripHairline"));
+        QVERIFY(hairline != nullptr);
+        QCOMPARE(sceneRectOf(hairline), QRectF(0, 32, fullscreen->width(), 1));
+        QCOMPARE(colorOf(hairline, "color"), colorOf(palette, "hairline"));
+
+        // The title semibold, then "Artist — Album" and the time, secondary.
+        QQuickItem *title = itemNamed(strip, QStringLiteral("viewerStripTitle"));
+        QQuickItem *context = itemNamed(strip, QStringLiteral("viewerStripContext"));
+        QQuickItem *time = itemNamed(strip, QStringLiteral("viewerStripTime"));
+        QVERIFY(title != nullptr && context != nullptr && time != nullptr);
+        QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
+        QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
+        QCOMPARE(colorOf(title, "color"), colorOf(palette, "text"));
+        QCOMPARE(context->property("text").toString(),
+                 QStringLiteral("The Quiet Meridian — Small Hours"));
+        QCOMPARE(colorOf(context, "color"), colorOf(palette, "textSecondary"));
+        QVERIFY2(time->property("text").toString().endsWith(QStringLiteral(" / 3:49")),
+                 qPrintable(time->property("text").toString()));
+        QCOMPARE(colorOf(time, "color"), colorOf(palette, "textSecondary"));
+        QVERIFY(sceneRectOf(title).right() < sceneRectOf(context).left());
+        QVERIFY(sceneRectOf(context).right() < sceneRectOf(time).left());
+        // With room for them, nothing is cut short.
+        QTRY_VERIFY(!context->property("truncated").toBool());
+        QVERIFY(!title->property("truncated").toBool());
+        QCOMPARE(context->width(), context->implicitWidth());
+
+        // Short of room, the time stays whole and the title elides, keeping
+        // clear of the context.
+        const QString longTitle = QStringLiteral("A Remarkably Long Track Title That Will Certainly "
+                                                 "Need Eliding Somewhere in the Strip, Again and Again");
+        bridge->setProperty("currentTrackTitle", longTitle + QStringLiteral(" ") + longTitle);
+        QTRY_VERIFY(title->property("truncated").toBool());
+        QTRY_VERIFY(sceneRectOf(title).right() < sceneRectOf(context).left()
+                    && sceneRectOf(context).right() < sceneRectOf(time).left());
+        QVERIFY(!time->property("truncated").toBool());
+        QCOMPARE(time->width(), time->implicitWidth());
+        QVERIFY(sceneRectOf(time).right() <= sceneRectOf(visibleItemNamed(fullscreen, shown.closeName)).left());
+        bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
+        QTRY_VERIFY(!title->property("truncated").toBool());
+
+        // A flat 24 px Close at the right, 4 px in; the view starts under
+        // the strip.
+        QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
+        QVERIFY2(close != nullptr, name.constData());
+        QVERIFY(strip->isAncestorOf(close));
+        QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
+        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
+        QCOMPARE(sceneRectOf(close).top(), 4.0);
+        auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
+        if (surface == nullptr) {
+            surface = fullscreen->findChild<QQuickItem *>(shown.surfaceName);
+        }
+        QVERIFY(surface != nullptr);
+        QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 33, fullscreen->width(), fullscreen->height() - 33));
+        // The only close button: the old 40 px one has gone.
+        QCOMPARE(visibleItemsNamed(fullscreen->contentItem(), QStringLiteral("viewerCloseButton")).size(), 0);
+
+        QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(close));
+        QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), name.constData());
+        QTRY_VERIFY(!fullscreen->isVisible());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+
+    // Stopped, the strip names no track, as the window's title does not.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QCOMPARE(fullscreen->title(), QStringLiteral("Ferrous Visualization"));
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QVERIFY(!itemNamed(strip, QStringLiteral("viewerStripTitle"))->isVisible());
+    QVERIFY(!itemNamed(strip, QStringLiteral("viewerStripTime"))->isVisible());
+    QTRY_VERIFY(fullscreen->activeFocusItem() != nullptr);
+    QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    const QString mainTitle = QStringLiteral("Morning Tide Field — Ferrous");
+    QTRY_COMPARE(window->title(), mainTitle);
+
+    struct Viewer {
+        const char *open;
+        const char *openProperty;
+        QString popupName;
+        QString controlsName;
+        QString closeName;
+        QString surfaceName;
+        QString title;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen", QStringLiteral("spectrogramViewerPopup"),
+         QStringLiteral("spectrogramPopupControls"), QStringLiteral("spectrogramPopupCloseButton"),
+         QStringLiteral("mainSpectrogramSurface"),
+         QStringLiteral("Morning Tide Field — Ferrous Visualization")},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", QStringLiteral("albumArtViewerPopup"),
+         QStringLiteral("albumArtPopupControls"), QStringLiteral("albumArtPopupCloseButton"),
+         QStringLiteral("albumArtSurface"),
+         QStringLiteral("Morning Tide Field — Ferrous Album Art")},
+    };
+    for (const Viewer &shown : viewers) {
+        const QByteArray name = shown.popupName.toUtf8();
+        QObject *popup = window->findChild<QObject *>(shown.popupName);
+        QVERIFY(popup != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY2(popup->property("opened").toBool(), name.constData());
+        QTRY_COMPARE(window->title(), shown.title);
+
+        // No title strip under the window's own title bar: the view fills
+        // the window, and the controls are on a plate in its corner.
+        QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("spectrogramFullscreenStrip")).size(), 0);
+        QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("albumArtFullscreenStrip")).size(), 0);
+        auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
+        QVERIFY(surface != nullptr);
+        QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 0, window->width(), window->height()));
+        QQuickItem *controls = visibleItemNamed(window, shown.controlsName);
+        QVERIFY2(controls != nullptr, name.constData());
+        QCOMPARE(sceneRectOf(controls).right(), window->width() - 4.0);
+        QCOMPARE(sceneRectOf(controls).top(), 4.0);
+        QQuickItem *close = visibleItemNamed(window, shown.closeName);
+        QVERIFY(close != nullptr && controls->isAncestorOf(close));
+        QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(close));
+        QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), name.constData());
+        QTRY_COMPARE(window->title(), mainTitle);
+    }
+}
+
+void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetVisualizationAction"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && resetAction != nullptr
+            && spectrogramSurface != nullptr && waveformSurface != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    const auto spectrogramZoom = [spectrogramSurface]() {
+        return spectrogramSurface->property("zoomLevel").toDouble();
+    };
+
+    // View › Reset Visualization View brings the spectrogram back to its
+    // default zoom, as it does the waveform.
+    spectrogramSurface->setProperty("_widgetZoomLevel", 3.0);
+    QCOMPARE(spectrogramZoom(), 3.0);
+    QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
+    QTRY_COMPARE(spectrogramZoom(), 1.0);
+
+    for (const int fullscreenMode : {1, 0}) {
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QQuickWindow *host = window;
+        QQuickItem *controls = nullptr;
+        if (fullscreenMode == 1) {
+            host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+            QVERIFY(host != nullptr);
+            QVERIFY(QTest::qWaitForWindowActive(host));
+            controls = visibleItemNamed(host, QStringLiteral("spectrogramFullscreenStrip"));
+        } else {
+            QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+            QTRY_VERIFY(popup->property("opened").toBool());
+            controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
+        }
+        QVERIFY(controls != nullptr);
+        QQuickItem *readout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
+        QQuickItem *reset = itemNamed(controls, QStringLiteral("viewerResetButton"));
+        QVERIFY(readout != nullptr && reset != nullptr);
+        // The window has its size: the controls end 4 px from its right.
+        QTRY_COMPARE(sceneRectOf(controls).right(),
+                     fullscreenMode == 1 ? double(host->width()) : host->width() - 4.0);
+
+        for (const int mode : {0, 1}) {
+            viewer->setProperty("visualizationMode", mode);
+            // Nothing at the default zoom.
+            QTRY_VERIFY(!readout->isVisible());
+            QVERIFY(!reset->isVisible());
+
+            // Zoomed: a quiet readout and Reset.
+            if (mode == 0) {
+                spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
+            } else {
+                waveform->setZoomLevel(4.0);
+            }
+            // In place at once, inside the window, without waiting for the
+            // window to draw.
+            QVERIFY(readout->isVisible() && reset->isVisible());
+            QVERIFY2(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+                         && sceneRectOf(readout).right() <= sceneRectOf(reset).left(),
+                     qPrintable(QStringLiteral("%1 %2").arg(sceneRectOf(readout).left())
+                                    .arg(sceneRectOf(reset).right())));
+            QTRY_VERIFY(readout->isVisible());
+            QCOMPARE(readout->property("text").toString(),
+                     mode == 0 ? QStringLiteral("Zoom 200%") : QStringLiteral("Zoom 400%"));
+            QVERIFY(reset->isVisible());
+            // Laid out: the readout, then Reset beside it.
+            QTRY_VERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+                        && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
+            // A double-click on the readout leaves the viewer open.
+            QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(readout));
+            QCoreApplication::processEvents();
+            QVERIFY(viewer->property("spectrogramViewerOpen").toBool());
+            QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(reset));
+            if (mode == 0) {
+                QTRY_COMPARE(spectrogramZoom(), 1.0);
+            } else {
+                QTRY_COMPARE(waveform->zoomLevel(), 1.0);
+            }
+            QTRY_VERIFY(!readout->isVisible());
+            QVERIFY(!reset->isVisible());
+            QVERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        }
+        viewer->setProperty("visualizationMode", 0);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+void TransportInputSmokeTest::viewerControlsComeBackForTheKeyboard() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+    QQuickItem *close = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCloseButton"));
+    QVERIFY(strip != nullptr && close != nullptr);
+
+    // The controls hide when the pointer rests; the strip stays, so the
+    // view keeps its size.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(!close->isVisible());
+    QVERIFY(strip->isVisible());
+
+    // Tab brings them back and moves into them, and they stay while one of
+    // them has the keyboard.
+    QTest::keyClick(fullscreen, Qt::Key_Tab);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QQuickItem *focused = fullscreen->activeFocusItem();
+    QVERIFY(focused != nullptr);
+    QVERIFY2(focused->property("visualFocus").toBool(), qPrintable(focused->objectName()));
+    QVERIFY(close->isVisible());
+    QTest::qWait(50);
+    QVERIFY(autoHide->property("controlsVisible").toBool());
+    for (int press = 0; press < 8 && !close->hasActiveFocus(); ++press) {
+        QTest::keyClick(fullscreen, Qt::Key_Tab);
+    }
+    QVERIFY(close->hasActiveFocus());
+    QQuickItem *ring = itemNamed(close, QStringLiteral("viewerToolButtonFocusRing"));
+    QVERIFY(ring != nullptr && ring->isVisible());
+    QTest::qWait(50);
+    QVERIFY(close->isVisible());
+
+    // Space presses the focused Close.
+    QTest::keyClick(fullscreen, Qt::Key_Space);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    autoHide->setProperty("hideDelay", 5000);
+}
+
+namespace {
+
+// The items Tab stops on in `host` from where the focus is, in order, until
+// it comes round again.
+QList<QQuickItem *> tabStops(QQuickWindow *host) {
+    QList<QQuickItem *> stops;
+    for (int press = 0; press < 24; ++press) {
+        QTest::keyClick(host, Qt::Key_Tab);
+        QQuickItem *item = host->activeFocusItem();
+        if (item == nullptr || stops.contains(item)) {
+            break;
+        }
+        stops << item;
+    }
+    return stops;
+}
+
+// Tabs in `host` until `stop` has focus; whether it got there.
+bool tabTo(QQuickWindow *host, QQuickItem *stop) {
+    for (int press = 0; press < 24 && host->activeFocusItem() != stop; ++press) {
+        QTest::keyClick(host, Qt::Key_Tab);
+    }
+    return host->activeFocusItem() == stop;
+}
+
+} // namespace
+
+void TransportInputSmokeTest::viewerKeysWorkFromEveryControl() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    const QString candidatePath = dir.filePath(QStringLiteral("candidate.png"));
+    QVERIFY(QImage(coverPath).save(candidatePath));
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    const QVariantMap candidate{
+        {QStringLiteral("normalizedUrl"), QUrl::fromLocalFile(candidatePath).toString()},
+        {QStringLiteral("normalizedPath"), candidatePath},
+    };
+    const QVariantMap folderImage{
+        {QStringLiteral("path"), coverPath},
+        {QStringLiteral("fileName"), QStringLiteral("cover.png")},
+        {QStringLiteral("embeddedCover"), false},
+    };
+    const auto contextMenuShown = [window]() {
+        return anyMenuVisible(window, QStringLiteral("albumArtViewerContextMenu"));
+    };
+
+    // The ways the viewers open: the visualization, the album art with its
+    // folder and Copy Path, and the album art comparing an iTunes candidate.
+    enum class Shown { Visualization, Art, Comparison };
+    const auto openViewer = [&](Shown shown) {
+        if (shown == Shown::Visualization) {
+            return QMetaObject::invokeMethod(viewer, "openSpectrogramViewer");
+        }
+        if (shown == Shown::Art) {
+            const bool opened = QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt");
+            viewer->setProperty("albumArtViewerFileInfo", folderImage);
+            return opened;
+        }
+        return QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForSuggestion",
+                                         Q_ARG(QVariant, QVariant(candidate)));
+    };
+    const auto isOpen = [viewer](Shown shown) {
+        return viewer->property(shown == Shown::Visualization ? "spectrogramViewerOpen"
+                                                              : "albumArtViewerOpen").toBool();
+    };
+
+    for (const int fullscreenMode : {1, 0}) {
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        for (const Shown shown : {Shown::Visualization, Shown::Art, Shown::Comparison}) {
+            const QString where = QStringLiteral("fullscreen %1, viewer %2")
+                                      .arg(fullscreenMode).arg(int(shown));
+            const auto hostWindow = [&]() -> QQuickWindow * {
+                if (fullscreenMode == 0) {
+                    return window;
+                }
+                return viewerWindowNamed(engine, shown == Shown::Visualization
+                                                     ? QStringLiteral("spectrogramFullscreenWindow")
+                                                     : QStringLiteral("albumArtFullscreenWindow"));
+            };
+            const auto openAndWait = [&]() {
+                if (!openViewer(shown) || !QTest::qWaitFor([&]() { return isOpen(shown); })) {
+                    return static_cast<QQuickWindow *>(nullptr);
+                }
+                QQuickWindow *host = hostWindow();
+                if (host == nullptr || !QTest::qWaitForWindowActive(host)
+                    || !QTest::qWaitFor([host]() { return host->activeFocusItem() != nullptr; })) {
+                    return static_cast<QQuickWindow *>(nullptr);
+                }
+                return host;
+            };
+
+            QQuickWindow *host = openAndWait();
+            QVERIFY2(host != nullptr, qPrintable(where));
+            const QList<QQuickItem *> stops = tabStops(host);
+            QVERIFY2(stops.size() >= 2, qPrintable(where));
+            QQuickItem *close = visibleItemNamed(host, shown == Shown::Visualization
+                ? (fullscreenMode == 1 ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                       : QStringLiteral("spectrogramPopupCloseButton"))
+                : (fullscreenMode == 1 ? QStringLiteral("albumArtFullscreenCloseButton")
+                                       : QStringLiteral("albumArtPopupCloseButton")));
+            QVERIFY2(stops.contains(close), qPrintable(where));
+            if (shown == Shown::Art) {
+                QVERIFY2(stops.contains(visibleItemNamed(host, QStringLiteral("albumArtCopyPathButton"))),
+                         qPrintable(where));
+            } else if (shown == Shown::Comparison) {
+                QVERIFY2(stops.contains(visibleItemNamed(host, QStringLiteral("albumArtCompareButton"))),
+                         qPrintable(where));
+            }
+            QTest::keyClick(host, Qt::Key_Escape);
+            QTRY_VERIFY2(!isOpen(shown), qPrintable(where));
+
+            for (QQuickItem *stop : stops) {
+                const QString at = where + QStringLiteral(", at ") + stop->objectName()
+                    + QLatin1Char(' ') + QString::fromLatin1(stop->metaObject()->className());
+                host = openAndWait();
+                QVERIFY2(host != nullptr, qPrintable(at));
+                QVERIFY2(tabTo(host, stop), qPrintable(at));
+                if (shown == Shown::Comparison) {
+                    // Left and Right switch between the two images.
+                    const bool current = viewer->property("albumArtViewerShowsCurrentTrack").toBool();
+                    QTest::keyClick(host, Qt::Key_Left);
+                    QTRY_VERIFY2(viewer->property("albumArtViewerShowsCurrentTrack").toBool() != current,
+                                 qPrintable(at));
+                    QTest::keyClick(host, Qt::Key_Right);
+                    QTRY_VERIFY2(viewer->property("albumArtViewerShowsCurrentTrack").toBool() == current,
+                                 qPrintable(at));
+                    QVERIFY2(tabTo(host, stop), qPrintable(at));
+                }
+                if (shown != Shown::Visualization) {
+                    // The menu key opens the context menu; Escape closes it alone.
+                    QTest::keyClick(host, Qt::Key_F10, Qt::ShiftModifier);
+                    QTRY_VERIFY2(contextMenuShown(), qPrintable(at));
+                    QTest::keyClick(QGuiApplication::focusWindow(), Qt::Key_Escape);
+                    QTRY_VERIFY2(!contextMenuShown(), qPrintable(at));
+                    QVERIFY2(isOpen(shown), qPrintable(at));
+                    QTRY_VERIFY2(host->isActive(), qPrintable(at));
+                    QVERIFY2(tabTo(host, stop), qPrintable(at));
+                }
+                // Escape closes the viewer from here.
+                QTest::keyClick(host, Qt::Key_Escape);
+                QTRY_VERIFY2(!isOpen(shown), qPrintable(at));
+            }
+            window->requestActivate();
+            QVERIFY(QTest::qWaitForWindowActive(window));
+        }
+    }
+}
+
+void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
+    // The album art viewer's controls never hide; the visualization
+    // viewer's hide while the pointer rests, unless one of them has focus,
+    // whatever gave it: the keyboard, a click, or assistive technology.
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr);
+    setPlayingTrack(bridge);
+    const auto controlsVisible = [autoHide]() {
+        return autoHide->property("controlsVisible").toBool();
+    };
+    // A real pointer move over the view: the strip's hover reports where
+    // the pointer is as its controls come and go, so a made-up position
+    // would wake them again.
+    QQuickWindow *pointerWindow = nullptr;
+    const auto wake = [&pointerWindow](double x) {
+        QTest::mouseMove(pointerWindow, QPoint(int(x) + 100, 300));
+        return true;
+    };
+
+    for (const int fullscreenMode : {1, 0}) {
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QQuickWindow *host = fullscreenMode == 1
+            ? viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow")) : window;
+        QVERIFY(host != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(host));
+        QTRY_VERIFY(host->activeFocusItem() != nullptr);
+        pointerWindow = host;
+        QQuickItem *viewFocus = host->findChild<QQuickItem *>(
+            fullscreenMode == 1 ? QStringLiteral("spectrogramFullscreenViewFocus")
+                                : QStringLiteral("spectrogramPopupViewFocus"));
+        QVERIFY(viewFocus != nullptr);
+        auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+        QVERIFY(surface != nullptr);
+        const QPoint viewPoint = sceneRectOf(surface).center().toPoint();
+        QQuickItem *close = visibleItemNamed(host, fullscreenMode == 1
+            ? QStringLiteral("spectrogramFullscreenCloseButton")
+            : QStringLiteral("spectrogramPopupCloseButton"));
+        QQuickItem *modeButton = visibleItemNamed(host, QStringLiteral("visualizationModeButton1"));
+        QVERIFY(close != nullptr && modeButton != nullptr);
+
+        double x = 10;
+        for (QQuickItem *control : {close, modeButton}) {
+            for (const Qt::FocusReason reason : {Qt::OtherFocusReason, Qt::TabFocusReason}) {
+                const QString where = QStringLiteral("fullscreen %1, %2, reason %3")
+                                          .arg(fullscreenMode).arg(control->objectName()).arg(int(reason));
+                QVERIFY(wake(++x));
+                QTRY_VERIFY(controlsVisible());
+                control->forceActiveFocus(reason);
+                QVERIFY2(control->hasActiveFocus(), qPrintable(where));
+                QCOMPARE(control->property("visualFocus").toBool(), reason == Qt::TabFocusReason);
+                autoHide->setProperty("hideDelay", 1);
+                QTest::qWait(50);
+                QVERIFY2(controlsVisible(), qPrintable(where));
+                QVERIFY2(control->isVisible(), qPrintable(where));
+
+                // A click on the view takes the focus back: they hide again.
+                QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, viewPoint);
+                QTRY_VERIFY2(host->activeFocusItem() == viewFocus, qPrintable(where));
+                QTRY_VERIFY2(!controlsVisible(), qPrintable(where));
+                autoHide->setProperty("hideDelay", 5000);
+            }
+        }
+        QVERIFY(wake(++x));
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+void TransportInputSmokeTest::albumArtDetailsShowBesideTheArt() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 300, 300);
+    QVERIFY(!coverPath.isEmpty());
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("testCoverUrl"),
+                                             QUrl::fromLocalFile(coverPath).toString());
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: surfaceWindow
+    width: 1000
+    height: 600
+    visible: true
+    property alias surface: surface
+    readonly property var tokens: surface.uiPalette
+
+    Action { id: replaceFromItunesAction }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: testCoverUrl
+        infoVisible: true
+        initialViewToken: 0
+        viewerDecodeWidth: 1000
+        viewerDecodeHeight: 600
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        focusFullscreen: function() {}
+        comparisonModeAvailable: false
+        uiPalette: Components.UiPalette { windowRoot: surfaceWindow }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QObject *palette = qvariant_cast<QObject *>(root->property("tokens"));
+    QVERIFY(surface != nullptr && palette != nullptr);
+    const QString folder = QStringLiteral("/music/The Quiet Meridian/Small Hours (Remastered "
+                                          "Deluxe Edition With Bonus Tracks)/Disc One");
+    surface->setProperty("fileInfo", QVariantMap{
+        {QStringLiteral("path"), folder + QStringLiteral("/cover.jpg")},
+        {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+        {QStringLiteral("width"), 1400},
+        {QStringLiteral("height"), 1400},
+        {QStringLiteral("fileSizeText"), QStringLiteral("412 KiB")},
+        {QStringLiteral("format"), QStringLiteral("JPEG")},
+        {QStringLiteral("embeddedCover"), false},
+    });
+
+    // The art on the view colour, beside a 280 px column behind a 1 px seam.
+    QQuickItem *floor = itemNamed(surface, QStringLiteral("albumArtFloor"));
+    QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *seam = itemNamed(surface, QStringLiteral("albumArtInfoSeam"));
+    QVERIFY(floor != nullptr && viewport != nullptr && column != nullptr && seam != nullptr);
+    QCOMPARE(colorOf(floor, "color"), colorOf(palette, "view"));
+    QTRY_COMPARE(sceneRectOf(column), QRectF(721, 0, 279, 600));
+    QCOMPARE(sceneRectOf(seam), QRectF(720, 0, 1, 600));
+    QCOMPARE(colorOf(seam, "color"), colorOf(palette, "seam"));
+    QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 720, 600));
+    // The square art fits the view's height, centred in what the details
+    // leave, however the decode request is shaped.
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QVERIFY(image != nullptr);
+    const auto paintedArt = [image]() {
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        const QPointF topLeft = image->mapToScene(
+            QPointF((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2));
+        return QRectF(topLeft, painted);
+    };
+    QTRY_COMPARE(paintedArt(), QRectF(60, 0, 600, 600));
+
+    // The file's name in semibold, then the rows: label, then value.
+    QQuickItem *title = itemNamed(column, QStringLiteral("albumArtInfoTitle"));
+    QVERIFY(title != nullptr);
+    QCOMPARE(title->property("text").toString(), QStringLiteral("cover.jpg"));
+    QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
+    QStringList values;
+    for (QQuickItem *value : visibleItemsNamed(column, QStringLiteral("albumArtInfoValue"))) {
+        values << value->property("text").toString();
+    }
+    const QString size = QLocale().toString(1400.0, 'f', 0);
+    QCOMPARE(values, (QStringList{QStringLiteral("%1 × %1 px").arg(size), QStringLiteral("412 KiB"),
+                                  QStringLiteral("JPEG"), QStringLiteral("Folder image")}));
+    QCOMPARE(visibleTextItems(column, QStringLiteral("Dimensions")).size(), 1);
+    QCOMPARE(visibleTextItems(column, QStringLiteral("Source")).size(), 1);
+
+    // The folder on its own line, then its path on a line of its own,
+    // elided in the middle, with the whole path in its tooltip.
+    QQuickItem *folderLabel = itemNamed(column, QStringLiteral("albumArtFolderLabel"));
+    QQuickItem *path = itemNamed(column, QStringLiteral("albumArtFolderPath"));
+    QQuickItem *copy = itemNamed(column, QStringLiteral("albumArtCopyPathButton"));
+    QVERIFY(folderLabel != nullptr && path != nullptr && copy != nullptr);
+    QVERIFY(folderLabel->isVisible() && path->isVisible() && copy->isVisible());
+    QCOMPARE(folderLabel->property("text").toString(), QStringLiteral("Folder"));
+    QTRY_VERIFY2(sceneRectOf(path).top() >= sceneRectOf(folderLabel).bottom(),
+                 qPrintable(QStringLiteral("%1 %2").arg(sceneRectOf(path).top())
+                                .arg(sceneRectOf(folderLabel).bottom())));
+    QCOMPARE(path->property("text").toString(), folder);
+    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideMiddle));
+    QTRY_VERIFY(path->property("truncated").toBool());
+    QVERIFY(sceneRectOf(path).left() == sceneRectOf(folderLabel).left());
+    QTest::mouseMove(window, centerInWindow(path));
+    QTRY_COMPARE(visibleTextItems(window->contentItem(), folder).size(), 1);
+
+    // Copy Path puts the folder on the clipboard.
+    QGuiApplication::clipboard()->clear();
+    QCOMPARE(copy->property("text").toString(), QStringLiteral("Copy Path"));
+    QCOMPARE(sceneRectOf(copy).size(), QSizeF(24, 24));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(copy));
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), folder);
+
+    // Art the track embeds has no folder of its own.
+    surface->setProperty("sourceKind", QStringLiteral("embedded"));
+    QTRY_VERIFY(!path->isVisible());
+    QVERIFY(!folderLabel->isVisible());
+    QCOMPARE(title->property("text").toString(), QStringLiteral("Embedded Image"));
+    QCOMPARE(visibleTextItems(column, QStringLiteral("Embedded in the track")).size(), 1);
+
+    // Without the details, the art has the whole view.
+    surface->setProperty("infoVisible", false);
+    QTRY_VERIFY(!column->isVisible());
+    QVERIFY(!seam->isVisible());
+    QTRY_COMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
+    QTRY_COMPARE(paintedArt(), QRectF(200, 0, 600, 600));
+}
+
+void TransportInputSmokeTest::albumArtViewerShowsWhenItsImageCannotBeRead() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Cannot open: .*missing\\.png")));
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("testMissingUrl"),
+        QUrl::fromLocalFile(dir.filePath(QStringLiteral("missing.png"))).toString());
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: surfaceWindow
+    width: 600
+    height: 400
+    visible: true
+    property alias surface: surface
+
+    Action { id: replaceFromItunesAction }
+
+    Viewers.AlbumArtSurface {
+        id: surface
+        anchors.fill: parent
+        viewerOpen: true
+        viewerSource: testMissingUrl
+        infoVisible: false
+        initialViewToken: 0
+        viewerDecodeWidth: 600
+        viewerDecodeHeight: 400
+        replaceFromItunesAction: replaceFromItunesAction
+        currentTrackItunesArtworkDisabledReason: function() { return "" }
+        closeViewer: function() {}
+        focusFullscreen: function() {}
+        comparisonModeAvailable: false
+        uiPalette: Components.UiPalette { windowRoot: surfaceWindow }
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qvariant_cast<QQuickItem *>(root->property("surface"));
+    QVERIFY(surface != nullptr);
+    QQuickItem *errorState = itemNamed(surface, QStringLiteral("albumArtErrorState"));
+    QVERIFY(errorState != nullptr);
+
+    // The view says so in its own place, centred in it, rather than in a
+    // banner.
+    QTRY_VERIFY(errorState->isVisible());
+    QCOMPARE(itemNamed(errorState, QStringLiteral("albumArtErrorText"))->property("text").toString(),
+             QStringLiteral("Couldn't load this image."));
+    const QPointF errorCenter = sceneRectOf(errorState).center();
+    QVERIFY(std::abs(errorCenter.x() - 300) <= 1 && std::abs(errorCenter.y() - 200) <= 1);
+
+    // An image it can read replaces the message.
+    surface->setProperty("viewerSource", QUrl::fromLocalFile(coverPath).toString());
+    QTRY_COMPARE(surface->property("imageStatus").toInt(), 1);
+    QVERIFY(!errorState->isVisible());
+    // Only the image's own warning, which the test expects.
+    const QString log = takeCapturedMessagesText();
+    QVERIFY2(log.contains(QStringLiteral("Cannot open")) && !log.contains(QLatin1Char('\n')),
+             qPrintable(log));
+}
+
+void TransportInputSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && palette != nullptr && surface != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QQuickItem *info = visibleItemNamed(fullscreen, QStringLiteral("albumArtFullscreenInfoButton"));
+    QVERIFY(info != nullptr);
+    QQuickItem *tint = itemNamed(info, QStringLiteral("viewerToolButtonChecked"));
+    QQuickItem *ring = itemNamed(info, QStringLiteral("viewerToolButtonFocusRing"));
+    QVERIFY(tint != nullptr && ring != nullptr);
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY(column != nullptr);
+
+    // Off: neither.
+    QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    QVERIFY(!tint->isVisible() && !ring->isVisible());
+    QVERIFY(!column->isVisible());
+
+    // A click shows the details: the tint, and no ring.
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(info));
+    QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QTRY_VERIFY(info->property("checked").toBool());
+    QVERIFY(tint->isVisible());
+    QCOMPARE(colorOf(tint, "color"), colorOf(palette, "selection"));
+    QVERIFY(!ring->isVisible());
+    QTRY_VERIFY(column->isVisible());
+
+    // I hides them again, and the button follows.
+    QTest::keyClick(fullscreen, Qt::Key_I);
+    QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    QVERIFY(!info->property("checked").toBool());
+    QVERIFY(!tint->isVisible());
+
+    // The keyboard reaches it: the ring for focus, and Space toggles it,
+    // with both the tint and the ring.
+    for (int press = 0; press < 8 && !info->hasActiveFocus(); ++press) {
+        QTest::keyClick(fullscreen, Qt::Key_Tab);
+    }
+    QVERIFY(info->hasActiveFocus());
+    QVERIFY(ring->isVisible());
+    QVERIFY(!tint->isVisible());
+    QTest::keyClick(fullscreen, Qt::Key_Space);
+    QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QVERIFY(tint->isVisible() && ring->isVisible());
+
+    // Zoomed, the strip has the readout and Reset, which fits the art again.
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("albumArtFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QQuickItem *readout = itemNamed(strip, QStringLiteral("viewerZoomReadout"));
+    QQuickItem *reset = itemNamed(strip, QStringLiteral("viewerResetButton"));
+    QVERIFY(readout != nullptr && reset != nullptr);
+    QVERIFY(!readout->isVisible() && !reset->isVisible());
+    surface->setProperty("zoom", 2.5);
+    // In place at once, without waiting for the window to draw.
+    QVERIFY(readout->isVisible() && reset->isVisible());
+    QVERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+            && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
+    QTRY_VERIFY(readout->isVisible());
+    QCOMPARE(readout->property("text").toString(), QStringLiteral("Zoom 250%"));
+    QTRY_VERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
+                && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(reset));
+    QTRY_COMPARE(surface->property("zoom").toDouble(), 1.0);
+    QTRY_VERIFY(!readout->isVisible());
+
+    QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
 void TransportInputSmokeTest::menuMnemonicsOpenTheMenusAndShowShortcuts() {
@@ -24707,7 +25649,7 @@ void SpectrogramSmokeTest::spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPrevi
     delete node;
 }
 
-void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
+void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirControlsHaveFocus() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
@@ -24722,9 +25664,12 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QVERIFY(bridge != nullptr && viewer != nullptr);
-    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
-    QVERIFY(playPause != nullptr);
-    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+    QObject *seekBackward = window->findChild<QObject *>(QStringLiteral("seekBackwardAction"));
+    QVERIFY(seekBackward != nullptr);
+    QSignalSpy seeks(seekBackward, SIGNAL(triggered(QObject*)));
+    // A track that can seek.
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    bridge->setProperty("durationSeconds", 100.0);
     bridge->setProperty("viewerFullscreenMode", 1);
     bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
 
@@ -24732,15 +25677,12 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
         const char *open;
         const char *openProperty;
         QString windowName;
-        QString bannerName;
     };
     const QList<Viewer> viewers{
         {"openSpectrogramViewer", "spectrogramViewerOpen",
-         QStringLiteral("spectrogramFullscreenWindow"),
-         QStringLiteral("spectrogramFullscreenErrorBanner")},
+         QStringLiteral("spectrogramFullscreenWindow")},
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
-         QStringLiteral("albumArtFullscreenWindow"),
-         QStringLiteral("albumArtFullscreenErrorBanner")},
+         QStringLiteral("albumArtFullscreenWindow")},
     };
     for (const Viewer &shown : viewers) {
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
@@ -24750,28 +25692,21 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirErrorHasFocus() {
         QVERIFY(QTest::qWaitForWindowActive(fullscreen));
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
                                 1, 0, QStringLiteral("/music/bad.flac")));
-        auto *banner = fullscreen->findChild<QQuickItem *>(shown.bannerName);
-        QVERIFY(banner != nullptr);
-        QTRY_VERIFY(banner->isVisible());
-        QQuickItem *dismiss = nullptr;
-        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
-            if (item->objectName() == QStringLiteral("errorBannerDismissButton")) {
-                dismiss = item;
-            }
-        }
-        QVERIFY(dismiss != nullptr);
+        QTRY_VERIFY(visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton")) != nullptr);
+        QQuickItem *issues = visibleItemNamed(fullscreen, QStringLiteral("viewerIssuesButton"));
 
-        // Tab moves into the error's buttons.
-        for (int press = 0; press < 8 && !dismiss->hasActiveFocus(); ++press) {
+        // Tab moves into the strip's buttons.
+        for (int press = 0; press < 8 && !issues->hasActiveFocus(); ++press) {
             QTest::keyClick(fullscreen, Qt::Key_Tab);
         }
-        QVERIFY2(dismiss->hasActiveFocus(), qPrintable(shown.windowName));
+        QVERIFY2(issues->hasActiveFocus(), qPrintable(shown.windowName));
+        QVERIFY(issues->property("visualFocus").toBool());
 
         // The main window's shortcuts still work, and Escape still closes
         // the viewer.
-        const int toggles = toggled.count();
-        QTest::keyClick(fullscreen, Qt::Key_Space);
-        QTRY_VERIFY(toggled.count() > toggles);
+        const int seeksBefore = seeks.count();
+        QTest::keyClick(fullscreen, Qt::Key_Left, Qt::ShiftModifier);
+        QTRY_VERIFY(seeks.count() > seeksBefore);
         QVERIFY(viewer->property(shown.openProperty).toBool());
         QTest::keyClick(fullscreen, Qt::Key_Escape);
         QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), qPrintable(shown.windowName));
@@ -24911,7 +25846,7 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
 }
 
-void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
+void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
@@ -24943,20 +25878,21 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
         const char *openProperty;
         int fullscreenMode;
         const char *windowName;
-        const char *bannerName;
+        const char *name;
+        const char *closeName;
     };
     const QList<Viewer> viewers{
-        {"openSpectrogramViewer", "spectrogramViewerOpen", 0, nullptr,
-         "spectrogramPopupErrorBanner"},
-        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", 0, nullptr,
-         "albumArtPopupErrorBanner"},
+        {"openSpectrogramViewer", "spectrogramViewerOpen", 0, nullptr, "spectrogram popup",
+         "spectrogramPopupCloseButton"},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", 0, nullptr, "album art popup",
+         "albumArtPopupCloseButton"},
         {"openSpectrogramViewer", "spectrogramViewerOpen", 1, "spectrogramFullscreenWindow",
-         "spectrogramFullscreenErrorBanner"},
+         "spectrogram fullscreen", "spectrogramFullscreenCloseButton"},
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", 1, "albumArtFullscreenWindow",
-         "albumArtFullscreenErrorBanner"},
+         "album art fullscreen", "albumArtFullscreenCloseButton"},
     };
     for (const Viewer &shown : viewers) {
-        const QByteArray name(shown.bannerName);
+        const QByteArray name(shown.name);
         bridge->setProperty("viewerFullscreenMode", shown.fullscreenMode);
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
         QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
@@ -24969,15 +25905,16 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
 
         QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it."),
                                 1, 0, QStringLiteral("/music/bad.flac")));
-        auto *banner = host->findChild<QQuickItem *>(QLatin1String(shown.bannerName));
-        if (banner == nullptr) {
-            banner = window->findChild<QQuickItem *>(QLatin1String(shown.bannerName));
-        }
-        QVERIFY2(banner != nullptr, name.constData());
-        QTRY_VERIFY2(banner->isVisible(), name.constData());
-        QQuickItem *historyButton = itemNamed(banner, QStringLiteral("errorBannerHistoryButton"));
-        QVERIFY(historyButton != nullptr);
+        QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("viewerIssuesButton")) != nullptr,
+                     name.constData());
+        QQuickItem *historyButton = visibleItemNamed(host, QStringLiteral("viewerIssuesButton"));
+        QQuickItem *viewerClose = visibleItemNamed(host, QLatin1String(shown.closeName));
+        QVERIFY2(viewerClose != nullptr, name.constData());
         QTRY_VERIFY(shownInsideItsWindow(historyButton));
+        // Laid out before Close.
+        QTRY_VERIFY2(clearOfTheOtherButtons(historyButton), name.constData());
+        QVERIFY2(sceneRectOf(historyButton).right() <= sceneRectOf(viewerClose).left(),
+                 name.constData());
 
         // A real click, which only arrives if nothing covers the button.
         QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(historyButton));
@@ -24990,11 +25927,12 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
         QCOMPARE(content->window(), host);
         QVERIFY(dialog->property("modal").toBool());
         QTRY_VERIFY(shownInsideItsWindow(clearAll));
-        // What the popup shows counts as seen, so the banner has gone.
-        QTRY_VERIFY2(!banner->isVisible(), name.constData());
         QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, QPoint(host->width() / 3, host->height() / 3));
         QTRY_VERIFY2(!dialog->property("visible").toBool(), name.constData());
         QVERIFY(viewer->property(shown.openProperty).toBool());
+        // What the dialog showed counts as seen, as for the status bar, so
+        // the button has gone.
+        QTRY_VERIFY2(!historyButton->isVisible(), name.constData());
 
         // Space does not reach the main window's shortcuts while the dialog
         // is open, and Escape closes the dialog alone.
@@ -25009,11 +25947,9 @@ void ErrorsSmokeTest::viewerBannersOpenRecentErrorsAboveTheViewer() {
         QTRY_VERIFY2(!dialog->property("visible").toBool(), name.constData());
         QVERIFY2(viewer->property(shown.openProperty).toBool(), name.constData());
 
-        // The viewer has the keyboard back, and not on the banner that
+        // The viewer has the keyboard back, and not on the button that
         // went: its Escape closes it.
-        QVERIFY2(host->activeFocusItem() == nullptr
-                     || !banner->isAncestorOf(host->activeFocusItem()),
-                 name.constData());
+        QVERIFY2(host->activeFocusItem() != historyButton, name.constData());
         QTest::keyClick(host, Qt::Key_Escape);
         QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), name.constData());
         if (host != window) {
@@ -25074,90 +26010,6 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(onlyErrorReports(log), qPrintable(log));
-}
-
-void ErrorsSmokeTest::fullscreenErrorTextScrollsWithTheKeyboard() {
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
-    QImage cover(16, 16, QImage::Format_RGB32);
-    cover.fill(Qt::darkCyan);
-    QVERIFY(cover.save(coverPath));
-
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
-    QVERIFY2(window != nullptr, "Main.qml failed to show");
-    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
-    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
-    QVERIFY(bridge != nullptr && viewer != nullptr && errors != nullptr);
-    bridge->setProperty("viewerFullscreenMode", 1);
-    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
-    QStringList lines{QStringLiteral("Saved 0 files; 10 failed.")};
-    for (int file = 0; file < 10; ++file) {
-        lines.push_back(QStringLiteral("/music/Some Artist/Some Album/%1 A Track Title.flac: "
-                                       "Permission denied (os error 13)")
-                            .arg(file + 1, 2, 10, QLatin1Char('0')));
-    }
-
-    const QList<std::array<const char *, 4>> viewers{
-        {"openSpectrogramViewer", "spectrogramViewerOpen", "spectrogramFullscreenWindow",
-         "spectrogramFullscreenErrorBanner"},
-        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", "albumArtFullscreenWindow",
-         "albumArtFullscreenErrorBanner"},
-    };
-    for (const auto &[open, openProperty, windowName, bannerName] : viewers) {
-        QVERIFY(QMetaObject::invokeMethod(viewer, open));
-        QTRY_VERIFY(viewer->property(openProperty).toBool());
-        QQuickWindow *fullscreen = viewerWindowNamed(engine, QLatin1String(windowName));
-        QVERIFY(fullscreen != nullptr);
-        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
-        QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
-        QVERIFY(sendBridgeError(bridge, lines.join(QLatin1Char('\n')), 4, 1));
-        auto *banner = fullscreen->findChild<QQuickItem *>(QLatin1String(bannerName));
-        QVERIFY(banner != nullptr);
-        QTRY_VERIFY(banner->isVisible());
-        QQuickItem *body = nullptr;
-        for (QQuickItem *item : banner->findChildren<QQuickItem *>()) {
-            if (item->objectName() == QStringLiteral("errorBannerBody")) {
-                body = item;
-            }
-        }
-        QVERIFY(body != nullptr);
-        auto *flickable = qvariant_cast<QQuickItem *>(body->property("contentItem"));
-        QVERIFY(flickable != nullptr);
-        QTRY_VERIFY(flickable->property("contentHeight").toReal() > body->height());
-
-        // Tab reaches the text, which says what it holds.
-        for (int press = 0; press < 8 && !body->hasActiveFocus(); ++press) {
-            QTest::keyClick(fullscreen, Qt::Key_Tab);
-        }
-        QVERIFY2(body->hasActiveFocus(), windowName);
-        QVERIFY(QAccessible::queryAccessibleInterface(body) != nullptr);
-        QCOMPARE(QAccessible::queryAccessibleInterface(body)->text(QAccessible::Name),
-                 QStringLiteral("Tags: ") + lines.join(QLatin1Char('\n')));
-
-        // Down scrolls it, and End and Home go to its ends.
-        QCOMPARE(flickable->property("contentY").toReal(), 0.0);
-        QTest::keyClick(fullscreen, Qt::Key_Down);
-        QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
-        QTest::keyClick(fullscreen, Qt::Key_End);
-        // Within a pixel: the view keeps to whole pixels.
-        QTRY_VERIFY(std::abs(flickable->property("contentY").toReal()
-                             - (flickable->property("contentHeight").toReal() - flickable->height()))
-                    <= 1.0);
-        QTest::keyClick(fullscreen, Qt::Key_Home);
-        QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
-        QVERIFY(viewer->property(openProperty).toBool());
-
-        // Escape still closes the viewer.
-        QTest::keyClick(fullscreen, Qt::Key_Escape);
-        QTRY_VERIFY2(!viewer->property(openProperty).toBool(), windowName);
-        QTRY_VERIFY(!fullscreen->isVisible());
-    }
-    QVERIFY(finishIncubation(engine));
-    takeCapturedMessagesText();
 }
 
 namespace {

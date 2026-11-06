@@ -16,9 +16,8 @@ QtObject {
     // times it was first and last reported, in ms since the epoch.
     property ListModel entries: ListModel {}
     readonly property int count: entries.count
-    // Whether the user has yet to see the newest entry: the viewers' banners
-    // show it and the status bar stands out, until the user dismisses it or
-    // opens the history.
+    // Whether the user has yet to see the newest entry, until the user
+    // dismisses it or opens the history.
     property bool latestUnseen: false
     // How many entries arrived or repeated since the user last saw the
     // history: the status bar's "2 new issues". They stay new while the

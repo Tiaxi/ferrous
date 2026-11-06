@@ -339,6 +339,7 @@ private slots:
     void aCenteredRingShowingTheWholeTrackSurvivesStopAndPlay();
     void asyncImageFileDetailsRequestCachesAndSignals();
     void asyncImageFileDetailsAcceptsImageProviderUrl();
+    void imageFileDetailsTellEmbeddedCoversFromFolderImages();
     void itunesArtworkUrlRequestsLargestRendition_data();
     void itunesArtworkUrlRequestsLargestRendition();
     void itunesArtworkUrlRejectsUnexpectedSources_data();
@@ -5254,6 +5255,52 @@ void BridgeClientTest::asyncImageFileDetailsAcceptsImageProviderUrl() {
     QCOMPARE(byLocalPath.value(QStringLiteral("width")).toInt(), 80);
     QCOMPARE(byLocalPath.value(QStringLiteral("height")).toInt(), 60);
     QCOMPARE(byProviderUrl.value(QStringLiteral("fileName")).toString(), QStringLiteral("front cover.png"));
+}
+
+// The album art viewer names where its image is from: the backend's cache
+// of the art tracks embed, or a folder image.
+void BridgeClientTest::imageFileDetailsTellEmbeddedCoversFromFolderImages() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+
+    // The test's own cache directory; see init().
+    const QString cache = qEnvironmentVariable("XDG_CACHE_HOME");
+    QVERIFY(!cache.isEmpty());
+    const QString embeddedDir = QDir(cache).filePath(QStringLiteral("ferrous/embedded_covers"));
+    QVERIFY(QDir().mkpath(embeddedDir));
+    QTemporaryDir folder;
+    QVERIFY(folder.isValid());
+
+    QImage image(16, 16, QImage::Format_RGB32);
+    image.fill(Qt::red);
+    const QString embedded = QDir(embeddedDir).filePath(QStringLiteral("0123abcd.png"));
+    const QString folderImage = folder.filePath(QStringLiteral("cover.png"));
+    // A folder whose name only starts like the cache's.
+    const QString lookalikeDir = embeddedDir + QStringLiteral("-old");
+    QVERIFY(QDir().mkpath(lookalikeDir));
+    const QString lookalike = QDir(lookalikeDir).filePath(QStringLiteral("cover.png"));
+    for (const QString &path : {embedded, folderImage, lookalike}) {
+        QVERIFY(image.save(path, "PNG"));
+    }
+
+    QSignalSpy detailsSpy(&client, SIGNAL(imageFileDetailsChanged(QString)));
+    client.requestImageFileDetails(embedded);
+    client.requestImageFileDetails(QUrl::fromLocalFile(folderImage).toString());
+    client.requestImageFileDetails(lookalike);
+    QTRY_VERIFY_WITH_TIMEOUT(!client.cachedImageFileDetails(embedded).isEmpty()
+                                 && !client.cachedImageFileDetails(folderImage).isEmpty()
+                                 && !client.cachedImageFileDetails(lookalike).isEmpty(),
+                             3000);
+
+    const auto embeddedCover = [&client](const QString &path) {
+        const QVariantMap details = client.cachedImageFileDetails(path);
+        return details.contains(QStringLiteral("embeddedCover"))
+            && details.value(QStringLiteral("embeddedCover")).toBool();
+    };
+    QVERIFY(embeddedCover(embedded));
+    QVERIFY(!embeddedCover(folderImage));
+    QVERIFY(client.cachedImageFileDetails(folderImage).contains(QStringLiteral("embeddedCover")));
+    QVERIFY(!embeddedCover(lookalike));
 }
 
 void BridgeClientTest::itunesArtworkUrlRequestsLargestRendition_data() {

@@ -7,7 +7,9 @@ QtObject {
 
     property bool active: false
     property int hideDelay: 5000
-    readonly property bool controlsVisible: !root.active || state.controlsVisible
+    // Keeps the controls shown, such as while one has keyboard focus.
+    property bool held: false
+    readonly property bool controlsVisible: !root.active || root.held || state.controlsVisible
 
     function pointerMoved(x, y) {
         if (!root.active) {
@@ -25,6 +27,16 @@ QtObject {
         hideTimer.restart()
     }
 
+    // Shows the controls for a key press, as a pointer move does, so the
+    // keyboard reaches them.
+    function wake() {
+        if (!root.active) {
+            return
+        }
+        state.controlsVisible = true
+        hideTimer.restart()
+    }
+
     function reset() {
         hideTimer.stop()
         state.controlsVisible = true
@@ -34,6 +46,12 @@ QtObject {
         }
     }
 
+    // Hidden no sooner than the delay after a control lets focus go.
+    onHeldChanged: {
+        if (!root.held) {
+            root.wake()
+        }
+    }
     onActiveChanged: reset()
     onHideDelayChanged: reset()
     Component.onCompleted: reset()

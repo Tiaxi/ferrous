@@ -59,10 +59,12 @@ In **Recent Issues**, the arrow and Page keys scroll the list, and Tab reaches e
 
 Double-click the visualization or the album art to open its viewer, and press Escape to close it. In the album art viewer, a double-click zooms in or out, I shows the image's details, Left and Right switch between the current and suggested artwork, and Menu or Shift+F10 opens the context menu.
 
+A viewer over the whole screen has its buttons in the title strip at the top; one in the main window has them in its top right corner. The visualization viewer's buttons hide while the pointer rests; a key press brings them back, and Tab moves through them, then to the visualization's mode switch. Space presses the focused button.
+
 The visualization's mode switch takes keyboard focus with Tab; Space or Enter picks the focused mode.
 
 ## Scrolling and zooming
 
 Lists scroll by what touchpads and high-resolution wheels report, so small movements scroll a little.
 
-The wheel zooms the spectrogram, the waveform and the album art viewer; a smaller movement zooms less. The spectrogram shows its current image at the new zoom at once and replaces it when the new zoom's data arrives. Its view follows playback, so it zooms about the playhead. The album art zooms about the pointer. Horizontal scrolling does not zoom, and a middle click resets the visualization's zoom.
+The wheel zooms the spectrogram, the waveform and the album art viewer; a smaller movement zooms less. The spectrogram shows its current image at the new zoom at once and replaces it when the new zoom's data arrives. Its view follows playback, so it zooms about the playhead. The album art zooms about the pointer. Horizontal scrolling does not zoom, and a middle click resets the visualization's zoom, as **View > Reset Visualization View** does. While a viewer is zoomed, it shows the zoom and a Reset button, which fits the album art again or resets the visualization.
