@@ -811,8 +811,11 @@ void SearchPaletteTest::footerNamesTheKeysForEachState() {
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
     QVERIFY(harness.open());
-    // Before typing, with no recent searches.
+    // Before typing, with no recent searches: the field and the footer,
+    // with only the field's seam between them.
     QTRY_COMPARE(harness.hints(), QStringList{QStringLiteral("Esc Close")});
+    QVERIFY(!harness.item(QStringLiteral("globalSearchFooterHairline"))->isVisible());
+    QCOMPARE(sceneRect(harness.palette()).height(), 44.0 + 1 + 1 + 28);
 
     harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 26});
     QTRY_COMPARE(harness.hints(), (QStringList{QStringLiteral("Enter Play Track"), QStringLiteral("Ctrl+Enter Add to Queue"),
@@ -877,6 +880,8 @@ void SearchPaletteTest::suggestionIsASelectableRow() {
     QVERIFY(tint != nullptr);
     QCOMPARE(hex(colorOf(tint)), hex(harness.token("selection")));
     QCOMPARE(harness.hints(), (QStringList{QStringLiteral("Enter Search Instead"), QStringLiteral("Esc Close")}));
+    // 8 px between the row and the footer's hairline.
+    QTRY_COMPARE(sceneRect(harness.item(QStringLiteral("globalSearchFooterHairline"))).top() - sceneRect(row).bottom(), 8.0);
     // Ctrl+Enter and Alt+Enter do nothing here.
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::ControlModifier);
     QTest::keyClick(harness.window, Qt::Key_Return, Qt::AltModifier);
@@ -922,6 +927,7 @@ void SearchPaletteTest::recentSearchesShowBeforeTyping() {
     QQuickItem *heading = harness.item(QStringLiteral("globalSearchRecentHeading"));
     QTRY_VERIFY(heading->isVisible());
     QCOMPARE(heading->property("text").toString(), QStringLiteral("Recent Searches"));
+    QVERIFY(harness.item(QStringLiteral("globalSearchFooterHairline"))->isVisible());
     const auto rows = visibleNamed(harness.palette(), QStringLiteral("globalSearchRecentRow"));
     QCOMPARE(rows.size(), 2);
     QVERIFY(visibleChildNamed(rows[0], QStringLiteral("rowBackgroundTint")) != nullptr);
@@ -1243,7 +1249,7 @@ void SearchPaletteTest::clearUsesTheBreezeIconAndNoTextGlyphs() {
     QQmlExpression iconName(qmlContext(clear), clear, QStringLiteral("icon.name"));
     QCOMPARE(iconName.evaluate().toString(), QStringLiteral("edit-clear"));
     QQmlExpression helpIcon(qmlContext(help), help, QStringLiteral("icon.name"));
-    QCOMPARE(helpIcon.evaluate().toString(), QStringLiteral("help-contextual"));
+    QCOMPARE(helpIcon.evaluate().toString(), QStringLiteral("question"));
     QCOMPARE(clear->property("display").toInt(), 0); // AbstractButton.IconOnly
     QCOMPARE(QAccessible::queryAccessibleInterface(clear)->text(QAccessible::Name), QStringLiteral("Clear"));
     // No text glyphs drawn as icons.

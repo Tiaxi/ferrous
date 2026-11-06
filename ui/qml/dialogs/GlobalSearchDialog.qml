@@ -389,7 +389,7 @@ Dialog {
                 width: 28
                 height: 28
                 display: AbstractButton.IconOnly
-                icon.name: "help-contextual"
+                icon.name: "question"
                 icon.width: 16
                 icon.height: 16
                 text: I18n.i18nc("@action:button", "Search Syntax and Keys")
@@ -418,7 +418,8 @@ Dialog {
             clip: true
             implicitHeight: root.resultsShown
                 ? resultsView.contentHeight + 6
-                : (noResultsMessage.visible ? noResultsMessage.height : 0) + auxColumn.implicitHeight
+                : (noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0)
+                    + (auxColumn.visible ? auxColumn.implicitHeight : 0)
                     + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
 
             ListView {
@@ -788,7 +789,7 @@ Dialog {
                             y: Math.round((parent.height - height) / 2)
                             width: 16
                             height: 16
-                            source: auxRow.modelData.kind === "recent" ? "document-open-recent" : "search"
+                            source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
                             color: root.uiPalette.textSecondary
                         }
@@ -822,8 +823,10 @@ Dialog {
         }
 
         // The keys for the selected row.
+        // Not when the footer meets the field's seam.
         Rectangle {
             objectName: "globalSearchFooterHairline"
+            visible: body.height > 0
             y: footerBar.y - 1
             width: parent.width
             height: 1
