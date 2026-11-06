@@ -5704,7 +5704,8 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/first.wav"));
     QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/first.wav"));
-    QVERIFY(meter->active());
+    // Paused, it keeps its file and shows an empty trough.
+    QVERIFY(!meter->active());
     const auto cancelled = std::make_shared<std::atomic_bool>(false);
     meter->m_cancelled = cancelled;
     meter->m_channels[0].observe(-3, 0);

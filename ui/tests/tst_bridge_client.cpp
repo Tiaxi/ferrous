@@ -6520,23 +6520,47 @@ void BridgeClientTest::analysisFrameTellsAFileThatEndsEarly() {
     isolateBridgeClient(client);
     QVERIFY(!client.waveformEndsEarly());
     // [len u32][magic][rate u32][flags][waveform len u16][coverage ms u32]
-    // [rows u16][bins u16][seq u32][channels]: 21 bytes after the length.
-    const auto frame = [](quint8 flags, quint32 coverageMillis, quint32 seq) {
+    // [rows u16][bins u16][seq u32][channels][track token u64]: 29 bytes
+    // after the length.
+    const auto frame = [](quint8 flags, quint32 coverageMillis, quint32 seq, quint64 token) {
         QByteArray bytes;
         QDataStream out(&bytes, QIODevice::WriteOnly);
         out.setByteOrder(QDataStream::LittleEndian);
-        out << quint32(21) << quint8(0xA1) << quint32(44100) << flags << quint16(0)
-            << coverageMillis << quint16(0) << quint16(0) << seq << quint8(0);
+        out << quint32(29) << quint8(0xA1) << quint32(44100) << flags << quint16(0)
+            << coverageMillis << quint16(0) << quint16(0) << seq << quint8(0) << token;
         return bytes;
     };
-    client.processAnalysisBytes(frame(0x10, 242000, 1));
+    const auto playing = [&client](quint64 token) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.trackToken = token;
+        snapshot.playback.currentPath = QStringLiteral("/music/%1.flac").arg(token);
+        QVERIFY(client.processBinarySnapshot(snapshot));
+    };
+    playing(4);
+    client.processAnalysisBytes(frame(0x10, 242000, 1, 4));
     QVERIFY(client.waveformEndsEarly());
     QVERIFY(!client.waveformComplete());
     QCOMPARE(client.waveformCoverageSeconds(), 242.0);
     // A frame without flags, as for the next track, clears it.
-    client.processAnalysisBytes(frame(0x00, 0, 2));
+    client.processAnalysisBytes(frame(0x00, 0, 2, 4));
     QVERIFY(!client.waveformEndsEarly());
     QCOMPARE(client.waveformCoverageSeconds(), 0.0);
+
+    // The track before's cut, sent before the bridge heard of the next
+    // track, is not the next one's, also when it plays the same file again.
+    client.processAnalysisBytes(frame(0x10, 242000, 3, 4));
+    QVERIFY(client.waveformEndsEarly());
+    playing(5);
+    QVERIFY(!client.waveformEndsEarly());
+    client.processAnalysisBytes(frame(0x10, 242000, 4, 4));
+    QVERIFY(!client.waveformEndsEarly());
+    QCOMPARE(client.waveformCoverageSeconds(), 242.0);
+    // The track's own frame tells of its own cut.
+    client.processAnalysisBytes(frame(0x10, 100000, 5, 5));
+    QVERIFY(client.waveformEndsEarly());
+    QCOMPARE(client.waveformCoverageSeconds(), 100.0);
 }
 
 void BridgeClientTest::spectrogramOverlaySettingsApplyFromSnapshot() {

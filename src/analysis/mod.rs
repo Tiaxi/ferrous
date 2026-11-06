@@ -18,6 +18,8 @@ mod gst_lifecycle;
 mod gst_waveform;
 mod session;
 mod stft_batch;
+#[cfg(test)]
+mod test_flac;
 mod track_io;
 mod waveform_prefill;
 mod waveform_pyramid;
@@ -43,7 +45,7 @@ use symphonia::core::audio::SampleBuffer;
 use cache::{usize_to_u64, WaveformSourceStamp};
 use centered_view::CenteredView;
 use decoders::{analysis_format_options, packet_first_frame, symphonia_track_shape};
-use fft::{ensure_sample_buffer, OverviewProgress, WaveformAccumulator, MIN_PREVIEW_PEAKS};
+use fft::{ensure_sample_buffer, CutOff, OverviewProgress, WaveformAccumulator, MIN_PREVIEW_PEAKS};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
 use session::{
@@ -82,13 +84,6 @@ macro_rules! profile_eprintln {
     ($($arg:tt)*) => {};
 }
 
-/// A file cut off before the length its header gives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CutOff {
-    /// What the file's frames are called, such as `FLAC`; `None` for PCM.
-    frames: Option<&'static str>,
-}
-
 /// An update of the overview waveform decode of the active track.
 #[derive(Debug, Clone)]
 pub struct WaveformUpdate {
@@ -120,7 +115,7 @@ impl WaveformUpdate {
             complete: progress == OverviewProgress::Complete,
             done: progress != OverviewProgress::Partial,
             ends_early: match progress {
-                OverviewProgress::EndsEarly(frames) => Some(CutOff { frames }),
+                OverviewProgress::EndsEarly(cut) => Some(cut),
                 _ => None,
             },
             source,
@@ -229,6 +224,10 @@ pub struct AnalysisSnapshot {
     /// `waveform_coverage_seconds`, before the length its header gives.
     pub waveform_ends_early: bool,
     pub sample_rate_hz: u32,
+    /// The track the snapshot is of (`AnalysisCommand::SetTrack`'s token).
+    /// A snapshot of an earlier track can still be queued when the next
+    /// one starts; the bridge applies only the current track's.
+    pub track_token: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -2194,13 +2193,16 @@ impl AnalysisRuntimeState {
         }
 
         self.snapshot.waveform_peaks = peaks;
-        self.snapshot.waveform_coverage_seconds = coverage_seconds;
+        // A file cut off: the waveform's coverage is the cut, where the
+        // file's timeline ends.
+        self.snapshot.waveform_coverage_seconds =
+            ends_early.map_or(coverage_seconds, |cut| cut.seconds());
         self.snapshot.waveform_complete = complete;
         self.snapshot.waveform_ends_early = ends_early.is_some();
         if let (Some(cut), Some(path)) = (ends_early, self.active_track_path.as_deref()) {
             let _ = event_tx.send(AnalysisEvent::FileEndsEarly {
                 path: path.to_path_buf(),
-                message: ends_early_message(path, cut.frames, coverage_seconds),
+                message: ends_early_message(path, cut.frames, cut.seconds()),
             });
         }
         // A decode stopped by an error shows what it covered, and the next
@@ -2235,6 +2237,7 @@ impl AnalysisRuntimeState {
     }
 
     fn emit_snapshot(&mut self, event_tx: &dyn AnalysisEventOutput, force: bool) {
+        self.snapshot.track_token = self.active_track_token;
         emit_snapshot(
             event_tx,
             &self.snapshot,
@@ -2486,6 +2489,7 @@ fn emit_snapshot(
         waveform_complete: snapshot.waveform_complete,
         waveform_ends_early: snapshot.waveform_ends_early,
         sample_rate_hz: snapshot.sample_rate_hz,
+        track_token: snapshot.track_token,
     };
     let _ = event_tx.send(AnalysisEvent::Snapshot(out));
     *waveform_dirty = false;
@@ -2612,6 +2616,9 @@ where
     let mut waveform = WaveformAccumulator::new(max_points, estimated_frames, sample_rate_hz);
 
     let mut decoded_any = false;
+    // Where the decoded timeline ends: the frame after the last packet that
+    // decoded. A damaged packet inside the file leaves a gap, not an end.
+    let mut timeline_end = 0_u64;
     let reached_end = loop {
         if is_cancelled() {
             return Ok(true);
@@ -2653,8 +2660,9 @@ where
 
         let samples = buf.samples();
         decoded_any |= !samples.is_empty();
+        let first_frame = packet_first_frame(format.as_ref(), track_id, packet.ts(), spec.rate);
+        timeline_end = timeline_end.max(first_frame + usize_to_u64(samples.len() / channels));
         if let Some(builder) = builder.as_mut() {
-            let first_frame = packet_first_frame(format.as_ref(), track_id, packet.ts(), spec.rate);
             builder.push(first_frame, samples, channels);
         }
         if !waveform.push_frames(samples, channels, on_update, is_cancelled) {
@@ -2672,8 +2680,12 @@ where
         let progress = if !reached_end {
             OverviewProgress::Truncated
         } else if let Some(frames) = cut_off_frames(codec, expected_frames, sample_rate_hz) {
-            if waveform.covered_frames() < frames {
-                OverviewProgress::EndsEarly(frame_name(codec))
+            if timeline_end < frames {
+                OverviewProgress::EndsEarly(CutOff {
+                    frames: frame_name(codec),
+                    end_frame: timeline_end,
+                    sample_rate_hz,
+                })
             } else {
                 OverviewProgress::Complete
             }
@@ -3495,6 +3507,7 @@ mod tests {
             waveform_complete: true,
             waveform_ends_early: false,
             sample_rate_hz: 48_000,
+            track_token: 0,
         };
         let mut pending_channels = Vec::<AnalysisSpectrogramChannel>::new();
         let mut waveform_dirty = true;
@@ -7417,12 +7430,77 @@ mod tests {
 
         let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "wav");
         let (peaks, coverage, progress) = updates.last().expect("final update");
-        assert_eq!(*progress, OverviewProgress::EndsEarly(None));
+        assert_eq!(
+            *progress,
+            OverviewProgress::EndsEarly(CutOff {
+                frames: None,
+                end_frame: 5 * 8_000,
+                sample_rate_hz: 8_000,
+            })
+        );
         assert!((coverage - 5.0).abs() < 0.01, "covers {coverage} s");
         assert!(!peaks.is_empty());
         let update = WaveformUpdate::of(peaks.clone(), *coverage, *progress, None);
         assert!(update.done && !update.complete);
-        assert_eq!(update.ends_early, Some(CutOff { frames: None }));
+        assert!(update
+            .ends_early
+            .is_some_and(|cut| (cut.seconds() - 5.0).abs() < 1e-6));
+    }
+
+    /// Interleaved 16-bit samples of a quiet tone, `frames` frames in
+    /// `channels` channels.
+    fn tone(frames: usize, channels: usize) -> Vec<i32> {
+        (0..frames * channels)
+            .map(|i| i32::try_from((i / channels * 37) % 2_001).unwrap() - 1_000)
+            .collect()
+    }
+
+    #[test]
+    fn interior_damage_with_an_intact_end_is_no_cut() {
+        // 48 kHz stereo FLAC, ten 4,096-frame blocks; the fourth cannot be
+        // decoded, and the ones after it can.
+        let frames = 10 * 4_096;
+        let bytes = test_flac::flac_bytes(&tone(frames, 2), 48_000, 2, 16, Some(3));
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+        let (_, coverage, progress) = updates.last().expect("final update");
+        // The damaged block did not decode: the decoded samples fall a block
+        // short.
+        let whole = 10.0 * 4_096.0 / 48_000.0;
+        assert!(
+            (whole - coverage - 4_096.0 / 48_000.0).abs() < 1e-3,
+            "covers {coverage} s"
+        );
+        // The decoded timeline reaches the header's length: the file is not
+        // cut off, though 85 ms inside it did not decode.
+        assert_eq!(*progress, OverviewProgress::Complete);
+    }
+
+    #[test]
+    fn a_cut_off_flac_ends_where_its_last_whole_block_ends() {
+        // Ten blocks in the header; the last one and a half are cut off.
+        let frames = 10 * 4_096;
+        let mut bytes = test_flac::flac_bytes(&tone(frames, 2), 48_000, 2, 16, None);
+        let block_bytes = (bytes.len() - 42) / 10;
+        bytes.truncate(bytes.len() - block_bytes * 3 / 2);
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+        let (_, coverage, progress) = updates.last().expect("final update");
+        let OverviewProgress::EndsEarly(cut) = *progress else {
+            panic!("{progress:?}");
+        };
+        assert_eq!(cut.frames, Some("FLAC"));
+        assert_eq!(cut.end_frame, 8 * 4_096);
+        assert!((cut.seconds() - 8.0 * 4_096.0 / 48_000.0).abs() < 1e-6);
+        assert!(*coverage <= cut.seconds() + 1e-6, "covers {coverage} s");
+        // With a damaged block before the cut too, the cut is where the
+        // timeline ends, not where the decoded samples would reach.
+        let mut bytes = test_flac::flac_bytes(&tone(frames, 2), 48_000, 2, 16, Some(3));
+        bytes.truncate(bytes.len() - block_bytes * 3 / 2);
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+        let (_, _, progress) = updates.last().expect("final update");
+        let OverviewProgress::EndsEarly(cut) = *progress else {
+            panic!("{progress:?}");
+        };
+        assert_eq!(cut.end_frame, 8 * 4_096);
     }
 
     #[test]
@@ -7448,11 +7526,16 @@ mod tests {
             done: true,
             ends_early: Some(CutOff {
                 frames: Some("FLAC"),
+                end_frame: 242 * 48_000,
+                sample_rate_hz: 48_000,
             }),
             source: None,
         };
         state.handle_waveform_progress(4, update, &tx);
         assert!(state.snapshot.waveform_ends_early);
+        // The coverage it tells is the cut.
+        assert!((state.snapshot.waveform_coverage_seconds - 242.0).abs() < 1e-3);
+        assert_eq!(state.snapshot.track_token, 4);
         let events: Vec<_> = rx.try_iter().collect();
         let reports: Vec<_> = events
             .iter()
@@ -7474,7 +7557,11 @@ mod tests {
             coverage_seconds: 10.0,
             complete: false,
             done: true,
-            ends_early: Some(CutOff { frames: None }),
+            ends_early: Some(CutOff {
+                frames: None,
+                end_frame: 10,
+                sample_rate_hz: 1,
+            }),
             source: None,
         };
         state.handle_waveform_progress(3, stale, &tx);

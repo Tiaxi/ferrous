@@ -256,6 +256,8 @@ void LevelMeterItem::setActive(bool value) {
     m_active = value;
     emit activeChanged();
     update();
+    // An inactive meter reads nothing: its readers hear of it.
+    noteReadout();
 }
 
 void LevelMeterItem::setReadoutWanted(bool value) {

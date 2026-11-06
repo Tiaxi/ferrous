@@ -3481,10 +3481,12 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     QCOMPARE(accessibleText(lanes[1], QAccessible::Name), QStringLiteral("Level of R"));
     QVERIFY(accessibleText(lanes[0], QAccessible::Description).contains(QStringLiteral("−∞ dB")));
     QVERIFY(bridge->setProperty("connected", true));
-    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
     QTRY_VERIFY(meter->active());
     // Held levels: the meter neither plays nor decays them while the
-    // test reads them.
+    // test reads them, and no clock of playback's clears them.
+    meter->setPlaying(false);
+    meter->setClock(nullptr);
     meter->m_channels.assign(2, {});
     meter->m_shown.assign(2, {});
     meter->m_shown[0].observe(-12.34, 0);
@@ -3500,6 +3502,33 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     QVERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
     QCOMPARE(evaluateOn(lanes[1], QStringLiteral("ToolTip.text")).toString(),
              QStringLiteral("R: Level 0.0 dB, peak 0.0 dB, clipping"));
+    // Paused, the column is an empty trough, as when stopped, and still
+    // reserved; playing again, the meter comes back.
+    const auto lampRow = [&]() {
+        const QSharedPointer<QQuickItemGrabResult> grab = meter->grabToImage();
+        QSignalSpy ready(grab.data(), &QQuickItemGrabResult::ready);
+        const QImage image = ready.wait(5000) ? grab->image() : QImage();
+        const double scale = image.isNull() ? 1.0 : double(image.width()) / meter->width();
+        // The lamp's rows and the gap under it, 3 to 7 px into the lane.
+        return QPair<QColor, QColor>(image.pixelColor(int(5 * scale), int(4.5 * scale)),
+                                     image.pixelColor(int(5 * scale), int(6.5 * scale)));
+    };
+    const QColor trough = layer->property("plotColors").value<QObject *>()
+        ->property("meterTrough").value<QColor>();
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
+    QTRY_VERIFY(!meter->active());
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QVERIFY(meter->isVisible());
+    auto [lamp, gap] = lampRow();
+    QCOMPARE(lamp, trough);
+    QCOMPARE(gap, trough);
+    QTRY_VERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("\u2212\u221e dB")));
+    QVERIFY(!accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
+    QTRY_VERIFY(meter->active());
+    std::tie(lamp, gap) = lampRow();
+    QVERIFY(lamp != trough);
+    QVERIFY(gap != trough);
     // Off again: the plot takes the column back.
     QVERIFY(bridge->setProperty("showLevelMeter", false));
     QTRY_COMPARE(surface->property("plotWidth").toReal(), layer->width());
@@ -3519,15 +3548,19 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
     QVERIFY(bridge->setProperty("showLevelMeter", true));
     QVERIFY(bridge->setProperty("connected", true));
     QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
-    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
+    QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
     QTRY_VERIFY(meter->active());
+    // The levels the test gives it decay, rather than play on, and no
+    // clock of playback's clears them.
+    meter->setPlaying(false);
+    meter->setClock(nullptr);
     for (const int mode : {0, 1}) {
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
         // The mode's plot gives the layer its lanes again: two, labelled.
         QVERIFY(showStereoLanes(layer));
         const QString what = mode == 0 ? QStringLiteral("spectrogram") : QStringLiteral("waveform");
-        // A level of -12 dB in the first lane; paused, it decays from there.
+        // A level of -12 dB in the first lane; it decays from there.
         meter->m_channels.assign(2, {});
         meter->m_channels[0].observe(-12, 0);
         meter->m_shown = meter->m_channels;

@@ -811,6 +811,8 @@ private:
     double m_waveformCoverageSeconds{0.0};
     bool m_waveformComplete{false};
     bool m_waveformEndsEarly{false};
+    // The track the waveform state is of, from the analysis frames.
+    quint64 m_waveformTrackToken{0};
     int m_sampleRateHz{48000};
     int m_fftSize{8192};
     int m_spectrogramViewMode{0};

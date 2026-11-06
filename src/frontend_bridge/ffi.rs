@@ -35,6 +35,9 @@ use crate::playback::{PathRenames, PlaybackState, RepeatMode};
 use crate::tag_editor;
 
 const ANALYSIS_FRAME_MAGIC: u8 = 0xA1;
+/// The bytes of an analysis frame before its peaks; `BridgeClient.cpp`'s
+/// `kAnalysisFrameHeaderBytes` matches it.
+const ANALYSIS_FRAME_HEADER: usize = 29;
 const PRECOMPUTED_SPECTROGRAM_MAGIC: u8 = 0xA2;
 const ANALYSIS_FLAG_WAVEFORM: u8 = 0x01;
 const ANALYSIS_FLAG_WAVEFORM_COMPLETE: u8 = 0x08;
@@ -112,6 +115,8 @@ struct AnalysisDelta {
     waveform_coverage_millis: u32,
     /// The analysis frame's flags for how far the waveform reaches.
     waveform_end_flags: u8,
+    /// The track the waveform state is of.
+    track_token: u64,
     waveform_peaks_u8: Vec<u8>,
 }
 
@@ -121,6 +126,7 @@ struct AnalysisEmitState {
     last_waveform_coverage_millis: u32,
     last_waveform_complete: bool,
     last_waveform_ends_early: bool,
+    last_track_token: u64,
     analysis_frame_seq: u32,
 }
 
@@ -3268,7 +3274,8 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     let waveform_meta_changed = waveform_coverage_millis
         != emit_state.last_waveform_coverage_millis
         || s.analysis.waveform_complete != emit_state.last_waveform_complete
-        || s.analysis.waveform_ends_early != emit_state.last_waveform_ends_early;
+        || s.analysis.waveform_ends_early != emit_state.last_waveform_ends_early
+        || s.analysis.track_token != emit_state.last_track_token;
     let waveform_peaks_u8 = if waveform_changed {
         emit_state
             .last_waveform_peaks
@@ -3283,6 +3290,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
     emit_state.last_waveform_coverage_millis = waveform_coverage_millis;
     emit_state.last_waveform_complete = s.analysis.waveform_complete;
     emit_state.last_waveform_ends_early = s.analysis.waveform_ends_early;
+    emit_state.last_track_token = s.analysis.track_token;
 
     let has_payload = waveform_changed || waveform_meta_changed;
     if has_payload {
@@ -3296,6 +3304,7 @@ fn compute_analysis_delta(s: &BridgeSnapshot, emit_state: &mut AnalysisEmitState
         waveform_changed,
         waveform_coverage_millis,
         waveform_end_flags: waveform_end_flags(&s.analysis),
+        track_token: s.analysis.track_token,
         waveform_peaks_u8,
     }
 }
@@ -3330,6 +3339,20 @@ fn round_clamped_to_u8(value: f64) -> u8 {
 
 /// Encode an analysis frame for the binary bridge protocol.
 /// Streaming spectrogram fields (rows, channels, reset) are always zero.
+///
+/// ```text
+/// [0]      u8   magic = 0xA1
+/// [1..5]   u32  sample_rate_hz
+/// [5]      u8   flags (ANALYSIS_FLAG_*)
+/// [6..8]   u16  waveform peak count
+/// [8..12]  u32  waveform coverage, ms
+/// [12..14] u16  rows = 0
+/// [14..16] u16  bins = 0
+/// [16..20] u32  frame sequence
+/// [20]     u8   channels = 0
+/// [21..29] u64  track token of the waveform state
+/// [29..]        waveform peaks, with ANALYSIS_FLAG_WAVEFORM
+/// ```
 fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     // A frame without a change would repeat the last sequence number, and
     // the UI would discard it.
@@ -3348,7 +3371,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
 
     let waveform_len_u16 = clamp_u16(waveform_len);
     // Streaming spectrogram fields are zero (rows=0, bins=0, channels=0).
-    let payload_len = 21usize + usize::from(waveform_len_u16);
+    let payload_len = ANALYSIS_FRAME_HEADER + usize::from(waveform_len_u16);
 
     let mut out = Vec::with_capacity(4 + payload_len);
     out.extend_from_slice(&clamp_u32(payload_len).to_le_bytes());
@@ -3361,6 +3384,7 @@ fn encode_analysis_frame(delta: &AnalysisDelta) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes()); // bin_count = 0
     out.extend_from_slice(&delta.frame_seq.to_le_bytes());
     out.push(0); // channel_count = 0
+    out.extend_from_slice(&delta.track_token.to_le_bytes());
 
     if (flags & ANALYSIS_FLAG_WAVEFORM) != 0 {
         out.extend_from_slice(&delta.waveform_peaks_u8[..usize::from(waveform_len_u16)]);
@@ -3614,6 +3638,7 @@ mod tests {
                 waveform_complete: true,
                 waveform_ends_early: false,
                 sample_rate_hz: 48_000,
+                track_token: 0,
             },
             metadata: crate::metadata::TrackMetadata {
                 source_path: Some("/music/a.flac".to_string()),
@@ -6294,9 +6319,13 @@ mod tests {
         cut.analysis.waveform_complete = false;
         cut.analysis.waveform_ends_early = true;
         cut.analysis.waveform_coverage_seconds = 242.0;
+        cut.analysis.track_token = 7;
         runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(cut.clone()))]);
         let frame = runtime.pop_analysis_frame().expect("a frame for the cut");
         assert_ne!(frame[9] & ANALYSIS_FLAG_WAVEFORM_ENDS_EARLY, 0);
+        // The track the cut is of, after the header's other fields.
+        let token = |frame: &[u8]| u64::from_le_bytes(frame[25..33].try_into().expect("token"));
+        assert_eq!(token(&frame), 7);
         assert_eq!(frame[9] & ANALYSIS_FLAG_WAVEFORM_COMPLETE, 0);
         assert_eq!(
             u32::from_le_bytes(frame[12..16].try_into().expect("coverage")),
@@ -6309,11 +6338,13 @@ mod tests {
         next.analysis.waveform_peaks.clear();
         next.analysis.waveform_ends_early = false;
         next.analysis.waveform_coverage_seconds = 0.0;
+        next.analysis.track_token = 8;
         runtime.process_bridge_events([BridgeEvent::Snapshot(Box::new(next))]);
         let frame = runtime
             .pop_analysis_frame()
             .expect("a frame for the change");
         assert_eq!(frame[9], 0);
+        assert_eq!(token(&frame), 8);
         assert!(runtime.pop_analysis_frame().is_none());
     }
 

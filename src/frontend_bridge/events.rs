@@ -236,6 +236,7 @@ pub(super) fn process_playback_event(
             state.analysis.waveform_complete = false;
             state.analysis.waveform_ends_early = false;
             state.analysis_track_token = track_token;
+            state.analysis.track_token = track_token;
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
             metadata.request(path.clone());
@@ -519,6 +520,13 @@ pub(super) fn process_analysis_event(
     snapshot: AnalysisSnapshot,
     state: &mut BridgeState,
 ) -> SnapshotUrgency {
+    // A snapshot of the track before can still be queued when the next one
+    // starts, also one of the same file, as for Repeat One: its waveform,
+    // coverage and cut are not the current track's.
+    if snapshot.track_token != state.analysis_track_token {
+        return SnapshotUrgency::None;
+    }
+    state.analysis.track_token = snapshot.track_token;
     state.analysis.sample_rate_hz = snapshot.sample_rate_hz;
     state.analysis.waveform_coverage_seconds = snapshot.waveform_coverage_seconds;
     state.analysis.waveform_complete = snapshot.waveform_complete;
@@ -1215,6 +1223,55 @@ mod tests {
         let changed = pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
         assert!(changed);
         assert!(state.analysis.waveform_peaks.is_empty());
+    }
+
+    #[test]
+    fn a_queued_snapshot_of_the_track_before_leaves_the_next_track_alone() {
+        // A manual change, a gapless one, and Repeat One, where the next
+        // track is the same file: each is a new track with a new token.
+        for (kind, next) in [
+            (TrackChangeKind::Manual, "/music/next.flac"),
+            (TrackChangeKind::Gapless, "/music/next.flac"),
+            (TrackChangeKind::Gapless, "/music/track.flac"),
+            (TrackChangeKind::Natural, "/music/track.flac"),
+        ] {
+            let (analysis, _commands, playback_tx, playback_rx, metadata, mut state) =
+                playback_harness(SpectrogramDisplayMode::Centered);
+            let (analysis_tx, analysis_rx) = crossbeam_channel::unbounded::<AnalysisEvent>();
+            let (event_tx, _event_rx) = crossbeam_channel::unbounded::<BridgeEvent>();
+            let cut = |token: u64, seconds: f32| {
+                AnalysisEvent::Snapshot(AnalysisSnapshot {
+                    waveform_peaks: vec![0.5; 8],
+                    waveform_coverage_seconds: seconds,
+                    waveform_ends_early: true,
+                    sample_rate_hz: 44_100,
+                    track_token: token,
+                    ..AnalysisSnapshot::default()
+                })
+            };
+            // The playing track's (token 7) last overview update, cut off,
+            // waits in the queue while playback moves on.
+            analysis_tx.send(cut(7, 242.0)).expect("queue the snapshot");
+            playback_tx
+                .send(PlaybackEvent::TrackChanged {
+                    path: p(next),
+                    queue_index: 1,
+                    kind: kind.clone(),
+                    track_token: 8,
+                })
+                .expect("send the track change");
+            pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+            assert_eq!(state.analysis.track_token, 8);
+            drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+            assert!(!state.analysis.waveform_ends_early, "{kind:?} {next}");
+            assert!(state.analysis.waveform_peaks.is_empty(), "{kind:?} {next}");
+            assert!(state.analysis.waveform_coverage_seconds.abs() < f32::EPSILON);
+            // The next track's own snapshot applies.
+            analysis_tx.send(cut(8, 100.0)).expect("queue the snapshot");
+            drain_analysis_events(&analysis_rx, &event_tx, &mut state);
+            assert!(state.analysis.waveform_ends_early, "{kind:?} {next}");
+            assert!((state.analysis.waveform_coverage_seconds - 100.0).abs() < f32::EPSILON);
+        }
     }
 
     #[test]
