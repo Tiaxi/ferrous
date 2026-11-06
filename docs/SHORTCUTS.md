@@ -14,6 +14,7 @@ These work in the main window and in the fullscreen viewers. Text fields, such a
 | Mute | Ctrl+Shift+M |
 | Open or close the visualization viewer | F11 |
 | Open or close the album art viewer | Shift+F11 |
+| Show the spectrogram or the waveform | Ctrl+1, Ctrl+2 |
 | Quit | Ctrl+Q |
 
 These work in the main window only:
@@ -21,12 +22,13 @@ These work in the main window only:
 | Action | Keys |
 | --- | --- |
 | Open files | Ctrl+O |
-| Global search | Ctrl+F |
-| Undo the latest Clear Playlist, removal of queue tracks, or replacement of the queue | Ctrl+Z |
+| Find (open global search) | Ctrl+F |
+| Undo the latest Clear Queue, removal of queue tracks, move of queue tracks, or replacement of the queue | Ctrl+Z |
 | Select the previous or next track in the queue | Ctrl+Up, Ctrl+Down |
 | Move the selected tracks up or down the queue | Ctrl+Shift+Up, Ctrl+Shift+Down |
+| Configure Ferrous | Ctrl+Shift+, (Plasma's standard key) |
 
-Alt and an underlined letter open a menu, such as Alt+P for **Playback**. [Global search](SEARCH.md) has keys of its own.
+Alt and an underlined letter open a menu, such as Alt+P for **Playback**. The menus show each item's shortcut; the queue's and the library's context menus also show the keys that do the same in the list, such as Enter and Delete. [Global search](SEARCH.md) has keys of its own.
 
 ## Library and queue
 
@@ -41,7 +43,7 @@ Alt and an underlined letter open a menu, such as Alt+P for **Playback**. [Globa
 
 In the library, typing the start of an artist's name selects that artist.
 
-Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After Clear Playlist, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
+Delete acts only while the queue has focus. Playing from the library or global search replaces the queue. After **Edit › Clear Queue**, Delete, or a replacement, Undo in the **Edit** menu (Ctrl+Z) stays available until the queue changes again. Undo brings back the tracks and their selection. It does not start playback: a track that plays on is left playing, otherwise the track that was current comes back stopped at its start.
 
 The handles between the queue's column headings resize the Artist, Album and Length columns; the title takes the rest. Tab reaches them: Left widens the column after the handle, Right narrows it, and Home, or a double-click, restores its default width. Ferrous keeps the widths you set.
 

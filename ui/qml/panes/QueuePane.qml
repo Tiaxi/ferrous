@@ -20,8 +20,10 @@ Rectangle {
     required property var playlistOrderText
     required property var libraryController
     required property var stepScrollView
-    required property var clearPlaylistAction
-    required property int popupTransitionMs
+    // The keys of the window's Move Up and Move Down, which the context
+    // menu shows beside its own.
+    property string moveUpKeyHint: ""
+    property string moveDownKeyHint: ""
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
     required property var droppedExternalPaths
@@ -885,15 +887,18 @@ Rectangle {
                     }
                 }
 
-                Menu {
+                // The keys beside the items are what the queue does with them;
+                // see KeyHintMenuItem.
+                Components.AppMenu {
                     id: playlistContextMenu
                     objectName: "playlistContextMenu"
                     property int rowIndex: -1
-                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Play Track")
+                    Components.KeyHintMenuItem {
+                        objectName: "queuePlayItem"
+                        text: I18n.i18nc("@action:inmenu", "Play")
+                        icon.name: "media-playback-start"
+                        keyHint: I18n.i18nc("@info:shortcut key name", "Enter")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             if (playlistContextMenu.rowIndex >= 0) {
@@ -902,8 +907,23 @@ Rectangle {
                         }
                     }
 
+                    MenuSeparator {}
+
                     MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Open containing folder")
+                        objectName: "queueShowInLibraryItem"
+                        text: I18n.i18nc("@action:inmenu", "Show in Library")
+                        icon.name: "go-jump"
+                        enabled: playlistContextMenu.rowIndex >= 0
+                        onTriggered: {
+                            const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
+                            root.libraryController.showTrackInLibrary(path || "")
+                        }
+                    }
+
+                    MenuItem {
+                        objectName: "queueOpenFolderItem"
+                        text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                        icon.name: "folder-open"
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
@@ -914,22 +934,39 @@ Rectangle {
                     }
 
                     MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Show in library")
-                        enabled: playlistContextMenu.rowIndex >= 0
-                        onTriggered: {
-                            const path = root.uiBridge.queuePathAt(playlistContextMenu.rowIndex)
-                            root.libraryController.showTrackInLibrary(path || "")
-                        }
-                    }
-
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Edit Tags")
+                        objectName: "queueEditTagsItem"
+                        text: I18n.i18nc("@action:inmenu", "Edit Tags…")
+                        icon.name: "document-edit"
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: root.controller.openTagEditorForRow(playlistContextMenu.rowIndex)
                     }
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Remove Track")
+                    MenuSeparator {}
+
+                    Components.KeyHintMenuItem {
+                        objectName: "queueMoveUpItem"
+                        text: I18n.i18nc("@action:inmenu", "Move Up")
+                        icon.name: "go-up"
+                        keyHint: root.moveUpKeyHint
+                        enabled: playlistContextMenu.rowIndex > 0
+                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, -1)
+                    }
+
+                    Components.KeyHintMenuItem {
+                        objectName: "queueMoveDownItem"
+                        text: I18n.i18nc("@action:inmenu", "Move Down")
+                        icon.name: "go-down"
+                        keyHint: root.moveDownKeyHint
+                        enabled: playlistContextMenu.rowIndex >= 0
+                            && playlistContextMenu.rowIndex < root.uiBridge.queueLength - 1
+                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, 1)
+                    }
+
+                    Components.KeyHintMenuItem {
+                        objectName: "queueRemoveItem"
+                        text: I18n.i18nc("@action:inmenu", "Remove from Queue")
+                        icon.name: "list-remove"
+                        keyHint: I18n.i18nc("@info:shortcut key name", "Del")
                         enabled: playlistContextMenu.rowIndex >= 0
                         onTriggered: {
                             if (playlistContextMenu.rowIndex < 0) {
@@ -943,24 +980,6 @@ Rectangle {
                             }
                         }
                     }
-
-                    MenuSeparator {}
-
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Move Up")
-                        enabled: playlistContextMenu.rowIndex > 0
-                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, -1)
-                    }
-
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Move Down")
-                        enabled: playlistContextMenu.rowIndex >= 0
-                            && playlistContextMenu.rowIndex < root.uiBridge.queueLength - 1
-                        onTriggered: root.controller.moveRowsOf(playlistContextMenu.rowIndex, 1)
-                    }
-
-                    MenuSeparator {}
-                    MenuItem { action: root.clearPlaylistAction }
                 }
             }
 

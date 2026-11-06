@@ -24,10 +24,7 @@ Rectangle {
     required property var uiPalette
     required property real snappyScrollFlickDeceleration
     required property real snappyScrollMaxFlickVelocity
-    required property int popupTransitionMs
     required property var stepScrollView
-    required property var playAllLibraryTracksAction
-    required property var appendAllLibraryTracksAction
     required property var addLibraryFolderAction
     // The tracks the playback failed to read, from the issue history.
     property var errorController: null
@@ -465,52 +462,90 @@ Rectangle {
                     }
                 }
 
-                // One menu for every row, rather than one in each row.
-                Menu {
+                // One menu for every row, rather than one in each row. Its
+                // first items name what they act on: the row, or every
+                // selected row when it is one of several.
+                Components.AppMenu {
                     id: libraryContextMenu
                     objectName: "libraryContextMenu"
                     property var rowMap: ({})
-                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
+                    readonly property string rowType: libraryContextMenu.rowMap.rowType || ""
+                    readonly property bool actsOnSelection: root.controller.selectionCount() > 1
+                        && root.libraryModel.isKeySelected(libraryContextMenu.rowMap.selectionKey || "")
 
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Play")
+                    Components.KeyHintMenuItem {
+                        objectName: "libraryPlayItem"
+                        text: {
+                            if (libraryContextMenu.actsOnSelection) {
+                                return I18n.i18nc("@action:inmenu", "Play Selection")
+                            }
+                            switch (libraryContextMenu.rowType) {
+                            case "artist":
+                                return I18n.i18nc("@action:inmenu", "Play Artist")
+                            case "album":
+                                return I18n.i18nc("@action:inmenu", "Play Album")
+                            case "track":
+                                return I18n.i18nc("@action:inmenu", "Play Track")
+                            default:
+                                return I18n.i18nc("@action:inmenu", "Play")
+                            }
+                        }
+                        icon.name: "media-playback-start"
+                        // What Enter does in the library.
+                        keyHint: I18n.i18nc("@info:shortcut key name", "Enter")
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.playRowItems(libraryContextMenu.rowMap)
                     }
 
                     MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Queue")
+                        objectName: "libraryQueueItem"
+                        text: {
+                            if (libraryContextMenu.actsOnSelection) {
+                                return I18n.i18nc("@action:inmenu", "Add Selection to Queue")
+                            }
+                            switch (libraryContextMenu.rowType) {
+                            case "artist":
+                                return I18n.i18nc("@action:inmenu", "Add Artist to Queue")
+                            case "album":
+                                return I18n.i18nc("@action:inmenu", "Add Album to Queue")
+                            case "track":
+                                return I18n.i18nc("@action:inmenu", "Add Track to Queue")
+                            default:
+                                return I18n.i18nc("@action:inmenu", "Add to Queue")
+                            }
+                        }
+                        icon.name: "media-playlist-append"
                         enabled: root.controller.isActionableRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.appendRowItems(libraryContextMenu.rowMap)
                     }
 
+                    MenuSeparator {}
+
+                    // A track's folder shows with the track selected; an
+                    // album's or an artist's is the folder itself.
                     MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Edit Tags")
+                        objectName: "libraryOpenFolderItem"
+                        text: I18n.i18nc("@action:inmenu", "Open Containing Folder")
+                        icon.name: "folder-open"
+                        enabled: libraryContextMenu.rowType === "track"
+                            ? (libraryContextMenu.rowMap.trackPath || "").length > 0
+                            : (libraryContextMenu.rowMap.openPath || "").length > 0
+                        onTriggered: {
+                            if (libraryContextMenu.rowType === "track") {
+                                root.uiBridge.openContainingFolder(libraryContextMenu.rowMap.trackPath || "")
+                            } else {
+                                root.uiBridge.openInFileBrowser(libraryContextMenu.rowMap.openPath || "")
+                            }
+                        }
+                    }
+
+                    MenuItem {
+                        objectName: "libraryEditTagsItem"
+                        text: I18n.i18nc("@action:inmenu", "Edit Tags…")
+                        icon.name: "document-edit"
                         visible: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
                         enabled: root.controller.canOpenTagEditorForRow(libraryContextMenu.rowMap)
                         onTriggered: root.controller.openTagEditorForRow(libraryContextMenu.rowMap)
-                    }
-
-                    MenuSeparator {}
-                    MenuItem { action: root.playAllLibraryTracksAction }
-                    MenuItem { action: root.appendAllLibraryTracksAction }
-                    MenuSeparator {}
-
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu %1 is an application", "Open in %1", root.uiBridge.fileBrowserName)
-                        visible: libraryContextMenu.rowMap.rowType !== "track"
-                        enabled: (libraryContextMenu.rowMap.openPath || "").length > 0
-                        onTriggered: root.uiBridge.openInFileBrowser(
-                            libraryContextMenu.rowMap.openPath || "")
-                    }
-
-                    MenuItem {
-                        text: I18n.i18nc("@action:inmenu", "Open containing folder")
-                        visible: libraryContextMenu.rowMap.rowType === "track"
-                        enabled: (libraryContextMenu.rowMap.trackPath || "").length > 0
-                        onTriggered: root.uiBridge.openContainingFolder(
-                            libraryContextMenu.rowMap.trackPath || "")
                     }
 
                     MenuSeparator {}
@@ -520,6 +555,7 @@ Rectangle {
                     MenuItem {
                         objectName: "libraryCollapseAllItem"
                         text: I18n.i18nc("@action:inmenu", "Collapse All")
+                        icon.name: "collapse-all"
                         enabled: root.libraryModel.count > 0
                         onTriggered: root.controller.collapseAll()
                     }

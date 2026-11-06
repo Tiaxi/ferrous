@@ -14,6 +14,8 @@ QtObject {
     property string lastSpectrogramPlaybackState: ""
     property real rememberedVolumeBeforeMute: 1.0
     property bool volumeMuted: false
+    // Whether a track plays now (not paused or stopped).
+    readonly property bool isPlaying: (root.uiBridge.playbackState || "") === "Playing"
 
     // Where playback is. The bridge's clock extrapolates the engine's
     // position samples; everything that shows the position reads it.
