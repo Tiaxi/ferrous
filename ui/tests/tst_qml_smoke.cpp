@@ -2093,7 +2093,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
         spectrogramFftChoices: [512, 1024, 2048]
         promptAddLibraryRoot: function(context) {}
         openLibraryRootNameDialog: function(mode, path, name) {}
@@ -2104,7 +2103,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
     }
 
     Dialogs.LibraryRootNameDialog {
@@ -2112,7 +2110,6 @@ Item {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: harness
-        popupTransitionMs: 0
         dialogMode: "add"
         pathValue: "/music"
         nameValue: "Music"
@@ -25718,7 +25715,6 @@ ApplicationWindow {
         uiBridge: bridge
         uiPalette: palette
         windowRoot: window
-        popupTransitionMs: 0
     }
 }
 )QML"), baseUrl, &errorText));

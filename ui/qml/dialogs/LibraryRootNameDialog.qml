@@ -7,6 +7,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 Dialog {
     id: root
@@ -14,7 +15,6 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
     required property string dialogMode
     required property string pathValue
     required property string nameValue
@@ -25,8 +25,6 @@ Dialog {
         ? I18n.i18nc("@title:window", "Rename Library Folder")
         : I18n.i18nc("@title:window", "Add Library Folder")
     width: Math.min(Kirigami.Units.gridUnit * 30, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
     onOpened: {
         libraryRootNameField.forceActiveFocus()
@@ -75,7 +73,7 @@ Dialog {
 
     contentItem: Kirigami.FormLayout {
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
 
         TextField {
             objectName: "libraryRootPathField"

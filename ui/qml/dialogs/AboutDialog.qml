@@ -7,6 +7,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // About Ferrous, laid out as KDE's About dialog: the icon, name and
 // version, then the About, Components, Authors and License tabs.
@@ -15,7 +16,6 @@ Dialog {
 
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
 
     readonly property string version: typeof appVersion !== "undefined" ? String(appVersion) : ""
     // The libraries Ferrous runs on, as main.cpp gives them: each a name and
@@ -50,8 +50,6 @@ Dialog {
     title: I18n.i18nc("@title:window", "About Ferrous")
     width: Math.min(Kirigami.Units.gridUnit * 29, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     closePolicy: Popup.CloseOnEscape
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
     onAboutToShow: root.tabIndex = 0
     onOpened: aboutTabs.currentItem.forceActiveFocus(Qt.PopupFocusReason)
@@ -108,7 +106,7 @@ Dialog {
 
     contentItem: ColumnLayout {
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
 
         spacing: 0
 

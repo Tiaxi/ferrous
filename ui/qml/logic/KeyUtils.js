@@ -24,3 +24,9 @@ function isEnter(event) {
 function editsText(item) {
     return !!item && ("cursorPosition" in item) && ("readOnly" in item) && !item.readOnly
 }
+
+// Whether `popup` still takes its keys: shown and not closing. A dialog
+// closes from the start of its exit transition.
+function popupTakesKeys(popup) {
+    return !!popup && popup.visible && !(popup.exit && popup.exit.running)
+}

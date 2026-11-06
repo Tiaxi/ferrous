@@ -7,6 +7,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 Dialog {
     id: root
@@ -75,7 +76,7 @@ Dialog {
 
     contentItem: ColumnLayout {
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
 
         spacing: 12
 

@@ -14,8 +14,8 @@ Control {
 
     padding: 0
 
-    function handleEnter(event, focusItem) {
-        return box.handleEnter(event, focusItem)
+    function handleEnter(event, focusItem, dialogOpen) {
+        return box.handleEnter(event, focusItem, dialogOpen)
     }
 
     contentItem: DialogButtons {

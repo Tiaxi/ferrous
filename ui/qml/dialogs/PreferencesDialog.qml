@@ -20,7 +20,6 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
     required property var spectrogramFftChoices
     required property var promptAddLibraryRoot
     required property var openLibraryRootNameDialog
@@ -167,8 +166,6 @@ Dialog {
     y: Math.round(((parent ? parent.height : root.windowRoot.height) - height) / 2)
     padding: 0
     closePolicy: Popup.CloseOnEscape
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
     onAboutToShow: {
         settingsState.discard()
@@ -258,7 +255,7 @@ Dialog {
         // Enter presses the default button, as in KDE's dialogs. The pages'
         // combo boxes pass it on from here too.
         function handleDialogEnter(event, focusItem) {
-            return dialogButtons.handleEnter(event, focusItem)
+            return dialogButtons.handleEnter(event, focusItem, KeyUtils.popupTakesKeys(root))
         }
         Keys.onPressed: function(event) { handleDialogEnter(event, Window.activeFocusItem) }
 

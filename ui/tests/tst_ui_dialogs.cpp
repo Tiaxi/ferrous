@@ -764,8 +764,12 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         QQuickItem *box = nullptr;
         QTRY_VERIFY2((box = visibleNamed(window, QString::fromLatin1(check.control))) != nullptr, check.control);
         const bool before = bridge->property(check.property).toBool();
-        click(window, box);
-        QTRY_COMPARE(box->property("checked").toBool(), !before);
+        // By the keyboard: a long page may have the box scrolled out of view.
+        box->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY2(box->property("checked").toBool() == !before,
+                     qPrintable(QStringLiteral("%1 at %2,%3").arg(QString::fromLatin1(check.control))
+                                    .arg(sceneRect(box).x()).arg(sceneRect(box).y())));
         QCOMPARE(bridge->property(check.property).toBool(), before);
         expected.insert(QString::fromLatin1(check.property), !before);
     }

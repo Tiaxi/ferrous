@@ -54,7 +54,8 @@ ApplicationWindow {
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
-    // The dialogs' and the viewers' transitions; menus take the style's.
+    // The viewers' transitions: they open and close at once. Menus and
+    // dialogs take the style's.
     readonly property int uiPopupTransitionMs: 0
     // Whether the window is on screen: visible, not minimized, and exposed.
     readonly property bool visualFeedsEnabled: windowPresence.shown
@@ -1236,7 +1237,6 @@ ApplicationWindow {
         id: aboutDialog
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
     }
 
     Dialogs.PreferencesDialog {
@@ -1245,7 +1245,6 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
         spectrogramFftChoices: root.spectrogramFftChoices
         promptAddLibraryRoot: root.promptAddLibraryRoot
         openLibraryRootNameDialog: root.openLibraryRootNameDialog
@@ -1257,7 +1256,6 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
         dialogMode: root.pendingLibraryRootDialogMode
         pathValue: root.pendingLibraryRootPath
         nameValue: root.pendingLibraryRootName
@@ -1278,7 +1276,6 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
     }
 
     Dialogs.RecentErrorsDialog {
@@ -1288,7 +1285,6 @@ ApplicationWindow {
         errorController: errorController
         uiPalette: root.uiPalette
         windowRoot: root
-        popupTransitionMs: root.uiPopupTransitionMs
         uiBridge: root.uiBridge
         showInQueue: root.showQueuePath
         showInLibrary: function(path) { libraryController.showTrackInLibrary(path) }

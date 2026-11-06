@@ -9,6 +9,7 @@ import FerrousUi 1.0
 import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
+import "../logic/KeyUtils.js" as KeyUtils
 
 Dialog {
     id: root
@@ -873,7 +874,7 @@ Dialog {
 
     contentItem: RowLayout {
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
 
         spacing: Kirigami.Units.gridUnit - 2
 

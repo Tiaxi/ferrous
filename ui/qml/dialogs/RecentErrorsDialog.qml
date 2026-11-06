@@ -20,7 +20,6 @@ Popup {
     required property var errorController
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
     // The actions of the entries, which the window carries out.
     required property var uiBridge
     required property var showInQueue
@@ -85,6 +84,11 @@ Popup {
         return null
     }
 
+    // The action chosen in the popup, which runs once it has closed: the
+    // popup gives the keyboard back as it goes, which would take it from
+    // the queue or a dialog the action opens.
+    property var chosenAction: null
+
     function runAction(kind, subject) {
         // The queue may have changed since the row was made: a file that has
         // left it gets the action that fits, and the popup stays.
@@ -92,19 +96,31 @@ Popup {
             root.refreshQueuedSubjects()
             return
         }
+        root.chosenAction = { kind: kind, subject: subject }
         root.close()
-        switch (kind) {
+    }
+
+    function runChosenAction() {
+        const action = root.chosenAction
+        root.chosenAction = null
+        if (!action) {
+            return
+        }
+        switch (action.kind) {
         case "queue":
-            root.showInQueue(subject)
+            root.showInQueue(action.subject)
             break
         case "library":
-            root.showInLibrary(subject)
+            root.showInLibrary(action.subject)
             break
         case "library-settings":
             root.openPreferencesPage(0)
             break
         case "lastfm-settings":
             root.openPreferencesPage(3)
+            break
+        case "diagnostics":
+            root.openDiagnostics()
             break
         }
     }
@@ -129,10 +145,9 @@ Popup {
     topPadding: Kirigami.Units.smallSpacing
     bottomPadding: Kirigami.Units.smallSpacing
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
     onAboutToShow: {
+        root.chosenAction = null
         root.errorController.dismissLatest()
         // Not visible yet: the refresh below would skip it.
         root.queuedSubjects = ({})
@@ -142,7 +157,10 @@ Popup {
     // Over a viewer the keyboard would otherwise stay with the viewer.
     onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
     // Issues that arrived while it was open have been seen too.
-    onClosed: root.errorController.markSeen()
+    onClosed: {
+        root.errorController.markSeen()
+        root.runChosenAction()
+    }
     onErrorCountChanged: {
         if (root.errorCount === 0) {
             root.close()
@@ -429,8 +447,8 @@ Popup {
             icon.name: "help-about"
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
             onClicked: {
+                root.chosenAction = { kind: "diagnostics", subject: "" }
                 root.close()
-                root.openDiagnostics()
             }
         }
     }

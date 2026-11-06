@@ -40,14 +40,16 @@ DialogButtonBox {
     // text; on a button of the row it presses that button; anywhere else in
     // the dialog it presses the default button, if it can be pressed. A
     // combo box's open list and other popups take their keys before the
-    // dialog sees them. Call it from a key handler of the dialog's content;
-    // it accepts the Enter it took.
-    function handleEnter(event, focusItem) {
+    // dialog sees them. Call it from a key handler of the dialog's content,
+    // with whether the dialog is open: a text field's own Enter may have
+    // closed it already, and the keyboard has then left the field. It
+    // accepts the Enter it took.
+    function handleEnter(event, focusItem, dialogOpen) {
         if (!KeyUtils.isEnter(event)) {
             return false
         }
         event.accepted = true
-        if (KeyUtils.editsText(focusItem)) {
+        if (dialogOpen === false || KeyUtils.editsText(focusItem)) {
             return true
         }
         const button = root.focusedButton() || root.primary

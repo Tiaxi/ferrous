@@ -7,6 +7,7 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 
 // The new name of each selected file, and why any cannot be renamed, before
 // anything is renamed. Cancel and Escape rename nothing.
@@ -90,7 +91,7 @@ Dialog {
 
     contentItem: ColumnLayout {
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
 
         spacing: 10
 
@@ -103,15 +104,48 @@ Dialog {
             color: root.errorText.length > 0 ? root.uiPalette.negative : root.uiPalette.text
         }
 
-        // Nothing to list: the summary alone, in the middle.
-        Kirigami.PlaceholderMessage {
+        // Nothing to list: a message alone, in the middle. Plain labels: a
+        // placeholder message's selectable text brings a Copy action whose
+        // Ctrl+C the window's own Copy has.
+        ColumnLayout {
             objectName: "renamePreviewEmpty"
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.topMargin: Kirigami.Units.gridUnit
+            Layout.bottomMargin: Kirigami.Units.gridUnit
             visible: root.rows.length === 0 && root.errorText.length === 0
-            icon.name: "edit-rename"
-            text: I18n.i18nc("@info", "No file is renamed")
-            explanation: I18n.i18nc("@info", "The selected files already have the names their tags give.")
+            spacing: Kirigami.Units.largeSpacing
+
+            Item { Layout.fillHeight: true }
+
+            Kirigami.Icon {
+                Layout.alignment: Qt.AlignHCenter
+                implicitWidth: Kirigami.Units.iconSizes.huge
+                implicitHeight: Kirigami.Units.iconSizes.huge
+                source: "edit-rename"
+                opacity: 0.5
+                Accessible.ignored: true
+            }
+
+            Label {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                text: I18n.i18nc("@info", "No file is renamed")
+                font.pointSize: root.uiPalette.basePointSize * 1.125
+                font.weight: Font.DemiBold
+                color: root.uiPalette.textSecondary
+            }
+
+            Label {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
+                text: I18n.i18nc("@info", "The selected files already have the names their tags give.")
+                color: root.uiPalette.textSecondary
+            }
+
+            Item { Layout.fillHeight: true }
         }
 
         ListView {

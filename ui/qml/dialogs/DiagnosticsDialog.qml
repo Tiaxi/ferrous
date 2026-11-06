@@ -14,7 +14,6 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
-    required property int popupTransitionMs
 
     property string diagnosticsText: ""
 
@@ -22,8 +21,6 @@ Dialog {
     title: I18n.i18nc("@title:window", "Diagnostics")
     width: Math.min(Kirigami.Units.gridUnit * 54, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     height: Math.min(Kirigami.Units.gridUnit * 38, root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
-    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
     function syncDiagnosticsText() {
         root.diagnosticsText = root.uiBridge.diagnosticsText || ""
@@ -155,8 +152,6 @@ Dialog {
 
                 Menu {
                     id: diagnosticsContextMenu
-                    enter: Components.PopupTransition { duration: root.popupTransitionMs }
-                    exit: Components.PopupTransition { duration: root.popupTransitionMs }
 
                     MenuItem {
                         text: I18n.i18nc("@action:inmenu", "Copy")
