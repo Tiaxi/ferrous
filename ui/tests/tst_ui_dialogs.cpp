@@ -7,6 +7,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QIcon>
 #include <QJsonArray>
@@ -28,6 +29,7 @@
 #include "../src/AboutComponents.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
+#include "../src/QueueRows.h"
 #include "../src/Localization.h"
 #include "../src/SpectrogramItem.h"
 #include "../src/WaveformEditorItem.h"
@@ -247,6 +249,17 @@ bool openIssues(QQuickWindow *window) {
     });
 }
 
+// Queue rows of `paths`, as the fallback bridge takes them.
+QVariantList queueRowsOf(const QStringList &paths) {
+    QVariantList rows;
+    for (const QString &path : paths) {
+        rows.push_back(QVariantMap{{QStringLiteral("title"), QFileInfo(path).completeBaseName()},
+                                   {QStringLiteral("path"), path},
+                                   {QStringLiteral("lengthText"), QStringLiteral("1:00")}});
+    }
+    return rows;
+}
+
 const QString kStaticPath = QStringLiteral("/music/The Quiet Meridian/Small Hours/04 - Static.flac");
 const QString kEndsEarly = QStringLiteral(
     "04 - Static.flac ends early. The last FLAC frame is cut off, so playback stops at 4:02.");
@@ -286,6 +299,8 @@ private slots:
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
+    void enterPressesConfiguresOkButtonUnlessAControlTakesIt();
+    void enterInATextFieldTakesTheTextNotTheDefaultButton();
     void everyConfigureSettingReachesTheBridge();
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
@@ -297,6 +312,7 @@ private slots:
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
+    void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
     void editTagsMarksAChangedFieldAndColumnAndReverts();
     void editTagsTableHeaderUsesTheQueuesHeaderStyle();
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
@@ -566,6 +582,131 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     QVERIFY(!bridge->property("showLevelMeter").toBool());
 }
 
+void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("libraryWatchEnabled", true));
+
+    // From the page list: OK applies and closes.
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
+    QTRY_VERIFY(list->hasActiveFocus());
+    QQuickItem *watch = nullptr;
+    QTRY_VERIFY((watch = visibleNamed(window, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
+    click(window, watch);
+    QTRY_VERIFY(!watch->property("checked").toBool());
+    list->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(!bridge->property("libraryWatchEnabled").toBool());
+
+    // From a check box, with the keypad's Enter.
+    QVERIFY(openPreferences(window, 0) != nullptr);
+    QTRY_VERIFY(watch->isVisible());
+    QVERIFY(tabTo(window, watch));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(watch->property("checked").toBool());
+    QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(bridge->property("libraryWatchEnabled").toBool());
+
+    // A combo box's open list takes its keys before the dialog: Enter there
+    // leaves Configure open, and Escape closes only the list.
+    QVERIFY(openPreferences(window, 0) != nullptr);
+    QQuickItem *sort = nullptr;
+    QTRY_VERIFY((sort = visibleNamed(window, QStringLiteral("librarySortComboBox"))) != nullptr);
+    QVERIFY(tabTo(window, sort));
+    QTest::keyClick(window, Qt::Key_Space);
+    QObject *sortPopup = qvariant_cast<QObject *>(sort->property("popup"));
+    QTRY_VERIFY(sortPopup->property("opened").toBool());
+    QTest::keyClick(window, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QVERIFY(dialog->property("visible").toBool());
+    if (sortPopup->property("visible").toBool()) {
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!sortPopup->property("visible").toBool());
+    }
+    QVERIFY(dialog->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(bridge->property("librarySortMode").toInt(), 0);
+
+    // On Cancel, Enter presses Cancel.
+    QVERIFY(openPreferences(window, 0) != nullptr);
+    QTRY_VERIFY(watch->isVisible());
+    click(window, watch);
+    QTRY_VERIFY(!watch->property("checked").toBool());
+    QQuickItem *cancel = visibleNamed(window, QStringLiteral("preferencesCancelButton"));
+    QVERIFY(tabTo(window, cancel));
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(bridge->property("libraryWatchEnabled").toBool());
+}
+
+void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
+    TagEditorController editor(nullptr);
+    int saves = 0;
+    editor.m_executeOperation = [&saves](TagEditorController::Operation operation, const QByteArray &,
+                                         const TagEditorController::RenameGate &) {
+        if (operation == TagEditorController::Operation::Save) {
+            ++saves;
+        }
+        return tagRows(2);
+    };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // In a tag field, Enter commits the text; Save, the default button,
+    // stays unpressed.
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    editor.selectAllRows();
+    QQuickItem *field = nullptr;
+    QTRY_VERIFY((field = visibleNamed(window, QStringLiteral("tagEditorField_genre"))) != nullptr);
+    field->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+    for (const char letter : QByteArrayLiteral("Ambient")) {
+        QTest::keyClick(window, letter);
+    }
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Ambient"));
+    QVERIFY(editor.dirty());
+    QCoreApplication::processEvents();
+    QCOMPARE(saves, 0);
+    QVERIFY(!editor.saving());
+    QVERIFY(dialog->property("visible").toBool());
+    // Out of the field, on the table, Enter presses Save.
+    QQuickItem *table = named(window, QStringLiteral("tagEditorTable"));
+    table->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(saves, 1);
+    QTRY_VERIFY(!editor.saving());
+    editor.close();
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+
+    // The library folder's name: Enter in the field adds the folder once.
+    QObject *nameDialog = object(window, QStringLiteral("libraryRootNameDialog"));
+    QVERIFY(QMetaObject::invokeMethod(window, "openLibraryRootNameDialog", Q_ARG(QVariant, QStringLiteral("add")),
+                                      Q_ARG(QVariant, QStringLiteral("/music/new")), Q_ARG(QVariant, QString())));
+    QTRY_VERIFY(nameDialog->property("opened").toBool());
+    QQuickItem *name = visibleNamed(window, QStringLiteral("libraryRootNameField"));
+    QTRY_VERIFY(name->hasActiveFocus());
+    QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
+    QTest::keyClick(window, Qt::Key_J);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(!nameDialog->property("visible").toBool());
+    QCoreApplication::processEvents();
+    QCOMPARE(accepted.count(), 1);
+}
+
 void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -826,7 +967,7 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
-    QVERIFY(bridge->setProperty("queuePaths", QStringList{QStringLiteral("/music/a.flac"), kStaticPath}));
+    QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
     QVERIFY(bridge->setProperty("queueLength", 2));
     report(window, 6, 1, QString(), QStringLiteral("The settings could not be saved: disk full"));
     report(window, 1, 0, kStaticPath, kEndsEarly);
@@ -866,7 +1007,7 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
              QStringLiteral("The settings could not be saved: disk full"));
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryActionButton")).at(0)->isVisible());
     // A file that left the queue is shown in the library instead.
-    QVERIFY(bridge->setProperty("queuePaths", QStringList{QStringLiteral("/music/a.flac")}));
+    QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac")})));
     QVERIFY(bridge->setProperty("queueLength", 1));
     QTRY_COMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
 }
@@ -887,7 +1028,6 @@ void UiDialogsTest::recentIssuesActionsShowTheFileOrOpenTheSettings() {
                                         {QStringLiteral("lengthText"), QStringLiteral("1:00")}});
     }
     QVERIFY(bridge->setProperty("queueRows", queueRows));
-    QVERIFY(bridge->setProperty("queuePaths", paths));
     QVERIFY(bridge->setProperty("queueLength", 5));
     QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
     QObject *queueController = object(window, QStringLiteral("queueController"));
@@ -1017,7 +1157,7 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
-    QVERIFY(bridge->setProperty("queuePaths", QStringList{QStringLiteral("/music/a.flac"), kStaticPath}));
+    QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac"), kStaticPath})));
     QVERIFY(bridge->setProperty("queueLength", 2));
     // The backend's warning for a cut-off file, as the analysis reports it.
     QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, kEndsEarly), Q_ARG(int, 1),
@@ -1057,6 +1197,52 @@ void UiDialogsTest::thePanesEndsEarlyLinkOpensItsIssue() {
     }
     QCOMPARE(actions.size(), 1);
     QCOMPARE(actions.first()->property("text").toString(), QStringLiteral("Show in Queue"));
+}
+
+void UiDialogsTest::recentIssuesFollowAQueueReplacedWithOneOfTheSameLength() {
+    // The bridge's own rows, whose count stays the same when another queue
+    // of one track replaces this one.
+    QueueRowsModel model;
+    const auto rowOf = [](const QString &path) {
+        QueueRowData row;
+        row.title = QFileInfo(path).completeBaseName();
+        row.path = path;
+        row.lengthText = QStringLiteral("4:18");
+        return row;
+    };
+    QVERIFY(model.setRows({rowOf(kStaticPath)}));
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("queueRows", QVariant::fromValue<QObject *>(&model)));
+    QVERIFY(bridge->setProperty("queueLength", 1));
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *action = nullptr;
+    QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
+
+    // Replaced from outside while the popup is open: the action follows.
+    QVERIFY(model.setRows({rowOf(QStringLiteral("/music/other.flac"))}));
+    QTRY_COMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
+    // And back again, by an edit of the row.
+    QVERIFY(model.updateRow(0, rowOf(kStaticPath)));
+    QTRY_COMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
+
+    // The file leaves the queue at the very moment of the click: the action
+    // does nothing it cannot, and the popup stays with the one that fits.
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    const QSignalBlocker quiet(&model);
+    QVERIFY(model.setRows({rowOf(QStringLiteral("/music/other.flac"))}));
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
+    QVERIFY(emitClicked(action));
+    QCoreApplication::processEvents();
+    QVERIFY(popup->property("visible").toBool());
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Library"));
+    QCOMPARE(evaluate(object(window, QStringLiteral("queueController")), QStringLiteral("selectedIndices")).toList(),
+             QVariantList{});
 }
 
 void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {

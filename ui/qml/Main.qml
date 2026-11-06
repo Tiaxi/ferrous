@@ -447,9 +447,25 @@ ApplicationWindow {
         function libraryThumbnailSource(path) { return "" }
         function queueTrackNumberAt(index) { return null }
         function queuePathAt(index) { return "" }
-        // The queue rows' paths, which tests set.
-        property var queuePaths: []
-        function queueIndexOfPath(path) { return queuePaths.indexOf(path) }
+        // As BridgeClient::queueIndexOfPath, over the rows tests set: a list
+        // of rows, or a QueueRowsModel, whose PathRole is Qt.UserRole + 7.
+        function queueIndexOfPath(path) {
+            const rows = queueRows
+            if (rows && typeof rows.rowCount === "function") {
+                for (let i = 0; i < rows.rowCount(); ++i) {
+                    if (rows.data(rows.index(i, 0), Qt.UserRole + 7) === path) {
+                        return i
+                    }
+                }
+                return -1
+            }
+            for (let i = 0; i < (rows || []).length; ++i) {
+                if ((rows[i] || {}).path === path) {
+                    return i
+                }
+            }
+            return -1
+        }
         function addLibraryRoot(path, name) {}
         function setLibraryRootName(path, name) {}
         function removeLibraryRoot(path) {}

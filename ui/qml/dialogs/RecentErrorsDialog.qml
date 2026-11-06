@@ -36,16 +36,32 @@ Popup {
     // status bar.
     readonly property real edgeMargin: Kirigami.Units.smallSpacing + 2
     readonly property real statusBarClearance: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing + 2
-    // Whose rows the queue's entries are found in again when it changes.
-    readonly property int queueRevision: root.uiBridge.queueLength || 0
+    // The files of the entries that are in the queue now, by path. It is
+    // worked out again whenever the queue's rows change, whatever their
+    // count, and whenever an entry arrives, only while the popup shows.
+    property var queuedSubjects: ({})
+
+    function refreshQueuedSubjects() {
+        if (!root.visible) {
+            return
+        }
+        const queued = ({})
+        const entries = root.errorController.entries
+        for (let i = 0; i < entries.count; ++i) {
+            const subject = entries.get(i).subject
+            if (subject.length > 0 && root.uiBridge.queueIndexOfPath
+                    && root.uiBridge.queueIndexOfPath(subject) >= 0) {
+                queued[subject] = true
+            }
+        }
+        root.queuedSubjects = queued
+    }
 
     // The action of an entry, as { kind, text }, or null.
     function entryAction(category, severity, subject) {
         if ((category === ErrorUtils.CategoryPlayback || category === ErrorUtils.CategoryAnalysis)
                 && subject.length > 0) {
-            // The queue is checked again whenever its length changes.
-            return root.queueRevision >= 0 && root.uiBridge.queueIndexOfPath
-                    && root.uiBridge.queueIndexOfPath(subject) >= 0
+            return root.queuedSubjects[subject] === true
                 ? { kind: "queue", text: I18n.i18nc("@action:button", "Show in Queue") }
                 : { kind: "library", text: I18n.i18nc("@action:button", "Show in Library") }
         }
@@ -59,6 +75,13 @@ Popup {
     }
 
     function runAction(kind, subject) {
+        // The queue may have changed since the row was made: a file that has
+        // left it gets the action that fits, and the popup stays.
+        if (kind === "queue" && !(root.uiBridge.queueIndexOfPath
+                && root.uiBridge.queueIndexOfPath(subject) >= 0)) {
+            root.refreshQueuedSubjects()
+            return
+        }
         root.close()
         switch (kind) {
         case "queue":
@@ -101,8 +124,11 @@ Popup {
 
     onAboutToShow: {
         root.errorController.dismissLatest()
+        // Not visible yet: the refresh below would skip it.
+        root.queuedSubjects = ({})
         root.showNewest()
     }
+    onVisibleChanged: root.refreshQueuedSubjects()
     // Over a viewer the keyboard would otherwise stay with the viewer.
     onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
     // Issues that arrived while it was open have been seen too.
@@ -119,9 +145,32 @@ Popup {
         target: root.errorController
         function onReported() {
             if (root.visible) {
+                root.refreshQueuedSubjects()
                 root.showNewest()
             }
         }
+    }
+
+    // The queue's rows: any edit, a whole new queue of the same length too.
+    Connections {
+        target: root.visible && root.uiBridge.queueRows
+            && typeof root.uiBridge.queueRows.rowCount === "function"
+            ? root.uiBridge.queueRows
+            : null
+        ignoreUnknownSignals: true
+        function onModelReset() { root.refreshQueuedSubjects() }
+        function onRowsInserted() { root.refreshQueuedSubjects() }
+        function onRowsRemoved() { root.refreshQueuedSubjects() }
+        function onRowsMoved() { root.refreshQueuedSubjects() }
+        function onDataChanged() { root.refreshQueuedSubjects() }
+        function onLayoutChanged() { root.refreshQueuedSubjects() }
+    }
+
+    // A bridge whose rows are a list rather than a model replaces the list.
+    Connections {
+        target: root.visible ? root.uiBridge : null
+        ignoreUnknownSignals: true
+        function onQueueRowsChanged() { root.refreshQueuedSubjects() }
     }
 
     contentItem: ColumnLayout {
