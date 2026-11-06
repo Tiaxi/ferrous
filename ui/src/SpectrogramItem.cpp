@@ -1526,10 +1526,20 @@ SpectrogramItem::CenteredView SpectrogramItem::centeredViewLocked(
             && m_rasterTarget.width == canvasWidth
             && m_rasterTarget.height == canvasHeight;
     }
+    // A step back of a column or two is the playhead's position wobbling,
+    // which the view does not follow; further back is a seek.  A view
+    // ending at a known end does not follow the playhead, though: one that
+    // starts left of the reference there had its end corrected, such as by
+    // the session's last chunk, and moves with it however little, or the
+    // columns past the new end would show blank.
     const bool isSeekJump =
         referenceRight >= referenceLeft
         && view.left < referenceLeft - 2;
+    const bool isEndCorrection = columns.endKnown
+        && range.right >= columns.end - 1
+        && range.left < referenceLeft;
     if (!isSeekJump
+        && !isEndCorrection
         && referenceComparable
         && referenceRight >= referenceLeft
         && std::abs(canvasZoom - referenceZoom) < 0.001) {
@@ -2543,37 +2553,34 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
     // Canvas freeze readiness: clear m_zoomFillActive when the ring
     // has enough data to cover the visible display.
     if (m_zoomFillActive) {
-        const int screenWidth = std::max(static_cast<int>(width()), 1);
-        // Two conditions must be met:
-        // 1. The ring has at least screenWidth columns (enough data
-        //    to fill the canvas).
-        // 2. The newest column in the ring covers the display's
-        //    right edge (playheadCol + screenWidth/2), so the
-        //    display won't have a black region on the right.
-        // Both are capped at the track's end for max zoom-out: where the
-        // centered view ends.
+        // The view the canvas will show: its device columns at the canvas's
+        // zoom (the shared effective zoom, then the device scale), ending
+        // where the session's views end.  Reckoned in logical pixels, it
+        // could be a column wider at fractional scales and wait for a
+        // column left of it.
         const CenteredColumns columns = centeredColumnsLocked();
         const int trackEnd = static_cast<int>(columns.end);
-        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
-        const int fillWidth = trackEnd > 0
-            ? std::min(screenWidth, trackEnd)
-            : screenWidth;
-        const bool ringHasEnoughColumns =
-            ringFill >= static_cast<qint64>(fillWidth) - 16;
-
         const double cps = m_precomputedHopSize > 0
             ? static_cast<double>(m_precomputedSampleRateHz)
                 / static_cast<double>(m_precomputedHopSize)
             : 1.0;
         const double playheadSeconds = std::max(
             0.0, currentRenderPositionSecondsLocked(m_now()));
-        const qint64 displayRightCol = static_cast<qint64>(
-            playheadSeconds * cps) + screenWidth / 2;
-        const qint64 displayRightCapped = trackEnd > 0
-            ? std::min(displayRightCol, static_cast<qint64>(trackEnd))
-            : displayRightCol;
+        const qint64 nowCol = static_cast<qint64>(std::floor(playheadSeconds * cps));
+        const CenteredView view = centeredViewLocked(playheadSeconds, canvasWidthLocked(),
+            canvasHeightLocked(), std::max(0.001, canvasZoomLocked()), cps);
+        const qint64 displayLeftCol = view.left;
+
+        // Two conditions must be met:
+        // 1. The ring has about as many columns as the view (enough data
+        //    to fill the canvas).
+        // 2. The newest column in the ring covers the view's right edge,
+        //    so the display won't have a black region on the right.
+        const qint64 ringFill = m_ringWriteSeq - m_ringOldestSeq;
+        const bool ringHasEnoughColumns =
+            ringFill >= view.right - view.left + 1 - 16;
         const bool ringCoversDisplayRight =
-            m_precomputedMaxColumnIndex + 1 >= displayRightCapped - 16;
+            m_precomputedMaxColumnIndex + 1 >= view.right + 1 - 16;
 
         // A large absolute max column does not prove that the ring contains
         // the LEFT edge of this viewport.  In particular, a stale backend
@@ -2582,25 +2589,6 @@ void SpectrogramItem::updateCanvasFillReadinessLocked() {
         // rebuilds every requested pixel from missing slots and turns the
         // widget fully black.  Require the active token to retain the
         // viewport's first source column before handing off to the new zoom.
-        const int visibleWindowCols = static_cast<int>(std::ceil(
-            static_cast<double>(screenWidth)
-            / std::max(0.001, effectiveZoomLocked())));
-        const qint64 estimateCount = std::max<qint64>(static_cast<qint64>(trackEnd), 1);
-        const qint64 nowCol = static_cast<qint64>(playheadSeconds * cps);
-        qint64 displayLeftCol;
-        if (static_cast<qint64>(visibleWindowCols) * 100 / estimateCount >= 90) {
-            displayLeftCol = 0;
-        } else {
-            const qint64 halfWindowCols = visibleWindowCols / 2;
-            displayLeftCol = std::max<qint64>(0, nowCol - halfWindowCols);
-            const qint64 displayRightColForEstimate = std::min(
-                estimateCount - 1,
-                displayLeftCol + static_cast<qint64>(visibleWindowCols) - 1);
-            displayLeftCol = std::max<qint64>(
-                0,
-                displayRightColForEstimate
-                    - static_cast<qint64>(visibleWindowCols) + 1);
-        }
         const bool ringCoversDisplayLeft =
             ringSlotForDisplayIndexLocked(displayLeftCol, false) >= 0;
 
