@@ -189,7 +189,6 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
-        qml/components/PopupTransition.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml

@@ -67,9 +67,6 @@ ApplicationWindow {
     readonly property bool backendStopped: (root.uiBridge.backendFailure || "").length > 0
     readonly property real snappyScrollFlickDeceleration: 18000
     readonly property real snappyScrollMaxFlickVelocity: 1400
-    // The viewers' transitions: they open and close at once. Menus and
-    // dialogs take the style's.
-    readonly property int uiPopupTransitionMs: 0
     // Whether the window is on screen: visible, not minimized, and exposed.
     readonly property bool visualFeedsEnabled: windowPresence.shown
     readonly property bool useWholeScreenViewerMode: uiBridge.viewerFullscreenMode === 1
