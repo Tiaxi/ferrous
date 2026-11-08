@@ -24973,6 +24973,30 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
         QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
         QTRY_VERIFY(strip->isVisible());
 
+        // The pointer over the album art's details, which take its hover
+        // from the art, brings the strip back too; the details start below
+        // it.
+        if (shown.surfaceName == QStringLiteral("albumArtSurface")) {
+            // Off the strip button the Tab above reached, which holds it.
+            viewFocus->forceActiveFocus(Qt::MouseFocusReason);
+            QVERIFY(viewer->setProperty("albumArtInfoVisible", true));
+            QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+            QQuickItem *details = itemNamed(surface, QStringLiteral("albumArtInfoTitle"));
+            QVERIFY(column != nullptr && details != nullptr);
+            QTRY_VERIFY(column->isVisible());
+            QTRY_VERIFY(sceneRectOf(details).top() >= sceneRectOf(strip).bottom());
+            autoHide->setProperty("hideDelay", 1);
+            QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+            QTRY_VERIFY(!strip->isVisible());
+            autoHide->setProperty("hideDelay", 5000);
+            const QRectF columnRect = sceneRectOf(column);
+            QTest::mouseMove(fullscreen, columnRect.center().toPoint());
+            QTest::mouseMove(fullscreen, columnRect.center().toPoint() + QPoint(4, 6));
+            QTRY_VERIFY2(autoHide->property("controlsVisible").toBool(), "over the details");
+            QTRY_VERIFY(strip->isVisible());
+            QVERIFY(viewer->setProperty("albumArtInfoVisible", false));
+        }
+
         QVERIFY(QMetaObject::invokeMethod(viewer, shown.openProperty[0] == 's'
                                                       ? "closeSpectrogramViewer"
                                                       : "closeAlbumArtViewer"));
