@@ -1619,6 +1619,7 @@ private slots:
     void viewerKeysWorkFromEveryControl();
     void itunesPreviewAppliesOrGoesBackToTheResults();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
+    void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void viewerControlsStayWhileOneHasFocus();
     void albumArtDetailsLieOverTheArt();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -27821,17 +27822,80 @@ QVariantList itunesArtworkFixture(const QTemporaryDir &dir, int count) {
     return rows;
 }
 
-// Replaces the fake bridge's suggestion at `index` with `changes` applied,
-// as a download that starts, ends or fails does.
-void updateItunesArtworkRow(QObject *bridge, int index, const QVariantMap &changes) {
-    QVariantList rows = bridge->property("itunesArtworkResults").toList();
+// A local fake of the iTunes artwork search and downloads, for the Replace
+// from iTunes dialog of Main.qml: it holds the suggestions a test sets and
+// records the ones prepared and applied. The playing track, its art and the
+// image details come from `real`, the window's bridge.
+QObject *injectItunesArtworkFake(QQmlEngine &engine, QObject *dialog, QObject *real) {
+    QQmlComponent component(&engine);
+    component.setData(QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+QtObject {
+    id: fake
+    required property var real
+    property var itunesArtworkResults: []
+    property var itunesArtworkTarget: ({})
+    property bool itunesArtworkLoading: false
+    property string itunesArtworkStatusText: ""
+    property var preparedItunesArtwork: []
+    property var appliedItunesArtwork: []
+    readonly property string currentTrackPath: fake.real.currentTrackPath
+    readonly property string currentTrackCoverPath: fake.real.currentTrackCoverPath
+    signal itunesArtworkChanged()
+    signal snapshotChanged()
+    signal imageFileDetailsChanged(string path)
+    function itunesArtworkResultAt(index) { return fake.itunesArtworkResults[index] || ({}) }
+    function prepareItunesArtworkSuggestion(index) {
+        fake.preparedItunesArtwork = fake.preparedItunesArtwork.concat([index])
+    }
+    function applyItunesArtworkSuggestion(index) {
+        fake.appliedItunesArtwork = fake.appliedItunesArtwork.concat([index])
+    }
+    function clearItunesArtworkSuggestions() {
+        fake.itunesArtworkResults = []
+        fake.itunesArtworkTarget = ({})
+    }
+    function requestImageFileDetails(path) { fake.real.requestImageFileDetails(path) }
+    function cachedImageFileDetails(path) { return fake.real.cachedImageFileDetails(path) }
+    property Connections forward: Connections {
+        target: fake.real
+        function onSnapshotChanged() { fake.snapshotChanged() }
+        function onImageFileDetailsChanged(path) { fake.imageFileDetailsChanged(path) }
+    }
+}
+)QML"),
+                      QUrl());
+    QObject *fake = component.createWithInitialProperties(
+        QVariantMap{{QStringLiteral("real"), QVariant::fromValue(real)}});
+    if (fake == nullptr) {
+        qWarning() << component.errorString();
+        return nullptr;
+    }
+    fake->setParent(dialog);
+    dialog->setProperty("uiBridge", QVariant::fromValue(fake));
+    return fake;
+}
+
+// Replaces the fake's suggestion at `index` with `changes` applied, as a
+// download that starts, ends or fails does.
+void updateItunesArtworkRow(QObject *fake, int index, const QVariantMap &changes) {
+    QVariantList rows = fake->property("itunesArtworkResults").toList();
     QVariantMap row = rows.value(index).toMap();
     for (auto it = changes.cbegin(); it != changes.cend(); ++it) {
         row.insert(it.key(), it.value());
     }
     rows[index] = row;
-    bridge->setProperty("itunesArtworkResults", rows);
-    QMetaObject::invokeMethod(bridge, "itunesArtworkChanged");
+    fake->setProperty("itunesArtworkResults", rows);
+    QMetaObject::invokeMethod(fake, "itunesArtworkChanged");
+}
+
+// Opens Replace from iTunes with `rows` for `target`, as a search finds them.
+bool openItunesArtworkDialog(QQuickWindow *window, QObject *dialog, QObject *fake,
+                             const QVariantList &rows, const QVariantMap &target) {
+    fake->setProperty("itunesArtworkResults", rows);
+    fake->setProperty("itunesArtworkTarget", target);
+    return QMetaObject::invokeMethod(window, "openItunesArtworkDialog")
+        && QTest::qWaitFor([dialog]() { return dialog->property("opened").toBool(); });
 }
 
 } // namespace
@@ -27852,9 +27916,10 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
     QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+    QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+    QVERIFY(fake != nullptr);
     setPlayingTrack(bridge);
     bridge->setProperty("currentTrackCoverPath", coverUrl);
-    bridge->setProperty("itunesArtworkFixture", fixture);
     const QVariantMap target{
         {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
         {QStringLiteral("album"), QStringLiteral("Small Hours")},
@@ -27863,7 +27928,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     };
     const int previewed = 7;
     const QString candidateUrl = fixture.at(previewed).toMap().value(QStringLiteral("normalizedUrl")).toString();
-    const auto applied = [bridge]() { return bridge->property("appliedItunesArtwork").toList(); };
+    const auto applied = [fake]() { return fake->property("appliedItunesArtwork").toList(); };
     const auto resultsView = [dialog]() {
         return dialog->findChild<QQuickItem *>(QStringLiteral("itunesArtworkResultsView"));
     };
@@ -27891,9 +27956,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             }
             // The dialog is over the viewer when that is open, in its window.
             QQuickWindow *dialogHost = viewerOpenBefore ? viewerHost() : window;
-            bridge->setProperty("itunesArtworkTarget", target);
-            QVERIFY(QMetaObject::invokeMethod(window, "openItunesArtworkDialog"));
-            QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
+            QVERIFY2(openItunesArtworkDialog(window, dialog, fake, fixture, target), at.constData());
             QTRY_VERIFY2(resultsView() != nullptr && resultsView()->property("count").toInt() == 12,
                          at.constData());
             QCOMPARE(qvariant_cast<QQuickItem *>(dialog->property("parent"))->window(), dialogHost);
@@ -27931,7 +27994,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 QCOMPARE(qvariant_cast<QQuickItem *>(dialog->property("parent"))->window(), dialogHost);
                 QCOMPARE(resultsView()->property("count").toInt(), 12);
                 QTRY_COMPARE(resultsView()->property("contentY").toReal(), 400.0);
-                QCOMPARE(bridge->property("itunesArtworkResults").toList().size(), 12);
+                QCOMPARE(fake->property("itunesArtworkResults").toList().size(), 12);
                 // The viewer shows what it did before: nothing, or the art.
                 QTRY_COMPARE(viewer->property("albumArtViewerOpen").toBool(), viewerOpenBefore);
                 QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
@@ -27996,7 +28059,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTRY_COMPARE(applied(), (QVariantList{previewed}));
             QVERIFY(!dialog->property("previewShown").toBool());
             QVERIFY(!dialog->property("visible").toBool());
-            QVERIFY(bridge->property("itunesArtworkResults").toList().isEmpty());
+            QVERIFY(fake->property("itunesArtworkResults").toList().isEmpty());
             QVERIFY(viewer->property("albumArtViewerOpen").toBool());
             QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
             QVERIFY(viewer->property("albumArtViewerShowsCurrentTrack").toBool());
@@ -28008,7 +28071,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTest::keyClick(host, Qt::Key_Escape);
             QTRY_VERIFY2(!viewer->property("albumArtViewerOpen").toBool(), at.constData());
             QVERIFY(!dialog->property("visible").toBool());
-            bridge->setProperty("appliedItunesArtwork", QVariantList{});
+            fake->setProperty("appliedItunesArtwork", QVariantList{});
             window->requestActivate();
             QVERIFY(QTest::qWaitForWindowActive(window));
         }
@@ -28020,9 +28083,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     bridge->setProperty("currentTrackCoverPath", QString());
     QVariantMap bareTarget = target;
     bareTarget.insert(QStringLiteral("coverPath"), QString());
-    bridge->setProperty("itunesArtworkTarget", bareTarget);
-    QVERIFY(QMetaObject::invokeMethod(window, "openItunesArtworkDialog"));
-    QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, bareTarget));
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, previewed)));
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
     QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton")) != nullptr);
@@ -28071,30 +28132,30 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
     QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+    QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+    QVERIFY(fake != nullptr);
     setPlayingTrack(bridge);
     bridge->setProperty("currentTrackCoverPath", coverUrl);
     bridge->setProperty("viewerFullscreenMode", 0);
-    bridge->setProperty("itunesArtworkFixture", fixture);
-    bridge->setProperty("itunesArtworkTarget", QVariantMap{
+    const QVariantMap target{
         {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
         {QStringLiteral("album"), QStringLiteral("Small Hours")},
         {QStringLiteral("coverPath"), QString()},
-    });
-    const auto applied = [bridge]() { return bridge->property("appliedItunesArtwork").toList(); };
+    };
+    const auto applied = [fake]() { return fake->property("appliedItunesArtwork").toList(); };
     const auto applyButton = [window]() {
         return visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton"));
     };
-    QVERIFY(QMetaObject::invokeMethod(window, "openItunesArtworkDialog"));
-    QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, target));
 
     // Preview waits for the download: the dialog stays until it is done.
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 2)));
-    QTRY_COMPARE(bridge->property("preparedItunesArtwork").toList(), (QVariantList{2}));
-    updateItunesArtworkRow(bridge, 2, {{QStringLiteral("assetLoading"), true}});
+    QTRY_COMPARE(fake->property("preparedItunesArtwork").toList(), (QVariantList{2}));
+    updateItunesArtworkRow(fake, 2, {{QStringLiteral("assetLoading"), true}});
     QVERIFY(dialog->property("visible").toBool());
     QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
     const QString readyPath = dir.filePath(QStringLiteral("candidate-2.png"));
-    updateItunesArtworkRow(bridge, 2, {
+    updateItunesArtworkRow(fake, 2, {
         {QStringLiteral("assetLoading"), false},
         {QStringLiteral("assetReady"), true},
         {QStringLiteral("normalizedPath"), readyPath},
@@ -28105,23 +28166,25 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     QTRY_VERIFY(applyButton() != nullptr && applyButton()->isEnabled());
 
     // Loading again, or failed, it cannot be applied from the preview.
-    updateItunesArtworkRow(bridge, 2, {{QStringLiteral("assetLoading"), true}});
+    updateItunesArtworkRow(fake, 2, {{QStringLiteral("assetLoading"), true}});
     QTRY_VERIFY(!applyButton()->isEnabled());
     QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
-    updateItunesArtworkRow(bridge, 2, {
+    updateItunesArtworkRow(fake, 2, {
         {QStringLiteral("assetLoading"), false},
         {QStringLiteral("assetError"), QStringLiteral("The artwork could not be downloaded.")},
     });
     QVERIFY(!applyButton()->isEnabled());
     QVERIFY(QMetaObject::invokeMethod(dialog, "applyPreviewedSuggestion"));
     QVERIFY(applied().isEmpty());
-    updateItunesArtworkRow(bridge, 2, {{QStringLiteral("assetError"), QString()}});
+    updateItunesArtworkRow(fake, 2, {{QStringLiteral("assetError"), QString()}});
     QTRY_VERIFY(applyButton()->isEnabled());
 
     // A candidate whose image the viewer cannot read cannot be applied.
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(dialog->property("opened").toBool());
     QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    // The viewer and the dialog's check of the candidate each warn once.
+    QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Error decoding: .*broken\\.png")));
     QTest::ignoreMessage(QtWarningMsg, QRegularExpression(QStringLiteral("Error decoding: .*broken\\.png")));
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 3)));
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
@@ -28139,8 +28202,100 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     QVERIFY(!applyButton()->isEnabled());
     QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
     QVERIFY(applied().isEmpty());
+    // Nor while the viewer shows the current art to compare, which decodes.
+    QTest::keyClick(window, Qt::Key_Left);
+    QTRY_VERIFY(viewer->property("albumArtViewerShowsCurrentTrack").toBool());
+    QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
+    QTRY_COMPARE(surface->property("imageStatus").toInt(), 1);
+    QVERIFY(!applyButton()->isEnabled());
+    QVERIFY(!dialog->property("previewCandidateReady").toBool());
+    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "applyPreviewedSuggestion"));
+    QVERIFY(applied().isEmpty());
     QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupBackButton")));
     QTRY_VERIFY(dialog->property("opened").toBool());
+}
+
+void TransportInputSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn() {
+    QTemporaryDir dir;
+    QTemporaryDir otherDir;
+    QVERIFY(dir.isValid() && otherDir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QString otherCoverUrl = QUrl::fromLocalFile(savedCover(otherDir, 40, 40)).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    QCOMPARE(fixture.size(), 3);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+    QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+    QVERIFY(fake != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", coverUrl);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // The suggestions are for the playing track's album, which has art.
+    QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, QVariantMap{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("coverPath"), coverUrl},
+    }));
+    const auto moveOnTo = [bridge](const QString &cover) {
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/Elsewhere/01 Lantern Rows.flac"));
+        bridge->setProperty("currentTrackCoverPath", cover);
+        QMetaObject::invokeMethod(bridge, "snapshotChanged");
+    };
+    const auto backToTheResults = [&]() {
+        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupBackButton")));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    };
+
+    for (const QString &otherCover : {QString(), otherCoverUrl}) {
+        const QByteArray at = otherCover.isEmpty() ? "next album without art" : "next album with art";
+        // Playback moves on to another album: the dialog keeps the searched
+        // album's art, and its Preview shows that art.
+        moveOnTo(otherCover);
+        QTRY_COMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
+        QVERIFY2(clickVisibleButton(window, QStringLiteral("itunesArtworkCurrentPreviewButton")), at.constData());
+        QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
+        QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupBackButton")) != nullptr,
+                     at.constData());
+        // It stays on that art while playback goes on.
+        QMetaObject::invokeMethod(bridge, "snapshotChanged");
+        QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
+        backToTheResults();
+
+        // A candidate compares with the searched album's art too.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+        QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_VERIFY2(viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
+        QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
+        QMetaObject::invokeMethod(bridge, "snapshotChanged");
+        QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
+        backToTheResults();
+    }
+
+    // Without the searched album's art there is nothing to preview: the
+    // dialog stays, rather than hiding with no preview to go back from.
+    fake->setProperty("itunesArtworkTarget", QVariantMap{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("coverPath"), QString()},
+    });
+    QMetaObject::invokeMethod(bridge, "snapshotChanged");
+    QTRY_COMPARE(dialog->property("currentArtworkSource").toString(), QString());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "showPreview", Q_ARG(QVariant, -1)));
+    QVERIFY(dialog->property("opened").toBool());
+    QVERIFY(!dialog->property("previewShown").toBool());
+    QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
 }
 
 void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {

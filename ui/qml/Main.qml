@@ -516,26 +516,11 @@ ApplicationWindow {
         function showTrackInLibrary(path) { shownInLibrary = shownInLibrary.concat([path]) }
         function setLibrarySortMode(mode) { librarySortMode = mode }
         function setGlobalSearchQuery(query) {}
-        // The suggestions tests set, which the search finds, and the ones
-        // they prepare and apply.
-        property var itunesArtworkFixture: []
-        property var preparedItunesArtwork: []
-        property var appliedItunesArtwork: []
-        function searchCurrentTrackArtworkSuggestions() {
-            itunesArtworkResults = itunesArtworkFixture
-            itunesArtworkChanged()
-        }
-        function clearItunesArtworkSuggestions() {
-            itunesArtworkResults = []
-            itunesArtworkTarget = ({})
-        }
-        function itunesArtworkResultAt(index) { return itunesArtworkResults[index] || ({}) }
-        function prepareItunesArtworkSuggestion(index) {
-            preparedItunesArtwork = preparedItunesArtwork.concat([index])
-        }
-        function applyItunesArtworkSuggestion(index) {
-            appliedItunesArtwork = appliedItunesArtwork.concat([index])
-        }
+        function searchCurrentTrackArtworkSuggestions() {}
+        function clearItunesArtworkSuggestions() {}
+        function itunesArtworkResultAt(index) { return ({}) }
+        function prepareItunesArtworkSuggestion(index) {}
+        function applyItunesArtworkSuggestion(index) {}
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
         function requestImageFileDetails(path) {}
@@ -1715,10 +1700,7 @@ ApplicationWindow {
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
-        // Not while the candidate's image loads or after it failed to.
         previewCanApply: itunesArtworkDialog.previewCandidateReady
-            && (viewerController.albumArtViewerShowsCurrentTrack
-                || albumArtSurface.imageStatus === Image.Ready)
         applyPreview: itunesArtworkDialog.applyPreviewedSuggestion
     }
 

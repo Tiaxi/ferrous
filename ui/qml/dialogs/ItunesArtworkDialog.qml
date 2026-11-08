@@ -16,6 +16,8 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
+    // Open the viewer's preview of a candidate row, compared with the current
+    // art, or of the current art; each returns whether the preview opened.
     required property var openAlbumArtViewerForSuggestion
     required property var openAlbumArtViewerForCurrentArt
     // Ends the viewer's preview; with true, after Apply.
@@ -30,10 +32,12 @@ Dialog {
     // when the viewer goes back to the results.
     property bool previewShown: false
     property int previewIndex: -1
-    // The previewed candidate is downloaded and ready to apply: not still
-    // loading, and not failed.
+    // The previewed candidate is ready to apply: downloaded, not still
+    // loading or failed, and its image decodes. That holds for the
+    // candidate, whichever image the viewer shows to compare.
     readonly property bool previewCandidateReady: root.previewShown && root.previewIndex >= 0
         && root.suggestionRowApplicable(root.previewRow)
+        && previewCandidateProbe.status === Image.Ready
     property var previewRow: ({})
     property int pendingPreviewIndex: -1
     property int pendingApplyIndex: -1
@@ -108,11 +112,18 @@ Dialog {
             && ((row && (row.assetError || "")) || "").length === 0
     }
 
-    // Hides the dialog and shows the candidate at `index`, or the current
-    // art for -1, in the album art viewer.
+    // Shows the candidate at `index`, or the current art for -1, in the
+    // album art viewer, and hides the dialog once the viewer shows it. The
+    // current art is the art of the album the suggestions are for.
     function showPreview(index) {
         const row = index >= 0 ? root.suggestionRowAt(index) : ({})
-        if (index >= 0 && !root.suggestionRowReady(row)) {
+        if (index >= 0 ? !root.suggestionRowReady(row) : root.currentArtworkSource.length === 0) {
+            return
+        }
+        const opened = index >= 0
+            ? root.openAlbumArtViewerForSuggestion(row, root.currentArtworkSource)
+            : root.openAlbumArtViewerForCurrentArt(root.currentArtworkSource)
+        if (!opened) {
             return
         }
         root.clearPendingActionState()
@@ -122,11 +133,6 @@ Dialog {
         root.previewRow = row
         root.previewShown = true
         root.close()
-        if (index >= 0) {
-            root.openAlbumArtViewerForSuggestion(row)
-        } else {
-            root.openAlbumArtViewerForCurrentArt()
-        }
     }
 
     // The viewer went back to the results: the dialog shows again where it
@@ -308,6 +314,19 @@ Dialog {
 
     contentItem: ColumnLayout {
         spacing: 12
+
+        // Decodes the previewed candidate, small, on a worker thread: one
+        // that does not decode cannot be applied.
+        Image {
+            id: previewCandidateProbe
+            visible: false
+            source: root.previewShown && root.previewIndex >= 0
+                ? ((root.previewRow && root.previewRow.normalizedUrl) || "") : ""
+            sourceSize.width: 32
+            sourceSize.height: 32
+            asynchronous: true
+            cache: false
+        }
 
         RowLayout {
             Layout.fillWidth: true

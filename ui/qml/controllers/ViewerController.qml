@@ -161,25 +161,33 @@ QtObject {
         root.albumArtViewerOpen = true
     }
 
-    // Previews from Replace from iTunes: the current art, or a candidate.
-    function previewCurrentArt() {
-        if ((root.uiBridge.currentTrackCoverPath || "").length === 0) {
-            return
+    // Previews from Replace from iTunes: the current art, or a candidate to
+    // compare with it. The current art is the art of the album the search
+    // was for, `currentSource`, which the dialog keeps once playback has
+    // moved on. Whether the preview opened.
+    function previewCurrentArt(currentSource) {
+        if ((currentSource || "").length === 0) {
+            return false
         }
         root.beginAlbumArtPreview()
-        root.openAlbumArtViewerForCurrentArt()
+        root.showCurrentArt(currentSource)
+        return true
     }
 
-    function previewSuggestion(rowMap) {
+    function previewSuggestion(rowMap, currentSource) {
         if (((rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || "").length === 0) {
-            return
+            return false
         }
         root.beginAlbumArtPreview()
-        root.openAlbumArtViewerForSuggestion(rowMap)
+        root.showSuggestion(rowMap, currentSource || "")
+        return true
     }
 
     function openAlbumArtViewerForCurrentArt() {
-        const currentSource = root.uiBridge.currentTrackCoverPath || ""
+        root.showCurrentArt(root.uiBridge.currentTrackCoverPath || "")
+    }
+
+    function showCurrentArt(currentSource) {
         if (currentSource.length === 0) {
             return
         }
@@ -200,6 +208,10 @@ QtObject {
 
     // A candidate, which can be compared with the current art.
     function openAlbumArtViewerForSuggestion(rowMap) {
+        root.showSuggestion(rowMap, root.uiBridge.currentTrackCoverPath || "")
+    }
+
+    function showSuggestion(rowMap, currentSource) {
         const previewSource = (rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || ""
         if (previewSource.length === 0) {
             return
@@ -209,7 +221,6 @@ QtObject {
             || PathUtils.pathFromAnyUrl(previewSource)
         root.albumArtViewerShowsCurrentTrack = false
 
-        const currentSource = root.uiBridge.currentTrackCoverPath || ""
         root.comparisonCandidateSource = previewSource
         root.comparisonCandidateInfoSource = root.albumArtViewerInfoSource
         root.comparisonCurrentSource = currentSource
@@ -284,7 +295,10 @@ QtObject {
     }
 
     function handleSnapshotChanged() {
+        // A preview's current art is the searched album's, also once
+        // playback has moved on.
         if (root.albumArtViewerOpen
+                && !root.albumArtPreviewActive
                 && root.albumArtViewerShowsCurrentTrack
                 && root.albumArtViewerSource !== (root.uiBridge.currentTrackCoverPath || "")) {
             root.albumArtViewerSource = root.uiBridge.currentTrackCoverPath || ""
