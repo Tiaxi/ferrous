@@ -120,13 +120,15 @@ constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
 // The spectrogram's plot set (UiPalette.spectrogramPlot), the same in both
 // themes: plotBg, the floor of its colour map, and what is drawn on it.
-const QColor kBackgroundColor(0x14, 0x06, 0x2e);
+// The floor is black, the lowest entry of both the colour and the greyscale
+// map (rebuildPalette), so where no column is drawn looks like silence.
+const QColor kBackgroundColor(0, 0, 0);
 const QColor kOverlayColor(190, 190, 200, 150);
 // Scale text, 12 px plotText, in a 1 px outline of plotOutline.
-const QColor kScaleTextColor(0xec, 0xe8, 0xf4);
-const QColor kScaleOutlineColor(0x14, 0x06, 0x2e);
+const QColor kScaleTextColor(0xec, 0xec, 0xec);
+const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
-const QColor kScaleTickColor(236, 232, 244, 191);
+const QColor kScaleTickColor(236, 236, 236, 191);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
 // with an opaque one, Qt's software renderer leaves a seam of background in

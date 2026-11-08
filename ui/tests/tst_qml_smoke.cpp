@@ -326,8 +326,9 @@ bool nearlyEqual(const QRectF &a, const QRectF &b) {
         && std::abs(a.width() - b.width()) < 1e-4 && std::abs(a.height() - b.height()) < 1e-4;
 }
 
-// The spectrogram's floor, plotBg, where it has no column to draw.
-const QRgb kSpectrogramFloor = qRgb(0x14, 0x06, 0x2e);
+// The spectrogram's floor, plotBg, where it has no column to draw: the
+// colour map's floor, black.
+const QRgb kSpectrogramFloor = qRgb(0, 0, 0);
 
 // The children of a spectrogram's scene node: the background, the canvas
 // tiles, the newest columns, the playhead's casing and the playhead, the
@@ -2836,8 +2837,31 @@ ApplicationWindow {
     auto *pane = root->findChild<QQuickItem *>(QStringLiteral("floorPane"));
     auto *surface = root->findChild<QQuickItem *>(QStringLiteral("floorSurface"));
     QVERIFY(tokens != nullptr && pane != nullptr && surface != nullptr);
-    const QColor floor(QStringLiteral("#14062e"));
-    QCOMPARE(tokens->property("spectrogramPlot").value<QObject *>()->property("plotBg").value<QColor>(), floor);
+    // The plot's floor is the colour map's: its lowest entry, for the colour
+    // and the greyscale (muted) map alike, which silence is drawn in.
+    QObject *plot = tokens->property("spectrogramPlot").value<QObject *>();
+    QVERIFY(plot != nullptr);
+    const QColor floor = plot->property("plotBg").value<QColor>();
+    QCOMPARE(plot->property("plotOutline").value<QColor>(), floor);
+    for (const bool muted : {false, true}) {
+        SpectrogramItem item;
+        QCOMPARE(QColor(item.m_palette32.back()), floor);
+        QCOMPARE(QColor(item.m_palette32Gray.back()), floor);
+        item.setWidth(200);
+        item.setHeight(100);
+        item.setDisplayMode(1);
+        item.setPlaying(false);
+        item.setChannelMuted(muted);
+        constexpr int bins = 8;
+        item.feedPrecomputedChunk(
+            QByteArray(bins * 100, '\0'), bins, 0, 100,
+            0, 400, 48000, 1024, false, true, 1, false, 1);
+        QSGNode *node = paintSettled(item, nullptr);
+        // Silence, and the canvas past the columns, are the floor.
+        QCOMPARE(QColor(item.m_canvas.pixel(50, 50)), floor);
+        QCOMPARE(QColor(item.m_canvas.pixel(170, 50)), floor);
+        delete node;
+    }
 
     QCOMPARE(pane->property("color").value<QColor>(), floor);
     QVariantList descriptors;
@@ -2885,7 +2909,7 @@ ApplicationWindow {
     QCOMPARE(drawn(160, 0.5), floor);
     QCOMPARE(drawn(160, 50), floor);
     QCOMPARE(drawn(160, 150), floor);
-    QCOMPARE(drawn(160, 100.5), QColor(QStringLiteral("#0a0318")));
+    QCOMPARE(drawn(160, 100.5), plot->property("plotLaneSeam").value<QColor>());
 }
 
 void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {
