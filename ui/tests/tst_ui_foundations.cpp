@@ -516,6 +516,20 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
             <= 2);
     QVERIFY(sameColor(colorOf(waveform, "checkedGlyph"), dark ? view : QColor(Qt::white)));
     QVERIFY(sameColor(colorOf(waveform, "plotFocusRing"), colorOf(tokens, "focusRing")));
+    // A checked flat button, as on a viewer's title strip: the selection on
+    // the view, and the dark theme's selection on the spectrogram's floor.
+    QVERIFY(sameColor(colorOf(waveform, "checkedTint"), colorOf(tokens, "selection")));
+    QVERIFY(channelDistance(colorOf(spectrogram, "checkedTint"),
+                            mixed(fromHex(QStringLiteral("#000000")), colorOf(tokens, "accent"), 0.26))
+            <= 1);
+    // A viewer's title strip is a plate over the plot: on the spectrogram,
+    // its secondary text reads over the colour map's brightest white too.
+    {
+        const QColor stripOverWhite = drawnOver(colorOf(spectrogram, "plotPlate"), QColor(Qt::white));
+        const QColor secondary = drawnOver(colorOf(spectrogram, "plotTextSecondary"), stripOverWhite);
+        QVERIFY2(contrastRatio(secondary, stripOverWhite) >= 4.5,
+                 qPrintable(describe(QStringLiteral("strip text over white"), secondary, stripOverWhite)));
+    }
 
     for (QObject *plot : {spectrogram, waveform}) {
         const QString name = plot == spectrogram ? QStringLiteral("spectrogram") : QStringLiteral("waveform");
@@ -530,6 +544,8 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
             {QStringLiteral("text on a plate"), colorOf(plot, "plotText"), plate, 4.5},
             {QStringLiteral("secondary text on the plot"), drawnOver(colorOf(plot, "plotTextSecondary"), floor),
              floor, 4.5},
+            {QStringLiteral("secondary text on a plate"), drawnOver(colorOf(plot, "plotTextSecondary"), plate),
+             plate, 4.5},
             {QStringLiteral("a link on the plot"), colorOf(plot, "plotLink"), floor, 4.5},
             {QStringLiteral("the checked fill on a plate"), checked, plate, 3.0},
             {QStringLiteral("the checked glyph or letter on the fill"), colorOf(plot, "checkedGlyph"), checked, 4.5},

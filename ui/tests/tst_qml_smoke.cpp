@@ -1597,6 +1597,8 @@ private slots:
     void visualizationModeSwitchShowsOnlyWithThePointerOrFocus();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
+    void fullscreenViewersGiveTheViewTheWholeScreen();
+    void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
     void viewerControlsComeBackForTheKeyboard();
@@ -23943,10 +23945,13 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
                     const QRectF view = sceneRectOf(surface);
                     const QRectF modeSwitch = sceneRectOf(modeSwitchItem);
                     const double margin = modeSwitch.height();
-                    // In the top right corner, off the centre line.
+                    // In the top right corner, off the centre line; over
+                    // the whole screen, below the title strip over the view.
+                    const double stripHeight = controlsRoot->window() != window ? 33.0 : 0.0;
                     QVERIFY(view.contains(modeSwitch));
                     QVERIFY(modeSwitch.left() > view.center().x());
-                    QVERIFY(modeSwitch.top() - view.top() < margin);
+                    QVERIFY(modeSwitch.top() >= view.top() + stripHeight);
+                    QVERIFY(modeSwitch.top() - (view.top() + stripHeight) < margin);
                     if (closeButton != nullptr) {
                         const QRectF close = sceneRectOf(closeButton);
                         QVERIFY(close.right() <= view.right());
@@ -24054,11 +24059,13 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     QVERIFY(QTest::qWaitForWindowExposed(fullscreen));
     QTRY_VERIFY(qFuzzyCompare(spectrogramSurface->width(), fullscreen->contentItem()->width()));
     // Over the whole screen, the viewer's controls are in the title strip
-    // above the view, so the switch has the corner to itself.
+    // over the view's top edge, so the switch, below it, has the corner to
+    // itself.
     QQuickItem *strip =
         firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
-    QCOMPARE(sceneRectOf(spectrogramSurface).top(), sceneRectOf(strip).bottom());
+    QCOMPARE(sceneRectOf(spectrogramSurface).top(), 0.0);
+    QCOMPARE(sceneRectOf(strip).top(), 0.0);
     QVERIFY(sceneRectOf(strip).contains(sceneRectOf(firstVisibleItemNamed(
         fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenCloseButton")))));
     checkLayouts(fullscreen->contentItem(), QString());
@@ -24608,9 +24615,8 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
             QVERIFY(popup != nullptr);
             QTRY_VERIFY(popup->property("opened").toBool());
         }
-        // Over the whole screen, under the 33 px title strip.
-        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(),
-                                  host->contentItem()->height() - (fullscreen == 1 ? 33 : 0)));
+        // Over the whole screen, all of it: the title strip lies over it.
+        QTRY_VERIFY(qFuzzyCompare(waveformSurface->height(), host->contentItem()->height()));
         QVERIFY(autoHide->property("active").toBool());
 
         for (const int visualization : {1, 0}) {
@@ -24714,16 +24720,18 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QString closeName;
         QString surfaceName;
         QString title;
+        // The plot set the strip takes its colours from.
+        const char *plotColors;
     };
     const QList<Viewer> viewers{
         {"openSpectrogramViewer", "spectrogramViewerOpen",
          QStringLiteral("spectrogramFullscreenWindow"), QStringLiteral("spectrogramFullscreenStrip"),
          QStringLiteral("spectrogramFullscreenCloseButton"), QStringLiteral("mainSpectrogramSurface"),
-         QStringLiteral("Morning Tide Field — Ferrous Visualization")},
+         QStringLiteral("Morning Tide Field — Ferrous Visualization"), "spectrogramPlot"},
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
          QStringLiteral("albumArtFullscreenWindow"), QStringLiteral("albumArtFullscreenStrip"),
          QStringLiteral("albumArtFullscreenCloseButton"), QStringLiteral("albumArtSurface"),
-         QStringLiteral("Morning Tide Field — Ferrous Album Art")},
+         QStringLiteral("Morning Tide Field — Ferrous Album Art"), "waveformPlot"},
     };
     for (const Viewer &shown : viewers) {
         const QByteArray name = shown.windowName.toUtf8();
@@ -24736,15 +24744,18 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(fullscreen->title(), shown.title);
         QCOMPARE(window->title(), mainTitle);
 
-        // 32 px of chrome with a hairline under it, at the top.
+        // A 32 px band on the plot's plate colour with its edge under it,
+        // over the top of the view.
+        QObject *plotColors = qvariant_cast<QObject *>(palette->property(shown.plotColors));
+        QVERIFY(plotColors != nullptr);
         QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
         QVERIFY2(strip != nullptr, name.constData());
         QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
-        QCOMPARE(colorOf(strip, "color"), colorOf(palette, "chrome"));
+        QCOMPARE(colorOf(strip, "color"), colorOf(plotColors, "plotPlate"));
         QQuickItem *hairline = itemNamed(strip, QStringLiteral("viewerStripHairline"));
         QVERIFY(hairline != nullptr);
         QCOMPARE(sceneRectOf(hairline), QRectF(0, 32, fullscreen->width(), 1));
-        QCOMPARE(colorOf(hairline, "color"), colorOf(palette, "hairline"));
+        QCOMPARE(colorOf(hairline, "color"), colorOf(plotColors, "plotPlateEdge"));
 
         // The title semibold, then "Artist — Album" and the time, secondary.
         QQuickItem *title = itemNamed(strip, QStringLiteral("viewerStripTitle"));
@@ -24753,13 +24764,13 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QVERIFY(title != nullptr && context != nullptr && time != nullptr);
         QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
         QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
-        QCOMPARE(colorOf(title, "color"), colorOf(palette, "text"));
+        QCOMPARE(colorOf(title, "color"), colorOf(plotColors, "plotText"));
         QCOMPARE(context->property("text").toString(),
                  QStringLiteral("The Quiet Meridian — Small Hours"));
-        QCOMPARE(colorOf(context, "color"), colorOf(palette, "textSecondary"));
+        QCOMPARE(colorOf(context, "color"), colorOf(plotColors, "plotTextSecondary"));
         QVERIFY2(time->property("text").toString().endsWith(QStringLiteral(" / 3:49")),
                  qPrintable(time->property("text").toString()));
-        QCOMPARE(colorOf(time, "color"), colorOf(palette, "textSecondary"));
+        QCOMPARE(colorOf(time, "color"), colorOf(plotColors, "plotTextSecondary"));
         QVERIFY(sceneRectOf(title).right() < sceneRectOf(context).left());
         QVERIFY(sceneRectOf(context).right() < sceneRectOf(time).left());
         // With room for them, nothing is cut short.
@@ -24781,20 +24792,23 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
         QTRY_VERIFY(!title->property("truncated").toBool());
 
-        // A flat 24 px Close at the right, 4 px in; the view starts under
-        // the strip.
+        // A flat 24 px Close at the right, 4 px in, in the plot's colours;
+        // the view fills the window under the strip.
         QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
         QVERIFY2(close != nullptr, name.constData());
         QVERIFY(strip->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
         QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
         QCOMPARE(sceneRectOf(close).top(), 4.0);
+        QQuickItem *closeIcon = itemNamed(close, QStringLiteral("viewerToolButtonIcon"));
+        QVERIFY(closeIcon != nullptr);
+        QCOMPARE(colorOf(closeIcon, "color"), colorOf(plotColors, "plotText"));
         auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
         if (surface == nullptr) {
             surface = fullscreen->findChild<QQuickItem *>(shown.surfaceName);
         }
         QVERIFY(surface != nullptr);
-        QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 33, fullscreen->width(), fullscreen->height() - 33));
+        QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 0, fullscreen->width(), fullscreen->height()));
         // The only close button: the old 40 px one has gone.
         QCOMPARE(visibleItemsNamed(fullscreen->contentItem(), QStringLiteral("viewerCloseButton")).size(), 0);
 
@@ -24818,6 +24832,224 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
     QTRY_VERIFY(fullscreen->activeFocusItem() != nullptr);
     QTest::keyClick(fullscreen, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("channelButtonsVisibility", 2);
+    bridge->setProperty("viewerFullscreenMode", 1);
+
+    struct Viewer {
+        const char *open;
+        const char *openProperty;
+        QString windowName;
+        QString autoHideName;
+        QString stripName;
+        QString closeName;
+        QString surfaceName;
+        QString viewFocusName;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "spectrogramViewerOpen", QStringLiteral("spectrogramFullscreenWindow"),
+         QStringLiteral("spectrogramFullscreenControlsAutoHide"), QStringLiteral("spectrogramFullscreenStrip"),
+         QStringLiteral("spectrogramFullscreenCloseButton"), QStringLiteral("mainSpectrogramSurface"),
+         QStringLiteral("spectrogramFullscreenViewFocus")},
+        {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen", QStringLiteral("albumArtFullscreenWindow"),
+         QStringLiteral("albumArtFullscreenControlsAutoHide"), QStringLiteral("albumArtFullscreenStrip"),
+         QStringLiteral("albumArtFullscreenCloseButton"), QStringLiteral("albumArtSurface"),
+         QStringLiteral("albumArtFullscreenViewFocus")},
+    };
+    for (const Viewer &shown : viewers) {
+        const QByteArray name = shown.windowName.toUtf8();
+        QObject *autoHide = window->findChild<QObject *>(shown.autoHideName);
+        QVERIFY2(autoHide != nullptr, name.constData());
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, shown.windowName);
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QVERIFY(autoHide->property("active").toBool());
+        auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
+        if (surface == nullptr) {
+            surface = fullscreen->findChild<QQuickItem *>(shown.surfaceName);
+        }
+        QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
+        QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
+        QQuickItem *viewFocus = fullscreen->findChild<QQuickItem *>(shown.viewFocusName);
+        QVERIFY2(surface != nullptr && strip != nullptr && close != nullptr && viewFocus != nullptr,
+                 name.constData());
+        const QRectF wholeWindow(0, 0, fullscreen->width(), fullscreen->height());
+
+        // With the controls shown, the strip lies over the view's top edge,
+        // and the view has the whole window.
+        QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+        QTRY_COMPARE(sceneRectOf(surface), wholeWindow);
+        QCOMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
+        QVERIFY(strip->z() > 0);
+        QTRY_COMPARE(strip->opacity(), 1.0);
+
+        // The pointer resting, the strip hides with them; the view keeps its
+        // size, and nothing of the strip is left over it.
+        autoHide->setProperty("hideDelay", 1);
+        QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+        QTRY_VERIFY2(!strip->isVisible(), name.constData());
+        QCOMPARE(sceneRectOf(surface), wholeWindow);
+        QVERIFY(visibleItemNamed(fullscreen, shown.closeName) == nullptr);
+
+        // The pointer on the view brings it back, over the same view.
+        autoHide->setProperty("hideDelay", 5000);
+        QTest::mouseMove(fullscreen, wholeWindow.center().toPoint());
+        QTRY_VERIFY2(autoHide->property("controlsVisible").toBool(), name.constData());
+        QTRY_VERIFY(strip->isVisible());
+        QTRY_COMPARE(strip->opacity(), 1.0);
+        QCOMPARE(sceneRectOf(surface), wholeWindow);
+
+        // Keyboard focus on a strip button keeps it, however long the
+        // pointer rests; a press on the view takes the focus, and it hides.
+        for (int press = 0; press < 12 && !close->hasActiveFocus(); ++press) {
+            QTest::keyClick(fullscreen, Qt::Key_Tab);
+        }
+        QVERIFY2(close->hasActiveFocus(), name.constData());
+        autoHide->setProperty("hideDelay", 1);
+        QTest::qWait(50);
+        QVERIFY2(autoHide->property("controlsVisible").toBool(), name.constData());
+        QVERIFY(strip->isVisible() && close->isVisible());
+        QCOMPARE(strip->opacity(), 1.0);
+        QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier,
+                          QPoint(fullscreen->width() / 2, fullscreen->height() / 2));
+        QTRY_VERIFY2(fullscreen->activeFocusItem() == viewFocus, name.constData());
+        QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+        QTRY_VERIFY(!strip->isVisible());
+
+        // A key brings the strip back for the keyboard.
+        autoHide->setProperty("hideDelay", 5000);
+        QTest::keyClick(fullscreen, Qt::Key_Tab);
+        QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+        QTRY_VERIFY(strip->isVisible());
+
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.openProperty[0] == 's'
+                                                      ? "closeSpectrogramViewer"
+                                                      : "closeAlbumArtViewer"));
+        QTRY_VERIFY(!viewer->property(shown.openProperty).toBool());
+        QTRY_VERIFY(!fullscreen->isVisible());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+
+    // In the main window, the album art viewer's controls never hide.
+    QObject *albumArtAutoHide =
+        window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    QVERIFY(albumArtAutoHide != nullptr);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QVERIFY(!albumArtAutoHide->property("active").toBool());
+    albumArtAutoHide->setProperty("hideDelay", 1);
+    QTest::qWait(50);
+    QQuickItem *popupClose = visibleItemNamed(window, QStringLiteral("albumArtPopupCloseButton"));
+    QVERIFY(popupClose != nullptr);
+    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStrip() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr && surface != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("showSpectrogramScale", true);
+    bridge->setProperty("channelButtonsVisibility", 2);
+    // Per channel, each lane with its head.
+    bridge->setProperty("spectrogramViewMode", 1);
+    setChannelCount(bridge, surface, 2);
+    QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
+
+    // The pane's: the mode switch 4 px from the top, the first lane's head
+    // 5 px.
+    const auto controlsTop = [](QQuickItem *in) {
+        QQuickItem *modeSwitch = firstVisibleItemNamed(in, QStringLiteral("visualizationModeSwitch"));
+        QQuickItem *laneHead = firstVisibleItemNamed(in, QStringLiteral("plotLaneHead"));
+        return std::make_pair(modeSwitch ? sceneRectOf(modeSwitch).top() : -1.0,
+                              laneHead ? sceneRectOf(laneHead).top() : -1.0);
+    };
+    QTRY_COMPARE(controlsTop(window->contentItem()),
+                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
+
+    // The viewer in the main window has no strip: the same.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_COMPARE(controlsTop(window->contentItem()), std::make_pair(4.0, 5.0));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // Over the whole screen, the controls that show with the strip keep
+    // below it, whether it shows or not, so they never move and are never
+    // under it; the time scale stays on the view's top edge, which the
+    // strip leaves clear while it is hidden.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    auto *spectrogram = qobject_cast<SpectrogramItem *>(
+        firstVisibleItemNamed(surface, QStringLiteral("spectrogramPaneItem")));
+    QVERIFY(spectrogram != nullptr);
+    QVERIFY(spectrogram->showTimeLabels());
+    QCOMPARE(sceneRectOf(spectrogram).top(), 0.0);
+    // The plot keeps its corner clear of the mode switch where it now is.
+    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 4.0 + 28.0);
+    for (const int mode : {1, 0}) {
+        viewer->setProperty("visualizationMode", mode);
+        QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
+        QQuickItem *modeSwitch =
+            firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("visualizationModeSwitch"));
+        QVERIFY(modeSwitch != nullptr);
+        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 4.0);
+        QVERIFY(!sceneRectOf(strip).intersects(sceneRectOf(modeSwitch)));
+    }
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(!strip->isVisible());
+    QQuickItem *laneHead = firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("plotLaneHead"));
+    QVERIFY(laneHead != nullptr);
+    QCOMPARE(sceneRectOf(laneHead).top(), 33.0 + 5.0);
+    autoHide->setProperty("hideDelay", 5000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+
+    // Back in the pane, as before.
+    QTRY_COMPARE(controlsTop(window->contentItem()),
+                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
 }
 
 void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
@@ -25004,12 +25236,11 @@ void TransportInputSmokeTest::viewerControlsComeBackForTheKeyboard() {
     QQuickItem *close = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenCloseButton"));
     QVERIFY(strip != nullptr && close != nullptr);
 
-    // The controls hide when the pointer rests; the strip stays, so the
-    // view keeps its size.
+    // The controls hide when the pointer rests, and the strip with them.
     autoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
     QTRY_VERIFY(!close->isVisible());
-    QVERIFY(strip->isVisible());
+    QTRY_VERIFY(!strip->isVisible());
 
     // Tab brings them back and moves into them, and they stay while one of
     // them has the keyboard.
@@ -25195,9 +25426,10 @@ void TransportInputSmokeTest::viewerKeysWorkFromEveryControl() {
 }
 
 void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
-    // The album art viewer's controls never hide; the visualization
-    // viewer's hide while the pointer rests, unless one of them has focus,
-    // whatever gave it: the keyboard, a click, or assistive technology.
+    // The visualization viewer's controls hide while the pointer rests,
+    // unless one of them has focus, whatever gave it: the keyboard, a click,
+    // or assistive technology. (The album art viewer's: see
+    // fullscreenViewersGiveTheViewTheWholeScreen.)
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
