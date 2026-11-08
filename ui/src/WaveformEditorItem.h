@@ -550,7 +550,8 @@ private:
     static std::pair<QRect, QRect> crosshairLabelRects(
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight,
-        const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect());
+        const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect(),
+        int widestValueTextWidth = 0, int widestTimeTextWidth = 0);
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,

@@ -3125,14 +3125,16 @@ QString WaveformEditorItem::formatCrosshairTime(double seconds) {
 std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
     int valueTextWidth, int timeTextWidth, int textHeight,
-    const QSizeF &reservedCorner, const QRect &laneHead) {
+    const QSizeF &reservedCorner, const QRect &laneHead,
+    int widestValueTextWidth, int widestTimeTextWidth) {
     // The spectrogram's plates, without an edge.
     constexpr int padding = CrosshairReadout::kPadding;
     return CrosshairReadout::plateRects(
         width, height, x, y,
         QSize(valueTextWidth + 2 * padding, textHeight + 2 * padding),
         QSize(timeTextWidth + 2 * padding, textHeight + 2 * padding),
-        reservedCorner, CrosshairReadout::RightScale(), laneHead);
+        reservedCorner, CrosshairReadout::RightScale(), laneHead,
+        widestValueTextWidth + 2 * padding, widestTimeTextWidth + 2 * padding);
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
@@ -3573,10 +3575,17 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const QString timeText = formatCrosshairTime(time);
     const QFont font = CrosshairReadout::font();
     const QFontMetrics metrics(font);
+    // Whether a plate shows goes by the widest text it can have, so it
+    // doesn't come and go as the level and time under the pointer change:
+    // down to -100 dB, the level of the lowest amplitude above silence.
+    static const int widestDbText = std::max(
+        CrosshairReadout::widestDigitsWidth(decibelFormat.arg(QStringLiteral("-100.0")), metrics),
+        CrosshairReadout::widestDigitsWidth(decibelFormat.arg(QStringLiteral("-∞")), metrics));
     const auto [dbRect, timeRect] = crosshairLabelRects(
         width, height, x, y, metrics.horizontalAdvance(dbText),
         metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
-        lowestLaneHeadLocked(height, channels));
+        lowestLaneHeadLocked(height, channels), widestDbText,
+        CrosshairReadout::widestDigitsWidth(timeText, metrics));
     // Translucent dark plates without an edge.
     const CrosshairReadout::Colors colors{
         QColor(0, 0, 10, 160), QColor(255, 255, 255, 220), QColor(Qt::transparent)};
