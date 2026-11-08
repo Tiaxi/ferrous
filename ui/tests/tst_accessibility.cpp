@@ -1469,10 +1469,11 @@ QString playheadGeometryError(QQuickItem *line, QQuickItem *progress, qreal dpr)
                              .arg(outline->x()).arg(outline->x() + outline->width())
                              .arg(outlineLeft).arg(outlineRight));
     }
-    // 20 px, in the middle of the 28 px bar.
-    if (!fuzzyEqual(line->height(), 20.0) || !fuzzyEqual(outline->height(), 20.0)
-        || !fuzzyEqual(outline->y(), (bar->height() - 20.0) / 2)) {
-        errors.push_back(QStringLiteral("not the playhead's 20 px in the bar's middle"));
+    // Across the 28 px bar.
+    if (!fuzzyEqual(bar->height(), 28.0) || !fuzzyEqual(line->height(), 28.0)
+        || !fuzzyEqual(outline->height(), 28.0) || !fuzzyEqual(outline->y(), 0.0)) {
+        errors.push_back(QStringLiteral("the playhead is %1 px at %2, not across the 28 px bar")
+                             .arg(outline->height()).arg(outline->y()));
     }
     constexpr qreal kTolerance = 1e-6;
     const qreal lineRight = lineX + line->width();
