@@ -12,7 +12,8 @@ import "../logic/WheelUtils.js" as WheelUtils
 
 // The album art viewer's view: the art on the view colour, fitted, zoomed
 // and panned; while `infoVisible`, a 280 px column of the image's details
-// behind a 1 px seam on the right.
+// behind a 1 px seam over its right edge. The details lie over the art and
+// take nothing from its view, so the art keeps its place, zoom and pan.
 Item {
     id: root
 
@@ -163,10 +164,7 @@ Item {
     Item {
         id: albumArtViewport
         objectName: "albumArtViewport"
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        width: root.infoVisible ? Math.max(0, parent.width - infoColumn.width - 1) : parent.width
+        anchors.fill: parent
         clip: true
         onWidthChanged: root.applyInitialView()
         onHeightChanged: root.applyInitialView()
@@ -340,10 +338,22 @@ Item {
         anchors.bottom: parent.bottom
         width: 279
 
-        // Presses on the details stay on them.
-        MouseArea {
+        // Opaque, so the details read the same over any art.
+        Rectangle {
+            objectName: "albumArtInfoBacking"
             anchors.fill: parent
+            color: root.uiPalette.view
+        }
+
+        // Presses, the wheel and the pointer's hover on the details and
+        // their seam stay on them, off the art's pan and zoom below.
+        MouseArea {
+            objectName: "albumArtInfoInputArea"
+            anchors.fill: parent
+            anchors.leftMargin: -1
             acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+            hoverEnabled: true
+            cursorShape: Qt.ArrowCursor
             onPressed: root.focusFullscreen()
             onWheel: function(wheel) { wheel.accepted = true }
         }

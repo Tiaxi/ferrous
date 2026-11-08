@@ -1602,9 +1602,11 @@ private slots:
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
-    void albumArtDetailsShowBesideTheArt();
+    void albumArtDetailsLieOverTheArt();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtInfoButtonIsTintedOnlyWhileChecked();
+    void albumArtStaysPutWhenTheDetailsOpen_data();
+    void albumArtStaysPutWhenTheDetailsOpen();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
 };
 
@@ -25176,7 +25178,7 @@ void TransportInputSmokeTest::viewerControlsStayWhileOneHasFocus() {
     }
 }
 
-void TransportInputSmokeTest::albumArtDetailsShowBesideTheArt() {
+void TransportInputSmokeTest::albumArtDetailsLieOverTheArt() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverPath = savedCover(dir, 300, 300);
@@ -25241,19 +25243,25 @@ Window {
         {QStringLiteral("embeddedCover"), false},
     });
 
-    // The art on the view colour, beside a 280 px column behind a 1 px seam.
+    // The art on the view colour, under a 280 px column behind a 1 px seam
+    // that lies over the view's right edge: the art keeps the whole view.
     QQuickItem *floor = itemNamed(surface, QStringLiteral("albumArtFloor"));
     QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
     QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
     QQuickItem *seam = itemNamed(surface, QStringLiteral("albumArtInfoSeam"));
-    QVERIFY(floor != nullptr && viewport != nullptr && column != nullptr && seam != nullptr);
+    QQuickItem *backing = itemNamed(surface, QStringLiteral("albumArtInfoBacking"));
+    QVERIFY(floor != nullptr && viewport != nullptr && column != nullptr && seam != nullptr
+            && backing != nullptr);
     QCOMPARE(colorOf(floor, "color"), colorOf(palette, "view"));
     QTRY_COMPARE(sceneRectOf(column), QRectF(721, 0, 279, 600));
     QCOMPARE(sceneRectOf(seam), QRectF(720, 0, 1, 600));
     QCOMPARE(colorOf(seam, "color"), colorOf(palette, "seam"));
-    QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 720, 600));
-    // The square art fits the view's height, centred in what the details
-    // leave, however the decode request is shaped.
+    QCOMPARE(sceneRectOf(backing), sceneRectOf(column));
+    QCOMPARE(colorOf(backing, "color"), colorOf(palette, "view"));
+    QCOMPARE(qAlpha(colorOf(backing, "color")), 255);
+    QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
+    // The square art fits the view's height, centred in the whole view,
+    // however the decode request is shaped.
     QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
     QVERIFY(image != nullptr);
     const auto paintedArt = [image]() {
@@ -25263,7 +25271,11 @@ Window {
             QPointF((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2));
         return QRectF(topLeft, painted);
     };
-    QTRY_COMPARE(paintedArt(), QRectF(60, 0, 600, 600));
+    QTRY_COMPARE(paintedArt(), QRectF(200, 0, 600, 600));
+    // The details draw over the art's right edge, which runs under them.
+    const QImage shown = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    QCOMPARE(shown.pixel(700, 590), QColor(Qt::darkCyan).rgb());
+    QCOMPARE(shown.pixel(760, 590), QColor::fromRgba(colorOf(palette, "view")).rgb());
 
     // The file's name in semibold, then the rows: label, then value.
     QQuickItem *title = itemNamed(column, QStringLiteral("albumArtInfoTitle"));
@@ -25312,12 +25324,14 @@ Window {
     QCOMPARE(title->property("text").toString(), QStringLiteral("Embedded Image"));
     QCOMPARE(visibleTextItems(column, QStringLiteral("Embedded in the track")).size(), 1);
 
-    // Without the details, the art has the whole view.
+    // Without the details, the art is where it was, and shows whole.
     surface->setProperty("infoVisible", false);
     QTRY_VERIFY(!column->isVisible());
     QVERIFY(!seam->isVisible());
-    QTRY_COMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
-    QTRY_COMPARE(paintedArt(), QRectF(200, 0, 600, 600));
+    QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
+    QCOMPARE(paintedArt(), QRectF(200, 0, 600, 600));
+    QTRY_COMPARE(window->grabWindow().convertToFormat(QImage::Format_RGB32).pixel(760, 590),
+                 QColor(Qt::darkCyan).rgb());
 }
 
 void TransportInputSmokeTest::albumArtViewerShowsWhenItsImageCannotBeRead() {
@@ -25477,6 +25491,157 @@ void TransportInputSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QTRY_VERIFY(!readout->isVisible());
 
     QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::albumArtStaysPutWhenTheDetailsOpen_data() {
+    QTest::addColumn<int>("viewerMode");
+    QTest::newRow("popup") << 0;
+    QTest::newRow("whole screen") << 1;
+}
+
+void TransportInputSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
+    // The details lie over the art's right edge: opening or closing them
+    // moves, zooms and pans the art not at all, and the pointer on them
+    // works the details rather than the art beneath.
+    QFETCH(int, viewerMode);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    // Wider than the view, so that the art runs under the details.
+    const QString coverPath = savedCover(dir, 1600, 800);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && palette != nullptr && surface != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", viewerMode);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QQuickWindow *shownIn = window;
+    if (viewerMode == 1) {
+        shownIn = viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
+        QVERIFY(shownIn != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(shownIn));
+    }
+    QTRY_VERIFY(surface->window() == shownIn && surface->isVisible());
+    QTRY_COMPARE_WITH_TIMEOUT(surface->property("imageStatus").toInt(), 1, 5000);
+    QVERIFY(!viewer->property("albumArtInfoVisible").toBool());
+
+    QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *seam = itemNamed(surface, QStringLiteral("albumArtInfoSeam"));
+    QObject *contextMenu = surface->findChild<QObject *>(QStringLiteral("albumArtViewerContextMenu"));
+    QVERIFY(viewport != nullptr && image != nullptr && column != nullptr && seam != nullptr
+            && contextMenu != nullptr);
+    QTRY_VERIFY(viewport->width() > 400 && viewport->height() > 200);
+    const auto paintedArt = [image]() {
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        const QPointF origin((image->width() - painted.width()) / 2,
+                             (image->height() - painted.height()) / 2);
+        return QRectF(image->mapToScene(origin),
+                      image->mapToScene(origin + QPointF(painted.width(), painted.height())));
+    };
+    struct View {
+        QRectF art;
+        double zoom;
+        double panX;
+        double panY;
+    };
+    const auto view = [&]() {
+        return View{paintedArt(), surface->property("zoom").toDouble(),
+                    surface->property("panX").toDouble(), surface->property("panY").toDouble()};
+    };
+    const auto sameView = [](const View &a, const View &b) {
+        return a.art == b.art && a.zoom == b.zoom && a.panX == b.panX && a.panY == b.panY;
+    };
+    const auto describe = [](const View &v) {
+        return QStringLiteral("art %1,%2 %3x%4 zoom %5 pan %6,%7")
+            .arg(v.art.x()).arg(v.art.y()).arg(v.art.width()).arg(v.art.height())
+            .arg(v.zoom).arg(v.panX).arg(v.panY);
+    };
+    const QRectF viewRect = sceneRectOf(viewport);
+
+    // Zoomed and panned by the pointer on the art.
+    const QPointF artPoint = viewRect.center() - QPointF(viewRect.width() / 4, 0);
+    QVERIFY(sendWheel(shownIn, artPoint, QPoint(), QPoint(0, 600)));
+    QVERIFY(surface->property("zoom").toDouble() > 1.0);
+    QTest::mousePress(shownIn, Qt::LeftButton, Qt::NoModifier, artPoint.toPoint());
+    QTest::mouseMove(shownIn, (artPoint + QPointF(40, 30)).toPoint());
+    QTest::mouseMove(shownIn, (artPoint + QPointF(80, 60)).toPoint());
+    QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, (artPoint + QPointF(80, 60)).toPoint());
+    QVERIFY(surface->property("panX").toDouble() != 0.0 || surface->property("panY").toDouble() != 0.0);
+    const View before = view();
+
+    // I shows the details over the view's right edge: the art stays put.
+    QTest::keyClick(shownIn, Qt::Key_I);
+    QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QTRY_VERIFY(column->isVisible() && seam->isVisible());
+    QVERIFY2(sameView(view(), before), qPrintable(describe(view()) + QStringLiteral(" / ")
+                                                   + describe(before)));
+    QCOMPARE(sceneRectOf(viewport), viewRect);
+    const QRectF columnRect = sceneRectOf(column);
+    QCOMPARE(columnRect.right(), viewRect.right());
+    QCOMPARE(columnRect.top(), viewRect.top());
+    QCOMPARE(columnRect.bottom(), viewRect.bottom());
+    QCOMPARE(columnRect.width(), 279.0);
+    QVERIFY(paintedArt().right() > columnRect.right());
+    // The column draws over the art, on its own backing, and the art beside
+    // it still shows.
+    const QImage shown = shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const qreal dpr = shown.devicePixelRatio();
+    const auto pixelAt = [&shown, dpr](QPointF point) {
+        return shown.pixel(int(point.x() * dpr), int(point.y() * dpr));
+    };
+    // Low in the art that shows, below the details' text.
+    const QRectF artShown = paintedArt().intersected(viewRect);
+    QVERIFY2(artShown.bottom() - 8 > columnRect.top() + columnRect.height() / 2,
+             qPrintable(QStringLiteral("%1").arg(artShown.bottom())));
+    const qreal sampleY = artShown.bottom() - 8;
+    QCOMPARE(pixelAt(QPointF(columnRect.center().x(), sampleY)),
+             QColor::fromRgba(colorOf(palette, "view")).rgb());
+    QCOMPARE(pixelAt(QPointF(columnRect.left() - 40, sampleY)), QColor(Qt::darkCyan).rgb());
+
+    // The wheel, a drag, a double-click and the context button on the
+    // details neither zoom nor pan the art, nor close the viewer.
+    const QPoint onColumn = QPointF(columnRect.center().x(), sampleY - 32).toPoint();
+    QTest::mouseMove(shownIn, onColumn);
+    sendWheel(shownIn, onColumn, QPoint(), QPoint(0, 360));
+    sendWheel(shownIn, onColumn, QPoint(), QPoint(0, -720));
+    QTest::mousePress(shownIn, Qt::LeftButton, Qt::NoModifier, onColumn);
+    QTest::mouseMove(shownIn, onColumn + QPoint(-60, -40));
+    QTest::mouseMove(shownIn, onColumn + QPoint(-120, -80));
+    QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, onColumn + QPoint(-120, -80));
+    QTest::mouseDClick(shownIn, Qt::LeftButton, Qt::NoModifier, onColumn);
+    // The seam is the details' too.
+    const QPoint onSeam = sceneRectOf(seam).center().toPoint();
+    QTest::mouseDClick(shownIn, Qt::LeftButton, Qt::NoModifier, onSeam);
+    sendWheel(shownIn, onSeam, QPoint(), QPoint(0, 360));
+    QTest::mouseClick(shownIn, Qt::RightButton, Qt::NoModifier, onColumn);
+    QTest::qWait(50);
+    QVERIFY2(sameView(view(), before), qPrintable(describe(view()) + QStringLiteral(" / ")
+                                                   + describe(before)));
+    QVERIFY(!contextMenu->property("visible").toBool());
+    QVERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(viewer->property("albumArtInfoVisible").toBool());
+
+    // Closing them again leaves the art as it was.
+    QTest::keyClick(shownIn, Qt::Key_I);
+    QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    QTRY_VERIFY(!column->isVisible());
+    QVERIFY2(sameView(view(), before), qPrintable(describe(view()) + QStringLiteral(" / ")
+                                                   + describe(before)));
+    QCOMPARE(sceneRectOf(viewport), viewRect);
+
+    QTest::keyClick(shownIn, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
