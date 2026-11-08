@@ -5368,23 +5368,24 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
 
 int SpectrogramItem::crosshairWidestValueWidthLocked() {
     const double topHz = topFrequencyHzLocked();
-    if (topHz != m_crosshairWidestValueTopHz) {
-        // Hertz below a kilohertz, kilohertz up to the top, each with any
-        // level or silence.
-        const QFontMetrics metrics(CrosshairReadout::font());
-        int widest = 0;
-        for (const double hz : {999.0, std::max(999.0, topHz)}) {
-            for (const double db : {-150.0, -std::numeric_limits<double>::infinity()}) {
-                widest = std::max(widest, CrosshairReadout::widestDigitsWidth(
-                    i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
-                          crosshairFrequency(hz), crosshairDecibels(db)),
-                    metrics));
+    return m_crosshairWidestValue.get(
+        CrosshairReadout::font(), topHz, [topHz](const QFontMetrics &metrics) {
+            // Each form at its most digits, as the readout's formatters write
+            // them: the hertz just under a kilohertz, which round up to
+            // "1000 Hz", and the top of the band, which can round up in
+            // kilohertz. A lower frequency has no more digits in its form.
+            const double underKilohertz = std::nextafter(1000.0, 0.0);
+            int widest = 0;
+            for (const double hz : {std::min(topHz, underKilohertz), topHz}) {
+                for (const double db : {-150.0, -std::numeric_limits<double>::infinity()}) {
+                    widest = std::max(widest, CrosshairReadout::widestDigitsWidth(
+                        i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
+                              crosshairFrequency(hz), crosshairDecibels(db)),
+                        metrics));
+                }
             }
-        }
-        m_crosshairWidestValueTopHz = topHz;
-        m_crosshairWidestValueWidth = widest;
-    }
-    return m_crosshairWidestValueWidth;
+            return widest;
+        });
 }
 
 void SpectrogramItem::publishCrosshairReadoutLocked(const QString &readout) {

@@ -3548,8 +3548,33 @@ QRect WaveformEditorItem::lowestLaneHeadLocked(int height, int lanes) const {
     return m_laneHeadBounds.translated(0.0, top).toAlignedRect();
 }
 
+namespace {
+
+// The crosshair's readout of a level at `amplitude` of full scale:
+// "-12.5 dB", or "-∞ dB" for silence.
+QString crosshairLevel(double amplitude) {
+    static const QString format = i18nc("@item:intext level in decibels", "%1 dB");
+    return amplitude <= 0.00001
+        ? format.arg(QStringLiteral("-∞"))
+        : format.arg(20.0 * std::log10(amplitude), 0, 'f', 1);
+}
+
+} // namespace
+
+int WaveformEditorItem::crosshairWidestLevelWidthLocked() {
+    return m_crosshairWidestLevel.get(
+        CrosshairReadout::font(), 0.0, [](const QFontMetrics &metrics) {
+            // Silence, and the lowest level above it, -100 dB: a louder level
+            // has no more digits.
+            return std::max(
+                CrosshairReadout::widestDigitsWidth(crosshairLevel(0.0), metrics),
+                CrosshairReadout::widestDigitsWidth(
+                    crosshairLevel(std::nextafter(0.00001, 1.0)), metrics));
+        });
+}
+
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
-                                        double visibleStart, double visibleEnd) const {
+                                        double visibleStart, double visibleEnd) {
     // On the column under the pointer, showing the time a click there
     // seeks to.
     const TimeAxis axis{visibleStart, visibleEnd, width, renderScaleLocked()};
@@ -3568,23 +3593,16 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
     const double channelHeight = static_cast<double>(height) / channels;
     const double localY = std::fmod(static_cast<double>(y), channelHeight);
     const double amplitude = std::clamp(std::abs((channelHeight * 0.5 - localY) / (channelHeight * 0.5)), 0.0, 1.0);
-    static const QString decibelFormat = i18nc("@item:intext level in decibels", "%1 dB");
-    const QString dbText = amplitude <= 0.00001
-        ? decibelFormat.arg(QStringLiteral("-∞"))
-        : decibelFormat.arg(20.0 * std::log10(amplitude), 0, 'f', 1);
+    const QString dbText = crosshairLevel(amplitude);
     const QString timeText = formatCrosshairTime(time);
     const QFont font = CrosshairReadout::font();
     const QFontMetrics metrics(font);
     // Whether a plate shows goes by the widest text it can have, so it
-    // doesn't come and go as the level and time under the pointer change:
-    // down to -100 dB, the level of the lowest amplitude above silence.
-    static const int widestDbText = std::max(
-        CrosshairReadout::widestDigitsWidth(decibelFormat.arg(QStringLiteral("-100.0")), metrics),
-        CrosshairReadout::widestDigitsWidth(decibelFormat.arg(QStringLiteral("-∞")), metrics));
+    // doesn't come and go as the level and time under the pointer change.
     const auto [dbRect, timeRect] = crosshairLabelRects(
         width, height, x, y, metrics.horizontalAdvance(dbText),
         metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
-        lowestLaneHeadLocked(height, channels), widestDbText,
+        lowestLaneHeadLocked(height, channels), crosshairWidestLevelWidthLocked(),
         CrosshairReadout::widestDigitsWidth(timeText, metrics));
     // Translucent dark plates without an edge.
     const CrosshairReadout::Colors colors{

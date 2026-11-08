@@ -74,6 +74,31 @@ inline int widestDigitsWidth(const QString &text, const QFontMetrics &metrics) {
     return metrics.horizontalAdvance(widened);
 }
 
+// A widest width (see widestDigitsWidth), measured in the readout's font and
+// kept until that font, or what it is the width of (`key`), changes: the
+// application's font, which the readout's takes its family and style from,
+// can change while the app runs. The width is of a pixel-sized font, as the
+// readout's text is measured, so the device pixel ratio doesn't change it.
+class WidestWidth {
+public:
+    template <typename Measure>
+    int get(const QFont &font, double key, Measure &&measure) {
+        if (!m_measured || font != m_font || key != m_key) {
+            m_width = measure(QFontMetrics(font));
+            m_font = font;
+            m_key = key;
+            m_measured = true;
+        }
+        return m_width;
+    }
+
+private:
+    QFont m_font;
+    double m_key{0.0};
+    int m_width{0};
+    bool m_measured{false};
+};
+
 // A scale along a plot's right edge: how far its labels reach from the
 // edge, and whether one is beside the bottom edge, where the time's plate
 // goes.

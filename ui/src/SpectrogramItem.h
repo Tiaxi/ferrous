@@ -589,8 +589,8 @@ private:
         double columnsPerSecond, double drawX);
     // Hands the readout laid out to the GUI thread, if it changed.
     void publishCrosshairReadoutLocked(const QString &readout);
-    // The width of the widest frequency and level the readout shows, for
-    // the top frequency of the band (see CrosshairReadout::plateRects).
+    // The width of the widest frequency and level the readout shows, in its
+    // font for the top frequency of the band (see CrosshairReadout::plateRects).
     int crosshairWidestValueWidthLocked();
     // The time in its own track of `continuousTime` on the view's
     // timeline, or NaN where it is in no track the view knows.
@@ -1006,9 +1006,8 @@ private:
     // has (crosshairReadout).
     QString m_crosshairLaidOutReadout;
     QString m_crosshairReadout;
-    // crosshairWidestValueWidthLocked's, measured for this top frequency.
-    double m_crosshairWidestValueTopHz{-1.0};
-    int m_crosshairWidestValueWidth{0};
+    // crosshairWidestValueWidthLocked's, for the font and top frequency.
+    CrosshairReadout::WidestWidth m_crosshairWidestValue;
     double m_markerSeconds{-1.0};
     // The marker's x as the render thread laid it out, and as the GUI
     // thread shows it.

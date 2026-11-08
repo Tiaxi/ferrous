@@ -6,6 +6,8 @@
 #include <memory>
 #include <functional>
 
+#include "CrosshairReadout.h"
+
 #include <QByteArray>
 #include <QColor>
 #include <QImage>
@@ -604,7 +606,10 @@ private:
         double startSeconds, double endSeconds) const;
     LaneStyle laneStyleLocked() const;
     void drawCrosshair(QPainter &painter, int width, int height,
-                       double visibleStart, double visibleEnd) const;
+                       double visibleStart, double visibleEnd);
+    // The width of the widest level the readout shows, in its font (see
+    // CrosshairReadout::plateRects).
+    int crosshairWidestLevelWidthLocked();
     static void drawFpsOverlay(
         QPainter &painter, int width, int fpsValue, const QSizeF &reservedCorner);
     int displayedChannelCountLocked() const;
@@ -632,6 +637,8 @@ private:
     bool m_showFpsOverlay{false};
     QSizeF m_reservedCorner;
     QRectF m_laneHeadBounds;
+    // crosshairWidestLevelWidthLocked's, for the readout's font.
+    CrosshairReadout::WidestWidth m_crosshairWidestLevel;
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     qulonglong m_soloedChannelsMask{0};

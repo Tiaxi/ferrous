@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
+#include <QFontDatabase>
 #include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
 #include <QDeadlineTimer>
@@ -45,6 +46,7 @@
 #include <QMutexLocker>
 #include <QScopedPointer>
 #include <QSemaphore>
+#include <QScopeGuard>
 #include <QSet>
 #include <QDir>
 #include <QTemporaryFile>
@@ -1273,6 +1275,8 @@ private slots:
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data();
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes();
     void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
+    void crosshairReadoutWidestWidthsFollowTheFont();
+    void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
     void spectrogramCrosshairReadoutReadsEachView();
     void spectrogramCrosshairReadoutAcrossAGaplessBoundary();
@@ -19761,6 +19765,83 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelCh
     }
     // The widths reach both sides of where the value stops fitting.
     QVERIFY(valueShown && valueLeftOut);
+}
+
+void SpectrogramSmokeTest::crosshairReadoutWidestWidthsFollowTheFont() {
+    // The readout's font takes its family and style from the application's,
+    // which can change while the app runs: the widest frequency and level
+    // the spectrogram and the waveform measured are measured again in it.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    SpectrogramItem spectrogram;
+    feedReadoutFixture(spectrogram);
+    WaveformEditorItem waveform;
+    const auto widest = [](SpectrogramItem &spectrogram, WaveformEditorItem &waveform) {
+        QMutexLocker spectrogramLock(&spectrogram.m_stateMutex);
+        QMutexLocker waveformLock(&waveform.m_stateMutex);
+        return std::pair(spectrogram.crosshairWidestValueWidthLocked(),
+                         waveform.crosshairWidestLevelWidthLocked());
+    };
+    const auto before = widest(spectrogram, waveform);
+    QVERIFY(before.first > 0 && before.second > 0);
+    QCOMPARE(widest(spectrogram, waveform), before);
+
+    // Another family, its letters 2 px further apart.
+    QFont font(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
+    QGuiApplication::setFont(font);
+    QCOMPARE(CrosshairReadout::font().letterSpacing(), 2.0);
+    const auto after = widest(spectrogram, waveform);
+    QVERIFY2(after.first > before.first && after.second > before.second,
+             qPrintable(QStringLiteral("before %1, %2; after %3, %4")
+                            .arg(before.first).arg(before.second)
+                            .arg(after.first).arg(after.second)));
+    // As items that never measured in the old font measure them.
+    SpectrogramItem freshSpectrogram;
+    feedReadoutFixture(freshSpectrogram);
+    WaveformEditorItem freshWaveform;
+    QCOMPARE(after, widest(freshSpectrogram, freshWaveform));
+
+    // And back.
+    QGuiApplication::setFont(applicationFont);
+    QCOMPARE(widest(spectrogram, waveform), before);
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairWidestValueCoversRoundedHertz() {
+    // At 11,025 Hz with 8,192-point FFTs, the bin at 999.948 Hz reads
+    // "1000 Hz": a frequency of more digits than "999 Hz", which the widest
+    // value the readout measures covers, with the lowest level, as every
+    // other frequency of the band.
+    SpectrogramItem item;
+    item.setSampleRateHz(11'025);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 4'097;
+    constexpr int columns = 50;
+    // −150 dB throughout: the level of the most digits.
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x01'), bins, 0, columns, 0, 1'000,
+                              11'025, 1'024, false, true, 1, false);
+    const QFontMetrics metrics(CrosshairReadout::font());
+    // A row for each bin.
+    const QSize lane(300, bins);
+    int widest = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        QCOMPARE(item.binHzLocked(), 11'025.0 / 8'192.0);
+        widest = item.crosshairWidestValueWidthLocked();
+    }
+    bool sawThousandHertz = false;
+    for (int row = 0; row < bins; ++row) {
+        layOutReadout(item, lane, 1.0, QPointF(20.5, row + 0.5));
+        for (const SpectrogramOverlayImage &plate : readoutPlatesOf(item.m_crosshair)) {
+            if (plate.text.contains(QLatin1Char(':'))) continue;
+            sawThousandHertz = sawThousandHertz
+                || plate.text.startsWith(QStringLiteral("1000 Hz, "));
+            QVERIFY2(CrosshairReadout::widestDigitsWidth(plate.text, metrics) <= widest,
+                     qPrintable(plate.text + QStringLiteral(" is wider than %1").arg(widest)));
+        }
+    }
+    QVERIFY(sawThousandHertz);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairTimeKeepsClearOfTheLaneHead() {
