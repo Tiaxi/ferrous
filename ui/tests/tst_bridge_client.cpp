@@ -400,6 +400,9 @@ private slots:
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
     void libraryChangesNotifyOnlyLibraryProperties();
+    void testBinariesSetNoFileBrowserNameDetector();
+    void detectedFileBrowserNameNotifiesOnlyWhenItChanges();
+    void clientsFindTheFileBrowserNameWithTheDetectorSet();
     void libraryWatchingDecodesFromBinaryPayload();
     void libraryScanErrorsAreReportedAsLibraryErrors();
     void unwatchedLibraryRootsAreShownAndReportedOnce();
@@ -7424,6 +7427,67 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     QCOMPARE(client.libraryScanProcessed(), 10);
 }
 
+// The file manager's name that xdg-mime finds would change the name guessed
+// from $XDG_CURRENT_DESKTOP after a test's client starts, and notify
+// snapshotChanged while the test counts it; main() sets no detector.
+void BridgeClientTest::testBinariesSetNoFileBrowserNameDetector() {
+    QVERIFY(BridgeClient::s_fileBrowserNameDetector == nullptr);
+}
+
+void BridgeClientTest::detectedFileBrowserNameNotifiesOnlyWhenItChanges() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    client.m_fileBrowserName = QStringLiteral("File Manager");
+    QSignalSpy changed(&client, &BridgeClient::snapshotChanged);
+
+    client.applyDetectedFileBrowserName(QStringLiteral("  Dolphin\n"));
+    QCOMPARE(client.fileBrowserName(), QStringLiteral("Dolphin"));
+    QTRY_COMPARE(changed.count(), 1);
+
+    // The same name, or none, changes nothing.
+    client.applyDetectedFileBrowserName(QStringLiteral("Dolphin"));
+    client.applyDetectedFileBrowserName(QStringLiteral(" "));
+    QVERIFY(!client.m_snapshotChangedPending);
+    QVERIFY(!client.m_snapshotNotifyTimer.isActive());
+    QCOMPARE(client.fileBrowserName(), QStringLiteral("Dolphin"));
+    QCOMPARE(changed.count(), 1);
+}
+
+namespace {
+
+QString testFileBrowserName() {
+    return QStringLiteral("Ferrous Test Files");
+}
+
+// Sets the detector of clients made while it lives, then the one before.
+class ScopedFileBrowserNameDetector {
+public:
+    explicit ScopedFileBrowserNameDetector(BridgeClient::FileBrowserNameDetector detector)
+        : m_previous(BridgeClient::s_fileBrowserNameDetector) {
+        BridgeClient::setFileBrowserNameDetector(detector);
+    }
+    ~ScopedFileBrowserNameDetector() { BridgeClient::setFileBrowserNameDetector(m_previous); }
+    ScopedFileBrowserNameDetector(const ScopedFileBrowserNameDetector &) = delete;
+    ScopedFileBrowserNameDetector &operator=(const ScopedFileBrowserNameDetector &) = delete;
+
+private:
+    BridgeClient::FileBrowserNameDetector m_previous;
+};
+
+} // namespace
+
+void BridgeClientTest::clientsFindTheFileBrowserNameWithTheDetectorSet() {
+    const ScopedFileBrowserNameDetector detector(&testFileBrowserName);
+    BridgeClient client;
+    // The guess, until the detector's name arrives in the event loop.
+    QCOMPARE(client.fileBrowserName(), BridgeClient::detectFileBrowserNameHeuristic());
+    QSignalSpy changed(&client, &BridgeClient::snapshotChanged);
+    isolateBridgeClient(client);
+
+    QTRY_COMPARE(client.fileBrowserName(), testFileBrowserName());
+    QTRY_VERIFY(changed.count() >= 1);
+}
+
 void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QByteArray bytes;
     const auto append = [&bytes](auto value) {
@@ -8377,6 +8441,9 @@ int main(int argc, char **argv) {
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
     keepGStreamerRegistryIn(testStorage.path());
+    // The clients' file manager is the one guessed from $XDG_CURRENT_DESKTOP,
+    // not the one that this desktop's xdg-mime names.
+    BridgeClient::setFileBrowserNameDetector(nullptr);
     QApplication app(argc, argv);
     BridgeClientTest test(testStorage.path());
     return QTest::qExec(&test, argc, argv);

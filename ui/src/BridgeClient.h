@@ -195,6 +195,17 @@ public:
     explicit BridgeClient(QObject *parent = nullptr);
     ~BridgeClient() override;
 
+    // Finds the name of the desktop's file manager. It runs on a thread of
+    // its own and returns the name, or nothing when it finds none.
+    using FileBrowserNameDetector = QString (*)();
+    // How clients made from now on find the file manager's name after they
+    // start; by default with xdg-mime, and with nothing when `detector` is
+    // null, which keeps the name guessed from $XDG_CURRENT_DESKTOP. Test
+    // binaries set none in main(), before their first client, so that what
+    // they see does not depend on the desktop they run in. Call it on the GUI
+    // thread only.
+    static void setFileBrowserNameDetector(FileBrowserNameDetector detector);
+
     // Adds a line to the diagnostics log (Help > Diagnostics).
     void logDiagnostic(const QString &category, const QString &message);
 
@@ -738,6 +749,7 @@ private:
     void setBackendFailure(const QString &message);
     static QString detectFileBrowserNameHeuristic();
     static QString detectFileBrowserName();
+    static FileBrowserNameDetector s_fileBrowserNameDetector;
     // What `program` prints, trimmed, or nothing when it fails or takes
     // longer than `timeoutMs`; then it is killed and waited for, up to a
     // second.

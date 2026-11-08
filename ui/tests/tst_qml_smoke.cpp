@@ -31101,6 +31101,9 @@ int main(int argc, char **argv) {
     // Tests with a real bridge play into a sink that needs no audio device.
     qputenv("FERROUS_GST_OUTPUT_SINK", "fakesink");
     addHiDpiTestScreens(testStorage);
+    // The bridges' file manager is the one guessed from $XDG_CURRENT_DESKTOP,
+    // not the one that this desktop's xdg-mime names.
+    BridgeClient::setFileBrowserNameDetector(nullptr);
 
     QApplication app(argc, argv);
     QStringList arguments;

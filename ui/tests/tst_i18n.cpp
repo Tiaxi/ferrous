@@ -424,6 +424,9 @@ int main(int argc, char **argv) {
     // A locale other than C, in which gettext uses the catalog of the language
     // that KI18n asks for; QApplication sets it up from the environment.
     qputenv("LC_ALL", "en_US.UTF-8");
+    // The clients' file manager is the one guessed from $XDG_CURRENT_DESKTOP,
+    // not the one that this desktop's xdg-mime names.
+    BridgeClient::setFileBrowserNameDetector(nullptr);
 
     QApplication app(argc, argv);
     TranslationTest test;

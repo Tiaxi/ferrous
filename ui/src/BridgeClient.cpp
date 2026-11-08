@@ -779,10 +779,21 @@ BridgeClient::~BridgeClient() {
     flushPendingDiagnosticDiskLines();
 }
 
+BridgeClient::FileBrowserNameDetector BridgeClient::s_fileBrowserNameDetector =
+    &BridgeClient::detectFileBrowserName;
+
+void BridgeClient::setFileBrowserNameDetector(FileBrowserNameDetector detector) {
+    s_fileBrowserNameDetector = detector;
+}
+
 void BridgeClient::startFileBrowserNameDetection() {
+    const FileBrowserNameDetector detector = s_fileBrowserNameDetector;
+    if (detector == nullptr) {
+        return;
+    }
     const QPointer<BridgeClient> self(this);
-    std::thread([self]() {
-        const QString detected = BridgeClient::detectFileBrowserName();
+    std::thread([self, detector]() {
+        const QString detected = detector();
         QCoreApplication *app = QCoreApplication::instance();
         if (app == nullptr) {
             return;
