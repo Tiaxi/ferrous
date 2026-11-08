@@ -97,8 +97,23 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
+    // What the lowest lane's head takes of that lane, from its top left,
+    // for the plot's crosshair time to keep clear of; empty while it shows
+    // none.
+    readonly property rect lowestLaneHeadBounds: {
+        const index = laneHeads.count - 1
+        const head = index >= 0 ? laneHeads.itemAt(index) : null
+        if (!head || !head.visible) {
+            return Qt.rect(0, 0, 0, 0)
+        }
+        const bounds = head.occupiedBounds
+        return Qt.rect(head.x + bounds.x, head.y - root.laneTop(index) + bounds.y,
+                       bounds.width, bounds.height)
+    }
+
     // The lane labels, with Mute and Solo.
     Repeater {
+        id: laneHeads
         model: root.laneCount
 
         delegate: Components.PlotLaneHead {

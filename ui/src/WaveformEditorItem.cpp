@@ -3,6 +3,7 @@
 #include "WaveformEditorItem.h"
 #include "WaveformSceneGraph.h"
 
+#include "CrosshairReadout.h"
 #include "FerrousBridgeFfi.h"
 #include "ViewCorner.h"
 
@@ -494,6 +495,18 @@ void WaveformEditorItem::setReservedCorner(const QSizeF &value) {
         m_reservedCorner = value;
     }
     emit reservedCornerChanged();
+    update();
+}
+
+QRectF WaveformEditorItem::laneHeadBounds() const { QMutexLocker lock(&m_stateMutex); return m_laneHeadBounds; }
+
+void WaveformEditorItem::setLaneHeadBounds(const QRectF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_laneHeadBounds == value) return;
+        m_laneHeadBounds = value;
+    }
+    emit laneHeadBoundsChanged();
     update();
 }
 QRectF WaveformEditorItem::fpsCounterRect() const {
@@ -3112,22 +3125,14 @@ QString WaveformEditorItem::formatCrosshairTime(double seconds) {
 std::pair<QRect, QRect> WaveformEditorItem::crosshairLabelRects(
     int width, int height, int x, int y,
     int valueTextWidth, int timeTextWidth, int textHeight,
-    const QSizeF &reservedCorner) {
-    constexpr int padding = 3;
-    const int valueY = std::clamp(y - textHeight / 2, 0, height - textHeight - 2 * padding);
-    const QRect valueRect(
-        ViewCorner::labelXClearOfCorner(
-            width - valueTextWidth - 2 * padding - 2, valueY,
-            valueTextWidth + 2 * padding, textHeight + 2 * padding, width, reservedCorner),
-        valueY,
-        valueTextWidth + 2 * padding,
-        textHeight + 2 * padding);
-    const QRect timeRect(
-        std::clamp(x - timeTextWidth / 2, 0, width - timeTextWidth - 2 * padding),
-        height - textHeight - 2 * padding - 2,
-        timeTextWidth + 2 * padding,
-        textHeight + 2 * padding);
-    return {valueRect, timeRect};
+    const QSizeF &reservedCorner, const QRect &laneHead) {
+    // The spectrogram's plates, without an edge.
+    constexpr int padding = CrosshairReadout::kPadding;
+    return CrosshairReadout::plateRects(
+        width, height, x, y,
+        QSize(valueTextWidth + 2 * padding, textHeight + 2 * padding),
+        QSize(timeTextWidth + 2 * padding, textHeight + 2 * padding),
+        reservedCorner, CrosshairReadout::RightScale(), laneHead);
 }
 
 void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height,
@@ -3531,6 +3536,16 @@ void WaveformEditorItem::drawDetailEnvelope(
     painter.setBrush(Qt::NoBrush);
 }
 
+QRect WaveformEditorItem::lowestLaneHeadLocked(int height, int lanes) const {
+    if (m_laneHeadBounds.isEmpty()) return QRect();
+    // The lanes' rows, as PlotLanes lays them out.
+    const int count = std::max(1, lanes);
+    const int top = count > 1
+        ? static_cast<int>(std::lround(static_cast<double>(count - 1) * height / count)) + 1
+        : 0;
+    return m_laneHeadBounds.translated(0.0, top).toAlignedRect();
+}
+
 void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
                                         double visibleStart, double visibleEnd) const {
     // On the column under the pointer, showing the time a click there
@@ -3556,29 +3571,17 @@ void WaveformEditorItem::drawCrosshair(QPainter &painter, int width, int height,
         ? decibelFormat.arg(QStringLiteral("-∞"))
         : decibelFormat.arg(20.0 * std::log10(amplitude), 0, 'f', 1);
     const QString timeText = formatCrosshairTime(time);
-    QFont font;
-    font.setPixelSize(10);
-    painter.setFont(font);
+    const QFont font = CrosshairReadout::font();
     const QFontMetrics metrics(font);
-    const int dbWidth = metrics.horizontalAdvance(dbText);
-    const int timeWidth = metrics.horizontalAdvance(timeText);
-    const int textHeight = metrics.height();
     const auto [dbRect, timeRect] = crosshairLabelRects(
-        width, height, x, y, dbWidth, timeWidth, textHeight, m_reservedCorner);
-    constexpr int padding = 3;
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor(0, 0, 10, 160));
-    painter.drawRoundedRect(dbRect, 3, 3);
-    painter.drawRoundedRect(timeRect, 3, 3);
-    painter.setPen(QColor(255, 255, 255, 220));
-    painter.drawText(
-        dbRect.x() + padding,
-        dbRect.y() + padding + metrics.ascent(),
-        dbText);
-    painter.drawText(
-        timeRect.x() + padding,
-        timeRect.bottom() - padding - metrics.descent(),
-        timeText);
+        width, height, x, y, metrics.horizontalAdvance(dbText),
+        metrics.horizontalAdvance(timeText), metrics.height(), m_reservedCorner,
+        lowestLaneHeadLocked(height, channels));
+    // Translucent dark plates without an edge.
+    const CrosshairReadout::Colors colors{
+        QColor(0, 0, 10, 160), QColor(255, 255, 255, 220), QColor(Qt::transparent)};
+    CrosshairReadout::drawPlate(painter, dbRect, dbText, font, colors);
+    CrosshairReadout::drawPlate(painter, timeRect, timeText, font, colors);
 }
 
 void WaveformEditorItem::drawFpsOverlay(

@@ -1571,6 +1571,7 @@ ApplicationWindow {
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
+            laneHeadBounds: plotLayer.lowestLaneHeadBounds
             markerSeconds: plotLayer.cutSeconds
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
@@ -1587,6 +1588,7 @@ ApplicationWindow {
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
+            laneHeadBounds: plotLayer.lowestLaneHeadBounds
             markerSeconds: plotLayer.cutSeconds
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette

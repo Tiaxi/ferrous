@@ -24,6 +24,7 @@
 #include <memory>
 #include <vector>
 
+#include "CrosshairReadout.h"
 #include "PlaybackClock.h"
 #include "PlaybackFrameScheduler.h"
 #include "WindowPresence.h"
@@ -156,8 +157,9 @@ struct SpectrogramRasterJob {
 // A small image an overlay places on the pane: a label, or a crosshair's
 // dotted line. The scene node keeps its texture while the overlay shows it.
 struct SpectrogramOverlayImage {
-    // A scale label: outlined text on the plot. The crosshair's dashed lines.
-    enum Kind { ScaleLabel, DashedColumn, DashedRow };
+    // A scale label: outlined text on the plot. The crosshair's dashed lines,
+    // and its readout's plates (see CrosshairReadout).
+    enum Kind { ScaleLabel, DashedColumn, DashedRow, ReadoutPlate };
     Kind kind{ScaleLabel};
     // A label's text, or a dotted line's length in device pixels.
     QString text;
@@ -227,9 +229,21 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
-    // Where the hovered crosshair is, for its tooltip: "4.4 kHz, −62 dB",
-    // a line break and "1:46.0"; empty while the pointer is not on this pane.
+    // What the crosshair's plates on this pane read, a line each: the
+    // frequency and level at the pointer ("4.4 kHz, −62 dB") on the hovered
+    // pane, then the time ("1:46.0") on the pane that shows it. Empty while
+    // it shows none.
     Q_PROPERTY(QString crosshairReadout READ crosshairReadout NOTIFY crosshairReadoutChanged)
+    // Whether the crosshair's time shows on this pane's bottom edge: on the
+    // lowest of a plot's lanes.
+    Q_PROPERTY(bool showCrosshairTime READ showCrosshairTime WRITE setShowCrosshairTime NOTIFY showCrosshairTimeChanged)
+    // What this lane's label and buttons take of it, from its top left; the
+    // crosshair's time keeps clear of them. Empty without any.
+    Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
+    // The readout's plates, in the plot's colours (UiPalette's PlotColors).
+    Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
     // A time of the track to follow, such as where its file is cut off, or
     // -1; markerX is where the view draws it, NaN while it does not.
     Q_PROPERTY(double markerSeconds READ markerSeconds WRITE setMarkerSeconds NOTIFY markerSecondsChanged)
@@ -279,6 +293,16 @@ public:
 
     bool crosshairEnabled() const;
     QString crosshairReadout() const { return m_crosshairReadout; }
+    bool showCrosshairTime() const;
+    void setShowCrosshairTime(bool value);
+    QRectF laneHeadBounds() const;
+    void setLaneHeadBounds(const QRectF &value);
+    QColor readoutPlateColor() const;
+    void setReadoutPlateColor(const QColor &value);
+    QColor readoutPlateEdgeColor() const;
+    void setReadoutPlateEdgeColor(const QColor &value);
+    QColor readoutTextColor() const;
+    void setReadoutTextColor(const QColor &value);
     double markerSeconds() const;
     void setMarkerSeconds(double value);
     double markerX() const { return m_markerX; }
@@ -362,6 +386,9 @@ signals:
     void displayModeChanged();
     void crosshairEnabledChanged();
     void crosshairReadoutChanged();
+    void showCrosshairTimeChanged();
+    void laneHeadBoundsChanged();
+    void readoutColorsChanged();
     void markerSecondsChanged();
     void markerXChanged();
     void gridEnabledChanged();
@@ -560,6 +587,12 @@ private:
         int width, int height,
         qint64 displayLeft, bool rollingMode,
         double columnsPerSecond, double drawX);
+    // Hands the readout laid out to the GUI thread, if it changed.
+    void publishCrosshairReadoutLocked(const QString &readout);
+    // The time in its own track of `continuousTime` on the view's
+    // timeline, or NaN where it is in no track the view knows.
+    double crosshairTrackTimeLocked(double continuousTime) const;
+    void setReadoutColor(QColor CrosshairReadout::Colors::*member, const QColor &value);
     // The device column (or row) of `logical`, clamped to the overlay.
     int crosshairDeviceColumnLocked(double logical, int devicePixelCount) const;
     // Names the layout's images' textures, at the canvas scale.
@@ -961,8 +994,13 @@ private:
     int m_crosshairCachedBinsPerColumn{0};
     QRect m_crosshairVerticalLineRect;
     QRect m_crosshairHorizontalLineRect;
+    bool m_showCrosshairTime{true};
+    QRectF m_laneHeadBounds;
+    // UiPalette's spectrogramPlot plates, until QML sets them.
+    CrosshairReadout::Colors m_readoutColors{
+        QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
     // The readout laid out with the crosshair, and the one the GUI thread
-    // shows (crosshairReadout).
+    // has (crosshairReadout).
     QString m_crosshairLaidOutReadout;
     QString m_crosshairReadout;
     double m_markerSeconds{-1.0};
@@ -974,6 +1012,9 @@ private:
 
     // Grid overlay state — split into static frequency grid and dynamic time grid.
     bool m_gridEnabled{false};
+    // How far from the right edge the frequency scale's labels reach, in
+    // logical pixels; 0 without any.
+    int m_freqScaleWidth{0};
     bool m_showTimeLabels{false};
 
     // Frequency grid: horizontal lines + labels. Only depends on
