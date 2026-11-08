@@ -2242,6 +2242,24 @@ void SpectrogramItem::setShowCrosshairTime(bool value) {
     update();
 }
 
+QRectF SpectrogramItem::laneHeadBounds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_laneHeadBounds;
+}
+
+void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_laneHeadBounds == value) {
+            return;
+        }
+        m_laneHeadBounds = value;
+        m_crosshairDirty = true;
+    }
+    emit laneHeadBoundsChanged();
+    update();
+}
+
 QColor SpectrogramItem::readoutPlateColor() const {
     QMutexLocker lock(&m_stateMutex);
     return m_readoutColors.fill;
@@ -5323,7 +5341,8 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
         static_cast<int>(std::floor(lineX)), static_cast<int>(std::floor(lineY)),
-        plateFor(valueText), timePlate, m_reservedCorner, rightScale);
+        plateFor(valueText), timePlate, m_reservedCorner, rightScale,
+        m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect());
     QStringList readout;
     if (valueRect.isValid()) {
         m_crosshair.images.push_back({SpectrogramOverlayImage::ReadoutPlate, valueText, 0,

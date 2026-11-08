@@ -47,6 +47,8 @@ Item {
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
+    // What the lowest lane's label and buttons take of it; see PlotLayer.
+    property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
     readonly property int pointerCursorShape: root.interactiveOverlaysVisible
         ? Qt.ArrowCursor
         : Qt.BlankCursor
@@ -317,6 +319,8 @@ Item {
                     // The crosshair's readout is drawn on the plot: the time
                     // on the bottom edge of the lowest lane.
                     showCrosshairTime: index === spectrogramRepeater.count - 1
+                    laneHeadBounds: index === spectrogramRepeater.count - 1
+                        ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
                     readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText

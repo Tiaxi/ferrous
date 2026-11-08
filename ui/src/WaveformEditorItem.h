@@ -61,6 +61,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     // What the controls over the top right corner take of it; see ViewCorner.
     Q_PROPERTY(QSizeF reservedCorner READ reservedCorner WRITE setReservedCorner NOTIFY reservedCornerChanged)
+    // What the lowest lane's label and buttons take of it, from its top
+    // left; the crosshair's time keeps clear of them. Empty without any.
+    Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
     Q_PROPERTY(int viewMode READ viewMode WRITE setViewMode NOTIFY viewModeChanged)
     // Whether each channel, 0 to 63, is muted: a 64-bit mask would lose its
     // low bits as a QML number.
@@ -117,6 +120,8 @@ public:
     void setShowFpsOverlay(bool value);
     QSizeF reservedCorner() const;
     void setReservedCorner(const QSizeF &value);
+    QRectF laneHeadBounds() const;
+    void setLaneHeadBounds(const QRectF &value);
     // Where the FPS counter shows, in this item; empty while it does not.
     QRectF fpsCounterRect() const;
     int viewMode() const;
@@ -175,6 +180,7 @@ signals:
     void crosshairEnabledChanged();
     void showFpsOverlayChanged();
     void reservedCornerChanged();
+    void laneHeadBoundsChanged();
     void viewModeChanged();
     void mutedChannelsChanged();
     void soloedChannelsChanged();
@@ -538,10 +544,13 @@ private:
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
     static QString formatCrosshairTime(double seconds);
+    // The lowest lane's label and buttons, in a plot `height` tall of
+    // `lanes` lanes.
+    QRect lowestLaneHeadLocked(int height, int lanes) const;
     static std::pair<QRect, QRect> crosshairLabelRects(
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight,
-        const QSizeF &reservedCorner = QSizeF());
+        const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect());
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,
@@ -621,6 +630,7 @@ private:
     bool m_crosshairEnabled{false};
     bool m_showFpsOverlay{false};
     QSizeF m_reservedCorner;
+    QRectF m_laneHeadBounds;
     int m_viewMode{0};
     qulonglong m_mutedChannelsMask{0};
     qulonglong m_soloedChannelsMask{0};

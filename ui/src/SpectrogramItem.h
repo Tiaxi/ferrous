@@ -237,6 +237,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // Whether the crosshair's time shows on this pane's bottom edge: on the
     // lowest of a plot's lanes.
     Q_PROPERTY(bool showCrosshairTime READ showCrosshairTime WRITE setShowCrosshairTime NOTIFY showCrosshairTimeChanged)
+    // What this lane's label and buttons take of it, from its top left; the
+    // crosshair's time keeps clear of them. Empty without any.
+    Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
@@ -292,6 +295,8 @@ public:
     QString crosshairReadout() const { return m_crosshairReadout; }
     bool showCrosshairTime() const;
     void setShowCrosshairTime(bool value);
+    QRectF laneHeadBounds() const;
+    void setLaneHeadBounds(const QRectF &value);
     QColor readoutPlateColor() const;
     void setReadoutPlateColor(const QColor &value);
     QColor readoutPlateEdgeColor() const;
@@ -382,6 +387,7 @@ signals:
     void crosshairEnabledChanged();
     void crosshairReadoutChanged();
     void showCrosshairTimeChanged();
+    void laneHeadBoundsChanged();
     void readoutColorsChanged();
     void markerSecondsChanged();
     void markerXChanged();
@@ -989,6 +995,7 @@ private:
     QRect m_crosshairVerticalLineRect;
     QRect m_crosshairHorizontalLineRect;
     bool m_showCrosshairTime{true};
+    QRectF m_laneHeadBounds;
     // UiPalette's spectrogramPlot plates, until QML sets them.
     CrosshairReadout::Colors m_readoutColors{
         QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};

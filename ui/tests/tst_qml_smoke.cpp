@@ -1263,6 +1263,9 @@ private slots:
     void spectrogramCrosshairReadoutClampsInsideTheLane();
     void spectrogramCrosshairReadoutFitsShortLanes_data();
     void spectrogramCrosshairReadoutFitsShortLanes();
+    void crosshairReadoutPlatesFollowThePointerSmoothly_data();
+    void crosshairReadoutPlatesFollowThePointerSmoothly();
+    void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
     void spectrogramCrosshairReadoutReadsEachView_data();
     void spectrogramCrosshairReadoutReadsEachView();
     void spectrogramCrosshairReadoutAcrossAGaplessBoundary();
@@ -9833,10 +9836,28 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
         width, 220, 599, 219, 42, 48, 12, reserved);
     QVERIFY(value.bottom() < time.top());
     QCOMPARE(value.right(), width - 3);
-    // In a plot too short for that, beside it on the line.
+    // In a plot too short for that, the time stops at the level's left.
     const auto [shortValue, shortTime] = WaveformEditorItem::crosshairLabelRects(
         width, 30, 599, 29, 42, 48, 12, reserved);
-    QVERIFY(shortValue.right() < shortTime.left());
+    QVERIFY(shortTime.right() < shortValue.left());
+
+    // The lowest of eight lanes of the per-channel view, 27 px at the
+    // pane's minimum: its head is on its rows, and the time keeps clear.
+    WaveformEditorItem item;
+    item.setLaneHeadBounds(QRectF(4.0, 3.0, 82.0, 26.0));
+    QRect head;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        head = item.lowestLaneHeadLocked(220, 8);
+    }
+    // PlotLanes.top(7, 8, 220): round(192.5) + 1.
+    QCOMPARE(head, QRect(4, 197, 82, 26));
+    for (const int x : {0, 40, 90, 300}) {
+        const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+            width, 220, x, 219, 42, 48, 12, reserved, head);
+        QVERIFY2(!time.intersects(head), qPrintable(QTest::toString(QRectF(time))));
+        QVERIFY(!value.intersects(time));
+    }
 }
 
 void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
@@ -19201,6 +19222,10 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutFitsShortLanes() {
     SpectrogramItem item;
     feedReadoutFixture(item);
     item.setGridEnabled(scaleShown);
+    // The lowest lane's label and its Mute and Solo buttons, as PlotLayer
+    // reports them.
+    const QRectF laneHead(4.0, 3.0, 82.0, 26.0);
+    item.setLaneHeadBounds(laneHead);
     const QSize lane(600, laneHeight);
     const QRectF laneRect(QPointF(0.0, 0.0), QSizeF(lane));
     const double bottom = laneHeight - 0.5;
@@ -19224,14 +19249,264 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutFitsShortLanes() {
         const QRectF time = plates[1].rect;
         const QByteArray where = QByteArray(pointer.where) + ": value "
             + QTest::toString(value) + ", time " + QTest::toString(time);
-        // Both readable: inside the lane, and apart.
+        // Both readable: inside the lane, apart, and clear of its head.
         QVERIFY2(laneRect.contains(value) && laneRect.contains(time), where.constData());
         QVERIFY2(!value.intersects(time), where.constData());
+        QVERIFY2(!time.intersects(laneHead) && !value.intersects(laneHead), where.constData());
         QCOMPARE(time.bottom(), laneHeight - 2.0);
         for (const SpectrogramOverlayImage &label : item.m_freqGrid.images) {
             QVERIFY2(!label.rect.intersects(value) && !label.rect.intersects(time),
                      (where + ", scale label " + QTest::toString(label.rect)).constData());
         }
+    }
+}
+
+void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly_data() {
+    QTest::addColumn<int>("height");
+    QTest::addColumn<bool>("scaleShown");
+    for (const int height : {27, 36, 120, 220}) {
+        for (const bool scaleShown : {false, true}) {
+            QTest::addRow("%d px%s", height, scaleShown ? ", frequency scale" : "")
+                << height << scaleShown;
+        }
+    }
+}
+
+void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
+    // Each plate follows its own line: a pointer moving a pixel moves a
+    // plate a pixel at most, and the plates never meet, in short lanes too.
+    QFETCH(int, height);
+    QFETCH(bool, scaleShown);
+    constexpr int width = 600;
+    const QSize value(66, 22);
+    const QSize time(36, 22);
+    const QRect laneHead(4, 3, 82, 26);
+    CrosshairReadout::RightScale scale;
+    if (scaleShown) {
+        scale.width = 48;
+        scale.reachesBottom = true;
+    }
+    const QRect lane(0, 0, width, height);
+    const QRect scaleColumn(width - scale.width, 0, scale.width, height);
+    QRect lastValue;
+    QRect lastTime;
+    const auto check = [&](int x, int y, bool steppingX) {
+        const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
+            width, height, x, y, value, time, QSizeF(), scale, laneHead);
+        const QByteArray where = QByteArray("pointer at ") + QByteArray::number(x) + ", "
+            + QByteArray::number(y) + ": value " + QTest::toString(QRectF(valueRect))
+            + ", time " + QTest::toString(QRectF(timeRect));
+        if (!(lane.contains(valueRect) && lane.contains(timeRect))
+            || valueRect.intersects(timeRect) || timeRect.intersects(laneHead)
+            || (scaleShown && (valueRect.intersects(scaleColumn)
+                               || timeRect.intersects(scaleColumn)))) {
+            QTest::qFail(where.constData(), __FILE__, __LINE__);
+            return false;
+        }
+        if (!lastValue.isNull()) {
+            const int valueMove = std::abs(valueRect.left() - lastValue.left())
+                + std::abs(valueRect.top() - lastValue.top());
+            const int timeMove = std::abs(timeRect.left() - lastTime.left())
+                + std::abs(timeRect.top() - lastTime.top());
+            // Along x only the time moves; along y only the value.
+            if (valueMove > (steppingX ? 0 : 1) || timeMove > (steppingX ? 1 : 0)) {
+                QTest::qFail(("jumps at " + where).constData(), __FILE__, __LINE__);
+                return false;
+            }
+        }
+        lastValue = valueRect;
+        lastTime = timeRect;
+        return true;
+    };
+    for (const int y : {height - 1, height / 2, 0}) {
+        lastValue = QRect();
+        for (int x = 0; x < width; ++x) {
+            if (!check(x, y, true)) return;
+        }
+        for (int x = width - 1; x >= 0; --x) {
+            if (!check(x, y, true)) return;
+        }
+    }
+    for (const int x : {width - 1, width - 40, width / 2, 0}) {
+        lastValue = QRect();
+        for (int y = 0; y < height; ++y) {
+            if (!check(x, y, false)) return;
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairTimeKeepsClearOfTheLaneHead() {
+    // Six lanes in the pane at its 220 px minimum, with their real heads.
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Window 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Window {
+    id: paletteRoot
+    width: 600
+    height: 240
+    visible: true
+
+    QtObject {
+        id: bridge
+        property string playbackState: "Paused"
+        property int spectrogramViewMode: 1
+        property int spectrogramDisplayMode: 1
+        property real dbRange: 90
+        property bool logScale: false
+        property bool spectrogramFrequencyCap: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: true
+        property bool showSpectrogramScale: true
+        property bool spectrogramZoomEnabled: true
+        property int channelButtonsVisibility: 1
+        property var mutedChannels: []
+        property var soloedChannels: []
+        property bool showLevelMeter: false
+        property string currentTrackPath: ""
+        property bool waveformEndsEarly: false
+        property real waveformCoverageSeconds: 0
+        property var currentTrackChannelLabels: []
+        property bool connected: true
+        property real durationSeconds: 0
+        property int currentTrackChannels: 6
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelSilent(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) {}
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+        function toggleChannelMute(channelIndex) {}
+        function soloChannel(channelIndex) {}
+    }
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    // Above a strip of the window the pointer leaves the plot for.
+    Viewers.SpectrogramSurface {
+        id: surface
+        objectName: "headSpectrogramSurface"
+        width: parent.width
+        height: 220
+        plotWidth: layer.plotWidth
+        laneHeadBounds: layer.lowestLaneHeadBounds
+        uiBridge: bridge
+        uiPalette: palette
+    }
+
+    Viewers.PlotLayer {
+        id: layer
+        objectName: "headPlotLayer"
+        width: parent.width
+        height: 220
+        uiBridge: bridge
+        uiPalette: palette
+        laneCount: surface.laneCount
+        laneLabels: surface.laneLabels
+        hoveredLane: surface.hoveredLane
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    auto *surface = qobject_cast<QQuickItem *>(
+        root->findChild<QObject *>(QStringLiteral("headSpectrogramSurface")));
+    auto *layer = qobject_cast<QQuickItem *>(
+        root->findChild<QObject *>(QStringLiteral("headPlotLayer")));
+    QVERIFY(surface != nullptr && layer != nullptr);
+    QVariantList descriptors;
+    const QStringList labels{QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("C"),
+                             QStringLiteral("LFE"), QStringLiteral("RL"), QStringLiteral("RR")};
+    for (int i = 0; i < labels.size(); ++i) {
+        descriptors.push_back(QVariantMap{
+            {QStringLiteral("label"), labels[i]},
+            {QStringLiteral("showLabel"), true},
+            {QStringLiteral("muted"), false},
+            {QStringLiteral("channelIndex"), i},
+        });
+    }
+    surface->setProperty("channelDescriptors", descriptors);
+
+    // The lowest lane and its head.
+    SpectrogramItem *pane = nullptr;
+    QTRY_VERIFY([&]() {
+        QList<SpectrogramItem *> panes;
+        collectQuickItems(surface, &panes);
+        pane = nullptr;
+        for (SpectrogramItem *candidate : panes) {
+            if (candidate->showCrosshairTime()) pane = candidate;
+        }
+        return panes.size() == 6 && pane != nullptr;
+    }());
+    QVERIFY(pane->height() < 37.0);
+    QQuickItem *head = nullptr;
+    QTRY_VERIFY([&]() {
+        head = nullptr;
+        QList<QQuickItem *> items;
+        collectQuickItems(layer, &items);
+        for (QQuickItem *candidate : items) {
+            if (candidate->objectName() == QStringLiteral("plotLaneHead") && candidate->isVisible()
+                && (head == nullptr || candidate->y() > head->y())) {
+                head = candidate;
+            }
+        }
+        // The sixth lane's, at the pane's bottom.
+        return head != nullptr && head->y() > 180.0;
+    }());
+    // The head's plates in the lane, buttons included while hidden.
+    const QPointF laneOrigin = pane->mapToScene(QPointF(0.0, 0.0));
+    QRectF headPlates;
+    QList<QQuickItem *> headItems;
+    collectQuickItems(head, &headItems);
+    for (QQuickItem *plate : headItems) {
+        if (plate->objectName() == QStringLiteral("plotLaneLabel")
+            || plate->objectName() == QStringLiteral("plotLaneButtons")) {
+            headPlates |= plate->mapRectToScene(QRectF(0.0, 0.0, plate->width(), plate->height()))
+                .translated(-laneOrigin);
+        }
+    }
+    QVERIFY(headPlates.width() > 40.0);
+    QTRY_VERIFY(pane->laneHeadBounds().contains(headPlates));
+
+    constexpr int bins = 4'097;
+    constexpr int columns = 2'000;
+    pane->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, 0, columns, 0, columns,
+                               48'000, 1'024, true, true, 1, false);
+    QTRY_VERIFY(pane->precomputedReady());
+    const auto platesAt = [&](const QPoint &at) {
+        QTest::mouseMove(window, at);
+        QVector<SpectrogramOverlayImage> plates;
+        const bool laidOut = QTest::qWaitFor([&]() {
+            QMutexLocker lock(&pane->m_stateMutex);
+            plates = readoutPlatesOf(pane->m_crosshair);
+            return plates.size() == 2 && !pane->m_crosshairDirty
+                && std::abs(pane->m_hoverPosition.x() - (at.x() - laneOrigin.x())) < 0.01;
+        }, 5'000);
+        return laidOut ? plates : QVector<SpectrogramOverlayImage>();
+    };
+    const int bottom = static_cast<int>(laneOrigin.y() + pane->height()) - 1;
+    for (const QPoint at : {QPoint(2, bottom), QPoint(30, bottom), QPoint(70, bottom),
+                            QPoint(300, bottom), QPoint(597, bottom)}) {
+        const QVector<SpectrogramOverlayImage> plates = platesAt(at);
+        QCOMPARE(plates.size(), 2);
+        const QByteArray where = QTest::toString(at) + QByteArray(": value ")
+            + QTest::toString(plates[0].rect) + ", time " + QTest::toString(plates[1].rect)
+            + ", head " + QTest::toString(headPlates);
+        QVERIFY2(!plates[1].rect.intersects(headPlates), where.constData());
+        QVERIFY2(!plates[0].rect.intersects(plates[1].rect), where.constData());
+        QVERIFY2(QRectF(0.0, 0.0, pane->width(), pane->height()).contains(plates[1].rect),
+                 where.constData());
     }
 }
 

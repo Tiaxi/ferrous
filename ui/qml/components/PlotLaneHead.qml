@@ -33,6 +33,16 @@ Item {
     // overhangs it above and below.
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
+    // What the head takes of its lane, from its own top left, with the
+    // plates' 1 px edges. The buttons count while they can show, so that it
+    // stays the same as they reveal and hide.
+    readonly property rect occupiedBounds: {
+        const top = (buttons.visible ? Math.min(0, buttons.y) : 0) - 1
+        const bottom = (buttons.visible
+            ? Math.max(labelPlate.height, buttons.y + buttons.height)
+            : labelPlate.height) + 1
+        return Qt.rect(-1, top, root.implicitWidth + 2, bottom - top)
+    }
     width: implicitWidth
     height: implicitHeight
 

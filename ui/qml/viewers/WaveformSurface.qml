@@ -18,6 +18,8 @@ Item {
     property bool interactiveOverlaysVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
+    // What the lowest lane's label and buttons take of it; see PlotLayer.
+    property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
     // The plot's width: the level meter's column takes the rest.
     property real plotWidth: root.width
     // A time of the track to follow, such as where its file is cut off, or
@@ -81,6 +83,7 @@ Item {
             && root.interactiveOverlaysVisible
         showFpsOverlay: root.uiBridge.showFps
         reservedCorner: root.reservedCorner
+        laneHeadBounds: root.laneHeadBounds
         viewMode: root.uiBridge.spectrogramViewMode
         channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
         markerSeconds: root.markerSeconds
