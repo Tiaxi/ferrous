@@ -35,6 +35,9 @@ Item {
     property var pointerActivity: null
     // What the viewer keeps clear on the right of the mode switch.
     property real trailingInset: 0
+    // What the viewer keeps clear along the top edge, under its title strip:
+    // the mode switch and the lane heads keep below it.
+    property real topInset: 0
     // Whether the plot waits for the track's analysis.
     property bool analysing: false
     // Where the plot draws markerSeconds, NaN while it does not.
@@ -82,7 +85,7 @@ Item {
         z: 2
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.topMargin: 4
+        anchors.topMargin: root.topInset + 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
         visible: root.controlsVisible
         revealed: root.paneHovered || root.hoveredLane >= 0 || modeSwitch.pointerHovered
@@ -102,7 +105,7 @@ Item {
             required property int index
             objectName: "plotLaneHead"
             x: 5
-            y: root.laneTop(index) + 5
+            y: Math.max(root.laneTop(index), root.topInset) + 5
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette

@@ -1608,6 +1608,7 @@ ApplicationWindow {
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             trailingInset: viewerController.spectrogramViewerOpen
                 ? spectrogramViewerShell.reservedCorner.width : 0
+            topInset: spectrogramViewerShell.controlsTopInset
             laneCount: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.laneCount : waveformSurface.laneCount
             laneLabels: visualizationSurface.spectrogramShown
@@ -1701,8 +1702,9 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         fileInfo: viewerController.albumArtViewerFileInfo
         sourceKind: viewerController.albumArtSourceKind
-        // In the main window, clear of the viewer's controls over the art.
-        infoTopInset: root.useWholeScreenViewerMode ? 0 : 32
+        // Clear of the viewer's controls over the art: the plate in the main
+        // window, or the title strip over the whole screen.
+        infoTopInset: root.useWholeScreenViewerMode ? albumArtViewerShell.stripHeight : 32
     }
 
     Item {

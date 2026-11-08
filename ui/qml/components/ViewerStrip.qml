@@ -2,21 +2,27 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
-// The title strip of a viewer over the whole screen: 32 px of chrome with a
-// hairline under it. On the left the playing track's title (semibold),
+// The title strip of a viewer over the whole screen: a 32 px band over the
+// top edge of the view, with a 1 px edge under it, in the colours of the
+// plot it sits on (UiPalette's PlotColors), so it reads over the plot or
+// the art alike. On the left the playing track's title (semibold),
 // "Artist — Album" and "1:17 / 3:49"; on the right flat 24 px tool
 // buttons: a zoom readout and Reset while the view is zoomed, the new
 // issues while there are any, the viewer's own buttons (declared inside
-// the strip) and Close. The buttons follow the auto-hide of the viewer's
-// controls; the strip itself stays, so the view under it never resizes.
+// the strip, from the left, each taking the strip's `plotColors`) and
+// Close. The whole strip shows and hides with the viewer's controls,
+// fading as they do; it is drawn over the view, which never resizes for it.
 Rectangle {
     id: root
 
     required property var uiPalette
+    required property var plotColors
     required property var closeViewer
     // The playing track; none without it.
     property var uiBridge: null
@@ -34,6 +40,16 @@ Rectangle {
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own buttons, before Close.
     default property alias viewerControls: controls.viewerControls
+    // Whether keyboard focus is on one of the strip's buttons, which keeps
+    // the viewer's controls shown.
+    readonly property bool focusInside: {
+        for (let item = root.Window.activeFocusItem; item; item = item.parent) {
+            if (item === root) {
+                return true
+            }
+        }
+        return false
+    }
 
     readonly property var track: root.uiBridge || ({})
     readonly property bool stopped: (root.track.playbackState || "Stopped") === "Stopped"
@@ -59,7 +75,20 @@ Rectangle {
             FormatUtils.clockText(root.track.durationText))
 
     implicitHeight: 33
-    color: root.uiPalette.chrome
+    color: root.plotColors.plotPlate
+    opacity: root.controlsVisible ? 1 : 0
+    // Shown at once, so the key that brings the controls back can move
+    // focus to them; it fades out, and hidden it takes no pointer.
+    visible: root.controlsVisible || opacity > 0
+
+    // Kirigami's durations are 0 with animations turned off.
+    Behavior on opacity {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
 
     Accessible.role: Accessible.ToolBar
     Accessible.name: I18n.i18nc("@label", "Viewer")
@@ -101,7 +130,7 @@ Rectangle {
             text: root.titleText
             visible: text.length > 0
             font.weight: Font.DemiBold
-            color: root.uiPalette.text
+            color: root.plotColors.plotText
             elide: Text.ElideRight
         }
 
@@ -112,7 +141,7 @@ Rectangle {
             width: Math.min(implicitWidth, Math.max(0, track.textRoom - titleLabel.width))
             text: root.artistAlbumText
             visible: text.length > 0 && root.titleText.length > 0
-            color: root.uiPalette.textSecondary
+            color: root.plotColors.plotTextSecondary
             elide: Text.ElideRight
         }
 
@@ -122,7 +151,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             text: root.timeText
             visible: text.length > 0
-            color: root.uiPalette.textSecondary
+            color: root.plotColors.plotTextSecondary
             font.features: root.uiPalette.tabularFigures
         }
     }
@@ -134,8 +163,8 @@ Rectangle {
         anchors.rightMargin: 4
         y: 4
         uiPalette: root.uiPalette
+        plotColors: root.plotColors
         closeViewer: root.closeViewer
-        controlsVisible: root.controlsVisible
         zoomLevel: root.zoomLevel
         resetView: root.resetView
         resetToolTip: root.resetToolTip
@@ -149,6 +178,6 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 1
-        color: root.uiPalette.hairline
+        color: root.plotColors.plotPlateEdge
     }
 }

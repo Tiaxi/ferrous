@@ -46,12 +46,19 @@ Item {
     // What the visualization keeps clear of in its top right corner: in the
     // main window, the viewer's controls, with the plot layer's mode switch
     // 4 px left of them; over the whole screen nothing, as the controls are
-    // in the title strip above the view. It does not change as they
-    // auto-hide.
+    // in the title strip. It does not change as they auto-hide.
     readonly property size reservedCorner: root.useWholeScreenViewerMode
         ? Qt.size(0, 0)
         : Qt.size(popupControls.width + 4,
                   popupControls.anchors.topMargin + popupControls.height)
+    // How far the visualization's controls, such as its mode switch and the
+    // first lane's Mute and Solo, keep below its top edge: over the whole
+    // screen, the title strip's height. They show only with the viewer's
+    // controls, so with the strip over the top edge; they keep there while
+    // it is hidden, rather than move each time it shows. What only reads,
+    // such as the time scale, stays on the edge and shows while it is hidden.
+    readonly property real controlsTopInset: root.wholeScreenOpen && root.fullscreenWindow
+        ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
@@ -321,11 +328,10 @@ Item {
                         fullscreenControlsAutoHide.wake()
                     }
 
-                    // The view, under the title strip. The strip never hides,
-                    // so the view keeps its size as the controls auto-hide.
+                    // The view, over the whole window: the title strip is
+                    // drawn over its top edge.
                     Rectangle {
                         anchors.fill: parent
-                        anchors.topMargin: spectrogramStrip.height
                         color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
                         MouseArea {
@@ -363,7 +369,9 @@ Item {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
+                        z: 1
                         uiPalette: root.uiPalette
+                        plotColors: root.uiPalette.plotColors(root.visualizationMode)
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "spectrogramFullscreenCloseButton"

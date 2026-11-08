@@ -45,6 +45,22 @@ Item {
     readonly property bool wholeScreenVisible: root.fullscreenWindow !== null
         && root.fullscreenWindow.visibility === Window.FullScreen
     readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
+    // The title strip's height over the whole screen, which it takes of the
+    // art's top edge while it shows.
+    readonly property real stripHeight: root.fullscreenWindow
+        ? root.fullscreenWindow.strip.implicitHeight : 0
+    property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
+    readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+
+    // Over the whole screen, the title strip hides while the pointer rests,
+    // as the visualization viewer's does, and stays while one of its buttons
+    // has keyboard focus. In the main window, the controls stay.
+    Components.FullscreenControlsAutoHide {
+        id: fullscreenControlsAutoHide
+        objectName: "albumArtFullscreenControlsAutoHide"
+        active: root.wholeScreenOpen
+        held: root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
+    }
 
     // Made the first time the viewer opens over the whole screen and kept,
     // hidden while the viewer is closed, as the visualization viewer's is.
@@ -218,6 +234,8 @@ Item {
                 objectName: "albumArtFullscreenWindow"
                 readonly property Item host: albumArtWindowHost
                 readonly property Item focusSink: albumArtFullscreenFocusSink
+                readonly property Item viewFocus: albumArtFullscreenViewFocus
+                readonly property Item strip: albumArtStrip
                 screen: root.windowRoot.screen
                 transientParent: root.windowRoot
                 modality: Qt.ApplicationModal
@@ -256,11 +274,29 @@ Item {
                     anchors.fill: parent
                     focus: albumArtFullscreenWindow.visibility === Window.FullScreen
 
+                    // Takes focus from the strip when the art is pressed.
+                    Item {
+                        id: albumArtFullscreenViewFocus
+                        objectName: "albumArtFullscreenViewFocus"
+                        focus: true
+                    }
+
+                    // The pointer anywhere in the viewer brings the strip
+                    // back; the art keeps its own hover.
+                    HoverHandler {
+                        onPointChanged: fullscreenControlsAutoHide.pointerMoved(
+                            point.scenePosition.x, point.scenePosition.y)
+                    }
+
+                    // Any key brings the strip back, so Tab reaches it.
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Escape) {
                             event.accepted = true
                             root.closeViewer()
-                        } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+                            return
+                        }
+                        fullscreenControlsAutoHide.wake()
+                        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
                             event.accepted = true
                             root.switchComparisonImage()
                         } else if (event.key === Qt.Key_Menu
@@ -270,14 +306,27 @@ Item {
                         }
                     }
 
-                    // The art, under the title strip.
+                    // The art, over the whole window: the title strip is
+                    // drawn over its top edge.
                     Item {
                         anchors.fill: parent
-                        anchors.topMargin: albumArtStrip.height
 
                         Item {
                             id: albumArtWindowHost
                             anchors.fill: parent
+                        }
+
+                        // A press anywhere on the art takes the focus from
+                        // the strip, so it can hide again, then goes on to
+                        // the art.
+                        MouseArea {
+                            anchors.fill: parent
+                            z: 1
+                            acceptedButtons: Qt.AllButtons
+                            onPressed: function(mouse) {
+                                albumArtFullscreenViewFocus.forceActiveFocus(Qt.MouseFocusReason)
+                                mouse.accepted = false
+                            }
                         }
                     }
 
@@ -287,10 +336,15 @@ Item {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top
+                        z: 1
                         uiPalette: root.uiPalette
+                        // The art is on the view colour, as the waveform is.
+                        plotColors: root.uiPalette.waveformPlot
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
+                        controlsVisible: root.fullscreenControlsVisible
+                        pointerActivity: fullscreenControlsAutoHide.pointerMoved
                         zoomLevel: root.zoomLevel
                         resetView: root.resetView
                         resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Screen")
@@ -299,6 +353,7 @@ Item {
 
                         InfoButton {
                             objectName: "albumArtFullscreenInfoButton"
+                            plotColors: albumArtStrip.plotColors
                         }
                     }
                 }

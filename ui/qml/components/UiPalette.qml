@@ -117,6 +117,9 @@ QtObject {
         // the plate, and its glyph or letter, at least 4.5:1 on the fill.
         required property color checkedFill
         required property color checkedGlyph
+        // A checked flat button's tint, as on a viewer's title strip: the
+        // selection's mix on the plot's floor.
+        required property color checkedTint
         // A tool button's keyboard focus ring, at least 3:1 on the plate.
         required property color plotFocusRing
     }
@@ -144,6 +147,8 @@ QtObject {
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         checkedFill: root.accent
         checkedGlyph: spectrogramColors.plotBg
+        // The dark theme's selection, on the floor.
+        checkedTint: ColorUtils.mixColor(spectrogramColors.plotBg, root.accent, 0.26)
         // The dark theme's focus ring, as the plot is dark in both.
         plotFocusRing: root._withHslLightness(root.accent, 1.03, 0.686)
     }
@@ -175,6 +180,7 @@ QtObject {
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing
         checkedGlyph: root.themeIsDark ? root.view : "#ffffff"
+        checkedTint: root.selection
         plotFocusRing: root.focusRing
     }
 

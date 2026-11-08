@@ -2,26 +2,26 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The controls of a viewer, as flat 24 px tool buttons 4 px apart on the
-// window's colours: a quiet zoom readout and Reset while the view is zoomed,
-// a button to Recent Issues while there are new ones (the viewer covers
-// the status bar), the viewer's own buttons (declared inside) and Close.
-// They fade out as the viewer's controls auto-hide.
+// window's colours, or with `plotColors` on the plot's: a quiet zoom readout
+// and Reset while the view is zoomed, a button to Recent Issues while there
+// are new ones (the viewer covers the status bar), the viewer's own buttons
+// (declared inside, which take `plotColors` themselves) and Close.
 //
 // The items are placed by bindings rather than a Row: a positioner places
 // an item that has just appeared only when the window next draws, so the
-// readout and Reset would show where they were last until then. Hiding with
-// the auto-hide leaves the width as it is, so nothing beside them moves.
+// readout and Reset would show where they were last until then.
 Item {
     id: root
 
     required property var uiPalette
     required property var closeViewer
-    property bool controlsVisible: true
+    // The plot's colours (UiPalette's PlotColors), or null for the window's.
+    property var plotColors: null
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
@@ -42,18 +42,6 @@ Item {
 
     implicitWidth: closeButton.x + closeButton.width
     implicitHeight: 24
-    opacity: root.controlsVisible ? 1 : 0
-    // Shown at once, so the key that brings the controls back can move
-    // focus to them; they fade out.
-    visible: root.controlsVisible || opacity > 0
-
-    Behavior on opacity {
-        enabled: Kirigami.Units.shortDuration > 0
-        NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
-        }
-    }
 
     // Quiet: only while the view is zoomed.
     Label {
@@ -68,7 +56,7 @@ Item {
             Math.round(root.zoomLevel * 100))
         font.pointSize: root.uiPalette.smallPointSize
         font.features: root.uiPalette.tabularFigures
-        color: root.uiPalette.textSecondary
+        color: root.plotColors ? root.plotColors.plotTextSecondary : root.uiPalette.textSecondary
     }
 
     Components.ViewerToolButton {
@@ -77,6 +65,7 @@ Item {
         x: readout.x + (root.readoutShown ? readout.width + root.spacing : 0)
         visible: root.resetShown
         uiPalette: root.uiPalette
+        plotColors: root.plotColors
         display: AbstractButton.TextOnly
         text: I18n.i18nc("@action:button reset the view's zoom", "Reset")
         toolTipText: root.resetToolTip
@@ -89,12 +78,19 @@ Item {
         x: resetButton.x + (root.resetShown ? resetButton.width + root.spacing : 0)
         visible: root.issuesShown
         uiPalette: root.uiPalette
+        plotColors: root.plotColors
         text: I18n.i18ncp("@action:button", "%1 new issue", "%1 new issues",
             root.unseenIssueCount)
         toolTipText: I18n.i18nc("@info:tooltip %1 is the issue count", "%1: Show Recent Issues",
             text)
         icon.name: Qt.resolvedUrl("../assets/status-warning.svg")
-        glyphColor: root.uiPalette.negative
+        // The window's negative is lightened on dark and darkened on light:
+        // on a plot of the other brightness, such as the spectrogram's black
+        // in a light theme, the glyph is the plot's text instead.
+        glyphColor: !root.plotColors
+                || (ColorUtils.colorLuma(root.plotColors.plotBg) < 0.45) === root.uiPalette.themeIsDark
+            ? root.uiPalette.negative
+            : root.plotColors.plotText
         onClicked: root.errorController.historyRequested()
     }
 
@@ -113,6 +109,7 @@ Item {
         objectName: root.closeButtonName
         x: viewerControlsRow.x + (root.viewerControlsShown ? viewerControlsRow.implicitWidth + root.spacing : 0)
         uiPalette: root.uiPalette
+        plotColors: root.plotColors
         text: I18n.i18nc("@action:button", "Close")
         icon.name: "window-close"
         onClicked: root.closeViewer()
