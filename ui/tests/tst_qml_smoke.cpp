@@ -19028,6 +19028,40 @@ void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
         QCOMPARE(image.kind, SpectrogramOverlayImage::ScaleLabel);
     }
+    // No label within 34 px of the top, where the lane's label and the mode
+    // switch are; nor, with the corner's controls further down, as below a
+    // viewer's title strip, within 2 px of their bottom.
+    const auto topLabel = [&item](int height) {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(height);
+        item.updateFreqGridOverlayLocked(200, height);
+        double top = height;
+        for (const SpectrogramOverlayImage &image : item.m_freqGrid.images) {
+            top = std::min(top, image.rect.top());
+        }
+        return top;
+    };
+    bool cornerMattered = false;
+    for (int height = 120; height <= 800; height += 20) {
+        item.setReservedCorner(QSizeF());
+        const double bare = topLabel(height);
+        QVERIFY2(bare >= 34.0, qPrintable(QString::number(height)));
+        item.setReservedCorner(QSizeF(60, 32));
+        QCOMPARE(topLabel(height), bare);
+        item.setReservedCorner(QSizeF(60, 65));
+        QVERIFY(item.m_freqGridDirty);
+        const double belowStrip = topLabel(height);
+        QVERIFY2(belowStrip >= 67.0, qPrintable(QStringLiteral("%1: %2").arg(height).arg(belowStrip)));
+        cornerMattered = cornerMattered || bare < 67.0;
+    }
+    // Some lane had a label where the lower corner is.
+    QVERIFY(cornerMattered);
+    item.setReservedCorner(QSizeF());
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.ensureMapping(100);
+        item.updateFreqGridOverlayLocked(200, 100);
+    }
     // The time scale is the first lane's, along its top.
     QVERIFY(!item.m_timeGrid.valid);
     {

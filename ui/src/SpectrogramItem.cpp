@@ -5249,8 +5249,11 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
     const int tickWidth = devicePixels(6.0, scale);
     constexpr int kLabelGap = 10;
     // Labels this close to the lane's top, where its label and the mode
-    // switch are, are left out.
+    // switch are, are left out: 34 px, or 2 px past the controls in the
+    // corner when they reach further down, as below a viewer's title strip.
     constexpr int kTopClearance = 34;
+    const int topClearance = std::max(
+        kTopClearance, static_cast<int>(std::ceil(m_reservedCorner.height())) + 2);
     // A label's height and 12 px: 5 kHz apart in a lane of about 125 px.
     const int minPixelSpacing = scaleLabelSize(QStringLiteral("0")).height() + 12;
 
@@ -5282,7 +5285,7 @@ void SpectrogramItem::updateFreqGridOverlayLocked(int width, int height) {
         const QString label = formatFrequencyLabel(freq);
         const QSize size = scaleLabelSize(label);
         const int labelY = static_cast<int>(std::round(pixelY / scale)) - size.height() / 2;
-        if (labelY < kTopClearance || labelY + size.height() > logicalHeight) {
+        if (labelY < topClearance || labelY + size.height() > logicalHeight) {
             continue;
         }
         prevPixelY = pixelY;
