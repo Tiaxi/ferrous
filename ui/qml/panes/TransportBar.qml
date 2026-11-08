@@ -313,11 +313,12 @@ ToolBar {
             readonly property bool durationKnown: root.uiBridge.durationSeconds > 1.0
             readonly property bool seekAllowed: durationKnown
                 && root.uiBridge.playbackState !== "Stopped"
-            // The bar: 28 px, with the 20 px playhead and the ±7 px
-            // waveform in its middle.
+            // The bar: 28 px, with the ±12 px waveform in its middle and
+            // the playhead across its height, 2 px past the waveform's
+            // peaks on either side.
             readonly property real boxHeight: 28
-            readonly property real playheadHeight: 20
-            readonly property real waveformHeight: 14
+            readonly property real playheadHeight: boxHeight
+            readonly property real waveformHeight: 24
             readonly property real windowDevicePixelRatio: root.windowDevicePixelRatio
             // The whole device pixels the bar holds. Rounded down, so the
             // playhead, which they place, never reaches past the bar's end.
@@ -449,7 +450,7 @@ ToolBar {
                     objectName: "seekWaveform"
                     x: 0
                     width: parent.width
-                    // ±7 px about the middle, on whole device pixels.
+                    // ±12 px about the middle, on whole device pixels.
                     y: root.snapped((parent.height - seekSlider.waveformHeight) / 2)
                     height: seekSlider.waveformHeight
                     visible: root.uiBridge.playbackState !== "Stopped"

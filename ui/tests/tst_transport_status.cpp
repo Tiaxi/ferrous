@@ -379,7 +379,7 @@ QColor pixelAt(const QImage &image, const QPointF &scenePoint, qreal scale) {
                             static_cast<int>(std::floor(scenePoint.y() * scale)));
 }
 
-// Full-scale peaks: the waveform fills its ±7 px everywhere.
+// Full-scale peaks: the waveform fills its ±12 px everywhere.
 QByteArray fullScalePeaks() {
     return QByteArray(800, static_cast<char>(255));
 }
@@ -475,9 +475,10 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QCOMPARE(seekRect.left(), 4.0 + 4 * 32.0 + 3 * 4.0 + 16.0);
     QCOMPARE(seekRect.height(), 28.0);
     QCOMPARE(seekRect.top() - top, 10.0);
-    // The waveform is ±7 px about the bar's middle.
-    QCOMPARE(waveform->height(), 14.0);
+    // The waveform is ±12 px about the bar's middle, 2 px from its edges.
+    QCOMPARE(waveform->height(), 24.0);
     QCOMPARE(sceneRect(waveform).center().y(), seekRect.center().y());
+    QCOMPARE(sceneRect(waveform).top() - seekRect.top(), 2.0);
     QCOMPARE(sceneRect(waveform).width(), seekRect.width());
     const QRectF timeRect = sceneRect(time);
     QCOMPARE(timeRect.left(), seekRect.right() + 16.0);
@@ -563,9 +564,9 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
 
 // The played part is `wave` mixed 12% toward the chrome (dark) or 20%
 // toward the text (light); the unplayed part is it at 50% or 62%, which is
-// at least 3:1 on the chrome. The playhead is a 2 px amber line with a
-// casing on each side that stands apart from the played part. Measured in
-// the drawn window.
+// at least 3:1 on the chrome. The playhead is a 2 px amber line across the
+// 28 px bar, past the ±12 px waveform, with a casing on each side that
+// stands apart from the played part. Measured in the drawn window.
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QFETCH(int, scheme);
     QFETCH(double, measured);
@@ -603,7 +604,7 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QVERIFY(sameColor(line->property("color").value<QColor>(), harness.token("now")));
     QVERIFY(sameColor(casing->property("color").value<QColor>(),
                       dark ? QColor::fromRgbF(0, 0, 0, 0.6f) : QColor::fromRgbF(1, 1, 1, 0.85f)));
-    QCOMPARE(line->height(), 20.0);
+    QCOMPARE(line->height(), 28.0);
     QCOMPARE(line->width(), 2.0);
 
     QTest::qWait(50);
@@ -629,6 +630,19 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QVERIFY2(channelDistance(drawnUnplayed, expectedUnplayed) <= 2,
              qPrintable(drawnUnplayed.name() + QStringLiteral(" vs ") + expectedUnplayed.name()));
     QVERIFY2(channelDistance(drawnLine, harness.token("now")) <= 1, qPrintable(drawnLine.name()));
+    // Full-scale peaks reach the waveform's top and bottom rows, played
+    // and unplayed, and the bar is the chrome just outside them.
+    for (const qreal y : {wave_.top() + 0.5, wave_.bottom() - 0.5}) {
+        const QColor playedEdge = pixelAt(image, QPointF(wave_.left() + wave_.width() * 0.25, y), scale);
+        const QColor unplayedEdge = pixelAt(image, QPointF(wave_.left() + wave_.width() * 0.75, y), scale);
+        QVERIFY2(channelDistance(playedEdge, expectedPlayed) <= 2, qPrintable(playedEdge.name()));
+        QVERIFY2(channelDistance(unplayedEdge, mixed(chrome, expectedPlayed, opacity)) <= 2,
+                 qPrintable(unplayedEdge.name()));
+    }
+    for (const qreal y : {wave_.top() - 0.5, wave_.bottom() + 0.5}) {
+        const QColor outside = pixelAt(image, QPointF(wave_.left() + wave_.width() * 0.25, y), scale);
+        QVERIFY2(channelDistance(outside, chrome) <= 1, qPrintable(outside.name()));
+    }
 
     // The unplayed part is at least 3:1 on the chrome, as the design
     // measured it (3.35:1 dark, 3.16:1 light), and the played part more.
