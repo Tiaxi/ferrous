@@ -34,6 +34,12 @@ QtObject {
     // The viewer was closed during a preview, by Back to Results, Escape or
     // Close: the results show again.
     signal albumArtPreviewClosed()
+    // Set while the viewer shows a cover applied from a preview to an album
+    // playback had moved on from: the applied image, until the track
+    // changes from the one playing then, when the viewer follows playback
+    // again.
+    property bool albumArtShowsAppliedCover: false
+    property string albumArtAppliedDuringTrack: ""
     // Where the album art viewer's image is from: "itunes" for a candidate
     // from the iTunes artwork search, "embedded" for art the track's file
     // holds, "folder" for an image beside the music.
@@ -53,6 +59,7 @@ QtObject {
             return
         }
         root.albumArtViewerOpen = false
+        root.albumArtShowsAppliedCover = false
         root.comparisonModeAvailable = false
         root.comparisonCurrentSource = ""
         root.comparisonCurrentInfoSource = ""
@@ -113,6 +120,7 @@ QtObject {
         root.albumArtViewerSource = root.uiBridge.currentTrackCoverPath || ""
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
         root.albumArtViewerShowsCurrentTrack = true
+        root.albumArtShowsAppliedCover = false
         root.albumArtInfoVisible = false
         root.albumArtViewResetToken += 1
         root.albumArtViewerFileInfo = ({})
@@ -129,10 +137,12 @@ QtObject {
         root.albumArtPreviewActive = true
     }
 
-    // Ends a preview from Replace from iTunes. After Apply, the viewer shows
-    // the current art, which becomes the applied cover once the album has
-    // it; otherwise it shows what it showed before the preview.
-    function endAlbumArtPreview(applied) {
+    // Ends a preview from Replace from iTunes. After Apply to the playing
+    // album, the viewer shows its art, which becomes the applied cover once
+    // the album has it. After Apply to an album playback has moved on from,
+    // it shows `appliedSource`, the applied image, until the track changes.
+    // Otherwise it shows what it showed before the preview.
+    function endAlbumArtPreview(applied, appliedSource) {
         if (!root.albumArtPreviewActive) {
             return
         }
@@ -142,9 +152,12 @@ QtObject {
             root.closeAlbumArtViewer()
             return
         }
-        root.albumArtViewerSource = coverSource
-        root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(coverSource)
-        root.albumArtViewerShowsCurrentTrack = true
+        const showsApplied = applied && (appliedSource || "").length > 0
+        root.albumArtViewerSource = showsApplied ? appliedSource : coverSource
+        root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
+        root.albumArtViewerShowsCurrentTrack = !showsApplied
+        root.albumArtShowsAppliedCover = showsApplied
+        root.albumArtAppliedDuringTrack = showsApplied ? (root.uiBridge.currentTrackPath || "") : ""
         root.comparisonModeAvailable = false
         root.comparisonCurrentSource = ""
         root.comparisonCurrentInfoSource = ""
@@ -191,6 +204,7 @@ QtObject {
         if (currentSource.length === 0) {
             return
         }
+        root.albumArtShowsAppliedCover = false
         root.albumArtViewerSource = currentSource
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(currentSource)
         root.albumArtViewerShowsCurrentTrack = true
@@ -216,6 +230,7 @@ QtObject {
         if (previewSource.length === 0) {
             return
         }
+        root.albumArtShowsAppliedCover = false
         root.albumArtViewerSource = previewSource
         root.albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || ""))
             || PathUtils.pathFromAnyUrl(previewSource)
@@ -295,6 +310,13 @@ QtObject {
     }
 
     function handleSnapshotChanged() {
+        // An applied cover shows until the track changes; then the viewer
+        // follows playback again.
+        if (root.albumArtShowsAppliedCover
+                && (root.uiBridge.currentTrackPath || "") !== root.albumArtAppliedDuringTrack) {
+            root.albumArtShowsAppliedCover = false
+            root.albumArtViewerShowsCurrentTrack = true
+        }
         // A preview's current art is the searched album's, also once
         // playback has moved on.
         if (root.albumArtViewerOpen

@@ -1620,6 +1620,7 @@ private slots:
     void itunesPreviewAppliesOrGoesBackToTheResults();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
+    void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
     void viewerControlsStayWhileOneHasFocus();
     void albumArtDetailsLieOverTheArt();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -28296,6 +28297,82 @@ void TransportInputSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybac
     QVERIFY(!dialog->property("previewShown").toBool());
     QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
+}
+
+void TransportInputSmokeTest::itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn() {
+    QTemporaryDir dir;
+    QTemporaryDir otherDir;
+    QTemporaryDir nextDir;
+    QVERIFY(dir.isValid() && otherDir.isValid() && nextDir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QString otherCoverUrl = QUrl::fromLocalFile(savedCover(otherDir, 40, 40)).toString();
+    const QString nextCoverUrl = QUrl::fromLocalFile(savedCover(nextDir, 32, 32)).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    QCOMPARE(fixture.size(), 3);
+    const QString appliedUrl = fixture.at(1).toMap().value(QStringLiteral("normalizedUrl")).toString();
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+    QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+    QVERIFY(fake != nullptr);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    const auto playTrack = [bridge](const QString &path, const QString &cover) {
+        bridge->setProperty("currentTrackPath", path);
+        bridge->setProperty("currentTrackCoverPath", cover);
+        QMetaObject::invokeMethod(bridge, "snapshotChanged");
+    };
+    const auto viewerSource = [viewer]() { return viewer->property("albumArtViewerSource").toString(); };
+
+    for (const QString &otherCover : {otherCoverUrl, QString()}) {
+        const QByteArray at = otherCover.isEmpty() ? "next album without art" : "next album with art";
+        // The suggestions are for album A, which has art; playback then
+        // moves on to album B.
+        setPlayingTrack(bridge);
+        playTrack(QStringLiteral("/music/Morning Tide Field.flac"), coverUrl);
+        QVERIFY2(openItunesArtworkDialog(window, dialog, fake, fixture, QVariantMap{
+            {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+            {QStringLiteral("album"), QStringLiteral("Small Hours")},
+            {QStringLiteral("coverPath"), coverUrl},
+        }), at.constData());
+        playTrack(QStringLiteral("/music/Elsewhere/01 Lantern Rows.flac"), otherCover);
+
+        // Apply from the preview, past the question: the viewer shows the
+        // cover applied to A, not B's art, nor nothing.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+        QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton")) != nullptr
+                         && visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton"))->isEnabled(),
+                     at.constData());
+        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+                     at.constData());
+        QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+        QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{1}));
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
+        QVERIFY(viewer->property("albumArtViewerOpen").toBool());
+        QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
+        QCOMPARE(viewerSource(), appliedUrl);
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupBackButton")) == nullptr,
+                     at.constData());
+
+        // It stays while B plays on, and follows playback at the next track.
+        QMetaObject::invokeMethod(bridge, "snapshotChanged");
+        QCOMPARE(viewerSource(), appliedUrl);
+        playTrack(QStringLiteral("/music/Elsewhere/02 Harbour Steps.flac"), nextCoverUrl);
+        QTRY_COMPARE(viewerSource(), nextCoverUrl);
+        QVERIFY(viewer->property("albumArtViewerShowsCurrentTrack").toBool());
+        playTrack(QStringLiteral("/music/Elsewhere/03 Low Tide.flac"), otherCoverUrl);
+        QTRY_COMPARE(viewerSource(), otherCoverUrl);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY2(!viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        fake->setProperty("appliedItunesArtwork", QVariantList{});
+    }
 }
 
 void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {

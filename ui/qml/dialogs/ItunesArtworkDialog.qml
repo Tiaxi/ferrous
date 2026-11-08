@@ -20,7 +20,8 @@ Dialog {
     // art, or of the current art; each returns whether the preview opened.
     required property var openAlbumArtViewerForSuggestion
     required property var openAlbumArtViewerForCurrentArt
-    // Ends the viewer's preview; with true, after Apply.
+    // Ends the viewer's preview; with true, after Apply, and the applied
+    // image when playback has moved on from the album it went to.
     required property var endAlbumArtPreview
     // Where the viewer is, which a question asked from its preview shows
     // over: its window over the whole screen, or the main window's overlay.
@@ -162,15 +163,20 @@ Dialog {
         root.applySuggestion(root.previewIndex)
     }
 
-    // After Apply: the dialog closes, and a viewer showing its preview goes
-    // on to show the applied cover.
-    function finishAfterApply() {
+    // After Apply of the suggestion at `index`: the dialog closes, and a
+    // viewer showing its preview goes on to show the applied cover: the
+    // playing album's art, which becomes it, or, once playback has moved on
+    // to another album, the applied image itself.
+    function finishAfterApply(index) {
         if (!root.previewShown) {
             root.close()
             return
         }
+        const targetPath = (root.uiBridge.itunesArtworkTarget || ({})).trackPath || ""
+        const movedOn = targetPath.length > 0 && targetPath !== (root.uiBridge.currentTrackPath || "")
+        const appliedRow = root.suggestionRowAt(index)
         root.previewShown = false
-        root.endAlbumArtPreview(true)
+        root.endAlbumArtPreview(true, movedOn ? (appliedRow.normalizedUrl || "") : "")
         root.clearAfterClose()
     }
 
@@ -205,7 +211,7 @@ Dialog {
         const target = root.uiBridge.itunesArtworkTarget || ({})
         if ((target.coverPath || "").length === 0) {
             root.uiBridge.applyItunesArtworkSuggestion(index)
-            root.finishAfterApply()
+            root.finishAfterApply(index)
             return
         }
         replaceCoverConfirmDialog.suggestionIndex = index
@@ -621,7 +627,7 @@ Dialog {
         confirmText: I18n.i18nc("@action:button", "Replace")
         onConfirmed: {
             root.uiBridge.applyItunesArtworkSuggestion(suggestionIndex)
-            root.finishAfterApply()
+            root.finishAfterApply(suggestionIndex)
         }
     }
 }
