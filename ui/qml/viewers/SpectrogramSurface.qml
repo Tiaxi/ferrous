@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
@@ -315,6 +314,12 @@ Item {
                     displayMode: root.uiBridge.spectrogramDisplayMode
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
                         && root.interactiveOverlaysVisible
+                    // The crosshair's readout is drawn on the plot: the time
+                    // on the bottom edge of the lowest lane.
+                    showCrosshairTime: index === spectrogramRepeater.count - 1
+                    readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
+                    readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
+                    readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     gridEnabled: root.uiBridge.showSpectrogramScale
                     // The time scale runs along the top of the first lane.
                     showTimeLabels: index === 0
@@ -387,16 +392,6 @@ Item {
                         }
                         onPointChanged: root.notePointerActivity(
                             point.scenePosition.x, point.scenePosition.y)
-                    }
-
-                    // The crosshair's readout, beside the pointer.
-                    ToolTip {
-                        objectName: "spectrogramCrosshairToolTip"
-                        x: paneHover.point.position.x + 14
-                        y: paneHover.point.position.y - height - 4
-                        visible: paneHover.hovered && spectrogramPaneItem.crosshairEnabled
-                            && spectrogramPaneItem.crosshairReadout.length > 0
-                        text: spectrogramPaneItem.crosshairReadout
                     }
                 }
             }
