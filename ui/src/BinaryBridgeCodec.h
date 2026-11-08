@@ -435,7 +435,10 @@ enum ScrobbleIneligibility : quint8 {
     ScrobbleIneligibilityTooShort = 1,
     // Without an artist or a title.
     ScrobbleIneligibilityMissingTags = 2,
-    ScrobbleIneligibilityLast = ScrobbleIneligibilityMissingTags,
+    // The rest of the track is shorter than the listening the play still
+    // needs, as after a seek forward; a seek back may make room again.
+    ScrobbleIneligibilityEndsTooSoon = 3,
+    ScrobbleIneligibilityLast = ScrobbleIneligibilityEndsTooSoon,
 };
 
 struct DecodedLastFm {

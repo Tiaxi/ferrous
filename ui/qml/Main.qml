@@ -1370,7 +1370,6 @@ ApplicationWindow {
         themeIsDark: root.themeIsDark
         errorController: errorController
         issuesOpen: recentErrorsDialog.visible
-        playbackClock: playbackController.playbackClock
         onLastFmSettingsRequested: preferencesDialog.openLastFmPage()
     }
 

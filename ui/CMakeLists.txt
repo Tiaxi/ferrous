@@ -241,6 +241,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/viewers/WaveformSurface.qml
     RESOURCES
         qml/assets/lastfm.svg
+        qml/assets/lastfm-paused.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
         qml/logic/ChannelLabels.js
@@ -652,6 +653,12 @@ if(BUILD_TESTING)
             TIMEOUT ${timeout}
         )
     endforeach()
+    # The Last.fm slot's ring moves by device pixels: its area again at 2x.
+    add_test(NAME ferrous_qml_smoke_scrobble_2x COMMAND ferrous_qml_smoke_tests -area scrobble)
+    set_tests_properties(ferrous_qml_smoke_scrobble_2x PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=2"
+        TIMEOUT 60
+    )
     # Fails when the binary has an area that is not registered here.
     add_test(NAME ferrous_qml_smoke_areas
         COMMAND ferrous_qml_smoke_tests -check-areas ${ferrous_smoke_area_names}

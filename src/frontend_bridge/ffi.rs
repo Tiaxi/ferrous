@@ -5790,6 +5790,12 @@ mod tests {
                 2,
             ),
             (
+                ScrobbleIndicatorState::Ineligible,
+                ScrobbleIneligibility::EndsTooSoon,
+                6,
+                3,
+            ),
+            (
                 ScrobbleIndicatorState::Skipped,
                 ScrobbleIneligibility::None,
                 7,

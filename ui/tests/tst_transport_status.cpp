@@ -93,7 +93,7 @@ const Scheme kBreezeLight{QStringLiteral("#eff0f1"), QStringLiteral("#ffffff"), 
                           QStringLiteral("#fcfcfc")};
 
 // A window in `scheme` with the transport and the status bar over a fake
-// bridge, an error controller and a clock of the test's own.
+// bridge and an error controller.
 QByteArray harnessQml(const Scheme &scheme, int width) {
     return QStringLiteral(R"QML(
 import QtQuick 2.15
@@ -119,7 +119,6 @@ ApplicationWindow {
     property alias errors: errors
     property alias startButton: startButton
     property alias statusBar: statusBar
-    property alias clock: clock
     property real positionSeconds: 77
     property string positionText: "01:17"
     property var seeks: []
@@ -168,14 +167,6 @@ ApplicationWindow {
 
     Controllers.ErrorController {
         id: errors
-    }
-
-    // The bridge's PlaybackClock, as the Last.fm slot uses it: the position
-    // now, and a signal when the position starts over.
-    QtObject {
-        id: clock
-        signal positionJumped()
-        function currentPositionSeconds() { return window.positionSeconds }
     }
 
     Item {
@@ -228,7 +219,6 @@ ApplicationWindow {
                 uiPalette: tokens
                 themeIsDark: tokens.themeIsDark
                 errorController: errors
-                playbackClock: clock
             }
         }
     }
@@ -411,7 +401,9 @@ private slots:
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarShowsTheScanWithItsBar();
     void lastFmSlotShowsEachState();
-    void lastFmSlotScrobblePointMovesWithSeeksAndNewPlays();
+    void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
+    void lastFmSlotPausedLooksStruckThrough_data();
+    void lastFmSlotPausedLooksStruckThrough();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
@@ -982,40 +974,84 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *box = harness.item(QStringLiteral("scrobbleIndicatorBox"));
+    QQuickItem *ring = harness.item(QStringLiteral("scrobbleIndicatorRing"));
     QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
     QQuickItem *label = harness.item(QStringLiteral("scrobbleIndicatorLabel"));
-    QVERIFY(slot && glyph && label);
+    QVERIFY(slot && box && ring && glyph && label);
     QObject *bridge = harness.bridge;
     QVERIFY(!slot->isVisible());
+    const auto progress = [slot]() { return slot->property("ringProgress").toDouble(); };
 
-    // Listening: the still glyph in the secondary colour, in its 16 px
-    // box, and the scrobble point in the tooltip.
+    // Listening: the glyph in the secondary colour inside the ring, which
+    // shows the listening done, and the time left in the tooltip.
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 77000);
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
-    QCOMPARE(glyph->width(), 16.0);
-    QCOMPARE(glyph->parentItem()->width(), 16.0);
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("lastfm.svg")));
+    QCOMPARE(box->size(), QSizeF(20, 20));
+    QCOMPARE(glyph->width(), 12.0);
+    QVERIFY(ring->isVisible());
+    QVERIFY(std::abs(progress() - 77.0 / 115.0) < 0.02);
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("textSecondary")));
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 0:38 to scrobble"));
+    QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
+    // Until the track's length is known, there is no scrobble point.
+    bridge->setProperty("lastFmScrobbleThresholdMs", 0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
+    QCOMPARE(progress(), 0.0);
+    bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
-    // After the scrobble, while sending, and for a play that can't be
-    // scrobbled: empty.
-    for (const int state : {2, 3, 6, 7, 0}) {
+    // A seek forward left too little of the track: the slot says so, the
+    // ring is empty and the tooltip says why.
+    bridge->setProperty("lastFmScrobbleState", 6);
+    bridge->setProperty("lastFmScrobbleIneligibility", 3);
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Won't scrobble"));
+    QVERIFY(label->isVisible());
+    QVERIFY(ring->isVisible());
+    QCOMPARE(progress(), 0.0);
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
+    QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
+    QCOMPARE(toolTipText(slot),
+             QStringLiteral("Last.fm: this play won't scrobble. The rest of the track is shorter than the "
+                            "0:38 of listening it still needs."));
+    // Other plays that can't be scrobbled, and skipped ones: empty.
+    for (const int reason : {1, 2}) {
+        bridge->setProperty("lastFmScrobbleIneligibility", reason);
+        QTRY_VERIFY2(!slot->isVisible(), qPrintable(QString::number(reason)));
+    }
+    bridge->setProperty("lastFmScrobbleIneligibility", 0);
+    for (const int state : {7, 0}) {
         bridge->setProperty("lastFmScrobbleState", state);
         QTRY_VERIFY2(!slot->isVisible(), qPrintable(QString::number(state)));
     }
 
-    // Queued: the words and the offline glyph.
+    // Scrobbled, and while it is sent: the ring closed, in the link colour.
+    for (const int state : {2, 3}) {
+        bridge->setProperty("lastFmScrobbleState", state);
+        QTRY_VERIFY2(slot->isVisible(), qPrintable(QString::number(state)));
+        QVERIFY(ring->isVisible());
+        QCOMPARE(progress(), 1.0);
+        QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("link")));
+        QVERIFY(!label->isVisible());
+    }
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbled"));
+    bridge->setProperty("lastFmScrobbleState", 2);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
+    QVERIFY2(contrastRatio(harness.token("link"), harness.token("chrome")) >= 3.0,
+             qPrintable(describe(QStringLiteral("scrobbled ring"), harness.token("link"), harness.token("chrome"))));
+
+    // Queued: the words and the offline glyph, without the ring.
     bridge->setProperty("lastFmScrobbleState", 5);
     bridge->setProperty("lastFmPendingScrobbleCount", 3);
     QTRY_VERIFY(slot->isVisible());
     QCOMPARE(label->property("text").toString(), QStringLiteral("3 scrobbles waiting"));
     QVERIFY(label->isVisible());
+    QVERIFY(!ring->isVisible());
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("status-offline.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(toolTipText(slot).startsWith(QStringLiteral("Last.fm can't be reached.")));
@@ -1028,17 +1064,23 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmScrobbleState", 4);
     bridge->setProperty("lastFmScrobbleMessage", QStringLiteral("Invalid session key"));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Scrobble failed"));
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("lastfm.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
+    QCOMPARE(glyph->width(), 16.0);
     const QColor negative = harness.token("negative");
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), negative));
     QVERIFY2(contrastRatio(negative, harness.token("chrome")) >= 3.0,
              qPrintable(describe(QStringLiteral("failed glyph"), negative, harness.token("chrome"))));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm didn't accept the scrobble: Invalid session key"));
 
-    // Paused by the user: the glyph, quieter; a click resumes.
+    // Paused by the user: the glyph struck through, quieter, without the
+    // ring; a click resumes.
+    bridge->setProperty("lastFmScrobbleState", 1);
     bridge->setProperty("lastFmScrobblingPaused", true);
     QTRY_COMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbling is paused"));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-paused.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
+    QVERIFY(!ring->isVisible());
+    QCOMPARE(box->size(), QSizeF(20, 20));
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(slot));
     QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
 
@@ -1047,77 +1089,115 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(!slot->isVisible());
 }
 
-// The scrobble point is a time in the track. Playback moves the position
-// and the listened time together, so it stays; a jump of the position, a
-// new track and a replay count it again, however small the jump and
-// whether or not the track plays.
-void TransportStatusTest::lastFmSlotScrobblePointMovesWithSeeksAndNewPlays() {
+// The time left comes from the scrobbler's listened time alone: a seek
+// either way and a pause leave it, and only a new play, whose count starts
+// from zero, starts it over. The ring and the tooltip move by whole seconds
+// of listening, and not at all while the count holds.
+void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
     QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
-    QObject *clock = harness.root->property("clock").value<QObject *>();
-    QVERIFY(slot != nullptr && clock != nullptr);
+    QVERIFY(slot != nullptr);
     QObject *bridge = harness.bridge;
-    const auto jump = [&](double seconds) {
-        harness.root->setProperty("positionSeconds", seconds);
-        QVERIFY(QMetaObject::invokeMethod(clock, "positionJumped"));
-    };
     harness.root->setProperty("positionSeconds", 30.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 30000);
     bridge->setProperty("lastFmScrobbleState", 1);
-    QTRY_COMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    QTRY_COMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:25 to scrobble"));
+    const double atThirty = slot->property("ringProgress").toDouble();
+    QVERIFY(atThirty > 0.0);
 
-    // Playback: the snapshots of the listened time move nothing, though
-    // they arrive a little apart from the position.
-    bridge->setProperty("lastFmScrobbleListenedMs", 30900);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    harness.root->setProperty("positionSeconds", 31.4);
-    bridge->setProperty("lastFmScrobbleListenedMs", 31000);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-
-    // A one-second seek while playing moves it by that second.
-    jump(32.4);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:56"));
-    bridge->setProperty("lastFmScrobbleListenedMs", 32000);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:56"));
-
-    // Paused at 0:30, a seek to 1:30: nothing of the scrobbler changes,
-    // and 85 s of listening are still needed.
-    jump(30.0);
-    bridge->setProperty("lastFmScrobbleListenedMs", 30000);
+    // Seeks forward and back, and a pause and a resume: the position and
+    // the playback state move, the count doesn't.
+    for (const double position : {90.0, 10.0}) {
+        harness.root->setProperty("positionSeconds", position);
+        QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:25 to scrobble"));
+        QCOMPARE(slot->property("ringProgress").toDouble(), atThirty);
+    }
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    jump(30.0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    jump(90.0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 2:55"));
-    QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: scrobbles at 2:55"));
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:25 to scrobble"));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:25 to scrobble"));
+    QCOMPARE(slot->property("ringProgress").toDouble(), atThirty);
 
-    // Repeat One plays the track again from its start: the position jumps
-    // before the scrobbler's new play counts from zero.
-    bridge->setProperty("lastFmScrobbleListenedMs", 100000);
-    jump(0.0);
-    bridge->setProperty("lastFmScrobbleListenedMs", 0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    // The same with the new play's count first.
-    bridge->setProperty("lastFmScrobbleListenedMs", 100000);
-    jump(100.0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
-    bridge->setProperty("lastFmScrobbleListenedMs", 0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 3:35"));
-    jump(0.0);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:55"));
+    // Snapshots within a second of listening change nothing.
+    QSignalSpy progressMoved(slot, SIGNAL(ringProgressChanged()));
+    QSignalSpy textChanged(slot, SIGNAL(stateTextChanged()));
+    for (int listened = 30040; listened < 31000; listened += 40) {
+        bridge->setProperty("lastFmScrobbleListenedMs", listened);
+    }
+    QCOMPARE(progressMoved.count(), 0);
+    QCOMPARE(textChanged.count(), 0);
+    bridge->setProperty("lastFmScrobbleListenedMs", 31000);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:24 to scrobble"));
+    QCOMPARE(progressMoved.count(), 1);
+    QCOMPARE(textChanged.count(), 1);
 
-    // A new track with another scrobble point.
-    bridge->setProperty("lastFmScrobbleThresholdMs", 100000);
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:40"));
-    // A gapless successor with the same point, whose start the bridge
-    // tells as a new track.
-    harness.root->setProperty("positionSeconds", 5.0);
-    QVERIFY(QMetaObject::invokeMethod(bridge, "trackIdentityChanged"));
-    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbles at 1:45"));
+    // A new play (a new track, a replay, Repeat One) counts from zero.
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:55 to scrobble"));
+    QCOMPARE(slot->property("ringProgress").toDouble(), 0.0);
+    // One with another scrobble point.
+    bridge->setProperty("lastFmScrobbleThresholdMs", 240000);
+    QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 4:00 to scrobble"));
+}
+
+void TransportStatusTest::lastFmSlotPausedLooksStruckThrough_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// Paused differs from listening in its shape, not only its colour: what is
+// drawn, ink against the chrome, differs in many pixels.
+void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *box = harness.item(QStringLiteral("scrobbleIndicatorBox"));
+    QVERIFY(slot && box);
+    QObject *bridge = harness.bridge;
+    bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 36000);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    const QColor chrome = harness.token("chrome");
+
+    // Which pixels of the glyph box are drawn.
+    const auto ink = [&]() {
+        const QImage image = harness.window->grabWindow();
+        const qreal scale = harness.window->effectiveDevicePixelRatio();
+        const QRectF rect = sceneRect(box);
+        QList<bool> drawn;
+        for (int y = 0; y < int(rect.height()); ++y) {
+            for (int x = 0; x < int(rect.width()); ++x) {
+                const QColor pixel = pixelAt(image, rect.topLeft() + QPointF(x + 0.5, y + 0.5), scale);
+                drawn.push_back(channelDistance(pixel, chrome) > 24);
+            }
+        }
+        return drawn;
+    };
+    const QList<bool> listening = ink();
+    bridge->setProperty("lastFmScrobblingPaused", true);
+    QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("paused"));
+    QTRY_VERIFY(ink() != listening);
+    const QList<bool> paused = ink();
+    int differing = 0;
+    int pausedInk = 0;
+    for (qsizetype i = 0; i < paused.size(); ++i) {
+        differing += paused[i] != listening[i] ? 1 : 0;
+        pausedInk += paused[i] ? 1 : 0;
+    }
+    QVERIFY2(differing >= 40, qPrintable(QString::number(differing)));
+    // The stroke crosses the box's middle, from corner to corner.
+    const int side = int(sceneRect(box).width());
+    QVERIFY(pausedInk > 0);
+    QVERIFY(paused[(side / 2) * side + side / 2]);
+    QVERIFY(paused[5 * side + 5]);
+    QVERIFY(paused[(side - 6) * side + side - 6]);
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
