@@ -24,6 +24,22 @@ QtObject {
     property string comparisonCandidateInfoSource: ""
     property string comparisonLabel: ""
     property bool spectrogramViewerOpen: false
+    // Set while the album art viewer shows a preview from Replace from
+    // iTunes: a candidate, or the current art to compare it with. Closing
+    // the viewer then goes back to the results, and the viewer shows what
+    // it showed before the preview: nothing, or the current art.
+    property bool albumArtPreviewActive: false
+    property bool albumArtOpenBeforePreview: false
+    property bool albumArtInfoVisibleBeforePreview: false
+    // The viewer was closed during a preview, by Back to Results, Escape or
+    // Close: the results show again.
+    signal albumArtPreviewClosed()
+    // Set while the viewer shows a cover applied from a preview to an album
+    // playback had moved on from: the applied image, until the track
+    // changes from the one playing then, when the viewer follows playback
+    // again.
+    property bool albumArtShowsAppliedCover: false
+    property string albumArtAppliedDuringTrack: ""
     // Where the album art viewer's image is from: "itunes" for a candidate
     // from the iTunes artwork search, "embedded" for art the track's file
     // holds, "folder" for an image beside the music.
@@ -37,7 +53,13 @@ QtObject {
     }
 
     function closeAlbumArtViewer() {
+        if (root.albumArtPreviewActive) {
+            root.endAlbumArtPreview(false)
+            root.albumArtPreviewClosed()
+            return
+        }
         root.albumArtViewerOpen = false
+        root.albumArtShowsAppliedCover = false
         root.comparisonModeAvailable = false
         root.comparisonCurrentSource = ""
         root.comparisonCurrentInfoSource = ""
@@ -98,6 +120,7 @@ QtObject {
         root.albumArtViewerSource = root.uiBridge.currentTrackCoverPath || ""
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
         root.albumArtViewerShowsCurrentTrack = true
+        root.albumArtShowsAppliedCover = false
         root.albumArtInfoVisible = false
         root.albumArtViewResetToken += 1
         root.albumArtViewerFileInfo = ({})
@@ -106,11 +129,82 @@ QtObject {
         root.albumArtViewerOpen = true
     }
 
+    function beginAlbumArtPreview() {
+        if (!root.albumArtPreviewActive) {
+            root.albumArtOpenBeforePreview = root.albumArtViewerOpen
+            root.albumArtInfoVisibleBeforePreview = root.albumArtInfoVisible
+        }
+        root.albumArtPreviewActive = true
+    }
+
+    // Ends a preview from Replace from iTunes. After Apply to the playing
+    // album, the viewer shows its art, which becomes the applied cover once
+    // the album has it. After Apply to an album playback has moved on from,
+    // it shows `appliedSource`, the applied image, until the track changes.
+    // Otherwise it shows what it showed before the preview.
+    function endAlbumArtPreview(applied, appliedSource) {
+        if (!root.albumArtPreviewActive) {
+            return
+        }
+        root.albumArtPreviewActive = false
+        const coverSource = root.uiBridge.currentTrackCoverPath || ""
+        if (!applied && (!root.albumArtOpenBeforePreview || coverSource.length === 0)) {
+            root.closeAlbumArtViewer()
+            return
+        }
+        const showsApplied = applied && (appliedSource || "").length > 0
+        root.albumArtViewerSource = showsApplied ? appliedSource : coverSource
+        root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
+        root.albumArtViewerShowsCurrentTrack = !showsApplied
+        root.albumArtShowsAppliedCover = showsApplied
+        root.albumArtAppliedDuringTrack = showsApplied ? (root.uiBridge.currentTrackPath || "") : ""
+        root.comparisonModeAvailable = false
+        root.comparisonCurrentSource = ""
+        root.comparisonCurrentInfoSource = ""
+        root.comparisonCandidateSource = ""
+        root.comparisonCandidateInfoSource = ""
+        root.comparisonLabel = ""
+        root.albumArtInfoVisible = applied ? root.albumArtInfoVisible : root.albumArtInfoVisibleBeforePreview
+        root.albumArtViewResetToken += 1
+        if (root.albumArtInfoVisible) {
+            root.refreshAlbumArtFileInfo()
+        } else {
+            root.albumArtViewerFileInfo = ({})
+        }
+        root.albumArtViewerOpen = true
+    }
+
+    // Previews from Replace from iTunes: the current art, or a candidate to
+    // compare with it. The current art is the art of the album the search
+    // was for, `currentSource`, which the dialog keeps once playback has
+    // moved on. Whether the preview opened.
+    function previewCurrentArt(currentSource) {
+        if ((currentSource || "").length === 0) {
+            return false
+        }
+        root.beginAlbumArtPreview()
+        root.showCurrentArt(currentSource)
+        return true
+    }
+
+    function previewSuggestion(rowMap, currentSource) {
+        if (((rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || "").length === 0) {
+            return false
+        }
+        root.beginAlbumArtPreview()
+        root.showSuggestion(rowMap, currentSource || "")
+        return true
+    }
+
     function openAlbumArtViewerForCurrentArt() {
-        const currentSource = root.uiBridge.currentTrackCoverPath || ""
+        root.showCurrentArt(root.uiBridge.currentTrackCoverPath || "")
+    }
+
+    function showCurrentArt(currentSource) {
         if (currentSource.length === 0) {
             return
         }
+        root.albumArtShowsAppliedCover = false
         root.albumArtViewerSource = currentSource
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(currentSource)
         root.albumArtViewerShowsCurrentTrack = true
@@ -126,17 +220,22 @@ QtObject {
         root.albumArtViewerOpen = true
     }
 
+    // A candidate, which can be compared with the current art.
     function openAlbumArtViewerForSuggestion(rowMap) {
+        root.showSuggestion(rowMap, root.uiBridge.currentTrackCoverPath || "")
+    }
+
+    function showSuggestion(rowMap, currentSource) {
         const previewSource = (rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || ""
         if (previewSource.length === 0) {
             return
         }
+        root.albumArtShowsAppliedCover = false
         root.albumArtViewerSource = previewSource
         root.albumArtViewerInfoSource = (rowMap && (rowMap.normalizedPath || ""))
             || PathUtils.pathFromAnyUrl(previewSource)
         root.albumArtViewerShowsCurrentTrack = false
 
-        const currentSource = root.uiBridge.currentTrackCoverPath || ""
         root.comparisonCandidateSource = previewSource
         root.comparisonCandidateInfoSource = root.albumArtViewerInfoSource
         root.comparisonCurrentSource = currentSource
@@ -197,6 +296,9 @@ QtObject {
     }
 
     function openItunesArtworkDialog(dialog, wholeScreenParent, overlayParent) {
+        // From the viewer's menu during a preview: a new search, over what
+        // the viewer showed before the preview.
+        root.endAlbumArtPreview(false)
         const targetParent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
             ? wholeScreenParent
             : overlayParent
@@ -208,7 +310,17 @@ QtObject {
     }
 
     function handleSnapshotChanged() {
+        // An applied cover shows until the track changes; then the viewer
+        // follows playback again.
+        if (root.albumArtShowsAppliedCover
+                && (root.uiBridge.currentTrackPath || "") !== root.albumArtAppliedDuringTrack) {
+            root.albumArtShowsAppliedCover = false
+            root.albumArtViewerShowsCurrentTrack = true
+        }
+        // A preview's current art is the searched album's, also once
+        // playback has moved on.
         if (root.albumArtViewerOpen
+                && !root.albumArtPreviewActive
                 && root.albumArtViewerShowsCurrentTrack
                 && root.albumArtViewerSource !== (root.uiBridge.currentTrackCoverPath || "")) {
             root.albumArtViewerSource = root.uiBridge.currentTrackCoverPath || ""

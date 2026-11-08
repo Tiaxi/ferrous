@@ -16,9 +16,30 @@ Dialog {
     required property var uiBridge
     required property var uiPalette
     required property var windowRoot
+    // Open the viewer's preview of a candidate row, compared with the current
+    // art, or of the current art; each returns whether the preview opened.
     required property var openAlbumArtViewerForSuggestion
     required property var openAlbumArtViewerForCurrentArt
+    // Ends the viewer's preview; with true, after Apply, and the applied
+    // image when playback has moved on from the album it went to.
+    required property var endAlbumArtPreview
+    // Where the viewer is, which a question asked from its preview shows
+    // over: its window over the whole screen, or the main window's overlay.
+    property var previewHost: null
 
+    // Previewing is a step of the dialog: it hides, keeping its results,
+    // their scroll position and focus, while the album art viewer shows
+    // the candidate, or the current art for -1, and shows again where it was
+    // when the viewer goes back to the results.
+    property bool previewShown: false
+    property int previewIndex: -1
+    // The previewed candidate is ready to apply: downloaded, not still
+    // loading or failed, and its image decodes. That holds for the
+    // candidate, whichever image the viewer shows to compare.
+    readonly property bool previewCandidateReady: root.previewShown && root.previewIndex >= 0
+        && root.suggestionRowApplicable(root.previewRow)
+        && previewCandidateProbe.status === Image.Ready
+    property var previewRow: ({})
     property int pendingPreviewIndex: -1
     property int pendingApplyIndex: -1
     property string currentArtworkSource: ""
@@ -86,12 +107,93 @@ Dialog {
         return ((row && (row.normalizedPath || "")) || "").length > 0
     }
 
+    function suggestionRowApplicable(row) {
+        return root.suggestionRowReady(row)
+            && !((row && (row.assetLoading || false)) || false)
+            && ((row && (row.assetError || "")) || "").length === 0
+    }
+
+    // Shows the candidate at `index`, or the current art for -1, in the
+    // album art viewer, and hides the dialog once the viewer shows it. The
+    // current art is the art of the album the suggestions are for.
+    function showPreview(index) {
+        const row = index >= 0 ? root.suggestionRowAt(index) : ({})
+        if (index >= 0 ? !root.suggestionRowReady(row) : root.currentArtworkSource.length === 0) {
+            return
+        }
+        const opened = index >= 0
+            ? root.openAlbumArtViewerForSuggestion(row, root.currentArtworkSource)
+            : root.openAlbumArtViewerForCurrentArt(root.currentArtworkSource)
+        if (!opened) {
+            return
+        }
+        root.clearPendingActionState()
+        root._savedContentY = itunesArtworkResultsView.contentY
+        root._savedResultCount = itunesArtworkResultsView.count
+        root.previewIndex = index
+        root.previewRow = row
+        root.previewShown = true
+        root.close()
+    }
+
+    // The viewer went back to the results: the dialog shows again where it
+    // was, with the focus on the Preview button that was pressed.
+    function showAgainAfterPreview() {
+        if (!root.previewShown) {
+            return
+        }
+        root.previewShown = false
+        root.open()
+        if (itunesArtworkResultsView.count === root._savedResultCount) {
+            itunesArtworkResultsView.contentY = root._savedContentY
+        }
+        const button = root.previewIndex >= 0
+            ? ((itunesArtworkResultsView.itemAtIndex(root.previewIndex) || {}).previewButton || null)
+            : currentArtworkPreviewButton
+        if (button) {
+            button.forceActiveFocus(Qt.OtherFocusReason)
+        }
+    }
+
+    // Apply in the viewer's preview.
+    function applyPreviewedSuggestion() {
+        if (!root.previewCandidateReady) {
+            return
+        }
+        root.applySuggestion(root.previewIndex)
+    }
+
+    // After Apply of the suggestion at `index`: the dialog closes, and a
+    // viewer showing its preview goes on to show the applied cover: the
+    // playing album's art, which becomes it, or, once playback has moved on
+    // to another album, the applied image itself.
+    function finishAfterApply(index) {
+        if (!root.previewShown) {
+            root.close()
+            return
+        }
+        const targetPath = (root.uiBridge.itunesArtworkTarget || ({})).trackPath || ""
+        const movedOn = targetPath.length > 0 && targetPath !== (root.uiBridge.currentTrackPath || "")
+        const appliedRow = root.suggestionRowAt(index)
+        root.previewShown = false
+        root.endAlbumArtPreview(true, movedOn ? (appliedRow.normalizedUrl || "") : "")
+        root.clearAfterClose()
+    }
+
+    function clearAfterClose() {
+        root.clearPendingActionState()
+        // Its suggestion goes with the suggestions cleared here.
+        replaceCoverConfirmDialog.close()
+        root.uiBridge.clearItunesArtworkSuggestions()
+        root.previewIndex = -1
+        root.previewRow = ({})
+        root.parent = Overlay.overlay
+    }
+
     function requestSuggestionPreview(index) {
         const row = root.suggestionRowAt(index)
         if (root.suggestionRowReady(row)) {
-            root.pendingPreviewIndex = -1
-            root.pendingApplyIndex = -1
-            root.openAlbumArtViewerForSuggestion(row)
+            root.showPreview(index)
             return
         }
         root.pendingApplyIndex = -1
@@ -109,10 +211,13 @@ Dialog {
         const target = root.uiBridge.itunesArtworkTarget || ({})
         if ((target.coverPath || "").length === 0) {
             root.uiBridge.applyItunesArtworkSuggestion(index)
-            root.close()
+            root.finishAfterApply(index)
             return
         }
         replaceCoverConfirmDialog.suggestionIndex = index
+        // Over the viewer during its preview, else over this dialog.
+        replaceCoverConfirmDialog.parent = root.previewShown && root.previewHost
+            ? root.previewHost : root.parent
         replaceCoverConfirmDialog.message = (target.album || "").length > 0
             ? ((target.artist || "").length > 0
                 ? I18n.i18nc("@info album, artist", "Replace the album art of \u201c%1\u201d by %2?",
@@ -157,8 +262,7 @@ Dialog {
         if (root.pendingPreviewIndex >= 0) {
             const previewRow = root.suggestionRowAt(root.pendingPreviewIndex)
             if (root.suggestionRowReady(previewRow)) {
-                root.clearPendingActionState()
-                root.openAlbumArtViewerForSuggestion(previewRow)
+                root.showPreview(root.pendingPreviewIndex)
                 return
             }
             if ((((previewRow && (previewRow.assetError || "")) || "").length > 0)
@@ -168,23 +272,29 @@ Dialog {
         }
     }
 
+    // Opened anew, also from the viewer's menu during a preview, it has no
+    // preview; shown again after one, it already has none.
+    onAboutToShow: root.previewShown = false
+
     onOpened: {
         root.clearPendingActionState()
         root.refreshCurrentArtworkInfo()
     }
 
+    // Hidden for a preview, it keeps its results and where it is.
     onClosed: {
-        root.clearPendingActionState()
-        // Its suggestion goes with the suggestions cleared here.
-        replaceCoverConfirmDialog.close()
-        root.uiBridge.clearItunesArtworkSuggestions()
-        root.parent = Overlay.overlay
+        if (!root.previewShown) {
+            root.clearAfterClose()
+        }
     }
 
     Connections {
         target: root.uiBridge
 
         function onItunesArtworkChanged() {
+            if (root.previewShown && root.previewIndex >= 0) {
+                root.previewRow = root.suggestionRowAt(root.previewIndex)
+            }
             root.processPendingSuggestionAction()
             Qt.callLater(() => {
                 if (itunesArtworkResultsView.count === root._savedResultCount) {
@@ -210,6 +320,19 @@ Dialog {
 
     contentItem: ColumnLayout {
         spacing: 12
+
+        // Decodes the previewed candidate, small, on a worker thread: one
+        // that does not decode cannot be applied.
+        Image {
+            id: previewCandidateProbe
+            visible: false
+            source: root.previewShown && root.previewIndex >= 0
+                ? ((root.previewRow && root.previewRow.normalizedUrl) || "") : ""
+            sourceSize.width: 32
+            sourceSize.height: 32
+            asynchronous: true
+            cache: false
+        }
 
         RowLayout {
             Layout.fillWidth: true
@@ -328,15 +451,18 @@ Dialog {
                 }
 
                 Button {
+                    id: currentArtworkPreviewButton
+                    objectName: "itunesArtworkCurrentPreviewButton"
                     text: I18n.i18nc("@action:button", "Preview")
                     enabled: (root.currentArtworkSource || "").length > 0
-                    onClicked: root.openAlbumArtViewerForCurrentArt()
+                    onClicked: root.showPreview(-1)
                 }
             }
         }
 
         ListView {
             id: itunesArtworkResultsView
+            objectName: "itunesArtworkResultsView"
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -354,6 +480,7 @@ Dialog {
             delegate: Rectangle {
                 required property int index
                 required property var modelData
+                readonly property Item previewButton: suggestionPreviewButton
 
                 x: ListView.view.leftMargin
                 width: Math.max(0, ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin)
@@ -459,6 +586,8 @@ Dialog {
                         spacing: 8
 
                         Button {
+                            id: suggestionPreviewButton
+                            objectName: "itunesArtworkPreviewButton"
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingPreviewIndex === index
                                 ? I18n.i18nc("@action:button", "Loading\u2026")
@@ -468,6 +597,7 @@ Dialog {
                         }
 
                         Button {
+                            objectName: "itunesArtworkApplyButton"
                             text: ((modelData && (modelData.assetLoading || false)) || false)
                                 && root.pendingApplyIndex === index
                                 ? I18n.i18nc("@action:button", "Loading\u2026")
@@ -485,8 +615,9 @@ Dialog {
         id: replaceCoverConfirmDialog
         objectName: "replaceCoverConfirmDialog"
         property int suggestionIndex: -1
-        // Over the viewer that holds this dialog, when one does.
-        parent: root.parent
+        // Over this dialog, or over the viewer during its preview, which is
+        // in the main window's overlay too in the main window.
+        z: root.z + 1
         uiPalette: root.uiPalette
         windowRoot: root.windowRoot
         title: I18n.i18nc("@title:window", "Replace Album Art")
@@ -496,7 +627,7 @@ Dialog {
         confirmText: I18n.i18nc("@action:button", "Replace")
         onConfirmed: {
             root.uiBridge.applyItunesArtworkSuggestion(suggestionIndex)
-            root.close()
+            root.finishAfterApply(suggestionIndex)
         }
     }
 }
