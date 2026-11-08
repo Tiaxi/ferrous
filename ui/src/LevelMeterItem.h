@@ -214,10 +214,10 @@ private:
     bool m_readoutWanted{false};
     int m_readoutRevision{0};
     void announceReadout();
-    QColor m_backgroundColor{QStringLiteral("#14062e")};
-    QColor m_seamColor{QStringLiteral("#0a0318")};
-    QColor m_troughColor{QStringLiteral("#2b1f43")};
-    QColor m_fillColor{QStringLiteral("#a39bb3")};
+    QColor m_backgroundColor{QStringLiteral("#000000")};
+    QColor m_seamColor{QStringLiteral("#1a1a1a")};
+    QColor m_troughColor{QStringLiteral("#2a2a2a")};
+    QColor m_fillColor{QStringLiteral("#a3a3a3")};
     QColor m_peakColor{QStringLiteral("#f4f4f6")};
     QColor m_clipOffColor{QColor::fromRgbF(1, 1, 1, 0.2)};
     QColor m_clipColor{QStringLiteral("#ed5a6a")};

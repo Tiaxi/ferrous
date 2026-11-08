@@ -122,20 +122,24 @@ QtObject {
     }
 
     // The spectrogram is the same dark colour map in both themes, so its
-    // set is fixed.
+    // set is fixed, from the colour map's floor: black, the lowest entry of
+    // the colour and the greyscale map (SpectrogramItem::rebuildPalette),
+    // which silence is drawn in. What is drawn on it is neutral.
     readonly property PlotColors spectrogramPlot: PlotColors {
         id: spectrogramColors
-        plotBg: "#14062e"
-        plotPlate: Qt.rgba(20 / 255, 6 / 255, 46 / 255, 0.88)
+        plotBg: "#000000"
+        // A neutral dark lifted from the floor.
+        plotPlate: Qt.rgba(20 / 255, 20 / 255, 20 / 255, 0.88)
         plotPlateEdge: Qt.rgba(1, 1, 1, 0.14)
-        plotText: "#ece8f4"
-        plotTextSecondary: Qt.rgba(236 / 255, 232 / 255, 244 / 255, 0.72)
-        plotOutline: "#14062e"
-        plotLaneSeam: "#0a0318"
-        plotTick: Qt.rgba(236 / 255, 232 / 255, 244 / 255, 0.75)
+        plotText: "#ececec"
+        plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
+        plotOutline: "#000000"
+        // Nothing is darker than the floor, so the seam is a little lighter.
+        plotLaneSeam: "#1a1a1a"
+        plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
-        meterTrough: "#2b1f43"
-        meterFill: "#a39bb3"
+        meterTrough: "#2a2a2a"
+        meterFill: "#a3a3a3"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         checkedFill: root.accent

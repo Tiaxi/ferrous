@@ -3615,7 +3615,7 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);
     QQuickItem *pane = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPane"));
     QVERIFY(pane != nullptr);
-    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#14062e")));
+    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#000000")));
     // A track without its analysis yet: Analysing…, after a moment.
     QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

@@ -347,7 +347,7 @@ void UiMainWindowTest::contentIsOneSheetWithFourSeams() {
     // Content on the view colour, the visualization on its floor.
     QCOMPARE(colorOf(sidebar), tokenHex(window, "view"));
     QCOMPARE(colorOf(queue), tokenHex(window, "view"));
-    QCOMPARE(colorOf(pane), QStringLiteral("#ff14062e"));
+    QCOMPARE(colorOf(pane), QStringLiteral("#ff000000"));
 
     // Transport | content: a chrome line right under the transport, and
     // the content right under it.
@@ -973,7 +973,7 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QCOMPARE(itemNamed(named(window, "queueHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
              QString());
-    QCOMPARE(colorOf(named(window, "spectrogramPane")), QStringLiteral("#ff14062e"));
+    QCOMPARE(colorOf(named(window, "spectrogramPane")), QStringLiteral("#ff000000"));
     QVERIFY(shown(named(window, "nowPlayingEmptyRow")));
     // The empty queue's header shows only its name, and Tab skips its
     // resize handles.
