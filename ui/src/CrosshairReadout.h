@@ -65,10 +65,11 @@ struct RightScale {
 // Where the value's and the time's plates go on a plot `width` by `height`,
 // for the crosshair's lines at `x` and `y`; an empty size leaves its plate
 // out. The value's plate is centred on the horizontal line at the right
-// edge, or left of the scale along it; it keeps out from under the corner's
-// controls (see ViewCorner) and above the time's plate. The time's plate is
-// centred on the vertical line at the bottom edge, and left of the scale
-// where one of its labels is beside it.
+// edge, or left of the scale along it, and keeps out from under the
+// corner's controls (see ViewCorner). The time's plate is centred on the
+// vertical line at the bottom edge, and left of the scale where one of its
+// labels is beside it. Where the two would meet, the value goes above the
+// time, or beside it in a lane too short for that.
 inline std::pair<QRect, QRect> plateRects(
     int width, int height, int x, int y,
     const QSize &valuePlate, const QSize &timePlate,
@@ -82,23 +83,44 @@ inline std::pair<QRect, QRect> plateRects(
             std::max(0, height - kEdgeMargin - timePlate.height()),
             timePlate.width(), timePlate.height());
     }
-    QRect value;
-    if (!valuePlate.isEmpty()) {
-        const int right = scale.width > 0 ? leftOfScale : width - kEdgeMargin;
-        const int left = std::max(0, right - valuePlate.width());
-        int top = std::clamp(y - valuePlate.height() / 2, kEdgeMargin,
-                             std::max(kEdgeMargin, height - kEdgeMargin - valuePlate.height()));
-        // Near the bottom right corner, above the time.
-        if (time.isValid() && QRect(left, top, valuePlate.width(), valuePlate.height())
-                .adjusted(-kGap, -kGap, kGap, kGap).intersects(time)) {
-            top = std::max(0, time.top() - kGap - valuePlate.height());
-        }
-        value = QRect(
-            std::max(0, ViewCorner::labelXClearOfCorner(
-                left, top, valuePlate.width(), valuePlate.height(), width, reservedCorner)),
-            top, valuePlate.width(), valuePlate.height());
+    if (valuePlate.isEmpty()) {
+        return {QRect(), time};
     }
-    return {value, time};
+    const int valueRight = scale.width > 0 ? leftOfScale : width - kEdgeMargin;
+    const auto clearOfCorner = [&](const QRect &plate) {
+        return plate.translated(
+            ViewCorner::labelXClearOfCorner(
+                plate.left(), plate.top(), plate.width(), plate.height(), width, reservedCorner)
+                - plate.left(),
+            0);
+    };
+    const auto meetsTime = [&](const QRect &plate) {
+        return time.isValid() && plate.adjusted(-kGap, -kGap, kGap, kGap).intersects(time);
+    };
+    const int top = std::clamp(y - valuePlate.height() / 2, kEdgeMargin,
+                               std::max(kEdgeMargin, height - kEdgeMargin - valuePlate.height()));
+    QRect value = clearOfCorner(QRect(
+        QPoint(std::max(0, valueRight - valuePlate.width()), top), valuePlate));
+    if (!meetsTime(value)) {
+        return {value, time};
+    }
+    // Above the time, where the lane is tall enough.
+    const int above = time.top() - kGap - valuePlate.height();
+    if (above >= 0) {
+        return {clearOfCorner(QRect(QPoint(value.left(), above), valuePlate)), time};
+    }
+    // Otherwise beside it, on its line: to the left, or else to the right.
+    const QRect left = clearOfCorner(QRect(
+        QPoint(std::min(value.left(), time.left() - kGap - valuePlate.width()), top), valuePlate));
+    if (left.left() >= 0 && !meetsTime(left)) {
+        return {left, time};
+    }
+    const QRect right(QPoint(time.right() + 1 + kGap, top), valuePlate);
+    if (right.right() < valueRight && clearOfCorner(right) == right) {
+        return {right, time};
+    }
+    // A plot too narrow for both side by side.
+    return {QRect(QPoint(std::max(0, left.left()), top), valuePlate), time};
 }
 
 // Draws a plate at `rect` with `text` in `font`.

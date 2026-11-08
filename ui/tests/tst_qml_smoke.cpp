@@ -1261,6 +1261,8 @@ private slots:
     void spectrogramCrosshairOverlayMovesOnlyItsTimeLabel();
     void spectrogramCrosshairReadoutClampsInsideTheLane_data();
     void spectrogramCrosshairReadoutClampsInsideTheLane();
+    void spectrogramCrosshairReadoutFitsShortLanes_data();
+    void spectrogramCrosshairReadoutFitsShortLanes();
     void spectrogramCrosshairReadoutReadsEachView_data();
     void spectrogramCrosshairReadoutReadsEachView();
     void spectrogramCrosshairReadoutAcrossAGaplessBoundary();
@@ -1433,6 +1435,7 @@ private slots:
     void waveformEditorSeeksMoveAtOnce();
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
+    void waveformEditorCrosshairLabelsKeepApartInShortPlots();
     void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -9801,6 +9804,39 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
     QCOMPARE(timeRect.bottom(), height - 3);
     QCOMPARE(valueRect.size(), QSize(valueWidth + 6, textHeight + 6));
     QCOMPARE(timeRect.size(), QSize(timeWidth + 6, textHeight + 6));
+}
+
+void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
+    // The readout spans the whole plot, all lanes of the per-channel view;
+    // its layout is the spectrogram's, which also lays out lanes of 27 px.
+    constexpr int width = 600;
+    const QSizeF reserved(120.0, 40.0);
+    for (const int height : {27, 36, 220}) {
+        for (const QPoint cursor : {QPoint(599, height - 1), QPoint(560, height - 1),
+                                    QPoint(599, 0), QPoint(0, height - 1)}) {
+            const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+                width, height, cursor.x(), cursor.y(), 42, 48, 12, reserved);
+            const QByteArray where = QByteArray::number(height) + " px at "
+                + QTest::toString(cursor) + ": value " + QTest::toString(value)
+                + ", time " + QTest::toString(time);
+            QVERIFY2(QRect(0, 0, width, height).contains(value)
+                         && QRect(0, 0, width, height).contains(time),
+                     where.constData());
+            QVERIFY2(!value.intersects(time), where.constData());
+            QVERIFY2(!value.intersects(QRect(width - 120, 0, 120, 40)), where.constData());
+        }
+    }
+
+    // At the pane's 220 px minimum, the height of all eight lanes of the
+    // per-channel view: in the bottom right corner, the level above the time.
+    const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+        width, 220, 599, 219, 42, 48, 12, reserved);
+    QVERIFY(value.bottom() < time.top());
+    QCOMPARE(value.right(), width - 3);
+    // In a plot too short for that, beside it on the line.
+    const auto [shortValue, shortTime] = WaveformEditorItem::crosshairLabelRects(
+        width, 30, 599, 29, 42, 48, 12, reserved);
+    QVERIFY(shortValue.right() < shortTime.left());
 }
 
 void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
@@ -19138,6 +19174,63 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutClampsInsideTheLane() {
         if (qstrcmp(pointer.where, "mid-plot") == 0) {
             QVERIFY2(std::abs(value.center().y() - 60.0) <= 1.0, where.constData());
             QVERIFY2(std::abs(time.center().x() - 150.0) <= 1.0, where.constData());
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadoutFitsShortLanes_data() {
+    QTest::addColumn<int>("laneHeight");
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("scaleShown");
+    // Eight lanes of the pane at its 220 px minimum are 27 px; six are 36.
+    for (const int laneHeight : {27, 31, 36}) {
+        for (const double scale : {1.0, 1.5, 2.0}) {
+            for (const bool scaleShown : {false, true}) {
+                QTest::addRow("%d px, %gx%s", laneHeight, scale,
+                              scaleShown ? ", frequency scale" : "")
+                    << laneHeight << scale << scaleShown;
+            }
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadoutFitsShortLanes() {
+    QFETCH(int, laneHeight);
+    QFETCH(double, scale);
+    QFETCH(bool, scaleShown);
+    SpectrogramItem item;
+    feedReadoutFixture(item);
+    item.setGridEnabled(scaleShown);
+    const QSize lane(600, laneHeight);
+    const QRectF laneRect(QPointF(0.0, 0.0), QSizeF(lane));
+    const double bottom = laneHeight - 0.5;
+    const double middle = laneHeight * 0.5;
+    const struct {
+        const char *where;
+        QPointF pointer;
+    } cases[] = {
+        {"in the bottom right corner", {599.5, bottom}},
+        {"at the right edge", {599.5, middle}},
+        {"in the top right corner", {599.5, 0.0}},
+        {"near the right edge", {560.0, bottom}},
+        {"at the bottom edge", {300.0, bottom}},
+        {"in the bottom left corner", {0.0, bottom}},
+    };
+    for (const auto &pointer : cases) {
+        layOutReadout(item, lane, scale, pointer.pointer);
+        const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(item.m_crosshair);
+        QVERIFY2(plates.size() == 2, pointer.where);
+        const QRectF value = plates[0].rect;
+        const QRectF time = plates[1].rect;
+        const QByteArray where = QByteArray(pointer.where) + ": value "
+            + QTest::toString(value) + ", time " + QTest::toString(time);
+        // Both readable: inside the lane, and apart.
+        QVERIFY2(laneRect.contains(value) && laneRect.contains(time), where.constData());
+        QVERIFY2(!value.intersects(time), where.constData());
+        QCOMPARE(time.bottom(), laneHeight - 2.0);
+        for (const SpectrogramOverlayImage &label : item.m_freqGrid.images) {
+            QVERIFY2(!label.rect.intersects(value) && !label.rect.intersects(time),
+                     (where + ", scale label " + QTest::toString(label.rect)).constData());
         }
     }
 }
