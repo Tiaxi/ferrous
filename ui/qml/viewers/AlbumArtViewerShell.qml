@@ -32,6 +32,14 @@ Item {
     // The art's zoom, 1 when it fits, and what fits it again.
     property real zoomLevel: 1.0
     property var resetView: null
+    // A preview from Replace from iTunes: what it shows, such as "iTunes
+    // Candidate", and Back to Results, which closeViewer does then too.
+    // With a candidate, Apply calls applyPreview while previewCanApply.
+    property bool previewActive: false
+    property string previewLabel: ""
+    property bool previewHasCandidate: false
+    property bool previewCanApply: false
+    property var applyPreview: null
 
     property alias popupHost: albumArtPopupHost
     // The window of the viewer over the whole screen, and the item in it
@@ -71,6 +79,14 @@ Item {
     }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
+    // A preview shows its strip, with Apply and Back to Results, and takes
+    // the keys from the dialog it came from.
+    onPreviewActiveChanged: {
+        if (root.previewActive) {
+            fullscreenControlsAutoHide.wake()
+            Qt.callLater(root.focusFullscreen)
+        }
+    }
     onUseWholeScreenViewerModeChanged: {
         if (root.viewerOpen) {
             Qt.callLater(root.syncPresentation)
@@ -118,6 +134,65 @@ Item {
         onClicked: root.toggleInfoVisible()
     }
 
+    // During a preview, before the info toggle: what the preview shows, Back
+    // to Results and, for a candidate, Apply. The items are placed by
+    // bindings, as ViewerControls places its own. Hidden, it takes no room.
+    component PreviewControls: Item {
+        id: previewControls
+
+        property var plotColors: null
+        property string namePrefix: ""
+        readonly property real spacing: 4
+
+        visible: root.previewActive
+        width: visible ? implicitWidth : 0
+        implicitWidth: root.previewHasCandidate
+            ? applyButton.x + applyButton.width
+            : backButton.x + backButton.width
+        implicitHeight: 24
+        height: 24
+
+        Label {
+            id: previewLabel
+            objectName: previewControls.namePrefix + "PreviewLabel"
+            x: 0
+            height: 24
+            leftPadding: 2
+            rightPadding: 4
+            verticalAlignment: Text.AlignVCenter
+            text: root.previewLabel
+            font.pointSize: root.uiPalette.smallPointSize
+            color: previewControls.plotColors
+                ? previewControls.plotColors.plotTextSecondary : root.uiPalette.textSecondary
+        }
+
+        Components.ViewerToolButton {
+            id: backButton
+            objectName: previewControls.namePrefix + "BackButton"
+            x: previewLabel.width + previewControls.spacing
+            uiPalette: root.uiPalette
+            plotColors: previewControls.plotColors
+            display: AbstractButton.TextOnly
+            text: I18n.i18nc("@action:button", "Back to Results")
+            toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
+            onClicked: root.closeViewer()
+        }
+
+        Components.ViewerToolButton {
+            id: applyButton
+            objectName: previewControls.namePrefix + "ApplyButton"
+            x: backButton.x + backButton.width + previewControls.spacing
+            visible: root.previewHasCandidate
+            enabled: root.previewCanApply
+            uiPalette: root.uiPalette
+            plotColors: previewControls.plotColors
+            display: AbstractButton.TextOnly
+            text: I18n.i18nc("@action:button", "Apply")
+            toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
+            onClicked: root.applyPreview()
+        }
+    }
+
     Popup {
         id: albumArtViewer
         objectName: "albumArtViewerPopup"
@@ -132,6 +207,19 @@ Item {
         closePolicy: Popup.CloseOnEscape
         visible: root.viewerOpen && !root.useWholeScreenViewerMode
         // The style's own transitions.
+
+        // Takes the keys of the viewer's items. During a preview, Escape goes
+        // back to the results: closeViewer then leaves the viewer open if it
+        // was before, so the popup does not close for it.
+        contentItem: FocusScope {
+            focus: true
+            Keys.onEscapePressed: function(event) {
+                event.accepted = root.previewActive
+                if (root.previewActive) {
+                    root.closeViewer()
+                }
+            }
+        }
 
         Components.ActionShortcuts {
             actions: root.viewerActions
@@ -169,6 +257,10 @@ Item {
         onClosed: {
             if (root.viewerOpen && !root.useWholeScreenViewerMode) {
                 root.closeViewer()
+                // Back from a preview to a viewer that stays open.
+                if (root.viewerOpen) {
+                    Qt.callLater(root.syncPresentation)
+                }
             }
         }
 
@@ -216,8 +308,14 @@ Item {
                 errorController: root.errorController
                 closeViewer: root.closeViewer
 
+                PreviewControls {
+                    id: popupPreviewControls
+                    namePrefix: "albumArtPopup"
+                }
+
                 InfoButton {
                     objectName: "albumArtPopupInfoButton"
+                    x: popupPreviewControls.visible ? popupPreviewControls.width + 4 : 0
                 }
             }
         }
@@ -256,6 +354,8 @@ Item {
                 onClosing: function(close) {
                     if (root.viewerOpen && root.useWholeScreenViewerMode) {
                         root.closeViewer()
+                        // Back from a preview to a viewer that stays open.
+                        close.accepted = !root.viewerOpen
                     }
                 }
 
@@ -351,8 +451,15 @@ Item {
                         errorController: root.errorController
                         closeViewer: root.closeViewer
 
+                        PreviewControls {
+                            id: fullscreenPreviewControls
+                            namePrefix: "albumArtFullscreen"
+                            plotColors: albumArtStrip.plotColors
+                        }
+
                         InfoButton {
                             objectName: "albumArtFullscreenInfoButton"
+                            x: fullscreenPreviewControls.visible ? fullscreenPreviewControls.width + 4 : 0
                             plotColors: albumArtStrip.plotColors
                         }
                     }

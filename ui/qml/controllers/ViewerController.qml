@@ -24,6 +24,16 @@ QtObject {
     property string comparisonCandidateInfoSource: ""
     property string comparisonLabel: ""
     property bool spectrogramViewerOpen: false
+    // Set while the album art viewer shows a preview from Replace from
+    // iTunes: a candidate, or the current art to compare it with. Closing
+    // the viewer then goes back to the results, and the viewer shows what
+    // it showed before the preview: nothing, or the current art.
+    property bool albumArtPreviewActive: false
+    property bool albumArtOpenBeforePreview: false
+    property bool albumArtInfoVisibleBeforePreview: false
+    // The viewer was closed during a preview, by Back to Results, Escape or
+    // Close: the results show again.
+    signal albumArtPreviewClosed()
     // Where the album art viewer's image is from: "itunes" for a candidate
     // from the iTunes artwork search, "embedded" for art the track's file
     // holds, "folder" for an image beside the music.
@@ -37,6 +47,11 @@ QtObject {
     }
 
     function closeAlbumArtViewer() {
+        if (root.albumArtPreviewActive) {
+            root.endAlbumArtPreview(false)
+            root.albumArtPreviewClosed()
+            return
+        }
         root.albumArtViewerOpen = false
         root.comparisonModeAvailable = false
         root.comparisonCurrentSource = ""
@@ -106,6 +121,63 @@ QtObject {
         root.albumArtViewerOpen = true
     }
 
+    function beginAlbumArtPreview() {
+        if (!root.albumArtPreviewActive) {
+            root.albumArtOpenBeforePreview = root.albumArtViewerOpen
+            root.albumArtInfoVisibleBeforePreview = root.albumArtInfoVisible
+        }
+        root.albumArtPreviewActive = true
+    }
+
+    // Ends a preview from Replace from iTunes. After Apply, the viewer shows
+    // the current art, which becomes the applied cover once the album has
+    // it; otherwise it shows what it showed before the preview.
+    function endAlbumArtPreview(applied) {
+        if (!root.albumArtPreviewActive) {
+            return
+        }
+        root.albumArtPreviewActive = false
+        const coverSource = root.uiBridge.currentTrackCoverPath || ""
+        if (!applied && (!root.albumArtOpenBeforePreview || coverSource.length === 0)) {
+            root.closeAlbumArtViewer()
+            return
+        }
+        root.albumArtViewerSource = coverSource
+        root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(coverSource)
+        root.albumArtViewerShowsCurrentTrack = true
+        root.comparisonModeAvailable = false
+        root.comparisonCurrentSource = ""
+        root.comparisonCurrentInfoSource = ""
+        root.comparisonCandidateSource = ""
+        root.comparisonCandidateInfoSource = ""
+        root.comparisonLabel = ""
+        root.albumArtInfoVisible = applied ? root.albumArtInfoVisible : root.albumArtInfoVisibleBeforePreview
+        root.albumArtViewResetToken += 1
+        if (root.albumArtInfoVisible) {
+            root.refreshAlbumArtFileInfo()
+        } else {
+            root.albumArtViewerFileInfo = ({})
+        }
+        root.albumArtViewerOpen = true
+    }
+
+    // Previews from Replace from iTunes: the current art, or a candidate.
+    function previewCurrentArt() {
+        if ((root.uiBridge.currentTrackCoverPath || "").length === 0) {
+            return
+        }
+        root.beginAlbumArtPreview()
+        root.openAlbumArtViewerForCurrentArt()
+    }
+
+    function previewSuggestion(rowMap) {
+        if (((rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || "").length === 0) {
+            return
+        }
+        root.beginAlbumArtPreview()
+        root.openAlbumArtViewerForSuggestion(rowMap)
+    }
+
     function openAlbumArtViewerForCurrentArt() {
         const currentSource = root.uiBridge.currentTrackCoverPath || ""
         if (currentSource.length === 0) {
@@ -126,6 +198,7 @@ QtObject {
         root.albumArtViewerOpen = true
     }
 
+    // A candidate, which can be compared with the current art.
     function openAlbumArtViewerForSuggestion(rowMap) {
         const previewSource = (rowMap && (rowMap.normalizedUrl || rowMap.previewSource || "")) || ""
         if (previewSource.length === 0) {
@@ -197,6 +270,9 @@ QtObject {
     }
 
     function openItunesArtworkDialog(dialog, wholeScreenParent, overlayParent) {
+        // From the viewer's menu during a preview: a new search, over what
+        // the viewer showed before the preview.
+        root.endAlbumArtPreview(false)
         const targetParent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
             ? wholeScreenParent
             : overlayParent

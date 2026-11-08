@@ -35,6 +35,13 @@ ApplicationWindow {
     readonly property string albumArtViewerName: I18n.i18nc(
         "@title:window the album art viewer; %1 is the application name", "%1 Album Art",
         root.appDisplayName)
+    // A preview from Replace from iTunes names what it shows:
+    // "iTunes Candidate — Ferrous Album Art".
+    readonly property string albumArtViewerTitleName: viewerController.albumArtPreviewActive
+            && viewerController.comparisonLabel.length > 0
+        ? I18n.i18nc("@title:window %1 is what the album art viewer shows; %2 is the viewer's name",
+                     "%1 \u2014 %2", viewerController.comparisonLabel, root.albumArtViewerName)
+        : root.albumArtViewerName
     function titleFor(name) {
         const context = playbackController.windowTitleContext()
         return context.length > 0
@@ -45,7 +52,7 @@ ApplicationWindow {
         ? root.appDisplayName
         : (viewerController.spectrogramViewerOpen
             ? root.visualizationViewerName
-            : (viewerController.albumArtViewerOpen ? root.albumArtViewerName : root.appDisplayName)))
+            : (viewerController.albumArtViewerOpen ? root.albumArtViewerTitleName : root.appDisplayName)))
     readonly property int albumArtViewerDecodeWidth: Math.max(
         1024,
         Math.ceil(Math.max(
@@ -509,11 +516,26 @@ ApplicationWindow {
         function showTrackInLibrary(path) { shownInLibrary = shownInLibrary.concat([path]) }
         function setLibrarySortMode(mode) { librarySortMode = mode }
         function setGlobalSearchQuery(query) {}
-        function searchCurrentTrackArtworkSuggestions() {}
-        function clearItunesArtworkSuggestions() {}
-        function itunesArtworkResultAt(index) { return ({}) }
-        function prepareItunesArtworkSuggestion(index) {}
-        function applyItunesArtworkSuggestion(index) {}
+        // The suggestions tests set, which the search finds, and the ones
+        // they prepare and apply.
+        property var itunesArtworkFixture: []
+        property var preparedItunesArtwork: []
+        property var appliedItunesArtwork: []
+        function searchCurrentTrackArtworkSuggestions() {
+            itunesArtworkResults = itunesArtworkFixture
+            itunesArtworkChanged()
+        }
+        function clearItunesArtworkSuggestions() {
+            itunesArtworkResults = []
+            itunesArtworkTarget = ({})
+        }
+        function itunesArtworkResultAt(index) { return itunesArtworkResults[index] || ({}) }
+        function prepareItunesArtworkSuggestion(index) {
+            preparedItunesArtwork = preparedItunesArtwork.concat([index])
+        }
+        function applyItunesArtworkSuggestion(index) {
+            appliedItunesArtwork = appliedItunesArtwork.concat([index])
+        }
         function openInFileBrowser(path) {}
         function openContainingFolder(path) {}
         function requestImageFileDetails(path) {}
@@ -1650,11 +1672,24 @@ ApplicationWindow {
 
     Dialogs.ItunesArtworkDialog {
         id: itunesArtworkDialog
+        objectName: "itunesArtworkDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: root
-        openAlbumArtViewerForSuggestion: viewerController.openAlbumArtViewerForSuggestion
-        openAlbumArtViewerForCurrentArt: viewerController.openAlbumArtViewerForCurrentArt
+        openAlbumArtViewerForSuggestion: viewerController.previewSuggestion
+        openAlbumArtViewerForCurrentArt: viewerController.previewCurrentArt
+        endAlbumArtPreview: viewerController.endAlbumArtPreview
+        previewHost: albumArtViewerShell.wholeScreenOpen && albumArtViewerShell.windowHost
+            ? albumArtViewerShell.windowHost
+            : root.overlayHost
+    }
+
+    Connections {
+        target: viewerController
+
+        function onAlbumArtPreviewClosed() {
+            itunesArtworkDialog.showAgainAfterPreview()
+        }
     }
 
     Viewers.AlbumArtViewerShell {
@@ -1662,7 +1697,7 @@ ApplicationWindow {
         windowRoot: root
         viewerOpen: viewerController.albumArtViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
-        titleText: root.titleFor(root.albumArtViewerName)
+        titleText: root.titleFor(root.albumArtViewerTitleName)
         closeViewer: viewerController.closeAlbumArtViewer
         toggleInfoVisible: function() {
             viewerController.toggleAlbumArtInfoVisible(albumArtViewerShell.focusFullscreen)
@@ -1677,6 +1712,14 @@ ApplicationWindow {
         infoVisible: viewerController.albumArtInfoVisible
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView
+        previewActive: viewerController.albumArtPreviewActive
+        previewLabel: viewerController.comparisonLabel
+        previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
+        // Not while the candidate's image loads or after it failed to.
+        previewCanApply: itunesArtworkDialog.previewCandidateReady
+            && (viewerController.albumArtViewerShowsCurrentTrack
+                || albumArtSurface.imageStatus === Image.Ready)
+        applyPreview: itunesArtworkDialog.applyPreviewedSuggestion
     }
 
     Viewers.AlbumArtSurface {
