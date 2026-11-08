@@ -3,7 +3,6 @@
 import QtQuick 2.15
 import FerrousUi 1.0
 import org.kde.kirigami 2.20 as Kirigami
-import "../components" as Components
 import "../logic/ChannelLabels.js" as ChannelLabels
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/PlotLanes.js" as PlotLanes
@@ -125,18 +124,5 @@ Item {
                 }
             }
         }
-    }
-
-    // How much of the track a zoomed view shows.
-    Components.PlotPlate {
-        objectName: "waveformViewportDurationIndicator"
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        anchors.margins: 5
-        visible: root.interactiveOverlaysVisible && waveform.zoomLevel > 1.001
-        plotColors: root.plotColors
-        uiPalette: root.uiPalette
-        text: waveform.formatViewportDuration(
-            waveform.durationSeconds / Math.max(1, waveform.zoomLevel))
     }
 }

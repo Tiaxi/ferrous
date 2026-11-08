@@ -27,7 +27,6 @@
 #define private public
 #include "../src/BridgeClient.h"
 #include "../src/TagEditorController.h"
-#include "../src/WaveformEditorItem.h"
 #undef private
 #include "../src/FerrousBridgeFfi.h"
 #include "../src/LibraryTreeModel.h"
@@ -183,7 +182,6 @@ private slots:
     void channelLayoutIconFollowsTheLayoutNotItsText();
     void albumArtRefusalsAreTranslated();
     void backendStopWithoutAReasonIsTranslated();
-    void drawnUnitsAreTranslated();
     void mainWindowShowsTranslatedText();
     void tagEditorTellsMixedValuesByAFlag();
     void drawsOffscreenUnlessAPlatformIsChosen();
@@ -337,13 +335,6 @@ void TranslationTest::backendStopWithoutAReasonIsTranslated() {
     QVERIFY(!client.processBinarySnapshot(decoded));
     QCOMPARE(client.backendFailure(),
              pseudo(QStringLiteral("The Ferrous backend stopped unexpectedly. Restart Ferrous to continue.")));
-}
-
-void TranslationTest::drawnUnitsAreTranslated() {
-    WaveformEditorItem item;
-    QCOMPARE(item.formatViewportDuration(0.834), pseudo(QStringLiteral("834 ms")));
-    // Durations of a second and more have no unit to translate.
-    QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
 }
 
 void TranslationTest::mainWindowShowsTranslatedText() {
