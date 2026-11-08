@@ -2,11 +2,13 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
 
 // A plate on a visualization, in the plot's own colours (UiPalette's
 // PlotColors) with a 1 px edge outside it. With `text`, it is a lane label;
 // otherwise it holds the items declared inside it, such as PlotToolButtons,
-// 2 px apart with 2 px around them.
+// 2 px apart with 2 px around them. A plate that is not `revealed` fades
+// out but keeps its place and its Tab stops, so the keyboard can reveal it.
 Item {
     id: root
 
@@ -20,10 +22,22 @@ Item {
     // Whether presses, clicks and double-clicks on the plate, between its
     // buttons too, stay on it rather than reach the view under it.
     property bool takesPointer: false
+    property bool revealed: true
     default property alias contentData: content.data
 
     implicitWidth: Math.max(20, content.implicitWidth + 2 * root.horizontalPadding)
     implicitHeight: Math.max(20, content.implicitHeight + 2 * root.verticalPadding)
+
+    opacity: root.revealed ? 1 : 0
+
+    // Kirigami's durations are 0 with animations turned off.
+    Behavior on opacity {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
 
     Accessible.role: root.isLabel ? Accessible.StaticText : Accessible.Grouping
     Accessible.name: root.text
