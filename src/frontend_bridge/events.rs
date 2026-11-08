@@ -239,6 +239,7 @@ pub(super) fn process_playback_event(
             state.analysis.track_token = track_token;
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
+            state.last_track_change.track_token = track_token;
             metadata.request(path.clone());
             // A track starts: check the queue's files again, since they may
             // have changed on disk since they were last checked.
@@ -689,6 +690,7 @@ pub(super) fn tick_lastfm_playback_at(
         && track_change.generation != tracker.track_change_generation;
     if restarted || tracker.active_path != current_path {
         finalize_lastfm_track(state, lastfm_handle, tracker, now);
+        let track_token = (track_change.path == current_path).then_some(track_change.track_token);
         *tracker = LastFmPlaybackTracker {
             active_path: current_path,
             track_change_generation: track_change.generation,
@@ -696,7 +698,7 @@ pub(super) fn tick_lastfm_playback_at(
                 Ok(value) if value > 0 => Some(value),
                 _ => None,
             },
-            start_position: Some(state.playback.position),
+            track_token,
             ..LastFmPlaybackTracker::default()
         };
     }
@@ -813,13 +815,12 @@ fn judge_whether_the_play_ends_too_soon(state: &BridgeState, tracker: &mut LastF
         tracker.ends_too_soon = false;
         return;
     };
-    // Until playback reports a position of this play's own, the position
-    // may be where the previous play ended.
-    if tracker.start_position == Some(state.playback.position) {
-        return;
-    }
-    tracker.start_position = None;
-    if state.playback.duration.is_zero() {
+    // A snapshot of the previous play may still follow the event that
+    // started this one: its position is where that play ended.
+    let previous_play = tracker
+        .track_token
+        .is_some_and(|token| token != state.playback.track_token);
+    if previous_play || state.playback.duration.is_zero() {
         return;
     }
     let needed =
@@ -1615,6 +1616,13 @@ mod tests {
         playing_snapshot.state = PlaybackState::Playing;
         playing_snapshot.current = Some(p("/music/other.flac"));
         let commands = snapshot_commands(playing_snapshot, harness, &mut state);
+        // The change is kept with its token, by which the scrobbler tells
+        // this play's snapshots from the previous play's.
+        assert_eq!(state.last_track_change.track_token, 8);
+        assert_eq!(
+            state.last_track_change.path.as_deref(),
+            Some(Path::new("/music/other.flac"))
+        );
         assert!(
             matches!(
                 commands.as_slice(),
@@ -2726,6 +2734,10 @@ mod tests {
         let (handle, _commands) = lastfm::test_support::command_handle();
         let track_path = p("/fixtures/replayed.flac");
         let mut state = lastfm_playing_state(&track_path);
+        state.last_track_change.path = Some(track_path.clone());
+        state.last_track_change.generation = 1;
+        state.last_track_change.track_token = 1;
+        state.playback.track_token = 1;
         let mut tracker = LastFmPlaybackTracker::default();
         let start = Instant::now();
         tick_at(&state, &handle, &mut tracker, start, 0);
@@ -2734,22 +2746,24 @@ mod tests {
         assert_eq!(shown.listened_ms, 100_000);
 
         // Repeat One plays the track again. Playback tells the replay
-        // before its new position: the end of the previous play says
-        // nothing about this one.
+        // before its snapshots carry the replay's token: the end of the
+        // previous play, still in them, says nothing about this one.
         state.playback.position = Duration::from_millis(239_900);
         tick_at(&state, &handle, &mut tracker, start, 240);
-        state.last_track_change.path = Some(track_path.clone());
         state.last_track_change.generation += 1;
-        let shown = tick_at(&state, &handle, &mut tracker, start, 240);
-        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
-        assert_eq!((shown.listened_ms, shown.threshold_ms), (0, 120_000));
+        state.last_track_change.track_token = 2;
+        for _ in 0..3 {
+            let shown = tick_at(&state, &handle, &mut tracker, start, 240);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+            assert_eq!((shown.listened_ms, shown.threshold_ms), (0, 120_000));
+        }
+        state.playback.track_token = 2;
         state.playback.position = Duration::from_secs(1);
         let shown = tick_at(&state, &handle, &mut tracker, start, 241);
         assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
         assert_eq!(shown.listened_ms, 1_000);
 
-        // A seek to the very position the play started from is judged
-        // like any other.
+        // A seek to where the previous play ended is judged like any other.
         state.playback.position = Duration::from_secs(200);
         let shown = tick_at(&state, &handle, &mut tracker, start, 241);
         assert_eq!(shown.ineligibility, ScrobbleIneligibility::EndsTooSoon);
@@ -2760,12 +2774,55 @@ mod tests {
         // A new track counts from zero too, and its own length decides.
         let next_path = p("/fixtures/next-after-replay.flac");
         state.playback.current = Some(next_path.clone());
+        state.playback.track_token = 3;
         state.playback.duration = Duration::from_secs(600);
         state.playback.position = Duration::from_secs(2);
         state.metadata.source_path = Some(next_path.to_string_lossy().into_owned());
         let shown = tick_at(&state, &handle, &mut tracker, start, 242);
         assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
         assert_eq!((shown.listened_ms, shown.threshold_ms), (0, 240_000));
+    }
+
+    /// A restored session cues its track paused where it was left, and
+    /// learns its length later. Nothing moves the position, which is this
+    /// play's own from the start.
+    #[test]
+    fn a_restored_position_too_late_in_the_track_says_it_wont_scrobble() {
+        let (handle, _commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/restored.flac");
+        let start = Instant::now();
+        // With the restored track's change and without one.
+        for told in [true, false] {
+            let mut state = lastfm_playing_state(&track_path);
+            state.playback.state = PlaybackState::Paused;
+            state.playback.position = Duration::from_secs(200);
+            state.playback.duration = Duration::ZERO;
+            if told {
+                state.last_track_change.path = Some(track_path.clone());
+                state.last_track_change.generation = 1;
+                state.last_track_change.track_token = 7;
+                state.playback.track_token = 7;
+            }
+            let mut tracker = LastFmPlaybackTracker::default();
+            let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Listening, "{told}");
+            assert_eq!(shown.threshold_ms, 0, "{told}");
+
+            // At 3:20 of 4:00, 40 s are left for the 120 s needed.
+            state.playback.duration = Duration::from_secs(240);
+            let shown = tick_at(&state, &handle, &mut tracker, start, 1);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible, "{told}");
+            assert_eq!(
+                shown.ineligibility,
+                ScrobbleIneligibility::EndsTooSoon,
+                "{told}"
+            );
+            assert_eq!(
+                (shown.listened_ms, shown.threshold_ms),
+                (0, 120_000),
+                "{told}"
+            );
+        }
     }
 
     #[test]

@@ -29273,7 +29273,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
 
 // The ring and the tooltip move by whole seconds of listening: of the
 // snapshots of the listened time, which arrive every 40 ms while the track
-// plays, only one a second draws anything.
+// plays, at most one a second draws anything. The ring also moves only by
+// whole device pixels of its arc, so how often it moves depends on the
+// scale; the ctest runs this at 1x and at 2x.
 void ScrobbleSmokeTest::scrobbleIndicatorRingMovesBySecondsWhileListening() {
     ScrobbleHarness harness;
     QString error;
@@ -29296,18 +29298,32 @@ void ScrobbleSmokeTest::scrobbleIndicatorRingMovesBySecondsWhileListening() {
     };
     QVERIFY(settle());
 
-    // Ten seconds of 40 ms snapshots towards a 120 s scrobble point.
+    // The second of listening at each move of the ring, and where it went.
+    QList<int> movedAtSecond;
+    QList<double> movedTo;
     QSignalSpy progressMoved(indicator, SIGNAL(ringProgressChanged()));
     QSignalSpy textChanged(indicator, SIGNAL(stateTextChanged()));
+
+    // Ten seconds of 40 ms snapshots towards a 120 s scrobble point.
     frames = 0;
     for (int listened = 40; listened <= 10000; listened += 40) {
+        const int movesBefore = progressMoved.count();
         bridge->setProperty("lastFmScrobbleListenedMs", listened);
+        if (progressMoved.count() != movesBefore) {
+            movedAtSecond.push_back(listened / 1000);
+            movedTo.push_back(indicator->property("ringProgress").toDouble());
+        }
         QCoreApplication::processEvents();
     }
     QVERIFY(settle());
-    // The ring moves by whole pixels of its arc as well: at 1x, a 57 px
-    // arc, of which 10 s of 120 s is 4 px.
-    QCOMPARE(progressMoved.count(), 4);
+    // It moves, forward, at most once in each second of listening.
+    QVERIFY(!movedTo.isEmpty());
+    QVERIFY2(movedTo.size() <= 10, qPrintable(QString::number(movedTo.size())));
+    for (qsizetype i = 1; i < movedTo.size(); ++i) {
+        QVERIFY2(movedAtSecond[i] > movedAtSecond[i - 1], qPrintable(QString::number(movedAtSecond[i])));
+        QVERIFY2(movedTo[i] > movedTo[i - 1], qPrintable(QString::number(movedTo[i])));
+    }
+    QVERIFY(movedTo.last() <= 10.0 / 120.0);
     QCOMPARE(textChanged.count(), 10);
     QVERIFY2(frames <= 10, qPrintable(QString::number(frames)));
     QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(),
@@ -29316,12 +29332,14 @@ void ScrobbleSmokeTest::scrobbleIndicatorRingMovesBySecondsWhileListening() {
     // While the count holds, as while the track is paused, nothing moves.
     frames = 0;
     progressMoved.clear();
+    textChanged.clear();
     for (int snapshot = 0; snapshot < 25; ++snapshot) {
         bridge->setProperty("lastFmScrobbleListenedMs", 10000);
         QCoreApplication::processEvents();
     }
     QVERIFY(settle());
     QCOMPARE(progressMoved.count(), 0);
+    QCOMPARE(textChanged.count(), 0);
     QCOMPARE(frames, 0);
 
     // Its scrobble closes the ring at once.

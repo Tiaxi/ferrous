@@ -793,6 +793,9 @@ pub(super) struct BridgeState {
 struct TrackChangeMarker {
     generation: u64,
     path: Option<PathBuf>,
+    /// The event's `track_token`, which playback's snapshots carry from
+    /// then on.
+    track_token: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -814,10 +817,11 @@ struct LastFmPlaybackTracker {
     scrobble: PlayScrobble,
     /// Whether the current track's metadata has been read.
     metadata_seen: bool,
-    /// The playback position when this play started, until playback
-    /// reports another. It may still be the previous play's: playback
-    /// reports a replay's new position after the replay itself.
-    start_position: Option<Duration>,
+    /// The `track_token` of the `TrackChanged` event that started this
+    /// play, when one did. Playback tells a replay before its snapshots
+    /// carry the replay's token, so until they do, their position is the
+    /// previous play's.
+    track_token: Option<u64>,
     /// Whether the rest of the track is too short for the listening the
     /// play still needs; see [`ScrobbleIneligibility::EndsTooSoon`].
     ends_too_soon: bool,
