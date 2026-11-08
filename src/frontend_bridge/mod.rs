@@ -597,6 +597,10 @@ pub enum ScrobbleIneligibility {
     TooShort,
     /// Without an artist or a title.
     MissingTags,
+    /// The rest of the track is shorter than the listening the play still
+    /// needs, as after a seek forward. A seek back may make it eligible
+    /// again.
+    EndsTooSoon,
 }
 
 impl ScrobbleIneligibility {
@@ -606,6 +610,7 @@ impl ScrobbleIneligibility {
             Self::None => 0,
             Self::TooShort => 1,
             Self::MissingTags => 2,
+            Self::EndsTooSoon => 3,
         }
     }
 }
@@ -809,6 +814,13 @@ struct LastFmPlaybackTracker {
     scrobble: PlayScrobble,
     /// Whether the current track's metadata has been read.
     metadata_seen: bool,
+    /// The playback position when this play started, until playback
+    /// reports another. It may still be the previous play's: playback
+    /// reports a replay's new position after the replay itself.
+    start_position: Option<Duration>,
+    /// Whether the rest of the track is too short for the listening the
+    /// play still needs; see [`ScrobbleIneligibility::EndsTooSoon`].
+    ends_too_soon: bool,
 }
 
 impl LastFmPlaybackTracker {

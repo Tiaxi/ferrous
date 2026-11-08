@@ -2,30 +2,35 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Shapes 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// The status bar's Last.fm slot (#373): a fixed 16 px glyph box, with a
-// few words before it when something needs the user's attention.
-// - Listening: the Last.fm glyph, still, in the secondary colour; its
-//   tooltip says where in the track it scrobbles.
+// The status bar's Last.fm slot (#373, #470): a fixed 20 px box, with a
+// few words before it when something needs saying.
+// - Listening: the Last.fm glyph in a ring that fills with the listening
+//   done towards the scrobble; its tooltip says how much is left. Both
+//   come from the scrobbler's listened time, which a seek doesn't move
+//   and a pause holds; a new play (a new track, a replay, Repeat One)
+//   starts it over.
+// - Won't scrobble: a seek forward left less of the track than the
+//   listening still needed. "Won't scrobble", the empty ring and the glyph
+//   in the tertiary colour; the tooltip says why.
+// - Scrobbled, or being sent: the ring closed, in the link colour.
 // - Queued: "3 scrobbles waiting" and the offline glyph.
 // - Failed: "Scrobble failed" and the glyph in the negative colour.
-// - Paused by the user: the glyph in the tertiary colour.
-// - Otherwise (scrobbled, sending, not eligible, signed out): nothing.
+// - Paused by the user: the glyph struck through, in the tertiary colour,
+//   without the ring.
+// - Otherwise (not eligible, skipped, signed out): nothing.
 // Clicking it pauses or resumes scrobbling; its menu has the settings.
 AbstractButton {
     id: root
 
     required property var uiBridge
     required property var uiPalette
-    // The bridge's PlaybackClock, for where the track scrobbles; see
-    // scrobbleAtSeconds. Without it, the listened time stands in for the
-    // position.
-    property var playbackClock: null
 
     // The Last.fm preferences were asked for.
     signal settingsRequested()
@@ -35,13 +40,15 @@ AbstractButton {
         && root.uiBridge.lastFmAuthState === 2
     readonly property bool paused: root.uiBridge.lastFmScrobblingPaused
     readonly property int scrobbleState: root.uiBridge.lastFmScrobbleState
+    readonly property int ineligibility: root.uiBridge.lastFmScrobbleIneligibility
     readonly property int listenedMs: root.uiBridge.lastFmScrobbleListenedMs
     readonly property int thresholdMs: root.uiBridge.lastFmScrobbleThresholdMs
     readonly property int pendingCount: Math.max(0, Number(root.uiBridge.lastFmPendingScrobbleCount) || 0)
 
-    // What the slot shows: "hidden", "listening", "queued", "failed",
-    // "paused" or "empty". The scrobble states are
-    // BinaryBridgeCodec::ScrobbleState.
+    // What the slot shows: "hidden", "listening", "wontScrobble",
+    // "scrobbled", "queued", "failed", "paused" or "empty". The scrobble
+    // states and reasons are BinaryBridgeCodec::ScrobbleState and
+    // ScrobbleIneligibility.
     readonly property string look: {
         if (!root.shown) {
             return "hidden"
@@ -59,62 +66,44 @@ AbstractButton {
         if (root.scrobbleState === 1) {
             return "listening"
         }
+        if (root.scrobbleState === 2 || root.scrobbleState === 3) {
+            return "scrobbled"
+        }
+        if (root.scrobbleState === 6 && root.ineligibility === 3) {
+            return "wontScrobble"
+        }
         return "empty"
     }
     readonly property bool occupied: root.look !== "hidden" && root.look !== "empty"
 
-    // Where in the track the play scrobbles, in seconds of the track: the
-    // position plus the listening it still needs, or -1. While the track
-    // plays, the position and the listened time advance together, so the
-    // point stays where it is; it is counted again only where it moves: a
-    // seek or a jump of the position (paused or not), a new track, a
-    // replay of the same track (Repeat One), and the scrobble point itself.
-    property real scrobbleAtSeconds: -1
-    // The listened time of the latest snapshot: one that goes back starts
-    // a new play, whose count the scrobbler may send after the position's
-    // jump.
-    property int lastListenedMs: 0
+    // The listening done and still needed, in whole seconds: the slot
+    // changes at most once a second while the track plays, and not at all
+    // while it is paused. The scrobble point is whole seconds.
+    readonly property int listenedSeconds: Math.floor(Math.max(0, root.listenedMs) / 1000)
+    readonly property int thresholdSeconds: Math.ceil(Math.max(0, root.thresholdMs) / 1000)
+    readonly property int secondsLeft: Math.max(0, root.thresholdSeconds - root.listenedSeconds)
 
-    function refreshScrobbleAt() {
-        if (root.look !== "listening" || root.thresholdMs <= 0) {
-            root.scrobbleAtSeconds = -1
-            return
+    // The ring around the glyph: its radius in the box, and how much of it
+    // is drawn, 0 to 1. The share moves by whole pixels of the arc too,
+    // so a long scrobble point redraws it more rarely still.
+    readonly property bool ringShown: root.look === "listening" || root.look === "wontScrobble"
+        || root.look === "scrobbled"
+    readonly property real ringStroke: 2
+    readonly property real ringRadius: (root.boxSize - root.ringStroke) / 2
+    readonly property real ringProgress: {
+        if (root.look === "scrobbled") {
+            return 1
         }
-        const remaining = Math.max(0, root.thresholdMs - root.listenedMs) / 1000
-        const position = root.playbackClock
-            ? Number(root.playbackClock.currentPositionSeconds())
-            : root.listenedMs / 1000
-        root.scrobbleAtSeconds = (isFinite(position) ? Math.max(0, position) : 0) + remaining
-    }
-
-    onLookChanged: root.refreshScrobbleAt()
-    onThresholdMsChanged: root.refreshScrobbleAt()
-    onListenedMsChanged: {
-        const newPlay = root.listenedMs < root.lastListenedMs
-        root.lastListenedMs = root.listenedMs
-        if (newPlay) {
-            root.refreshScrobbleAt()
+        if (root.look !== "listening" || root.thresholdSeconds <= 0) {
+            return 0
         }
+        const steps = Math.max(1, Math.round(2 * Math.PI * root.ringRadius * Math.max(1, Screen.devicePixelRatio)))
+        return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    Component.onCompleted: {
-        root.lastListenedMs = root.listenedMs
-        root.refreshScrobbleAt()
-    }
-
-    Connections {
-        target: root.playbackClock || null
-        function onPositionJumped() {
-            root.refreshScrobbleAt()
-        }
-    }
-
-    Connections {
-        target: root.uiBridge
-        ignoreUnknownSignals: true
-        function onTrackIdentityChanged() {
-            root.refreshScrobbleAt()
-        }
-    }
+    readonly property color ringColor: root.look === "scrobbled"
+        ? root.uiPalette.link
+        : root.uiPalette.textSecondary
+    readonly property color ringTrackColor: ColorUtils.withAlpha(root.uiPalette.textSecondary, 0.3)
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -124,6 +113,8 @@ AbstractButton {
                 root.pendingCount)
         case "failed":
             return I18n.i18nc("@info:status", "Scrobble failed")
+        case "wontScrobble":
+            return I18n.i18nc("@info:status", "Won't scrobble")
         default:
             return ""
         }
@@ -133,10 +124,18 @@ AbstractButton {
     readonly property string stateText: {
         switch (root.look) {
         case "listening":
-            return root.scrobbleAtSeconds >= 0
-                ? I18n.i18nc("@info:tooltip %1 is a time in the track", "Last.fm: scrobbles at %1",
-                    FormatUtils.formatClockTime(Math.round(root.scrobbleAtSeconds)))
+            return root.thresholdSeconds > 0
+                ? I18n.i18nc("@info:tooltip %1 is a duration", "Last.fm: %1 to scrobble",
+                    FormatUtils.formatClockTime(root.secondsLeft))
                 : I18n.i18nc("@info:tooltip", "Last.fm: listening")
+        case "wontScrobble":
+            return I18n.i18nc("@info:tooltip %1 is a duration",
+                "Last.fm: this play won't scrobble. The rest of the track is shorter than the %1 of listening it still needs.",
+                FormatUtils.formatClockTime(root.secondsLeft))
+        case "scrobbled":
+            return root.scrobbleState === 3
+                ? I18n.i18nc("@info:tooltip", "Last.fm: scrobbled")
+                : I18n.i18nc("@info:tooltip", "Last.fm: sending the scrobble")
         case "queued":
             return root.uiBridge.lastFmScrobbleMessage.length > 0
                 ? I18n.i18ncp("@info:tooltip %2 is the reason",
@@ -159,14 +158,29 @@ AbstractButton {
         }
     }
 
-    readonly property string glyphSource: root.look === "queued"
-        ? Qt.resolvedUrl("../assets/status-offline.svg")
-        : Qt.resolvedUrl("../assets/lastfm.svg")
+    // The box the glyph and its ring are drawn in.
+    readonly property int boxSize: Kirigami.Units.iconSizes.small + 4
+    readonly property string glyphSource: {
+        switch (root.look) {
+        case "queued":
+            return Qt.resolvedUrl("../assets/status-offline.svg")
+        case "paused":
+            return Qt.resolvedUrl("../assets/lastfm-paused.svg")
+        default:
+            return Qt.resolvedUrl("../assets/lastfm.svg")
+        }
+    }
+    // Inside the ring, the glyph is smaller; the offline glyph is a 14 px
+    // one.
+    readonly property int glyphSize: root.ringShown
+        ? Kirigami.Units.iconSizes.small - 4
+        : (root.look === "queued" ? Kirigami.Units.iconSizes.small - 2 : Kirigami.Units.iconSizes.small)
     readonly property color glyphColor: {
         switch (root.look) {
         case "failed":
             return root.uiPalette.negative
         case "paused":
+        case "wontScrobble":
             return root.uiPalette.textTertiary
         default:
             return root.uiPalette.textSecondary
@@ -277,21 +291,61 @@ AbstractButton {
                 text: root.labelText
                 font.pointSize: root.uiPalette.smallPointSize
                 font.features: root.uiPalette.tabularFigures
-                color: root.look === "queued" ? root.uiPalette.textSecondary : root.uiPalette.text
+                color: root.look === "queued" || root.look === "wontScrobble"
+                    ? root.uiPalette.textSecondary
+                    : root.uiPalette.text
                 Accessible.ignored: true
             }
 
-            // The fixed 16 px glyph box.
+            // The fixed glyph box.
             Item {
+                objectName: "scrobbleIndicatorBox"
                 anchors.verticalCenter: parent.verticalCenter
-                width: Kirigami.Units.iconSizes.small
-                height: Kirigami.Units.iconSizes.small
+                width: root.boxSize
+                height: root.boxSize
+
+                // The ring: its track, and the listening done on it from
+                // the top, clockwise.
+                Shape {
+                    objectName: "scrobbleIndicatorRing"
+                    anchors.fill: parent
+                    visible: root.ringShown
+                    preferredRendererType: Shape.CurveRenderer
+
+                    ShapePath {
+                        strokeColor: root.ringProgress < 1 ? root.ringTrackColor : "transparent"
+                        strokeWidth: root.ringStroke
+                        fillColor: "transparent"
+                        PathAngleArc {
+                            centerX: root.boxSize / 2
+                            centerY: root.boxSize / 2
+                            radiusX: root.ringRadius
+                            radiusY: root.ringRadius
+                            startAngle: 0
+                            sweepAngle: 360
+                        }
+                    }
+                    ShapePath {
+                        objectName: "scrobbleIndicatorRingArc"
+                        strokeColor: root.ringProgress > 0 ? root.ringColor : "transparent"
+                        strokeWidth: root.ringStroke
+                        fillColor: "transparent"
+                        capStyle: ShapePath.FlatCap
+                        PathAngleArc {
+                            centerX: root.boxSize / 2
+                            centerY: root.boxSize / 2
+                            radiusX: root.ringRadius
+                            radiusY: root.ringRadius
+                            startAngle: -90
+                            sweepAngle: 360 * root.ringProgress
+                        }
+                    }
+                }
 
                 Kirigami.Icon {
                     objectName: "scrobbleIndicatorGlyph"
                     anchors.centerIn: parent
-                    // The offline glyph is a 14 px one in the 16 px box.
-                    width: root.look === "queued" ? Kirigami.Units.iconSizes.small - 2 : parent.width
+                    width: root.glyphSize
                     height: width
                     source: root.glyphSource
                     color: root.glyphColor

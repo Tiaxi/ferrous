@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The status bar's Last.fm glyph while scrobbling is paused: lastfm.svg struck through, with a gap
+     around the stroke. A one-colour mask, drawn in the text colours. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+<rect width="16" height="16" fill="#fff"/>
+<path d="M2 2 14 14" stroke="#000" stroke-width="3.7" stroke-linecap="round"/>
+</mask>
+</defs>
+<g mask="url(#gap)">
+<path d="M2.5 8.2c0-3 1.8-4.7 4.2-4.7 2 0 2.9 1 3.6 3l.9 2.6c.4 1.2 1.1 1.8 2.2 1.8.8 0 1.3-.4 1.3-1.1 0-.7-.5-1.1-1.5-1.4l-1-.3c-1.6-.5-2.3-1.4-2.3-2.7 0-1.5 1.2-2.4 2.9-2.4" fill="none" stroke="#000" stroke-width="1.3" stroke-linecap="round"/>
+<path d="M8.3 9.8c-.6 1.3-1.6 2.1-3 2.1-1.7 0-2.8-1.4-2.8-3.7" fill="none" stroke="#000" stroke-width="1.3" stroke-linecap="round"/>
+</g>
+<path d="M2 2 14 14" stroke="#000" stroke-width="1.3" stroke-linecap="round"/>
+</svg>

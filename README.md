@@ -22,7 +22,7 @@ Ferrous is a personal project built for my own daily listening. It pairs a Rust 
 
 **Desktop integration** — MPRIS media controls, media key support, single-instance file opening, and `.desktop`/MIME registration.
 
-**Scrobbling** — Last.fm integration with desktop authentication and batched submissions. A ring in the status bar fills with the time listened towards the scrobble point, as the scrobbler counts it, and turns green once Last.fm accepts the scrobble, orange if it failed, or grey with a clock while Last.fm can't be reached. Clicking it pauses scrobbling until Ferrous quits: a track that plays while scrobbling is paused is never scrobbled, and nothing is sent to Last.fm. The Last.fm preferences can hide the ring.
+**Scrobbling** — Last.fm integration with desktop authentication and batched submissions. In the status bar, a ring around the Last.fm glyph fills with the time listened towards the scrobble, as the scrobbler counts it: a seek doesn't move it, and only a new play starts it over. Its tooltip gives the time left, and the ring closes once the track is scrobbled. After a seek forward that leaves too little of the track, the slot says the play won't scrobble; it also says when scrobbles wait for Last.fm or one failed. Clicking it pauses scrobbling until Ferrous quits, and strikes the glyph through: a track that plays while scrobbling is paused is never scrobbled, and nothing is sent to Last.fm. The Last.fm preferences can hide the slot.
 
 ## Design priorities
 
