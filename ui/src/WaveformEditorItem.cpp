@@ -626,26 +626,6 @@ void WaveformEditorItem::setChannelCountHint(int value) {
 void WaveformEditorItem::resetZoom() { setZoomLevel(1.0); }
 double WaveformEditorItem::maximumZoomLevel() const { QMutexLocker lock(&m_stateMutex); return maximumZoomLevelLocked(); }
 
-QString WaveformEditorItem::formatViewportDuration(double seconds) const {
-    // Translated once: the viewport is labelled on every repaint.
-    static const QString millisecondsFormat = i18nc("@item:intext duration in milliseconds", "%1 ms");
-    if (!std::isfinite(seconds) || seconds <= 0.0) {
-        return millisecondsFormat.arg(0);
-    }
-    if (seconds < 1.0) {
-        const int milliseconds = std::clamp(
-            static_cast<int>(std::lround(seconds * 1000.0)), 1, 999);
-        return millisecondsFormat.arg(milliseconds);
-    }
-    const qint64 totalSeconds = std::max<qint64>(
-        1, static_cast<qint64>(std::llround(seconds)));
-    const qint64 minutes = totalSeconds / 60;
-    const qint64 secondsPart = totalSeconds % 60;
-    return QStringLiteral("%1:%2")
-        .arg(minutes, 2, 10, QLatin1Char('0'))
-        .arg(secondsPart, 2, 10, QLatin1Char('0'));
-}
-
 void WaveformEditorItem::setHoverPosition(double x, double y, bool active) {
     {
         QMutexLocker lock(&m_stateMutex);

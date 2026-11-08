@@ -1382,7 +1382,6 @@ private slots:
     void waveformEditorSeeksWhereTheCrosshairShows_data();
     void waveformEditorSeeksWhereTheCrosshairShows();
     void waveformEditorSampleMarkersRequireSampleResolution();
-    void waveformEditorFormatsViewportDuration();
     void waveformEditorConnectsSamplesBeforeMarkers();
     void waveformEditorScrollsInsideCachedDetailWithoutRebuild();
     void waveformEditorUsesChannelHintBeforeDetailArrives();
@@ -3140,24 +3139,18 @@ Item {
     QTRY_VERIFY(waveform->showFpsOverlay());
     QVERIFY(!waveform->playing());
 
-    QObject *durationIndicator = root->findChild<QObject *>(
-        QStringLiteral("waveformViewportDurationIndicator"));
-    // The indicator is a plate in the plot's colours, with the text.
-    QObject *durationText = durationIndicator;
-    QVERIFY(durationIndicator != nullptr);
-    QVERIFY(durationText != nullptr);
-    QVERIFY(!durationIndicator->property("visible").toBool());
-    waveform->setZoomLevel(2.0);
-    QTRY_VERIFY(durationIndicator->property("visible").toBool());
-    QTRY_COMPARE(
-        durationText->property("text").toString(),
-        QStringLiteral("00:05"));
-    waveform->setZoomLevel(20.0);
-    QTRY_COMPARE(
-        durationText->property("text").toString(),
-        QStringLiteral("500 ms"));
+    // A zoomed view tells nothing of how much of the track it spans: no
+    // plate covers the plot.
+    QVERIFY(surface->property("interactiveOverlaysVisible").toBool());
+    for (const double zoom : {2.0, 20.0}) {
+        waveform->setZoomLevel(zoom);
+        QTRY_COMPARE(waveform->zoomLevel(), zoom);
+        QVERIFY(root->findChild<QObject *>(
+            QStringLiteral("waveformViewportDurationIndicator")) == nullptr);
+        QVERIFY(surface->findChildren<QObject *>(QStringLiteral("plotPlateFill")).isEmpty());
+        QVERIFY(surface->findChildren<QObject *>(QStringLiteral("plotPlateLabel")).isEmpty());
+    }
     waveform->resetZoom();
-    QTRY_VERIFY(!durationIndicator->property("visible").toBool());
 
     QObject *hoverHandler = root->findChild<QObject *>(
         QStringLiteral("waveformSurfaceHoverHandler"));
@@ -8366,15 +8359,6 @@ void WaveformSmokeTest::waveformEditorSampleMarkersRequireSampleResolution() {
 
     item.m_detail.framesPerPoint = 2;
     QVERIFY(!item.samplePointsVisible());
-}
-
-void WaveformSmokeTest::waveformEditorFormatsViewportDuration() {
-    WaveformEditorItem item;
-    QCOMPARE(item.formatViewportDuration(245.2), QStringLiteral("04:05"));
-    QCOMPARE(item.formatViewportDuration(1.0), QStringLiteral("00:01"));
-    QCOMPARE(item.formatViewportDuration(0.834), QStringLiteral("834 ms"));
-    QCOMPARE(item.formatViewportDuration(0.0004), QStringLiteral("1 ms"));
-    QCOMPARE(item.formatViewportDuration(0.0), QStringLiteral("0 ms"));
 }
 
 void WaveformSmokeTest::waveformEditorConnectsSamplesBeforeMarkers() {
