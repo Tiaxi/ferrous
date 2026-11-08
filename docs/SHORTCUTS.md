@@ -61,7 +61,7 @@ Double-click the visualization or the album art to open its viewer, and press Es
 
 A viewer over the whole screen has its buttons in the title strip at the top; one in the main window has them in its top right corner. The visualization viewer's buttons hide while the pointer rests; a key press brings them back, and Tab moves through them, then to the visualization's mode switch. Space presses the focused button.
 
-The visualization's mode switch takes keyboard focus with Tab; Space or Enter picks the focused mode.
+The visualization's mode switch, in its top right corner, shows while the pointer is over the visualization or keyboard focus is on it, as the channels' Mute and Solo buttons do. It takes keyboard focus with Tab while hidden, which shows it; Space or Enter picks the focused mode. Ctrl+1 and Ctrl+2, and the **View** menu, pick the mode without it.
 
 ## Scrolling and zooming
 

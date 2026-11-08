@@ -27,6 +27,9 @@ Item {
     property var laneLabels: []
     // The lane under the pointer, from the plot, which takes hover; or -1.
     property int hoveredLane: -1
+    // Whether the pointer is over the pane, from the item that holds the
+    // plot and this layer: a handler here would take hover from the plot.
+    property bool paneHovered: false
     // Whether the viewer's controls show; the main pane's always do.
     property bool controlsVisible: true
     property var pointerActivity: null
@@ -71,7 +74,9 @@ Item {
     }
 
     // The mode switch comes first in the Tab order, then each lane's Mute
-    // and Solo.
+    // and Solo. It shows while the pointer is over the pane or keyboard
+    // focus is on it, as Mute and Solo do: in rolling mode, its corner is
+    // the newest part of the plot.
     Components.PlotModeSwitch {
         id: modeSwitch
         z: 2
@@ -80,6 +85,8 @@ Item {
         anchors.topMargin: 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
         visible: root.controlsVisible
+        revealed: root.paneHovered || root.hoveredLane >= 0 || modeSwitch.pointerHovered
+            || modeSwitch.focusInside
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode

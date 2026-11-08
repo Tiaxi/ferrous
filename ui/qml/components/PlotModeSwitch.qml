@@ -5,7 +5,8 @@ import FerrousUi 1.0
 import "." as Components
 
 // The visualization's mode switch: two tool buttons on one plate,
-// Spectrogram and Waveform, the current one checked.
+// Spectrogram and Waveform, the current one checked. Set `revealed` from
+// the pane's pointer and `focusInside`: hidden, the buttons stay Tab stops.
 Components.PlotPlate {
     id: root
     objectName: "visualizationModeSwitch"
@@ -14,6 +15,16 @@ Components.PlotPlate {
     required property var setMode
     property var pointerActivity: null
     readonly property bool pointerHovered: switchHover.hovered
+    // Whether keyboard focus is on either button.
+    readonly property bool focusInside: {
+        for (let i = 0; i < buttons.count; ++i) {
+            const button = buttons.itemAt(i)
+            if (button && button.activeFocus) {
+                return true
+            }
+        }
+        return false
+    }
 
     Accessible.name: I18n.i18nc("@label", "Visualization")
 
@@ -27,6 +38,7 @@ Components.PlotPlate {
     }
 
     Repeater {
+        id: buttons
         model: [
             { name: I18n.i18nc("@option:radio visualization mode", "Spectrogram"),
               icon: "view-statistics" },

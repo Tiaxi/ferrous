@@ -3,7 +3,6 @@
 import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
-import org.kde.kirigami 2.20 as Kirigami
 
 // A lane's label, and 8 px right of it its Mute and Solo buttons on one
 // plate. The buttons show while the pointer is on the lane or the plate, and
@@ -53,16 +52,8 @@ Item {
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         visible: root.buttonsVisibility !== 0
-        opacity: root.buttonsRevealed ? 1 : 0
+        revealed: root.buttonsRevealed
         Accessible.name: I18n.i18nc("@label %1 is a channel", "Channel %1", root.label)
-
-        Behavior on opacity {
-            enabled: Kirigami.Units.shortDuration > 0
-            NumberAnimation {
-                duration: Kirigami.Units.shortDuration
-                easing.type: Easing.OutCubic
-            }
-        }
 
         HoverHandler {
             id: buttonsHover

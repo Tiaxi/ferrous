@@ -1595,6 +1595,7 @@ private slots:
     void fullscreenViewerWindowsAreMadeOnFirstOpenAndKept();
     void visualizationModeSwitchTakesKeyboardFocus();
     void visualizationModeSwitchStaysClearOfTheCornerOverlays();
+    void visualizationModeSwitchShowsOnlyWithThePointerOrFocus();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void viewersInTheMainWindowAreNamedInItsTitle();
@@ -1805,8 +1806,6 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     QCOMPARE(modeSwitch->property("width").toDouble(), 54.0);
     QCOMPARE(modeSwitch->property("height").toDouble(), 28.0);
     QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
-    // A plate, opaque without hovering.
-    QCOMPARE(modeSwitch->property("opacity").toDouble(), 1.0);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());
     setMode.call(QJSValueList{QJSValue(1)});
@@ -23848,11 +23847,13 @@ void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     QVERIFY(spectrogramButton != nullptr && waveformButton != nullptr);
     QVERIFY(spectrogramButton->activeFocusOnTab());
     QVERIFY(waveformButton->activeFocusOnTab());
-    QQuickItem *modeSwitch = waveformButton->parentItem();
+    // The plate, round the buttons' row.
+    QQuickItem *modeSwitch = waveformButton->parentItem()->parentItem();
     QVERIFY(modeSwitch != nullptr);
-    // Visible without hovering.
+    QCOMPARE(modeSwitch->objectName(), QStringLiteral("visualizationModeSwitch"));
+    // Without the pointer, faded out but still there for Tab.
     QVERIFY(modeSwitch->isVisible());
-    QVERIFY(modeSwitch->opacity() >= 0.5);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
 
     // Tab reaches the switch.
     QQuickItem *beforeSwitch = spectrogramButton->nextItemInFocusChain(false);
@@ -24103,6 +24104,116 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     autoHide->setProperty("hideDelay", 5000);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFocus() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr);
+    // Rolling: the plot's right edge is now.
+    QVERIFY(bridge->setProperty("spectrogramDisplayMode", 0));
+    QTRY_VERIFY(surface->isVisible());
+    QQuickItem *modeSwitch =
+        firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QQuickItem *spectrogramButton =
+        visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QQuickItem *waveformButton =
+        visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(modeSwitch != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
+
+    const QRectF pane = sceneRectOf(surface);
+    QVERIFY(pane.contains(sceneRectOf(modeSwitch)));
+    // A point of the window off the pane.
+    QPoint away;
+    for (const QPoint candidate : {QPoint(4, window->height() - 4), QPoint(4, 4),
+                                   QPoint(window->width() - 4, window->height() - 4)}) {
+        if (!pane.contains(candidate)) {
+            away = candidate;
+            break;
+        }
+    }
+    QVERIFY(!pane.contains(away) && !away.isNull());
+
+    // The pointer away: nothing on the plot's newest edge, but the switch is
+    // still a Tab stop with its name.
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    QVERIFY(modeSwitch->isVisible());
+    QVERIFY(spectrogramButton->activeFocusOnTab() && waveformButton->activeFocusOnTab());
+    QAccessible::setActive(true);
+    const QScopeGuard stopAccessibility([]() { QAccessible::setActive(false); });
+    QAccessibleInterface *switchAccessible = QAccessible::queryAccessibleInterface(modeSwitch);
+    QVERIFY(switchAccessible != nullptr);
+    QCOMPARE(switchAccessible->text(QAccessible::Name), QStringLiteral("Visualization"));
+    QAccessibleInterface *spectrogramAccessible =
+        QAccessible::queryAccessibleInterface(spectrogramButton);
+    QVERIFY(spectrogramAccessible != nullptr);
+    QCOMPARE(spectrogramAccessible->text(QAccessible::Name), QStringLiteral("Spectrogram"));
+    QVERIFY(spectrogramAccessible->state().focusable);
+
+    // The pointer anywhere on the pane shows it: on the plot's middle, and
+    // on the left, away from the switch.
+    QTest::mouseMove(window, pane.center().toPoint());
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    QTest::mouseMove(window, QPoint(static_cast<int>(pane.left()) + 60,
+                                    static_cast<int>(pane.bottom()) - 10));
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    // On the switch itself, it stays.
+    QTest::mouseMove(window, sceneRectOf(spectrogramButton).center().toPoint());
+    QTRY_VERIFY(modeSwitch->property("pointerHovered").toBool());
+    QCOMPARE(modeSwitch->opacity(), 1.0);
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+
+    // Tab focus shows it, and it stays while focus is on either button.
+    QQuickItem *beforeSwitch = spectrogramButton->nextItemInFocusChain(false);
+    QVERIFY(beforeSwitch != nullptr);
+    beforeSwitch->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(spectrogramButton->hasActiveFocus());
+    QVERIFY(modeSwitch->property("focusInside").toBool());
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY(!switchAccessible->state().invisible);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(waveformButton->hasActiveFocus());
+    QTest::qWait(50);
+    QCOMPARE(modeSwitch->opacity(), 1.0);
+    // Focus leaving it hides it again.
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(!waveformButton->hasActiveFocus());
+    QVERIFY(!modeSwitch->property("focusInside").toBool());
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+
+    // Ctrl+1 and Ctrl+2 pick the modes while it is hidden.
+    window->contentItem()->forceActiveFocus();
+    QTest::keyClick(window, Qt::Key_2, Qt::ControlModifier);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QCOMPARE(modeSwitch->property("selectedMode").toInt(), 1);
+    QCOMPARE(modeSwitch->opacity(), 0.0);
+    QTest::keyClick(window, Qt::Key_1, Qt::ControlModifier);
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
+    QCOMPARE(modeSwitch->opacity(), 0.0);
+
+    // In the viewer in the main window, the pointer on the view shows it too.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_VERIFY(surface->isVisible());
+    QTest::mouseMove(window, sceneRectOf(surface).center().toPoint());
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QTest::mouseMove(window, away);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {

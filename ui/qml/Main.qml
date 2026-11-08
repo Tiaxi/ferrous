@@ -1551,6 +1551,13 @@ ApplicationWindow {
             }
         }
 
+        // The pointer over the visualization, its plot or anything on it,
+        // for the plot layer's mode switch. On this parent, it leaves the
+        // plot its own hover.
+        HoverHandler {
+            id: visualizationHover
+        }
+
         Viewers.SpectrogramSurface {
             id: spectrogramSurface
             objectName: "mainSpectrogramSurface"
@@ -1607,6 +1614,7 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
+            paneHovered: visualizationHover.hovered
             analysing: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
