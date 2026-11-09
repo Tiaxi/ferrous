@@ -28,9 +28,9 @@ use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
     send_error, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
-    ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack, PlayScrobble,
-    ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility, SettingsSaveTiming,
-    SnapshotUrgency,
+    EndedEarlyPlay, ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack,
+    PlayScrobble, ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility,
+    SettingsSaveTiming, SnapshotUrgency,
 };
 
 #[cfg(feature = "profiling-logs")]
@@ -708,8 +708,7 @@ pub(super) fn tick_lastfm_playback_at(
         && track_change.path == current_path
         && track_change.generation != tracker.track_change_generation;
     if restarted || tracker.active_path != current_path {
-        finalize_lastfm_track(state, lastfm_handle, tracker, now);
-        let track_token = (track_change.path == current_path).then_some(track_change.track_token);
+        let ended_early = end_lastfm_play(state, lastfm_handle, tracker, now);
         *tracker = LastFmPlaybackTracker {
             active_path: current_path,
             track_change_generation: track_change.generation,
@@ -717,19 +716,22 @@ pub(super) fn tick_lastfm_playback_at(
                 Ok(value) if value > 0 => Some(value),
                 _ => None,
             },
-            track_token,
+            ended_early,
             ..LastFmPlaybackTracker::default()
         };
     }
 
     if state.playback.state == PlaybackState::Stopped || tracker.active_path.is_none() {
-        finalize_lastfm_track(state, lastfm_handle, tracker, now);
+        let ended_early = end_lastfm_play(state, lastfm_handle, tracker, now);
         *tracker = LastFmPlaybackTracker {
             track_change_generation: tracker.track_change_generation,
+            ended_early,
             ..LastFmPlaybackTracker::default()
         };
         return;
     }
+    // A play is under way, so the last one is behind it.
+    tracker.ended_early = None;
 
     // Playback may correct the duration during the play. Follow it until the
     // play qualifies, so the threshold matches the track.
@@ -773,7 +775,6 @@ pub(super) fn tick_lastfm_playback_at(
     // Queue as soon as the play qualifies, so that quitting or crashing
     // later in the track cannot lose it.
     queue_lastfm_scrobble_if_ready(state, lastfm_handle, tracker);
-    judge_whether_the_play_ends_too_soon(state, tracker);
 
     if state.lastfm.enabled
         && !state.lastfm_scrobbling_paused
@@ -815,44 +816,36 @@ fn advance_lastfm_listened_duration(tracker: &mut LastFmPlaybackTracker, now: In
     }
 }
 
-/// How much more listening a play must need than the rest of the track has
-/// before it is shown as unable to scrobble. While the track plays, the
-/// listened time and the position advance together but are read apart, so
-/// their difference wavers by a little; this keeps a play that a seek left
-/// at the edge from flickering between the two.
-const ENDS_TOO_SOON_MARGIN: Duration = Duration::from_millis(500);
-
-/// Whether the rest of the track is too short for the listening the play
-/// still needs, as after a seek forward, so the play cannot scrobble unless
-/// a seek back makes room again. The scrobble rule itself counts only the
-/// listened time.
-fn judge_whether_the_play_ends_too_soon(state: &BridgeState, tracker: &mut LastFmPlaybackTracker) {
-    let threshold = tracker
+/// Ends the play `tracker` follows, as [`finalize_lastfm_track`] does, and
+/// returns it if it ended before its scrobble point. Without a play, which
+/// a tracker that has been reset has, it keeps the play that ended last.
+fn end_lastfm_play(
+    state: &BridgeState,
+    lastfm_handle: &LastFmHandle,
+    tracker: &mut LastFmPlaybackTracker,
+    now: Instant,
+) -> Option<EndedEarlyPlay> {
+    finalize_lastfm_track(state, lastfm_handle, tracker, now);
+    if tracker.started_at_utc.is_none() {
+        return tracker.ended_early;
+    }
+    // A play that would never scrobble, or that scrobbling paused, did not
+    // miss its scrobble point.
+    if !state.lastfm.enabled
+        || state.lastfm_scrobbling_paused
+        || tracker.scrobble != PlayScrobble::Counting
+        || tracker.artist.is_empty()
+        || tracker.track.is_empty()
+    {
+        return None;
+    }
+    let threshold_seconds = tracker
         .duration_seconds
-        .and_then(lastfm::scrobble_threshold_seconds);
-    let (Some(threshold_seconds), PlayScrobble::Counting) = (threshold, tracker.scrobble) else {
-        tracker.ends_too_soon = false;
-        return;
-    };
-    // A snapshot of the previous play may still follow the event that
-    // started this one: its position is where that play ended.
-    let previous_play = tracker
-        .track_token
-        .is_some_and(|token| token != state.playback.track_token);
-    if previous_play || state.playback.duration.is_zero() {
-        return;
-    }
-    let needed =
-        Duration::from_secs(u64::from(threshold_seconds)).saturating_sub(tracker.listened_duration);
-    let left = state
-        .playback
-        .duration
-        .saturating_sub(state.playback.position);
-    if needed > left.saturating_add(ENDS_TOO_SOON_MARGIN) {
-        tracker.ends_too_soon = true;
-    } else if left >= needed {
-        tracker.ends_too_soon = false;
-    }
+        .and_then(lastfm::scrobble_threshold_seconds)?;
+    Some(EndedEarlyPlay {
+        listened_duration: tracker.listened_duration,
+        threshold_seconds,
+    })
 }
 
 fn queue_lastfm_scrobble_if_ready(
@@ -898,12 +891,21 @@ pub(super) fn scrobble_indicator(
     tracker: &LastFmPlaybackTracker,
 ) -> ScrobbleIndicator {
     // Only a connected account that scrobbles shows the indicator.
-    if !state.lastfm.enabled
-        || state.lastfm.auth_state != lastfm::AuthState::Connected
-        || tracker.active_path.is_none()
-        || state.playback.state == PlaybackState::Stopped
-    {
+    if !state.lastfm.enabled || state.lastfm.auth_state != lastfm::AuthState::Connected {
         return ScrobbleIndicator::default();
+    }
+    // Once playback stops, it tells only a play that ended before its
+    // scrobble point.
+    if tracker.active_path.is_none() || state.playback.state == PlaybackState::Stopped {
+        return tracker
+            .ended_early
+            .map_or_else(ScrobbleIndicator::default, |play| ScrobbleIndicator {
+                state: ScrobbleIndicatorState::Ineligible,
+                ineligibility: ScrobbleIneligibility::EndedEarly,
+                listened_ms: u32::try_from(play.listened_duration.as_millis()).unwrap_or(u32::MAX),
+                threshold_ms: play.threshold_seconds.saturating_mul(1000),
+                message: String::new(),
+            });
     }
     let threshold_seconds = tracker
         .duration_seconds
@@ -937,9 +939,6 @@ pub(super) fn scrobble_indicator(
     } else if tracker.metadata_seen && (tracker.artist.is_empty() || tracker.track.is_empty()) {
         indicator.state = ScrobbleIndicatorState::Ineligible;
         indicator.ineligibility = ScrobbleIneligibility::MissingTags;
-    } else if tracker.ends_too_soon {
-        indicator.state = ScrobbleIndicatorState::Ineligible;
-        indicator.ineligibility = ScrobbleIneligibility::EndsTooSoon;
     }
     indicator
 }
@@ -3125,9 +3124,9 @@ mod tests {
     }
 
     #[test]
-    fn a_play_that_a_seek_leaves_too_little_track_for_says_it_wont_scrobble() {
+    fn a_seek_forward_near_the_end_keeps_the_countdown_and_the_play_scrobbles() {
         let (handle, commands) = lastfm::test_support::command_handle();
-        let track_path = p("/fixtures/ends-too-soon.flac");
+        let track_path = p("/fixtures/seek-near-end.flac");
         let mut state = lastfm_playing_state(&track_path);
         let mut tracker = LastFmPlaybackTracker::default();
         let start = Instant::now();
@@ -3136,47 +3135,155 @@ mod tests {
         let shown = tick_at(&state, &handle, &mut tracker, start, 30);
         assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
 
-        // At 3:20 of 4:00, 40 s are left for the 90 s still needed.
+        // At 3:20 of 4:00, 40 s are left for the 90 s still needed. The
+        // countdown goes on: only the listened time decides.
         state.playback.position = Duration::from_secs(200);
-        let shown = tick_at(&state, &handle, &mut tracker, start, 30);
-        assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible);
-        assert_eq!(shown.ineligibility, ScrobbleIneligibility::EndsTooSoon);
-        // The count and the scrobble point stay, for the tooltip.
-        assert_eq!((shown.listened_ms, shown.threshold_ms), (30_000, 120_000));
-
-        // Paused, a seek back makes room again: 90 s left for 90 s needed.
-        state.playback.state = PlaybackState::Paused;
-        state.playback.position = Duration::from_secs(150);
-        let shown = tick_at(&state, &handle, &mut tracker, start, 40);
-        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
-        assert_eq!(shown.ineligibility, ScrobbleIneligibility::None);
-        assert_eq!(shown.listened_ms, 30_000);
-
-        // Within half a second of the edge, it holds what it showed.
-        let at = |millis| Duration::from_millis(millis);
-        for (position, ends_too_soon) in [
-            (150_300, false),
-            (150_600, true),
-            (150_300, true),
-            (150_000, false),
-        ] {
-            state.playback.position = at(position);
-            let shown = tick_at(&state, &handle, &mut tracker, start, 41);
+        for (seconds, position) in [(30, 200), (31, 201), (60, 230), (69, 239)] {
+            state.playback.position = Duration::from_secs(position);
+            let shown = tick_at(&state, &handle, &mut tracker, start, seconds);
+            assert_eq!(shown.state, ScrobbleIndicatorState::Listening, "{seconds}");
             assert_eq!(
-                shown.ineligibility == ScrobbleIneligibility::EndsTooSoon,
-                ends_too_soon,
-                "{position}"
+                shown.ineligibility,
+                ScrobbleIneligibility::None,
+                "{seconds}"
+            );
+            assert_eq!(
+                (shown.listened_ms, shown.threshold_ms),
+                (u32::try_from(seconds).unwrap() * 1000, 120_000),
+                "{seconds}"
             );
         }
 
-        // The rule counts only the listened time: listening on from 1:00
-        // still scrobbles.
-        state.playback.state = PlaybackState::Playing;
+        // A seek back, and the listening on from there reaches the
+        // scrobble point.
         state.playback.position = Duration::from_secs(60);
-        tick_at(&state, &handle, &mut tracker, start, 42);
-        let shown = tick_at(&state, &handle, &mut tracker, start, 132);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 70);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+        state.playback.position = Duration::from_secs(110);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 120);
         assert_eq!(shown.state, ScrobbleIndicatorState::Sending);
         assert_eq!(queued_scrobbles(&sent(&commands)).len(), 1);
+    }
+
+    #[test]
+    fn a_play_that_ends_before_its_scrobble_point_says_so_once_it_has_ended() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/ends-early.flac");
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        let start = Instant::now();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        // A seek forward near the end, and the track plays out.
+        state.playback.position = Duration::from_secs(200);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 30);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        state.playback.position = Duration::from_secs(240);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 70);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+
+        // The end of the queue stops playback on the track; the listening
+        // up to then counts.
+        state.playback.state = PlaybackState::Stopped;
+        state.playback.position = Duration::ZERO;
+        let ended = ScrobbleIndicator {
+            state: ScrobbleIndicatorState::Ineligible,
+            ineligibility: ScrobbleIneligibility::EndedEarly,
+            listened_ms: 71_000,
+            threshold_ms: 120_000,
+            message: String::new(),
+        };
+        for seconds in [71, 72, 300] {
+            assert_eq!(
+                tick_at(&state, &handle, &mut tracker, start, seconds),
+                ended
+            );
+        }
+        // Clearing the queue leaves it as it was.
+        state.playback.current = None;
+        assert_eq!(tick_at(&state, &handle, &mut tracker, start, 301), ended);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+
+        // Playing again starts over.
+        state.playback.current = Some(track_path.clone());
+        state.playback.state = PlaybackState::Playing;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 302);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::None);
+        assert_eq!(shown.listened_ms, 0);
+
+        // A stop ends a play too.
+        tick_at(&state, &handle, &mut tracker, start, 312);
+        state.playback.state = PlaybackState::Stopped;
+        let shown = tick_at(&state, &handle, &mut tracker, start, 313);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::EndedEarly);
+        assert_eq!(shown.listened_ms, 11_000);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+    }
+
+    #[test]
+    fn only_a_play_that_missed_its_scrobble_point_says_so_once_it_has_ended() {
+        let (handle, commands) = lastfm::test_support::command_handle();
+        let track_path = p("/fixtures/ended.flac");
+        let start = Instant::now();
+        let ended_after =
+            |state: &mut BridgeState, tracker: &mut LastFmPlaybackTracker, seconds| {
+                tick_at(state, &handle, tracker, start, 0);
+                tick_at(state, &handle, tracker, start, seconds);
+                state.playback.state = PlaybackState::Stopped;
+                tick_at(state, &handle, tracker, start, seconds + 1)
+            };
+
+        // A scrobbled play.
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        assert_eq!(
+            ended_after(&mut state, &mut tracker, 130),
+            ScrobbleIndicator::default()
+        );
+        assert_eq!(queued_scrobbles(&sent(&commands)).len(), 1);
+
+        // A track too short to scrobble.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.duration = Duration::from_secs(30);
+        let mut tracker = LastFmPlaybackTracker::default();
+        assert_eq!(
+            ended_after(&mut state, &mut tracker, 10),
+            ScrobbleIndicator::default()
+        );
+
+        // A play while scrobbling is paused.
+        let mut state = lastfm_playing_state(&track_path);
+        state.lastfm_scrobbling_paused = true;
+        let mut tracker = LastFmPlaybackTracker::default();
+        assert_eq!(
+            ended_after(&mut state, &mut tracker, 10),
+            ScrobbleIndicator::default()
+        );
+
+        // A track that was cued but never played.
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.state = PlaybackState::Paused;
+        let mut tracker = LastFmPlaybackTracker::default();
+        assert_eq!(
+            ended_after(&mut state, &mut tracker, 10),
+            ScrobbleIndicator::default()
+        );
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
+
+        // A play that playback moves on from leaves the slot to the next.
+        let mut state = lastfm_playing_state(&track_path);
+        let mut tracker = LastFmPlaybackTracker::default();
+        tick_at(&state, &handle, &mut tracker, start, 0);
+        tick_at(&state, &handle, &mut tracker, start, 10);
+        let next_path = p("/fixtures/ended-next.flac");
+        state.playback.current = Some(next_path.clone());
+        state.metadata.source_path = Some(next_path.to_string_lossy().into_owned());
+        let shown = tick_at(&state, &handle, &mut tracker, start, 11);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::None);
+        assert_eq!(shown.listened_ms, 0);
+        assert!(queued_scrobbles(&sent(&commands)).is_empty());
     }
 
     #[test]
@@ -3213,13 +3320,11 @@ mod tests {
         assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
         assert_eq!(shown.listened_ms, 1_000);
 
-        // A seek to where the previous play ended is judged like any other.
-        state.playback.position = Duration::from_secs(200);
-        let shown = tick_at(&state, &handle, &mut tracker, start, 241);
-        assert_eq!(shown.ineligibility, ScrobbleIneligibility::EndsTooSoon);
+        // A seek to where the previous play ended leaves the count.
         state.playback.position = Duration::from_millis(239_900);
         let shown = tick_at(&state, &handle, &mut tracker, start, 241);
-        assert_eq!(shown.ineligibility, ScrobbleIneligibility::EndsTooSoon);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!((shown.listened_ms, shown.threshold_ms), (1_000, 120_000));
 
         // A new track counts from zero too, and its own length decides.
         let next_path = p("/fixtures/next-after-replay.flac");
@@ -3234,45 +3339,27 @@ mod tests {
     }
 
     /// A restored session cues its track paused where it was left, and
-    /// learns its length later. Nothing moves the position, which is this
-    /// play's own from the start.
+    /// learns its length later. However late in the track, the play counts
+    /// down from the whole scrobble point.
     #[test]
-    fn a_restored_position_too_late_in_the_track_says_it_wont_scrobble() {
+    fn a_restored_position_late_in_the_track_keeps_the_countdown() {
         let (handle, _commands) = lastfm::test_support::command_handle();
         let track_path = p("/fixtures/restored.flac");
         let start = Instant::now();
-        // With the restored track's change and without one.
-        for told in [true, false] {
-            let mut state = lastfm_playing_state(&track_path);
-            state.playback.state = PlaybackState::Paused;
-            state.playback.position = Duration::from_secs(200);
-            state.playback.duration = Duration::ZERO;
-            if told {
-                state.last_track_change.path = Some(track_path.clone());
-                state.last_track_change.generation = 1;
-                state.last_track_change.track_token = 7;
-                state.playback.track_token = 7;
-            }
-            let mut tracker = LastFmPlaybackTracker::default();
-            let shown = tick_at(&state, &handle, &mut tracker, start, 0);
-            assert_eq!(shown.state, ScrobbleIndicatorState::Listening, "{told}");
-            assert_eq!(shown.threshold_ms, 0, "{told}");
+        let mut state = lastfm_playing_state(&track_path);
+        state.playback.state = PlaybackState::Paused;
+        state.playback.position = Duration::from_secs(200);
+        state.playback.duration = Duration::ZERO;
+        let mut tracker = LastFmPlaybackTracker::default();
+        let shown = tick_at(&state, &handle, &mut tracker, start, 0);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.threshold_ms, 0);
 
-            // At 3:20 of 4:00, 40 s are left for the 120 s needed.
-            state.playback.duration = Duration::from_secs(240);
-            let shown = tick_at(&state, &handle, &mut tracker, start, 1);
-            assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible, "{told}");
-            assert_eq!(
-                shown.ineligibility,
-                ScrobbleIneligibility::EndsTooSoon,
-                "{told}"
-            );
-            assert_eq!(
-                (shown.listened_ms, shown.threshold_ms),
-                (0, 120_000),
-                "{told}"
-            );
-        }
+        state.playback.duration = Duration::from_secs(240);
+        let shown = tick_at(&state, &handle, &mut tracker, start, 1);
+        assert_eq!(shown.state, ScrobbleIndicatorState::Listening);
+        assert_eq!(shown.ineligibility, ScrobbleIneligibility::None);
+        assert_eq!((shown.listened_ms, shown.threshold_ms), (0, 120_000));
     }
 
     #[test]

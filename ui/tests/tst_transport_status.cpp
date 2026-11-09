@@ -1005,19 +1005,20 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(progress(), 0.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
-    // A seek forward left too little of the track: the slot says so, the
-    // ring is empty and the tooltip says why.
+    // Once playback has stopped after a play that ended before its
+    // scrobble point: the slot says so, the ring is empty and the tooltip
+    // says how far the play got.
     bridge->setProperty("lastFmScrobbleState", 6);
     bridge->setProperty("lastFmScrobbleIneligibility", 3);
-    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Won't scrobble"));
+    QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Not scrobbled"));
     QVERIFY(label->isVisible());
     QVERIFY(ring->isVisible());
     QCOMPARE(progress(), 0.0);
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(toolTipText(slot),
-             QStringLiteral("Last.fm: this play won't scrobble. The rest of the track is shorter than the "
-                            "0:38 of listening it still needs."));
+             QStringLiteral("Last.fm: not scrobbled. The play ended after 1:17 of the 1:55 of listening it "
+                            "needed."));
     // Other plays that can't be scrobbled, and skipped ones: empty.
     for (const int reason : {1, 2}) {
         bridge->setProperty("lastFmScrobbleIneligibility", reason);

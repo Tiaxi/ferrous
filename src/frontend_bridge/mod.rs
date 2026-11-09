@@ -606,10 +606,11 @@ pub enum ScrobbleIneligibility {
     TooShort,
     /// Without an artist or a title.
     MissingTags,
-    /// The rest of the track is shorter than the listening the play still
-    /// needs, as after a seek forward. A seek back may make it eligible
-    /// again.
-    EndsTooSoon,
+    /// The play ended, by the end of the track or a stop, before the
+    /// listening reached the scrobble point. Shown only while playback is
+    /// stopped after it: a seek never decides it, as the scrobble rule
+    /// counts only the listened time.
+    EndedEarly,
 }
 
 impl ScrobbleIneligibility {
@@ -619,7 +620,7 @@ impl ScrobbleIneligibility {
             Self::None => 0,
             Self::TooShort => 1,
             Self::MissingTags => 2,
-            Self::EndsTooSoon => 3,
+            Self::EndedEarly => 3,
         }
     }
 }
@@ -836,14 +837,16 @@ struct LastFmPlaybackTracker {
     scrobble: PlayScrobble,
     /// Whether the current track's metadata has been read.
     metadata_seen: bool,
-    /// The `track_token` of the `TrackChanged` event that started this
-    /// play, when one did. Playback tells a replay before its snapshots
-    /// carry the replay's token, so until they do, their position is the
-    /// previous play's.
-    track_token: Option<u64>,
-    /// Whether the rest of the track is too short for the listening the
-    /// play still needs; see [`ScrobbleIneligibility::EndsTooSoon`].
-    ends_too_soon: bool,
+    /// The last play, when it ended before its scrobble point, until
+    /// playback plays again; see [`ScrobbleIneligibility::EndedEarly`].
+    ended_early: Option<EndedEarlyPlay>,
+}
+
+/// A play that ended before its scrobble point, as it stood then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EndedEarlyPlay {
+    listened_duration: Duration,
+    threshold_seconds: u32,
 }
 
 impl LastFmPlaybackTracker {

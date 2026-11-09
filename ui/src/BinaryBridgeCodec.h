@@ -434,7 +434,7 @@ enum ScrobbleState : quint8 {
     ScrobbleStateLast = ScrobbleStateSkipped,
 };
 
-// Why a play cannot be scrobbled. Mirrors ScrobbleIneligibility in
+// Why a play cannot be, or was not, scrobbled. Mirrors ScrobbleIneligibility in
 // src/frontend_bridge/mod.rs.
 enum ScrobbleIneligibility : quint8 {
     ScrobbleIneligibilityNone = 0,
@@ -442,10 +442,11 @@ enum ScrobbleIneligibility : quint8 {
     ScrobbleIneligibilityTooShort = 1,
     // Without an artist or a title.
     ScrobbleIneligibilityMissingTags = 2,
-    // The rest of the track is shorter than the listening the play still
-    // needs, as after a seek forward; a seek back may make room again.
-    ScrobbleIneligibilityEndsTooSoon = 3,
-    ScrobbleIneligibilityLast = ScrobbleIneligibilityEndsTooSoon,
+    // The play ended, by the end of the track or a stop, before the
+    // listening reached the scrobble point. Sent only while playback is
+    // stopped after it; a seek never decides it.
+    ScrobbleIneligibilityEndedEarly = 3,
+    ScrobbleIneligibilityLast = ScrobbleIneligibilityEndedEarly,
 };
 
 struct DecodedLastFm {

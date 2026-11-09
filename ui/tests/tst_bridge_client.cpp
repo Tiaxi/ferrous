@@ -2044,14 +2044,14 @@ void BridgeClientTest::lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt() {
         QCOMPARE(decoded.lastfm.scrobbleIneligibility,
                  int(BinaryBridgeCodec::ScrobbleIneligibilityMissingTags));
     }
-    // A play a seek left too little of the track for.
+    // A play that ended before its scrobble point.
     QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
         packetWithSection(BinaryBridgeCodec::SectionLastFm,
                           lastFmSectionPayload(true, 0, 6, 3, 30000, 120000, "")),
         &decoded, &error));
     QCOMPARE(decoded.lastfm.scrobbleState, int(BinaryBridgeCodec::ScrobbleStateIneligible));
     QCOMPARE(decoded.lastfm.scrobbleIneligibility,
-             int(BinaryBridgeCodec::ScrobbleIneligibilityEndsTooSoon));
+             int(BinaryBridgeCodec::ScrobbleIneligibilityEndedEarly));
     QCOMPARE(decoded.lastfm.scrobbleListenedMs, quint32(30000));
     QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
         packetWithSection(BinaryBridgeCodec::SectionLastFm,

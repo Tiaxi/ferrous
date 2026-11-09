@@ -16,9 +16,11 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   come from the scrobbler's listened time, which a seek doesn't move
 //   and a pause holds; a new play (a new track, a replay, Repeat One)
 //   starts it over.
-// - Won't scrobble: a seek forward left less of the track than the
-//   listening still needed. "Won't scrobble", the empty ring and the glyph
-//   in the tertiary colour; the tooltip says why.
+// - Not scrobbled: once playback has stopped, by the end of the queue or
+//   a stop, after a play that ended before its scrobble point. "Not
+//   scrobbled", the empty ring and the glyph in the tertiary colour; the
+//   tooltip says how far the play got. A seek never decides it: the
+//   countdown goes on while the track plays.
 // - Scrobbled, or being sent: the ring closed, in the link colour.
 // - Queued: "3 scrobbles waiting" and the offline glyph.
 // - Failed: "Scrobble failed" and the glyph in the negative colour.
@@ -45,7 +47,7 @@ AbstractButton {
     readonly property int thresholdMs: root.uiBridge.lastFmScrobbleThresholdMs
     readonly property int pendingCount: Math.max(0, Number(root.uiBridge.lastFmPendingScrobbleCount) || 0)
 
-    // What the slot shows: "hidden", "listening", "wontScrobble",
+    // What the slot shows: "hidden", "listening", "notScrobbled",
     // "scrobbled", "queued", "failed", "paused" or "empty". The scrobble
     // states and reasons are BinaryBridgeCodec::ScrobbleState and
     // ScrobbleIneligibility.
@@ -70,7 +72,7 @@ AbstractButton {
             return "scrobbled"
         }
         if (root.scrobbleState === 6 && root.ineligibility === 3) {
-            return "wontScrobble"
+            return "notScrobbled"
         }
         return "empty"
     }
@@ -86,7 +88,7 @@ AbstractButton {
     // The ring around the glyph: its radius in the box, and how much of it
     // is drawn, 0 to 1. The share moves by whole pixels of the arc too,
     // so a long scrobble point redraws it more rarely still.
-    readonly property bool ringShown: root.look === "listening" || root.look === "wontScrobble"
+    readonly property bool ringShown: root.look === "listening" || root.look === "notScrobbled"
         || root.look === "scrobbled"
     readonly property real ringStroke: 2
     readonly property real ringRadius: (root.boxSize - root.ringStroke) / 2
@@ -113,8 +115,8 @@ AbstractButton {
                 root.pendingCount)
         case "failed":
             return I18n.i18nc("@info:status", "Scrobble failed")
-        case "wontScrobble":
-            return I18n.i18nc("@info:status", "Won't scrobble")
+        case "notScrobbled":
+            return I18n.i18nc("@info:status", "Not scrobbled")
         default:
             return ""
         }
@@ -128,10 +130,11 @@ AbstractButton {
                 ? I18n.i18nc("@info:tooltip %1 is a duration", "Last.fm: %1 to scrobble",
                     FormatUtils.formatClockTime(root.secondsLeft))
                 : I18n.i18nc("@info:tooltip", "Last.fm: listening")
-        case "wontScrobble":
-            return I18n.i18nc("@info:tooltip %1 is a duration",
-                "Last.fm: this play won't scrobble. The rest of the track is shorter than the %1 of listening it still needs.",
-                FormatUtils.formatClockTime(root.secondsLeft))
+        case "notScrobbled":
+            return I18n.i18nc("@info:tooltip %1 and %2 are durations",
+                "Last.fm: not scrobbled. The play ended after %1 of the %2 of listening it needed.",
+                FormatUtils.formatClockTime(root.listenedSeconds),
+                FormatUtils.formatClockTime(root.thresholdSeconds))
         case "scrobbled":
             return root.scrobbleState === 3
                 ? I18n.i18nc("@info:tooltip", "Last.fm: scrobbled")
@@ -180,7 +183,7 @@ AbstractButton {
         case "failed":
             return root.uiPalette.negative
         case "paused":
-        case "wontScrobble":
+        case "notScrobbled":
             return root.uiPalette.textTertiary
         default:
             return root.uiPalette.textSecondary
@@ -291,7 +294,7 @@ AbstractButton {
                 text: root.labelText
                 font.pointSize: root.uiPalette.smallPointSize
                 font.features: root.uiPalette.tabularFigures
-                color: root.look === "queued" || root.look === "wontScrobble"
+                color: root.look === "queued" || root.look === "notScrobbled"
                     ? root.uiPalette.textSecondary
                     : root.uiPalette.text
                 Accessible.ignored: true

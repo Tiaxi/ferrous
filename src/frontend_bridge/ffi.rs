@@ -5843,7 +5843,7 @@ mod tests {
             ),
             (
                 ScrobbleIndicatorState::Ineligible,
-                ScrobbleIneligibility::EndsTooSoon,
+                ScrobbleIneligibility::EndedEarly,
                 6,
                 3,
             ),

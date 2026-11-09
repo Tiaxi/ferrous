@@ -183,10 +183,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
          QStringLiteral("Last.fm can't be reached (refused for testing). 1 scrobble is waiting to be sent.")},
         {"too short", 6, 1, false, 0, "empty", QString(), "", QColor(), QString()},
         {"without tags", 6, 2, false, 0, "empty", QString(), "", QColor(), QString()},
-        {"ends too soon", 6, 3, false, 0, "wontScrobble", QStringLiteral("Won't scrobble"), "/lastfm.svg",
+        {"ended early", 6, 3, false, 0, "notScrobbled", QStringLiteral("Not scrobbled"), "/lastfm.svg",
          tertiary,
-         QStringLiteral("Last.fm: this play won't scrobble. The rest of the track is shorter than the 2:00 "
-                        "of listening it still needs.")},
+         QStringLiteral("Last.fm: not scrobbled. The play ended after 0:00 of the 2:00 of listening it needed.")},
         {"skipped", 7, 0, false, 0, "empty", QString(), "", QColor(), QString()},
         {"paused", 1, 0, true, 3, "paused", QString(), "/lastfm-paused.svg", tertiary,
          QStringLiteral("Last.fm: scrobbling is paused")},
