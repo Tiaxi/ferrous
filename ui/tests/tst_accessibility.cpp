@@ -3636,6 +3636,16 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QVERIFY(text != nullptr && link != nullptr);
     QCOMPARE(text->property("text").toString(), QStringLiteral("The file ends at 4:02."));
     QCOMPARE(accessibleRole(link), QAccessible::Link);
+    // The messages over the plot take no hover from the view under them, as
+    // a Label of the app's style would, with its hover handler.
+    const auto takesHover = [](QQuickItem *item) {
+        const QList<QObject *> children = item->findChildren<QObject *>();
+        return item->acceptHoverEvents()
+            || std::any_of(children.cbegin(), children.cend(),
+                           [](QObject *child) { return child->inherits("QQuickHoverHandler"); });
+    };
+    QVERIFY(!takesHover(analysing));
+    QVERIFY(!takesHover(text));
     QSignalSpy issues(errors, SIGNAL(historyRequested()));
     link->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(window, Qt::Key_Return);

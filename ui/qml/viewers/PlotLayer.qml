@@ -160,7 +160,9 @@ Item {
         }
     }
 
-    Label {
+    // Over the plot, a Text rather than a Label: the desktop style's Label
+    // has a hover handler, which would take the hover from the view.
+    Text {
         objectName: "plotAnalysingText"
         anchors.centerIn: parent
         anchors.horizontalCenterOffset: -root.meterWidth / 2
@@ -200,7 +202,7 @@ Item {
                     color: root.plotColors.plotTextSecondary
                 }
 
-                Label {
+                Text {
                     objectName: "plotEndsEarlyText"
                     text: I18n.i18nc("@info %1 is a time in the track, such as 4:02",
                                      "The file ends at %1.", root.formatCut(root.cutSeconds))
