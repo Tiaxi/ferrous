@@ -82,6 +82,10 @@ pub struct TrackMetadata {
 #[derive(Debug, Clone)]
 pub enum MetadataEvent {
     Loaded(TrackMetadata),
+    /// A request for this path was dropped unread: a newer request for
+    /// another path came before the worker got to it. Sent before the
+    /// newer read starts, and once per path.
+    Superseded(PathBuf),
 }
 
 pub struct MetadataService {
@@ -101,7 +105,7 @@ impl MetadataService {
 
     /// A service that runs `before_read` on each path before reading it.
     #[cfg(test)]
-    fn with_read_hook(
+    pub(crate) fn with_read_hook(
         before_read: impl Fn(&Path) + Send + 'static,
     ) -> (Self, Receiver<MetadataEvent>) {
         Self::spawn(std::time::Duration::ZERO, before_read)
@@ -156,8 +160,16 @@ fn run_metadata_worker(
     before_read: impl Fn(&Path),
 ) {
     while let Ok(mut path) = req_rx.recv() {
+        let mut superseded = Vec::new();
         while let Ok(newer_path) = req_rx.try_recv() {
-            path = newer_path;
+            superseded.push(std::mem::replace(&mut path, newer_path));
+        }
+        // Only the newest request is read. Whoever asked for the others
+        // learns that they were dropped, unless the path is read anyway.
+        for (index, dropped) in superseded.iter().enumerate() {
+            if *dropped != path && !superseded[..index].contains(dropped) {
+                let _ = event_tx.send(MetadataEvent::Superseded(dropped.clone()));
+            }
         }
 
         if !delay.is_zero() {
@@ -729,7 +741,9 @@ mod tests {
             let event = rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("metadata event");
-            let MetadataEvent::Loaded(metadata) = event;
+            let MetadataEvent::Loaded(metadata) = event else {
+                panic!("a single request is never dropped: {event:?}");
+            };
             if metadata.title == "Harvest" {
                 seen = Some(metadata);
                 break;
@@ -1005,6 +1019,44 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_reports_the_requests_it_drops_for_a_newer_one() {
+        let dir = metadata_test_path("superseded", "d");
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let (first, second, newest) = (dir.join("01.wav"), dir.join("02.wav"), dir.join("03.wav"));
+        write_numbered_test_wave(&newest, 3, 3);
+        let (request_tx, request_rx) = crossbeam_channel::unbounded();
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        // All queued while the worker is busy: only the newest is read.
+        for path in [&first, &second, &first, &newest, &newest] {
+            request_tx.send(path.clone()).expect("queue request");
+        }
+        drop(request_tx);
+        run_metadata_worker(&request_rx, &event_tx, Duration::ZERO, |_| {});
+        drop(event_tx);
+
+        let events = event_rx.iter().collect::<Vec<_>>();
+        let superseded = events
+            .iter()
+            .map_while(|event| match event {
+                MetadataEvent::Superseded(path) => Some(path.clone()),
+                MetadataEvent::Loaded(_) => None,
+            })
+            .collect::<Vec<_>>();
+        // Once each, before the newer read, and never the path it reads.
+        assert_eq!(superseded, vec![first, second]);
+        let rest = &events[superseded.len()..];
+        assert!(!rest.is_empty());
+        for event in rest {
+            let MetadataEvent::Loaded(metadata) = event else {
+                panic!("a dropped request reported after the read: {event:?}");
+            };
+            assert_eq!(metadata.source_path.as_deref(), newest.to_str());
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn track_change_finds_covers_without_decoding_them() {
         // A flat picture this size compresses to a few kilobytes but decodes
         // to 16 MiB of RGBA, far more than the rest of a track change asks for.
@@ -1047,8 +1099,9 @@ mod tests {
             run_metadata_worker(&request_rx, &event_tx, Duration::ZERO, |_| {});
             let allocated = crate::test_alloc::allocated_bytes() - before;
 
-            let MetadataEvent::Loaded(metadata) =
-                event_rx.try_iter().last().expect("final metadata");
+            let Some(MetadataEvent::Loaded(metadata)) = event_rx.try_iter().last() else {
+                panic!("no final metadata for {track:?}");
+            };
             assert_eq!(
                 metadata.cover_art_path.as_deref(),
                 expected_cover.to_str(),
@@ -1078,6 +1131,9 @@ mod tests {
         loop {
             match rx.recv_timeout(Duration::from_secs(20)) {
                 Ok(MetadataEvent::Loaded(metadata)) => final_metadata = Some(metadata),
+                Ok(MetadataEvent::Superseded(path)) => {
+                    panic!("a single request is never dropped: {path:?}")
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     panic!("the metadata worker did not finish")

@@ -4571,7 +4571,9 @@ mod tests {
             .metadata_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("metadata event");
-        let MetadataEvent::Loaded(older_metadata) = &older;
+        let MetadataEvent::Loaded(older_metadata) = &older else {
+            panic!("a single request is never dropped: {older:?}");
+        };
         assert_eq!(older_metadata.track_total, Some(8));
         // Handled one by one, so nothing else of the read arrives between.
         let report = renumber_and_report(&track);
@@ -4583,6 +4585,60 @@ mod tests {
         // It was read in an older state, so the tags are read again.
         apply_metadata_until_total(&mut runtime, 10);
         assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
+        assert!(runtime.state.reported_playing_file.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rescan_read_dropped_for_a_late_artwork_request_is_read_again() {
+        let _guard = test_guard();
+        let (dir, track, mut runtime, event_tx) = rescan_fixture("dropped");
+        // The track before, whose reads keep the metadata worker busy until
+        // released.
+        let previous = dir.join("01.wav");
+        crate::metadata::write_numbered_test_wave(&previous, 1, 5);
+        let (reading_tx, reading) = unbounded::<()>();
+        let (release, release_rx) = bounded::<()>(1);
+        let busy = previous.clone();
+        (runtime.metadata, runtime.metadata_rx) =
+            MetadataService::with_read_hook(move |path: &Path| {
+                if path == busy {
+                    let _ = reading_tx.send(());
+                    let _ = release_rx.recv();
+                }
+            });
+        runtime.metadata.request(track.clone());
+        apply_metadata_until_total(&mut runtime, 8);
+        runtime.metadata.request(previous.clone());
+        reading
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker reads the track before");
+
+        // A scan reports the playing file changed, so its tags are asked for
+        // again. Artwork applied to the track before asks for that one's
+        // after it, and the busy worker reads only the newer request.
+        let report = renumber_and_report(&track);
+        let changed = report.changes.changed_files[0].1;
+        runtime.handle_wake(BridgeLoopWake::Library(report), &event_tx);
+        runtime.handle_wake(
+            BridgeLoopWake::ApplyAlbumArt(ApplyAlbumArtEvent {
+                track_path: previous.clone(),
+                indexed_by_path: HashMap::new(),
+                fingerprints: HashMap::new(),
+                error: None,
+            }),
+            &event_tx,
+        );
+        drop(release);
+
+        apply_metadata_until_total(&mut runtime, 10);
+        assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
+        assert_eq!(runtime.state.metadata.file_fingerprint, Some(changed));
+        assert_eq!(
+            runtime.state.metadata.source_path.as_deref(),
+            track.to_str()
+        );
         assert!(runtime.state.reported_playing_file.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
