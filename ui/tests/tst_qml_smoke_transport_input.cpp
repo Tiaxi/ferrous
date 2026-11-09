@@ -27,6 +27,7 @@ private slots:
     void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
+    void resetZoomResetsOnlyTheShownPlotsZoom();
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
@@ -1467,7 +1468,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetVisualizationAction"));
+    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetZoomAction"));
     auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
     auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
     QVERIFY(bridge != nullptr && viewer != nullptr && resetAction != nullptr
@@ -1480,8 +1481,8 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
         return spectrogramSurface->property("zoomLevel").toDouble();
     };
 
-    // View › Reset Visualization View brings the spectrogram back to its
-    // default zoom, as it does the waveform.
+    // View › Reset Zoom brings the spectrogram back to its default zoom, as
+    // it does the waveform.
     spectrogramSurface->setProperty("_widgetZoomLevel", 3.0);
     QCOMPARE(spectrogramZoom(), 3.0);
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
@@ -1557,6 +1558,111 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
+}
+
+void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetZoomAction"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && resetAction != nullptr
+            && spectrogramSurface != nullptr && waveformSurface != nullptr);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    QCOMPARE(resetAction->property("shortcut").value<QKeySequence>(),
+             QKeySequence(QStringLiteral("Ctrl+0")));
+
+    // The spectrogram with two channels: the old Reset Visualization View
+    // cleared them and drew the spectrogram afresh.
+    QVariant stereo;
+    QVERIFY(QMetaObject::invokeMethod(spectrogramSurface, "descriptorsForChannelCount",
+                                      Q_RETURN_ARG(QVariant, stereo), Q_ARG(QVariant, 2)));
+    spectrogramSurface->setProperty("channelDescriptors", stereo);
+    QCOMPARE(spectrogramSurface->property("laneCount").toInt(), 2);
+    QSignalSpy triggered(resetAction, SIGNAL(triggered(QObject *)));
+
+    // `zoom` sets the shown plot's zoom in the main window or a viewer;
+    // `zoomOf` reads it.
+    const auto zoom = [&](int mode, double level) {
+        if (mode == 0) {
+            spectrogramSurface->setProperty(
+                viewer->property("spectrogramViewerOpen").toBool() ? "_viewerZoomLevel" : "_widgetZoomLevel",
+                level);
+        } else {
+            waveform->setZoomLevel(level);
+        }
+    };
+    const auto zoomOf = [&](int mode) {
+        return mode == 0 ? spectrogramSurface->property("zoomLevel").toDouble() : waveform->zoomLevel();
+    };
+    // In `host`: disabled at the default zoom, enabled when zoomed, and
+    // Ctrl+0 resets the shown plot's zoom and nothing else.
+    const auto check = [&](QQuickWindow *host, const char *where) {
+        for (const int mode : {0, 1}) {
+            const QByteArray label = QByteArray(where) + (mode == 0 ? " spectrogram" : " waveform");
+            viewer->setProperty("visualizationMode", mode);
+            QTRY_COMPARE(zoomOf(mode), 1.0);
+            QVERIFY2(!resetAction->property("enabled").toBool(), label.constData());
+            // At 1×, the key does nothing.
+            const int before = triggered.count();
+            QTest::keyClick(host, Qt::Key_0, Qt::ControlModifier);
+            QCoreApplication::processEvents();
+            QVERIFY2(triggered.count() == before, label.constData());
+
+            zoom(mode, 3.0);
+            QCOMPARE(zoomOf(mode), 3.0);
+            QVERIFY2(resetAction->property("enabled").toBool(), label.constData());
+            QTest::keyClick(host, Qt::Key_0, Qt::ControlModifier);
+            QTRY_COMPARE(triggered.count(), before + 1);
+            QCOMPARE(zoomOf(mode), 1.0);
+            QVERIFY2(!resetAction->property("enabled").toBool(), label.constData());
+            // The spectrogram keeps its channels: nothing was cleared.
+            QCOMPARE(spectrogramSurface->property("laneCount").toInt(), 2);
+            QCOMPARE(spectrogramSurface->property("channelDescriptors").toList().size(), 2);
+        }
+        viewer->setProperty("visualizationMode", 0);
+    };
+
+    // The main window.
+    window->contentItem()->forceActiveFocus();
+    check(window, "main window");
+
+    // The viewer inside the main window.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(popup != nullptr);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    check(window, "viewer in the window");
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+
+    // The viewer over the whole screen.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(spectrogramSurface->window() != nullptr && spectrogramSurface->window() != window);
+    QQuickWindow *fullscreen = spectrogramSurface->window();
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    check(fullscreen, "viewer over the screen");
+
+    // The strip's Reset does the same zoom-only reset.
+    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QQuickItem *reset = itemNamed(strip, QStringLiteral("viewerResetButton"));
+    QVERIFY(reset != nullptr);
+    zoom(0, 2.0);
+    QTRY_VERIFY(reset->isVisible());
+    QTest::mouseClick(fullscreen, Qt::LeftButton, Qt::NoModifier, centerInWindow(reset));
+    QTRY_COMPARE(zoomOf(0), 1.0);
+    QCOMPARE(spectrogramSurface->property("laneCount").toInt(), 2);
+    QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
 void TransportInputSmokeTest::viewerControlsComeBackForTheKeyboard() {

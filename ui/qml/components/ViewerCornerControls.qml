@@ -25,7 +25,7 @@ Item {
     property var pointerActivity: null
     property real zoomLevel: 1.0
     property var resetView: null
-    property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Visualization View")
+    property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
 

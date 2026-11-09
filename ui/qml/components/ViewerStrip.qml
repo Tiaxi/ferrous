@@ -37,7 +37,7 @@ Rectangle {
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
     property var resetView: null
-    property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Visualization View")
+    property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     // The app's errors: new ones show as a button that opens Recent Issues,
     // as the viewer covers the status bar.
     property var errorController: null
