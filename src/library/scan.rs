@@ -47,6 +47,18 @@ struct RootScanProgress {
     files_per_second: Option<f32>,
 }
 
+/// How far the scan of a root has come, for the total of its progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanStage {
+    /// The walk goes on, and can find more files.
+    Walking,
+    /// The walk has ended. Writing the rows read and removing the rows of
+    /// files that are gone remain.
+    Walked,
+    /// The root is done.
+    Finished,
+}
+
 struct ScanProgressReporter {
     previous_index_count: usize,
     smoothed_rate: Option<f32>,
@@ -77,15 +89,13 @@ impl ScanProgressReporter {
         }
     }
 
-    /// The progress to report, if it is `force`d or due. `walked` tells
-    /// whether the walk of the root has ended, so that `discovered` are all
-    /// its files.
+    /// The progress to report, if it is `force`d or due, at `stage`.
     fn emit(
         &mut self,
         force: bool,
         discovered: usize,
         processed: usize,
-        walked: bool,
+        stage: ScanStage,
     ) -> Option<RootScanProgress> {
         if !force && self.last_emit.elapsed() < Duration::from_millis(180) {
             return None;
@@ -108,23 +118,31 @@ impl ScanProgressReporter {
         Some(RootScanProgress {
             discovered,
             processed,
-            estimated_total: self.estimated_total(discovered, walked),
+            estimated_total: self.estimated_total(discovered, processed, stage),
             files_per_second,
         })
     }
 
-    /// The files the scan will have processed when it ends. Once the walk
-    /// has ended, those are the files it found. Until then, they are the
-    /// files the root had when the scan started, and more than the walk has
-    /// found so far, since it can find another; a root that had none has no
-    /// estimate.
-    fn estimated_total(&self, discovered: usize, walked: bool) -> Option<usize> {
-        if walked {
-            Some(discovered)
-        } else if self.previous_index_count == 0 {
-            None
-        } else {
-            Some(self.previous_index_count.max(discovered.saturating_add(1)))
+    /// The files the scan will have processed when it ends, and more than
+    /// `processed` until it has.
+    ///
+    /// While the walk goes on, those are the files the root had when the
+    /// scan started, and more than the walk has found so far, since it can
+    /// find another; a root that had none has no estimate. Once the walk has
+    /// ended, they are the files it found, and one more while all of those
+    /// are processed: the rows of files that are gone are still to remove.
+    /// Those rows are not files to scan, so they do not count as files.
+    fn estimated_total(
+        &self,
+        discovered: usize,
+        processed: usize,
+        stage: ScanStage,
+    ) -> Option<usize> {
+        match stage {
+            ScanStage::Walking if self.previous_index_count == 0 => None,
+            ScanStage::Walking => Some(self.previous_index_count.max(discovered.saturating_add(1))),
+            ScanStage::Walked => Some(discovered.max(processed.saturating_add(1))),
+            ScanStage::Finished => Some(discovered),
         }
     }
 }
@@ -635,6 +653,7 @@ pub(super) fn run_scans_with(
         }
     }
     run.remove_unreferenced_covers();
+    run.publish_run_done();
     scan_result(&run.problems)
 }
 
@@ -676,6 +695,7 @@ pub(super) fn run_scoped_scan(
     if end.changed {
         run.remove_unreferenced_covers();
     }
+    run.publish_run_done();
     scan_result(&run.problems)
 }
 
@@ -710,17 +730,27 @@ impl RunProgress {
     /// have processed when it ends, with `root` the progress of the current
     /// root.
     fn of(self, root: &RootScanProgress) -> (usize, usize, Option<usize>) {
+        let processed = self.processed_before.saturating_add(root.processed);
         let total = root.estimated_total.zip(self.later).map(|(root, later)| {
-            self.processed_before
-                .saturating_add(root)
-                .saturating_add(later)
+            unfinished_total(
+                self.processed_before
+                    .saturating_add(root)
+                    .saturating_add(later),
+                processed,
+            )
         });
         (
             self.processed_before.saturating_add(root.discovered),
-            self.processed_before.saturating_add(root.processed),
+            processed,
             total,
         )
     }
+}
+
+/// `total`, and more than `processed`: a run is done only once it says so,
+/// after the cleanup that follows its last root.
+fn unfinished_total(total: usize, processed: usize) -> usize {
+    total.max(processed.saturating_add(1))
 }
 
 /// The rows of `root`, a configured root, as the scan of the root counts
@@ -904,10 +934,24 @@ impl ScanRun<'_> {
             supported_files_processed: processed,
             supported_files_total: run_progress
                 .later
-                .map(|later| processed.saturating_add(later)),
+                .map(|later| unfinished_total(processed.saturating_add(later), processed)),
             files_per_second: final_progress.files_per_second,
             eta_seconds: None,
         });
+        self.library.publish(self.event_tx);
+    }
+
+    /// Publishes the progress of the run once it is done: the files it
+    /// processed are all it has.
+    fn publish_run_done(&mut self) {
+        let processed = self.processed_before;
+        let Some(progress) = self.library.status.scan_progress.as_mut() else {
+            return;
+        };
+        progress.supported_files_discovered = processed;
+        progress.supported_files_processed = processed;
+        progress.supported_files_total = Some(processed);
+        progress.eta_seconds = None;
         self.library.publish(self.event_tx);
     }
 
@@ -3673,8 +3717,8 @@ struct RootScan<'a> {
     folders: HashMap<PathBuf, Option<FolderCover>>,
     discovered: usize,
     processed: usize,
-    /// Whether the walk has ended, so that `discovered` are all the files.
-    walked: bool,
+    /// How far the scan has come; see [`ScanStage`].
+    stage: ScanStage,
     progress: ScanProgressReporter,
     read_failures: ReadFailures,
     identities: IdentityCounts,
@@ -3819,7 +3863,7 @@ impl RootScan<'_> {
     fn report(&mut self, sink: &mut dyn ScanSink, force: bool) {
         if let Some(progress) =
             self.progress
-                .emit(force, self.discovered, self.processed, self.walked)
+                .emit(force, self.discovered, self.processed, self.stage)
         {
             sink.progress(self.conn, progress);
         }
@@ -4143,7 +4187,7 @@ fn scan_root_in(
         folders: HashMap::new(),
         discovered: 0,
         processed: 0,
-        walked: false,
+        stage: ScanStage::Walking,
         progress: ScanProgressReporter::new(previous_index_count),
         read_failures: ReadFailures::default(),
         identities: IdentityCounts::default(),
@@ -4209,7 +4253,7 @@ fn scan_root_in(
             }
         }
         // The files found are all there are: the total is known now.
-        scan.walked = true;
+        scan.stage = ScanStage::Walked;
         scan.report(sink, true);
 
         for (task, existing_state) in std::mem::take(&mut unconfirmed) {
@@ -4255,6 +4299,9 @@ fn scan_root_in(
         }
         workers.join();
         scan.flush(sink)?;
+        // Every file is written; removing the rows of files that are gone
+        // remains, and the progress shows that.
+        scan.report(sink, true);
         true
     };
     if !complete {
@@ -4319,6 +4366,7 @@ fn scan_root_in(
         None => delete_stale_rows(conn, stale, &existing)?,
     };
 
+    scan.stage = ScanStage::Finished;
     scan.report(sink, true);
 
     let walk_problem = match walk.first_read_error {
