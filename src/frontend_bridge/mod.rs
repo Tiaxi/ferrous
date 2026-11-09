@@ -56,6 +56,9 @@ use config::{
     apply_session_restore, load_session_snapshot, load_settings_into, session_save_due,
     session_snapshot_for_state, SaveFailure, SessionSnapshot,
 };
+#[cfg(test)]
+pub(crate) use errors::test_log;
+pub(crate) use errors::{log_info, log_warning};
 pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
     apply_library_events, drain_analysis_events, drain_apply_album_art_events,
@@ -1690,12 +1693,11 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Tree(result) => self.apply_tree_result(result),
             BridgeLoopWake::QueueValidated(result) => {
                 let (changed, problem) = self.queue_validator.apply(result, &mut self.state);
+                // The queue shows what it could read, or the file names,
+                // and the files still play; playing one that fails is
+                // reported then. So this is only logged.
                 if let Some(problem) = problem {
-                    eprintln!("[ferrous] {problem}");
-                    let _ = try_send_event(
-                        event_tx,
-                        BridgeEvent::Error(BridgeError::warning(ErrorCategory::Playback, problem)),
-                    );
+                    log_warning(ErrorCategory::Playback, &problem);
                 }
                 if changed {
                     self.state.refresh_queue_rows();
@@ -4268,7 +4270,7 @@ mod tests {
                     warning: false,
                 },
                 crate::lastfm::Problem {
-                    message: "Last.fm is unreachable; Ferrous keeps retrying.".to_string(),
+                    message: "Last.fm ignored 1 scrobble: Artist name missing".to_string(),
                     warning: true,
                 },
             ],
@@ -4289,7 +4291,7 @@ mod tests {
                 BridgeError::error(ErrorCategory::LastFm, "Last.fm session expired."),
                 BridgeError::warning(
                     ErrorCategory::LastFm,
-                    "Last.fm is unreachable; Ferrous keeps retrying."
+                    "Last.fm ignored 1 scrobble: Artist name missing"
                 ),
             ]
         );
@@ -6916,7 +6918,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_files_whose_tags_could_not_be_read_are_shown_counted_per_batch() {
+    fn queue_files_whose_tags_could_not_be_read_are_logged_counted_per_batch() {
         let _guard = test_guard();
         let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
         let (event_tx, event_rx) = event_channel();
@@ -6943,6 +6945,7 @@ mod tests {
             .expect("validation result");
         runtime.handle_wake(BridgeLoopWake::QueueValidated(result), &event_tx);
 
+        // The queue shows the file names, so Recent Issues is not told.
         let errors: Vec<BridgeError> = event_rx
             .try_iter()
             .filter_map(|event| match event {
@@ -6950,16 +6953,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(errors.len(), 1, "one error for the batch: {errors:?}");
-        assert_eq!(errors[0].category, ErrorCategory::Playback);
-        assert_eq!(errors[0].severity, ErrorSeverity::Warning);
-        assert!(
-            errors[0]
-                .message
-                .starts_with("Could not read the tags of 2 files in the queue"),
-            "{}",
-            errors[0].message
+        assert!(errors.is_empty(), "{errors:?}");
+        // The diagnostics log is, once for the batch.
+        let logged = test_log::lines_containing(
+            "[ferrous] [playback] warning: Could not read the tags of 2 files in the queue",
         );
+        assert_eq!(logged.len(), 1, "{logged:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

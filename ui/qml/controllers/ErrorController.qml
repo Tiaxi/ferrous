@@ -7,6 +7,7 @@ import "../logic/ErrorUtils.js" as ErrorUtils
 // The errors shown to the user: the status bar counts them, the viewers'
 // banners show the latest, and the recent errors dialog lists a short history.
 // An error that repeats one in the history is counted there, not added.
+// They come from BridgeClient's bridgeError, which logged them already.
 QtObject {
     id: root
 
@@ -71,9 +72,6 @@ QtObject {
             ? ErrorUtils.SeverityWarning
             : ErrorUtils.SeverityError
         const about = String(subject || "")
-        // The diagnostics log keeps every report.
-        console.warn("error [" + ErrorUtils.categoryLabel(kind) + "]: " + text
-            + (about.length > 0 ? " (" + about + ")" : ""))
         const now = Date.now()
         for (let i = 0; i < root.entries.count; ++i) {
             const entry = root.entries.get(i)

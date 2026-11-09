@@ -571,7 +571,7 @@ void TransportInputSmokeTest::fullscreenViewerWindowsAreMadeOnFirstOpenAndKept()
     }
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {

@@ -13,6 +13,8 @@ use serde_json::Value;
 
 use queue_file::LoadOutcome;
 
+use crate::frontend_bridge::{log_info, log_warning, ErrorCategory};
+
 pub const KEYRING_SERVICE: &str = "ferrous.lastfm";
 const API_ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
 const AUTH_ENDPOINT: &str = "https://www.last.fm/api/auth/";
@@ -93,11 +95,14 @@ pub enum ScrobbleDelivery {
     Failed,
 }
 
-/// A Last.fm failure the user is told about.
+/// A Last.fm failure the user is told about in Recent Issues: one the user
+/// must act on, or one that loses or refuses scrobbles. Temporary failures,
+/// which the service retries, are only logged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Problem {
     pub message: String,
-    /// Whether the service works around it, for example by retrying.
+    /// Whether the service works around it, for example by keeping the
+    /// scrobbles in memory.
     pub warning: bool,
 }
 
@@ -489,6 +494,10 @@ struct Service {
     retry_attempt: u32,
     /// When the next automatic flush is due, if one is scheduled.
     retry_due: Option<Instant>,
+    /// Set by a temporary failure, until a request goes through again with
+    /// nothing left to retry: the scrobbles Last.fm took meanwhile, for the
+    /// line that logs the recovery.
+    recovering: Option<usize>,
     /// Cleared while handling the commands that precede shutdown, so that
     /// shutdown does not wait for the network.
     network_allowed: bool,
@@ -696,6 +705,7 @@ impl Service {
             retry_policy: backends.retry,
             retry_attempt: 0,
             retry_due: None,
+            recovering: None,
             network_allowed: true,
             waiting_commands: None,
             flush_ignored: IgnoredScrobbles::default(),
@@ -974,6 +984,7 @@ impl Service {
         self.pending_auth = None;
         self.retry_attempt = 0;
         self.retry_due = None;
+        self.recovering = None;
         self.state.username.clear();
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::Disconnected;
@@ -1004,12 +1015,25 @@ impl Service {
                 // Last.fm is reachable again; do not wait for the scheduled retry.
                 if self.retry_due.is_some() {
                     self.flush_queue();
+                } else {
+                    self.log_recovery();
                 }
             }
             Err(err) if is_invalid_session(&err) => {
                 self.transition_to_reauth(
                     "Last.fm session expired. Reconnect to resume scrobbling.",
                 );
+            }
+            // It would be stale by the time a retry went through, so it is
+            // dropped; the user need not act on it.
+            Err(err) if is_transient(&err) => {
+                let message = request_error_message(&err);
+                log_warning(
+                    ErrorCategory::LastFm,
+                    &format!("{message}; the now-playing update was not sent."),
+                );
+                self.recovering.get_or_insert(0);
+                self.state.status_text = message;
             }
             Err(err) => {
                 self.fail(request_error_message(&err), true);
@@ -1055,48 +1079,7 @@ impl Service {
             );
             match result {
                 Ok(outcome) => {
-                    // The latest scrobble is the queue's last entry.
-                    if batch_len == self.queue.len() {
-                        let last = batch_len - 1;
-                        if outcome.deferred[last] {
-                            self.set_latest_delivery(
-                                ScrobbleDelivery::Waiting,
-                                "Last.fm daily scrobble limit reached",
-                                true,
-                            );
-                        } else if let Some(reason) = &outcome.ignored_reasons[last] {
-                            self.set_latest_delivery(ScrobbleDelivery::Failed, reason, false);
-                        } else {
-                            self.set_latest_delivery(ScrobbleDelivery::Accepted, "", false);
-                        }
-                    }
-                    let mut index = 0;
-                    self.queue.retain(|_| {
-                        let keep = index >= batch_len || outcome.deferred[index];
-                        index += 1;
-                        keep
-                    });
-                    self.save_queue();
-                    self.flush_ignored.count += outcome.ignored;
-                    if self.flush_ignored.reason.is_none() {
-                        self.flush_ignored.reason = outcome.ignored_reason;
-                    }
-                    if outcome.deferred.contains(&true) {
-                        // The latest scrobble, in this batch or behind it,
-                        // waits for the retry too.
-                        self.set_latest_delivery(
-                            ScrobbleDelivery::Waiting,
-                            "Last.fm daily scrobble limit reached",
-                            true,
-                        );
-                        self.schedule_retry("Last.fm daily scrobble limit reached");
-                        return;
-                    }
-                    self.retry_attempt = 0;
-                    if !self.queue.is_empty() && self.commands_waiting() {
-                        // The service loop handles the waiting commands, then
-                        // resumes the flush at once.
-                        self.retry_due = Some(Instant::now());
+                    if !self.take_batch_outcome(batch_len, outcome) {
                         return;
                     }
                 }
@@ -1124,6 +1107,7 @@ impl Service {
                 }
             }
         }
+        self.log_recovery();
         let ignored = std::mem::take(&mut self.flush_ignored);
         match ignored.reason {
             None => self.state.status_text = "Last.fm scrobble queue flushed.".to_string(),
@@ -1142,21 +1126,93 @@ impl Service {
         }
     }
 
+    /// Takes Last.fm's answer to the batch of the queue's first
+    /// `batch_len` entries. Returns whether the flush goes on now.
+    fn take_batch_outcome(&mut self, batch_len: usize, outcome: ScrobbleOutcome) -> bool {
+        // The latest scrobble is the queue's last entry.
+        if batch_len == self.queue.len() {
+            let last = batch_len - 1;
+            if outcome.deferred[last] {
+                self.set_latest_delivery(
+                    ScrobbleDelivery::Waiting,
+                    "Last.fm daily scrobble limit reached",
+                    true,
+                );
+            } else if let Some(reason) = &outcome.ignored_reasons[last] {
+                self.set_latest_delivery(ScrobbleDelivery::Failed, reason, false);
+            } else {
+                self.set_latest_delivery(ScrobbleDelivery::Accepted, "", false);
+            }
+        }
+        if let Some(sent) = self.recovering.as_mut() {
+            *sent += outcome
+                .deferred
+                .iter()
+                .filter(|deferred| !**deferred)
+                .count();
+        }
+        let mut index = 0;
+        self.queue.retain(|_| {
+            let keep = index >= batch_len || outcome.deferred[index];
+            index += 1;
+            keep
+        });
+        self.save_queue();
+        self.flush_ignored.count += outcome.ignored;
+        if self.flush_ignored.reason.is_none() {
+            self.flush_ignored.reason = outcome.ignored_reason;
+        }
+        if outcome.deferred.contains(&true) {
+            // The latest scrobble, in this batch or behind it,
+            // waits for the retry too.
+            self.set_latest_delivery(
+                ScrobbleDelivery::Waiting,
+                "Last.fm daily scrobble limit reached",
+                true,
+            );
+            self.schedule_retry("Last.fm daily scrobble limit reached");
+            return false;
+        }
+        self.retry_attempt = 0;
+        if !self.queue.is_empty() && self.commands_waiting() {
+            // The service loop handles the waiting commands, then
+            // resumes the flush at once.
+            self.retry_due = Some(Instant::now());
+            return false;
+        }
+        true
+    }
+
     fn commands_waiting(&self) -> bool {
         self.waiting_commands
             .as_ref()
             .is_some_and(|commands| !commands.is_empty())
     }
 
+    /// Retry the flush after a temporary failure, `message`. The scrobbles
+    /// stay queued until Last.fm takes them, so the user need not act: the
+    /// failure is logged, and the status shows when the next retry is.
     fn schedule_retry(&mut self, message: &str) {
         self.retry_attempt = self.retry_attempt.saturating_add(1);
         let delay = self.retry_policy.delay(self.retry_attempt);
         self.retry_due = Some(Instant::now() + delay);
-        // Told once for a run of failures; the status shows each retry.
-        if self.retry_attempt == 1 {
-            self.report(&format!("{message}; Ferrous keeps retrying."), true);
-        }
-        self.state.status_text = format!("{message}; retrying in {}.", describe_delay(delay));
+        self.recovering.get_or_insert(0);
+        let status = format!("{message}; retrying in {}.", describe_delay(delay));
+        log_warning(ErrorCategory::LastFm, &status);
+        self.state.status_text = status;
+    }
+
+    /// Log, once, that requests go through again after a temporary failure.
+    fn log_recovery(&mut self) {
+        let Some(sent) = self.recovering.take() else {
+            return;
+        };
+        let message = match sent {
+            0 => "Last.fm is reachable again.".to_string(),
+            1 => "Last.fm is reachable again; sent 1 queued scrobble.".to_string(),
+            sent => format!("Last.fm is reachable again; sent {sent} queued scrobbles."),
+        };
+        log_info(ErrorCategory::LastFm, &message);
     }
 
     fn transition_to_reauth(&mut self, message: &str) {
@@ -1164,6 +1220,7 @@ impl Service {
         self.pending_auth = None;
         self.retry_attempt = 0;
         self.retry_due = None;
+        self.recovering = None;
         self.state.auth_url.clear();
         self.state.auth_state = AuthState::ReauthRequired;
         self.fail(message.to_string(), false);
@@ -1516,7 +1573,7 @@ fn send_signed_request(
 /// nothing about the request.
 fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
     let Ok(payload) = serde_json::from_str::<Value>(&reply.body) else {
-        return Err(if reply.status >= 500 {
+        return Err(if is_temporary_status(reply.status) {
             RequestError::Http {
                 status: reply.status,
             }
@@ -1580,7 +1637,7 @@ fn is_invalid_session(error: &RequestError) -> bool {
 fn is_transient(error: &RequestError) -> bool {
     match error {
         RequestError::Transport(_) | RequestError::InvalidResponse(_) => true,
-        RequestError::Http { status } => *status >= 500,
+        RequestError::Http { status } => is_temporary_status(*status),
         RequestError::Api { code, .. } => matches!(
             *code,
             LASTFM_ERROR_OPERATION_FAILED
@@ -1590,6 +1647,12 @@ fn is_transient(error: &RequestError) -> bool {
         ),
         RequestError::Keyring(_) => false,
     }
+}
+
+/// Whether an HTTP status says the server cannot answer now but may later:
+/// a server error, or too many requests.
+fn is_temporary_status(status: u16) -> bool {
+    status >= 500 || status == 429
 }
 
 fn request_error_message(error: &RequestError) -> String {
@@ -1823,6 +1886,7 @@ mod tests {
 
     use super::test_support::{MemorySessionKeys, ScriptedTransport};
     use super::*;
+    use crate::frontend_bridge::test_log;
 
     const USERNAME: &str = "tester";
 
@@ -2013,6 +2077,11 @@ mod tests {
                 "rate limit",
                 reply(429, r#"{"error":29,"message":"Rate limit exceeded"}"#),
             ),
+            ("429 without a Last.fm error", reply(429, "{}")),
+            (
+                "429 HTML page",
+                reply(429, "<html>Too Many Requests</html>"),
+            ),
         ];
         for (name, failure) in cases {
             let transport = ScriptedTransport::with_replies([failure]);
@@ -2031,7 +2100,129 @@ mod tests {
                 "{name}: {}",
                 state.status_text
             );
+            // Recent Issues is not told; the diagnostics log is.
+            assert!(
+                service.problems.is_empty(),
+                "{name}: {:?}",
+                service.problems
+            );
+            let logged = format!("[ferrous] [lastfm] warning: {}", state.status_text);
+            assert!(
+                !test_log::lines_containing(&logged).is_empty(),
+                "{name}: {logged}"
+            );
         }
+    }
+
+    #[test]
+    fn temporary_failures_are_logged_until_the_scrobbles_go_through() {
+        let transport = ScriptedTransport::with_replies([
+            reply(503, "<html>Service Unavailable</html>"),
+            reply(503, "<html>Service Unavailable</html>"),
+            accepted_reply(2),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..2));
+        let recovered = "[ferrous] [lastfm] info: Last.fm is reachable again";
+
+        // Each failure is logged with the next retry's delay, and none
+        // reaches Recent Issues, also after the first of the run.
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::Flush);
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+        for delay in ["30 s", "60 s"] {
+            let line =
+                format!("[ferrous] [lastfm] warning: Last.fm HTTP error 503; retrying in {delay}.");
+            assert_eq!(test_log::lines_containing(&line).len(), 1, "{line}");
+        }
+        assert_eq!(service.queue, entries(0..2));
+        assert!(test_log::lines_containing(recovered).is_empty());
+
+        // The retry sends them, and the recovery is logged once, with them.
+        service.handle_command(Command::Flush);
+        assert!(service.queue.is_empty());
+        assert!(service.retry_due.is_none());
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+        assert_eq!(
+            test_log::lines_containing(recovered),
+            vec![format!("{recovered}; sent 2 queued scrobbles.")]
+        );
+        service.handle_command(Command::QueueScrobble(entry(2)));
+        assert!(service.queue.is_empty());
+        assert_eq!(test_log::lines_containing(recovered).len(), 1);
+    }
+
+    #[test]
+    fn a_now_playing_update_that_fails_for_now_is_only_logged() {
+        let transport = ScriptedTransport::with_replies([
+            reply(502, ""),
+            Err("timed out".to_string()),
+            reply(200, r#"{"nowplaying":{}}"#),
+        ]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+        // The status shows the latest; the log has both.
+        assert_eq!(
+            service.published_state().status_text,
+            "Last.fm transport error: timed out"
+        );
+        for message in [
+            "Last.fm HTTP error 502",
+            "Last.fm transport error: timed out",
+        ] {
+            let line = format!(
+                "[ferrous] [lastfm] warning: {message}; the now-playing update was not sent."
+            );
+            assert_eq!(test_log::lines_containing(&line).len(), 1, "{line}");
+        }
+        // Not sent again: it would be stale.
+        assert_eq!(transport.requests().len(), 2);
+        assert_eq!(service.state.auth_state, AuthState::Connected);
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] info: Last.fm is reachable again."),
+            vec!["[ferrous] [lastfm] info: Last.fm is reachable again.".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_now_playing_update_last_fm_refuses_is_reported() {
+        let transport = ScriptedTransport::with_replies([reply(
+            400,
+            r#"{"error":6,"message":"Invalid parameters"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        assert_eq!(
+            service.problems,
+            vec![Problem {
+                message: "Last.fm API error 6: Invalid parameters".to_string(),
+                warning: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_now_playing_update_with_an_expired_session_asks_to_reconnect() {
+        let transport = ScriptedTransport::with_replies([reply(
+            403,
+            r#"{"error":9,"message":"Invalid session key"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        assert_eq!(service.state.auth_state, AuthState::ReauthRequired);
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        assert!(!service.problems[0].warning);
+        assert!(service.problems[0].message.contains("Reconnect"));
     }
 
     /// What became of the latest scrobble.
@@ -2171,6 +2362,10 @@ mod tests {
         assert_eq!(delivery, ScrobbleDelivery::Failed);
         assert!(message.contains("Invalid API key"), "{message}");
         assert_eq!(service.queue, entries(0..1));
+        // Retrying would not help, so the user is told.
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        assert!(!service.problems[0].warning);
+        assert!(service.problems[0].message.contains("Invalid API key"));
     }
 
     #[test]
@@ -2398,6 +2593,9 @@ mod tests {
         assert_eq!(service.state.auth_state, AuthState::ReauthRequired);
         assert_eq!(service.queue, entries(0..3));
         assert!(service.retry_due.is_none());
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        assert!(!service.problems[0].warning);
+        assert!(service.problems[0].message.contains("Reconnect"));
     }
 
     #[test]
@@ -2409,10 +2607,12 @@ mod tests {
 
         service.handle_command(Command::Flush);
 
-        // The entry deferred by the daily limit stays queued for a retry.
+        // The entry deferred by the daily limit stays queued for a retry,
+        // which the user need not be told about.
         assert_eq!(service.queue, vec![entry(2)]);
         assert_eq!(read_queue_file(&queue_path), vec![entry(2)]);
         assert!(service.retry_due.is_some());
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
         assert!(service
             .published_state()
             .status_text

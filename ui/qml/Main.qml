@@ -558,6 +558,10 @@ ApplicationWindow {
         }
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
+        // BridgeClient also logs it; there is no log here.
+        function reportUiError(category, severity, subject, message) {
+            bridgeFallback.bridgeError(message, category, severity, subject)
+        }
         function toggleChannelMute(channelIndex) {}
         function soloChannel(channelIndex) {}
         function isChannelSilent(channelIndex) { return false }
@@ -1963,8 +1967,9 @@ ApplicationWindow {
     Connections {
         target: root.tagEditorApi
         ignoreUnknownSignals: true
+        // Through the bridge, which logs what Recent Issues shows.
         function onErrorReported(message) {
-            errorController.report(
+            root.uiBridge.reportUiError(
                 ErrorUtils.CategoryTags, ErrorUtils.SeverityError, "", message)
         }
     }
@@ -1974,7 +1979,7 @@ ApplicationWindow {
         target: root.displaySleepInhibitorApi
         ignoreUnknownSignals: true
         function onInhibitionFailed(message) {
-            errorController.report(
+            root.uiBridge.reportUiError(
                 ErrorUtils.CategorySystem, ErrorUtils.SeverityWarning, "", message)
         }
     }

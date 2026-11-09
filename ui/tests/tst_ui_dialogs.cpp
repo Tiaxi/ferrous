@@ -73,10 +73,6 @@ void captureMessage(QtMsgType type, const QMessageLogContext &context, const QSt
 QString takeMessages() {
     QMutexLocker locker(&messageMutex());
     capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
-    // The error controller logs every issue it is given.
-    capturedMessages().removeIf([](const QString &message) {
-        return message.startsWith(QStringLiteral("error ["));
-    });
     const QString text = capturedMessages().join(QLatin1Char('\n'));
     capturedMessages().clear();
     return text;

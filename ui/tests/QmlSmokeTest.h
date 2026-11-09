@@ -369,10 +369,6 @@ QPoint centerInWindow(QQuickItem *item);
 // destroying the engine leaves none half made.
 bool finishIncubation(QQmlEngine &engine);
 
-// Whether `log` holds only the error controller's reports to the
-// diagnostics log, which the error tests expect.
-bool onlyErrorReports(const QString &log);
-
 // Loads and shows Main.qml without a backend, so it uses its fallback bridge.
 QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel);
 

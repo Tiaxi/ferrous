@@ -26,6 +26,23 @@ pub enum ErrorCategory {
     Settings = 6,
 }
 
+impl ErrorCategory {
+    /// The category's name in the diagnostics log. `errorCategoryLogName`
+    /// in `ui/src/BridgeClient.cpp` names the errors it reports the same way.
+    #[must_use]
+    pub fn log_name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Playback => "playback",
+            Self::Library => "library",
+            Self::Analysis => "analysis",
+            Self::Tags => "tags",
+            Self::LastFm => "lastfm",
+            Self::Settings => "settings",
+        }
+    }
+}
+
 /// How much an error matters. Sent to the UI as its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -79,6 +96,29 @@ impl fmt::Display for BridgeError {
     }
 }
 
+/// Logs a warning about `category` to the diagnostics log only, for what the
+/// user need not see in Recent Issues: a condition Ferrous recovers from by
+/// itself, a retry, or a fallback that works. The UI copies standard error
+/// to the log (`ConsoleTee`).
+pub(crate) fn log_warning(category: ErrorCategory, message: &str) {
+    log_only(category, "warning", message);
+}
+
+/// Logs `message` about `category` to the diagnostics log only, as
+/// [`log_warning`] does, for news such as a recovery.
+pub(crate) fn log_info(category: ErrorCategory, message: &str) {
+    log_only(category, "info", message);
+}
+
+fn log_only(category: ErrorCategory, level: &str, message: &str) {
+    // One line each: the log is read line by line.
+    let message = message.replace('\n', "\\n").replace('\r', "\\r");
+    let line = format!("[ferrous] [{}] {level}: {message}", category.log_name());
+    eprintln!("{line}");
+    #[cfg(test)]
+    test_log::record(line);
+}
+
 /// Tests that do not care about the category send system errors.
 #[cfg(test)]
 impl From<String> for BridgeError {
@@ -91,5 +131,32 @@ impl From<String> for BridgeError {
 impl From<&str> for BridgeError {
     fn from(message: &str) -> Self {
         Self::error(ErrorCategory::System, message)
+    }
+}
+
+/// What [`log_warning`] and [`log_info`] wrote on this thread, for tests
+/// that log on their own thread.
+#[cfg(test)]
+pub(crate) mod test_log {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(line: String) {
+        LINES.with(|lines| lines.borrow_mut().push(line));
+    }
+
+    /// The lines this thread logged so far that contain `needle`.
+    pub(crate) fn lines_containing(needle: &str) -> Vec<String> {
+        LINES.with(|lines| {
+            lines
+                .borrow()
+                .iter()
+                .filter(|line| line.contains(needle))
+                .cloned()
+                .collect()
+        })
     }
 }

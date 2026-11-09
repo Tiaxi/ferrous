@@ -125,6 +125,8 @@ With a profiling build, these runtime variables select additional output:
 
 The desktop app copies console output to the diagnostics log available through **Help > Diagnostics**. Waveform editor entries use the `[ui-waveform-editor]` prefix.
 
+Recent Issues shows only errors that get in the user's way, such as a track that can't be played, a setting that wasn't saved, or Last.fm needing to be reconnected, and errors in Ferrous's own logic. `BridgeClient::reportError` writes each of them to the diagnostics log too, as `[<category>] error: <message> (<file>)` or `warning:`. What the user need not act on, such as a temporary Last.fm failure that is retried or a fallback that works, goes to the log only: the backend writes it to standard error with `log_warning` or `log_info` (`src/frontend_bridge/errors.rs`), as `[ferrous] [<category>] warning: <message>`.
+
 To measure spectrogram CPU projection with synthetic resident data after a UI test build:
 
 ```bash

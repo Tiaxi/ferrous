@@ -482,13 +482,6 @@ bool finishIncubation(QQmlEngine &engine) {
     return QTest::qWaitFor([controller]() { return controller->incubatingObjectCount() == 0; });
 }
 
-bool onlyErrorReports(const QString &log) {
-    const QStringList lines = log.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    return std::all_of(lines.begin(), lines.end(), [](const QString &line) {
-        return line.startsWith(QStringLiteral("error ["));
-    });
-}
-
 QQuickWindow *loadMainWindowForQuit(QQmlApplicationEngine &engine, LibraryTreeModel &libraryModel) {
     qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
     qmlRegisterType<WaveformItem>("FerrousUi", 1, 0, "WaveformItem");
