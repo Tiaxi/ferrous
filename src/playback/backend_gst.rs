@@ -11712,14 +11712,21 @@ mod engine_tests {
         /// something wakes it; `wakes` counts the wakes of its loop.
         #[track_caller]
         fn assert_sleeps(&mut self, wakes: &AtomicU64) {
-            // The pipeline has reached its state and the engine has taken
-            // the messages of the change. A wake for the last of them may
-            // still be on its way, and one more for a message it took in
-            // the same drain; with a timer, it would wake far more often.
+            // The engine has taken every command sent, the pipeline has
+            // reached its state, and the engine has taken the messages of
+            // the change. A wake for the last of them may still be on its
+            // way, and one more for a message it took in the same drain;
+            // with a timer, it would wake far more often. A snapshot that
+            // the test awaited can predate the last command: a failure
+            // that stopped the engine reports Stopped before a Stop is
+            // taken.
             let bus = self.playbin.bus().unwrap();
             self.listen_until("the pipeline did not settle", |engine| {
                 let (result, _, pending) = engine.playbin.state(gst::ClockTime::ZERO);
-                result.is_ok() && pending == gst::State::VoidPending && !bus.have_pending()
+                engine.commands.is_empty()
+                    && result.is_ok()
+                    && pending == gst::State::VoidPending
+                    && !bus.have_pending()
             });
             let before = wakes.load(Ordering::Relaxed);
             std::thread::sleep(millis(1_000));
@@ -11770,22 +11777,31 @@ mod engine_tests {
             !engine.errors.is_empty()
         });
 
+        // The error stopped the track, which has no successor, so Stopped
+        // can arrive before the engine takes the Stop.
         engine.send(PlaybackCommand::Stop);
         engine.listen_until("stop did not take effect", |engine| {
             engine.snapshot.state == PlaybackState::Stopped
         });
         engine.assert_sleeps(&wakes);
         // A restored session cues the stopped track paused, and learns its
-        // duration from the bus.
+        // duration from the bus. The paused seek landed before, so only a
+        // landing after it is the cue's.
+        let landed = engine.seeked.len();
         engine.send(PlaybackCommand::Cue {
             position: millis(2_500),
             expected: FileStamp::of(&a).expect("stamp"),
         });
         engine.listen_until("the cue did not land", |engine| {
-            !engine.seeked.is_empty()
+            engine.seeked.len() > landed
                 && engine.snapshot.state == PlaybackState::Paused
                 && engine.snapshot.duration.abs_diff(millis(20_000)) < millis(100)
         });
+        assert!(
+            engine.seeked[landed].abs_diff(millis(2_500)) < millis(50),
+            "{:?}",
+            engine.seeked
+        );
         engine.assert_sleeps(&wakes);
         // Play resumes from the cue.
         engine.send(PlaybackCommand::Play);
