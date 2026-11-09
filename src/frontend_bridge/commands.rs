@@ -1392,11 +1392,11 @@ pub(super) fn apply_edited_details(
     let mut changed = update_library_track_details(state, indexed_by_path);
     changed |= update_queue_track_details(state, indexed_by_path, fingerprints);
 
-    if let Some(current_path) = state.playback.current.as_ref() {
-        if indexed_by_path.contains_key(current_path) {
-            metadata.request(current_path.clone());
-            changed = true;
-        }
+    // The playing track's file, also before a playback snapshot names it:
+    // a read of the track before would drop the playing track's.
+    if super::events::playing_file(state).is_some_and(|path| indexed_by_path.contains_key(&path)) {
+        super::events::request_playing_metadata(state, metadata);
+        changed = true;
     }
 
     sync_queue_details(state);
@@ -1517,14 +1517,20 @@ fn apply_renamed_queue_paths(
     }
 
     if let Some(current_path) = state.playback.current.as_mut() {
-        if remap_path(current_path, rename_map) {
-            metadata.request(current_path.clone());
-            changed = true;
-        }
+        changed |= remap_path(current_path, rename_map);
     }
     // A rename keeps the current track's identity.
     if let Some(path) = state.last_track_change.path.as_mut() {
         remap_path(path, rename_map);
+    }
+    super::events::remap_playing_file_read(state, rename_map);
+    // The playing file was renamed, also before a playback snapshot names
+    // it, when it now has a name a file was renamed to.
+    if super::events::playing_file(state)
+        .is_some_and(|path| rename_map.values().any(|renamed| *renamed == path))
+    {
+        super::events::request_playing_metadata(state, metadata);
+        changed = true;
     }
     if let Some(pending) = state.pending_waveform_track.as_mut() {
         remap_path(&mut pending.path, rename_map);
