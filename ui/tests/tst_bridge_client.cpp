@@ -239,6 +239,7 @@ private slots:
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
     void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
     void scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt();
+    void fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHasIt();
     void lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt();
     void lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
@@ -1837,9 +1838,9 @@ void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt(
                  qPrintable(error));
         QCOMPARE(decoded.settings.spectrogramFrequencyCap, capped);
         QCOMPARE(decoded.settings.queueColumnWidthsGeneration, quint32(12));
-        // Only the scrobble progress setting may follow it.
+        // Only the scrobble progress and title strip settings may follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(2, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(3, '\0')),
             &decoded, &error));
     }
     BinaryBridgeCodec::DecodedSnapshot older;
@@ -1888,8 +1889,9 @@ void BridgeClientTest::scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt(
                      &error),
                  qPrintable(error));
         QCOMPARE(decoded.settings.lastFmShowScrobbleProgress, show);
+        // Only the title strip setting may follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(2, '\0')),
             &decoded, &error));
     }
     QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
@@ -1922,6 +1924,60 @@ void BridgeClientTest::scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt(
     snapshot.settings.lastFmShowScrobbleProgress = true;
     QVERIFY(client.processBinarySnapshot(snapshot));
     QVERIFY(client.lastFmShowScrobbleProgress());
+}
+
+void BridgeClientTest::fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHasIt() {
+    // The settings section ends with it, after the scrobble progress
+    // indicator's setting; older backends end it before, and the strip shows.
+    for (const bool show : {false, true}) {
+        QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+        payload.append('\0');
+        payload.append('\1');
+        payload.append(static_cast<char>(show ? 1 : 0));
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString error;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload), &decoded,
+                     &error),
+                 qPrintable(error));
+        QCOMPARE(decoded.settings.showFullscreenTitleStrip, show);
+        QVERIFY(decoded.settings.lastFmShowScrobbleProgress);
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            &decoded, &error));
+    }
+    QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
+    older.append('\0');
+    older.append('\0');
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionSettings, older), &decoded, &error));
+    QVERIFY(decoded.settings.showFullscreenTitleStrip);
+    QVERIFY(!decoded.settings.lastFmShowScrobbleProgress);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QVERIFY(client.showFullscreenTitleStrip());
+    client.setShowFullscreenTitleStrip(false);
+    QVERIFY(!client.showFullscreenTitleStrip());
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0].size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(76));
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetShowFullscreenTitleStrip), quint16(76));
+    QCOMPARE(sent[0].at(BinaryBridgeCodec::kCommandHeaderBytes), char(0));
+
+    // The backend's value wins.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.showFullscreenTitleStrip = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.showFullscreenTitleStrip());
 }
 
 namespace {
@@ -6526,7 +6582,7 @@ void BridgeClientTest::settingDefaultsAreANewBackendsSettings() {
     QVERIFY(snapshots.wait(5000));
     // Configure Ferrous's Defaults: what the backend starts with.
     const QVariantMap defaults = client->settingDefaults();
-    QCOMPARE(defaults.size(), 19);
+    QCOMPARE(defaults.size(), 20);
     // The level meter is off for new installs.
     QCOMPARE(defaults.value(QStringLiteral("showLevelMeter")), QVariant(false));
     for (auto it = defaults.cbegin(); it != defaults.cend(); ++it) {
@@ -7365,6 +7421,7 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
     QCOMPARE(decoded.settings.preventDisplaySleepInFullscreen, true);
     // Without the field, the default the Rust settings have.
     QCOMPARE(decoded.settings.showLevelMeter, false);
+    QCOMPARE(decoded.settings.showFullscreenTitleStrip, true);
 }
 
 void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {

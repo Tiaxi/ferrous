@@ -27,6 +27,16 @@ Preferences.PreferencesPage {
     }
 
     CheckBox {
+        objectName: "showFullscreenTitleStripCheckBox"
+        text: I18n.i18nc("@option:check", "Show the title strip when the pointer moves")
+        // Only a viewer over the whole screen has the strip; one in the
+        // window has its corner buttons.
+        enabled: Math.max(0, Math.min(1, root.settings.value("viewerFullscreenMode"))) === 1
+        checked: root.settings.value("showFullscreenTitleStrip")
+        onToggled: root.settings.setValue("showFullscreenTitleStrip", checked)
+    }
+
+    CheckBox {
         objectName: "preventDisplaySleepInFullscreenCheckBox"
         text: I18n.i18nc("@option:check", "Keep the display awake while playing fullscreen")
         checked: root.settings.value("preventDisplaySleepInFullscreen")

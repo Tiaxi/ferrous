@@ -287,6 +287,7 @@ ApplicationWindow {
         property int spectrogramDisplayMode: 0
         property int viewerFullscreenMode: 0
         property bool preventDisplaySleepInFullscreen: true
+        property bool showFullscreenTitleStrip: true
         property bool logScale: false
         property bool spectrogramFrequencyCap: false
         property int repeatMode: 0
@@ -393,6 +394,7 @@ ApplicationWindow {
         function setSpectrogramDisplayMode(value) { spectrogramDisplayMode = value }
         function setViewerFullscreenMode(value) { viewerFullscreenMode = value }
         function setPreventDisplaySleepInFullscreen(value) { preventDisplaySleepInFullscreen = value }
+        function setShowFullscreenTitleStrip(value) { showFullscreenTitleStrip = value }
         function setDbRange(value) { dbRange = Math.max(50, Math.min(150, value)) }
         function setLogScale(value) { logScale = value }
         function setSpectrogramFrequencyCap(value) { spectrogramFrequencyCap = value }
@@ -406,7 +408,8 @@ ApplicationWindow {
                 fftSize: 8192, spectrogramViewMode: 0, spectrogramDisplayMode: 0,
                 viewerFullscreenMode: 0, dbRange: 132, logScale: false, showFps: false,
                 showLevelMeter: false, librarySortMode: 0, systemMediaControlsEnabled: true,
-                preventDisplaySleepInFullscreen: true, showSpectrogramCrosshair: false,
+                preventDisplaySleepInFullscreen: true, showFullscreenTitleStrip: true,
+                showSpectrogramCrosshair: false,
                 showSpectrogramScale: false, channelButtonsVisibility: 1,
                 spectrogramZoomEnabled: true, libraryWatchEnabled: true,
                 spectrogramFrequencyCap: false, lastFmShowScrobbleProgress: true,
@@ -1653,6 +1656,7 @@ ApplicationWindow {
         zoomLevel: visualizationSurface.zoomLevel
         resetView: visualizationSurface.resetView
         cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
+        stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 
     Dialogs.ItunesArtworkDialog {
@@ -1698,10 +1702,7 @@ ApplicationWindow {
         zoomLevel: albumArtSurface.zoom
         resetView: albumArtSurface.resetView
         previewActive: viewerController.albumArtPreviewActive
-        previewLabel: viewerController.comparisonLabel
-        previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
-        previewCanApply: itunesArtworkDialog.previewCandidateReady
-        applyPreview: itunesArtworkDialog.applyPreviewedSuggestion
+        stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 
     Viewers.AlbumArtSurface {
@@ -1732,6 +1733,11 @@ ApplicationWindow {
         // Clear of the viewer's controls over the art: the plate in the main
         // window, or the title strip over the whole screen.
         infoTopInset: root.useWholeScreenViewerMode ? albumArtViewerShell.stripHeight : 32
+        previewActive: viewerController.albumArtPreviewActive
+        previewLabel: viewerController.comparisonLabel
+        previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
+        previewCanApply: itunesArtworkDialog.previewCandidateReady
+        applyPreview: itunesArtworkDialog.applyPreviewedSuggestion
     }
 
     Item {

@@ -36,6 +36,9 @@ Item {
     // How far the corner controls keep from the right edge, clear of the
     // level meter's column.
     property real cornerRightMargin: 4
+    // Whether the title strip shows over the whole screen when the pointer
+    // moves: the Preferences setting.
+    property bool stripEnabled: true
 
     property alias popupHost: spectrogramPopupHost
     // The window of the viewer over the whole screen, and the item in it
@@ -53,11 +56,13 @@ Item {
                   popupControls.anchors.topMargin + popupControls.height)
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole
-    // screen, the title strip's height. They show only with the viewer's
-    // controls, so with the strip over the top edge; they keep there while
-    // it is hidden, rather than move each time it shows. What only reads,
-    // such as the time scale, stays on the edge and shows while it is hidden.
+    // screen, the title strip's height while it can show. They show only
+    // with the viewer's controls, so with the strip over the top edge; they
+    // keep there while it is hidden, rather than move each time it shows.
+    // What only reads, such as the time scale, stays on the edge and shows
+    // while it is hidden. With the strip turned off, they are on the edge.
     readonly property real controlsTopInset: root.wholeScreenOpen && root.fullscreenWindow
+            && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
     readonly property bool fullscreenDisplayActive:
@@ -376,6 +381,7 @@ Item {
                         positionText: root.positionText
                         closeButtonName: "spectrogramFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
+                        available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
                         zoomLevel: root.zoomLevel
                         resetView: root.resetView

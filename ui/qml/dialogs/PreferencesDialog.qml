@@ -78,7 +78,8 @@ Dialog {
             "logScale", "spectrogramFrequencyCap", "showSpectrogramScale",
             "showSpectrogramCrosshair", "showFps", "spectrogramZoomEnabled",
             "channelButtonsVisibility",
-            "viewerFullscreenMode", "preventDisplaySleepInFullscreen", "showLevelMeter",
+            "viewerFullscreenMode", "showFullscreenTitleStrip", "preventDisplaySleepInFullscreen",
+            "showLevelMeter",
             "lastFmScrobblingEnabled", "lastFmShowScrobbleProgress",
             "systemMediaControlsEnabled"
         ]

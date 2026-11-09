@@ -2469,6 +2469,7 @@ fn parse_settings_command(
         73 => BridgeSettingsCommand::SetSpectrogramFrequencyCap(reader.read_u8()? != 0),
         74 => BridgeSettingsCommand::SetLastFmScrobblingPaused(reader.read_u8()? != 0),
         75 => BridgeSettingsCommand::SetLastFmShowScrobbleProgress(reader.read_u8()? != 0),
+        76 => BridgeSettingsCommand::SetShowFullscreenTitleStrip(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3150,6 +3151,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.integrations.lastfm_show_scrobble_progress),
     );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.show_fullscreen_title_strip),
+    );
     out
 }
 
@@ -3723,6 +3728,7 @@ mod tests {
                     show_fps: false,
                     show_level_meter: true,
                     prevent_display_sleep_in_fullscreen: true,
+                    show_fullscreen_title_strip: true,
                     show_spectrogram_crosshair: false,
                     show_spectrogram_scale: false,
                     channel_buttons_visibility: 1,
@@ -5477,9 +5483,10 @@ mod tests {
     const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
 
     /// The bytes that end the settings section: the queue's column widths
-    /// and their generation, then the spectrogram's frequency cap and
-    /// whether the scrobble progress indicator is shown.
-    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 2;
+    /// and their generation, then the spectrogram's frequency cap, whether
+    /// the scrobble progress indicator is shown, and whether a viewer over
+    /// the whole screen shows its title strip.
+    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 3;
 
     #[test]
     fn frequency_cap_setting_command_and_snapshot_share_protocol() {
@@ -5493,8 +5500,9 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.spectrogram_frequency_cap = enabled;
             let settings = encode_settings_section(&snapshot);
-            // Followed by the scrobble progress indicator's setting.
-            assert_eq!(settings[settings.len() - 2], u8::from(enabled));
+            // Followed by the scrobble progress indicator's setting and the
+            // title strip's.
+            assert_eq!(settings[settings.len() - 3], u8::from(enabled));
         }
         assert!(parse_binary_command(&encode_command(73, &[])).is_err());
         assert!(parse_binary_command(&encode_command(73, &[1, 0])).is_err());
@@ -5512,11 +5520,30 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.integrations.lastfm_show_scrobble_progress = show;
             let settings = encode_settings_section(&snapshot);
-            // The last byte of the section.
-            assert_eq!(settings[settings.len() - 1], u8::from(show));
+            // Followed by the title strip's setting.
+            assert_eq!(settings[settings.len() - 2], u8::from(show));
         }
         assert!(parse_binary_command(&encode_command(75, &[])).is_err());
         assert!(parse_binary_command(&encode_command(75, &[1, 0])).is_err());
+    }
+
+    #[test]
+    fn fullscreen_title_strip_setting_command_and_snapshot_share_protocol() {
+        for show in [false, true] {
+            let cmd = parse_binary_command(&encode_command(76, &[u8::from(show)]))
+                .expect("parse title strip setting")
+                .expect("title strip setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetShowFullscreenTitleStrip(value))
+                if value == show));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.display.show_fullscreen_title_strip = show;
+            let settings = encode_settings_section(&snapshot);
+            // The last byte of the section.
+            assert_eq!(settings[settings.len() - 1], u8::from(show));
+        }
+        assert!(parse_binary_command(&encode_command(76, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(76, &[1, 0])).is_err());
     }
 
     #[test]
@@ -5590,7 +5617,7 @@ mod tests {
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 2];
+        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 3];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);

@@ -320,6 +320,9 @@ pub enum BridgeSettingsCommand {
     SetSpectrogramDisplayMode(SpectrogramDisplayMode),
     SetViewerFullscreenMode(ViewerFullscreenMode),
     SetPreventDisplaySleepInFullscreen(bool),
+    /// Whether a viewer over the whole screen shows its title strip when
+    /// the pointer moves.
+    SetShowFullscreenTitleStrip(bool),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -647,6 +650,9 @@ pub struct BridgeDisplaySettings {
     pub show_fps: bool,
     pub show_level_meter: bool,
     pub prevent_display_sleep_in_fullscreen: bool,
+    /// Whether a viewer over the whole screen shows its title strip when
+    /// the pointer moves.
+    pub show_fullscreen_title_strip: bool,
     pub show_spectrogram_crosshair: bool,
     pub show_spectrogram_scale: bool,
     pub channel_buttons_visibility: u8,
@@ -710,6 +716,7 @@ impl Default for BridgeSettings {
                 // `config::parse_settings_text`.
                 show_level_meter: false,
                 prevent_display_sleep_in_fullscreen: true,
+                show_fullscreen_title_strip: true,
                 show_spectrogram_crosshair: false,
                 show_spectrogram_scale: false,
                 channel_buttons_visibility: 1,
@@ -3845,6 +3852,26 @@ mod tests {
                     .settings
                     .integrations
                     .lastfm_show_scrobble_progress,
+                show
+            );
+            assert!(runtime.flags.settings_dirty);
+        }
+    }
+
+    #[test]
+    fn fullscreen_title_strip_setting_updates_and_marks_it_for_persistence() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        assert!(runtime.state.settings.display.show_fullscreen_title_strip);
+        for show in [false, true] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetShowFullscreenTitleStrip(show)),
+                &event_tx,
+            );
+            assert_eq!(
+                runtime.state.settings.display.show_fullscreen_title_strip,
                 show
             );
             assert!(runtime.flags.settings_dirty);
