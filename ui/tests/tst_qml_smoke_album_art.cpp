@@ -1353,6 +1353,37 @@ void startPlay(QObject *bridge) {
     bridge->setProperty("currentPlaySerial", bridge->property("currentPlaySerial").toDouble() + 1);
 }
 
+// The name of the item with the keyboard focus in `window`.
+QString focusedName(QQuickWindow *window) {
+    QQuickItem *focused = window->activeFocusItem();
+    return focused != nullptr ? focused->objectName() : QString();
+}
+
+// A point on the art the album art viewer's `surface` shows, clear of the
+// details and the controls over it: in the left quarter of the image as
+// drawn, halfway down. Null until the image has loaded.
+QPoint pointOnTheArt(QQuickItem *surface) {
+    if (!QTest::qWaitFor([surface]() { return surface->property("imageStatus").toInt() == 1; }, 5000)) {
+        return {};
+    }
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    if (image == nullptr || viewport == nullptr || column == nullptr) {
+        return {};
+    }
+    const QSizeF painted(image->property("paintedWidth").toReal(), image->property("paintedHeight").toReal());
+    const QPointF origin((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2);
+    const QRectF art = QRectF(image->mapToScene(origin),
+                              image->mapToScene(origin + QPointF(painted.width(), painted.height())))
+                           .intersected(sceneRectOf(viewport));
+    const QPointF point(art.left() + art.width() / 4, art.center().y());
+    if (art.width() < 8 || (column->isVisible() && point.x() >= sceneRectOf(column).left())) {
+        return {};
+    }
+    return point.toPoint();
+}
+
 } // namespace
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
@@ -1582,7 +1613,9 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
     QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
-    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr && playPause != nullptr);
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr && playPause != nullptr
+            && surface != nullptr);
     QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
     QVERIFY(fake != nullptr);
     setPlayingTrack(bridge);
@@ -1649,14 +1682,11 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
                      at.constData());
 
         // Away from the buttons, with the art's focus, Space still plays and
-        // pauses. Over the whole screen, a press on the art gives it the
-        // focus back; the main window's viewer gives it the focus as it opens.
-        if (fullscreenMode == 1) {
-            QQuickItem *viewFocus = itemNamed(host->contentItem(), QStringLiteral("albumArtFullscreenViewFocus"));
-            QVERIFY2(viewFocus != nullptr, at.constData());
-            viewFocus->forceActiveFocus();
-            QTRY_VERIFY2(viewFocus->hasActiveFocus(), at.constData());
-        } else {
+        // pauses. The main window's viewer gives the art the focus as it
+        // opens.
+        const QString viewFocusName = fullscreenMode == 1
+            ? QStringLiteral("albumArtFullscreenViewFocus") : QStringLiteral("albumArtPopupViewFocus");
+        if (fullscreenMode == 0) {
             QTest::keyClick(host, Qt::Key_Escape);
             QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
             QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
@@ -1668,21 +1698,77 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
             QQuickItem *content = qvariant_cast<QQuickItem *>(popup->property("contentItem"));
             QVERIFY2(content != nullptr, at.constData());
             QTRY_VERIFY2(content->hasActiveFocus(), at.constData());
-            QQuickItem *focused = window->activeFocusItem();
-            QVERIFY2(focused != nullptr
-                         && !focused->objectName().startsWith(QStringLiteral("albumArtPreview"))
-                         && !focused->objectName().endsWith(QStringLiteral("Button")),
-                     qPrintable(QStringLiteral("%1: focus on %2").arg(QString::fromLatin1(at),
-                                                                      focused ? focused->objectName() : QString())));
+            QTRY_COMPARE(focusedName(window), viewFocusName);
+            QTest::keyClick(host, Qt::Key_Space);
+            QTRY_COMPARE(toggled.count(), 1);
+            QVERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
+            toggled.clear();
         }
+
+        // A press on the art takes the focus back from a button; the art
+        // still zooms with a double-click and opens its menu.
+        QTRY_VERIFY2((back = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"))) != nullptr,
+                     at.constData());
+        QVERIFY2(tabTo(host, back), at.constData());
+        const QPoint onArt = pointOnTheArt(surface);
+        QVERIFY2(!onArt.isNull(), at.constData());
+        QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, onArt);
+        QTRY_COMPARE(focusedName(host), viewFocusName);
         QTest::keyClick(host, Qt::Key_Space);
         QTRY_COMPARE(toggled.count(), 1);
         QVERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
+        QVERIFY2(!dialog->property("visible").toBool(), at.constData());
         toggled.clear();
+        QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, onArt);
+        QTRY_COMPARE(surface->property("zoom").toDouble(), 2.0);
+        QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, onArt);
+        QTRY_COMPARE(surface->property("zoom").toDouble(), 1.0);
+        QObject *contextMenu = surface->findChild<QObject *>(QStringLiteral("albumArtViewerContextMenu"));
+        QVERIFY2(contextMenu != nullptr, at.constData());
+        QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier, onArt);
+        QTRY_VERIFY2(contextMenu->property("opened").toBool(), at.constData());
+        QVERIFY(QMetaObject::invokeMethod(contextMenu, "close"));
+        QTRY_VERIFY2(!contextMenu->property("visible").toBool(), at.constData());
+        QVERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
         QTest::keyClick(host, Qt::Key_Escape);
         QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
         QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
+        QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        // Out of a preview, from Image Details too. The viewer opens with
+        // the art's focus, not that of the button that had it as it closed.
+        const QString infoName = fullscreenMode == 1 ? QStringLiteral("albumArtFullscreenInfoButton")
+                                                     : QStringLiteral("albumArtPopupInfoButton");
+        QQuickItem *info = nullptr;
+        for (int opening = 0; opening < 2; ++opening) {
+            QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+            QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+            host = viewerHost();
+            QVERIFY2(host != nullptr && QTest::qWaitForWindowActive(host), at.constData());
+            QTRY_COMPARE(focusedName(host), viewFocusName);
+            QTRY_VERIFY2((info = visibleItemNamed(host, infoName)) != nullptr, at.constData());
+            QVERIFY2(tabTo(host, info), at.constData());
+            if (opening == 0) {
+                QTest::keyClick(host, Qt::Key_Escape);
+                QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+                window->requestActivate();
+                QVERIFY(QTest::qWaitForWindowActive(window));
+            }
+        }
+        const bool infoVisible = viewer->property("albumArtInfoVisible").toBool();
+        const QPoint onCover = pointOnTheArt(surface);
+        QVERIFY2(!onCover.isNull(), at.constData());
+        QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, onCover);
+        QTRY_COMPARE(focusedName(host), viewFocusName);
+        QTest::keyClick(host, Qt::Key_Space);
+        QTRY_COMPARE(toggled.count(), 1);
+        QCOMPARE(viewer->property("albumArtInfoVisible").toBool(), infoVisible);
+        QVERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
+        toggled.clear();
+        QTest::keyClick(host, Qt::Key_Escape);
         QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
