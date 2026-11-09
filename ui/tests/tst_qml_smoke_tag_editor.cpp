@@ -28,6 +28,9 @@ private slots:
     void aSecondClickAsAConfirmationFadesAnswersNothingMore();
     void discardAndReloadClickedTwiceAsItFadesReloadsOnce();
     void quitAnywayTakesNoSecondAnswerAsTheWaitFades();
+    void askingToCloseAfterAReloadQuestionOffersSaveAndDiscard_data();
+    void askingToCloseAfterAReloadQuestionOffersSaveAndDiscard();
+    void switchingTheTagEditorQuestionsKeepsEveryButton();
     void autoNumberRejectsStartsThatAreNotNumbers();
     void tagEditorRowsFollowTheKeyboard();
     void tagEditorShowsEveryValueOfMultiValueFields();
@@ -179,6 +182,17 @@ QStringList tagEditorCellTexts(QQuickItem *row) {
     return texts;
 }
 
+QVariant evaluateOn(QQuickItem *item, const QString &expression) {
+    QQmlExpression evaluated(qmlContext(item), item, expression);
+    bool undefined = false;
+    const QVariant value = evaluated.evaluate(&undefined);
+    return evaluated.hasError() || undefined ? QVariant() : value;
+}
+
+bool isDefaultButton(QQuickItem *button) {
+    return evaluateOn(button, QStringLiteral("Accessible.defaultButton")).toBool();
+}
+
 QList<int> selectedTagEditorRows(const TagEditorController &editor) {
     QList<int> rows;
     for (const QVariant &row : editor.selectedRows()) {
@@ -232,6 +246,31 @@ struct TagEditorWindow {
         return message != nullptr ? message->property("text").toString() : QString();
     }
     int stateSaves() const { return bridge->property("lastStateSaveRequestId").toInt(); }
+    // The confirmation's button `objectName`, when it is in its button row
+    // and shown.
+    QQuickItem *confirmButtonShown(const QString &objectName) const {
+        auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(confirm->property("footer")));
+        auto *button = window->findChild<QQuickItem *>(objectName);
+        return footer != nullptr && button != nullptr && footer->isAncestorOf(button) && button->isVisible()
+            ? button
+            : nullptr;
+    }
+    // Gives the keyboard to the confirmation's text, out of its buttons.
+    bool focusConfirmContent() const {
+        auto *content = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(confirm->property("contentItem")));
+        if (content == nullptr) {
+            return false;
+        }
+        content->forceActiveFocus();
+        return content->hasActiveFocus();
+    }
+    // Deletes what waits for deletion, and what the engine no longer holds.
+    void settleDeletions() {
+        QCoreApplication::processEvents();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        engine.collectGarbage();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
     QObject *quitWait() const {
         return window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitDialog"));
     }
@@ -792,6 +831,145 @@ void TagEditorSmokeTest::quitAnywayTakesNoSecondAnswerAsTheWaitFades() {
     QCOMPARE(stops.count(), 0);
     QCOMPARE(fixture.stateSaves(), 1);
     fixture.saves->release.release();
+}
+
+void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard_data() {
+    QTest::addColumn<bool>("quit");
+    QTest::addColumn<bool>("save");
+    QTest::newRow("close, save") << false << true;
+    QTest::newRow("close, discard") << false << false;
+    QTest::newRow("quit, save") << true << true;
+    QTest::newRow("quit, discard") << true << false;
+}
+
+// The reload question makes Discard the default button; the close and quit
+// questions that follow it still have Save and Discard (#559).
+void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard() {
+    QFETCH(bool, quit);
+    QFETCH(bool, save);
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    const QString saveName = QStringLiteral("tagEditorCloseConfirmSaveButton");
+    const QString discardName = QStringLiteral("tagEditorCloseConfirmDiscardButton");
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(fixture.confirmButtonShown(discardName) != nullptr);
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmKeepEditingButton")));
+    QTRY_VERIFY(!fixture.confirmShown());
+    fixture.settleDeletions();
+
+    if (quit) {
+        fixture.window->close();
+    } else {
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    }
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QCOMPARE(fixture.confirmMessage(), quit ? QStringLiteral("Save tag changes before quitting Ferrous?")
+                                            : QStringLiteral("Save changes before closing the tag editor?"));
+    fixture.settleDeletions();
+    QQuickItem *saveButton = fixture.confirmButtonShown(saveName);
+    QQuickItem *discardButton = fixture.confirmButtonShown(discardName);
+    QVERIFY(saveButton != nullptr);
+    QVERIFY(discardButton != nullptr);
+    QVERIFY(fixture.confirmButtonShown(QStringLiteral("tagEditorCloseConfirmKeepEditingButton")) != nullptr);
+    QVERIFY(saveButton->isEnabled());
+    QVERIFY(discardButton->isEnabled());
+    QVERIFY(isDefaultButton(saveButton));
+    QVERIFY(!isDefaultButton(discardButton));
+
+    QVERIFY(clickButton(fixture.window, save ? saveName : discardName));
+    if (quit) {
+        QTRY_VERIFY(!fixture.window->isVisible());
+        QCOMPARE(fixture.stateSaves(), 1);
+    } else {
+        QTRY_VERIFY(!fixture.editorShown());
+    }
+    QVERIFY(!fixture.editor.isOpen());
+    QCOMPARE(fixture.saves->saveCount(), save ? 1 : 0);
+    if (save) {
+        const QJsonArray rows = QJsonDocument::fromJson(fixture.saves->payload())
+                                    .object().value(QStringLiteral("rows")).toArray();
+        QCOMPARE(rows.size(), 1);
+        QCOMPARE(rows.first().toObject().value(QStringLiteral("title")).toString(), QStringLiteral("Edited"));
+    }
+}
+
+// Moving the default button between Save and Discard destroys neither, and
+// Enter presses the one that is the default now (#559).
+void TagEditorSmokeTest::switchingTheTagEditorQuestionsKeepsEveryButton() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const QString saveName = QStringLiteral("tagEditorCloseConfirmSaveButton");
+    const QString discardName = QStringLiteral("tagEditorCloseConfirmDiscardButton");
+    const QString keepEditingName = QStringLiteral("tagEditorCloseConfirmKeepEditingButton");
+    const QPointer<QQuickItem> save = fixture.window->findChild<QQuickItem *>(saveName);
+    const QPointer<QQuickItem> discard = fixture.window->findChild<QQuickItem *>(discardName);
+    const QPointer<QQuickItem> keepEditing = fixture.window->findChild<QQuickItem *>(keepEditingName);
+    QVERIFY(save && discard && keepEditing);
+
+    for (int round = 0; round < 3; ++round) {
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+        QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+        fixture.settleDeletions();
+        QVERIFY(save && discard && keepEditing);
+        QCOMPARE(fixture.confirmButtonShown(discardName), discard.data());
+        QCOMPARE(fixture.confirmButtonShown(keepEditingName), keepEditing.data());
+        QVERIFY(!save->isVisible());
+        QVERIFY(isDefaultButton(discard));
+        QVERIFY(!isDefaultButton(save));
+        QVERIFY(clickButton(fixture.window, keepEditingName));
+        QTRY_VERIFY(!fixture.confirmShown());
+        fixture.settleDeletions();
+        QVERIFY(save && discard && keepEditing);
+
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+        QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+        fixture.settleDeletions();
+        QVERIFY(save && discard && keepEditing);
+        QCOMPARE(fixture.confirmButtonShown(saveName), save.data());
+        QCOMPARE(fixture.confirmButtonShown(discardName), discard.data());
+        QCOMPARE(fixture.confirmButtonShown(keepEditingName), keepEditing.data());
+        QVERIFY(isDefaultButton(save));
+        QVERIFY(!isDefaultButton(discard));
+        QVERIFY(clickButton(fixture.window, keepEditingName));
+        QTRY_VERIFY(!fixture.confirmShown());
+        fixture.settleDeletions();
+        QVERIFY(save && discard && keepEditing);
+    }
+    QVERIFY(fixture.editor.dirty());
+    QCOMPARE(fixture.saves->saveCount(), 0);
+
+    // Enter in the question presses Discard and Reload on the reload
+    // question...
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(fixture.focusConfirmContent());
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_COMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0"));
+    QTRY_VERIFY(!fixture.editor.loading());
+    QVERIFY(!fixture.editor.dirty());
+    QTRY_VERIFY(!fixture.confirmShown());
+    QVERIFY(fixture.editorShown());
+    QCOMPARE(fixture.saves->saveCount(), 0);
+
+    // ...and Save on the close question.
+    fixture.editor.setCell(0, QStringLiteral("title"), QStringLiteral("Edited again"));
+    QVERIFY(fixture.editor.dirty());
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(fixture.focusConfirmContent());
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_COMPARE(fixture.saves->saveCount(), 1);
+    QTRY_VERIFY(!fixture.editorShown());
+    QVERIFY(!fixture.editor.isOpen());
+    const QJsonArray rows = QJsonDocument::fromJson(fixture.saves->payload())
+                                .object().value(QStringLiteral("rows")).toArray();
+    QCOMPARE(rows.size(), 1);
+    QCOMPARE(rows.first().toObject().value(QStringLiteral("title")).toString(), QStringLiteral("Edited again"));
+    fixture.settleDeletions();
+    QVERIFY(save && discard && keepEditing);
 }
 
 void TagEditorSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
