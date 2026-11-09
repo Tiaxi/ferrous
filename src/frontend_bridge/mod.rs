@@ -512,6 +512,9 @@ pub struct BridgeSearchResultRow {
 #[derive(Debug, Clone)]
 pub struct BridgeSnapshot {
     pub playback: PlaybackSnapshot,
+    /// Advances whenever a play starts, also when the same file plays
+    /// again or a stopped track plays again.
+    pub play_serial: u64,
     pub analysis: AnalysisSnapshot,
     pub metadata: TrackMetadata,
     pub library: Arc<LibrarySnapshot>,
@@ -785,6 +788,12 @@ pub(super) struct BridgeState {
     pending_waveform_track: Option<PendingWaveformTrack>,
     analysis_track_token: u64,
     last_track_change: TrackChangeMarker,
+    /// Advances whenever a play starts: on every track change, also one that
+    /// plays the same file again, and when a stopped track plays again,
+    /// which keeps its `track_token`. The UI tells a new play from a
+    /// continuing one by it; a seek, a pause or a queue edit that keeps the
+    /// playing track leaves it as it is.
+    play_serial: u64,
     /// Renames sent to the playback engine that it has not acknowledged.
     /// Events it sent before the acknowledgement still carry the old paths.
     unacknowledged_engine_renames: VecDeque<Arc<PathRenames>>,
@@ -939,6 +948,7 @@ impl BridgeState {
         };
         BridgeSnapshot {
             playback: self.playback.clone(),
+            play_serial: self.play_serial,
             analysis: self.analysis.clone(),
             metadata,
             library: self.library.clone(),

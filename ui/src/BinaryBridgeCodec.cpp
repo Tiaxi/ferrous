@@ -210,6 +210,10 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
         && (!reader.readU64(&sampledAtNs) || !reader.readU8(&advancing) || advancing > 1)) {
         return false;
     }
+    quint64 playSerial = 0;
+    if (!reader.atEnd() && !reader.readU64(&playSerial)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -227,6 +231,7 @@ bool decodePlaybackSection(const QByteArray &payload, DecodedPlayback *out) {
     out->positionSampledAtNs = static_cast<qint64>(
         std::min<quint64>(sampledAtNs, std::numeric_limits<qint64>::max()));
     out->positionAdvancing = advancing != 0;
+    out->playSerial = playSerial;
     return true;
 }
 

@@ -5626,6 +5626,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         changed = true;
         trackIdentitySignalChanged = true;
     }
+    if (snapshot.playback.present && m_currentPlaySerial != snapshot.playback.playSerial) {
+        m_currentPlaySerial = snapshot.playback.playSerial;
+        changed = true;
+        trackIdentitySignalChanged = true;
+    }
 
     if (playing < 0 && !currentPath.isEmpty() && m_queueLength > 0) {
         playing = queuePathFirstIndex(currentPath);

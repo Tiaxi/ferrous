@@ -240,6 +240,7 @@ pub(super) fn process_playback_event(
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
             state.last_track_change.track_token = track_token;
+            state.play_serial = state.play_serial.wrapping_add(1);
             // A report about the file that played before is no longer
             // wanted, even while the playback snapshot still names it.
             if state
@@ -341,6 +342,17 @@ fn remap_unacknowledged_engine_path(state: &BridgeState, path: &mut PathBuf) {
     }
 }
 
+/// Advances the play serial when playback leaves Stopped with a track: the
+/// stopped track plays again from its start, under the same track token.
+fn count_play_of_stopped_track(previous: PlaybackState, state: &mut BridgeState) {
+    if previous == PlaybackState::Stopped
+        && state.playback.state != PlaybackState::Stopped
+        && state.playback.current.is_some()
+    {
+        state.play_serial = state.play_serial.wrapping_add(1);
+    }
+}
+
 fn process_playback_snapshot_event(
     snapshot: PlaybackSnapshot,
     analysis: &AnalysisEngine,
@@ -358,6 +370,7 @@ fn process_playback_snapshot_event(
         (None, None) => state.last_current_row = None,
         (None, Some(_)) => {}
     }
+    count_play_of_stopped_track(previous_playback.state, state);
     if next_state == PlaybackState::Playing && previous_playback.state == PlaybackState::Stopped {
         // Queued files may have changed on disk while nothing played.
         super::sync_queue_details(state);
@@ -1680,6 +1693,75 @@ mod tests {
             ),
             "{commands:?}"
         );
+    }
+
+    #[test]
+    fn play_serial_advances_for_each_play_of_the_same_track() {
+        let (analysis, command_rx, playback_tx, playback_rx, metadata, mut state) =
+            playback_harness(SpectrogramDisplayMode::Centered);
+        let harness = (
+            &analysis,
+            &command_rx,
+            &playback_tx,
+            &playback_rx,
+            &metadata,
+        );
+        let track = p("/music/track.flac");
+        let replay = |token: u64, kind: TrackChangeKind, state: &mut BridgeState| {
+            playback_tx
+                .send(PlaybackEvent::TrackChanged {
+                    path: track.clone(),
+                    queue_index: 0,
+                    kind,
+                    track_token: token,
+                })
+                .expect("send track change");
+            pump_playback_events(&playback_rx, &analysis, &metadata, state);
+        };
+        let mut playing = state.playback.clone();
+        playing.track_token = 7;
+        let _ = snapshot_commands(playing.clone(), harness, &mut state);
+        let mut serial = state.play_serial;
+
+        // Seeking, pausing and resuming keep the play.
+        let mut sought = playing.clone();
+        sought.position = Duration::from_secs(90);
+        sought.seek_serial = 1;
+        sought.seek_landed_serial = 1;
+        let _ = snapshot_commands(sought.clone(), harness, &mut state);
+        let mut paused = sought.clone();
+        paused.state = PlaybackState::Paused;
+        let _ = snapshot_commands(paused, harness, &mut state);
+        let _ = snapshot_commands(sought.clone(), harness, &mut state);
+        assert_eq!(state.play_serial, serial);
+
+        // Repeat One, or the same file next in the queue: a gapless replay.
+        replay(8, TrackChangeKind::Gapless, &mut state);
+        assert_ne!(state.play_serial, serial);
+        serial = state.play_serial;
+        let mut replayed = sought.clone();
+        replayed.track_token = 8;
+        replayed.position = Duration::ZERO;
+        let _ = snapshot_commands(replayed.clone(), harness, &mut state);
+        assert_eq!(state.play_serial, serial);
+
+        // Played again by hand.
+        replay(9, TrackChangeKind::Manual, &mut state);
+        assert_ne!(state.play_serial, serial);
+        serial = state.play_serial;
+        replayed.track_token = 9;
+        let _ = snapshot_commands(replayed.clone(), harness, &mut state);
+
+        // Stopped, and played again under the same token: stopping ends the
+        // play, playing starts the next.
+        let mut stopped = replayed.clone();
+        stopped.state = PlaybackState::Stopped;
+        stopped.current_queue_index = None;
+        let _ = snapshot_commands(stopped, harness, &mut state);
+        assert_eq!(state.play_serial, serial);
+        let _ = snapshot_commands(replayed, harness, &mut state);
+        assert_ne!(state.play_serial, serial);
+        assert_eq!(state.snapshot(false).play_serial, state.play_serial);
     }
 
     /// A playing 240 s track (scrobble threshold 120 s) with its metadata.
