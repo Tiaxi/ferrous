@@ -547,55 +547,72 @@ Item {
         // shows, then its buttons at the end of a row. When they do not fit
         // side by side, with a larger font or a longer translation, they
         // stack, each the column's width, Back to Results first.
-        ColumnLayout {
+        // Anchors and bindings place them, so they are in place the moment
+        // Apply shows or hides: a layout would place them only at its next
+        // polish, leaving Apply where it was laid out before, past the
+        // column's end, until then.
+        Item {
             id: previewFooter
             objectName: "albumArtPreviewFooter"
             visible: root.previewActive
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
-            spacing: 0
+            height: previewButtons.y + previewButtons.height + 16
 
             Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
+                id: previewSeam
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 1
                 color: root.uiPalette.seam
             }
 
             Label {
+                id: previewLabelText
                 objectName: "albumArtPreviewLabel"
-                Layout.fillWidth: true
-                Layout.leftMargin: 16
-                Layout.rightMargin: 16
-                Layout.topMargin: 12
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: previewSeam.bottom
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                anchors.topMargin: 12
                 text: root.previewLabel
                 font.weight: Font.DemiBold
                 color: root.uiPalette.text
                 elide: Text.ElideRight
             }
 
-            GridLayout {
+            Item {
                 id: previewButtons
                 objectName: "albumArtPreviewButtons"
-                readonly property real room: previewFooter.width - 32
+                readonly property real spacing: Kirigami.Units.smallSpacing
                 readonly property bool oneRow: previewBackButton.implicitWidth
                     + (previewApplyButton.visible
-                        ? columnSpacing + previewApplyButton.implicitWidth : 0) <= room
-                Layout.alignment: Qt.AlignRight
-                Layout.fillWidth: !oneRow
-                Layout.maximumWidth: room
-                Layout.leftMargin: 16
-                Layout.rightMargin: 16
-                Layout.topMargin: 8
-                Layout.bottomMargin: 16
-                columns: oneRow ? 2 : 1
-                columnSpacing: Kirigami.Units.smallSpacing
-                rowSpacing: Kirigami.Units.smallSpacing
+                        ? spacing + previewApplyButton.implicitWidth : 0) <= width
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: previewLabelText.bottom
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                anchors.topMargin: 8
+                height: oneRow
+                    ? Math.max(previewBackButton.height,
+                        previewApplyButton.visible ? previewApplyButton.height : 0)
+                    : previewBackButton.height + (previewApplyButton.visible
+                        ? spacing + previewApplyButton.height : 0)
 
                 DetailsButton {
                     id: previewBackButton
                     objectName: "albumArtPreviewBackButton"
-                    Layout.fillWidth: !previewButtons.oneRow
+                    x: previewButtons.oneRow
+                        ? (previewApplyButton.visible
+                            ? previewApplyButton.x - previewButtons.spacing
+                            : previewButtons.width) - width
+                        : 0
+                    y: previewButtons.oneRow ? (previewButtons.height - height) / 2 : 0
+                    width: previewButtons.oneRow ? implicitWidth : previewButtons.width
                     icon.name: "go-previous"
                     text: I18n.i18nc("@action:button", "Back to Results")
                     toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
@@ -605,7 +622,11 @@ Item {
                 DetailsButton {
                     id: previewApplyButton
                     objectName: "albumArtPreviewApplyButton"
-                    Layout.fillWidth: !previewButtons.oneRow
+                    x: previewButtons.oneRow ? previewButtons.width - width : 0
+                    y: previewButtons.oneRow
+                        ? (previewButtons.height - height) / 2
+                        : previewBackButton.height + previewButtons.spacing
+                    width: previewButtons.oneRow ? implicitWidth : previewButtons.width
                     visible: root.previewHasCandidate
                     enabled: root.previewCanApply
                     icon.name: "dialog-ok-apply"

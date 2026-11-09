@@ -20,6 +20,7 @@ private slots:
     void itunesPreviewAppliesOrGoesBackToTheResults();
     void itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut();
     void itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide();
+    void itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
@@ -1263,6 +1264,27 @@ bool isWithin(const QQuickItem *item, const QQuickItem *ancestor) {
     return false;
 }
 
+// Clicks the preview's button `objectName` in `host` once it is enabled and
+// sits whole inside the image's details, at the same place on two looks in
+// a row: where the user sees it, not where the viewer opening might still
+// move it from.
+bool clickPreviewButton(QQuickWindow *host, const QString &objectName) {
+    QRectF last;
+    const bool settled = QTest::qWaitFor([&]() {
+        QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
+        QQuickItem *button = visibleItemNamed(host, objectName);
+        if (column == nullptr || button == nullptr || !button->isEnabled() || !isWithin(button, column)) {
+            last = QRectF();
+            return false;
+        }
+        const QRectF rect = sceneRectOf(button);
+        const bool same = !last.isNull() && rect == last;
+        last = rect;
+        return same && sceneRectOf(column).contains(rect);
+    });
+    return settled && clickVisibleButton(host, objectName);
+}
+
 // During a preview in `host`: its label and buttons are at the foot of the
 // image's details, Back to Results before Apply on one row, and the
 // viewer's controls named by `prefix` have none of them, nor Image Details.
@@ -1277,9 +1299,7 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
-    // The buttons' layout places them on its next polish after they show,
-    // so wait for it: until then Apply can still be where it was laid out
-    // before, past the column's end.
+    // The viewer can still be taking its size, as its window shows.
     const auto settled = [&]() {
         const QRectF rect = rectOf(column);
         return rect.contains(rectOf(label)) && rect.contains(rectOf(back))
@@ -1314,10 +1334,7 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
                                      const QByteArray &at) {
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, index)));
     QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
-    QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr
-                     && visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled(),
-                 at.constData());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
+    QVERIFY2(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
     QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                  at.constData());
     QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
@@ -1471,7 +1488,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTRY_VERIFY2(!viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
 
             // Back to Results, clicked: the preview is in front of the dialog.
-            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewBackButton")), at.constData());
+            QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewBackButton")), at.constData());
             backAtTheResults();
 
             // Escape goes back too; the popup viewer stays open for it, rather
@@ -1491,7 +1508,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             // and leaves the viewer showing the cover.
             preview();
             host = viewerHost();
-            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
+            QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY(applied().isEmpty());
@@ -1500,7 +1517,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                          at.constData());
             QVERIFY(dialog->property("previewShown").toBool());
             QVERIFY(viewer->property("albumArtPreviewActive").toBool());
-            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
+            QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogConfirmButton")), at.constData());
@@ -1537,9 +1554,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, bareTarget));
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, previewed)));
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr);
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
+    QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QTRY_COMPARE(applied(), (QVariantList{previewed}));
     QVERIFY(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) == nullptr);
     QVERIFY(!dialog->property("visible").toBool());
@@ -1745,8 +1760,18 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
             QVERIFY2(!sceneRectOf(back).intersects(sceneRectOf(apply)), at.constData());
             QVERIFY2(back->width() >= back->implicitWidth() - 0.5 && apply->width() >= apply->implicitWidth() - 0.5,
                      at.constData());
-            const bool fitsInARow = back->implicitWidth() + apply->implicitWidth() + 4
-                <= columnRect.width() - 32;
+            // The footer's buttons, at the foot of the column.
+            QQuickItem *footer = visibleItemNamed(host, QStringLiteral("albumArtPreviewFooter"));
+            QQuickItem *buttons = visibleItemNamed(host, QStringLiteral("albumArtPreviewButtons"));
+            QVERIFY2(footer != nullptr && buttons != nullptr, at.constData());
+            QVERIFY2(isWithin(back, buttons) && isWithin(apply, buttons) && isWithin(footer, column),
+                     at.constData());
+            QCOMPARE(sceneRectOf(footer).bottom(), columnRect.bottom());
+            QVERIFY2(sceneRectOf(footer).contains(sceneRectOf(back))
+                         && sceneRectOf(footer).contains(sceneRectOf(apply)), at.constData());
+            const bool fitsInARow = back->implicitWidth() + buttons->property("spacing").toReal()
+                + apply->implicitWidth() <= columnRect.width() - 32;
+            QCOMPARE(buttons->property("oneRow").toBool(), fitsInARow);
             if (fitsInARow) {
                 // One row, Back to Results then Apply, at the column's end.
                 QCOMPARE(sceneRectOf(back).top(), sceneRectOf(apply).top());
@@ -1771,6 +1796,115 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
             window->requestActivate();
             QVERIFY(QTest::qWaitForWindowActive(window));
         }
+        QVERIFY(finishIncubation(engine));
+    }
+}
+
+void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
+    // Back to Results and Apply are in place inside the details the moment
+    // a preview shows them, before any frame, so that nothing can find
+    // Apply elsewhere: a candidate's preview after one of the current art,
+    // which had Back to Results alone, as when it was laid out last. With
+    // the usual font they share a row; at 24 pt they stack, as in
+    // itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    QCOMPARE(fixture.size(), 3);
+
+    for (const qreal pointSize : {0.0, 24.0}) {
+        const bool stacked = pointSize > 0;
+        if (stacked) {
+            QFont larger = applicationFont;
+            larger.setPointSizeF(pointSize);
+            QGuiApplication::setFont(larger);
+        }
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+        QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+        QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
+        QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+        QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+        QVERIFY(fake != nullptr);
+        setPlayingTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", coverUrl);
+        bridge->setProperty("viewerFullscreenMode", 0);
+        QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, QVariantMap{
+            {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+            {QStringLiteral("album"), QStringLiteral("Small Hours")},
+            {QStringLiteral("coverPath"), coverUrl},
+        }));
+        const auto backToTheResults = [&]() {
+            QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
+            QTRY_VERIFY(dialog->property("opened").toBool());
+            QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+        };
+        // Where the preview's buttons are now, without letting the events run.
+        const auto checkButtonsInPlace = [window, stacked](const QByteArray &at) {
+            QQuickItem *column = visibleItemNamed(window, QStringLiteral("albumArtInfoColumn"));
+            QQuickItem *back = visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton"));
+            QQuickItem *apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
+            QVERIFY2(column != nullptr && back != nullptr && apply != nullptr, at.constData());
+            const QRectF columnRect = sceneRectOf(column);
+            const QRectF inside = columnRect.adjusted(15.5, 0, -15.5, 0);
+            const QRectF backRect = sceneRectOf(back);
+            const QRectF applyRect = sceneRectOf(apply);
+            const auto where = [&]() {
+                return QStringLiteral("%1: column %2..%3, back %4..%5 at %6, apply %7..%8 at %9")
+                    .arg(QString::fromLatin1(at))
+                    .arg(inside.left()).arg(inside.right())
+                    .arg(backRect.left()).arg(backRect.right()).arg(backRect.top())
+                    .arg(applyRect.left()).arg(applyRect.right()).arg(applyRect.top());
+            };
+            QVERIFY2(inside.contains(backRect) && inside.contains(applyRect), qPrintable(where()));
+            if (stacked) {
+                // Back to Results above Apply, each the column's width.
+                QVERIFY2(backRect.bottom() <= applyRect.top(), qPrintable(where()));
+                for (const QRectF &rect : {backRect, applyRect}) {
+                    QVERIFY2(qAbs(rect.left() - (columnRect.left() + 16)) <= 0.5, qPrintable(where()));
+                    QVERIFY2(qAbs(rect.width() - (columnRect.width() - 32)) <= 0.5, qPrintable(where()));
+                }
+            } else {
+                // One row, Back to Results then Apply, at the column's end.
+                QVERIFY2(backRect.right() <= applyRect.left(), qPrintable(where()));
+                QCOMPARE(backRect.top(), applyRect.top());
+                QVERIFY2(inside.right() - applyRect.right() <= 0.5, qPrintable(where()));
+            }
+        };
+
+        QTRY_COMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
+        for (int round = 1; round <= 2; ++round) {
+            const QByteArray at = QByteArray("point size ") + QByteArray::number(pointSize)
+                + QByteArray(", round ") + QByteArray::number(round);
+            // The current art: Back to Results alone.
+            QVERIFY(QMetaObject::invokeMethod(dialog, "showPreview", Q_ARG(QVariant, -1)));
+            QTRY_VERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
+            QVERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) == nullptr,
+                     at.constData());
+            backToTheResults();
+
+            // A candidate: Apply joins it, both in place at once.
+            QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+            QVERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
+            checkButtonsInPlace(at);
+            if (QTest::currentTestFailed()) {
+                return;
+            }
+            QTest::qWait(50);
+            checkButtonsInPlace(at + " later");
+            if (QTest::currentTestFailed()) {
+                return;
+            }
+            backToTheResults();
+        }
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
         QVERIFY(finishIncubation(engine));
     }
 }
@@ -1896,7 +2030,7 @@ void AlbumArtSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {
     QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QVERIFY(QMetaObject::invokeMethod(dialog, "applyPreviewedSuggestion"));
     QVERIFY(applied().isEmpty());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewBackButton")));
+    QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
     QTRY_VERIFY(dialog->property("opened").toBool());
 }
 
@@ -1933,7 +2067,7 @@ void AlbumArtSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMoves
         QMetaObject::invokeMethod(bridge, "snapshotChanged");
     };
     const auto backToTheResults = [&]() {
-        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewBackButton")));
+        QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
     };
