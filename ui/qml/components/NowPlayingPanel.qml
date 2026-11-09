@@ -145,12 +145,16 @@ Item {
 
     // A line that fades: the text it showed before (`text`); the start of
     // it that stays still (`still`, see `_sharedStart`), set when the line
-    // starts to fade and only ever cut shorter; and the rest of it in parts
-    // that fade out from the opacity each had when this fade started
-    // (`parts`, [{start, from}], in order: each from the end of its
-    // `start`, a start of `text`, to the next one's; the first at `still`).
-    function _fadingLine(text, still, parts) {
-        return { text: text, still: still, parts: parts }
+    // starts to fade and only ever cut shorter; the rest of the text before
+    // in parts that fade out from the opacity each had when this fade
+    // started (`parts`, [{start, from}], in order: each from the end of its
+    // `start`, a start of `text`, to the next one's; the first at `still`);
+    // and the playing track's text past `still`, which fades in as one,
+    // from 1 - `incomingFrom`. The parts are cut where the text before has
+    // gaps, which the playing track's text need not have there, so it is
+    // never cut but at `still`, the end of the start both share.
+    function _fadingLine(text, still, parts, incomingFrom) {
+        return { text: text, still: still, parts: parts, incomingFrom: incomingFrom }
     }
 
     // The line before of `key` as it fades out, or null.
@@ -196,8 +200,10 @@ Item {
     }
 
     // What of `line` still shows once the playing track's line is `next`:
-    // the parts go on from the opacity they have; a field of the still start
-    // that `next` no longer shares fades from full opacity, as it showed.
+    // the parts, and the playing track's text, go on from the opacity they
+    // have; a field of the still start that `next` no longer shares fades
+    // out from full opacity, as it showed, and the playing track's text
+    // there fades in with the rest of it.
     function _goOn(line, next, separator) {
         const level = 1 - root.handover
         const parts = line.parts.map(part => ({ start: part.start, from: part.from * level }))
@@ -207,7 +213,7 @@ Item {
             parts.unshift({ start: still, from: 1 })
         // Parts that fade alike are one.
         const merged = parts.filter((part, index) => index === 0 || part.from !== parts[index - 1].from)
-        return root._fadingLine(line.text, still, merged)
+        return root._fadingLine(line.text, still, merged, line.incomingFrom * level)
     }
 
     function followTrack() {
@@ -307,7 +313,7 @@ Item {
     // shared start.
     function _newFadingLine(key, before, after) {
         const still = root._sharedStart(before, after, root.lineSeparators[key] || "")
-        return root._fadingLine(before, still, [{ start: still, from: 1 }])
+        return root._fadingLine(before, still, [{ start: still, from: 1 }], 1)
     }
 
     // The same track's cover, album or, during a track change, a line
@@ -409,8 +415,9 @@ Item {
     // While a track change fades it, the line before fades out over it
     // past the fields at the start that the two share; those stay still,
     // drawn by the playing track's own text, clipped, so nothing in them
-    // moves or dims. Each part of the rest fades on its own (see
-    // `_fadingLine`), between edges in the gaps of the line before.
+    // moves or dims. Past them the playing track's text fades in as one,
+    // and each part of the line before fades out on its own (see
+    // `_fadingLine`), between edges in its own gaps.
     component FadingLine: Item {
         id: line
 
@@ -418,9 +425,9 @@ Item {
         required property string lineKey
         required property string text
         // Its items' names: "nowPlaying<name>" for the playing track's
-        // text, and in each part "nowPlayingIncoming<name>" for the playing
-        // track's and "nowPlayingOutgoing<name>Part" for the line before's,
-        // whose text is "nowPlayingOutgoing<name>".
+        // text, "nowPlayingIncoming<name>" for the part of it that fades in,
+        // and "nowPlayingOutgoing<name>Part" for each part of the line
+        // before, whose text is "nowPlayingOutgoing<name>".
         required property string name
         property real pointSize: root.uiPalette.basePointSize
         property int weight: Font.Normal
@@ -434,29 +441,37 @@ Item {
             ? (root.outgoing.lines[line.lineKey] || null) : null
         readonly property bool fading: line.before !== null && root.handover < 1
         readonly property string outgoingText: line.fading ? line.before.text : ""
+        // The playing track's text past the still start, fading in.
+        readonly property real incomingOpacity: line.fading
+            ? 1 - line.before.incomingFrom * (1 - root.handover) : 1
         // How much of the line stays still, from the left: up to the middle
-        // of the space after the still start, where no glyph is; all of it
-        // when nothing fades.
+        // of the space after the still start, where neither has a glyph; all
+        // of it when nothing fades.
         readonly property real stillWidth: {
             if (!line.fading)
                 return line.width
-            if (line.before.still.length === 0)
+            const still = line.before.still
+            if (still.length === 0)
                 return 0
-            const edge = line._edgeAfter(line.before.still)
-            if (edge + metrics.advanceWidth("\u2026") <= line.width)
-                return edge
+            if (line._keeps(line.before.text, still) && line._keeps(line.text, still))
+                return line._edgeAfter(still)
             // Elided within the still start: the two look the same when
             // both are, and differ there otherwise.
-            const beforeTruncated = metrics.advanceWidth(line.before.text) > line.width
-            return stillText.truncated && beforeTruncated ? line.width : 0
+            const elidedWithin = metrics.advanceWidth(still) + metrics.advanceWidth("\u2026") > line.width
+            return elidedWithin && line._cutOff(line.before.text) && line._cutOff(line.text) ? line.width : 0
         }
-        // Where each part starts, then the end of the line.
+        // Where each part of the line before starts, then the end of the
+        // line. A part that would start where the line before is elided
+        // starts at the end, so the ellipsis is in one part.
         readonly property var partEdges: {
             if (!line.fading)
                 return []
+            const text = line.before.text
             const edges = line.before.parts.map((part, index) => index === 0
                 ? line.stillWidth
-                : Math.min(line.width, Math.max(line.stillWidth, line._edgeAfter(part.start))))
+                : (line._keeps(text, part.start)
+                    ? Math.min(line.width, Math.max(line.stillWidth, line._edgeAfter(part.start)))
+                    : line.width))
             edges.push(line.width)
             return edges
         }
@@ -467,6 +482,19 @@ Item {
             // Read the font, for the edges to follow it.
             metrics.font
             return (metrics.advanceWidth(start) + metrics.advanceWidth(start + " ")) / 2
+        }
+
+        function _cutOff(text) {
+            return metrics.advanceWidth(text) > line.width
+        }
+
+        // Whether `text`, elided to the line, still shows `start`, the
+        // space after it and the glyph after that, so that the gap after
+        // `start` is one with no ellipsis in it.
+        function _keeps(text, start) {
+            return !line._cutOff(text)
+                || metrics.advanceWidth(text.slice(0, start.length + 2)) + metrics.advanceWidth("\u2026")
+                    <= line.width
         }
 
         Layout.fillWidth: true
@@ -494,8 +522,24 @@ Item {
             }
         }
 
-        // What changes, part by part: the playing track's text fading in,
-        // and the line before's fading out over it.
+        // What changes: the playing track's text past stillWidth, fading in
+        // as one, and over it the line before's, fading out part by part.
+        Item {
+            objectName: "nowPlayingIncoming" + line.name
+            x: line.stillWidth
+            width: Math.max(0, line.width - line.stillWidth)
+            height: line.height
+            clip: true
+            visible: line.fading
+            opacity: line.incomingOpacity
+
+            LineText {
+                x: -line.stillWidth
+                owner: line
+                text: line.text
+                Accessible.ignored: true
+            }
+        }
         Repeater {
             model: line.fading ? line.before.parts : []
 
@@ -505,38 +549,20 @@ Item {
                 required property var modelData
                 required property int index
                 readonly property real start: line.partEdges[part.index] || 0
-                readonly property real outgoingOpacity: part.modelData.from * (1 - root.handover)
 
+                objectName: "nowPlayingOutgoing" + line.name + "Part"
                 x: part.start
                 width: Math.max(0, (line.partEdges[part.index + 1] || 0) - part.start)
                 height: line.height
+                clip: true
+                opacity: part.modelData.from * (1 - root.handover)
 
-                Item {
-                    objectName: "nowPlayingIncoming" + line.name
-                    anchors.fill: parent
-                    clip: true
-                    opacity: 1 - part.outgoingOpacity
-
-                    LineText {
-                        x: -part.start
-                        owner: line
-                        text: line.text
-                        Accessible.ignored: true
-                    }
-                }
-                Item {
-                    objectName: "nowPlayingOutgoing" + line.name + "Part"
-                    anchors.fill: parent
-                    clip: true
-                    opacity: part.outgoingOpacity
-
-                    LineText {
-                        objectName: "nowPlayingOutgoing" + line.name
-                        x: -part.start
-                        owner: line
-                        text: line.outgoingText
-                        Accessible.ignored: true
-                    }
+                LineText {
+                    objectName: "nowPlayingOutgoing" + line.name
+                    x: -part.start
+                    owner: line
+                    text: line.outgoingText
+                    Accessible.ignored: true
                 }
             }
         }
