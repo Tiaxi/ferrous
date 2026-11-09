@@ -762,8 +762,8 @@ pub(super) struct BridgeState {
     library_album_count: usize,
     library_root_track_counts: Arc<HashMap<PathBuf, usize>>,
     pre_built_tree_bytes: Arc<Vec<u8>>,
-    /// See [`events::ReportedPlayingFile`].
-    reported_playing_file: Option<events::ReportedPlayingFile>,
+    /// See [`events::PlayingFileRead`].
+    playing_file_read: Option<events::PlayingFileRead>,
     expanded_keys: HashSet<String>,
     library_view_selection_key: String,
     library_view_anchor_key: String,
@@ -1723,7 +1723,7 @@ impl BridgeLoopRuntime {
             BridgeLoopWake::Library(event) => self.handle_library_events(Some(event)),
             BridgeLoopWake::SearchResults(frame) => self.handle_search_results(frame),
             BridgeLoopWake::ApplyAlbumArt(event) => {
-                self.handle_apply_album_art_event(event, event_tx)
+                self.handle_apply_album_art_event(&event, event_tx)
             }
             BridgeLoopWake::LastFm(event) => self.handle_lastfm_event(event, event_tx),
             BridgeLoopWake::Persisted(outcome) => {
@@ -2193,14 +2193,14 @@ impl BridgeLoopRuntime {
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
-        self.read_metadata_again_if_reported();
+        self.read_playing_metadata_again();
         urgency
     }
 
-    /// Ask for the playing file's metadata again when a scan reported the
-    /// file in another state than the metadata shown was read in; see
-    /// [`events::metadata_to_read_again`].
-    fn read_metadata_again_if_reported(&mut self) {
+    /// Ask for the playing file's metadata again when the metadata worker
+    /// dropped its read, or a scan reported the file in another state than
+    /// the metadata shown was read in; see [`events::metadata_to_read_again`].
+    fn read_playing_metadata_again(&mut self) {
         if let Some(path) = events::metadata_to_read_again(&mut self.state) {
             self.metadata.request(path);
         }
@@ -2224,7 +2224,7 @@ impl BridgeLoopRuntime {
             self.edit_refreshes.forget_applied();
         }
         let applied = apply_library_events(events, &mut self.state);
-        self.read_metadata_again_if_reported();
+        self.read_playing_metadata_again();
         self.handle_library_refresh(applied);
         applied.urgency()
     }
@@ -2236,7 +2236,7 @@ impl BridgeLoopRuntime {
 
     fn handle_apply_album_art_event(
         &mut self,
-        event: ApplyAlbumArtEvent,
+        event: &ApplyAlbumArtEvent,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
         let urgency =
@@ -2435,7 +2435,7 @@ impl BridgeLoopRuntime {
         );
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
-        self.read_metadata_again_if_reported();
+        self.read_playing_metadata_again();
         let library_urgency = self.handle_library_events(None);
         let apply_album_art_urgency = drain_apply_album_art_events(
             &self.apply_album_art_rx,
@@ -3128,6 +3128,7 @@ mod tests {
     use super::config::{save_session_snapshot, save_settings};
     use super::*;
     use crate::library::{LibraryRoot, LibraryTrack};
+    use crate::playback::TrackChangeKind;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
@@ -4595,13 +4596,20 @@ mod tests {
         // It was read in an older state, so the tags are read again.
         apply_metadata_until_total(&mut runtime, 10);
         assert_eq!(runtime.state.metadata.shown_track_total(), Some(10));
-        assert!(runtime.state.reported_playing_file.is_none());
+        assert_eq!(
+            runtime
+                .state
+                .playing_file_read
+                .as_ref()
+                .and_then(events::PlayingFileRead::reported),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_rescan_read_dropped_for_a_late_artwork_request_is_read_again() {
+    fn a_rescan_read_dropped_for_a_request_for_another_file_is_read_again() {
         let _guard = test_guard();
         let (dir, track, mut runtime, event_tx) = rescan_fixture("dropped");
         // The track before, whose reads keep the metadata worker busy until
@@ -4626,20 +4634,12 @@ mod tests {
             .expect("the worker reads the track before");
 
         // A scan reports the playing file changed, so its tags are asked for
-        // again. Artwork applied to the track before asks for that one's
-        // after it, and the busy worker reads only the newer request.
+        // again. A request for the track before comes after it, and the busy
+        // worker reads only the newer request.
         let report = renumber_and_report(&track);
         let changed = report.changes.changed_files[0].1;
         runtime.handle_wake(BridgeLoopWake::Library(report), &event_tx);
-        runtime.handle_wake(
-            BridgeLoopWake::ApplyAlbumArt(ApplyAlbumArtEvent {
-                track_path: previous.clone(),
-                indexed_by_path: HashMap::new(),
-                fingerprints: HashMap::new(),
-                error: None,
-            }),
-            &event_tx,
-        );
+        runtime.metadata.request(previous.clone());
         drop(release);
 
         apply_metadata_until_total(&mut runtime, 10);
@@ -4649,9 +4649,199 @@ mod tests {
             runtime.state.metadata.source_path.as_deref(),
             track.to_str()
         );
-        assert!(runtime.state.reported_playing_file.is_none());
+        assert_eq!(
+            runtime
+                .state
+                .playing_file_read
+                .as_ref()
+                .and_then(events::PlayingFileRead::reported),
+            None
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Three wave files, the track before (1 of 5), the next track (2 of 8)
+    /// and another file (3 of 3), and a runtime playing the track before,
+    /// whose metadata worker records each read and stops at the first read
+    /// of the other file until released.
+    struct HeldMetadataFixture {
+        dir: PathBuf,
+        previous: PathBuf,
+        next: PathBuf,
+        other: PathBuf,
+        runtime: BridgeLoopRuntime,
+        event_tx: Sender<BridgeEvent>,
+        reads: Arc<Mutex<Vec<PathBuf>>>,
+        release: Sender<()>,
+    }
+
+    fn held_metadata_fixture(name: &str) -> HeldMetadataFixture {
+        let (dir, _, mut runtime, event_tx) = rescan_fixture(name);
+        let (previous, next, other) = (dir.join("01.wav"), dir.join("02.wav"), dir.join("03.wav"));
+        crate::metadata::write_numbered_test_wave(&previous, 1, 5);
+        crate::metadata::write_numbered_test_wave(&other, 3, 3);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let (reading_tx, reading) = unbounded::<()>();
+        let (release, release_rx) = bounded::<()>(1);
+        let (busy, recorded) = (other.clone(), Arc::clone(&reads));
+        (runtime.metadata, runtime.metadata_rx) =
+            MetadataService::with_read_hook(move |path: &Path| {
+                recorded.lock().expect("reads").push(path.to_path_buf());
+                if path == busy {
+                    let _ = reading_tx.send(());
+                    let _ = release_rx.recv();
+                }
+            });
+        runtime.state.playback.current = Some(previous.clone());
+        runtime.state.playback.track_token = 1;
+        runtime.state.playback.state = PlaybackState::Playing;
+        runtime.metadata.request(other.clone());
+        reading
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker reads the other file");
+        HeldMetadataFixture {
+            dir,
+            previous,
+            next,
+            other,
+            runtime,
+            event_tx,
+            reads,
+            release,
+        }
+    }
+
+    impl HeldMetadataFixture {
+        fn change_track(&mut self, path: &Path, kind: TrackChangeKind) {
+            self.runtime.handle_wake(
+                BridgeLoopWake::Playback(PlaybackEvent::TrackChanged {
+                    path: path.to_path_buf(),
+                    queue_index: 0,
+                    kind,
+                    track_token: 2,
+                }),
+                &self.event_tx,
+            );
+        }
+
+        /// Releases the worker and applies its metadata until `path`'s,
+        /// numbered of `total`, is shown, and returns the files it read.
+        fn release_until_shown(self, path: &Path, total: u32) -> Vec<PathBuf> {
+            let Self {
+                dir,
+                mut runtime,
+                reads,
+                release,
+                ..
+            } = self;
+            drop(release);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while runtime.state.metadata.source_path.as_deref() != path.to_str()
+                || runtime.state.metadata.track_total != Some(total)
+            {
+                let event = runtime
+                    .metadata_rx
+                    .recv_deadline(deadline)
+                    .unwrap_or_else(|_| panic!("no metadata of {path:?} arrived"));
+                runtime.handle_metadata_event(event);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            let reads = reads.lock().expect("reads").clone();
+            reads
+        }
+    }
+
+    #[test]
+    fn a_track_changes_read_dropped_for_a_request_for_another_file_is_read_again() {
+        let _guard = test_guard();
+        // A manual change, a gapless one, and Repeat One.
+        for (kind, to_next) in [
+            (TrackChangeKind::Manual, true),
+            (TrackChangeKind::Gapless, true),
+            (TrackChangeKind::Gapless, false),
+        ] {
+            let mut fixture = held_metadata_fixture("change-dropped");
+            let (path, total) = if to_next {
+                (fixture.next.clone(), 8)
+            } else {
+                (fixture.previous.clone(), 5)
+            };
+            // The change asks for the track's metadata while the worker is
+            // busy, and the playback snapshot still names the track before.
+            // A late request for another file comes after it, and the worker
+            // reads only the newer request.
+            fixture.change_track(&path, kind.clone());
+            fixture.runtime.metadata.request(fixture.other.clone());
+            let reads = fixture.release_until_shown(&path, total);
+            assert_eq!(reads.last(), Some(&path), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn artwork_applied_to_the_track_before_leaves_the_playing_tracks_read_alone() {
+        let _guard = test_guard();
+        let mut fixture = held_metadata_fixture("art-before");
+        let (previous, next, other) = (
+            fixture.previous.clone(),
+            fixture.next.clone(),
+            fixture.other.clone(),
+        );
+        fixture.change_track(&next, TrackChangeKind::Gapless);
+        // The apply started while the track before played and finishes
+        // before a playback snapshot names the next track.
+        fixture.runtime.handle_wake(
+            BridgeLoopWake::ApplyAlbumArt(ApplyAlbumArtEvent {
+                track_path: previous.clone(),
+                indexed_by_path: HashMap::from([(previous, indexed_titled("Before"))]),
+                fingerprints: HashMap::new(),
+                error: None,
+            }),
+            &fixture.event_tx,
+        );
+        let reads = fixture.release_until_shown(&next, 8);
+        assert_eq!(reads, vec![other, next]);
+    }
+
+    #[test]
+    fn a_tag_edit_refresh_before_the_snapshot_names_the_track_reads_the_playing_one() {
+        let _guard = test_guard();
+        let mut fixture = held_metadata_fixture("edit-window");
+        let (previous, next, other) = (
+            fixture.previous.clone(),
+            fixture.next.clone(),
+            fixture.other.clone(),
+        );
+        fixture.change_track(&next, TrackChangeKind::Manual);
+        // The tag editor saved the album, both tracks among it, before a
+        // playback snapshot names the next track.
+        assert!(commands::apply_edited_details(
+            &mut fixture.runtime.state,
+            &HashMap::from([
+                (previous.clone(), indexed_titled("Before")),
+                (next.clone(), indexed_titled("Next")),
+            ]),
+            &HashMap::new(),
+            &fixture.runtime.metadata,
+        ));
+        let reads = fixture.release_until_shown(&next, 8);
+        assert_eq!(reads, vec![other, next]);
+    }
+
+    #[test]
+    fn a_tag_edit_refresh_read_dropped_for_a_request_for_another_file_is_read_again() {
+        let _guard = test_guard();
+        let mut fixture = held_metadata_fixture("edit-dropped");
+        let (previous, other) = (fixture.previous.clone(), fixture.other.clone());
+        assert!(commands::apply_edited_details(
+            &mut fixture.runtime.state,
+            &HashMap::from([(previous.clone(), indexed_titled("Edited"))]),
+            &HashMap::new(),
+            &fixture.runtime.metadata,
+        ));
+        fixture.runtime.metadata.request(other.clone());
+        let reads = fixture.release_until_shown(&previous, 5);
+        assert_eq!(reads, vec![other.clone(), other, previous]);
     }
 
     /// A track file for imports, which expand and canonicalize their paths.
