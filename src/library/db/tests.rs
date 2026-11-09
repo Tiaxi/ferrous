@@ -609,7 +609,7 @@ fn switching_to_write_ahead_logging_does_not_wait_for_another_writer() {
     writer
         .execute_batch("CREATE TABLE t (x); BEGIN IMMEDIATE; INSERT INTO t VALUES (1)")
         .expect("write lock");
-    let switcher = Connection::open(&path).expect("switcher");
+    let mut switcher = Connection::open(&path).expect("switcher");
     switcher.busy_handler(Some(count_wait)).expect("handler");
 
     let error = switcher
