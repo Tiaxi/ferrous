@@ -1297,7 +1297,9 @@ impl GstPlaybackRuntime {
             }
         }
         if was_stopped {
-            self.begin_startup_ramp();
+            // A stopped pipeline holds no buffer, and the track plays
+            // from its start.
+            self.begin_track_start();
         }
         self.buffering_active = false;
         if self.restarting() {
@@ -1322,9 +1324,10 @@ impl GstPlaybackRuntime {
                 .get_or_insert_with(Instant::now);
         }
         if was_stopped {
-            // Re-assert mute after state transition to close the race
-            // window where new internal elements may not have volume=0.
-            self.playbin.set_property("volume", 0.0_f64);
+            // Re-assert the volume after the state transition, so that
+            // elements the new run created also have it.
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
         }
         self.snapshot.state = PlaybackState::Playing;
         // The position advances once the pipeline has reached Playing.
@@ -1785,6 +1788,29 @@ impl GstPlaybackRuntime {
         let _ = self.set_pipeline_state(gst::State::Playing);
         self.playing_state_requested_at = Some(Instant::now());
         self.begin_startup_ramp();
+    }
+
+    /// Bring the output to the volume for a new pipeline run that plays the
+    /// current track from its start, and holds no buffer prerolled at
+    /// another gain: at once, so the track's own attack is heard as
+    /// recorded. An AC3/DTS decoder produces garbage frames as it starts,
+    /// so those tracks still hold silence and fade in.
+    fn begin_track_start(&mut self) {
+        if self
+            .snapshot
+            .current
+            .as_deref()
+            .is_some_and(is_raw_surround_file)
+        {
+            self.begin_startup_ramp();
+            return;
+        }
+        self.applied_volume = self.target_volume;
+        self.playbin
+            .set_property("volume", f64::from(self.applied_volume));
+        self.startup_gain_ramp = false;
+        self.startup_ramp_hold_left = None;
+        self.volume_ramp_tick_at = None;
     }
 
     /// Silence the output and fade the current track in from silence.
@@ -2781,12 +2807,15 @@ impl GstPlaybackRuntime {
         self.snapshot.current = Some(path.to_path_buf());
         self.snapshot.current_file = FileStamp::of(path);
         if was_playing {
+            // The new run plays from the track's start.
+            self.begin_track_start();
             let _ = self.set_pipeline_state(gst::State::Playing);
             self.playing_state_requested_at = Some(Instant::now());
             self.snapshot.state = PlaybackState::Playing;
-            // Mutes again after the state change, so that elements the new
-            // run created also start silent.
-            self.begin_startup_ramp();
+            // Re-assert the volume after the state change, so that elements
+            // the new run created also have it.
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
             self.startup_gain_ramp = false;
@@ -3108,7 +3137,7 @@ fn record_opened(stream_durations: &Mutex<StreamDurations>, stream: &OpenedStrea
 const VOLUME_RAMP_TICK: Duration = Duration::from_millis(5);
 /// Time a volume change takes to cross the whole level scale.
 const VOLUME_FADE_FULL_SCALE: Duration = Duration::from_millis(220);
-/// Time the fade-in after a start or track switch takes to reach full level.
+/// Time the fade-in from silence of a start takes to reach full level.
 const STARTUP_FADE_FULL_SCALE: Duration = Duration::from_millis(90);
 /// Silence held at the start of an AC3/DTS track before its fade-in.
 const RAW_SURROUND_START_HOLD: Duration = Duration::from_millis(80);
@@ -11109,17 +11138,17 @@ mod engine_tests {
         &buffers[start..]
     }
 
-    /// Assert that `run`, the buffers of a track from its start, fades in
-    /// from silence over its first buffers.
+    /// Assert that `run`, the buffers of a track from where it started,
+    /// fades in from silence over its first buffers.
     #[track_caller]
-    fn assert_fades_in_from_the_start(run: &[OutputBuffer]) {
+    fn assert_fades_in(run: &[OutputBuffer]) {
         assert!(run[0].peak < WAV_PEAK / 2.0, "{run:?}");
         let full = run
             .iter()
             .position(|buffer| buffer.peak > WAV_PEAK * 0.99)
             .unwrap_or_else(|| panic!("never at full level: {run:?}"));
         assert!(
-            run[full].stream_time < millis(300),
+            run[full].stream_time < run[0].stream_time + millis(300),
             "full level only at {:?}: {run:?}",
             run[full].stream_time
         );
@@ -11188,9 +11217,21 @@ mod engine_tests {
         );
     }
 
+    /// Assert that `run`, the buffers of a track from its start, plays at
+    /// full level from its first sample, so its own attack is heard as
+    /// recorded.
+    #[track_caller]
+    fn assert_full_level_from_the_start(run: &[OutputBuffer]) {
+        assert!(run[0].stream_time.is_zero(), "{run:?}");
+        assert!(
+            run.iter().all(|buffer| buffer.peak > WAV_PEAK * 0.99),
+            "faded in: {run:?}"
+        );
+    }
+
     #[test]
-    fn fade_in_plays_from_the_start_of_each_track() {
-        let fixtures = Fixtures::new("fade-in");
+    fn each_track_plays_from_its_start_at_full_level() {
+        let fixtures = Fixtures::new("track-start");
         let a = fixtures.wav_at("a.wav", 4_000, 48_000);
         let b = fixtures.wav_at("b.wav", 4_000, 48_000);
         let mut engine = Engine::start();
@@ -11200,14 +11241,87 @@ mod engine_tests {
         engine.wait_until("the position did not reach 0.6 s", |engine| {
             engine.snapshot.position >= millis(600)
         });
-        assert_fades_in_from_the_start(last_run(&output.lock().unwrap()));
+        assert_full_level_from_the_start(last_run(&output.lock().unwrap()));
 
+        // Next while playing.
         engine.send(PlaybackCommand::Next);
         engine.wait_until("row 1 did not reach 0.6 s", |engine| {
             engine.snapshot.current_queue_index == Some(1)
                 && engine.snapshot.position >= millis(600)
         });
-        assert_fades_in_from_the_start(last_run(&output.lock().unwrap()));
+        assert_full_level_from_the_start(last_run(&output.lock().unwrap()));
+
+        // Play after a stop, which starts the track from its start.
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("playback did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        let stopped_at = output.lock().unwrap().len();
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("row 1 did not play again to 0.6 s", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(600)
+        });
+        assert_full_level_from_the_start(last_run(&output.lock().unwrap()[stopped_at..]));
+    }
+
+    #[test]
+    fn a_cued_start_within_a_track_fades_in() {
+        let fixtures = Fixtures::new("cue-fade-in");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        // As a restored session does.
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Cue {
+            position: millis(2_000),
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.wait_until("the cue did not land", |engine| {
+            !engine.seeked.is_empty() && engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not reach 2.6 s", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(2_600)
+        });
+        let buffers = output.lock().unwrap();
+        // From the buffer the cue prerolled, which the output plays first.
+        let cued = buffers
+            .iter()
+            .position(|buffer| buffer.stream_time >= millis(1_900))
+            .expect("the cue prerolled");
+        let played = &buffers[cued..];
+        assert!(
+            played[0].stream_time.abs_diff(millis(2_000)) < millis(100),
+            "{played:?}"
+        );
+        assert_fades_in(played);
+    }
+
+    #[test]
+    fn play_after_the_queue_ended_plays_from_the_start_at_full_level() {
+        let fixtures = Fixtures::new("ended-start");
+        let a = fixtures.wav_at("a.wav", 1_000, 48_000);
+        let mut engine = Engine::start();
+        let output = record_output(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the track did not play", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(300)
+        });
+        engine.wait_until("the queue did not end", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        let ended_at = output.lock().unwrap().len();
+        assert!(ended_at > 0, "nothing played");
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the track did not play again to 0.6 s", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(600)
+        });
+        assert_full_level_from_the_start(last_run(&output.lock().unwrap()[ended_at..]));
     }
 
     /// Assert that `switches`, the buffers of the tracks that played
@@ -11392,8 +11506,31 @@ mod engine_tests {
             now + millis(20)
         }
 
-        /// Assert that the fade-in of a track start, to volume level 0.5,
-        /// starts from silence, however long ago a fade stepped last.
+        /// Assert that a track that starts from its start plays at once at
+        /// volume level `level`, without a fade or hold for the engine to
+        /// step.
+        #[track_caller]
+        fn assert_plays_at_once_at(&mut self, level: f32) {
+            let gain = super::super::volume_level_to_gain(level);
+            assert!(!self.runtime.startup_gain_ramp);
+            assert_eq!(self.runtime.startup_ramp_hold_left, None);
+            assert!((self.runtime.applied_volume - gain).abs() < f32::EPSILON);
+            assert!(
+                (self.runtime.playbin.property::<f64>("volume") - f64::from(gain)).abs() < 1e-6
+            );
+            assert!(!self.runtime.volume_ramp_pending());
+            self.wait_until_confirmed_playing();
+            assert!(!self.runtime.volume_ramp_pending());
+            assert_ne!(
+                self.runtime.command_wait_timeout(Instant::now()),
+                Some(VOLUME_RAMP_TICK)
+            );
+            assert!((self.runtime.applied_volume - gain).abs() < f32::EPSILON);
+        }
+
+        /// Assert that the fade-in of a start, to volume level 0.5 or
+        /// higher, starts from silence, however long ago a fade stepped
+        /// last.
         #[track_caller]
         fn assert_fades_in_from_silence(&mut self) {
             assert!(self.runtime.startup_gain_ramp);
@@ -11410,7 +11547,7 @@ mod engine_tests {
     }
 
     #[test]
-    fn quick_switches_during_a_fade_fade_in_from_silence() {
+    fn quick_switches_during_a_fade_play_at_once_at_the_volume() {
         let fixtures = Fixtures::new("switch-fade");
         let queue: Vec<_> = ["a.wav", "b.wav", "c.wav"]
             .into_iter()
@@ -11420,20 +11557,22 @@ mod engine_tests {
         engine.play_until_opened(queue, RepeatMode::Off);
         engine.finish_fade();
 
-        // Next during a volume change.
+        // Next during a volume change: the track switched to plays from
+        // its start at the volume the change goes to.
         engine.start_fade_to(0.5);
         engine.runtime.apply_command(PlaybackCommand::Next);
         assert_eq!(engine.runtime.snapshot.current_queue_index, Some(1));
-        engine.assert_fades_in_from_silence();
+        engine.assert_plays_at_once_at(0.5);
 
-        // Next again during the fade-in of the track switched to.
-        engine.runtime.apply_command(PlaybackCommand::Next);
-        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(2));
-        engine.assert_fades_in_from_silence();
+        // Previous during another volume change.
+        engine.start_fade_to(0.8);
+        engine.runtime.apply_command(PlaybackCommand::Previous);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(0));
+        engine.assert_plays_at_once_at(0.8);
     }
 
     #[test]
-    fn play_after_the_queue_ended_during_a_fade_fades_in_from_silence() {
+    fn play_after_the_queue_ended_during_a_fade_plays_at_once_at_the_volume() {
         let fixtures = Fixtures::new("end-fade");
         let a = fixtures.wav("a.wav", 1_000);
         let mut engine = DirectEngine::start();
@@ -11447,6 +11586,45 @@ mod engine_tests {
         assert_eq!(engine.runtime.snapshot.state, PlaybackState::Stopped);
 
         // Play in the same burst as the end of stream, before a fade step.
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_plays_at_once_at(0.5);
+    }
+
+    #[test]
+    fn paused_starts_still_fade_in_from_silence() {
+        // A paused pipeline holds a buffer prerolled while the output was
+        // silent, which a later volume change does not reach, so these
+        // starts fade in as before.
+        let fixtures = Fixtures::new("paused-starts");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+
+        // A cue at the track's start, as a restored session saved there.
+        let mut engine = DirectEngine::start();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+        engine.runtime.apply_command(PlaybackCommand::Cue {
+            position: Duration::ZERO,
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Paused);
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_fades_in_from_silence();
+
+        // A track picked while paused.
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a, b], RepeatMode::Off);
+        engine.finish_fade();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine.runtime.apply_command(PlaybackCommand::PlayAt(1));
+        assert_eq!(engine.runtime.snapshot.state, PlaybackState::Paused);
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(1));
+        engine.wait_until("row 1 did not preroll", |runtime| {
+            runtime.pipeline_prerolled()
+        });
         engine.runtime.apply_command(PlaybackCommand::Play);
         engine.assert_fades_in_from_silence();
     }
@@ -11472,19 +11650,23 @@ mod engine_tests {
     }
 
     #[test]
-    fn fade_in_waits_for_a_pipeline_slow_to_start() {
+    fn fade_in_waits_for_a_cued_pipeline_slow_to_start() {
         // A first read that takes long, as from a slow drive or under load,
-        // holds the pipeline back from playing for longer than the fade.
+        // holds a cued track back from playing for longer than the fade.
         // Paused before it plays, the track fades in once it plays after
         // the resume.
         for pause_first in [false, true] {
             let fixtures = Fixtures::new(&format!("slow-start-fade-{pause_first}"));
             let a = fixtures.wav("a.wav", 4_000);
             let mut engine = DirectEngine::start();
-            let hold = hold_reads(&a);
             engine
                 .runtime
-                .apply_command(PlaybackCommand::LoadQueue(vec![a]));
+                .apply_command(PlaybackCommand::LoadQueue(vec![a.clone()]));
+            let hold = hold_reads(&a);
+            engine.runtime.apply_command(PlaybackCommand::Cue {
+                position: millis(2_000),
+                expected: FileStamp::of(&a).expect("stamp"),
+            });
             engine.runtime.apply_command(PlaybackCommand::Play);
             engine.wait_until("no read was held", |_| hold.holds_a_read());
             if pause_first {
@@ -11498,22 +11680,18 @@ mod engine_tests {
                     engine.runtime.command_wait_timeout(Instant::now()),
                     Some(VOLUME_RAMP_TICK)
                 );
-            }
-            let now = Instant::now();
-            engine.runtime.poll_volume_ramp(now);
-            engine
-                .runtime
-                .poll_volume_ramp(now + Duration::from_secs(1));
-            assert!(
-                engine.runtime.applied_volume.abs() < f32::EPSILON,
-                "pause_first={pause_first}"
-            );
-
-            if pause_first {
+                let now = Instant::now();
+                engine.runtime.poll_volume_ramp(now);
+                engine
+                    .runtime
+                    .poll_volume_ramp(now + Duration::from_secs(1));
+                assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
                 engine.runtime.apply_command(PlaybackCommand::Play);
             }
-            // The track fades in once it plays.
+            // The track fades in from where it was cued once it plays.
             hold.release();
+            engine.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
+            assert!(engine.runtime.snapshot.position >= millis(1_900));
             engine.assert_fades_in_from_silence();
         }
     }
