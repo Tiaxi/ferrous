@@ -84,7 +84,7 @@ Item {
     onPreviewActiveChanged: {
         if (root.previewActive) {
             fullscreenControlsAutoHide.wake()
-            Qt.callLater(root.focusFullscreen)
+            Qt.callLater(root.focusView)
         }
     }
     onUseWholeScreenViewerModeChanged: {
@@ -103,13 +103,23 @@ Item {
         }
         if (root.wholeScreenOpen && root.fullscreenWindow) {
             root.fullscreenWindow.requestActivate()
-            root.focusFullscreen()
+            root.focusView()
         }
     }
 
     function focusFullscreen() {
         if (root.wholeScreenVisible) {
             root.fullscreenWindow.focusSink.forceActiveFocus()
+        }
+    }
+
+    // Gives the art the keys, away from the button that last had them, as
+    // the viewer opens and as a preview begins: Space plays and pauses.
+    function focusView() {
+        if (root.wholeScreenVisible) {
+            root.fullscreenWindow.viewFocus.forceActiveFocus()
+        } else if (albumArtViewer.visible) {
+            albumArtPopupViewFocus.forceActiveFocus()
         }
     }
 
@@ -163,6 +173,14 @@ Item {
                     root.closeViewer()
                 }
             }
+
+            // Takes focus from the viewer's buttons when the art is pressed,
+            // as the whole screen's does.
+            Item {
+                id: albumArtPopupViewFocus
+                objectName: "albumArtPopupViewFocus"
+                focus: true
+            }
         }
 
         Components.ActionShortcuts {
@@ -198,6 +216,10 @@ Item {
             onActivated: root.switchComparisonImage()
         }
 
+        // The popup is kept: it opens with the art's focus, not that of the
+        // button that had it as it last closed.
+        onAboutToShow: albumArtPopupViewFocus.focus = true
+
         onClosed: {
             if (root.viewerOpen && !root.useWholeScreenViewerMode) {
                 root.closeViewer()
@@ -213,9 +235,27 @@ Item {
             color: root.uiPalette.view
         }
 
+        // The art, under the controls' plate.
         Item {
-            id: albumArtPopupHost
             anchors.fill: parent
+
+            Item {
+                id: albumArtPopupHost
+                anchors.fill: parent
+            }
+
+            // A press anywhere on the art takes the focus from the viewer's
+            // buttons, so Space plays and pauses again, then goes on to the
+            // art.
+            MouseArea {
+                anchors.fill: parent
+                z: 1
+                acceptedButtons: Qt.AllButtons
+                onPressed: function(mouse) {
+                    albumArtPopupViewFocus.forceActiveFocus(Qt.MouseFocusReason)
+                    mouse.accepted = false
+                }
+            }
         }
 
         // The window's title names the viewer, so it has no title strip:
@@ -285,7 +325,7 @@ Item {
                 onVisibilityChanged: function() {
                     if (albumArtFullscreenWindow.visibility === Window.FullScreen) {
                         requestActivate()
-                        root.focusFullscreen()
+                        root.focusView()
                     }
                 }
 
