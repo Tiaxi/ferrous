@@ -5709,15 +5709,18 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 #endif
 
-    QString nextTrackTitle = m_currentTrackTitle;
-    QString nextTrackArtist = m_currentTrackArtist;
-    QString nextTrackAlbum = m_currentTrackAlbum;
+    // The track's text describes the current track alone: what its queue
+    // row and its metadata tell. Another track's never stays for it, so a
+    // new track starts with nothing until one of the two tells it.
+    const bool sameTrack = !currentPath.isEmpty() && !currentPathChanged;
+    QString nextTrackTitle = sameTrack ? m_currentTrackTitle : QString{};
+    QString nextTrackArtist = sameTrack ? m_currentTrackArtist : QString{};
+    QString nextTrackAlbum = sameTrack ? m_currentTrackAlbum : QString{};
     // Only the current track's file metadata carries the album artist.
-    QString nextTrackAlbumArtist = currentPath.isEmpty() || currentPathChanged
-        ? QString{} : m_currentTrackAlbumArtist;
-    QString nextTrackGenre = m_currentTrackGenre;
-    QVariant nextTrackYear = m_currentTrackYear;
-    int nextTrackNumber = currentPath.isEmpty() ? 0 : m_currentTrackNumber;
+    QString nextTrackAlbumArtist = sameTrack ? m_currentTrackAlbumArtist : QString{};
+    QString nextTrackGenre = sameTrack ? m_currentTrackGenre : QString{};
+    QVariant nextTrackYear = sameTrack ? m_currentTrackYear : QVariant{};
+    int nextTrackNumber = sameTrack ? m_currentTrackNumber : 0;
     // The backend counts the album for the number in the metadata, so the
     // total belongs to the current track's metadata alone.
     int nextTrackTotal = currentPath.isEmpty() || currentPathChanged ? 0 : m_currentTrackTotal;
@@ -5743,43 +5746,41 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }
     if (!currentPath.isEmpty()) {
-        int detailIndex = playing;
-        if (detailIndex < 0 && m_queueLength > 0) {
-            detailIndex = queuePathFirstIndex(currentPath);
+        // The current track's queue row: the row at the playing index
+        // only when it holds the track, as a row that lags the queue holds
+        // another.
+        const QueueRowData *row = m_queueRowsModel.rowAt(playing);
+        if (row == nullptr || row->path != currentPath) {
+            row = m_queueLength > 0 ? m_queueRowsModel.rowAt(queuePathFirstIndex(currentPath)) : nullptr;
         }
+        if (row != nullptr) {
+            queueTrackCover = searchCoverUrlFast(row->coverPath, row->coverStamp);
+        }
+        const int unknownYear = std::numeric_limits<int>::min();
 
-        if (const QueueRowData *row = m_queueRowsModel.rowAt(detailIndex)) {
+        if (metadataMatchesCurrentPath) {
+            // The track's own metadata: a field it lacks is empty, or what
+            // the track's queue row has.
+            const auto field = [](const QString &metadataValue, const QString &rowValue) {
+                return metadataValue.trimmed().isEmpty() ? rowValue : metadataValue;
+            };
+            nextTrackTitle = field(snapshot.metadata.title, row ? row->title : QString{});
+            nextTrackArtist = field(snapshot.metadata.artist, row ? row->artist : QString{});
+            nextTrackAlbum = field(snapshot.metadata.album, row ? row->album : QString{});
+            nextTrackGenre = field(metadataGenre, row ? row->genre : QString{});
+            const int year = metadataYear != unknownYear ? metadataYear : (row ? row->year : unknownYear);
+            nextTrackYear = year != unknownYear ? QVariant(year) : QVariant{};
+            nextTrackNumber = metadataTrackNumber > 0 ? metadataTrackNumber : (row ? row->trackNumber : 0);
+        } else if (row != nullptr) {
             nextTrackTitle = row->title;
             nextTrackArtist = row->artist;
             nextTrackAlbum = row->album;
             nextTrackGenre = row->genre;
-            queueTrackCover = searchCoverUrlFast(row->coverPath, row->coverStamp);
-            if (row->year != std::numeric_limits<int>::min()) {
+            if (row->year != unknownYear) {
                 nextTrackYear = row->year;
             }
             if (row->trackNumber > 0) {
                 nextTrackNumber = row->trackNumber;
-            }
-        }
-
-        if (snapshot.metadata.present && metadataSourcePath == currentPath) {
-            if (!snapshot.metadata.title.trimmed().isEmpty()) {
-                nextTrackTitle = snapshot.metadata.title;
-            }
-            if (!snapshot.metadata.artist.trimmed().isEmpty()) {
-                nextTrackArtist = snapshot.metadata.artist;
-            }
-            if (!snapshot.metadata.album.trimmed().isEmpty()) {
-                nextTrackAlbum = snapshot.metadata.album;
-            }
-            if (!metadataGenre.trimmed().isEmpty()) {
-                nextTrackGenre = metadataGenre;
-            }
-            if (metadataYear != std::numeric_limits<int>::min()) {
-                nextTrackYear = metadataYear;
-            }
-            if (metadataTrackNumber > 0) {
-                nextTrackNumber = metadataTrackNumber;
             }
         }
 
