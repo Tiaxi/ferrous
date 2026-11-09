@@ -393,6 +393,7 @@ private slots:
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
     void commandsToAStoppedBackendFailVisibly();
+    void quittingSendsNothingToTheStoppedBackend();
     void eachTestStartsWithEmptyUserDirectories_data();
     void eachTestStartsWithEmptyUserDirectories();
     void destroyingTheClientWaitsForTheBackendsFinalSave();
@@ -6855,6 +6856,50 @@ void BridgeClientTest::commandsToAStoppedBackendFailVisibly() {
     QCOMPARE(
         errors.constLast().at(0).toString(),
         QStringLiteral("command not sent: the backend has stopped"));
+}
+
+void BridgeClientTest::quittingSendsNothingToTheStoppedBackend() {
+    auto client = std::make_unique<BridgeClient>();
+    QVERIFY(client->m_ffiBridge != nullptr);
+    QTRY_VERIFY_WITH_TIMEOUT(client->connected(), 10000);
+    // Playback confirms its stop only once it has started, which waits for
+    // the GStreamer registry: the first bridge of a test process rebuilds it.
+    // As long as a rebuild may take a loaded machine.
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(qEnvironmentVariable("GST_REGISTRY")), 60000);
+    const QString logPath = client->diagnosticsLogPath();
+    QVERIFY(!logPath.isEmpty());
+    QSignalSpy errors(client.get(), &BridgeClient::bridgeError);
+    QSignalSpy failures(client.get(), &BridgeClient::backendFailureChanged);
+
+    // As the main window's close handler and MPRIS Quit stop the backend.
+    client->shutdown();
+    QTRY_VERIFY_WITH_TIMEOUT(!client->connected(), 10000);
+    // The backend's thread has ended, so nothing sent from here on reaches it.
+    const QByteArray snapshot =
+        BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdRequestSnapshot);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        !ferrous_ffi_bridge_send_binary(
+            client->m_ffiBridge,
+            reinterpret_cast<const std::uint8_t *>(snapshot.constData()),
+            static_cast<std::size_t>(snapshot.size())),
+        10000);
+    const QString backendFailure = client->backendFailure();
+
+    // The application ends, and the client with it.
+    client.reset();
+    QStringList reported;
+    for (const QList<QVariant> &error : std::as_const(errors)) {
+        reported.push_back(error.at(0).toString());
+    }
+    QVERIFY2(reported.isEmpty(), qPrintable(reported.join(QStringLiteral("; "))));
+    QFile log(logPath);
+    QVERIFY(log.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QByteArray logged = log.readAll();
+    QVERIFY2(!logged.contains("failed to send command"), logged.constData());
+    // The stop was asked for, so it is no failure.
+    QVERIFY2(backendFailure.isEmpty(), qPrintable(backendFailure));
+    QCOMPARE(failures.count(), 0);
+    QVERIFY2(!logged.contains("backend stopped"), logged.constData());
 }
 
 void BridgeClientTest::eachTestStartsWithEmptyUserDirectories_data() {
