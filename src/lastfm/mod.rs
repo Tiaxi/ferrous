@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use queue_file::LoadOutcome;
 
-use crate::frontend_bridge::{log_info, log_warning, ErrorCategory};
+use crate::frontend_bridge::{log_info, log_undelivered, log_warning, BridgeError, ErrorCategory};
 
 pub const KEYRING_SERVICE: &str = "ferrous.lastfm";
 const API_ENDPOINT: &str = "https://ws.audioscrobbler.com/2.0/";
@@ -107,6 +107,17 @@ pub struct Problem {
     /// Whether the service works around it, for example by keeping the
     /// scrobbles in memory.
     pub warning: bool,
+}
+
+impl Problem {
+    /// The error Recent Issues shows for it.
+    pub(crate) fn into_bridge_error(self) -> BridgeError {
+        if self.warning {
+            BridgeError::warning(ErrorCategory::LastFm, self.message)
+        } else {
+            BridgeError::error(ErrorCategory::LastFm, self.message)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -284,6 +295,10 @@ pub(crate) struct HttpReply {
     /// How long the reply's `Retry-After` asks to wait before the next
     /// request, if it has one that can be read; see [`parse_retry_after`].
     pub(crate) retry_after: Option<Duration>,
+    /// Why the body could not be read, if it could not, for example
+    /// because the connection closed before its end; `body` is empty then.
+    /// The status and `Retry-After` still say most.
+    pub(crate) body_error: Option<String>,
 }
 
 /// Tells the service to stop waiting for requests, once it is shutting down.
@@ -416,13 +431,12 @@ impl ServiceBackends {
     }
 }
 
-#[cfg(not(test))]
 struct HttpTransport {
     client: reqwest::blocking::Client,
 }
 
-#[cfg(not(test))]
 impl HttpTransport {
+    #[cfg(not(test))]
     fn new() -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -432,7 +446,6 @@ impl HttpTransport {
     }
 }
 
-#[cfg(not(test))]
 impl Transport for HttpTransport {
     fn post_form(&self, url: &str, form: &[(String, String)]) -> Result<HttpReply, String> {
         let response = self
@@ -447,11 +460,17 @@ impl Transport for HttpTransport {
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()));
-        let body = response.text().map_err(|err| err.to_string())?;
+        // A body cut off keeps the status and `Retry-After`, so a rate
+        // limit's wait is kept to whatever came after them.
+        let (body, body_error) = match response.text() {
+            Ok(body) => (body, None),
+            Err(err) => (String::new(), Some(err.to_string())),
+        };
         Ok(HttpReply {
             status,
             body,
             retry_after,
+            body_error,
         })
     }
 }
@@ -828,10 +847,19 @@ impl Service {
         state
     }
 
+    /// Send the state, with the problems not sent yet, which Recent Issues
+    /// shows and logs. When nothing receives it any more, they are logged
+    /// here instead.
     fn publish(&mut self, event_tx: &Sender<Event>) {
         let mut state = self.published_state();
         state.problems = std::mem::take(&mut self.problems);
-        let _ = event_tx.send(Event::State(state));
+        if let Err(unsent) = event_tx.send(Event::State(state)) {
+            if let Event::State(state) = unsent.into_inner() {
+                for problem in state.problems {
+                    log_undelivered(&problem.into_bridge_error());
+                }
+            }
+        }
     }
 
     /// Tell the user about `message` with the next state; see
@@ -1471,16 +1499,15 @@ impl Service {
     }
 
     fn record_save_error(&mut self, path: &Path, err: &std::io::Error) {
-        eprintln!(
-            "Last.fm: failed to save scrobble queue {}: {err}",
-            path.display()
-        );
         let error = format!(
             "Pending scrobbles could not be saved to {} ({err}).",
             path.display()
         );
-        // A save that keeps failing the same way is told once.
-        if self.queue_save_error.as_ref() != Some(&error) {
+        // A save that keeps failing the same way is told once, and Recent
+        // Issues logs it then; the failures after it are only logged.
+        if self.queue_save_error.as_ref() == Some(&error) {
+            log_warning(ErrorCategory::LastFm, &format!("{error} Again."));
+        } else {
             self.report(&error, false);
         }
         self.queue_save_error = Some(error);
@@ -1704,7 +1731,11 @@ fn send_signed_request(
 /// as permanent as one with no body. A successful status with a body that is
 /// not JSON, such as a captive portal's page, is an invalid response.
 fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
-    let payload = serde_json::from_str::<Value>(&reply.body).ok();
+    let payload = reply
+        .body_error
+        .is_none()
+        .then(|| serde_json::from_str::<Value>(&reply.body).ok())
+        .flatten();
     if let Some(payload) = &payload {
         if let Some(code) = payload.get("error").and_then(json_integer) {
             let message = payload
@@ -1726,7 +1757,10 @@ fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
         });
     }
     payload.ok_or_else(|| {
-        RequestError::InvalidResponse(format!("unexpected non-JSON reply (HTTP {})", reply.status))
+        RequestError::InvalidResponse(match &reply.body_error {
+            Some(error) => format!("could not read the reply (HTTP {}): {error}", reply.status),
+            None => format!("unexpected non-JSON reply (HTTP {})", reply.status),
+        })
     })
 }
 
@@ -2130,6 +2164,7 @@ mod tests {
             status,
             body: body.to_string(),
             retry_after: None,
+            body_error: None,
         })
     }
 
@@ -2139,6 +2174,7 @@ mod tests {
             status,
             body: body.to_string(),
             retry_after: Some(Duration::from_secs(seconds)),
+            body_error: None,
         })
     }
 
@@ -2450,6 +2486,7 @@ mod tests {
                 status,
                 body: body.to_string(),
                 retry_after: None,
+                body_error: None,
             })
             .expect_err("not a reply");
             assert!(is_transient(&error), "{status}: {error:?}");
@@ -2583,6 +2620,101 @@ mod tests {
         assert_eq!(service.state.auth_state, AuthState::Connected);
         assert!(service.queue.is_empty());
         assert_eq!(scrobble_requests(&transport).len(), 2);
+    }
+
+    /// Serves one request on loopback with `response`, then closes the
+    /// connection. Returns the URL to post to.
+    fn serve_once(response: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}/2.0/", listener.local_addr().expect("address"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("a request");
+            // Read the request's head and body before answering.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).expect("read the request");
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let length = text[..head_end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            stream.write_all(response).expect("answer");
+            // Closing here cuts the body short of its Content-Length.
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn a_rate_limit_whose_body_is_cut_off_still_holds_back_requests() {
+        let (url, server) = serve_once(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\n\
+              Content-Type: application/json\r\nContent-Length: 200\r\n\
+              Connection: close\r\n\r\n{\"error\":29,\"mess",
+        );
+        let transport = HttpTransport {
+            client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("client"),
+        };
+
+        let reply = transport
+            .post_form(
+                &url,
+                &[("method".to_string(), "track.scrobble".to_string())],
+            )
+            .expect("the status and headers arrived");
+        server.join().expect("server");
+
+        assert_eq!(reply.status, 429);
+        assert_eq!(reply.retry_after, Some(Duration::from_secs(120)));
+        assert!(reply.body_error.is_some(), "{reply:?}");
+        assert!(reply.body.is_empty());
+
+        // The service keeps to the wait it asked for.
+        let scripted = ScriptedTransport::with_replies([Ok(reply)]);
+        let mut service = connected_service(&scripted, None, entries(0..1));
+        service.handle_command(Command::Flush);
+        let hold = service.hold.clone().expect("a hold");
+        assert!(hold.until >= Instant::now() + Duration::from_secs(110));
+        assert_eq!(service.retry_due, Some(hold.until));
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        assert_eq!(scripted.requests().len(), 1);
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+    }
+
+    #[test]
+    fn a_successful_reply_whose_body_is_cut_off_is_retried() {
+        let error = interpret_reply(&HttpReply {
+            status: 200,
+            body: String::new(),
+            retry_after: None,
+            body_error: Some("connection closed".to_string()),
+        })
+        .expect_err("nothing to read");
+        assert!(is_transient(&error));
+        assert_eq!(
+            request_error_message(&error),
+            "Last.fm response error: could not read the reply (HTTP 200): connection closed"
+        );
     }
 
     #[test]
@@ -3336,6 +3468,50 @@ mod tests {
             "{}",
             state.status_text
         );
+        // Recent Issues is told, and logs it; the service logs nothing of
+        // its own for it.
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        assert!(test_log::lines_containing("save-failure").is_empty());
+
+        // The same failure again is not told again, but logged.
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        let again = test_log::lines_containing("save-failure");
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert!(
+            again[0]
+                .starts_with("[ferrous] [lastfm] warning: Pending scrobbles could not be saved"),
+            "{again:?}"
+        );
+        assert!(again[0].ends_with(" Again."), "{again:?}");
+    }
+
+    #[test]
+    fn problems_nothing_receives_any_more_are_logged_instead() {
+        let dir = scratch_dir("save-failure-unsent");
+        let blocker = dir.join("not-a-directory");
+        fs::write(&blocker, b"").expect("write blocking file");
+        let transport = ScriptedTransport::default();
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: Some(blocker.join("lastfm_queue.json")),
+                initial_enabled: false,
+            },
+            backends(&transport, MemorySessionKeys::default()),
+        );
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        let (event_tx, event_rx) = unbounded();
+        drop(event_rx);
+
+        service.publish(&event_tx);
+
+        let logged = test_log::lines_containing("save-failure-unsent");
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(
+            logged[0].starts_with("[ferrous] [lastfm] error: Pending scrobbles could not be saved"),
+            "{logged:?}"
+        );
+        assert!(service.problems.is_empty());
     }
 
     #[test]

@@ -183,6 +183,19 @@ struct FfiRuntime {
     stopped: bool,
 }
 
+/// The errors still queued when the bridge goes away never reach the UI,
+/// which logs those it shows, so they are logged here: those of the backend's
+/// shutdown, for example, come after the UI stopped taking events.
+impl Drop for FfiRuntime {
+    fn drop(&mut self) {
+        for event in &self.pending_binary_events {
+            if let PendingBinaryEvent::Error(_, error) = event {
+                log_undelivered(error);
+            }
+        }
+    }
+}
+
 impl FfiRuntime {
     fn new(
         command_tx: crossbeam_channel::Sender<BridgeCommand>,
@@ -776,6 +789,13 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
         if encoder.stopped {
             shared.request_stop();
             break;
+        }
+    }
+    // The relay stops once the bridge has, or when told to; the errors it
+    // has not taken by then never reach the UI, so they are logged here.
+    for event in event_rx.try_iter() {
+        if let BridgeEvent::Error(error) = event {
+            log_undelivered(&error);
         }
     }
 }
@@ -7596,6 +7616,72 @@ mod tests {
         let stopped = runtime.pop_binary_event().expect("the stop");
         assert_eq!(parse_packet_header(&stopped).2, SECTION_STOPPED);
         assert!(runtime.pop_binary_event().is_none());
+    }
+
+    /// The diagnostics log's lines for the error `message`.
+    fn logged_error(message: &str) -> Vec<String> {
+        crate::frontend_bridge::test_log::lines_containing(&format!(
+            "[ferrous] [playback] error: {message}"
+        ))
+    }
+
+    #[test]
+    fn errors_of_the_shutdown_the_ui_never_takes_are_logged_once_at_teardown() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        // As the backend's shutdown sends them: after the UI stopped
+        // taking events, so it never shows or logs them.
+        for message in ["shown teardown error", "unshown teardown error"] {
+            event_tx
+                .send(BridgeEvent::Error(BridgeError::error(
+                    ErrorCategory::Playback,
+                    message,
+                )))
+                .unwrap();
+        }
+        event_tx.send(BridgeEvent::Stopped).unwrap();
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+        // The UI took the first before it stopped polling, and logs it.
+        let taken = shared.lock_runtime().pop_binary_event().expect("an error");
+        assert_eq!(
+            error_message(&taken).as_deref(),
+            Some("shown teardown error")
+        );
+        assert!(logged_error("unshown teardown error").is_empty());
+
+        drop(shared);
+
+        assert!(logged_error("shown teardown error").is_empty());
+        assert_eq!(
+            logged_error("unshown teardown error"),
+            vec!["[ferrous] [playback] error: unshown teardown error".to_string()]
+        );
+    }
+
+    #[test]
+    fn errors_a_stopped_relay_never_took_are_logged_once() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        event_tx
+            .send(BridgeEvent::Error(BridgeError::error(
+                ErrorCategory::Playback,
+                "error behind the stop",
+            )))
+            .unwrap();
+        event_tx.send(BridgeEvent::Stopped).unwrap();
+        // Told to stop before it took them, as when the bridge thread
+        // outlived its shutdown timeout.
+        shared.request_stop();
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+        assert!(shared.lock_runtime().pop_binary_event().is_none());
+        drop(shared);
+
+        assert_eq!(
+            logged_error("error behind the stop"),
+            vec!["[ferrous] [playback] error: error behind the stop".to_string()]
+        );
     }
 
     #[test]

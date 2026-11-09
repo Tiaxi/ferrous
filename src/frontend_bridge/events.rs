@@ -632,12 +632,7 @@ pub(super) fn process_lastfm_state(
     event_tx: &Sender<BridgeEvent>,
 ) -> SnapshotUrgency {
     for problem in std::mem::take(&mut runtime.problems) {
-        let error = if problem.warning {
-            BridgeError::warning(ErrorCategory::LastFm, problem.message)
-        } else {
-            BridgeError::error(ErrorCategory::LastFm, problem.message)
-        };
-        send_error(event_tx, error);
+        send_error(event_tx, problem.into_bridge_error());
     }
     let mut urgency = SnapshotUrgency::None;
     if state.lastfm != runtime {
