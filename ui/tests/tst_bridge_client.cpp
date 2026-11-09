@@ -382,6 +382,7 @@ private slots:
     void coverRevisionLinksKeepThePublishedLinkThroughABurst();
     void mprisMetadataIsRebuiltOnlyForTrackChanges();
     void mprisAlbumArtistComesFromAlbumArtistTag();
+    void trackWithoutTitleOrArtistTagsShowsItsFileName();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
     void mprisPositionReadsThePlaybackClock();
     void mprisRateWritePausesOnlyForZero();
@@ -6410,6 +6411,32 @@ void BridgeClientTest::mprisAlbumArtistComesFromAlbumArtistTag() {
     meta = controller.metadata();
     QVERIFY(!meta.contains(QStringLiteral("xesam:albumArtist")));
     QCOMPARE(meta.value(QStringLiteral("xesam:artist")).toStringList(), QStringList{QStringLiteral("Soloist")});
+}
+
+// A file whose tag lacks its title and artist comes with those fields
+// empty: the title shows the file's name, and the artist is left out, here
+// and over MPRIS, rather than given a stand-in (#560).
+void BridgeClientTest::trackWithoutTitleOrArtistTagsShowsItsFileName() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    snapshot.playback.currentPath = QStringLiteral("/fixture/untitled take.flac");
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.album = QStringLiteral("Fixture Album");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("untitled take.flac"));
+    QVERIFY(client.currentTrackArtist().isEmpty());
+    QCOMPARE(client.currentTrackAlbum(), QStringLiteral("Fixture Album"));
+
+    client.m_queueLength = 1;
+    MprisController controller(&client);
+    const QVariantMap meta = controller.metadata();
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("untitled take.flac"));
+    QVERIFY(!meta.contains(QStringLiteral("xesam:artist")));
+    QCOMPARE(meta.value(QStringLiteral("xesam:album")).toString(), QStringLiteral("Fixture Album"));
 }
 
 void BridgeClientTest::albumArtistFollowsMatchingMetadataAcrossTracks() {
