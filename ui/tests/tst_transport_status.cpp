@@ -144,6 +144,7 @@ ApplicationWindow {
         property bool libraryScanInProgress: false
         property int libraryScanProcessed: 0
         property int libraryScanDiscovered: 0
+        property int libraryScanTotal: -1
         property var libraryRootEntries: []
         property bool lastFmShowScrobbleProgress: true
         property bool lastFmScrobblingEnabled: true
@@ -421,6 +422,8 @@ private slots:
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarShowsTheScanWithItsBar();
+    void statusBarScanBarFillsOnlyOnceTheRescanEnds();
+    void statusBarScanWithoutATotalIsBusy();
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotPausedLooksStruckThrough_data();
@@ -1131,9 +1134,11 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
                                     QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("Music")},
                                                              {QStringLiteral("path"), QStringLiteral("/fixture/music")}}});
         harness.bridge->setProperty("libraryScanProcessed", 412);
-        harness.bridge->setProperty("libraryScanDiscovered", 1204);
+        harness.bridge->setProperty("libraryScanDiscovered", 413);
+        harness.bridge->setProperty("libraryScanTotal", 1204);
         harness.bridge->setProperty("libraryScanInProgress", true);
         QTRY_VERIFY(scan->isVisible());
+        // The files processed of those to scan, not of those found so far.
         QCOMPARE(count->property("text").toString(), QStringLiteral("412 / 1,204"));
         if (width == 1000) {
             QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning"));
@@ -1144,7 +1149,7 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         QVERIFY(bar->isVisible());
         QCOMPARE(bar->size(), QSizeF(72, 4));
         // The bar moves with the batches, by whole pixels.
-        QCOMPARE(fill->width(), std::round(72.0 * 412 / 1204));
+        QCOMPARE(fill->width(), std::floor(72.0 * 412 / 1204));
         harness.bridge->setProperty("libraryScanProcessed", 602);
         QCOMPARE(fill->width(), 36.0);
         // Two folders: no name.
@@ -1156,6 +1161,82 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         harness.bridge->setProperty("libraryScanInProgress", false);
         QTRY_VERIFY(!scan->isVisible());
     }
+}
+
+// A rescan, whose files are processed as soon as they are found: the bar
+// runs from empty to full against the files to scan, and is full only once
+// they all are.
+void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *busy = harness.item(QStringLiteral("statusBarScanBarBusy"));
+    QVERIFY(count && fill && busy);
+    harness.bridge->setProperty("libraryScanTotal", 1000);
+    harness.bridge->setProperty("libraryScanProcessed", 0);
+    harness.bridge->setProperty("libraryScanDiscovered", 0);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(fill->isVisible());
+    QVERIFY(!busy->isVisible());
+    QCOMPARE(fill->width(), 0.0);
+    QCOMPARE(count->property("text").toString(), QStringLiteral("0 / 1,000"));
+
+    double previous = 0.0;
+    for (int processed = 1; processed < 1000; ++processed) {
+        harness.bridge->setProperty("libraryScanProcessed", processed);
+        harness.bridge->setProperty("libraryScanDiscovered", processed);
+        const double width = fill->width();
+        QVERIFY2(width >= previous, qPrintable(QString::number(processed)));
+        QVERIFY2(width < 72.0, qPrintable(QStringLiteral("full at %1 of 1000").arg(processed)));
+        previous = width;
+    }
+    QCOMPARE(count->property("text").toString(), QStringLiteral("999 / 1,000"));
+    QCOMPARE(fill->width(), 71.0);
+    harness.bridge->setProperty("libraryScanProcessed", 1000);
+    QCOMPARE(fill->width(), 72.0);
+    QCOMPARE(count->property("text").toString(), QStringLiteral("1,000 / 1,000"));
+}
+
+// The first scan of a folder cannot tell its total: a busy bar and the
+// files scanned so far, until the scan can tell.
+void TransportStatusTest::statusBarScanWithoutATotalIsBusy() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+    QQuickItem *busy = harness.item(QStringLiteral("statusBarScanBarBusy"));
+    QVERIFY(scan && count && bar && fill && busy);
+    harness.bridge->setProperty("libraryScanTotal", -1);
+    harness.bridge->setProperty("libraryScanProcessed", 0);
+    harness.bridge->setProperty("libraryScanDiscovered", 0);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible());
+    QVERIFY(bar->isVisible());
+    QVERIFY(busy->isVisible());
+    QVERIFY(!fill->isVisible());
+    QCOMPARE(busy->width(), 24.0);
+    QVERIFY(!count->isVisible());
+
+    harness.bridge->setProperty("libraryScanProcessed", 1);
+    harness.bridge->setProperty("libraryScanDiscovered", 1);
+    QCOMPARE(count->property("text").toString(), QStringLiteral("1 file"));
+    harness.bridge->setProperty("libraryScanProcessed", 1204);
+    harness.bridge->setProperty("libraryScanDiscovered", 1500);
+    QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 files"));
+    QVERIFY(busy->isVisible());
+    QVERIFY(!fill->isVisible());
+
+    // The walk has ended: the files it found are the total.
+    harness.bridge->setProperty("libraryScanTotal", 1500);
+    QVERIFY(!busy->isVisible());
+    QVERIFY(fill->isVisible());
+    QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 / 1,500"));
+    QCOMPARE(fill->width(), std::floor(72.0 * 1204 / 1500));
 }
 
 void TransportStatusTest::lastFmSlotShowsEachState() {

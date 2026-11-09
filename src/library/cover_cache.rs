@@ -200,6 +200,7 @@ fn migrate_and_remove_legacy_entries(
                     roots_total: library.roots().len(),
                     supported_files_discovered: total,
                     supported_files_processed: processed,
+                    supported_files_total: Some(total),
                     ..LibraryScanProgress::default()
                 });
                 library.publish(event_tx);

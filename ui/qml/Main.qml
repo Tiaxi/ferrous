@@ -339,6 +339,7 @@ ApplicationWindow {
         property int libraryScanRootsTotal: 0
         property int libraryScanDiscovered: 0
         property int libraryScanProcessed: 0
+        property int libraryScanTotal: -1
         property real libraryScanFilesPerSecond: 0
         property real libraryScanEtaSeconds: -1
         property var globalSearchArtistResults: []

@@ -181,6 +181,10 @@ pub struct LibraryScanProgress {
     pub roots_total: usize,
     pub supported_files_discovered: usize,
     pub supported_files_processed: usize,
+    /// The files the scan will have processed when it ends, as far as it
+    /// can tell: always more than the files processed while work remains.
+    /// `None` while it cannot tell, as in the first scan of a root.
+    pub supported_files_total: Option<usize>,
     pub files_per_second: Option<f32>,
     pub eta_seconds: Option<f32>,
 }
