@@ -54,6 +54,7 @@ private slots:
     void queueChangesShowNoNoticeAndEditUndoRestoresThem();
     void removingALibraryRootAsksFirstAndNamesIt();
     void libraryKeysReachBothEndsAndOpenTheContextMenu();
+    void libraryRowsLayOutTheirYearsWithoutWarnings();
     void editMenuNamesTheUndoOfAMoveAndItSelectsTheMovedRows();
 };
 
@@ -1742,6 +1743,195 @@ void LibraryQueueSmokeTest::libraryKeysReachBothEndsAndOpenTheContextMenu() {
     QTRY_VERIFY(rowMenuVisible());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!rowMenuVisible());
+}
+
+namespace {
+
+// Artists with two albums each, one with a year and one without, and
+// `tracksPerAlbum` tracks in each: the delegates the view reuses go from
+// rows with a year to rows without one.
+QByteArray artistsWithDatedAndUndatedAlbumsBinary(int artistCount, int tracksPerAlbum) {
+    QVector<BinaryTreeRow> rows;
+    for (int artist = 1; artist <= artistCount; ++artist) {
+        const QString name = QStringLiteral("Artist %1").arg(artist, 2, 10, QLatin1Char('0'));
+        const QString artistPath = QStringLiteral("/music/") + name;
+        rows.push_back(BinaryTreeRow{1, 0, -1, 0, 2, name + QStringLiteral(" (2)"),
+            QStringLiteral("artist|%1").arg(name), name, artistPath, {}, {}, {}});
+        for (int album = 1; album <= 2; ++album) {
+            // A long title, which a narrow pane elides before the year.
+            const QString albumName = QStringLiteral("Album %1 With A Title Long Enough To Elide").arg(album);
+            const QString albumPath = artistPath + QStringLiteral("/Album %1").arg(album);
+            BinaryTreeRow albumRow{2, 1, -1, 0, static_cast<quint32>(tracksPerAlbum), albumName,
+                QStringLiteral("album|%1|%2").arg(name, albumName), name, albumPath, {}, {}, {}};
+            albumRow.year = album == 1 ? 1980 + artist : 0;
+            rows.push_back(albumRow);
+            for (int track = 1; track <= tracksPerAlbum; ++track) {
+                const QString path = albumPath + QStringLiteral("/%1.flac").arg(track, 2, 10, QLatin1Char('0'));
+                rows.push_back(BinaryTreeRow{4, 2, -1, static_cast<quint32>(track), 0,
+                    QStringLiteral("%1 - Track").arg(track, 2, 10, QLatin1Char('0')),
+                    QStringLiteral("track|%1").arg(path), name, path, {}, path, QStringList{path}});
+            }
+        }
+    }
+    return encodeRows(rows);
+}
+
+QStringList datedAndUndatedAlbumKeys(int artistCount) {
+    QStringList keys;
+    for (int artist = 1; artist <= artistCount; ++artist) {
+        const QString name = QStringLiteral("Artist %1").arg(artist, 2, 10, QLatin1Char('0'));
+        keys.push_back(QStringLiteral("artist|%1").arg(name));
+        for (int album = 1; album <= 2; ++album) {
+            keys.push_back(QStringLiteral("album|%1|Album %2 With A Title Long Enough To Elide").arg(name).arg(album));
+        }
+    }
+    return keys;
+}
+
+} // namespace
+
+// The rows lay out their years and titles without a QML warning, such as a
+// binding loop, with and without a year, collapsed and expanded, and in a
+// narrow pane (#474). The year stays right-aligned at the scrollbar lane,
+// and the title ends before it.
+void LibraryQueueSmokeTest::libraryRowsLayOutTheirYearsWithoutWarnings() {
+    constexpr int artistCount = 24;
+    constexpr int tracksPerAlbum = 3;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *libraryView = qvariant_cast<QQuickItem *>(window->property("libraryViewRef"));
+    QVERIFY(libraryView != nullptr);
+    QVERIFY2(takeCapturedMessagesText().isEmpty(), "the window warned before the rows came");
+
+    // The pane's warnings so far, with the phase that caused them.
+    QStringList warnings;
+    const auto collect = [&warnings](const char *phase) {
+        QStringList lines = takeCapturedMessagesText().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        lines.removeDuplicates();
+        if (!lines.isEmpty()) {
+            warnings << QStringLiteral("%1: %2").arg(QLatin1String(phase), lines.join(QLatin1Char('\n')));
+        }
+    };
+    // The next frame: the view lays out its rows when the window polishes.
+    QSignalSpy frames(window, &QQuickWindow::frameSwapped);
+    const auto settle = [window, &frames]() {
+        frames.clear();
+        window->update();
+        QVERIFY(frames.wait(5000));
+    };
+    // Every row from top to bottom, and back, so the view reuses its
+    // delegates for rows of each kind.
+    const auto scrollThrough = [&]() {
+        const qreal step = std::max<qreal>(1.0, libraryView->height() / 2.0);
+        for (qreal y = 0.0;; y += step) {
+            const qreal end = libraryView->property("contentHeight").toReal() - libraryView->height();
+            libraryView->setProperty("contentY", std::min(y, std::max<qreal>(0.0, end)));
+            settle();
+            if (y >= end) {
+                break;
+            }
+        }
+        libraryView->setProperty("contentY", 0.0);
+        settle();
+    };
+    // The visible rows with a year: every year ends the same distance,
+    // the scrollbar lane and the inset, before its row's right end, and its
+    // title ends before it.
+    qreal yearRightGap = -1.0;
+    const auto checkRowGeometry = [libraryView, &yearRightGap]() -> QString {
+        const qreal rowInset = 12.0;
+        int dated = 0;
+        for (QQuickItem *row : visibleItemsNamed(libraryView, QStringLiteral("libraryRow"))) {
+            QQuickItem *year = nullptr;
+            QQuickItem *title = nullptr;
+            for (QQuickItem *child : row->childItems()) {
+                if (child->objectName() == QLatin1String("libraryRowYear")) {
+                    year = child;
+                } else if (child->objectName() == QLatin1String("libraryRowTitle")) {
+                    title = child;
+                }
+            }
+            if (year == nullptr || title == nullptr) {
+                return QStringLiteral("a row without its year or title");
+            }
+            const QString yearText = year->property("text").toString();
+            if (!year->isVisible()) {
+                // A row without a year: its title reaches the year's place.
+                if (!yearText.isEmpty()) {
+                    return QStringLiteral("a hidden year with text %1").arg(yearText);
+                }
+                continue;
+            }
+            ++dated;
+            if (yearText.size() != 4 || year->width() < 1.0) {
+                return QStringLiteral("a year %1 of width %2").arg(yearText).arg(year->width());
+            }
+            const qreal gap = row->width() - (year->x() + year->width());
+            if (yearRightGap < 0.0) {
+                yearRightGap = gap;
+            }
+            if (gap <= rowInset || !qFuzzyCompare(gap, yearRightGap)) {
+                return QStringLiteral("year %1 ends %2 px before its row's end, not %3")
+                    .arg(yearText).arg(gap).arg(yearRightGap);
+            }
+            if (title->x() + title->width() > year->x()) {
+                return QStringLiteral("a title overlapping year %1").arg(yearText);
+            }
+        }
+        return dated > 0 ? QString() : QStringLiteral("no row with a year");
+    };
+
+    libraryModel.setExpandedKeys(datedAndUndatedAlbumKeys(artistCount));
+    QVERIFY(applyLibraryTree(libraryModel, artistsWithDatedAndUndatedAlbumsBinary(artistCount, tracksPerAlbum)));
+    QTRY_COMPARE(libraryModel.rowCount(), artistCount * (1 + 2 * (1 + tracksPerAlbum)));
+    settle();
+    collect("expanded");
+    QCOMPARE(checkRowGeometry(), QString());
+    scrollThrough();
+    collect("scrolled expanded");
+
+    // Collapsed albums: every album row shows, with and without a year.
+    QStringList artistsOnly;
+    for (int artist = 1; artist <= artistCount; ++artist) {
+        artistsOnly << QStringLiteral("artist|Artist %1").arg(artist, 2, 10, QLatin1Char('0'));
+    }
+    libraryModel.setExpandedKeys(artistsOnly);
+    QTRY_COMPARE(libraryModel.rowCount(), artistCount * 3);
+    settle();
+    collect("albums collapsed");
+    QCOMPARE(checkRowGeometry(), QString());
+    scrollThrough();
+    collect("scrolled collapsed");
+
+    // A narrow pane elides the titles before their years.
+    const int wideWidth = window->width();
+    window->resize(480, window->height());
+    settle();
+    collect("narrow");
+    QCOMPARE(checkRowGeometry(), QString());
+    const QList<QQuickItem *> titles = visibleItemsNamed(libraryView, QStringLiteral("libraryRowTitle"));
+    QVERIFY(std::any_of(titles.cbegin(), titles.cend(), [](QQuickItem *title) {
+        return title->property("truncated").toBool();
+    }));
+    scrollThrough();
+    collect("scrolled narrow");
+
+    // Expanded again in the narrow pane, then wide again.
+    libraryModel.setExpandedKeys(datedAndUndatedAlbumKeys(artistCount));
+    QTRY_COMPARE(libraryModel.rowCount(), artistCount * (1 + 2 * (1 + tracksPerAlbum)));
+    settle();
+    collect("expanded narrow");
+    QCOMPARE(checkRowGeometry(), QString());
+    scrollThrough();
+    collect("scrolled expanded narrow");
+    window->resize(wideWidth, window->height());
+    settle();
+    collect("wide again");
+    QCOMPARE(checkRowGeometry(), QString());
+
+    QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join(QLatin1Char('\n'))));
 }
 
 namespace {
