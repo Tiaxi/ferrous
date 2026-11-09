@@ -94,8 +94,9 @@ Item {
 
     // A track change cross-fades (#373 Motion), line by line: a line that
     // differs for the next track fades the one before out over it, in
-    // place, and the fields at its start that the two share stay still; a
-    // line that is the same stays still. The next track of the same album
+    // place, and its fields, and the words of a field in which only a
+    // number changes, that are the same for both and do not move stay
+    // still (#537); a line that is the same stays still. The next track of the same album
     // fades over shortDuration; a track of another album, or with another
     // cover, fades the cover and the lines together on one curve over
     // longDuration. A line that comes to differ while the track change
@@ -150,27 +151,28 @@ Item {
     // one fade comes to that. A layer that has faded out is dropped.
     readonly property int maxOutgoingLayers: 2
 
-    // A line that fades: the start of it that stays still (`still`, see
-    // `_sharedStart`), set when the line starts to fade and only ever cut
-    // shorter, a start of every text the line shows; the lines before that
-    // fade out under the playing track's, oldest first (`layers`, see
-    // `_layer`); the playing track's text past `still`, which fades in as
-    // one, from 1 - `incomingFrom`; and whether that text is the playing track's
-    // own (`own`), or still the one of the track before, which goes out
-    // as a layer of its own once the playing track's comes. The parts are
-    // cut where the text before has gaps, which the playing track's text
-    // need not have there, so it is never cut but at `still`, the end of
-    // the start all share.
+    // A line that fades: the words of it that stay still (`still`, see
+    // `_stillRuns`), set when the line starts to fade and only ever cut
+    // down, the same in every text the line shows and in the same place;
+    // the lines before that fade out under the playing track's, oldest
+    // first (`layers`, see `_layer`); the playing track's text but where
+    // the line stays still, which fades in as one, from 1 - `incomingFrom`;
+    // and whether that text is the playing track's own (`own`), or still
+    // the one of the track before, which goes out as a layer of its own once
+    // the playing track's comes. The parts of a line before are cut where
+    // its own text has gaps, which the playing track's text need not have
+    // there, so that is cut only at the edges of what stays still, in gaps
+    // all share.
     function _fadingLine(still, layers, incomingFrom, own) {
         return { still: still, layers: layers, incomingFrom: incomingFrom, own: own }
     }
 
     // A line before as it fades out (`text`), in parts that fade out from
-    // the opacity each had when this fade started (`parts`, [{start,
-    // from}], in order: each from the end of its `start`, a start of
-    // `text`, to the next one's). The first starts at the line's still
-    // start or past it: what is short of it shows in the still start, or
-    // in a layer above.
+    // the opacity each had when this fade started (`parts`, [{at, from}],
+    // in order, the first at 0). A part runs from the middle of the gap
+    // after the first `at` characters of `text` (from the line's start for
+    // 0) to where the next one starts. A part at 0 draws nothing. Where the
+    // line stays still, the playing track's text draws instead.
     function _layer(text, parts) {
         return { text: text, parts: parts }
     }
@@ -201,28 +203,155 @@ Item {
     // Whether `text` has a right-to-left character: its fields are then
     // not laid out from the left, so none of it stays still.
     function _hasRightToLeft(text) {
-        return /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u200F\u202B\u202E\u2067]|[\uD802\uD803\uD83A\uD83B][\uDC00-\uDFFF]/
+        return /[֐-ࣿיִ-﷿ﹰ-﻿‏‫‮⁧]|[\uD802\uD803\uD83A\uD83B][\uDC00-\uDFFF]/
             .test(text)
     }
 
-    // The start of two lines that can stay still while one fades into the
-    // other: their whole leading fields that are the same, with the
-    // separator after them when both go on. Empty when the first fields
-    // differ, or when either has right-to-left text.
-    function _sharedStart(before, after, separator) {
+    // The lines whose numbers are tabular figures, where a digit that
+    // changes moves nothing after it.
+    readonly property var tabularLines: ({ details: true, narrowAlbum: true, narrowDetails: true })
+
+    // The words of `text` (what is between its spaces) that are not empty,
+    // each as [start, end], with `offset` added.
+    function _wordRanges(text, offset) {
+        const ranges = []
+        let start = offset
+        for (const word of text.split(" ")) {
+            if (word.length > 0)
+                ranges.push([start, start + word.length])
+            start += word.length + 1
+        }
+        return ranges
+    }
+
+    // Whether two words take the same width in tabular figures: the same
+    // but for digits, each in place of another.
+    function _sameWidth(left, right) {
+        if (left.length !== right.length)
+            return false
+        for (let index = 0; index < left.length; ++index) {
+            if (left[index] !== right[index]
+                    && !(/[0-9]/.test(left[index]) && /[0-9]/.test(right[index])))
+                return false
+        }
+        return true
+    }
+
+    // What stays still while a line goes from `before` to `after`: the
+    // runs of words of `after`, as [start, end] in order, that both have,
+    // the same, in the same place. A field that is the same stays still
+    // while what is before it on the line keeps its width; within a field
+    // in which only numbers change, so do the words that are the same. In
+    // tabular figures (`tabular`), a number with as many digits keeps its
+    // width. A field or word that moves fades, and so does all after it.
+    // Nothing stays still in right-to-left text, whose fields are not laid
+    // out from the left.
+    function _stillRuns(before, after, separator, tabular) {
         if (root._hasRightToLeft(before) || root._hasRightToLeft(after))
-            return ""
-        if (separator.length === 0)
-            return before === after ? before : ""
-        const left = before.split(separator)
-        const right = after.split(separator)
-        let shared = 0
-        while (shared < left.length && shared < right.length && left[shared] === right[shared])
-            ++shared
-        if (shared === 0)
-            return ""
-        const start = left.slice(0, shared).join(separator)
-        return shared < left.length && shared < right.length ? start + separator.replace(/\s+$/, "") : start
+            return []
+        if (before === after)
+            return before.length > 0 ? [[0, before.length]] : []
+        const left = separator.length > 0 ? before.split(separator) : [before]
+        const right = separator.length > 0 ? after.split(separator) : [after]
+        const words = []
+        let at = 0
+        for (let field = 0; field < left.length && field < right.length; ++field) {
+            // Both go on past the separator before this field, which is in
+            // the same place in both.
+            if (field > 0)
+                words.push(...root._wordRanges(separator, at - separator.length))
+            const was = left[field]
+            const is = right[field]
+            if (was !== is) {
+                if (was.replace(/[0-9]+/g, "0") !== is.replace(/[0-9]+/g, "0"))
+                    break
+                const wasWords = was.split(" ")
+                const isWords = is.split(" ")
+                let offset = at
+                let kept = true
+                for (let word = 0; kept && word < isWords.length; ++word) {
+                    if (wasWords[word] === isWords[word])
+                        words.push(...root._wordRanges(isWords[word], offset))
+                    else
+                        kept = tabular && root._sameWidth(wasWords[word], isWords[word])
+                    offset += isWords[word].length + 1
+                }
+                if (!kept)
+                    break
+            } else {
+                words.push(...root._wordRanges(is, at))
+            }
+            at += is.length + separator.length
+        }
+        // Words with nothing but spaces between them stay still as one.
+        const runs = []
+        for (const word of words) {
+            const last = runs.length > 0 ? runs[runs.length - 1] : null
+            if (last !== null && /^ *$/.test(after.slice(last[1], word[0])))
+                last[1] = word[1]
+            else
+                runs.push([word[0], word[1]])
+        }
+        return runs
+    }
+
+    function _stillRunsOf(key, before, after) {
+        return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
+    }
+
+    // The runs both `left` and `right` have.
+    function _commonRuns(left, right) {
+        const common = []
+        for (const one of left) {
+            for (const other of right) {
+                const start = Math.max(one[0], other[0])
+                const end = Math.min(one[1], other[1])
+                if (start < end)
+                    common.push([start, end])
+            }
+        }
+        return common
+    }
+
+    function _sameRuns(left, right) {
+        return left.length === right.length
+            && left.every((run, index) => run[0] === right[index][0] && run[1] === right[index][1])
+    }
+
+    // What of `runs`, runs of words of `text`, is not in `kept`, a part of
+    // them: from the gap before each piece to the gap after it, as [at,
+    // at] in the terms of `_layer`.
+    function _givenUp(runs, kept, text) {
+        const spans = []
+        const add = (start, end) => {
+            while (start < end && text[start] === " ")
+                ++start
+            while (end > start && text[end - 1] === " ")
+                --end
+            if (start < end)
+                spans.push([start === 0 ? 0 : start - 1, end])
+        }
+        for (const run of runs) {
+            let start = run[0]
+            for (const keep of kept) {
+                if (keep[1] <= start || keep[0] >= run[1])
+                    continue
+                add(start, keep[0])
+                start = Math.max(start, keep[1])
+            }
+            add(start, run[1])
+        }
+        return spans
+    }
+
+    // `parts` (see `_layer`), with `from` from `at` up to `until`.
+    function _withFrom(parts, at, until, from) {
+        const after = parts.filter(part => part.at <= until).pop().from
+        const result = parts.filter(part => part.at < at)
+        result.push({ at: at, from: from })
+        if (!parts.some(part => part.at === until))
+            result.push({ at: until, from: after })
+        return result.concat(parts.filter(part => part.at >= until))
     }
 
     // The line of `key` in a fade that starts now, as it shows when the
@@ -230,48 +359,43 @@ Item {
     // does not fade. Each layer goes on from the opacity each of its parts
     // has. During a track change (`track`), the playing track's line
     // before goes out as a layer of its own when it was the track
-    // before's, from the opacity it has: whole in the still start, and
-    // past it as it faded in so far; a line that did not fade, from full
-    // opacity. A line that is the playing track's own changes in place,
-    // as late metadata does, and so does any line once it fades out as
-    // many layers as it can. A field of the still start that `after` no
-    // longer shares fades out from full opacity, as it showed, and the
-    // playing track's text there fades in with the rest of it.
+    // before's, from the opacity it has, as far as it faded in; a line
+    // that did not fade, from full opacity. A line that is the playing
+    // track's own changes in place, as late metadata does, and so does any
+    // line once it fades out as many layers as it can. What stayed still
+    // and `after` no longer has in its place fades out from full opacity,
+    // as it showed, in the newest layer, and the playing track's text there
+    // fades in with the rest of it.
     // `newTrack`: the fade is another track's, whose lines are still the
     // track before's.
     function _nextLine(key, before, after, track, newTrack) {
-        const separator = root.lineSeparators[key] || ""
         const changes = before !== after
+        const runs = root._stillRunsOf(key, before, after)
         const line = root._shownLine(key)
         if (line === null) {
             if (!track || !changes)
                 return null
-            const still = root._sharedStart(before, after, separator)
-            return root._fadingLine(still, [root._layer(before, [{ start: still, from: 1 }])], 1, true)
+            return root._fadingLine(runs, [root._layer(before, [{ at: 0, from: 1 }])], 1, true)
         }
         const level = 1 - root.handover
-        const shared = root._sharedStart(before, after, separator)
-        const still = shared.length < line.still.length ? shared : line.still
-        const layers = line.layers
-            .map(layer => root._layer(layer.text, layer.parts.map(part => ({ start: part.start, from: part.from * level }))))
+        const still = root._commonRuns(line.still, runs)
+        const givenUp = root._givenUp(line.still, still, before)
+        let layers = line.layers
+            .map(layer => root._layer(layer.text, layer.parts.map(part => ({ at: part.at, from: part.from * level }))))
             .filter(layer => root._layerFrom(layer) > 0)
         const own = !newTrack && line.own
         let incomingFrom = line.incomingFrom * level
         if (changes && !own && layers.length < root.maxOutgoingLayers) {
-            const shown = 1 - incomingFrom
-            const parts = still !== line.still
-                ? [{ start: still, from: 1 }, { start: line.still, from: shown }]
-                : [{ start: still, from: shown }]
-            layers.push(root._layer(before, parts))
+            layers.push(root._layer(before, [{ at: 0, from: 1 - incomingFrom }]))
             incomingFrom = 1
-        } else if (still !== line.still) {
-            // Every layer shares the still start: the newest draws it.
-            layers[layers.length - 1].parts.unshift({ start: still, from: 1 })
         }
-        const kept = layers
-            .map(layer => root._layer(layer.text, root._mergedParts(layer.parts)))
+        // Every layer had what was still in common with the playing track's
+        // text: the newest draws it, the others nothing there.
+        layers = layers.map((layer, index) => root._layer(layer.text, root._mergedParts(givenUp.reduce(
+            (parts, span) => root._withFrom(parts, span[0], span[1], index === layers.length - 1 ? 1 : 0),
+            layer.parts))))
             .filter(layer => root._layerFrom(layer) > 0)
-        return kept.length > 0 ? root._fadingLine(still, kept, incomingFrom, own || changes) : null
+        return layers.length > 0 ? root._fadingLine(still, layers, incomingFrom, own || changes) : null
     }
 
     // Parts that fade alike are one.
@@ -353,7 +477,8 @@ Item {
 
     // Whether a line changed from `was` to `next` that does not change in
     // place: one that does not fade, one that fades but shows the track
-    // before's text, or one that no longer shares all of its still start.
+    // before's text, or one that no longer has all that stayed still of it
+    // in place.
     function _linesJoin(was, next) {
         for (const key in next.lines) {
             if (was.lines[key] === next.lines[key])
@@ -361,8 +486,8 @@ Item {
             const line = root._shownLine(key)
             if (line === null || !line.own)
                 return true
-            const separator = root.lineSeparators[key] || ""
-            if (root._sharedStart(was.lines[key], next.lines[key], separator).length < line.still.length)
+            const runs = root._stillRunsOf(key, was.lines[key], next.lines[key])
+            if (!root._sameRuns(root._commonRuns(line.still, runs), line.still))
                 return true
         }
         return false
@@ -451,12 +576,12 @@ Item {
     }
 
     // A line of the playing track, with its text as the accessible name.
-    // While a track change fades it, the lines before fade out under it
-    // past the fields at the start that all share; those stay still, drawn
-    // by the playing track's own text, clipped, so nothing in them moves or
-    // dims. Past them the playing track's text fades in as one, over the
-    // lines before, the oldest at the bottom; each part of a line before
-    // fades out on its own (see `_layer`), between edges in its own gaps.
+    // While a track change fades it, the words that every text it shows has
+    // the same, in the same place, stay still, drawn by the playing track's
+    // own text, clipped, so nothing in them moves or dims. Elsewhere the
+    // playing track's text fades in as one, over the lines before, the
+    // oldest at the bottom; each part of a line before fades out on its own
+    // (see `_layer`), between edges in its own gaps.
     component FadingLine: Item {
         id: line
 
@@ -464,14 +589,18 @@ Item {
         required property string lineKey
         required property string text
         // Its items' names: "nowPlaying<name>" for the playing track's
-        // text, "nowPlayingIncoming<name>" for the part of it that fades in,
+        // text, "nowPlayingStill<name>" for each run of it that stays still,
+        // "nowPlayingIncoming<name>" for the rest of it, which fades in, and
+        // "nowPlayingIncoming<name>Window" for each piece of that,
         // "nowPlayingOutgoing<name>Layer" for each line before, and
-        // "nowPlayingOutgoing<name>Part" for each part of one, whose text
+        // "nowPlayingOutgoing<name>Part" for each piece of one, whose text
         // is "nowPlayingOutgoing<name>".
         required property string name
         property real pointSize: root.uiPalette.basePointSize
         property int weight: Font.Normal
-        property var features: ({})
+        // Tabular figures where `_stillRuns` counts on them.
+        readonly property var features: root.tabularLines[line.lineKey] === true
+            ? root.uiPalette.tabularFigures : ({})
         property color color: root.uiPalette.textSecondary
         // A line height in pixels, or 0 for the font's.
         property real fixedLineHeight: 0
@@ -481,40 +610,88 @@ Item {
             ? (root.outgoing.lines[line.lineKey] || null) : null
         readonly property bool fading: line.before !== null && root.handover < 1
         readonly property var layers: line.fading ? line.before.layers : []
-        // The playing track's text past the still start, fading in.
+        // Every text the line shows, the playing track's last.
+        readonly property var texts: line.layers.map(layer => layer.text).concat([line.text])
+        // The playing track's text where it does not stay still, fading in.
         readonly property real incomingOpacity: line.fading
             ? 1 - line.before.incomingFrom * (1 - root.handover) : 1
-        // How much of the line stays still, from the left: up to the middle
-        // of the space after the still start, where none has a glyph; all
-        // of it when nothing fades.
-        readonly property real stillWidth: {
+        // Where the line stays still while it fades, [left, right] for each
+        // run of `still`: from the middle of the gap before it to the middle
+        // of the gap after it, where no text has a glyph. A run whose gap
+        // after it the ellipsis takes in one of the texts stays still to the
+        // end of the line when all are cut off within it, alike, and fades
+        // otherwise, as does all past it.
+        readonly property var stillWindows: {
             if (!line.fading)
-                return line.width
-            const still = line.before.still
-            if (still.length === 0)
-                return 0
-            const texts = line.layers.map(layer => layer.text).concat([line.text])
-            if (texts.every(text => line._keeps(text, still)))
-                return line._edgeAfter(still)
-            // Elided within the still start: they look the same when all
-            // are, and differ there otherwise.
-            const elidedWithin = metrics.advanceWidth(still) + metrics.advanceWidth("\u2026") > line.width
-            return elidedWithin && texts.every(text => line._cutOff(text)) ? line.width : 0
+                return []
+            const windows = []
+            for (const run of line.before.still) {
+                const start = run[0] === 0 ? 0 : run[0] - 1
+                if (start > 0 && !line.texts.every(text => line._keeps(text, start)))
+                    break
+                const left = start === 0 ? 0 : line._edgeAfter(line.text.slice(0, start))
+                let right = line.width
+                if (!line.texts.every(text => text.length === run[1])) {
+                    if (line.texts.every(text => line._keeps(text, run[1]))) {
+                        right = Math.min(line.width, line._edgeAfter(line.text.slice(0, run[1])))
+                    } else {
+                        const elidedWithin = metrics.advanceWidth(line.text.slice(0, run[1]))
+                            + metrics.advanceWidth("…") > line.width
+                        if (!elidedWithin || !line.texts.every(text => line._cutOff(text)))
+                            break
+                    }
+                }
+                if (right > left)
+                    windows.push([left, right])
+                if (right >= line.width)
+                    break
+            }
+            return windows
+        }
+        // Where the line changes while it fades: all but stillWindows.
+        readonly property var changingWindows: {
+            if (!line.fading)
+                return []
+            const windows = []
+            let from = 0
+            for (const still of line.stillWindows) {
+                if (still[0] > from)
+                    windows.push([from, still[0]])
+                from = Math.max(from, still[1])
+            }
+            if (from < line.width)
+                windows.push([from, line.width])
+            return windows
         }
 
-        // Where each part of `layer` starts, then the end of the line. A
-        // part from the still start starts where the line stops being
-        // still; one that would start where its text is elided starts at
-        // the end, so the ellipsis is in one part.
-        function _partEdges(layer) {
-            const still = line.before.still
-            const edges = layer.parts.map(part => part.start.length <= still.length
-                ? line.stillWidth
-                : (line._keeps(layer.text, part.start)
-                    ? Math.min(line.width, Math.max(line.stillWidth, line._edgeAfter(part.start)))
-                    : line.width))
-            edges.push(line.width)
-            return edges
+        // What `layer` draws, where the line changes: each of its parts
+        // that shows, {x, width, from}, cut where the line stays still.
+        function _pieces(layer) {
+            const pieces = []
+            const parts = layer.parts
+            for (let index = 0; index < parts.length; ++index) {
+                if (parts[index].from <= 0)
+                    continue
+                const left = line._partEdge(layer.text, parts[index].at)
+                const right = index + 1 < parts.length
+                    ? line._partEdge(layer.text, parts[index + 1].at) : line.width
+                for (const changing of line.changingWindows) {
+                    const start = Math.max(left, changing[0])
+                    const end = Math.min(right, changing[1])
+                    if (start < end)
+                        pieces.push({ x: start, width: end - start, from: parts[index].from })
+                }
+            }
+            return pieces
+        }
+
+        // Where a part of `text` that starts at `at` starts on the line: in
+        // the gap after the first `at` characters; at the end of the line
+        // where `text` is elided, so the ellipsis is in one part.
+        function _partEdge(text, at) {
+            if (at === 0)
+                return 0
+            return line._keeps(text, at) ? Math.min(line.width, line._edgeAfter(text.slice(0, at))) : line.width
         }
 
         // The middle of the space after `start`, a start of a text the line
@@ -526,16 +703,16 @@ Item {
         }
 
         function _cutOff(text) {
+            metrics.font
             return metrics.advanceWidth(text) > line.width
         }
 
-        // Whether `text`, elided to the line, still shows `start`, the
-        // space after it and the glyph after that, so that the gap after
-        // `start` is one with no ellipsis in it.
-        function _keeps(text, start) {
+        // Whether `text`, elided to the line, still shows its first `at`
+        // characters, the space after them and the glyph after that, so that
+        // the gap after them is one with no ellipsis in it.
+        function _keeps(text, at) {
             return !line._cutOff(text)
-                || metrics.advanceWidth(text.slice(0, start.length + 2)) + metrics.advanceWidth("\u2026")
-                    <= line.width
+                || metrics.advanceWidth(text.slice(0, at + 2)) + metrics.advanceWidth("…") <= line.width
         }
 
         Layout.fillWidth: true
@@ -547,9 +724,10 @@ Item {
             font: stillText.font
         }
 
-        // What stays still: the playing track's text up to stillWidth.
+        // The playing track's text, whole while nothing fades; while the
+        // line fades it draws through stillWindows and changingWindows.
         Item {
-            width: line.stillWidth
+            width: line.fading ? 0 : line.width
             height: line.height
             clip: line.fading
 
@@ -563,9 +741,33 @@ Item {
             }
         }
 
+        // What stays still: the playing track's text in stillWindows.
+        Repeater {
+            model: line.stillWindows
+
+            delegate: Item {
+                id: stillWindow
+
+                required property var modelData
+
+                objectName: "nowPlayingStill" + line.name
+                x: stillWindow.modelData[0]
+                width: stillWindow.modelData[1] - stillWindow.modelData[0]
+                height: line.height
+                clip: true
+
+                LineText {
+                    x: -stillWindow.x
+                    owner: line
+                    text: line.text
+                    Accessible.ignored: true
+                }
+            }
+        }
+
         // What changes: the lines before, fading out part by part, the
-        // oldest at the bottom, and over them the playing track's text past
-        // stillWidth, fading in as one.
+        // oldest at the bottom, and over them the playing track's text in
+        // changingWindows, fading in as one.
         Repeater {
             model: line.layers
 
@@ -573,34 +775,32 @@ Item {
                 id: lineBefore
 
                 required property var modelData
-                readonly property var edges: line._partEdges(lineBefore.modelData)
+                readonly property string text: lineBefore.modelData.text
 
                 objectName: "nowPlayingOutgoing" + line.name + "Layer"
                 width: line.width
                 height: line.height
 
                 Repeater {
-                    model: lineBefore.modelData.parts
+                    model: line._pieces(lineBefore.modelData)
 
                     delegate: Item {
                         id: part
 
                         required property var modelData
-                        required property int index
-                        readonly property real start: lineBefore.edges[part.index] || 0
 
                         objectName: "nowPlayingOutgoing" + line.name + "Part"
-                        x: part.start
-                        width: Math.max(0, (lineBefore.edges[part.index + 1] || 0) - part.start)
+                        x: part.modelData.x
+                        width: part.modelData.width
                         height: line.height
                         clip: true
                         opacity: part.modelData.from * (1 - root.handover)
 
                         LineText {
                             objectName: "nowPlayingOutgoing" + line.name
-                            x: -part.start
+                            x: -part.x
                             owner: line
-                            text: lineBefore.modelData.text
+                            text: lineBefore.text
                             Accessible.ignored: true
                         }
                     }
@@ -609,19 +809,33 @@ Item {
         }
         Item {
             objectName: "nowPlayingIncoming" + line.name
-            x: line.stillWidth
             z: 1
-            width: Math.max(0, line.width - line.stillWidth)
+            width: line.width
             height: line.height
-            clip: true
             visible: line.fading
             opacity: line.incomingOpacity
 
-            LineText {
-                x: -line.stillWidth
-                owner: line
-                text: line.text
-                Accessible.ignored: true
+            Repeater {
+                model: line.changingWindows
+
+                delegate: Item {
+                    id: changingWindow
+
+                    required property var modelData
+
+                    objectName: "nowPlayingIncoming" + line.name + "Window"
+                    x: changingWindow.modelData[0]
+                    width: changingWindow.modelData[1] - changingWindow.modelData[0]
+                    height: line.height
+                    clip: true
+
+                    LineText {
+                        x: -changingWindow.x
+                        owner: line
+                        text: line.text
+                        Accessible.ignored: true
+                    }
+                }
             }
         }
     }
@@ -738,7 +952,6 @@ Item {
                 name: "Details"
                 text: root.trackLines.details
                 pointSize: root.uiPalette.smallPointSize
-                features: root.uiPalette.tabularFigures
                 color: root.uiPalette.textTertiary
             }
         }
@@ -780,7 +993,6 @@ Item {
                 name: "NarrowAlbum"
                 text: root.trackLines.narrowAlbum
                 pointSize: root.uiPalette.smallPointSize
-                features: root.uiPalette.tabularFigures
                 color: root.uiPalette.textTertiary
             }
             FadingLine {
@@ -789,7 +1001,6 @@ Item {
                 name: "NarrowDetails"
                 text: root.trackLines.narrowDetails
                 pointSize: root.uiPalette.smallPointSize
-                features: root.uiPalette.tabularFigures
                 color: root.uiPalette.textTertiary
             }
         }
