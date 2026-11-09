@@ -812,6 +812,12 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             QCOMPARE(boxOf(label).left(), boxOf(labels.first()).left());
             QCOMPARE(boxOf(value).left(), boxOf(values.first()).left());
             QVERIFY2(boxOf(label).right() + 12 <= boxOf(value).left() + 0.01, qPrintable(where));
+            // A label and its value start on the same line, however many
+            // lines either takes.
+            QVERIFY2(qAbs(boxOf(label).top() - boxOf(value).top()) < 0.5,
+                     qPrintable(QStringLiteral("%1; tops %2 and %3, value %4 lines")
+                                    .arg(where).arg(boxOf(label).top()).arg(boxOf(value).top())
+                                    .arg(value->property("lineCount").toInt())));
             // Within the column's margins, and with room for the value.
             QVERIFY2(inside.contains(boxOf(label)) && inside.contains(boxOf(value)),
                      qPrintable(where));

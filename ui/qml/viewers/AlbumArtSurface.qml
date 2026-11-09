@@ -474,6 +474,7 @@ Item {
                     Label {
                         objectName: "albumArtInfoValue"
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
                         text: modelData.value
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
