@@ -243,7 +243,7 @@ Dialog {
     }
 
     function processPendingSuggestionAction() {
-        if (!root.visible) {
+        if (!root.visible || closingState.closing) {
             return
         }
         if (root.pendingApplyIndex >= 0) {
@@ -279,6 +279,13 @@ Dialog {
     onOpened: {
         root.clearPendingActionState()
         root.refreshCurrentArtworkInfo()
+    }
+
+    // Applied, closed or hidden for a preview, it takes no click as it fades
+    // out: Apply again would apply again.
+    Components.PopupClosing {
+        id: closingState
+        popup: root
     }
 
     // Hidden for a preview, it keeps its results and where it is.
@@ -454,7 +461,7 @@ Dialog {
                     id: currentArtworkPreviewButton
                     objectName: "itunesArtworkCurrentPreviewButton"
                     text: I18n.i18nc("@action:button", "Preview")
-                    enabled: (root.currentArtworkSource || "").length > 0
+                    enabled: (root.currentArtworkSource || "").length > 0 && !closingState.closing
                     onClicked: root.showPreview(-1)
                 }
             }
@@ -593,6 +600,7 @@ Dialog {
                                 ? I18n.i18nc("@action:button", "Loading\u2026")
                                 : I18n.i18nc("@action:button", "Preview")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
+                                && !closingState.closing
                             onClicked: root.requestSuggestionPreview(index)
                         }
 
@@ -603,6 +611,7 @@ Dialog {
                                 ? I18n.i18nc("@action:button", "Loading\u2026")
                                 : I18n.i18nc("@action:button", "Apply")
                             enabled: !((modelData && (modelData.assetLoading || false)) || false)
+                                && !closingState.closing
                             onClicked: root.requestSuggestionApply(index)
                         }
                     }
@@ -625,9 +634,15 @@ Dialog {
             + "image that is there, or embeds it in the album's tracks in place of their artwork. "
             + "It keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
+        // The answer takes the suggestion it was asked for, at once.
         onConfirmed: {
-            root.uiBridge.applyItunesArtworkSuggestion(suggestionIndex)
-            root.finishAfterApply(suggestionIndex)
+            const index = suggestionIndex
+            suggestionIndex = -1
+            if (index < 0) {
+                return
+            }
+            root.uiBridge.applyItunesArtworkSuggestion(index)
+            root.finishAfterApply(index)
         }
     }
 }

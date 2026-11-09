@@ -11,6 +11,7 @@ public:
 
 private slots:
     void consecutiveErrorsAreBothVisible();
+    void clearAllAsTheDialogFadesKeepsAnIssueThatArrives();
     void repeatedErrorsAreCounted();
     void errorHistoryKeepsTheLatestErrors();
     void aLongErrorIsShownWhole();
@@ -24,6 +25,7 @@ private slots:
     void quitActionClosesTheWindowThroughItsCloseHandler();
     void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
     void quitAnywayClosesAfterAFailedSave();
+    void retryTakesNoSecondAnswerAsTheDialogFades();
     void aFailedSaveBeforeQuitIsNotHiddenByRecentErrors();
     void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
     void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
@@ -145,6 +147,35 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(log.isEmpty(), qPrintable(log));
+}
+
+void ErrorsSmokeTest::clearAllAsTheDialogFadesKeepsAnIssueThatArrives() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("recentErrorsDialog"));
+    QVERIFY(bridge != nullptr && errors != nullptr && dialog != nullptr);
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("Couldn't play it."), 1, 1));
+    QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QQuickItem *clearAll = itemNamed(popupContent(dialog), QStringLiteral("errorHistoryClearButton"));
+    QVERIFY(clearAll != nullptr);
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(clearAll));
+    QVERIFY(popupFadingOut(dialog));
+    QVERIFY(errorHistoryMessages(errors).isEmpty());
+
+    // An issue arrives as the dialog fades out, and a quick second click on
+    // Clear All, where it is now, does not clear it unseen.
+    const QString late = QStringLiteral("Last.fm session expired.");
+    QVERIFY(sendBridgeError(bridge, late, 5, 1));
+    QVERIFY(popupFadingOut(dialog));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(clearAll));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(errorHistoryMessages(errors), (QStringList{late}));
 }
 
 void ErrorsSmokeTest::repeatedErrorsAreCounted() {
@@ -481,6 +512,39 @@ void ErrorsSmokeTest::quitAnywayClosesAfterAFailedSave() {
     QTRY_VERIFY(dialog->property("visible").toBool());
     QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
 
+    QTRY_VERIFY(!window->isVisible());
+}
+
+void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("holdStateSaveAnswers", true));
+
+    window->close();
+    const int first = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+
+    // A quick second click on Retry, as the dialog fades out, saves no
+    // second time.
+    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("quitSaveFailedRetryButton"), dialog));
+    const int retry = bridge->property("lastStateSaveRequestId").toInt();
+    QCOMPARE(retry, first + 1);
+    // Nor does Escape, as it still fades out, give up on the retry.
+    QVERIFY(popupFadingOut(dialog));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
+
+    // The retry's answer still closes the window.
+    QVERIFY(answerStateSave(bridge, retry, true));
     QTRY_VERIFY(!window->isVisible());
 }
 

@@ -755,6 +755,24 @@ bool clickVisibleButton(QQuickWindow *window, const QString &objectName) {
     return true;
 }
 
+bool popupFadingOut(QObject *popup) {
+    return popup->property("visible").toBool() && !popup->property("opened").toBool();
+}
+
+bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *popup) {
+    QQuickItem *button = visibleItemNamed(window, objectName);
+    if (button == nullptr || !button->isEnabled()) {
+        return false;
+    }
+    const QPoint center = centerInWindow(button);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, center);
+    if (!popupFadingOut(popup)) {
+        return false;
+    }
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, center);
+    return true;
+}
+
 bool popupsSettled() {
     for (QWindow *window : QGuiApplication::topLevelWindows()) {
         for (QObject *object : window->findChildren<QObject *>()) {

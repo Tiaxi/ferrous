@@ -474,6 +474,15 @@ bool tabTo(QQuickWindow *host, QQuickItem *stop);
 // The visible button named `objectName` in `window`, clicked as a user would.
 bool clickVisibleButton(QQuickWindow *window, const QString &objectName);
 
+// Whether `popup` fades out: closed, but visible until the style's exit
+// transition ends.
+bool popupFadingOut(QObject *popup);
+
+// Clicks the visible, enabled button `objectName` as a user would, and the
+// same place again as `popup`, which the first click closed, fades out: a
+// quick second click. Whether both clicks were made, the second in the fade.
+bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *popup);
+
 // Whether no popup in any window is opening or closing. The app's style
 // fades popups in and out: in its enter or exit transition a popup is
 // visible but not opened, and a modal one that fades out still takes the

@@ -25,6 +25,9 @@ private slots:
     void keepWaitingForAStalledTagSaveQuitsWhenItFinishes();
     void repeatedQuitsDuringATagSaveShowOneWait();
     void tagEditorReloadAsksBeforeDroppingEdits();
+    void aSecondClickAsAConfirmationFadesAnswersNothingMore();
+    void discardAndReloadClickedTwiceAsItFadesReloadsOnce();
+    void quitAnywayTakesNoSecondAnswerAsTheWaitFades();
     void autoNumberRejectsStartsThatAreNotNumbers();
     void tagEditorRowsFollowTheKeyboard();
     void tagEditorShowsEveryValueOfMultiValueFields();
@@ -699,6 +702,96 @@ void TagEditorSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
     QVERIFY(fixture.editor.loading());
     QVERIFY(!fixture.confirmShown());
     QTRY_VERIFY(!fixture.editor.loading());
+}
+
+void TagEditorSmokeTest::aSecondClickAsAConfirmationFadesAnswersNothingMore() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    // The window stays open after the settings and queue are saved, so the
+    // clicks stay in it.
+    QVERIFY(fixture.bridge->setProperty("holdStateSaveAnswers", true));
+    QSignalSpy discards(fixture.confirm, SIGNAL(discardRequested()));
+    QSignalSpy kept(fixture.confirm, SIGNAL(keepEditingRequested()));
+    QVERIFY(discards.isValid() && kept.isValid());
+
+    // A save that fails closes the question, and Save, clicked again as it
+    // fades out, does not save again.
+    fixture.saves->setResponse(kFailedTagSave);
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QQuickItem *save = visibleItemNamed(fixture.window, QStringLiteral("tagEditorCloseConfirmSaveButton"));
+    QVERIFY(save != nullptr && save->isEnabled());
+    const QPoint saveAt = centerInWindow(save);
+    QTest::mouseClick(fixture.window, Qt::LeftButton, Qt::NoModifier, saveAt);
+    QVERIFY(QTest::qWaitFor([&fixture]() {
+        return !fixture.editor.saving() && popupFadingOut(fixture.confirm);
+    }));
+    QTest::mouseClick(fixture.window, Qt::LeftButton, Qt::NoModifier, saveAt);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(fixture.saves->saveCount(), 1);
+    QVERIFY(fixture.editor.dirty());
+    QVERIFY(fixture.editorShown());
+    QVERIFY(finishIncubation(fixture.engine));
+    QCOMPARE(takeCapturedMessagesText(), QString());
+
+    // Quitting: Discard, clicked twice, answers once, and Escape as the
+    // question fades out does not take the quit back.
+    fixture.window->close();
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(clickTwiceAsItCloses(fixture.window, QStringLiteral("tagEditorCloseConfirmDiscardButton"),
+                                 fixture.confirm));
+    QVERIFY(popupFadingOut(fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(discards.count(), 1);
+    QCOMPARE(kept.count(), 0);
+    QCOMPARE(fixture.stateSaves(), 1);
+    QVERIFY(!fixture.editor.isOpen());
+}
+
+void TagEditorSmokeTest::discardAndReloadClickedTwiceAsItFadesReloadsOnce() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    QSignalSpy discards(fixture.confirm, SIGNAL(discardRequested()));
+    QVERIFY(discards.isValid());
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(clickTwiceAsItCloses(fixture.window, QStringLiteral("tagEditorCloseConfirmDiscardButton"),
+                                 fixture.confirm));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(discards.count(), 1);
+    QTRY_VERIFY(!fixture.editor.loading());
+    QVERIFY(!fixture.editor.dirty());
+    QVERIFY(fixture.editorShown());
+}
+
+void TagEditorSmokeTest::quitAnywayTakesNoSecondAnswerAsTheWaitFades() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(fixture.bridge->setProperty("holdStateSaveAnswers", true));
+    QVERIFY(fixture.startStalledSave());
+    fixture.window->close();
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered() && fixture.quitWait()->property("opened").toBool());
+    QSignalSpy quits(fixture.quitWait(), SIGNAL(quitAnywayRequested()));
+    QSignalSpy stops(fixture.quitWait(), SIGNAL(stopQuittingRequested()));
+    QVERIFY(quits.isValid() && stops.isValid());
+
+    // Quit Anyway, clicked again quickly as the wait fades out, quits once,
+    // and Escape meanwhile does not stop the quit.
+    QVERIFY(clickTwiceAsItCloses(fixture.window, QStringLiteral("tagEditorQuitWaitQuitButton"),
+                                 fixture.quitWait()));
+    QVERIFY(popupFadingOut(fixture.quitWait()));
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(quits.count(), 1);
+    QCOMPARE(stops.count(), 0);
+    QCOMPARE(fixture.stateSaves(), 1);
+    fixture.saves->release.release();
 }
 
 void TagEditorSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
