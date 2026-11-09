@@ -367,6 +367,8 @@ private slots:
     void trackCoverHasNoFallbackOfTheUisOwn();
     void trackCoverStaysUntilTheNextTracksCoverIsKnown_data();
     void trackCoverStaysUntilTheNextTracksCoverIsKnown();
+    void trackCoverWaitsForTheNextTracksLateMetadata_data();
+    void trackCoverWaitsForTheNextTracksLateMetadata();
     void trackCoverStaysThroughRepeatOne();
     void trackCoverTakesTheQueueRowsCoverBeforeTheMetadata();
     void mprisRepublishesOnTrackMetadataChanged();
@@ -5889,6 +5891,67 @@ void BridgeClientTest::trackCoverStaysUntilTheNextTracksCoverIsKnown() {
     QCOMPARE(client.currentTrackCoverPath(), expected);
     // Once known, a snapshot without metadata keeps it.
     client.processBinarySnapshot(played(trackWithoutMetadata(second, 2, state), 0.09));
+    QCOMPARE(client.currentTrackCoverPath(), expected);
+}
+
+// The next track's first read is dropped for a newer request and read again
+// (#519, #525): its metadata comes many snapshots after its path, all of
+// which still carry the track before's metadata or none. The cover before
+// stays all that while, unchanged, and gives way only when the next track's
+// metadata comes: to its cover, or to none.
+void BridgeClientTest::trackCoverWaitsForTheNextTracksLateMetadata_data() {
+    QTest::addColumn<QString>("nextCover");
+    QTest::newRow("covered to covered") << QStringLiteral("/music/B/cover.jpg");
+    QTest::newRow("covered to none") << QString();
+}
+
+void BridgeClientTest::trackCoverWaitsForTheNextTracksLateMetadata() {
+    QFETCH(QString, nextCover);
+    const QString first = QStringLiteral("/music/A/01.flac");
+    const QString second = QStringLiteral("/music/B/01.flac");
+    const QString firstCover = QStringLiteral("/music/A/cover.jpg");
+    const QString firstUrl = QStringLiteral("image://covers//music/A/cover.jpg#v=1");
+    const auto at = [](BinaryBridgeCodec::DecodedSnapshot snapshot, double seconds) {
+        snapshot.playback.positionSeconds = seconds;
+        snapshot.playback.durationSeconds = 180.0;
+        snapshot.playback.positionSampledAtNs = monotonicNowNs();
+        snapshot.playback.positionAdvancing = true;
+        return snapshot;
+    };
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(
+        at(trackWithMetadataOf(first, 1, first, firstCover), 179.9)));
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+
+    QVERIFY(client.processBinarySnapshot(
+        at(trackWithMetadataOf(second, 2, first, firstCover), 0.01)));
+    QCOMPARE(client.currentTrackPath(), second);
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+    // The heartbeat goes on while the read is dropped and asked for again:
+    // the track before's metadata in most snapshots, none in some.
+    double seconds = 0.01;
+    for (int i = 0; i < 24; ++i) {
+        seconds += 0.25;
+        client.m_pollTrackMetadataChanged = false;
+        BinaryBridgeCodec::DecodedSnapshot heartbeat = i % 3 == 2
+            ? trackWithoutMetadata(second, 2)
+            : trackWithMetadataOf(second, 2, first, firstCover);
+        client.processBinarySnapshot(at(heartbeat, seconds));
+        QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+        QVERIFY2(!client.m_pollTrackMetadataChanged, qPrintable(QString::number(i)));
+    }
+
+    // The next track's metadata, at last.
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(
+        at(trackWithMetadataOf(second, 2, second, nextCover), seconds + 0.25)));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    const QString expected = nextCover.isEmpty()
+        ? QString()
+        : QStringLiteral("image://covers/") + nextCover + QStringLiteral("#v=1");
+    QCOMPARE(client.currentTrackCoverPath(), expected);
+    client.processBinarySnapshot(at(trackWithoutMetadata(second, 2), seconds + 0.5));
     QCOMPARE(client.currentTrackCoverPath(), expected);
 }
 
