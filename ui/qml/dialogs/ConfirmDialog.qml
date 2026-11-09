@@ -10,7 +10,8 @@ import "../components" as Components
 import "../logic/KeyUtils.js" as KeyUtils
 
 // Asks before an action that cannot be undone. Escape and Cancel keep
-// things as they are; only the confirm button sends `confirmed`.
+// things as they are; only the confirm button sends `confirmed`, once each
+// time the dialog shows: its buttons take no click as it fades out.
 Dialog {
     id: root
 
@@ -31,6 +32,11 @@ Dialog {
 
     onAccepted: root.confirmed()
 
+    Components.PopupClosing {
+        id: closingState
+        popup: root
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }
@@ -38,6 +44,7 @@ Dialog {
     footer: Components.DialogButtons {
 
         id: dialogButtons
+        enabled: !closingState.closing
         primary: confirmDialogConfirmButton
         Button {
             id: confirmDialogConfirmButton

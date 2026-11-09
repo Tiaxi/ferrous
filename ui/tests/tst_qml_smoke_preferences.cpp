@@ -376,9 +376,12 @@ ApplicationWindow {
     QVERIFY(QMetaObject::invokeMethod(bridge, "snapshotChanged"));
     QVERIFY(confirm->property("visible").toBool());
     QCOMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
-    QTRY_COMPARE(applied(), (QVariantList{0}));
-    QTRY_VERIFY(!dialog->property("visible").toBool());
+    // A quick second click on Replace, as the question fades out, applies
+    // nothing more.
+    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(applied(), (QVariantList{0}));
+    QVERIFY(!dialog->property("visible").toBool());
 
     // Without art there is nothing to lose, so it applies at once.
     bridge->setProperty("itunesArtworkTarget", QVariantMap{
@@ -388,8 +391,28 @@ ApplicationWindow {
     });
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
-    QTRY_COMPARE(applied(), (QVariantList{0, 0}));
+    // Nor does a quick second click on Apply, as the dialog fades out.
+    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("itunesArtworkApplyButton"), dialog));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(applied(), (QVariantList{0, 0}));
+    QVERIFY(!confirm->property("visible").toBool());
+    QVERIFY(!dialog->property("visible").toBool());
+
+    // Apply of a suggestion still downloading waits for it; a download that
+    // finishes as the closed dialog fades out applies nothing.
+    bridge->setProperty("itunesArtworkResults",
+                        QVariantList{QVariantMap{{QStringLiteral("normalizedPath"), QString()}}});
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("itunesArtworkApplyButton")));
+    QCOMPARE(dialog->property("pendingApplyIndex").toInt(), 0);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+    QVERIFY(popupFadingOut(dialog));
+    bridge->setProperty("itunesArtworkResults", QVariantList{QVariantMap{
+        {QStringLiteral("normalizedPath"), QStringLiteral("/fixture/cache/suggestion.jpg")}}});
+    QVERIFY(QMetaObject::invokeMethod(bridge, "itunesArtworkChanged"));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(applied(), (QVariantList{0, 0}));
     QVERIFY(!confirm->property("visible").toBool());
 }
 
@@ -448,8 +471,10 @@ ApplicationWindow {
 
     QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
-    QTRY_COMPARE(root->property("clears").toInt(), 1);
+    // A quick second click, as the question fades out, clears nothing more.
+    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 1);
     QCOMPARE(dialog->property("diagnosticsText").toString(), QString());
 }
 

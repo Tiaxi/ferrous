@@ -169,6 +169,13 @@ Popup {
         }
     }
 
+    // Its buttons take no click as it fades out: Clear All again would clear
+    // an issue that arrived meanwhile, unseen.
+    Components.PopupClosing {
+        id: closingState
+        popup: root
+    }
+
     // Closing counts as having seen what arrived, so it must not arrive out
     // of view.
     Connections {
@@ -245,6 +252,7 @@ Popup {
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
                 flat: true
+                enabled: !closingState.closing
                 onClicked: root.errorController.clear()
             }
         }
@@ -387,6 +395,7 @@ Popup {
                                     id: actionButton
                                     objectName: "errorHistoryActionButton"
                                     visible: historyRow.action !== null
+                                    enabled: !closingState.closing
                                     Layout.leftMargin: -leftPadding
                                     flat: true
                                     focusPolicy: Qt.StrongFocus
@@ -448,6 +457,7 @@ Popup {
             flat: true
             icon.name: "help-about"
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
+            enabled: !closingState.closing
             onClicked: {
                 root.chosenAction = { kind: "diagnostics", subject: "" }
                 root.close()

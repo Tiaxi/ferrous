@@ -37,6 +37,13 @@ Dialog {
 
     onRejected: root.stopQuittingRequested()
 
+    // Quit Anyway closes it, and its buttons take no other answer as it
+    // fades out.
+    Components.PopupClosing {
+        id: closingState
+        popup: root
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }
@@ -46,6 +53,7 @@ Dialog {
         id: dialogButtons
         primary: tagEditorQuitWaitKeepWaitingButton
         visible: root.offerChoice
+        enabled: !closingState.closing
 
         Button {
             id: tagEditorQuitWaitKeepWaitingButton

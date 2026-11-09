@@ -31,6 +31,12 @@ Dialog {
     // Escape keeps Ferrous open.
     closePolicy: Popup.CloseOnEscape
 
+    // An answer closes it, and its buttons take no other as it fades out.
+    Components.PopupClosing {
+        id: closingState
+        popup: root
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }
@@ -38,6 +44,7 @@ Dialog {
     footer: Components.DialogFooter {
 
         id: dialogButtons
+        enabled: !closingState.closing
         primary: quitSaveFailedRetryButton
         Button {
             id: quitSaveFailedRetryButton

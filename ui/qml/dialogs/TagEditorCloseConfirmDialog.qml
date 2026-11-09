@@ -39,6 +39,12 @@ Dialog {
 
     onRejected: root.keepEditingRequested()
 
+    // An answer closes it, and its buttons take no other as it fades out.
+    Components.PopupClosing {
+        id: closingState
+        popup: root
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }
@@ -46,6 +52,7 @@ Dialog {
     // Save, Discard, Cancel.
     footer: Components.DialogFooter {
         id: dialogButtons
+        enabled: !closingState.closing
         // Save, or Discard and Reload when there is nothing else to do.
         primary: root.forReload ? discardButton : saveButton
         Button {
