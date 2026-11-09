@@ -547,6 +547,11 @@ struct Service {
     waiting_commands: Option<Receiver<Command>>,
     /// Entries ignored since a flush last completed, reported when one does.
     flush_ignored: IgnoredScrobbles,
+    /// How many of the queue's first entries the diagnostics log has
+    /// already listed as sent. Sending them again, as a retry does, is
+    /// logged without listing them, so that an outage does not flood the
+    /// log.
+    listed_scrobbles: usize,
     queue_path: Option<PathBuf>,
     queue: Vec<ScrobbleEntry>,
     /// Problem found while loading the queue file, shown for the session.
@@ -775,6 +780,7 @@ impl Service {
             network_allowed: true,
             waiting_commands: None,
             flush_ignored: IgnoredScrobbles::default(),
+            listed_scrobbles: 0,
             queue_path: options.queue_path,
             queue: Vec::new(),
             queue_load_notice: None,
@@ -1069,6 +1075,7 @@ impl Service {
         self.state.status_text = status_text;
         if clear_queue {
             self.queue.clear();
+            self.listed_scrobbles = 0;
             self.latest_queued = false;
             self.save_queue();
         }
@@ -1186,8 +1193,12 @@ impl Service {
             let batch_len = self.queue.len().min(MAX_SCROBBLES_PER_BATCH);
             log_info(
                 ErrorCategory::LastFm,
-                &scrobbles_sent_line(&self.queue[..batch_len]),
+                &scrobbles_sent_line(
+                    &self.queue[..batch_len],
+                    self.listed_scrobbles.min(batch_len),
+                ),
             );
+            self.listed_scrobbles = self.listed_scrobbles.max(batch_len);
             // A failure is logged with its retry, or in Recent Issues.
             let result = send_scrobble_batch(
                 self.transport.as_ref(),
@@ -1281,6 +1292,13 @@ impl Service {
             index += 1;
             keep
         });
+        // The deferred entries, all listed, now lead the queue.
+        let deferred = outcome
+            .deferred
+            .iter()
+            .filter(|deferred| **deferred)
+            .count();
+        self.listed_scrobbles = deferred + self.listed_scrobbles.saturating_sub(batch_len);
         self.save_queue();
         self.flush_ignored.count += outcome.ignored;
         if self.flush_ignored.reason.is_none() {
@@ -1506,6 +1524,9 @@ impl Service {
         match queue_file::save(&path, &merged) {
             Ok(()) => {
                 self.queue = merged;
+                // The saved scrobbles now come first, and were never
+                // listed; the ones in memory are listed again with them.
+                self.listed_scrobbles = 0;
                 self.queue_unreadable = None;
                 self.queue_save_error = None;
             }
@@ -1787,18 +1808,28 @@ fn scrobbles_count(count: usize) -> String {
     }
 }
 
-/// The diagnostics log's line for sending `batch` to Last.fm. It names the
-/// tracks and when they were played, and nothing of the request itself,
-/// whose session key and signature must not be logged.
-fn scrobbles_sent_line(batch: &[ScrobbleEntry]) -> String {
-    let tracks = logged_list(batch.iter().map(|entry| {
+/// The diagnostics log's line for sending `batch` to Last.fm, whose first
+/// `listed` entries an earlier line listed. It names the other tracks and
+/// when they were played, and nothing of the request itself, whose session
+/// key and signature must not be logged.
+fn scrobbles_sent_line(batch: &[ScrobbleEntry], listed: usize) -> String {
+    let count = scrobbles_count(batch.len());
+    let new = &batch[listed.min(batch.len())..];
+    if new.is_empty() {
+        return format!("Sending {count} again.");
+    }
+    let tracks = logged_list(new.iter().map(|entry| {
         format!(
             "{} at {}",
             logged_track(&entry.artist, &entry.track),
             logged_utc_time(entry.timestamp_utc)
         )
     }));
-    format!("Sending {}: {tracks}.", scrobbles_count(batch.len()))
+    if listed == 0 {
+        format!("Sending {count}: {tracks}.")
+    } else {
+        format!("Sending {count}, {listed} of them again: {tracks}.")
+    }
 }
 
 /// The diagnostics log's line for Last.fm's answer, `outcome`, to `batch`.
@@ -4587,5 +4618,102 @@ mod tests {
                 assert!(!line.contains(secret.as_str()), "{line}");
             }
         }
+    }
+
+    #[test]
+    fn a_retried_batch_is_listed_only_once() {
+        let transport = ScriptedTransport::with_replies([
+            reply(503, ""),
+            Err("offline".to_string()),
+            accepted_reply(5),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..5));
+
+        for _ in 0..3 {
+            service.handle_command(Command::Flush);
+        }
+
+        assert!(service.queue.is_empty());
+        assert_eq!(scrobble_requests(&transport).len(), 3);
+        assert_eq!(test_log::lines_containing("Artist 0 – Track 0").len(), 1);
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info(
+                    "Sending 5 scrobbles: Artist 0 – Track 0 at 2023-11-14T22:13:20Z; \
+                     Artist 1 – Track 1 at 2023-11-14T22:13:21Z; \
+                     Artist 2 – Track 2 at 2023-11-14T22:13:22Z; +2 more."
+                ),
+                info("Sending 5 scrobbles again."),
+                info("Sending 5 scrobbles again."),
+                info("Last.fm accepted 5 scrobbles."),
+            ]
+        );
+        // Each retry adds one line besides #510's warning for the failure.
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] warning: "),
+            [
+                "[ferrous] [lastfm] warning: Last.fm HTTP error 503; retrying in 30 s.",
+                "[ferrous] [lastfm] warning: Last.fm transport error: offline; retrying in 60 s.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_retry_lists_only_the_scrobbles_that_joined_it() {
+        let transport = ScriptedTransport::with_replies([
+            reply(503, ""),
+            reply(503, ""),
+            accepted_reply(3),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..2));
+
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::QueueScrobble(entry(2)));
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::QueueScrobble(entry(3)));
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info(
+                    "Sending 2 scrobbles: Artist 0 – Track 0 at 2023-11-14T22:13:20Z; \
+                     Artist 1 – Track 1 at 2023-11-14T22:13:21Z."
+                ),
+                info(
+                    "Sending 3 scrobbles, 2 of them again: Artist 2 – Track 2 at \
+                     2023-11-14T22:13:22Z."
+                ),
+                info("Sending 3 scrobbles again."),
+                info("Last.fm accepted 3 scrobbles."),
+                // Once taken, the queue's entries are new again.
+                info("Sending 1 scrobble: Artist 3 – Track 3 at 2023-11-14T22:13:23Z."),
+                info("Last.fm accepted 1 scrobble."),
+            ]
+        );
+    }
+
+    #[test]
+    fn scrobbles_deferred_for_the_daily_limit_are_not_listed_again() {
+        let transport =
+            ScriptedTransport::with_replies([scrobble_reply(&[0, 5]), accepted_reply(2)]);
+        let mut service = connected_service(&transport, None, entries(0..2));
+
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::QueueScrobble(entry(2)));
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            lastfm_info_lines()[2..],
+            [
+                info(
+                    "Sending 2 scrobbles, 1 of them again: Artist 2 – Track 2 at \
+                     2023-11-14T22:13:22Z."
+                ),
+                info("Last.fm accepted 2 scrobbles."),
+            ]
+        );
     }
 }
