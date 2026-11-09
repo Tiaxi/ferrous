@@ -561,8 +561,25 @@ if(BUILD_TESTING)
     )
     ferrous_add_default_platform_test(ferrous_search_palette_tests drawsOffscreenUnlessAPlatformIsChosen)
 
+    # One program, its test classes in files of their own, so that they
+    # compile in parallel and a change to one recompiles only its file.
     qt_add_executable(ferrous_qml_smoke_tests
         tests/tst_qml_smoke.cpp
+        tests/QmlSmokeTest.h
+        tests/QmlSmokeTest.cpp
+        tests/tst_qml_smoke_spectrogram.cpp
+        tests/tst_qml_smoke_spectrogram_playback.cpp
+        tests/tst_qml_smoke_spectrogram_canvas.cpp
+        tests/tst_qml_smoke_waveform.cpp
+        tests/tst_qml_smoke_waveform_scene_graph.cpp
+        tests/tst_qml_smoke_waveform_coverage.cpp
+        tests/tst_qml_smoke_library_queue.cpp
+        tests/tst_qml_smoke_transport_input.cpp
+        tests/tst_qml_smoke_window.cpp
+        tests/tst_qml_smoke_preferences.cpp
+        tests/tst_qml_smoke_errors.cpp
+        tests/tst_qml_smoke_tag_editor.cpp
+        tests/tst_qml_smoke_scrobble.cpp
         src/QmlTypes.cpp
         src/BinaryBridgeCodec.cpp
         src/BridgeClient.cpp
@@ -625,8 +642,9 @@ if(BUILD_TESTING)
     )
     # The smoke tests run by area, each area in a process of its own, so a
     # crash or hang in one area costs only that area's results, and quickly.
-    # The areas are the test classes of tst_qml_smoke.cpp. Each timeout is
-    # many times the area's run time in CI, for slower machines.
+    # An area has one or more test classes; see kSmokeTestAreas in
+    # tst_qml_smoke.cpp. Each timeout is many times the area's run time in
+    # CI, for slower machines.
     set(FERROUS_QML_SMOKE_AREAS
         spectrogram 180
         waveform 120
