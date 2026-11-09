@@ -724,6 +724,34 @@ QQuickItem *firstVisibleItemNamed(QQuickItem *root, const QString &objectName) {
     return found.isEmpty() ? nullptr : found.constFirst();
 }
 
+void setPlayingTrack(QObject *bridge) {
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian"));
+    bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours"));
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Morning Tide Field.flac"));
+    bridge->setProperty("durationText", QStringLiteral("03:49"));
+    bridge->setProperty("durationSeconds", 229.0);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+}
+
+QString savedCover(const QTemporaryDir &dir, int width, int height) {
+    const QString path = dir.filePath(QStringLiteral("cover.png"));
+    QImage cover(width, height, QImage::Format_RGB32);
+    cover.fill(Qt::darkCyan);
+    return cover.save(path) ? path : QString();
+}
+
+QRgb colorOf(QObject *object, const char *name) {
+    return object->property(name).value<QColor>().rgba();
+}
+
+bool tabTo(QQuickWindow *host, QQuickItem *stop) {
+    for (int press = 0; press < 24 && host->activeFocusItem() != stop; ++press) {
+        QTest::keyClick(host, Qt::Key_Tab);
+    }
+    return host->activeFocusItem() == stop;
+}
+
 bool clickVisibleButton(QQuickWindow *window, const QString &objectName) {
     QQuickItem *button = visibleItemNamed(window, objectName);
     if (button == nullptr || !button->isEnabled()) {

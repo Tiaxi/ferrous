@@ -462,6 +462,19 @@ QList<QQuickItem *> visibleItemsNamed(QQuickItem *root, const QString &objectNam
 // The first visible item named `objectName` under `root`.
 QQuickItem *firstVisibleItemNamed(QQuickItem *root, const QString &objectName);
 
+// Gives the fallback bridge a playing track, as the viewers' boards show it.
+void setPlayingTrack(QObject *bridge);
+
+// Saves a `width` by `height` cover image in `dir`: its path, or an empty one
+// if it could not be saved.
+QString savedCover(const QTemporaryDir &dir, int width = 64, int height = 64);
+
+// The colour property `name` of `object`, as 8-bit RGBA, as it is drawn.
+QRgb colorOf(QObject *object, const char *name);
+
+// Tabs in `host` until `stop` has focus; whether it got there.
+bool tabTo(QQuickWindow *host, QQuickItem *stop);
+
 // The visible button named `objectName` in `window`, clicked as a user would.
 bool clickVisibleButton(QQuickWindow *window, const QString &objectName);
 

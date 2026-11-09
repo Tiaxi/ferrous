@@ -575,6 +575,7 @@ if(BUILD_TESTING)
         tests/tst_qml_smoke_waveform_coverage.cpp
         tests/tst_qml_smoke_library_queue.cpp
         tests/tst_qml_smoke_transport_input.cpp
+        tests/tst_qml_smoke_album_art.cpp
         tests/tst_qml_smoke_window.cpp
         tests/tst_qml_smoke_preferences.cpp
         tests/tst_qml_smoke_errors.cpp
