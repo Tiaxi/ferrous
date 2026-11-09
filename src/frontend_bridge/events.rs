@@ -606,7 +606,7 @@ pub(super) fn process_metadata_event(
     match event {
         MetadataEvent::Loaded(mut metadata) => {
             keep_newer_cover(state, &mut metadata);
-            state.metadata = metadata;
+            state.metadata = *metadata;
             SnapshotUrgency::Immediate
         }
         MetadataEvent::Superseded(path) => {
@@ -2144,11 +2144,11 @@ mod tests {
     }
 
     fn loaded(path: &Path, read_in: TrackFileFingerprint) -> MetadataEvent {
-        MetadataEvent::Loaded(crate::metadata::TrackMetadata {
+        MetadataEvent::Loaded(Box::new(crate::metadata::TrackMetadata {
             source_path: Some(path.to_string_lossy().into_owned()),
             file_fingerprint: Some(read_in),
             ..crate::metadata::TrackMetadata::default()
-        })
+        }))
     }
 
     #[test]
@@ -2567,7 +2567,7 @@ mod tests {
         // The metadata worker chose the cover, then went on probing the
         // file; its later results carry the cover it chose first.
         let read = covered_metadata(&source, cover, 1, read_at(base, 0));
-        process_metadata_event(MetadataEvent::Loaded(read.clone()), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(read.clone())), &mut state);
         assert_eq!(state.metadata.cover_art_stamp, 1);
 
         // The image is replaced, and the watcher's scan gives the row stamp 2.
@@ -2580,7 +2580,7 @@ mod tests {
             bitrate_kbps: Some(905),
             ..read
         };
-        process_metadata_event(MetadataEvent::Loaded(probed), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(probed)), &mut state);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(cover));
         assert_eq!(state.metadata.cover_art_stamp, 2);
         assert_eq!(state.metadata.bitrate_kbps, Some(905));
@@ -2588,7 +2588,7 @@ mod tests {
         // A read made since then is newer than the scan's cover.
         let front = "/music/Artist/Album/front.jpg";
         let reread = covered_metadata(&source, front, 3, read_at(base, 20));
-        process_metadata_event(MetadataEvent::Loaded(reread), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(reread)), &mut state);
         assert_eq!(state.metadata.cover_art_stamp, 3);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(front));
     }
@@ -2600,7 +2600,12 @@ mod tests {
         let old = "/music/Artist/Album/folder.jpg";
         let new = "/music/Artist/Album/cover.png";
         process_metadata_event(
-            MetadataEvent::Loaded(covered_metadata(&source, old, 1, read_at(base, 0))),
+            MetadataEvent::Loaded(Box::new(covered_metadata(
+                &source,
+                old,
+                1,
+                read_at(base, 0),
+            ))),
             &mut state,
         );
         // 1. A large rescan reads the old cover; its batch is published later.
@@ -2635,7 +2640,7 @@ mod tests {
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(new));
         assert_eq!(state.metadata.cover_art_stamp, 2);
         // 5. The metadata read after the apply arrives, and agrees.
-        process_metadata_event(MetadataEvent::Loaded(reread), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(reread)), &mut state);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(new));
         assert_eq!(state.metadata.cover_art_stamp, 2);
     }

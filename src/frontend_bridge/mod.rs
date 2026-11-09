@@ -7071,11 +7071,11 @@ mod tests {
         runtime.state.playback.state = PlaybackState::Stopped;
 
         runtime.handle_wake(
-            BridgeLoopWake::Metadata(MetadataEvent::Loaded(TrackMetadata {
+            BridgeLoopWake::Metadata(MetadataEvent::Loaded(Box::new(TrackMetadata {
                 source_path: Some(track.to_string_lossy().to_string()),
                 title: "ferrous_reactive_stopped_metadata".to_string(),
                 ..TrackMetadata::default()
-            })),
+            }))),
             &event_tx,
         );
 

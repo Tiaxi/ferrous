@@ -2865,12 +2865,12 @@ mod tests {
         assert_eq!(state.metadata.album, "Old Album");
 
         metadata_tx
-            .send(MetadataEvent::Loaded(TrackMetadata {
+            .send(MetadataEvent::Loaded(Box::new(TrackMetadata {
                 title: "New Title".to_string(),
                 artist: "New Artist".to_string(),
                 album: "New Album".to_string(),
                 ..TrackMetadata::default()
-            }))
+            })))
             .expect("send metadata event");
         let changed = pump_metadata_events(&metadata_rx, &mut state);
         assert!(changed);

@@ -81,7 +81,8 @@ pub struct TrackMetadata {
 
 #[derive(Debug, Clone)]
 pub enum MetadataEvent {
-    Loaded(TrackMetadata),
+    /// Boxed, as it is far larger than the other events.
+    Loaded(Box<TrackMetadata>),
     /// A request for this path was dropped unread: a newer request for
     /// another path came before the worker got to it. Sent before the
     /// newer read starts, and once per path.
@@ -177,18 +178,18 @@ fn run_metadata_worker(
         }
         before_read(&path);
         let mut metadata = load_metadata_for_path(&path);
-        let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        let _ = event_tx.send(MetadataEvent::Loaded(Box::new(metadata.clone())));
         metadata.channel_labels = crate::analysis::probe_source_channel_labels(&path);
         if !metadata.channel_labels.is_empty() {
             metadata.channels = u8::try_from(metadata.channel_labels.len()).ok();
-            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+            let _ = event_tx.send(MetadataEvent::Loaded(Box::new(metadata.clone())));
         }
         apply_technical_details(&path, &mut metadata, event_tx);
 
         if metadata.current_bitrate_kbps.is_none() {
             metadata.current_bitrate_kbps = metadata.bitrate_kbps;
         }
-        let _ = event_tx.send(MetadataEvent::Loaded(metadata));
+        let _ = event_tx.send(MetadataEvent::Loaded(Box::new(metadata)));
     }
 }
 
@@ -333,7 +334,7 @@ fn apply_technical_details(
                 .current_bitrate_kbps
                 .or(metadata.current_bitrate_kbps)
                 .or(metadata.bitrate_kbps);
-            let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+            let _ = event_tx.send(MetadataEvent::Loaded(Box::new(metadata.clone())));
         }
         return;
     }
@@ -353,7 +354,7 @@ fn apply_technical_details(
         metadata.bitrate_kbps = metadata.bitrate_kbps.or(details.bitrate_kbps);
         metadata.current_bitrate_kbps = details.current_bitrate_kbps;
         metadata.bitrate_timeline_kbps = details.bitrate_timeline_kbps;
-        let _ = event_tx.send(MetadataEvent::Loaded(metadata.clone()));
+        let _ = event_tx.send(MetadataEvent::Loaded(Box::new(metadata.clone())));
     }
 }
 
