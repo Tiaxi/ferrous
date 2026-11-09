@@ -78,7 +78,9 @@ Item {
         anchors.centerIn: parent
         spacing: 2
 
-        Label {
+        // Text, not a Label: the desktop style's Label has a hover handler,
+        // which would take the hover from the view under the plate.
+        Text {
             objectName: "plotPlateLabel"
             visible: root.isLabel
             text: root.text

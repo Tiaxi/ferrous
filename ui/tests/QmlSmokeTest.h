@@ -474,6 +474,12 @@ bool tabTo(QQuickWindow *host, QQuickItem *stop);
 // The visible button named `objectName` in `window`, clicked as a user would.
 bool clickVisibleButton(QQuickWindow *window, const QString &objectName);
 
+// Whether no popup in any window is opening or closing. The app's style
+// fades popups in and out: in its enter or exit transition a popup is
+// visible but not opened, and a modal one that fades out still takes the
+// keys and the clicks.
+bool popupsSettled();
+
 // What the tests of every area share. Each area has one or more test
 // classes, which CTest runs in a process of their own; see main() in
 // tst_qml_smoke.cpp.

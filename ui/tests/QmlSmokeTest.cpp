@@ -755,6 +755,18 @@ bool clickVisibleButton(QQuickWindow *window, const QString &objectName) {
     return true;
 }
 
+bool popupsSettled() {
+    for (QWindow *window : QGuiApplication::topLevelWindows()) {
+        for (QObject *object : window->findChildren<QObject *>()) {
+            if (object->inherits("QQuickPopup") && object->property("visible").toBool()
+                && !object->property("opened").toBool()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Compiled here, after QmlSmokeTest.h opened the items' private members to
 // the tests, not in the build's mocs_compilation.cpp, where an earlier moc file
 // would have included their headers without that.

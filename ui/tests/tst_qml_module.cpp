@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QIcon>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
@@ -182,13 +183,14 @@ void QmlModuleTest::sessionIsolationClearsTheDesktopAndPlatformTheme() {
 }
 
 // Run in a KDE session too, as CTest's ferrous_qml_module_kde_session does.
-// No session's platform theme chooses the styles: the KDE one would choose
-// org.kde.desktop for the controls and Breeze for widgets, rather than
-// Qt's own Fusion.
+// No session's platform theme chooses the styles: the controls have the
+// app's style and the icons Breeze, as without a session, and widgets
+// Qt's own Fusion rather than the session's Breeze.
 void QmlModuleTest::looksTheSameWhateverTheDesktopSession() {
     QVERIFY(!qEnvironmentVariableIsSet("XDG_CURRENT_DESKTOP"));
     QVERIFY(!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME"));
-    QCOMPARE(QQuickStyle::name(), QStringLiteral("Fusion"));
+    QCOMPARE(QQuickStyle::name(), QStringLiteral("org.kde.desktop"));
+    QCOMPARE(QIcon::themeName(), QStringLiteral("breeze"));
     QCOMPARE(QApplication::style()->name(), QStringLiteral("fusion"));
 }
 
@@ -203,9 +205,9 @@ int main(int argc, char **argv) {
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
 
-    // No desktop session's platform theme, which would choose the
-    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
-    isolateFromDesktopSession();
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h.
+    isolateFromDesktopSessionWithAppLook();
     QApplication app(argc, argv);
     QmlModuleTest test;
     return QTest::qExec(&test, argc, argv);

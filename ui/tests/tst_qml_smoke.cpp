@@ -219,9 +219,9 @@ int main(int argc, char **argv) {
     // not the one that this desktop's xdg-mime names.
     BridgeClient::setFileBrowserNameDetector(nullptr);
 
-    // No desktop session's platform theme, which would choose the
-    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
-    isolateFromDesktopSession();
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h.
+    isolateFromDesktopSessionWithAppLook();
     QApplication app(argc, argv);
     QStringList arguments;
     for (int i = 0; i < argc; ++i) {

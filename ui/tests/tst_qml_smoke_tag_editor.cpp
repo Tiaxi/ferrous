@@ -220,6 +220,8 @@ struct TagEditorWindow {
         return editor.dirty() == edit;
     }
 
+    // A closed dialog is visible until the style's exit transition ends:
+    // wait for it to hide, QTRY_VERIFY(!...Shown()).
     bool confirmShown() const { return confirm->property("visible").toBool(); }
     bool editorShown() const { return dialog->property("visible").toBool(); }
     QString confirmMessage() const {
@@ -581,9 +583,10 @@ void TagEditorSmokeTest::savingTagEditsChosenWhenQuittingWaitsWithinTheBound() {
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCloseConfirmSaveButton")));
     QTRY_COMPARE(fixture.saves->saveCount(), 1);
 
-    // The confirmation gives way to the wait, which shows the file.
+    // The confirmation gives way to the wait, which shows the file. The
+    // confirmation is visible until the style's exit transition ends.
     QTRY_VERIFY(fixture.quitWaitShown());
-    QVERIFY(!fixture.confirmShown());
+    QTRY_VERIFY(!fixture.confirmShown());
     QObject *files = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorQuitWaitFiles"));
     QVERIFY(files != nullptr);
     QCOMPARE(files->property("text").toString(), QStringLiteral("01 Song.flac"));
@@ -625,7 +628,7 @@ void TagEditorSmokeTest::keepWaitingForAStalledTagSaveQuitsWhenItFinishes() {
     fixture.saves->release.release();
     QTRY_VERIFY(!fixture.window->isVisible());
     QCOMPARE(fixture.stateSaves(), 1);
-    QVERIFY(!fixture.quitWaitShown());
+    QTRY_VERIFY(!fixture.quitWaitShown());
     QVERIFY(!fixture.editor.dirty());
 }
 
@@ -689,7 +692,7 @@ void TagEditorSmokeTest::tagEditorReloadAsksBeforeDroppingEdits() {
     QTRY_COMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0"));
     QVERIFY(!fixture.editor.dirty());
     QVERIFY(fixture.editorShown());
-    QVERIFY(!fixture.confirmShown());
+    QTRY_VERIFY(!fixture.confirmShown());
 
     // Without edits, Reload does not ask.
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));

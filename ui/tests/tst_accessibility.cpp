@@ -50,6 +50,10 @@
 
 namespace {
 
+// The controls style that the test program's main() sets, rather than the
+// app's, for a child process that asks for another.
+constexpr char childControlsStyleVariable[] = "FERROUS_TEST_CHILD_CONTROLS_STYLE";
+
 QMutex &capturedMessageMutex() {
     static QMutex mutex;
     return mutex;
@@ -179,6 +183,27 @@ QString accessibleText(QObject *object, QAccessible::Text text) {
 QAccessible::Role accessibleRole(QObject *object) {
     QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(object);
     return iface != nullptr ? iface->role() : QAccessible::NoRole;
+}
+
+// `object`'s interface where assistive technology finds it: in the tree that
+// starts at `window`. Null when it is not there.
+QAccessibleInterface *inAccessibleTree(QQuickWindow *window, QObject *object) {
+    const std::function<QAccessibleInterface *(QAccessibleInterface *)> visit =
+        [&](QAccessibleInterface *iface) -> QAccessibleInterface * {
+        if (iface == nullptr) {
+            return nullptr;
+        }
+        if (iface->object() == object) {
+            return iface;
+        }
+        for (int i = 0; i < iface->childCount(); ++i) {
+            if (QAccessibleInterface *found = visit(iface->child(i))) {
+                return found;
+            }
+        }
+        return nullptr;
+    };
+    return visit(QAccessible::queryAccessibleInterface(window));
 }
 
 // Evaluates `expression` in `item`'s own QML scope, as for its attached
@@ -2518,9 +2543,10 @@ void AccessibilityTest::transportBarHasNoWarnings() {
 
 void AccessibilityTest::transportBarHasNoWarningsUnderTheBasicStyle() {
     // The style is fixed once a control loads, so a child process runs the
-    // check above under the Basic style.
+    // check above under the Basic style. main() sets the app's style, which
+    // would override $QT_QUICK_CONTROLS_STYLE, so it sets the child's.
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("QT_QUICK_CONTROLS_STYLE"), QStringLiteral("Basic"));
+    environment.insert(QString::fromLatin1(childControlsStyleVariable), QStringLiteral("Basic"));
     QProcess child;
     child.setProcessEnvironment(environment);
     child.setProcessChannelMode(QProcess::MergedChannels);
@@ -3623,6 +3649,11 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QVERIFY(!analysing->isVisible());
     QTRY_VERIFY(analysing->isVisible());
     QCOMPARE(analysing->property("text").toString(), QStringLiteral("Analysing…"));
+    // Assistive technology reads it.
+    QAccessibleInterface *analysingIface = inAccessibleTree(window, analysing);
+    QVERIFY(analysingIface != nullptr);
+    QCOMPARE(analysingIface->role(), QAccessible::StaticText);
+    QCOMPARE(analysingIface->text(QAccessible::Name), QStringLiteral("Analysing…"));
     // The file ends early: its message, in the empty part after the cut,
     // as Recent Issues says it, with the way there.
     QVERIFY(bridge->setProperty("waveformCoverageSeconds", 242.6));
@@ -3635,7 +3666,21 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QQuickItem *link = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarlyLink"));
     QVERIFY(text != nullptr && link != nullptr);
     QCOMPARE(text->property("text").toString(), QStringLiteral("The file ends at 4:02."));
+    QAccessibleInterface *textIface = inAccessibleTree(window, text);
+    QVERIFY(textIface != nullptr);
+    QCOMPARE(textIface->role(), QAccessible::StaticText);
+    QCOMPARE(textIface->text(QAccessible::Name), QStringLiteral("The file ends at 4:02."));
     QCOMPARE(accessibleRole(link), QAccessible::Link);
+    // The messages over the plot take no hover from the view under them, as
+    // a Label of the app's style would, with its hover handler.
+    const auto takesHover = [](QQuickItem *item) {
+        const QList<QObject *> children = item->findChildren<QObject *>();
+        return item->acceptHoverEvents()
+            || std::any_of(children.cbegin(), children.cend(),
+                           [](QObject *child) { return child->inherits("QQuickHoverHandler"); });
+    };
+    QVERIFY(!takesHover(analysing));
+    QVERIFY(!takesHover(text));
     QSignalSpy issues(errors, SIGNAL(historyRequested()));
     link->forceActiveFocus(Qt::TabFocusReason);
     QTest::keyClick(window, Qt::Key_Return);
@@ -3666,9 +3711,14 @@ int main(int argc, char **argv) {
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
 
-    // No desktop session's platform theme, which would choose the
-    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
-    isolateFromDesktopSession();
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h. A child process that
+    // transportBarHasNoWarningsUnderTheBasicStyle() starts asks for another.
+    isolateFromDesktopSessionWithAppLook();
+    const QString childStyle = qEnvironmentVariable(childControlsStyleVariable);
+    if (!childStyle.isEmpty()) {
+        QQuickStyle::setStyle(childStyle);
+    }
     QApplication app(argc, argv);
     QAccessible::setActive(true);
     AccessibilityTest test;
