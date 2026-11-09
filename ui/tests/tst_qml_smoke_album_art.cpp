@@ -1341,6 +1341,8 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     QVERIFY2(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
     QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                  at.constData());
+    // Clicked once it has faded in, where the user sees it.
+    QTRY_VERIFY2(popupsSettled(), at.constData());
     QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
     QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{index}));
     QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
@@ -1472,6 +1474,16 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 QVERIFY2(host != nullptr && QTest::qWaitForWindowActive(host), at.constData());
                 QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton")) != nullptr,
                              at.constData());
+                // The art has the keys, also once the dialog has faded out,
+                // which gives back the keys it closes with.
+                const QString viewFocus = fullscreenMode == 0 ? QStringLiteral("albumArtPopupViewFocus")
+                                                              : QStringLiteral("albumArtFullscreenViewFocus");
+                QTRY_VERIFY2(popupsSettled(), at.constData());
+                QVERIFY2(host->activeFocusItem() != nullptr
+                             && host->activeFocusItem()->objectName() == viewFocus,
+                         qPrintable(QStringLiteral("%1: %2").arg(QString::fromUtf8(at),
+                             host->activeFocusItem() != nullptr ? host->activeFocusItem()->objectName()
+                                                                : QStringLiteral("none"))));
                 QQuickItem *label = visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"));
                 QVERIFY2(label != nullptr, at.constData());
                 QCOMPARE(label->property("text").toString(), QStringLiteral("iTunes Candidate"));
@@ -1548,6 +1560,8 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY(applied().isEmpty());
+            // The question's buttons are clicked once it has faded in.
+            QTRY_VERIFY2(popupsSettled(), at.constData());
             QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogCancelButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
                          at.constData());
@@ -1556,6 +1570,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
+            QTRY_VERIFY2(popupsSettled(), at.constData());
             QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogConfirmButton")), at.constData());
             QTRY_COMPARE(applied(), (QVariantList{previewed}));
             QVERIFY(!dialog->property("previewShown").toBool());
@@ -1684,6 +1699,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
                      at.constData());
         QCOMPARE(toggled.count(), 0);
         QCOMPARE(bridge->property("playbackState").toString(), playbackBefore);
+        QTRY_VERIFY2(popupsSettled(), at.constData());
         QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogCancelButton")), at.constData());
         QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
                      at.constData());

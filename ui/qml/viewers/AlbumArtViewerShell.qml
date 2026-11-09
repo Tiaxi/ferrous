@@ -80,11 +80,14 @@ Item {
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
     // A preview shows the viewer's controls and takes the keys from the
-    // dialog it came from.
+    // dialog it came from, before that dialog closes: a dialog that closes
+    // with the keys gives them back as its fade-out ends, to the window
+    // rather than to the viewer. A viewer that opens for the preview takes
+    // them as it shows.
     onPreviewActiveChanged: {
         if (root.previewActive) {
             fullscreenControlsAutoHide.wake()
-            Qt.callLater(root.focusView)
+            root.focusView()
         }
     }
     onUseWholeScreenViewerModeChanged: {
