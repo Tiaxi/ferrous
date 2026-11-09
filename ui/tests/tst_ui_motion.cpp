@@ -6,6 +6,7 @@
 // drag. Each uses Kirigami's durations with an OutCubic curve, is instant
 // with Plasma's animations off, and leaves nothing running once it is done.
 
+#include <QAbstractAnimation>
 #include <QApplication>
 #include <QColor>
 #include <QEasingCurve>
@@ -322,6 +323,42 @@ bool rowsSettled(QQuickItem *view, int count) {
     }
     return true;
 }
+
+// The time of every animation of the GUI thread, while it lives: it stands
+// still but for the steps the test takes, however busy the machine. For the
+// lists' transitions, whose animations cannot be paused or set to a point.
+// Qt takes it only while no other driver is installed: main() keeps Qt
+// Quick on the basic render loop, whose window installs none.
+class SteppedAnimationDriver : public QAnimationDriver {
+public:
+    SteppedAnimationDriver() { install(); }
+    ~SteppedAnimationDriver() override { uninstall(); }
+    SteppedAnimationDriver(const SteppedAnimationDriver &) = delete;
+    SteppedAnimationDriver &operator=(const SteppedAnimationDriver &) = delete;
+
+    qint64 elapsed() const override { return m_elapsed; }
+
+    // Lets `ms` of animation time pass, a frame of 16 ms at a time, as the
+    // window would draw them. Whether this driver ran the animations: Qt
+    // starts the installed driver once one runs, so it is false when Qt
+    // left it out, and the animations ran on real time instead.
+    [[nodiscard]] bool step(int ms) {
+        bool drove = false;
+        for (int done = 0; done < ms; done += kFrame) {
+            // The animations that started since: they run from the next
+            // frame on.
+            QCoreApplication::processEvents();
+            drove = drove || isRunning();
+            m_elapsed += std::min(kFrame, ms - done);
+            advance();
+        }
+        return drove;
+    }
+
+private:
+    static constexpr int kFrame = 16;
+    qint64 m_elapsed = 0;
+};
 
 // The frames `window` draws over `ms` of wall time.
 int framesOver(QQuickWindow *window, int ms) {
@@ -1054,22 +1091,25 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         ? QStringList{QStringLiteral("NarrowArtist"), QStringLiteral("NarrowAlbum")}
         : QStringList{QStringLiteral("ArtistAlbum")};
     QString failure;
+    // The frames the window drew while the fade ran, and the looks
+    // checked, at those frames and at the points the test sets.
     int frames = 0;
+    int checks = 0;
     const auto checkFrame = [&]() {
         if (!failure.isEmpty() || !handover->property("running").toBool()) {
             return;
         }
-        ++frames;
+        ++checks;
         for (const QString &name : stillLines) {
             if (!lineStill(panel, name)) {
-                failure = QStringLiteral("%1 is not still in frame %2").arg(name).arg(frames);
+                failure = QStringLiteral("%1 is not still in check %2").arg(name).arg(checks);
             }
         }
         for (const QString &name : {title, details}) {
             const PanelLine line = panelLine(panel, name);
             if (!qFuzzyCompare(line.incomingOpacity() + line.outgoingOpacity() + 1.0, 2.0)) {
-                failure = QStringLiteral("%1 fades in at %2 and out at %3 in frame %4")
-                              .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(frames);
+                failure = QStringLiteral("%1 fades in at %2 and out at %3 in check %4")
+                              .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(checks);
             }
         }
         const PanelLine titleLine = panelLine(panel, title);
@@ -1082,7 +1122,12 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         }
     };
     const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, checkFrame);
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (handover->property("running").toBool()) {
+                ++frames;
+            }
+            checkFrame();
+        });
 
     // As BridgeClient tells it: the path, then the metadata.
     bridge->setProperty("currentTrackPath", kTrackA2);
@@ -1110,11 +1155,14 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     }
     QVERIFY(!itemNamed(panel, QStringLiteral("albumArtOutgoing"))->isVisible());
 
-    // Along the way, as the fade stands at each point of it.
+    // Along the way, as the fade stands at each point of it, and as the
+    // window draws it there: held there, a frame comes whatever the load.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     for (const double at : {0.25, 0.5, 0.75}) {
+        const int framesBefore = frames;
         panel->setProperty("handover", at);
         checkFrame();
+        QVERIFY(QTest::qWaitFor([&]() { return frames > framesBefore; }));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QCOMPARE(titleLine.outgoingOpacity(), 1.0 - at);
         QCOMPARE(detailsLine.outgoingOpacity(), 1.0 - at);
@@ -1190,10 +1238,10 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
         return true;
     };
     QVERIFY(oneCurve());
-    QVERIFY(QTest::qWaitFor([&]() {
-        const double cover = outgoingCover->opacity();
-        return cover < 0.9 && cover > 0.1;
-    }));
+    // Half-way, still on the one curve.
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.5);
+    QCOMPARE(outgoingCover->opacity(), 0.5);
     QVERIFY(oneCurve());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("Second"));
     QCOMPARE(textOf(panel, "nowPlayingOutgoingArtistAlbum"), QStringLiteral("Artist A — Album A"));
@@ -1201,6 +1249,7 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     QCOMPARE(panelLine(panel, QStringLiteral("Title")).stillWidth(), 0.0);
     QCOMPARE(panelLine(panel, QStringLiteral("Details")).stillWidth(), 0.0);
     QVERIFY(keepsStill(panelLine(panel, QStringLiteral("ArtistAlbum")), QStringLiteral("Artist A —")));
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
@@ -1220,21 +1269,23 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
-    units->setShortDuration(1500);
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
     showTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"));
     QVERIFY(handover->property("running").toBool());
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     const PanelLine artistAlbum = panelLine(panel, QStringLiteral("ArtistAlbum"));
-    QVERIFY(QTest::qWaitFor([&]() { return title.outgoingOpacity() < 0.6; }, 5000));
-    QVERIFY(title.outgoingOpacity() > 0.05);
+    // Part of the way.
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.45);
+    QCOMPARE(title.outgoingOpacity(), 0.55);
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
     const double titleBefore = title.outgoingOpacity();
 
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist B"));
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), 1500);
+    QCOMPARE(handover->property("duration").toInt(), units->shortDuration());
+    QCOMPARE(panel->property("handover").toDouble(), 0.0);
     // At once: the line before shows whole, as the line did; the title
     // where it was.
     QVERIFY(artistAlbum.fades());
@@ -1247,21 +1298,23 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
     QCOMPARE(title.outgoingText(), QStringLiteral("First"));
 
     // Then each goes one way only, on the one curve, to the playing track.
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     double titleOut = titleBefore;
     double lineOut = 1.0;
-    QVERIFY(QTest::qWaitFor([&]() {
+    for (const double at : {0.25, 0.5, 0.9}) {
+        panel->setProperty("handover", at);
         const double nextTitle = title.outgoingOpacity();
         const double nextLine = artistAlbum.outgoingOpacity();
-        if (nextTitle > titleOut || nextLine > lineOut
-            || !qFuzzyCompare(nextTitle / titleBefore + 1.0, nextLine + 1.0)) {
-            qWarning("title %f -> %f, line %f -> %f", titleOut, nextTitle, lineOut, nextLine);
-            return true;
-        }
+        QVERIFY(nextTitle < titleOut);
+        QVERIFY(nextLine < lineOut);
+        QCOMPARE(nextTitle, titleBefore * (1.0 - at));
+        QCOMPARE(nextLine, 1.0 - at);
+        QCOMPARE(artistAlbum.incomingOpacity(), at);
         titleOut = nextTitle;
         lineOut = nextLine;
-        return !handover->property("running").toBool();
-    }, 6000));
-    QVERIFY(!handover->property("running").toBool());
+    }
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     QVERIFY(allLinesStill(panel));
 }
 
@@ -1639,13 +1692,14 @@ void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     QVERIFY(title.fades());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
     QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
-    QVERIFY(QTest::qWaitFor([&]() {
-        const double cover = outgoingCover->opacity();
-        return cover < 0.9 && cover > 0.1;
-    }));
+    // Half-way, still together.
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.5);
+    QCOMPARE(outgoingCover->opacity(), 0.5);
     QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
     // The album line is the same: it stays still all along.
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
@@ -1799,17 +1853,16 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
-    // Slow enough to stop where the test wants.
-    units->setShortDuration(1500);
-    units->setLongDuration(3000);
+    QVERIFY(units->longDuration() != units->shortDuration());
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
     showTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"), covers.first);
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), 1500);
+    QCOMPARE(handover->property("duration").toInt(), units->shortDuration());
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
-    QVERIFY(QTest::qWaitFor([&]() { return title.outgoingOpacity() < linesLeft; }, 5000));
-    QVERIFY(title.outgoingOpacity() > 0.05);
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 1.0 - linesLeft);
+    QCOMPARE(title.outgoingOpacity(), linesLeft);
     const double outgoingBefore = title.outgoingOpacity();
     const double liveBefore = title.incomingOpacity();
     QVERIFY(!outgoingCover->isVisible());
@@ -1818,7 +1871,8 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     // At once: every layer where it was; the cover before shows whole over
     // the new one, as it did before.
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), 3000);
+    QCOMPARE(handover->property("duration").toInt(), units->longDuration());
+    QCOMPARE(panel->property("handover").toDouble(), 0.0);
     QVERIFY(title.fades());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
     QCOMPARE(title.outgoingOpacity(), outgoingBefore);
@@ -1828,24 +1882,25 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     QCOMPARE(outgoingCover->childItems().first()->property("source").toUrl().toString(), covers.first);
 
     // Then each goes one way only, on the one curve, to the playing track.
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     double lines = outgoingBefore;
     double cover = 1.0;
-    QVERIFY(QTest::qWaitFor([&]() {
+    for (const double at : {0.25, 0.5, 0.9}) {
+        panel->setProperty("handover", at);
         const double nextLines = title.outgoingOpacity();
-        const double nextCover = outgoingCover->isVisible() ? outgoingCover->opacity() : 0.0;
-        if (nextLines > lines || nextCover > cover
-            || !qFuzzyCompare(title.incomingOpacity() + nextLines + 1.0, 2.0)
-            || (nextCover > 0 && !qFuzzyCompare(nextLines / outgoingBefore + 1.0, nextCover + 1.0))
-            || !lineStill(panel, QStringLiteral("ArtistAlbum"))) {
-            qWarning("lines %f -> %f, cover %f -> %f, live %f", lines, nextLines, cover, nextCover,
-                     title.incomingOpacity());
-            return true;
-        }
+        QVERIFY(outgoingCover->isVisible());
+        const double nextCover = outgoingCover->opacity();
+        QVERIFY(nextLines < lines);
+        QVERIFY(nextCover < cover);
+        QCOMPARE(nextLines, outgoingBefore * (1.0 - at));
+        QCOMPARE(nextCover, 1.0 - at);
+        QCOMPARE(title.incomingOpacity() + nextLines, 1.0);
+        QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
         lines = nextLines;
         cover = nextCover;
-        return !handover->property("running").toBool();
-    }, 6000));
-    QVERIFY(!handover->property("running").toBool());
+    }
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     QVERIFY(!outgoingCover->isVisible());
     QVERIFY(allLinesStill(panel));
 }
@@ -2332,6 +2387,9 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     const double albumAY = albumA->y();
     QCOMPARE(albumB->y(), 2 * rowHeight);
 
+    // The slide's time, in the test's steps.
+    SteppedAnimationDriver driver;
+    const int duration = units->shortDuration();
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     // Laid out at once: the children are in place, Album A has not moved,
     // and Album B starts where it was, over the children.
@@ -2342,19 +2400,24 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
-    QVERIFY(QTest::qWaitFor([&]() {
-        return albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight;
-    }));
+    // Half-way, it is on its way down, still over the children.
+    QVERIFY(driver.step(duration / 2));
+    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    QVERIFY(albumB->z() > firstChild->z());
     QCOMPARE(albumA->y(), albumAY);
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->y() == 4 * rowHeight; }));
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->z() == 1.0; }));
+    QVERIFY(driver.step(duration));
+    QCOMPARE(albumB->y(), 4 * rowHeight);
+    QCOMPARE(albumB->z(), 1.0);
 
     // Collapsing: Album B slides back up over the children as they fade.
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->y() == 2 * rowHeight; }));
+    QVERIFY(driver.step(duration / 2));
+    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    QVERIFY(driver.step(duration));
+    QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
 }
 
@@ -2407,6 +2470,8 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
     QCOMPARE(slide->property("duration").toInt(), units->shortDuration());
     QCOMPARE(easingOf(slide), QEasingCurve::OutCubic);
     const double rowHeight = view->property("rowHeight").toDouble();
+    // The slide's time, in the test's steps.
+    SteppedAnimationDriver driver;
 
     // Row 0 dropped before row 3; the backend moves it there.
     QMetaObject::invokeMethod(controller, "dropQueueRows", Q_ARG(QVariant, 0), Q_ARG(QVariant, 3));
@@ -2420,8 +2485,10 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
     QCOMPARE(moved->y(), 2 * rowHeight);
     QCOMPARE(displaced->y(), 1 * rowHeight);
     QVERIFY(moved->z() > displaced->z());
-    QVERIFY(QTest::qWaitFor([&]() { return displaced->y() < rowHeight && displaced->y() > 0; }));
-    QVERIFY(QTest::qWaitFor([&]() { return rowsSettled(view, 5); }));
+    QVERIFY(driver.step(units->shortDuration() / 2));
+    QVERIFY2(displaced->y() < rowHeight && displaced->y() > 0, qPrintable(QString::number(displaced->y())));
+    QVERIFY(driver.step(units->shortDuration()));
+    QVERIFY(rowsSettled(view, 5));
     QCOMPARE(itemAtIndex(view, 2), moved);
 }
 
@@ -2616,6 +2683,10 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();
