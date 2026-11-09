@@ -9,6 +9,7 @@
 #include <optional>
 
 #include "PlaybackClock.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -648,5 +649,12 @@ void PlaybackClockTest::ticksStopAtTheEndOfTheTrack() {
     QVERIFY(!clock.m_tickTimer.isActive());
 }
 
-QTEST_MAIN(PlaybackClockTest)
+int main(int argc, char **argv) {
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
+    QCoreApplication app(argc, argv);
+    PlaybackClockTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 #include "tst_playback_clock.moc"

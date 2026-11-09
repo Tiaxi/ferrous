@@ -13,7 +13,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFont>
-#include <QIcon>
 #include <QImage>
 #include <QLocale>
 #include <QMutex>
@@ -23,7 +22,6 @@
 #include <QQmlEngine>
 #include <QQmlExpression>
 #include <QQuickItem>
-#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -38,6 +36,7 @@
 #include "GlobalSearchResultsModel.h"
 #include "Localization.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -1371,8 +1370,9 @@ int main(int argc, char **argv) {
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
-    // The app's controls style, which it needs to start (docs/INSTALL.md).
-    QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h.
+    isolateFromDesktopSessionWithAppLook();
     // Settings, data and caches of the test's own: no developer's icon
     // theme, colours or caches reach the tests.
     QTemporaryDir fixtures;
@@ -1383,16 +1383,10 @@ int main(int argc, char **argv) {
     qputenv("XDG_CONFIG_DIRS", QFile::encodeName(fixtures.filePath(QStringLiteral("config-dirs"))));
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
-    // The same platform whatever the desktop the tests run in: without a
-    // desktop, Qt loads no desktop's platform theme.
-    qunsetenv("XDG_CURRENT_DESKTOP");
-    qunsetenv("QT_QPA_PLATFORMTHEME");
     qputenv("LANGUAGE", "en_US");
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates));
     QApplication app(argc, argv);
     QAccessible::setActive(true);
-    // Breeze, as a KDE session's platform theme sets it.
-    QIcon::setThemeName(QStringLiteral("breeze"));
     FerrousLocalization::registerQmlTypes();
     SearchPaletteTest test;
     return QTest::qExec(&test, argc, argv);

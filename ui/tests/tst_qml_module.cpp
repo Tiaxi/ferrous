@@ -13,14 +13,17 @@
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlContext>
+#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSignalSpy>
+#include <QStyle>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
 #include "../src/LibraryTreeModel.h"
 #include "../src/QmlTypes.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -86,6 +89,8 @@ private slots:
     void theModuleHasEveryFileOfTheQmlSourceTree();
     void everyQmlFileOfTheModuleCompiles();
     void drawsOffscreenUnlessAPlatformIsChosen();
+    void sessionIsolationClearsTheDesktopAndPlatformTheme();
+    void looksTheSameWhateverTheDesktopSession();
 };
 
 void QmlModuleTest::initTestCase() {
@@ -167,6 +172,26 @@ void QmlModuleTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
+// The helper that every test program's main() calls; TestSessionIsolation.h.
+void QmlModuleTest::sessionIsolationClearsTheDesktopAndPlatformTheme() {
+    qputenv("XDG_CURRENT_DESKTOP", "KDE");
+    qputenv("QT_QPA_PLATFORMTHEME", "kde");
+    isolateFromDesktopSession();
+    QVERIFY(!qEnvironmentVariableIsSet("XDG_CURRENT_DESKTOP"));
+    QVERIFY(!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME"));
+}
+
+// Run in a KDE session too, as CTest's ferrous_qml_module_kde_session does.
+// No session's platform theme chooses the styles: the KDE one would choose
+// org.kde.desktop for the controls and Breeze for widgets, rather than
+// Qt's own Fusion.
+void QmlModuleTest::looksTheSameWhateverTheDesktopSession() {
+    QVERIFY(!qEnvironmentVariableIsSet("XDG_CURRENT_DESKTOP"));
+    QVERIFY(!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME"));
+    QCOMPARE(QQuickStyle::name(), QStringLiteral("Fusion"));
+    QCOMPARE(QApplication::style()->name(), QStringLiteral("fusion"));
+}
+
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);
     disableGpuShaderCaches();
@@ -178,6 +203,9 @@ int main(int argc, char **argv) {
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
 
+    // No desktop session's platform theme, which would choose the
+    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QApplication app(argc, argv);
     QmlModuleTest test;
     return QTest::qExec(&test, argc, argv);

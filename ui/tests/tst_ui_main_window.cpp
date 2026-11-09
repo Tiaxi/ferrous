@@ -10,7 +10,6 @@
 #include <QColor>
 #include <QFile>
 #include <QFont>
-#include <QIcon>
 #include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
@@ -20,7 +19,6 @@
 #include <QQmlContext>
 #include <QQmlProperty>
 #include <QQuickItem>
-#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -39,6 +37,7 @@
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -1010,8 +1009,9 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
-    // The app's controls style, which it needs to start (docs/INSTALL.md).
-    QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h.
+    isolateFromDesktopSessionWithAppLook();
     // Settings, data and caches of the test's own: no developer's colours,
     // fonts, layout or caches reach the tests.
     QTemporaryDir fixtures;
@@ -1022,12 +1022,7 @@ int main(int argc, char **argv) {
     qputenv("XDG_CONFIG_DIRS", QFile::encodeName(fixtures.filePath(QStringLiteral("config-dirs"))));
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
-    // The same platform whatever the desktop the tests run in: without a
-    // desktop, Qt loads no desktop's platform theme.
-    qunsetenv("XDG_CURRENT_DESKTOP");
-    qunsetenv("QT_QPA_PLATFORMTHEME");
     QApplication app(argc, argv);
-    QIcon::setThemeName(QStringLiteral("breeze"));
     UiMainWindowTest test;
     return QTest::qExec(&test, argc, argv);
 }

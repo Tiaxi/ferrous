@@ -23,6 +23,7 @@
 
 #include "AppIcon.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -314,10 +315,9 @@ void AppIconTest::desktopFileNamesTheIcon() {
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);
-    // Without a desktop, Qt loads no desktop's platform theme, whose icon
-    // loader could answer for the theme.
-    qunsetenv("XDG_CURRENT_DESKTOP");
-    qunsetenv("QT_QPA_PLATFORMTHEME");
+    // No desktop session's platform theme, whose icon loader could answer
+    // for the theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QGuiApplication app(argc, argv);
     AppIconTest test;
     return QTest::qExec(&test, argc, argv);

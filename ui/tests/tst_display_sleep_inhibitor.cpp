@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "../src/DisplaySleepInhibitor.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -221,6 +222,13 @@ void DisplaySleepInhibitorTest::failedInhibitIsReportedWhileRequested() {
     QCOMPARE(failures.size(), 1);
 }
 
-QTEST_GUILESS_MAIN(DisplaySleepInhibitorTest)
+int main(int argc, char **argv) {
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
+    QCoreApplication app(argc, argv);
+    DisplaySleepInhibitorTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 
 #include "tst_display_sleep_inhibitor.moc"
