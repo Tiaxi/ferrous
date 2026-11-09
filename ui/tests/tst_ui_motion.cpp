@@ -538,6 +538,7 @@ private slots:
     void queueRowsTheKeyboardMovesMoveAtOnce();
     void animationsOffMakeEveryChangeInstant();
     void nothingAnimatesOnceTheMotionIsDone();
+    void nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown();
 };
 
 void UiMotionTest::initTestCase() {
@@ -1872,6 +1873,61 @@ void UiMotionTest::nothingAnimatesOnceTheMotionIsDone() {
     // as the tree's height changes, then none.
     QTest::qWait(1000);
     QCOMPARE(framesOver(window, 500), 0);
+}
+
+// A track change in BridgeClient's order (#466): the new path and lines,
+// with the cover before kept while the new track's is not known, then its
+// cover. The cover before shows until the new one fades in over the long
+// curve; the placeholder shows only for a track known to have no cover.
+void UiMotionTest::nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown() {
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    QQuickItem *glyph = itemNamed(panel, QStringLiteral("albumArtPlaceholderGlyph"));
+    QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
+    QVERIFY(glyph != nullptr);
+    QVERIFY(outgoingCover != nullptr);
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    QVERIFY(!glyph->isVisible());
+    int placeholderShown = 0;
+    const QMetaObject::Connection connection =
+        QObject::connect(glyph, &QQuickItem::visibleChanged, glyph, [&]() {
+            if (glyph->isVisible()) {
+                ++placeholderShown;
+            }
+        });
+
+    // Another album, whose cover the bridge does not know yet.
+    showTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), covers.first);
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(!glyph->isVisible());
+    QTest::qWait(units->shortDuration() / 2);
+    QVERIFY(!glyph->isVisible());
+    // Its cover comes and fades in over the cover before.
+    bridge->setProperty("currentTrackCoverPath", covers.second);
+    QVERIFY(handover->property("running").toBool());
+    QCOMPARE(handover->property("duration").toInt(), units->longDuration());
+    QVERIFY(outgoingCover->isVisible());
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(!outgoingCover->isVisible());
+    QCOMPARE(placeholderShown, 0);
+
+    // A track known to have no cover: the placeholder shows once its
+    // metadata says so, and not before.
+    showTrack(bridge, kTrackA2, QStringLiteral("Third"), QStringLiteral("Album A"), covers.second);
+    QVERIFY(!glyph->isVisible());
+    QCOMPARE(placeholderShown, 0);
+    bridge->setProperty("currentTrackCoverPath", QString());
+    QVERIFY(glyph->isVisible());
+    QCOMPARE(placeholderShown, 1);
+    QObject::disconnect(connection);
 }
 
 int main(int argc, char **argv) {

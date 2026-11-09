@@ -5462,7 +5462,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     bool snapshotSignalChanged = false;
     bool librarySignalChanged = false;
     bool libraryScanSignalChanged = false;
-    const bool hadTrackContextPath = !m_currentTrackPath.isEmpty();
     const bool currentPathChanged = m_currentTrackPath != currentPath;
     const bool trackTokenChanged = snapshot.playback.present
         && snapshot.playback.trackToken != m_currentTrackToken;
@@ -5737,7 +5736,6 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     int nextTrackBitDepth = currentPath.isEmpty() ? 0 : m_currentTrackBitDepth;
     int nextTrackCurrentBitrateKbps = currentPath.isEmpty() ? 0 : m_currentTrackCurrentBitrateKbps;
     QString queueTrackCover;
-    const bool stoppedTrackAdvanced = isStopped && hadTrackContextPath && currentPathChanged;
     if (!metadataMatchesCurrentPath && !currentPath.isEmpty() && nextTrackFormatLabel.isEmpty()) {
         nextTrackFormatLabel = formatLabelFromPath(currentPath);
     }
@@ -5881,12 +5879,17 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 
     // The backend's cover choice: the track's metadata, or its queue row
-    // until the metadata arrives.
-    QString currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
-    const bool waitingForMetadata =
-        !currentPath.isEmpty() && !currentPathChanged && !metadataMatchesCurrentPath;
-    if (currentCover.isEmpty() && ((isStopped && !stoppedTrackAdvanced) || waitingForMetadata)) {
-        currentCover = m_currentTrackCoverPath;
+    // until the metadata arrives. Without either, the track's cover is not
+    // known yet, which is not the same as no cover: the cover shown stays
+    // until the track's metadata tells it, so a placeholder shows only for
+    // a track known to have none. The metadata until then is the track
+    // before's, which the backend keeps until it has read the new one's.
+    QString currentCover;
+    if (!currentPath.isEmpty()) {
+        currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
+        if (currentCover.isEmpty() && !metadataMatchesCurrentPath) {
+            currentCover = m_currentTrackCoverPath;
+        }
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;

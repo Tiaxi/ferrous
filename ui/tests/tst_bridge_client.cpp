@@ -365,6 +365,10 @@ private slots:
     void gaplessHandoffSetsIdentityFlagBeforeMetadata();
     void trackCoverIsTheBackendsChoiceWithItsStamp();
     void trackCoverHasNoFallbackOfTheUisOwn();
+    void trackCoverStaysUntilTheNextTracksCoverIsKnown_data();
+    void trackCoverStaysUntilTheNextTracksCoverIsKnown();
+    void trackCoverStaysThroughRepeatOne();
+    void trackCoverTakesTheQueueRowsCoverBeforeTheMetadata();
     void mprisRepublishesOnTrackMetadataChanged();
     void mprisRepublishesOnTrackIdentityChanged();
     void mprisPublishesPlaybackStateOnPlaybackSignal();
@@ -5788,6 +5792,179 @@ void BridgeClientTest::trackCoverHasNoFallbackOfTheUisOwn() {
     QCOMPARE(client.currentTrackCoverPath(), QString());
     QCoreApplication::processEvents();
     QCOMPARE(client.currentTrackCoverPath(), QString());
+}
+
+namespace {
+
+// A snapshot of `trackPath` at `token` in `state`, with the metadata the
+// backend holds: that of `metadataPath`, whose cover is `coverPath`. A track
+// change sends the metadata of the track before until the backend has read
+// the new track's.
+BinaryBridgeCodec::DecodedSnapshot trackWithMetadataOf(
+    const QString &trackPath, quint64 token, const QString &metadataPath,
+    const QString &coverPath, int state = 1) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot = playingWithCover(metadataPath, coverPath, 1);
+    snapshot.playback.state = state;
+    snapshot.playback.currentPath = trackPath;
+    snapshot.playback.trackToken = token;
+    return snapshot;
+}
+
+// A snapshot of `trackPath` at `token` with no metadata section.
+BinaryBridgeCodec::DecodedSnapshot trackWithoutMetadata(
+    const QString &trackPath, quint64 token, int state = 1) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = state;
+    snapshot.playback.currentPath = trackPath;
+    snapshot.playback.trackToken = token;
+    return snapshot;
+}
+
+} // namespace
+
+// A track change tells the new path before the new track's metadata: the
+// cover shown stays until the metadata tells the new track's, so no frame
+// shows the placeholder of a track known to have no cover (#466).
+void BridgeClientTest::trackCoverStaysUntilTheNextTracksCoverIsKnown_data() {
+    QTest::addColumn<QString>("nextCover");
+    QTest::addColumn<int>("state");
+    QTest::addColumn<bool>("gapless");
+    QTest::newRow("covered to covered") << QStringLiteral("/music/B/cover.jpg") << 1 << false;
+    QTest::newRow("covered to none") << QString() << 1 << false;
+    // The engine goes on from the end of one track into the next, its clock
+    // advancing all through the change.
+    QTest::newRow("gapless covered to covered") << QStringLiteral("/music/B/cover.jpg") << 1
+                                                << true;
+    QTest::newRow("gapless covered to none") << QString() << 1 << true;
+    // The next track chosen while stopped.
+    QTest::newRow("stopped covered to covered") << QStringLiteral("/music/B/cover.jpg") << 0
+                                                << false;
+    QTest::newRow("stopped covered to none") << QString() << 0 << false;
+}
+
+void BridgeClientTest::trackCoverStaysUntilTheNextTracksCoverIsKnown() {
+    QFETCH(QString, nextCover);
+    QFETCH(int, state);
+    QFETCH(bool, gapless);
+    const QString first = QStringLiteral("/music/A/01.flac");
+    const QString second = QStringLiteral("/music/B/01.flac");
+    const QString firstCover = QStringLiteral("/music/A/cover.jpg");
+    const QString firstUrl = QStringLiteral("image://covers//music/A/cover.jpg#v=1");
+    // In a gapless change, every snapshot is at a sampled, advancing
+    // position: the first track's end, then the next one's start.
+    const auto played = [gapless](BinaryBridgeCodec::DecodedSnapshot snapshot, double seconds) {
+        if (gapless) {
+            snapshot.playback.positionSeconds = seconds;
+            snapshot.playback.durationSeconds = 180.0;
+            snapshot.playback.positionSampledAtNs = monotonicNowNs();
+            snapshot.playback.positionAdvancing = true;
+        }
+        return snapshot;
+    };
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(
+        played(trackWithMetadataOf(first, 1, first, firstCover, state), 179.95)));
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+
+    // The new path, with the metadata of the track before; then a snapshot
+    // without metadata; then the old track's metadata once more.
+    QVERIFY(client.processBinarySnapshot(
+        played(trackWithMetadataOf(second, 2, first, firstCover, state), 0.01)));
+    QCOMPARE(client.currentTrackPath(), second);
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+    client.processBinarySnapshot(played(trackWithoutMetadata(second, 2, state), 0.03));
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+    client.processBinarySnapshot(
+        played(trackWithMetadataOf(second, 2, first, firstCover, state), 0.05));
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+
+    // The new track's metadata tells its cover, or that it has none.
+    QVERIFY(client.processBinarySnapshot(
+        played(trackWithMetadataOf(second, 2, second, nextCover, state), 0.07)));
+    const QString expected = nextCover.isEmpty()
+        ? QString()
+        : QStringLiteral("image://covers/") + nextCover + QStringLiteral("#v=1");
+    QCOMPARE(client.currentTrackCoverPath(), expected);
+    // Once known, a snapshot without metadata keeps it.
+    client.processBinarySnapshot(played(trackWithoutMetadata(second, 2, state), 0.09));
+    QCOMPARE(client.currentTrackCoverPath(), expected);
+}
+
+// Repeat One plays the same file again under a new token: its cover stays
+// through the change and the backend's new read of its metadata, whether
+// the track has a cover or none.
+void BridgeClientTest::trackCoverStaysThroughRepeatOne() {
+    const QString track = QStringLiteral("/music/A/01.flac");
+    const QString other = QStringLiteral("/music/B/01.flac");
+    const QString cover = QStringLiteral("/music/A/cover.jpg");
+    const QString coverUrl = QStringLiteral("image://covers//music/A/cover.jpg#v=1");
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QVERIFY(client.processBinarySnapshot(trackWithMetadataOf(track, 1, track, cover)));
+    QCOMPARE(client.currentTrackCoverPath(), coverUrl);
+    client.processBinarySnapshot(trackWithoutMetadata(track, 2));
+    QCOMPARE(client.currentTrackCoverPath(), coverUrl);
+    client.processBinarySnapshot(trackWithMetadataOf(track, 2, track, cover));
+    QCOMPARE(client.currentTrackCoverPath(), coverUrl);
+
+    // A track without a cover repeats without the cover of one before.
+    QVERIFY(client.processBinarySnapshot(trackWithMetadataOf(other, 3, other, QString())));
+    QCOMPARE(client.currentTrackCoverPath(), QString());
+    client.processBinarySnapshot(trackWithoutMetadata(other, 4));
+    QCOMPARE(client.currentTrackCoverPath(), QString());
+    client.processBinarySnapshot(trackWithMetadataOf(other, 4, other, QString()));
+    QCOMPARE(client.currentTrackCoverPath(), QString());
+}
+
+// The next track's queue row knows its cover before the metadata: that
+// cover shows at once. A row without one tells nothing, and the cover shown
+// stays until the metadata.
+void BridgeClientTest::trackCoverTakesTheQueueRowsCoverBeforeTheMetadata() {
+    const QString first = QStringLiteral("/music/A/01.flac");
+    const QString second = QStringLiteral("/music/B/01.flac");
+    const QString third = QStringLiteral("/music/C/01.flac");
+    const QString firstCover = QStringLiteral("/music/A/cover.jpg");
+    const QString secondCover = QStringLiteral("/music/B/cover.jpg");
+    const QString thirdCover = QStringLiteral("/music/C/cover.jpg");
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot queue = fullQueueSnapshot(1, {first, second, third});
+    queue.queue.tracks[0].coverPath = firstCover;
+    queue.queue.tracks[1].coverPath = secondCover;
+    queue.queue.tracks[1].coverStamp = 7;
+    QVERIFY(client.processBinarySnapshot(queue));
+
+    BinaryBridgeCodec::DecodedSnapshot playing = trackWithMetadataOf(first, 1, first, firstCover);
+    playing.playback.currentQueueIndex = 0;
+    QVERIFY(client.processBinarySnapshot(playing));
+    const QString firstUrl = QStringLiteral("image://covers//music/A/cover.jpg#v=1");
+    QCOMPARE(client.currentTrackCoverPath(), firstUrl);
+
+    BinaryBridgeCodec::DecodedSnapshot handoff = trackWithMetadataOf(second, 2, first, firstCover);
+    handoff.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(handoff));
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/B/cover.jpg#v=7"));
+    BinaryBridgeCodec::DecodedSnapshot known = trackWithMetadataOf(second, 2, second, secondCover);
+    known.playback.currentQueueIndex = 1;
+    known.metadata.coverStamp = 7;
+    client.processBinarySnapshot(known);
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/B/cover.jpg#v=7"));
+
+    // The third row has no cover yet: the second's stays until the metadata.
+    handoff = trackWithMetadataOf(third, 3, second, secondCover);
+    handoff.playback.currentQueueIndex = 2;
+    QVERIFY(client.processBinarySnapshot(handoff));
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/B/cover.jpg#v=7"));
+    known = trackWithMetadataOf(third, 3, third, thirdCover);
+    known.playback.currentQueueIndex = 2;
+    QVERIFY(client.processBinarySnapshot(known));
+    QCOMPARE(client.currentTrackCoverPath(),
+             QStringLiteral("image://covers//music/C/cover.jpg#v=1"));
 }
 
 void BridgeClientTest::mprisRepublishesOnTrackMetadataChanged() {
