@@ -97,10 +97,8 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(transport->mapToScene(QPointF(0, 0)).y(), transportBefore);
     QCOMPARE(mainSplit->mapToScene(QPointF(0, 0)).y(), splitBefore);
-    // Both are in the diagnostics log, with their category.
-    QCOMPARE(takeCapturedMessagesText(),
-             QStringLiteral("error [Playback]: ") + skipped + QStringLiteral(" (/music/bad.flac)\n")
-                 + QStringLiteral("error [Library]: ") + scan);
+    // BridgeClient logs them; the window adds nothing to the console.
+    QCOMPARE(takeCapturedMessagesText(), QString());
 
     // A click on the indicator opens the modal dialog, which lists both and
     // counts as seeing them.
@@ -146,7 +144,7 @@ void ErrorsSmokeTest::consecutiveErrorsAreBothVisible() {
     QVERIFY(!statusBar->property("issuesOpen").toBool());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::repeatedErrorsAreCounted() {
@@ -181,7 +179,7 @@ void ErrorsSmokeTest::repeatedErrorsAreCounted() {
     QCOMPARE(errorHistoryMessages(errors).size(), 4);
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::errorHistoryKeepsTheLatestErrors() {
@@ -206,7 +204,7 @@ void ErrorsSmokeTest::errorHistoryKeepsTheLatestErrors() {
     QCOMPARE(errorHistoryMessages(errors), expected);
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::aLongErrorIsShownWhole() {
@@ -248,7 +246,7 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     QVERIFY(row->property("contentWidth").toReal() <= row->width() + 1);
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
@@ -315,7 +313,7 @@ void ErrorsSmokeTest::displaySleepFailureShowsInTheFullscreenViewer() {
     QTRY_VERIFY(!inhibitor.inhibited());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::stoppedBackendShowsMessageAndDisablesControls() {
@@ -463,7 +461,7 @@ void ErrorsSmokeTest::aFailedSaveBeforeQuitIsNotHiddenByRecentErrors() {
     QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedQuitButton")));
     QTRY_VERIFY(!window->isVisible());
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::quitAnywayClosesAfterAFailedSave() {
@@ -674,7 +672,7 @@ void ErrorsSmokeTest::quitTimeErrorClosesAFullscreenViewerFirst() {
     QVERIFY(window->isVisible());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirControlsHaveFocus() {
@@ -742,7 +740,7 @@ void ErrorsSmokeTest::escapeClosesFullscreenViewersWhileTheirControlsHaveFocus()
     }
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
@@ -871,7 +869,7 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/track 0.flac")});
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
@@ -989,7 +987,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
     }
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
@@ -1037,7 +1035,7 @@ void ErrorsSmokeTest::recentErrorsFollowAFullscreenViewerThatCloses() {
     QTRY_VERIFY(dialog->property("opened").toBool());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
-    QVERIFY2(onlyErrorReports(log), qPrintable(log));
+    QVERIFY2(log.isEmpty(), qPrintable(log));
 }
 
 std::unique_ptr<QmlSmokeTest> makeErrorsSmokeTest(const QString &userDirectoriesParent) {

@@ -17,11 +17,11 @@ use super::queue_columns::{self, QueueColumnWidths};
 use super::queue_relay::{QueueBatch, QueueRelay};
 use super::window_layout::{self, WindowGeometry, WindowLayout};
 use super::{
-    BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
-    BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType, BridgeSearchResultsFrame,
-    BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory, FrontendBridgeHandle,
-    LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState, RowsMove,
-    ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
+    log_undelivered, BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent,
+    BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand, BridgeSearchResultRowType,
+    BridgeSearchResultsFrame, BridgeSettingsCommand, BridgeSnapshot, BridgeThread, ErrorCategory,
+    FrontendBridgeHandle, LibraryQueueItem, LibrarySortMode, QueuePlacement, QueueUndoState,
+    RowsMove, ViewerFullscreenMode, BRIDGE_SHUTDOWN_TIMEOUT,
 };
 use crate::analysis::{
     AnalysisEvent, PrecomputedSpectrogramChunk, SpectrogramDisplayMode, SpectrogramStops,
@@ -155,9 +155,9 @@ enum PendingBinaryEvent {
     /// A packet the UI must receive, such as a save's answer or the
     /// bridge's stop.
     Packet(Vec<u8>),
-    /// An error. Past [`MAX_PENDING_ERRORS`], the oldest give way to
-    /// [`PendingBinaryEvent::EarlierErrors`].
-    Error(Vec<u8>),
+    /// An error, and its packet. Past [`MAX_PENDING_ERRORS`], the oldest
+    /// give way to [`PendingBinaryEvent::EarlierErrors`].
+    Error(Vec<u8>, BridgeError),
     /// How many errors gave way to newer ones, and the packet that says so.
     EarlierErrors { count: usize, packet: Vec<u8> },
     /// The newest snapshot. At most one waits at a time: the relay takes it
@@ -181,6 +181,19 @@ struct FfiRuntime {
     wake_write_fd: i32,
     wake_signaled: bool,
     stopped: bool,
+}
+
+/// The errors still queued when the bridge goes away never reach the UI,
+/// which logs those it shows, so they are logged here: those of the backend's
+/// shutdown, for example, come after the UI stopped taking events.
+impl Drop for FfiRuntime {
+    fn drop(&mut self) {
+        for event in &self.pending_binary_events {
+            if let PendingBinaryEvent::Error(_, error) = event {
+                log_undelivered(error);
+            }
+        }
+    }
 }
 
 impl FfiRuntime {
@@ -329,26 +342,30 @@ impl FfiRuntime {
     /// Queue an error. If the UI has not taken the last
     /// [`MAX_PENDING_ERRORS`], the oldest gives way to the count of earlier
     /// errors, so the UI still hears that they happened.
-    fn push_error(&mut self, packet: Vec<u8>) {
+    fn push_error(&mut self, packet: Vec<u8>, error: BridgeError) {
         let errors = self
             .pending_binary_events
             .iter()
-            .filter(|event| matches!(event, PendingBinaryEvent::Error(_)))
+            .filter(|event| matches!(event, PendingBinaryEvent::Error(..)))
             .count();
         if errors >= MAX_PENDING_ERRORS {
             self.collapse_oldest_error();
         }
-        self.push_pending_binary_event(PendingBinaryEvent::Error(packet));
+        self.push_pending_binary_event(PendingBinaryEvent::Error(packet, error));
     }
 
     fn collapse_oldest_error(&mut self) {
         let Some(oldest) = self
             .pending_binary_events
             .iter()
-            .position(|event| matches!(event, PendingBinaryEvent::Error(_)))
+            .position(|event| matches!(event, PendingBinaryEvent::Error(..)))
         else {
             return;
         };
+        // The UI never sees it, so it does not log it either.
+        if let Some(PendingBinaryEvent::Error(_, error)) = self.pending_binary_events.get(oldest) {
+            log_undelivered(error);
+        }
         // The count takes the place of the first error it stands for, so it
         // comes before the errors that are still shown.
         let earlier = self.pending_binary_events.iter_mut().find_map(|event| {
@@ -506,10 +523,8 @@ impl FfiRuntime {
                 false
             }
             Err(message) => {
-                self.push_error(encode_error_event(&BridgeError::error(
-                    ErrorCategory::System,
-                    message,
-                )));
+                let error = BridgeError::error(ErrorCategory::System, message);
+                self.push_error(encode_error_event(&error), error);
                 false
             }
         }
@@ -558,7 +573,7 @@ impl FfiRuntime {
         for event in events {
             match event {
                 PreparedEvent::Binary(bytes) => self.push_binary_event(bytes),
-                PreparedEvent::Error(bytes) => self.push_error(bytes),
+                PreparedEvent::Error(bytes, error) => self.push_error(bytes, error),
                 PreparedEvent::Analysis(bytes) => self.push_analysis_frame(bytes),
                 PreparedEvent::Tree(bytes) => self.push_library_tree_frame(bytes),
                 PreparedEvent::Search(seq, bytes) => self.push_search_results_frame(seq, bytes),
@@ -578,7 +593,7 @@ impl FfiRuntime {
     fn pop_binary_event(&mut self) -> Option<Vec<u8>> {
         Some(match self.pending_binary_events.pop_front()? {
             PendingBinaryEvent::Packet(packet)
-            | PendingBinaryEvent::Error(packet)
+            | PendingBinaryEvent::Error(packet, _)
             | PendingBinaryEvent::EarlierErrors { packet, .. }
             | PendingBinaryEvent::Snapshot(packet) => packet,
         })
@@ -607,7 +622,7 @@ struct Prepared {
 
 enum PreparedEvent {
     Binary(Vec<u8>),
-    Error(Vec<u8>),
+    Error(Vec<u8>, BridgeError),
     Analysis(Vec<u8>),
     Tree(Vec<u8>),
     Search(u32, Vec<u8>),
@@ -657,7 +672,7 @@ impl FfiEncoder {
                     ));
                 }
                 BridgeEvent::Error(error) => {
-                    prepared.push(PreparedEvent::Error(encode_error_event(&error)));
+                    prepared.push(PreparedEvent::Error(encode_error_event(&error), error));
                 }
                 BridgeEvent::SearchResults(frame) => {
                     prepared.push(PreparedEvent::Search(
@@ -776,6 +791,13 @@ fn run_ffi_relay_loop(shared: Arc<FfiShared>, event_rx: crossbeam_channel::Recei
             break;
         }
     }
+    // The relay stops once the bridge has, or when told to; the errors it
+    // has not taken by then never reach the UI, so they are logged here.
+    for event in event_rx.try_iter() {
+        if let BridgeEvent::Error(error) = event {
+            log_undelivered(&error);
+        }
+    }
 }
 
 // Dedicated spectral relay may wait for UI consumption; control publication never waits here.
@@ -785,12 +807,13 @@ fn run_spectral_relay(shared: &FfiShared, event_rx: &crossbeam_channel::Receiver
     });
     if let Err(message) = relayed {
         // Playback goes on; only the spectrogram stops updating.
+        let error = BridgeError::error(
+            ErrorCategory::Analysis,
+            format!("The spectrogram stopped updating after an {message}."),
+        );
         shared
             .lock_runtime()
-            .push_error(encode_error_event(&BridgeError::error(
-                ErrorCategory::Analysis,
-                format!("The spectrogram stopped updating after an {message}."),
-            )));
+            .push_error(encode_error_event(&error), error);
     }
 }
 
@@ -6515,6 +6538,14 @@ mod tests {
             .collect();
         let expected_answers: Vec<u32> = (0..u32::try_from(total).expect("small total")).collect();
         assert_eq!(answers, expected_answers);
+        // The UI never sees those that gave way, so they are logged here,
+        // once each; the rest the UI logs as it shows them.
+        assert_eq!(
+            crate::frontend_bridge::test_log::lines_containing("[ferrous] [system] error: error "),
+            (0..6)
+                .map(|index| format!("[ferrous] [system] error: error {index}"))
+                .collect::<Vec<_>>()
+        );
 
         // Once the UI has caught up, errors are shown one by one again.
         runtime.process_bridge_events([BridgeEvent::Error("later".to_string().into())]);
@@ -7587,6 +7618,72 @@ mod tests {
         let stopped = runtime.pop_binary_event().expect("the stop");
         assert_eq!(parse_packet_header(&stopped).2, SECTION_STOPPED);
         assert!(runtime.pop_binary_event().is_none());
+    }
+
+    /// The diagnostics log's lines for the error `message`.
+    fn logged_error(message: &str) -> Vec<String> {
+        crate::frontend_bridge::test_log::lines_containing(&format!(
+            "[ferrous] [playback] error: {message}"
+        ))
+    }
+
+    #[test]
+    fn errors_of_the_shutdown_the_ui_never_takes_are_logged_once_at_teardown() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        // As the backend's shutdown sends them: after the UI stopped
+        // taking events, so it never shows or logs them.
+        for message in ["shown teardown error", "unshown teardown error"] {
+            event_tx
+                .send(BridgeEvent::Error(BridgeError::error(
+                    ErrorCategory::Playback,
+                    message,
+                )))
+                .unwrap();
+        }
+        event_tx.send(BridgeEvent::Stopped).unwrap();
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+        // The UI took the first before it stopped polling, and logs it.
+        let taken = shared.lock_runtime().pop_binary_event().expect("an error");
+        assert_eq!(
+            error_message(&taken).as_deref(),
+            Some("shown teardown error")
+        );
+        assert!(logged_error("unshown teardown error").is_empty());
+
+        drop(shared);
+
+        assert!(logged_error("shown teardown error").is_empty());
+        assert_eq!(
+            logged_error("unshown teardown error"),
+            vec!["[ferrous] [playback] error: unshown teardown error".to_string()]
+        );
+    }
+
+    #[test]
+    fn errors_a_stopped_relay_never_took_are_logged_once() {
+        let shared = relay_shared();
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        event_tx
+            .send(BridgeEvent::Error(BridgeError::error(
+                ErrorCategory::Playback,
+                "error behind the stop",
+            )))
+            .unwrap();
+        event_tx.send(BridgeEvent::Stopped).unwrap();
+        // Told to stop before it took them, as when the bridge thread
+        // outlived its shutdown timeout.
+        shared.request_stop();
+
+        run_ffi_relay_loop(Arc::clone(&shared), event_rx);
+        assert!(shared.lock_runtime().pop_binary_event().is_none());
+        drop(shared);
+
+        assert_eq!(
+            logged_error("error behind the stop"),
+            vec!["[ferrous] [playback] error: error behind the stop".to_string()]
+        );
     }
 
     #[test]

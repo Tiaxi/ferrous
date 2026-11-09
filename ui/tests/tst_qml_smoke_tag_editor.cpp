@@ -388,8 +388,7 @@ void TagEditorSmokeTest::tagEditorStaysOpenWhileSavingAndShowsTheResult() {
     QCOMPARE(errorHistoryMessages(errors),
              QStringList{QStringLiteral("Saved 0 files; 1 failed.\n01 Song.flac: permission denied")});
     QVERIFY(finishIncubation(fixture.engine));
-    QCOMPARE(takeCapturedMessagesText(),
-             QStringLiteral("error [Tags]: Saved 0 files; 1 failed.\n01 Song.flac: permission denied"));
+    QCOMPARE(takeCapturedMessagesText(), QString());
 }
 
 void TagEditorSmokeTest::closingTheWindowWithTagEditsAsksAndCancelKeepsThem() {
@@ -486,8 +485,7 @@ void TagEditorSmokeTest::tagSaveFailureWhileQuittingKeepsTheWindowOpen() {
     QVERIFY(fixture.editor.dirty());
     QCOMPARE(fixture.stateSaves(), 0);
     QVERIFY(finishIncubation(fixture.engine));
-    QCOMPARE(takeCapturedMessagesText(),
-             QStringLiteral("error [Tags]: Saved 0 files; 1 failed.\n01 Song.flac: permission denied"));
+    QCOMPARE(takeCapturedMessagesText(), QString());
 
     // Quitting again asks again.
     fixture.window->close();

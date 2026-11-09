@@ -97,6 +97,28 @@ constexpr int kItunesArtworkResultDisplayLimit = 40;
 // The rows' height follows the font size, so this only rules out nonsense.
 constexpr double kMaxLibraryViewAnchorOffset = 4096.0;
 
+// The category's name in the diagnostics log, as ErrorCategory::log_name
+// in src/frontend_bridge/errors.rs names it for the lines the backend logs.
+QString errorCategoryLogName(BinaryBridgeCodec::ErrorCategory category) {
+    switch (category) {
+    case BinaryBridgeCodec::ErrorCategorySystem:
+        return QStringLiteral("system");
+    case BinaryBridgeCodec::ErrorCategoryPlayback:
+        return QStringLiteral("playback");
+    case BinaryBridgeCodec::ErrorCategoryLibrary:
+        return QStringLiteral("library");
+    case BinaryBridgeCodec::ErrorCategoryAnalysis:
+        return QStringLiteral("analysis");
+    case BinaryBridgeCodec::ErrorCategoryTags:
+        return QStringLiteral("tags");
+    case BinaryBridgeCodec::ErrorCategoryLastFm:
+        return QStringLiteral("lastfm");
+    case BinaryBridgeCodec::ErrorCategorySettings:
+        return QStringLiteral("settings");
+    }
+    return QStringLiteral("system");
+}
+
 bool shouldEmitUiProfileLog(qint64 nowMs, qint64 *lastMs, qint64 minIntervalMs = 250) {
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     if (lastMs == nullptr) {
@@ -829,7 +851,6 @@ bool BridgeClient::startInProcessBridge() {
 
     m_ffiBridge = ferrous_ffi_bridge_create();
     if (m_ffiBridge == nullptr) {
-        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("failed to create in-process bridge"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
                     i18nc("@info", "failed to create in-process Rust bridge"));
         return false;
@@ -1331,9 +1352,6 @@ BridgeClient::BridgePollRunResult BridgeClient::drainBridgeQueues(qint64 budgetM
         BinaryBridgeCodec::DecodedSnapshot decoded;
         QString decodeError;
         if (!BinaryBridgeCodec::decodeSnapshotPacket(packet, &decoded, &decodeError)) {
-            logDiagnostic(
-                QStringLiteral("bridge"),
-                QStringLiteral("snapshot decode error: %1").arg(decodeError));
             reportError(BinaryBridgeCodec::ErrorCategorySystem,
                         i18nc("@info", "invalid bridge packet: %1", decodeError));
             continue;
@@ -1658,9 +1676,6 @@ void BridgeClient::applyWorkerSnapshots() {
     resetPollChanges();
     for (QueueSnapshotWorker::Result &result : ready) {
         if (!result.ok) {
-            logDiagnostic(
-                QStringLiteral("bridge"),
-                QStringLiteral("snapshot decode error: %1").arg(result.error));
             reportError(BinaryBridgeCodec::ErrorCategorySystem,
                         i18nc("@info", "invalid bridge packet: %1", result.error));
         } else {
@@ -4055,13 +4070,13 @@ void BridgeClient::applyItunesArtworkSuggestion(int index) {
     // search found, which it compares with this.
     const QVariant identity = m_itunesArtworkTarget.value(QStringLiteral("identity"));
     if (!identity.isValid() || identity.toMap().isEmpty()) {
-        emit bridgeError(identity.isValid()
-                             ? i18nc("@info", "The album art was not applied: the track was not "
-                                              "found when the artwork search started.")
-                             : i18nc("@info", "The album art was not applied: the track is still "
-                                              "being checked. Try again in a moment."),
-                         BinaryBridgeCodec::ErrorCategoryLibrary,
-                         BinaryBridgeCodec::ErrorSeverityError, trackPath);
+        reportError(BinaryBridgeCodec::ErrorCategoryLibrary,
+                    identity.isValid()
+                        ? i18nc("@info", "The album art was not applied: the track was not "
+                                         "found when the artwork search started.")
+                        : i18nc("@info", "The album art was not applied: the track is still "
+                                         "being checked. Try again in a moment."),
+                    trackPath);
         return;
     }
     const QVariantMap file = identity.toMap();
@@ -5238,13 +5253,35 @@ bool BridgeClient::openUrlInFileBrowser(const QString &path, bool containingFold
 
 void BridgeClient::reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                                const QString &subject, BinaryBridgeCodec::ErrorSeverity severity) {
+    // The log keeps every error Recent Issues shows, with what it concerns.
+    QString line = QStringLiteral("%1: %2").arg(
+        severity == BinaryBridgeCodec::ErrorSeverityWarning ? QStringLiteral("warning")
+                                                            : QStringLiteral("error"),
+        message);
+    if (!subject.isEmpty()) {
+        line += QStringLiteral(" (%1)").arg(subject);
+    }
+    logDiagnostic(errorCategoryLogName(category), line);
     emit bridgeError(message, static_cast<int>(category), static_cast<int>(severity), subject);
+}
+
+void BridgeClient::reportUiError(int category, int severity, const QString &subject,
+                                 const QString &message) {
+    if (message.trimmed().isEmpty()) {
+        return;
+    }
+    const auto knownCategory = category >= 0 && category <= BinaryBridgeCodec::ErrorCategoryLast
+        ? static_cast<BinaryBridgeCodec::ErrorCategory>(category)
+        : BinaryBridgeCodec::ErrorCategorySystem;
+    reportError(knownCategory, message, subject,
+                severity == BinaryBridgeCodec::ErrorSeverityWarning
+                    ? BinaryBridgeCodec::ErrorSeverityWarning
+                    : BinaryBridgeCodec::ErrorSeverityError);
 }
 
 bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
     if (payload.isEmpty()) {
         // Encoders return nothing for a command over the bound.
-        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command over the bound"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
                     i18nc("@info",
                           "Command not sent: it is over the %1 MiB the backend "
@@ -5256,7 +5293,6 @@ bool BridgeClient::sendBinaryCommand(const QByteArray &payload) {
         return m_sendCommandOverride(payload);
     }
     if (m_ffiBridge == nullptr) {
-        logDiagnostic(QStringLiteral("bridge"), QStringLiteral("drop command: bridge not initialized"));
         reportError(BinaryBridgeCodec::ErrorCategorySystem,
                     i18nc("@info", "bridge is not initialized"));
         return false;

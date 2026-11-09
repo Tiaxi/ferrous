@@ -816,8 +816,6 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
                                       Q_ARG(QVariant, kTrackPath),
                                       Q_ARG(QVariant, QStringLiteral("The file cannot be read."))));
     QCOMPARE(unreadablePaths().value(kTrackPath).toString(), QStringLiteral("The file cannot be read."));
-    // The history logs each report.
-    QCOMPARE(takeMessages().count(QStringLiteral("error [")), 3);
     QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
     QTRY_VERIFY(shown(treeGlyph));
     QCOMPARE(treeGlyph->property("source").toString(), QStringLiteral("dialog-warning"));

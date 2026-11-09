@@ -331,6 +331,7 @@ private slots:
     void diagnosticsWritesBatchOffHotPath();
     void profileDiagnosticsBypassUiThreadDiskQueue();
     void clearDiagnosticsDropsPendingDiskWrites();
+    void reportedErrorsAreLoggedWithTheirCategoryAndSeverity();
     void pendingSeekIgnoresStalePlaybackSnapshotUntilTargetArrives();
     void seekThatDoesNotLandReleasesThePlayhead();
     void seekLandingElsewhereReanchorsThePlayhead();
@@ -4918,6 +4919,64 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
 }
 
+void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = logPath;
+    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsLines.clear();
+    QSignalSpy errors(&client, &BridgeClient::bridgeError);
+
+    // An error the backend sends, about a file.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.errorCategory = BinaryBridgeCodec::ErrorCategoryPlayback;
+    snapshot.errorSeverity = BinaryBridgeCodec::ErrorSeverityError;
+    snapshot.errorSubject = QStringLiteral("/fixture/bad.flac");
+    snapshot.errorMessage = QStringLiteral("Couldn't play \u201cbad.flac\u201d; skipped it.");
+    QVERIFY(!client.processBinarySnapshot(snapshot));
+    // Errors from the UI, as QML reports them, the second of a category
+    // the bridge does not know.
+    client.reportUiError(BinaryBridgeCodec::ErrorCategoryTags,
+                         BinaryBridgeCodec::ErrorSeverityWarning, QString(),
+                         QStringLiteral("Saved 1 file; 1 failed.\nfirst.flac: denied"));
+    client.reportUiError(99, 7, QString(), QStringLiteral("Out of range"));
+    // Nothing to show is not reported.
+    client.reportUiError(BinaryBridgeCodec::ErrorCategoryTags,
+                         BinaryBridgeCodec::ErrorSeverityError, QString(), QStringLiteral("  "));
+
+    // Recent Issues has each, as before.
+    QCOMPARE(errors.count(), 3);
+    QCOMPARE(errors[0][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryPlayback));
+    QCOMPARE(errors[1][0].toString(), QStringLiteral("Saved 1 file; 1 failed.\nfirst.flac: denied"));
+    QCOMPARE(errors[1][1].toInt(), int(BinaryBridgeCodec::ErrorCategoryTags));
+    QCOMPARE(errors[1][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QCOMPARE(errors[2][1].toInt(), int(BinaryBridgeCodec::ErrorCategorySystem));
+    QCOMPARE(errors[2][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityError));
+
+    // The diagnostics log has each too, one line each, with what it is about.
+    QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines =
+        QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 3);
+    QVERIFY2(lines[0].endsWith(QStringLiteral(
+                 "[playback] error: Couldn't play \u201cbad.flac\u201d; skipped it. "
+                 "(/fixture/bad.flac)")),
+             qPrintable(lines[0]));
+    QVERIFY2(lines[1].endsWith(
+                 QStringLiteral("[tags] warning: Saved 1 file; 1 failed.\\nfirst.flac: denied")),
+             qPrintable(lines[1]));
+    QVERIFY2(lines[2].endsWith(QStringLiteral("[system] error: Out of range")),
+             qPrintable(lines[2]));
+    // The Diagnostics window shows them at once.
+    QCOMPARE(client.m_diagnosticsLines, lines);
+}
+
 void BridgeClientTest::profileDiagnosticsBypassUiThreadDiskQueue() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -7791,12 +7850,16 @@ void BridgeClientTest::expectedUnwatchedLibraryRootsAreShownButNotReported() {
     QCOMPARE(errors.count(), 0);
     QCOMPARE(loggedCount(), 1);
 
-    // The share going away is a problem, and is reported.
+    // The share going away is a problem, and is reported, and logged as one.
     snapshot.library.rootEntries[0].unwatchedReason = QStringLiteral("the folder is not available");
     snapshot.library.rootEntries[0].unwatchedExpected = false;
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(errors.count(), 1);
     QCOMPARE(errors[0][2].toInt(), int(BinaryBridgeCodec::ErrorSeverityWarning));
+    QVERIFY2(client.m_diagnosticsLines.last().endsWith(
+                 QStringLiteral("[library] warning: Not watched for changes in library folder "
+                                "/nas: the folder is not available (/nas)")),
+             qPrintable(client.m_diagnosticsLines.last()));
 }
 
 void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {

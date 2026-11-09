@@ -488,6 +488,11 @@ public:
     Q_INVOKABLE quint32 saveStateBeforeQuit();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
+    // Show an error from the UI in Recent Issues, as the bridge's are: it is
+    // logged, then sent with bridgeError. `category` and `severity` are
+    // BinaryBridgeCodec's; an unknown one counts as a system error.
+    Q_INVOKABLE void reportUiError(int category, int severity, const QString &subject,
+                                   const QString &message);
     // Tag editor renames go through this gate so the bridge applies them in
     // order with the imports that read the same files. Null without a bridge.
     std::shared_ptr<FerrousFfiRenameGate> renameGate() const;
@@ -765,7 +770,9 @@ private:
     bool openUrlInFileBrowser(const QString &path, bool containingFolder) const;
     // Returns whether the bridge took the command.
     bool sendBinaryCommand(const QByteArray &payload);
-    // Tell the UI about an error; see bridgeError.
+    // Tell the UI about an error, which Recent Issues shows, and add it to
+    // the diagnostics log with its category and severity; see bridgeError.
+    // What the user need not see goes to logDiagnostic only.
     void reportError(BinaryBridgeCodec::ErrorCategory category, const QString &message,
                      const QString &subject = {},
                      BinaryBridgeCodec::ErrorSeverity severity =

@@ -27,7 +27,7 @@ use crate::playback::{
 use crate::profile_logging::heartbeat_trace_enabled;
 
 use super::{
-    try_send_event, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
+    send_error, ApplyAlbumArtEvent, BridgeError, BridgeEvent, BridgeLoopFlags, BridgeState,
     ErrorCategory, ErrorSeverity, LastFmPlaybackTracker, PendingWaveformTrack, PlayScrobble,
     ScrobbleIndicator, ScrobbleIndicatorState, ScrobbleIneligibility, SettingsSaveTiming,
     SnapshotUrgency,
@@ -54,7 +54,7 @@ pub(super) fn process_apply_album_art_event(
     if let Some(error) = event.error.as_ref() {
         let error = BridgeError::error(ErrorCategory::Library, error.clone())
             .about(event.track_path.to_string_lossy());
-        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+        send_error(event_tx, error);
         if event.indexed_by_path.is_empty() {
             return SnapshotUrgency::None;
         }
@@ -300,7 +300,7 @@ pub(super) fn process_playback_event(
             if let Some(path) = error.path.as_mut() {
                 remap_unacknowledged_engine_path(state, path);
             }
-            let _ = try_send_event(event_tx, BridgeEvent::Error(playback_error(&error)));
+            send_error(event_tx, playback_error(&error));
             SnapshotUrgency::None
         }
     }
@@ -586,16 +586,13 @@ pub(super) fn drain_analysis_events(
                 let _ = event_tx.send(BridgeEvent::PrecomputedSpectrogramChunk(chunk));
             }
             AnalysisEvent::WorkerFailed(message) => {
-                let _ = try_send_event(
+                send_error(
                     event_tx,
-                    BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                    BridgeError::error(ErrorCategory::Analysis, message),
                 );
             }
             AnalysisEvent::FileEndsEarly { path, message } => {
-                let _ = try_send_event(
-                    event_tx,
-                    BridgeEvent::Error(file_ends_early(&path, message)),
-                );
+                send_error(event_tx, file_ends_early(&path, message));
             }
         }
     }
@@ -661,12 +658,7 @@ pub(super) fn process_lastfm_state(
     event_tx: &Sender<BridgeEvent>,
 ) -> SnapshotUrgency {
     for problem in std::mem::take(&mut runtime.problems) {
-        let error = if problem.warning {
-            BridgeError::warning(ErrorCategory::LastFm, problem.message)
-        } else {
-            BridgeError::error(ErrorCategory::LastFm, problem.message)
-        };
-        let _ = try_send_event(event_tx, BridgeEvent::Error(error));
+        send_error(event_tx, problem.into_bridge_error());
     }
     let mut urgency = SnapshotUrgency::None;
     if state.lastfm != runtime {
