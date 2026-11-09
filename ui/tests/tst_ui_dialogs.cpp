@@ -1270,6 +1270,18 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     }
     QVERIFY(diagnosticsDialog != nullptr);
     QTRY_VERIFY(diagnosticsDialog->property("opened").toBool());
+
+    // Copy Log Without Paths asks the bridge for the copy once there is a log.
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *copyWithoutPaths = visibleNamed(window, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QVERIFY(copyWithoutPaths != nullptr);
+    QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Log Without Paths"));
+    QVERIFY(!copyWithoutPaths->isEnabled());
+    bridge->setProperty("diagnosticsText", QStringLiteral("[app] info: Ferrous started."));
+    QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
+    QTRY_VERIFY(copyWithoutPaths->isEnabled());
+    click(window, copyWithoutPaths);
+    QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
 }
 
 void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {

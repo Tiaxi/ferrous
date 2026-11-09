@@ -15,8 +15,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use crossbeam_channel::Sender;
 use crossbeam_channel::{unbounded, Receiver};
 
-use super::config::{save_session_snapshot, save_settings, SaveFailure, SessionSnapshot};
-use super::BridgeSettings;
+use super::config::{
+    format_settings_text, save_session_snapshot, save_settings, settings_path, SaveFailure,
+    SessionSnapshot,
+};
+use super::{log_info, BridgeSettings, ErrorCategory};
 
 /// What to save. `id` is that of the newest request it carries; each request
 /// has a larger `id` than the ones before it.
@@ -203,8 +206,16 @@ fn spawn(save: fn(&PersistRequest) -> PersistOutcome) -> (Arc<Shared>, Receiver<
         #[cfg(test)]
         crate::paths::set_config_dir_override(config_dir);
         let guard = WriterGuard(writer);
+        let mut saved_settings = SavedSettings::default();
         while let Some(request) = next_request(&guard.0) {
-            if result_tx.send(save(&request)).is_err() {
+            if request.settings.is_some() {
+                saved_settings.read_once();
+            }
+            let outcome = save(&request);
+            if let (Some(settings), Some(Ok(()))) = (&request.settings, &outcome.settings) {
+                saved_settings.saved(format_settings_text(settings));
+            }
+            if result_tx.send(outcome).is_err() {
                 break;
             }
         }
@@ -215,6 +226,71 @@ fn spawn(save: fn(&PersistRequest) -> PersistOutcome) -> (Arc<Shared>, Receiver<
         shared.close();
     }
     (shared, results)
+}
+
+/// The settings file as the writer last saved it, or found it before its
+/// first save, so that it logs the keys each save changes.
+#[derive(Default)]
+struct SavedSettings(Option<String>);
+
+impl SavedSettings {
+    /// Read the file the first save replaces; for a new install, what it
+    /// would hold with the defaults.
+    fn read_once(&mut self) {
+        if self.0.is_none() {
+            self.0 = Some(
+                settings_path()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_else(|| format_settings_text(&BridgeSettings::default())),
+            );
+        }
+    }
+
+    /// Log what `text`, just saved, changed, and remember it.
+    fn saved(&mut self, text: String) {
+        if let Some(line) = settings_change_line(self.0.as_deref().unwrap_or_default(), &text) {
+            log_info(ErrorCategory::Settings, &line);
+        }
+        self.0 = Some(text);
+    }
+}
+
+/// Settings keys whose values the log leaves out: the Last.fm account is
+/// the user's own. Secrets are never in the settings file; the session key
+/// is in the keyring.
+const UNLOGGED_SETTINGS_VALUES: &[&str] = &["lastfm_username"];
+
+/// Settings keys the log leaves out: `volume` repeats `volume_cubic`, as
+/// the gain older builds read.
+const UNLOGGED_SETTINGS_KEYS: &[&str] = &["volume"];
+
+/// The line that says which keys `after`, a settings file's text, changed
+/// from `before`, with their new values; `None` if it changed none.
+fn settings_change_line(before: &str, after: &str) -> Option<String> {
+    let entries = |text: &str| -> std::collections::HashMap<String, String> {
+        text.lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+            .collect()
+    };
+    let before = entries(before);
+    let mut changed = Vec::new();
+    for line in after.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if UNLOGGED_SETTINGS_KEYS.contains(&key) || before.get(key).is_some_and(|old| old == value)
+        {
+            continue;
+        }
+        if UNLOGGED_SETTINGS_VALUES.contains(&key) {
+            changed.push(format!("{key} (changed)"));
+        } else {
+            changed.push(format!("{key}={value}"));
+        }
+    }
+    (!changed.is_empty()).then(|| format!("Settings changed: {}.", changed.join(", ")))
 }
 
 /// A worker whose saves wait until the test opens [`STALL_GATE`], as on
@@ -234,8 +310,42 @@ pub(super) static STALL_GATE: std::sync::LazyLock<(Sender<()>, Receiver<()>)> =
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_log;
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_settings_save_logs_the_keys_it_changed_with_their_values() {
+        let _config = crate::paths::TestConfigDir::new();
+        test_log::clear();
+        let mut saved = SavedSettings::default();
+        saved.read_once();
+        let changed = BridgeSettings {
+            fft_size: 4096,
+            volume: 0.5,
+            ..BridgeSettings::default()
+        };
+        saved.saved(format_settings_text(&changed));
+        // Saving the same settings again changes nothing.
+        saved.saved(format_settings_text(&changed));
+        assert_eq!(
+            test_log::all(),
+            ["[ferrous] [settings] info: Settings changed: volume_cubic=0.5000, fft_size=4096."]
+        );
+    }
+
+    #[test]
+    fn the_settings_line_leaves_out_the_lastfm_account() {
+        let before = "lastfm_username=\nlog_scale=0\n";
+        let after = "lastfm_username=fixture-listener\nlog_scale=1\nunknown_key=7\n";
+        let line = settings_change_line(before, after).expect("a change");
+        assert_eq!(
+            line,
+            "Settings changed: lastfm_username (changed), log_scale=1, unknown_key=7."
+        );
+        assert!(!line.contains("fixture-listener"));
+        assert_eq!(settings_change_line(after, after), None);
+    }
 
     fn session(path: &str) -> SessionSnapshot {
         SessionSnapshot {

@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 use crate::file_edit_lock;
 use crate::file_identity::FileId;
 use crate::folder_cover::{CoverStamp, FolderImages};
-use crate::frontend_bridge::{log_warning, ErrorCategory};
+use crate::frontend_bridge::{log_info, log_warning, quoted_path, ErrorCategory};
 use crate::metadata::EmbeddedCoverCache;
 use crate::no_replace::rename_no_replace;
 use crate::raw_audio::{
@@ -824,6 +824,9 @@ impl ScanRun<'_> {
         if self.control.defer_walk(root) {
             return RootScanEnd::default();
         }
+        let what = scanned_what(root, scope);
+        log_info(ErrorCategory::Library, &format!("Scanning {what}."));
+        let started = Instant::now();
         let run_progress = self.run_progress(position.0);
         let mut sink = SnapshotSink::new(
             self.library,
@@ -845,6 +848,10 @@ impl ScanRun<'_> {
             changed: committed_any,
             ..RootScanEnd::default()
         };
+        log_info(
+            ErrorCategory::Library,
+            &scan_end_line(&what, started.elapsed(), stopped.is_some(), &result),
+        );
         match result {
             Ok(outcome) => {
                 // A removed name of a file with other names: only a scan of
@@ -973,6 +980,41 @@ impl ScanRun<'_> {
         {
             self.problems.push(err);
         }
+    }
+}
+
+/// What a scan of `scope` of `root`, or of all of it, scans, for its lines
+/// in the log.
+fn scanned_what(root: &Path, scope: Option<&[PathBuf]>) -> String {
+    match scope {
+        None => quoted_path(root),
+        Some(scope) => format!(
+            "{} in {}",
+            count_label(scope.len(), "changed path", "changed paths"),
+            quoted_path(root)
+        ),
+    }
+}
+
+/// The line that logs how the scan of `what` ended, `elapsed` after it
+/// started.
+fn scan_end_line(
+    what: &str,
+    elapsed: Duration,
+    stopped: bool,
+    result: &Result<RootScanOutcome, String>,
+) -> String {
+    let seconds = elapsed.as_secs_f64();
+    match result {
+        Ok(_) if stopped => format!("Scan of {what} stopped after {seconds:.1} s."),
+        Ok(outcome) => format!(
+            "Scanned {what} in {seconds:.1} s: {} added, {} changed, {} removed.",
+            outcome.added,
+            outcome.changed,
+            outcome.removed.len()
+        ),
+        // The error reaches the user, and the log, with the command's.
+        Err(_) => format!("Scan of {what} failed after {seconds:.1} s."),
     }
 }
 
@@ -3634,6 +3676,10 @@ struct RootScanOutcome {
     /// After a complete scan of the whole root, the files found that have
     /// other names.
     hard_linked: Option<HashSet<PathBuf>>,
+    /// Files found that were not rows of the root.
+    added: usize,
+    /// Files with rows whose size or modification time changed.
+    changed: usize,
 }
 
 impl RootScanOutcome {
@@ -3652,6 +3698,8 @@ impl RootScanOutcome {
             notes: Vec::new(),
             needs_full_scan: false,
             hard_linked: None,
+            added: 0,
+            changed: 0,
         }
     }
 }
@@ -3722,6 +3770,11 @@ struct RootScan<'a> {
     progress: ScanProgressReporter,
     read_failures: ReadFailures,
     identities: IdentityCounts,
+    /// Files the scan found that were not rows of the root, for the log.
+    added: usize,
+    /// Files with rows whose size or modification time changed, for the
+    /// log.
+    changed: usize,
 }
 
 /// How a walked file's identity compares with its row's, for a file of the
@@ -4191,6 +4244,8 @@ fn scan_root_in(
         progress: ScanProgressReporter::new(previous_index_count),
         read_failures: ReadFailures::default(),
         identities: IdentityCounts::default(),
+        added: 0,
+        changed: 0,
     };
     scan.report(sink, true);
 
@@ -4221,9 +4276,19 @@ fn scan_root_in(
             seen_paths.insert(path_string.clone());
 
             let existing_state = existing.get(&path_string);
-            if existing_state.is_none() {
-                scan.note_row(&path_string)?;
-                scan.new_files.insert((size_bytes, mtime_ns));
+            match existing_state {
+                None => {
+                    scan.note_row(&path_string)?;
+                    scan.new_files.insert((size_bytes, mtime_ns));
+                    scan.added += 1;
+                }
+                Some(existing_state)
+                    if existing_state.row.mtime_ns != mtime_ns
+                        || existing_state.row.size_bytes != size_bytes =>
+                {
+                    scan.changed += 1;
+                }
+                Some(_) => {}
             }
             let task = MetadataTask {
                 path,
@@ -4402,6 +4467,8 @@ fn scan_root_in(
         notes,
         needs_full_scan: walk.needs_full_scan,
         hard_linked: scope.is_none().then_some(walk.hard_linked),
+        added: scan.added,
+        changed: scan.changed,
     })
 }
 
@@ -6148,6 +6215,69 @@ mod tests {
             snapshot,
             &event_tx,
         )
+    }
+
+    #[test]
+    fn a_scan_logs_its_start_and_its_end_with_what_it_found() {
+        let conn = Connection::open_in_memory().expect("db");
+        init_schema(&conn).expect("schema");
+        let root = test_dir("scan-log");
+        fs::create_dir_all(&root).expect("mkdir");
+        let root = root.canonicalize().expect("canonical root");
+        let kept = root.join("kept.mp3");
+        let edited = root.join("edited.flac");
+        let removed = root.join("removed.mp3");
+        for path in [&kept, &edited, &removed] {
+            write_stub(path, b"not-real-audio");
+        }
+        let mut library = WorkerLibrary::default();
+        let (event_tx, _event_rx) = unbounded();
+        test_log::clear();
+        run_scans(
+            &conn,
+            std::slice::from_ref(&root),
+            None,
+            &mut library,
+            &event_tx,
+        )
+        .expect("first scan");
+
+        write_stub(&edited, b"not-real-audio, longer now");
+        fs::remove_file(&removed).expect("remove");
+        write_stub(&root.join("new.mp3"), b"not-real-audio");
+        run_scans(
+            &conn,
+            std::slice::from_ref(&root),
+            None,
+            &mut library,
+            &event_tx,
+        )
+        .expect("second scan");
+
+        let quoted = quoted_path(&root);
+        let lines: Vec<String> = test_log::lines_containing("[library] info:")
+            .into_iter()
+            .map(|line| {
+                // The time a scan takes varies.
+                let (before, after) = line.split_once(" in ").map_or((line.as_str(), ""), |x| x);
+                let after = after.split_once(" s:").map_or(after, |(_, rest)| rest);
+                format!("{before}{after}")
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                format!("[ferrous] [library] info: Scanning {quoted}."),
+                format!(
+                    "[ferrous] [library] info: Scanned {quoted} 3 added, 0 changed, 0 removed."
+                ),
+                format!("[ferrous] [library] info: Scanning {quoted}."),
+                format!(
+                    "[ferrous] [library] info: Scanned {quoted} 1 added, 1 changed, 1 removed."
+                ),
+            ]
+        );
+        fs::remove_dir_all(&root).expect("clean up");
     }
 
     #[test]

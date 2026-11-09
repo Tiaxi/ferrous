@@ -574,6 +574,9 @@ struct Service {
     /// the [`Handle`], which sets it; see [`Handle::set_paused`]. Never
     /// saved.
     paused: Arc<AtomicBool>,
+    /// The authentication state the diagnostics log last told; see
+    /// [`Service::log_auth_change`].
+    logged_auth_state: AuthState,
 }
 
 #[derive(Debug)]
@@ -788,6 +791,7 @@ impl Service {
             problems: Vec::new(),
             latest_queued: false,
             paused: Arc::new(AtomicBool::new(false)),
+            logged_auth_state: AuthState::Disconnected,
             state: RuntimeState {
                 enabled: options.initial_enabled,
                 build_configured,
@@ -864,6 +868,7 @@ impl Service {
     /// shows and logs. When nothing receives it any more, they are logged
     /// here instead.
     fn publish(&mut self, event_tx: &Sender<Event>) {
+        self.log_auth_change();
         let mut state = self.published_state();
         state.problems = std::mem::take(&mut self.problems);
         if let Err(unsent) = event_tx.send(Event::State(state)) {
@@ -873,6 +878,29 @@ impl Service {
                 }
             }
         }
+    }
+
+    /// Log the authentication state once it changed, one line per change.
+    /// The line never holds the session key, the token, or the address of
+    /// the browser's approval page, which has the token.
+    fn log_auth_change(&mut self) {
+        let now = self.state.auth_state;
+        if now == self.logged_auth_state {
+            return;
+        }
+        self.logged_auth_state = now;
+        let line = match now {
+            AuthState::Disconnected => "Authentication: disconnected.",
+            AuthState::AwaitingBrowserApproval => {
+                "Authentication: waiting for approval in the browser."
+            }
+            AuthState::Connected => "Authentication: connected.",
+            AuthState::ReauthRequired => {
+                "Authentication: Last.fm no longer accepts the session; reconnecting is needed."
+            }
+            AuthState::Error => "Authentication: failed; the reason is in Recent Issues.",
+        };
+        log_info(ErrorCategory::LastFm, line);
     }
 
     /// Tell the user about `message` with the next state; see
@@ -2781,6 +2809,57 @@ mod tests {
         let due = service.retry_due.expect("a retry");
         assert!(due <= Instant::now() + MAX_REQUESTED_WAIT);
         assert!(due >= Instant::now() + MAX_REQUESTED_WAIT - Duration::from_secs(10));
+    }
+
+    #[test]
+    fn authentication_changes_are_logged_once_each_without_secrets() {
+        crate::frontend_bridge::test_log::clear();
+        let transport = ScriptedTransport::with_replies([
+            reply(200, r#"{"token":"fixture-token-123"}"#),
+            reply(
+                200,
+                r#"{"session":{"name":"tester","key":"fixture-session-key-456"}}"#,
+            ),
+        ]);
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: None,
+                initial_enabled: true,
+            },
+            backends(&transport, MemorySessionKeys::default()),
+        );
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        service.publish(&event_tx);
+        service.handle_command(Command::BeginDesktopAuth);
+        assert_eq!(service.state.auth_state, AuthState::AwaitingBrowserApproval);
+        service.publish(&event_tx);
+        service.publish(&event_tx);
+        service.handle_command(Command::CompleteDesktopAuth);
+        assert_eq!(service.state.auth_state, AuthState::Connected);
+        service.publish(&event_tx);
+        service.handle_command(Command::Disconnect { clear_queue: false });
+        service.publish(&event_tx);
+
+        let lines = crate::frontend_bridge::test_log::lines_containing("Authentication");
+        assert_eq!(
+            lines,
+            [
+                "waiting for approval in the browser.",
+                "connected.",
+                "disconnected.",
+            ]
+            .map(|state| format!("[ferrous] [lastfm] info: Authentication: {state}"))
+        );
+        for line in crate::frontend_bridge::test_log::all() {
+            for secret in [
+                "fixture-token-123",
+                "fixture-session-key-456",
+                "secret",
+                "api-key",
+            ] {
+                assert!(!line.contains(secret), "{secret} in {line}");
+            }
+        }
     }
 
     #[test]

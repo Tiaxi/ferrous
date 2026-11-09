@@ -214,6 +214,17 @@ public:
 
     // Adds a line to the diagnostics log (Help > Diagnostics).
     void logDiagnostic(const QString &category, const QString &message);
+    // Adds an event to the log, as "[category] info: message", in the form
+    // the backend's lines have. One line per event, never per frame.
+    void logInfo(const QString &category, const QString &message);
+    // Adds "[category] debug: message" to the log with FERROUS_LOG=debug
+    // only: details that would crowd the trace logInfo writes.
+    void logDebug(const QString &category, const QString &message);
+    // Whether FERROUS_LOG=debug asks for logDebug's lines.
+    static bool debugLoggingEnabled();
+    // The log as the Diagnostics dialog shows it, without the library's
+    // paths and file names; see DiagnosticsLog::withoutPaths.
+    QString diagnosticsTextWithoutPaths() const;
 
     QString playbackState() const;
     PlaybackClock *playbackClock() const { return m_playbackClock; }
@@ -492,6 +503,8 @@ public:
     Q_INVOKABLE quint32 saveStateBeforeQuit();
     Q_INVOKABLE void clearDiagnostics();
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
+    // Puts diagnosticsTextWithoutPaths on the clipboard, for a bug report.
+    Q_INVOKABLE void copyDiagnosticsWithoutPaths();
     // Show an error from the UI in Recent Issues, as the bridge's are: it is
     // logged, then sent with bridgeError. `category` and `severity` are
     // BinaryBridgeCodec's; an unknown one counts as a system error.

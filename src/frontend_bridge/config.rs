@@ -221,6 +221,7 @@ pub(super) fn apply_session_restore(
     if let Some(idx) = restored_current_index {
         state.playback.current = state.queue.get(idx).cloned();
         state.playback.current_queue_index = Some(idx);
+        state.restored_track_pending = true;
         playback.command(PlaybackCommand::PlayAt(idx));
         // The position was saved for the track at `current_path`. The
         // engine opens it paused there, unless its file has changed since;

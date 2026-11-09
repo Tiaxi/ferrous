@@ -33,6 +33,8 @@
 #include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QtTest/QtTest>
 
 #include <poll.h>
@@ -391,6 +393,7 @@ private slots:
     void mprisPositionReadsThePlaybackClock();
     void mprisRateWritePausesOnlyForZero();
     void mprisOpenUriOpensOnlyLocalFiles();
+    void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -6741,6 +6744,68 @@ void BridgeClientTest::mprisOpenUriOpensOnlyLocalFiles() {
     QCOMPARE(sentCommands.count(), 0);
     QVERIFY(controller.openUri(QStringLiteral("file:///music/track.flac")));
     QCOMPARE(sentCommands.count(), 1);
+}
+
+void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    const QString root = QStringLiteral("/srv/fixture-music");
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    BinaryBridgeCodec::DecodedLibraryRoot entry;
+    entry.path = root;
+    snapshot.library.rootEntries = {entry};
+    snapshot.library.rootPaths = {root};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.libraryRoots(), QStringList{root});
+
+    const QString song = root + QStringLiteral("/Fixture Artist/Fixture Album (1999)/01 Fixture Song.flac");
+    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning \"%1\".").arg(song));
+    MprisController controller(&client);
+    controller.next();
+    controller.setShuffle(true);
+    const auto uri = [](const QString &path) { return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded); };
+    QVERIFY(controller.openUri(uri(root + QStringLiteral("/Other/02 Other Song.ogg"))));
+    QVERIFY(controller.openUri(uri(QStringLiteral("/media/stick/03 Loose Song.mp3"))));
+    client.reportError(BinaryBridgeCodec::ErrorCategoryPlayback, QStringLiteral("Could not play the file."),
+                       song, BinaryBridgeCodec::ErrorSeverityWarning);
+    client.logDebug(QStringLiteral("app"), QStringLiteral("only with FERROUS_LOG=debug"));
+    client.reloadDiagnosticsFromDisk();
+
+    const QStringList lines = client.diagnosticsText().split(QLatin1Char('\n'));
+    const auto lineEnding = [&lines](const QString &tail) {
+        return std::any_of(lines.begin(), lines.end(), [&tail](const QString &line) {
+            return line.startsWith(QLatin1Char('[')) && line.endsWith(tail);
+        });
+    };
+    QVERIFY2(lineEnding(QStringLiteral("] [library] info: Scanning \"%1\".").arg(song)),
+             qPrintable(client.diagnosticsText()));
+    QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Next.")));
+    QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Shuffle set on.")));
+    QVERIFY(!client.diagnosticsText().contains(QStringLiteral("only with FERROUS_LOG=debug")));
+
+    // The copy keeps the events and drops every path and file name.
+    const QString copied = client.diagnosticsTextWithoutPaths();
+    QCOMPARE(copied.count(QLatin1Char('\n')), client.diagnosticsText().count(QLatin1Char('\n')));
+    for (const QString &leak : {root, QStringLiteral("Fixture Artist"), QStringLiteral("Fixture Album"),
+                                QStringLiteral("Fixture Song"), QStringLiteral("Other Song"),
+                                QStringLiteral("Loose Song"), QStringLiteral("/media/stick")}) {
+        QVERIFY2(!copied.contains(leak), qPrintable(leak + QStringLiteral(" in:\n") + copied));
+    }
+    QVERIFY2(copied.contains(QStringLiteral("[library] info: Scanning \"<library 1>/\u2026.flac\".")),
+             qPrintable(copied));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: OpenUri \"<library 1>/\u2026.ogg\".")));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: OpenUri \"<path>.mp3\".")));
+    QVERIFY(copied.contains(QStringLiteral("[playback] warning: Could not play the file. (<library 1>/\u2026.flac)")));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: Next.")));
+
+    client.copyDiagnosticsWithoutPaths();
+    QCOMPARE(QGuiApplication::clipboard()->text(), copied);
 }
 
 namespace {

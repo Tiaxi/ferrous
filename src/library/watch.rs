@@ -43,6 +43,7 @@ use walkdir::WalkDir;
 use self::inotify::{Inotify, RawEvent, Waker};
 use super::{is_supported_audio, LibraryCommand, UnwatchedRoot};
 use crate::folder_cover::is_cover_image;
+use crate::frontend_bridge::{log_info, quoted_path, ErrorCategory};
 use crate::worker_thread::JoinableThread;
 
 /// How the watcher batches changes and rescans the roots it cannot watch.
@@ -570,6 +571,8 @@ struct Watcher {
     unwatched_mounts: BTreeMap<PathBuf, (PathBuf, String)>,
     /// What the worker was last told about `unwatched`.
     reported: Vec<UnwatchedRoot>,
+    /// What the diagnostics log was last told about `unwatched`.
+    logged_unwatched: BTreeMap<PathBuf, Fallback>,
     pending: Coalescer,
     mount_rescans: MountRescans,
     /// When the roots that are not watched are rescanned next.
@@ -611,6 +614,7 @@ impl Watcher {
             unwatched: BTreeMap::new(),
             unwatched_mounts: BTreeMap::new(),
             reported: Vec::new(),
+            logged_unwatched: BTreeMap::new(),
             pending: Coalescer::default(),
             mount_rescans: MountRescans::default(),
             next_periodic: None,
@@ -774,8 +778,25 @@ impl Watcher {
         }
         self.caught_up = true;
         // A root that is gone is rescanned once it is back.
-        for root in self.roots.iter().flatten().filter(|root| root.is_dir()) {
-            let _ = self.commands.send(LibraryCommand::RescanRoot(root.clone()));
+        let present: Vec<PathBuf> = self
+            .roots
+            .iter()
+            .flatten()
+            .filter(|root| root.is_dir())
+            .cloned()
+            .collect();
+        if !present.is_empty() {
+            log_info(
+                ErrorCategory::Library,
+                &format!(
+                    "Rescanning {}: watching started, and they may have changed while \
+                     it was off.",
+                    super::scan::count_label(present.len(), "library root", "library roots")
+                ),
+            );
+        }
+        for root in present {
+            let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
     }
 
@@ -824,6 +845,13 @@ impl Watcher {
             .mount_rescans
             .take_due(now, |root| enabled && root.is_dir())
         {
+            log_info(
+                ErrorCategory::Library,
+                &format!(
+                    "Rescanning {}: the mounts there changed.",
+                    quoted_path(&root)
+                ),
+            );
             let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
     }
@@ -1173,6 +1201,13 @@ impl Watcher {
     fn flush_due(&mut self, now: Instant) {
         for (root, changes) in self.pending.take_due(now, &self.tuning) {
             let command = if changes.whole {
+                log_info(
+                    ErrorCategory::Library,
+                    &format!(
+                        "Rescanning {}: it changed more than the watches can follow.",
+                        quoted_path(&root)
+                    ),
+                );
                 LibraryCommand::RescanRoot(root)
             } else {
                 LibraryCommand::ScanPaths {
@@ -1204,6 +1239,14 @@ impl Watcher {
                 }
                 self.watch_root(&root);
             }
+            log_info(
+                ErrorCategory::Library,
+                &format!(
+                    "Rescanning {}: the check every {} of roots that are not watched.",
+                    quoted_path(&root),
+                    describe_interval(self.tuning.periodic)
+                ),
+            );
             let _ = self.commands.send(LibraryCommand::RescanRoot(root));
         }
         let mut mounts: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
@@ -1214,6 +1257,14 @@ impl Watcher {
                 .push(mount_point.clone());
         }
         for (root, paths) in mounts {
+            log_info(
+                ErrorCategory::Library,
+                &format!(
+                    "Rescanning the mounts in {} that are not watched: the check every {}.",
+                    quoted_path(&root),
+                    describe_interval(self.tuning.periodic)
+                ),
+            );
             let _ = self
                 .commands
                 .send(LibraryCommand::ScanPaths { root, paths });
@@ -1223,9 +1274,52 @@ impl Watcher {
         }
     }
 
+    /// Logs the roots that became unavailable or available again, or are
+    /// no longer watched or watched again, once each.
+    fn log_unwatched_changes(&mut self) {
+        if self.unwatched == self.logged_unwatched {
+            return;
+        }
+        if !self.enabled {
+            // Turning watching off, which the settings line logs, forgets
+            // why roots were not watched; nothing became available.
+            self.logged_unwatched.clone_from(&self.unwatched);
+            return;
+        }
+        let roots = self.roots.as_deref().unwrap_or_default();
+        for (root, before) in &self.logged_unwatched {
+            if self.unwatched.contains_key(root) || !roots.contains(root) {
+                continue;
+            }
+            let line = if *before == Fallback::Missing {
+                format!("Library root {} is available again.", quoted_path(root))
+            } else {
+                format!("Library root {} is watched again.", quoted_path(root))
+            };
+            log_info(ErrorCategory::Library, &line);
+        }
+        for (root, fallback) in &self.unwatched {
+            if self.logged_unwatched.get(root) == Some(fallback) {
+                continue;
+            }
+            let line = if *fallback == Fallback::Missing {
+                format!("Library root {} is unavailable.", quoted_path(root))
+            } else {
+                format!(
+                    "Library root {} is not watched: {}.",
+                    quoted_path(root),
+                    fallback.describe(self.tuning.periodic)
+                )
+            };
+            log_info(ErrorCategory::Library, &line);
+        }
+        self.logged_unwatched.clone_from(&self.unwatched);
+    }
+
     /// Tells the worker the roots that are not watched, or have mounts that
     /// are not, when they change.
     fn report(&mut self) {
+        self.log_unwatched_changes();
         let periodic = self.tuning.periodic;
         let mut reasons: BTreeMap<PathBuf, (String, bool)> = self
             .unwatched

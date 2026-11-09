@@ -560,6 +560,11 @@ ApplicationWindow {
         }
         function clearDiagnostics() {}
         function reloadDiagnosticsFromDisk() {}
+        // Counts the copies, for tests; there is no log here.
+        property int diagnosticsCopiesWithoutPaths: 0
+        function copyDiagnosticsWithoutPaths() {
+            bridgeFallback.diagnosticsCopiesWithoutPaths += 1
+        }
         // BridgeClient also logs it; there is no log here.
         function reportUiError(category, severity, subject, message) {
             bridgeFallback.bridgeError(message, category, severity, subject)

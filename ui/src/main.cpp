@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QApplication>
+#include <QIcon>
+#include <QLocale>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QScreen>
 #include <QStandardPaths>
 #include <QWindow>
+
+#include <ki18n_version.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +45,41 @@ bool hasInstalledDesktopEntry(const QString &desktopFileName) {
                 desktopFileName,
                 QStandardPaths::LocateFile)
                 .isEmpty();
+}
+
+// Logs what the UI runs with, for a bug report: the versions, the session,
+// the platform and the style. The backend logs its own versions and folders.
+void logStartup(BridgeClient &bridge, const QString &logPath) {
+    const QString desktop = qEnvironmentVariable("XDG_CURRENT_DESKTOP");
+    bridge.logInfo(
+        QStringLiteral("app"),
+        QStringLiteral("Ferrous %1 started: Qt %2 (built with %3), KDE Frameworks %4, "
+                       "desktop %5, platform %6, style %7, icon theme %8, locale %9; log \"%10\".")
+            .arg(QStringLiteral(FERROUS_APP_VERSION),
+                 QString::fromLatin1(qVersion()),
+                 QStringLiteral(QT_VERSION_STR),
+                 QStringLiteral(KI18N_VERSION_STRING),
+                 desktop.isEmpty() ? QStringLiteral("none") : desktop,
+                 QGuiApplication::platformName(),
+                 QQuickStyle::name(),
+                 QIcon::themeName(),
+                 QLocale().name(),
+                 logPath));
+    if (!BridgeClient::debugLoggingEnabled()) {
+        return;
+    }
+    QStringList screens;
+    for (const QScreen *screen : QGuiApplication::screens()) {
+        screens.push_back(QStringLiteral("%1 %2x%3 at %4x")
+                              .arg(screen->name())
+                              .arg(screen->size().width())
+                              .arg(screen->size().height())
+                              .arg(screen->devicePixelRatio()));
+    }
+    bridge.logDebug(
+        QStringLiteral("app"),
+        QStringLiteral("Platform theme %1, screens: %2.")
+            .arg(qEnvironmentVariable("QT_QPA_PLATFORMTHEME"), screens.join(QStringLiteral(", "))));
 }
 
 } // namespace
@@ -112,6 +152,7 @@ int main(int argc, char *argv[]) {
         Qt::QueuedConnection);
 
     engine.loadFromModule("FerrousUi", "Main");
+    logStartup(bridge, DiagnosticsLog::defaultLogPath());
     if (!engine.rootObjects().isEmpty()) {
         auto *mainWindow = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
         setMainActivationWindow(mainWindow);

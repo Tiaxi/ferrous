@@ -112,6 +112,18 @@ Dialog {
                     }
                 }
             }
+
+            Button {
+                objectName: "diagnosticsCopyWithoutPathsButton"
+                icon.name: "edit-copy"
+                text: I18n.i18nc("@action:button", "Copy Log Without Paths")
+                enabled: (root.diagnosticsText || "").length > 0
+                ToolTip.visible: hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip",
+                    "Copy the log with the library's folders and file names replaced, for a bug report")
+                onClicked: root.uiBridge.copyDiagnosticsWithoutPaths()
+            }
         }
 
         ScrollView {
@@ -172,6 +184,12 @@ Dialog {
                             diagnosticsTextArea.selectAll()
                             diagnosticsTextArea.copy()
                         }
+                    }
+
+                    MenuItem {
+                        text: I18n.i18nc("@action:inmenu", "Copy Log Without Paths")
+                        enabled: (diagnosticsTextArea.text || "").length > 0
+                        onTriggered: root.uiBridge.copyDiagnosticsWithoutPaths()
                     }
                 }
             }

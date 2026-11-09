@@ -300,6 +300,7 @@ Item {
         function applyItunesArtworkSuggestion(index) {}
         function reloadDiagnosticsFromDisk() {}
         function clearDiagnostics() {}
+        function copyDiagnosticsWithoutPaths() {}
         function libraryThumbnailSource(path, stamp) { return "" }
         function queuePathAt(index) { return "" }
         function playAt(index) {}

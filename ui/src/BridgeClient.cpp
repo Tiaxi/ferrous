@@ -27,6 +27,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QBuffer>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
@@ -794,6 +795,8 @@ BridgeClient::~BridgeClient() {
                 QStringLiteral("the backend did not stop cleanly before exiting; recent "
                                "settings, the queue, or Last.fm scrobbles may be missing, or "
                                "playback left a file open that it could not close"));
+        } else {
+            logInfo(QStringLiteral("app"), QStringLiteral("Ferrous quit cleanly."));
         }
         m_ffiBridge = nullptr;
     }
@@ -4265,6 +4268,52 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     m_pendingDiagnosticsDiskLines.push_back(line);
     if (!m_diagnosticsFlushTimer.isActive()) {
         m_diagnosticsFlushTimer.start();
+    }
+}
+
+void BridgeClient::logInfo(const QString &category, const QString &message) {
+    logDiagnostic(category, QStringLiteral("info: ") + message);
+}
+
+bool BridgeClient::debugLoggingEnabled() {
+    static const bool enabled =
+        qEnvironmentVariable("FERROUS_LOG").trimmed().compare(QLatin1String("debug"), Qt::CaseInsensitive)
+        == 0;
+    return enabled;
+}
+
+void BridgeClient::logDebug(const QString &category, const QString &message) {
+    if (debugLoggingEnabled()) {
+        logDiagnostic(category, QStringLiteral("debug: ") + message);
+    }
+}
+
+QString BridgeClient::diagnosticsTextWithoutPaths() const {
+    DiagnosticsLog::PathRedaction redaction;
+    redaction.libraryRoots = m_libraryRoots;
+    redaction.homePath = QDir::homePath();
+    // Ferrous's own folders tell nothing about the library.
+    for (const auto location : {QStandardPaths::GenericConfigLocation,
+                                QStandardPaths::GenericDataLocation,
+                                QStandardPaths::GenericCacheLocation}) {
+        const QString base = QStandardPaths::writableLocation(location);
+        if (!base.isEmpty()) {
+            redaction.keptFolders.push_back(QDir(base).filePath(QStringLiteral("ferrous")));
+        }
+    }
+    if (!m_diagnosticsLogPath.isEmpty()) {
+        redaction.keptFolders.push_back(QFileInfo(m_diagnosticsLogPath).absolutePath());
+    }
+    return DiagnosticsLog::withoutPaths(m_diagnosticsText, redaction);
+}
+
+void BridgeClient::copyDiagnosticsWithoutPaths() {
+    // The clipboard is a GUI application's.
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr) {
+        return;
+    }
+    if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+        clipboard->setText(diagnosticsTextWithoutPaths());
     }
 }
 

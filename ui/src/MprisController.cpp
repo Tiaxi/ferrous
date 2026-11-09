@@ -355,11 +355,19 @@ bool MprisController::canControl() const {
     return m_bridge != nullptr;
 }
 
+void MprisController::logCommand(const QString &command) const {
+    if (m_bridge != nullptr) {
+        m_bridge->logInfo(QStringLiteral("mpris"), command + QLatin1Char('.'));
+    }
+}
+
 void MprisController::raiseWindow() {
+    logCommand(QStringLiteral("Raise"));
     activateMainWindow();
 }
 
 void MprisController::quitApplication() {
+    logCommand(QStringLiteral("Quit"));
     // The main window's close handler saves the settings and the queue, and
     // shows the user a failure, before it stops the backend.
     if (closeMainWindow()) {
@@ -375,24 +383,28 @@ void MprisController::quitApplication() {
 }
 
 void MprisController::next() {
+    logCommand(QStringLiteral("Next"));
     if (m_bridge != nullptr) {
         m_bridge->next();
     }
 }
 
 void MprisController::previous() {
+    logCommand(QStringLiteral("Previous"));
     if (m_bridge != nullptr) {
         m_bridge->previous();
     }
 }
 
 void MprisController::pause() {
+    logCommand(QStringLiteral("Pause"));
     if (m_bridge != nullptr && normalizedPlaybackState(m_bridge) == QStringLiteral("Playing")) {
         m_bridge->pause();
     }
 }
 
 void MprisController::playPause() {
+    logCommand(QStringLiteral("PlayPause"));
     if (m_bridge == nullptr) {
         return;
     }
@@ -404,18 +416,21 @@ void MprisController::playPause() {
 }
 
 void MprisController::stop() {
+    logCommand(QStringLiteral("Stop"));
     if (m_bridge != nullptr) {
         m_bridge->stop();
     }
 }
 
 void MprisController::play() {
+    logCommand(QStringLiteral("Play"));
     if (m_bridge != nullptr) {
         m_bridge->play();
     }
 }
 
 void MprisController::setLoopStatus(const QString &loopStatusValue) {
+    logCommand(QStringLiteral("LoopStatus set to %1").arg(loopStatusValue.trimmed()));
     if (m_bridge == nullptr) {
         return;
     }
@@ -432,18 +447,22 @@ void MprisController::setLoopStatus(const QString &loopStatusValue) {
 }
 
 void MprisController::setShuffle(bool enabledValue) {
+    logCommand(enabledValue ? QStringLiteral("Shuffle set on") : QStringLiteral("Shuffle set off"));
     if (m_bridge != nullptr) {
         m_bridge->setShuffleEnabled(enabledValue);
     }
 }
 
 void MprisController::setVolume(double value) {
+    logCommand(QStringLiteral("Volume set to %1%").arg(std::lround(std::clamp(value, 0.0, 1.0) * 100.0)));
     if (m_bridge != nullptr) {
         m_bridge->setVolume(std::clamp(value, 0.0, 1.0));
     }
 }
 
 void MprisController::seek(qlonglong offsetUs) {
+    logCommand(QStringLiteral("Seek by %1 s")
+                   .arg(QString::number(static_cast<double>(offsetUs) / 1000000.0, 'f', 1)));
     if (m_bridge == nullptr || !canSeek()) {
         return;
     }
@@ -464,6 +483,8 @@ QString MprisController::localPathForOpenUri(const QString &uri) {
 
 bool MprisController::openUri(const QString &uri) {
     const QString localPath = localPathForOpenUri(uri);
+    logCommand(localPath.isEmpty() ? QStringLiteral("OpenUri with a URI that is not a local file")
+                                   : QStringLiteral("OpenUri \"%1\"").arg(localPath));
     if (localPath.isEmpty()) {
         if (calledFromDBus()) {
             sendErrorReply(
@@ -480,6 +501,8 @@ bool MprisController::openUri(const QString &uri) {
 }
 
 void MprisController::setPosition(const QString &trackIdPath, qlonglong positionUs) {
+    logCommand(QStringLiteral("SetPosition to %1 s")
+                   .arg(QString::number(static_cast<double>(positionUs) / 1000000.0, 'f', 1)));
     if (m_bridge == nullptr || !canSeek()) {
         return;
     }

@@ -440,6 +440,16 @@ if(BUILD_TESTING)
     add_test(NAME ferrous_console_tee_tests COMMAND ferrous_console_tee_tests)
     set_tests_properties(ferrous_console_tee_tests PROPERTIES TIMEOUT 60)
 
+    qt_add_executable(ferrous_diagnostics_log_tests
+        tests/tst_diagnostics_log.cpp
+        src/DiagnosticsLog.cpp
+    )
+    target_include_directories(ferrous_diagnostics_log_tests PRIVATE src)
+    target_link_libraries(ferrous_diagnostics_log_tests PRIVATE Qt6::Core Qt6::Test)
+    ferrous_enable_strict_warnings(ferrous_diagnostics_log_tests)
+    add_test(NAME ferrous_diagnostics_log_tests COMMAND ferrous_diagnostics_log_tests)
+    set_tests_properties(ferrous_diagnostics_log_tests PROPERTIES TIMEOUT 60)
+
     qt_add_executable(ferrous_heap_allocator_tests
         tests/tst_heap_allocator.cpp
         src/HeapAllocator.cpp

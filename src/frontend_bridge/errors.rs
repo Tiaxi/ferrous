@@ -3,6 +3,9 @@
 //! The errors the bridge shows the user, with what they concern.
 
 use std::fmt;
+use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 /// What part of Ferrous an error concerns. The values are sent to the UI;
 /// `BinaryBridgeCodec::ErrorCategory` in `ui/src/BinaryBridgeCodec.h` and
@@ -110,6 +113,49 @@ pub(crate) fn log_info(category: ErrorCategory, message: &str) {
     log_only(category, "info", message);
 }
 
+/// Whether `FERROUS_LOG=debug` asks for the debug lines of [`log_debug`].
+/// Read once: the environment does not change while the app runs.
+pub(crate) fn debug_logging() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FERROUS_LOG").is_ok_and(|level| level.trim().eq_ignore_ascii_case("debug"))
+    })
+}
+
+/// Logs the line `message` makes about `category`, only with
+/// `FERROUS_LOG=debug`: details that would crowd the event trace that
+/// [`log_info`] writes. `message` is called only then, so a caller pays for
+/// no formatting otherwise.
+pub(crate) fn log_debug(category: ErrorCategory, message: impl FnOnce() -> String) {
+    if debug_logging() {
+        log_only(category, "debug", &message());
+    }
+}
+
+/// `path` as the log lines quote a path, in double quotes, so that Copy Log
+/// Without Paths (`DiagnosticsLog::withoutPaths` in the UI) can tell where
+/// it ends.
+pub(crate) fn quoted_path(path: &Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
+/// A playback position or a duration as the log shows it: `m:ss.t`, with
+/// hours when there are any.
+pub(crate) fn log_position(position: Duration) -> String {
+    let tenths = position.as_millis() / 100;
+    let (hours, minutes, seconds, tenth) = (
+        tenths / 36_000,
+        tenths / 600 % 60,
+        tenths / 10 % 60,
+        tenths % 10,
+    );
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}.{tenth}")
+    } else {
+        format!("{minutes}:{seconds:02}.{tenth}")
+    }
+}
+
 /// Logs `error`, which could not reach Recent Issues, as
 /// `BridgeClient::reportError` logs the errors it shows. An error that
 /// reaches it is logged there, so only one line is written for each.
@@ -153,7 +199,8 @@ impl From<&str> for BridgeError {
     }
 }
 
-/// What [`log_warning`] and [`log_info`] wrote on this thread, for tests
+/// What [`log_warning`], [`log_info`] and [`log_debug`] wrote on this
+/// thread, for tests
 /// that log on their own thread.
 #[cfg(test)]
 pub(crate) mod test_log {
@@ -165,6 +212,16 @@ pub(crate) mod test_log {
 
     pub(super) fn record(line: String) {
         LINES.with(|lines| lines.borrow_mut().push(line));
+    }
+
+    /// Forgets the lines this thread logged so far.
+    pub(crate) fn clear() {
+        LINES.with(|lines| lines.borrow_mut().clear());
+    }
+
+    /// The lines this thread logged so far.
+    pub(crate) fn all() -> Vec<String> {
+        LINES.with(|lines| lines.borrow().clone())
     }
 
     /// The lines this thread logged so far that contain `needle`.
