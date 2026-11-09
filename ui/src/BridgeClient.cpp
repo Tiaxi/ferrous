@@ -4207,7 +4207,7 @@ quint32 BridgeClient::saveStateBeforeQuit() {
 }
 
 void BridgeClient::shutdown() {
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandNoPayload(BinaryBridgeCodec::CmdShutdown));
+    shutdownBridgeGracefully();
 }
 
 void BridgeClient::clearDiagnostics() {
@@ -5125,7 +5125,10 @@ void BridgeClient::scheduleAnalysisChanged() {
 }
 
 void BridgeClient::shutdownBridgeGracefully() {
-    if (m_ffiBridge == nullptr) {
+    // Asked for once: the window's close and MPRIS Quit ask before the
+    // destructor does, and the backend's thread ends on the first request,
+    // so a second would reach a stopped backend and fail.
+    if (m_ffiBridge == nullptr || m_bridgeShutdownRequested) {
         return;
     }
 
