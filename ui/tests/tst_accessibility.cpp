@@ -50,6 +50,10 @@
 
 namespace {
 
+// The controls style that the test program's main() sets, rather than the
+// app's, for a child process that asks for another.
+constexpr char childControlsStyleVariable[] = "FERROUS_TEST_CHILD_CONTROLS_STYLE";
+
 QMutex &capturedMessageMutex() {
     static QMutex mutex;
     return mutex;
@@ -2518,9 +2522,10 @@ void AccessibilityTest::transportBarHasNoWarnings() {
 
 void AccessibilityTest::transportBarHasNoWarningsUnderTheBasicStyle() {
     // The style is fixed once a control loads, so a child process runs the
-    // check above under the Basic style.
+    // check above under the Basic style. main() sets the app's style, which
+    // would override $QT_QUICK_CONTROLS_STYLE, so it sets the child's.
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(QStringLiteral("QT_QUICK_CONTROLS_STYLE"), QStringLiteral("Basic"));
+    environment.insert(QString::fromLatin1(childControlsStyleVariable), QStringLiteral("Basic"));
     QProcess child;
     child.setProcessEnvironment(environment);
     child.setProcessChannelMode(QProcess::MergedChannels);
@@ -3676,9 +3681,14 @@ int main(int argc, char **argv) {
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
 
-    // No desktop session's platform theme, which would choose the
-    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
-    isolateFromDesktopSession();
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h. A child process that
+    // transportBarHasNoWarningsUnderTheBasicStyle() starts asks for another.
+    isolateFromDesktopSessionWithAppLook();
+    const QString childStyle = qEnvironmentVariable(childControlsStyleVariable);
+    if (!childStyle.isEmpty()) {
+        QQuickStyle::setStyle(childStyle);
+    }
     QApplication app(argc, argv);
     QAccessible::setActive(true);
     AccessibilityTest test;

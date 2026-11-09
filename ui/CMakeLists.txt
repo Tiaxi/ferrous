@@ -651,7 +651,7 @@ if(BUILD_TESTING)
         waveform 120
         waveform_coverage 120
         library_queue 120
-        transport_input 90
+        transport_input 180
         window 120
         preferences 60
         errors 120

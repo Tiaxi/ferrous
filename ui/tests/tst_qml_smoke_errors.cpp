@@ -434,7 +434,8 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QVERIFY(clickButton(window, QStringLiteral("quitSaveFailedRetryButton")));
 
     QTRY_VERIFY(!window->isVisible());
-    QVERIFY(!dialog->property("visible").toBool());
+    // Visible until the style's exit transition ends.
+    QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
 void ErrorsSmokeTest::aFailedSaveBeforeQuitIsNotHiddenByRecentErrors() {
