@@ -240,6 +240,15 @@ pub(super) fn process_playback_event(
             state.last_track_change.generation = state.last_track_change.generation.wrapping_add(1);
             state.last_track_change.path = Some(path.clone());
             state.last_track_change.track_token = track_token;
+            // A report about the file that played before is no longer
+            // wanted, even while the playback snapshot still names it.
+            if state
+                .reported_playing_file
+                .as_ref()
+                .is_some_and(|report| report.path != path)
+            {
+                state.reported_playing_file = None;
+            }
             metadata.request(path.clone());
             // A track starts: check the queue's files again, since they may
             // have changed on disk since they were last checked.
@@ -597,8 +606,12 @@ pub(super) fn process_metadata_event(
     match event {
         MetadataEvent::Loaded(mut metadata) => {
             keep_newer_cover(state, &mut metadata);
-            state.metadata = metadata;
+            state.metadata = *metadata;
             SnapshotUrgency::Immediate
+        }
+        MetadataEvent::Superseded(path) => {
+            note_dropped_metadata_read(state, &path);
+            SnapshotUrgency::None
         }
     }
 }
@@ -1043,8 +1056,21 @@ pub(super) fn apply_library_events(
 pub(super) struct ReportedPlayingFile {
     path: PathBuf,
     state: TrackFileFingerprint,
-    /// Whether the metadata was asked for again since the report.
-    read_requested: bool,
+    read: ReportedFileRead,
+}
+
+/// Where the read of a [`ReportedPlayingFile`] stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportedFileRead {
+    /// Not asked for since the report. Metadata of the file may still be
+    /// on its way, read before or after the change.
+    NotAsked,
+    /// Asked for since the report, so metadata read in its state or later
+    /// is on its way.
+    Asked,
+    /// The metadata worker dropped a request for the file for a newer one,
+    /// so no metadata of it is on its way.
+    Dropped,
 }
 
 /// Keeps the latest state that `changed`, files a scan found changed on
@@ -1069,8 +1095,21 @@ fn note_reported_playing_file(
         state.reported_playing_file = Some(ReportedPlayingFile {
             path: path.clone(),
             state: *reported,
-            read_requested: false,
+            read: ReportedFileRead::NotAsked,
         });
+    }
+}
+
+/// The metadata worker dropped a request for `path` unread. When the
+/// playing file was reported changed, nothing now brings its metadata in
+/// the reported state, so [`metadata_to_read_again`] asks for it again.
+fn note_dropped_metadata_read(state: &mut BridgeState, path: &Path) {
+    if let Some(report) = state
+        .reported_playing_file
+        .as_mut()
+        .filter(|report| report.path == path)
+    {
+        report.read = ReportedFileRead::Dropped;
     }
 }
 
@@ -1079,23 +1118,27 @@ fn note_reported_playing_file(
 /// Asks once per report, since the read asked for comes after any read
 /// still on its way, and forgets the report once metadata read in its
 /// state arrives. Metadata still to arrive for the track waits until it
-/// does, as it may have been read before the change.
+/// does, as it may have been read before the change. A request the
+/// metadata worker dropped is asked for again, whatever is shown, since
+/// no metadata of the file is then on its way.
 pub(super) fn metadata_to_read_again(state: &mut BridgeState) -> Option<PathBuf> {
     let report = state.reported_playing_file.as_mut()?;
     if state.playback.current.as_ref() != Some(&report.path) {
         state.reported_playing_file = None;
         return None;
     }
-    if state.metadata.source_path.as_deref().map(Path::new) != Some(report.path.as_path()) {
-        return None;
-    }
-    if state.metadata.file_fingerprint == Some(report.state) {
+    let shows_file =
+        state.metadata.source_path.as_deref().map(Path::new) == Some(report.path.as_path());
+    if shows_file && state.metadata.file_fingerprint == Some(report.state) {
         state.reported_playing_file = None;
         return None;
     }
-    if std::mem::replace(&mut report.read_requested, true) {
-        return None;
+    match report.read {
+        ReportedFileRead::Asked => return None,
+        ReportedFileRead::NotAsked if !shows_file => return None,
+        ReportedFileRead::NotAsked | ReportedFileRead::Dropped => {}
     }
+    report.read = ReportedFileRead::Asked;
     Some(report.path.clone())
 }
 
@@ -2101,11 +2144,11 @@ mod tests {
     }
 
     fn loaded(path: &Path, read_in: TrackFileFingerprint) -> MetadataEvent {
-        MetadataEvent::Loaded(crate::metadata::TrackMetadata {
+        MetadataEvent::Loaded(Box::new(crate::metadata::TrackMetadata {
             source_path: Some(path.to_string_lossy().into_owned()),
             file_fingerprint: Some(read_in),
             ..crate::metadata::TrackMetadata::default()
-        })
+        }))
     }
 
     #[test]
@@ -2198,6 +2241,79 @@ mod tests {
         state.playback.current = Some(p("/music/A/Album/03.flac"));
         assert_eq!(metadata_to_read_again(&mut state), None);
         assert!(state.reported_playing_file.is_none());
+    }
+
+    #[test]
+    fn a_dropped_read_of_the_reported_playing_file_is_asked_for_again() {
+        let playing = p("/music/A/Album/02.flac");
+        let previous = p("/music/A/Album/01.flac");
+        let (read_state, changed_state) = (file_state(1), file_state(2));
+        let mut state = BridgeState::default();
+        state.playback.current = Some(playing.clone());
+        process_metadata_event(loaded(&playing, read_state), &mut state);
+        apply_library_events(
+            vec![scanned(vec![(playing.clone(), changed_state)])],
+            &mut state,
+        );
+        assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
+
+        // A request for the track before comes while the worker is busy,
+        // and the worker reads that one instead.
+        process_metadata_event(MetadataEvent::Superseded(playing.clone()), &mut state);
+        process_metadata_event(loaded(&previous, read_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
+        // Asked once more, until that read is dropped too.
+        process_metadata_event(loaded(&previous, read_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        process_metadata_event(MetadataEvent::Superseded(previous.clone()), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        process_metadata_event(MetadataEvent::Superseded(playing.clone()), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
+        // Metadata read in the reported state settles it.
+        process_metadata_event(loaded(&playing, changed_state), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+        assert!(state.reported_playing_file.is_none());
+
+        // With nothing reported, dropped reads ask for nothing.
+        process_metadata_event(MetadataEvent::Superseded(playing.clone()), &mut state);
+        assert_eq!(metadata_to_read_again(&mut state), None);
+    }
+
+    #[test]
+    fn a_dropped_read_of_a_reported_file_no_longer_playing_is_not_asked_for() {
+        // A manual change, a gapless one, and Repeat One, where the next
+        // track is the same file and the report still holds.
+        for (kind, next, keeps_report) in [
+            (TrackChangeKind::Manual, "/music/next.flac", false),
+            (TrackChangeKind::Gapless, "/music/next.flac", false),
+            (TrackChangeKind::Gapless, "/music/track.flac", true),
+        ] {
+            let (analysis, _commands, playback_tx, playback_rx, metadata, mut state) =
+                playback_harness(SpectrogramDisplayMode::Rolling);
+            let playing = p("/music/track.flac");
+            process_metadata_event(loaded(&playing, file_state(1)), &mut state);
+            apply_library_events(
+                vec![scanned(vec![(playing.clone(), file_state(2))])],
+                &mut state,
+            );
+            assert_eq!(metadata_to_read_again(&mut state), Some(playing.clone()));
+
+            // The track changes, and the change's request drops the read
+            // before the playback snapshot names the next track.
+            playback_tx
+                .send(PlaybackEvent::TrackChanged {
+                    path: p(next),
+                    queue_index: 1,
+                    kind: kind.clone(),
+                    track_token: 8,
+                })
+                .expect("send the track change");
+            pump_playback_events(&playback_rx, &analysis, &metadata, &mut state);
+            assert_eq!(state.playback.current, Some(playing.clone()));
+            process_metadata_event(MetadataEvent::Superseded(playing.clone()), &mut state);
+            let expected = keeps_report.then(|| playing.clone());
+            assert_eq!(metadata_to_read_again(&mut state), expected, "{kind:?}");
+        }
     }
 
     #[test]
@@ -2451,7 +2567,7 @@ mod tests {
         // The metadata worker chose the cover, then went on probing the
         // file; its later results carry the cover it chose first.
         let read = covered_metadata(&source, cover, 1, read_at(base, 0));
-        process_metadata_event(MetadataEvent::Loaded(read.clone()), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(read.clone())), &mut state);
         assert_eq!(state.metadata.cover_art_stamp, 1);
 
         // The image is replaced, and the watcher's scan gives the row stamp 2.
@@ -2464,7 +2580,7 @@ mod tests {
             bitrate_kbps: Some(905),
             ..read
         };
-        process_metadata_event(MetadataEvent::Loaded(probed), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(probed)), &mut state);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(cover));
         assert_eq!(state.metadata.cover_art_stamp, 2);
         assert_eq!(state.metadata.bitrate_kbps, Some(905));
@@ -2472,7 +2588,7 @@ mod tests {
         // A read made since then is newer than the scan's cover.
         let front = "/music/Artist/Album/front.jpg";
         let reread = covered_metadata(&source, front, 3, read_at(base, 20));
-        process_metadata_event(MetadataEvent::Loaded(reread), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(reread)), &mut state);
         assert_eq!(state.metadata.cover_art_stamp, 3);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(front));
     }
@@ -2484,7 +2600,12 @@ mod tests {
         let old = "/music/Artist/Album/folder.jpg";
         let new = "/music/Artist/Album/cover.png";
         process_metadata_event(
-            MetadataEvent::Loaded(covered_metadata(&source, old, 1, read_at(base, 0))),
+            MetadataEvent::Loaded(Box::new(covered_metadata(
+                &source,
+                old,
+                1,
+                read_at(base, 0),
+            ))),
             &mut state,
         );
         // 1. A large rescan reads the old cover; its batch is published later.
@@ -2519,7 +2640,7 @@ mod tests {
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(new));
         assert_eq!(state.metadata.cover_art_stamp, 2);
         // 5. The metadata read after the apply arrives, and agrees.
-        process_metadata_event(MetadataEvent::Loaded(reread), &mut state);
+        process_metadata_event(MetadataEvent::Loaded(Box::new(reread)), &mut state);
         assert_eq!(state.metadata.cover_art_path.as_deref(), Some(new));
         assert_eq!(state.metadata.cover_art_stamp, 2);
     }
