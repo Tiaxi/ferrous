@@ -2968,6 +2968,7 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     let files_processed = progress.map_or(0, |p| clamp_u32(p.supported_files_processed));
     let files_per_second = progress.and_then(|p| p.files_per_second).unwrap_or(0.0);
     let eta_seconds = progress.and_then(|p| p.eta_seconds).unwrap_or(-1.0);
+    let files_total = progress.and_then(|p| p.supported_files_total);
 
     push_u32(&mut out, clamp_u32(snapshot.library.roots.len()));
     push_u32(&mut out, clamp_u32(snapshot.library.tracks.len()));
@@ -2989,6 +2990,9 @@ fn encode_library_meta_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u32(&mut out, files_processed);
     push_f32(&mut out, files_per_second);
     push_f32(&mut out, eta_seconds);
+    // The files the scan will have processed when it ends, if it can tell.
+    push_u8(&mut out, u8::from(files_total.is_some()));
+    push_u32(&mut out, files_total.map_or(0, clamp_u32));
     push_u16(&mut out, clamp_u16(snapshot.library.roots.len()));
     for root in &snapshot.library.roots {
         let root_str = root.path.to_string_lossy().to_string();

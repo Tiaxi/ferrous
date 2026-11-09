@@ -99,8 +99,14 @@ ToolBar {
 
     readonly property bool scanning: root.uiBridge.libraryScanInProgress === true
     readonly property int scanProcessed: Math.max(0, Number(root.uiBridge.libraryScanProcessed) || 0)
-    readonly property int scanDiscovered: Math.max(root.scanProcessed,
-        Number(root.uiBridge.libraryScanDiscovered) || 0)
+    // The files the scan will have processed when it ends: more than those
+    // processed while work remains. A scan that cannot tell, as the first
+    // scan of a folder, shows a busy bar and its count instead.
+    readonly property int scanTotal: {
+        const total = Number(root.uiBridge.libraryScanTotal)
+        return isFinite(total) && total > 0 ? Math.max(root.scanProcessed, total) : -1
+    }
+    readonly property bool scanTotalKnown: root.scanTotal > 0
     // The folder being scanned, by name: known when the library has one.
     readonly property string scanFolderName: {
         const entries = root.uiBridge.libraryRootEntries || []
@@ -111,10 +117,13 @@ ToolBar {
         const name = String(entry.name || "").trim()
         return name.length > 0 ? name : FormatUtils.basenameFromPath(String(entry.path || ""))
     }
-    readonly property string scanCountText: root.scanDiscovered > 0
-        ? I18n.i18nc("@info:status files scanned of files found", "%1 / %2",
-            root.formatCount(root.scanProcessed), root.formatCount(root.scanDiscovered))
-        : ""
+    readonly property string scanCountText: root.scanTotalKnown
+        ? I18n.i18nc("@info:status files scanned of files to scan", "%1 / %2",
+            root.formatCount(root.scanProcessed), root.formatCount(root.scanTotal))
+        : root.scanProcessed > 0
+            ? I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
+                root.scanProcessed, root.formatCount(root.scanProcessed))
+            : ""
 
     // A count with the locale's digit grouping: "1,204".
     function formatCount(count) {
@@ -276,14 +285,15 @@ ToolBar {
 
         // The library scan: "Scanning “Music” 412 / 1,204" and a bar that
         // moves with the scan's batches; narrow: "Scanning 412 / 1,204".
+        // Without a total: "Scanning “Music” 412 files" and a busy bar.
         Row {
             id: scanGroup
             objectName: "statusBarScan"
             visible: root.scanning && root.showTrackSections
             spacing: Kirigami.Units.largeSpacing
             Layout.alignment: Qt.AlignVCenter
-            readonly property real fraction: root.scanDiscovered > 0
-                ? Math.min(1, root.scanProcessed / root.scanDiscovered)
+            readonly property real fraction: root.scanTotalKnown
+                ? Math.min(1, root.scanProcessed / root.scanTotal)
                 : 0
             Accessible.role: Accessible.StaticText
             Accessible.name: scanToolTipText.text
@@ -317,10 +327,43 @@ ToolBar {
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    // Whole pixels: the bar moves with the batches.
-                    width: Math.round(parent.width * scanGroup.fraction)
+                    visible: root.scanTotalKnown
+                    // Whole pixels, rounded down: the bar moves with the
+                    // batches, and is full only once the scan is.
+                    width: Math.floor(parent.width * scanGroup.fraction)
                     radius: 2
                     color: root.uiPalette.textSecondary
+                }
+
+                // Busy: a third of the bar goes back and forth; it stays
+                // at the start when the desktop turns animations off.
+                Rectangle {
+                    id: scanBusy
+                    objectName: "statusBarScanBarBusy"
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    visible: !root.scanTotalKnown
+                    width: Math.round(parent.width / 3)
+                    radius: 2
+                    color: root.uiPalette.textSecondary
+
+                    SequentialAnimation on x {
+                        objectName: "statusBarScanBarBusyAnimation"
+                        running: scanBusy.visible && Kirigami.Units.longDuration > 0
+                        loops: Animation.Infinite
+                        NumberAnimation {
+                            from: 0
+                            to: scanBusy.parent.width - scanBusy.width
+                            duration: Kirigami.Units.veryLongDuration * 3
+                            easing.type: Easing.InOutQuad
+                        }
+                        NumberAnimation {
+                            from: scanBusy.parent.width - scanBusy.width
+                            to: 0
+                            duration: Kirigami.Units.veryLongDuration * 3
+                            easing.type: Easing.InOutQuad
+                        }
+                    }
                 }
             }
 
@@ -334,11 +377,15 @@ ToolBar {
             QtObject {
                 id: scanToolTipText
                 readonly property string text: {
-                    const files = root.scanDiscovered > 0
+                    const files = root.scanTotalKnown
                         ? I18n.i18ncp("@info:tooltip %2 and %3 are file counts",
-                            "%2 of %3 file", "%2 of %3 files", root.scanDiscovered,
-                            root.formatCount(root.scanProcessed), root.formatCount(root.scanDiscovered))
-                        : ""
+                            "%2 of %3 file", "%2 of %3 files", root.scanTotal,
+                            root.formatCount(root.scanProcessed), root.formatCount(root.scanTotal))
+                        : root.scanProcessed > 0
+                            ? I18n.i18ncp("@info:tooltip %2 is the files scanned so far",
+                                "%2 file so far", "%2 files so far", root.scanProcessed,
+                                root.formatCount(root.scanProcessed))
+                            : ""
                     const folder = root.scanFolderName.length > 0
                         ? I18n.i18nc("@info:tooltip %1 is a library folder", "Scanning “%1”",
                             root.scanFolderName)

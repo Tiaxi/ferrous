@@ -165,6 +165,7 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int libraryScanRootsTotal READ libraryScanRootsTotal NOTIFY libraryScanChanged)
     Q_PROPERTY(int libraryScanDiscovered READ libraryScanDiscovered NOTIFY libraryScanChanged)
     Q_PROPERTY(int libraryScanProcessed READ libraryScanProcessed NOTIFY libraryScanChanged)
+    Q_PROPERTY(int libraryScanTotal READ libraryScanTotal NOTIFY libraryScanChanged)
     Q_PROPERTY(double libraryScanFilesPerSecond READ libraryScanFilesPerSecond NOTIFY libraryScanChanged)
     Q_PROPERTY(double libraryScanEtaSeconds READ libraryScanEtaSeconds NOTIFY libraryScanChanged)
     Q_PROPERTY(QVariantList globalSearchArtistResults READ globalSearchArtistResults NOTIFY globalSearchResultsChanged)
@@ -311,6 +312,9 @@ public:
     int libraryScanRootsTotal() const;
     int libraryScanDiscovered() const;
     int libraryScanProcessed() const;
+    // The files the scan will have processed when it ends: more than those
+    // processed while work remains; -1 while the scan cannot tell.
+    int libraryScanTotal() const;
     double libraryScanFilesPerSecond() const;
     double libraryScanEtaSeconds() const;
     QVariantList globalSearchArtistResults() const;
@@ -925,6 +929,7 @@ private:
     int m_libraryScanRootsTotal{0};
     int m_libraryScanDiscovered{0};
     int m_libraryScanProcessed{0};
+    int m_libraryScanTotal{-1};
     double m_libraryScanFilesPerSecond{0.0};
     double m_libraryScanEtaSeconds{-1.0};
     QVariantList m_globalSearchArtistResults;

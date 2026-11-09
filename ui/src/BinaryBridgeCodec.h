@@ -342,6 +342,9 @@ struct DecodedLibraryMeta {
     int filesProcessed{0};
     double filesPerSecond{0.0};
     double etaSeconds{-1.0};
+    // The files the scan will have processed when it ends; -1 while the
+    // scan cannot tell, as in the first scan of a folder.
+    int filesTotal{-1};
     QStringList rootPaths;
     QVector<DecodedLibraryRoot> rootEntries;
     bool viewStatePresent{false};

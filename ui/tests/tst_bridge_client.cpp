@@ -7801,6 +7801,7 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     snapshot.library.scanInProgress = true;
     snapshot.library.filesDiscovered = 100;
     snapshot.library.filesProcessed = 10;
+    snapshot.library.filesTotal = 120;
 
     // Scan progress: only the scan's properties are notified.
     QVERIFY(client.processBinarySnapshot(snapshot));
@@ -7829,6 +7830,14 @@ void BridgeClientTest::libraryChangesNotifyOnlyLibraryProperties() {
     QCOMPARE(other.count(), 0);
     QCOMPARE(client.libraryTrackCount(), 5);
     QCOMPARE(client.libraryScanProcessed(), 10);
+    QCOMPARE(client.libraryScanTotal(), 120);
+
+    // A scan that cannot tell its total.
+    client.m_pollLibraryScanChanged = false;
+    snapshot.library.filesTotal = -1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.m_pollLibraryScanChanged);
+    QCOMPARE(client.libraryScanTotal(), -1);
 }
 
 // The file manager's name that xdg-mime finds would change the name guessed
@@ -7925,9 +7934,11 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     append(quint8(0));                                       // scan in progress
     append(qint32(0));                                       // sort mode
     text(QString());                                         // last error
-    for (quint32 value : {0u, 0u, 0u, 0u}) append(value);    // scan progress
+    for (quint32 value : {0u, 0u, 3u, 2u}) append(value);    // scan progress
     append(float(0.0f));
     append(float(-1.0f));
+    append(quint8(1));                                       // files to scan known
+    append(quint32(40));                                     // files to scan
     append(quint16(2));
     text(QStringLiteral("/music"));
     text(QStringLiteral("Music"));
@@ -7957,6 +7968,23 @@ void BridgeClientTest::libraryWatchingDecodesFromBinaryPayload() {
     QVERIFY(decoded.library.rootEntries[1].scanProblem.isEmpty());
     QCOMPARE(decoded.library.rootEntries[0].trackCount, 1234);
     QCOMPARE(decoded.library.rootEntries[1].trackCount, 0);
+    QCOMPARE(decoded.library.filesDiscovered, 3);
+    QCOMPARE(decoded.library.filesProcessed, 2);
+    QCOMPARE(decoded.library.filesTotal, 40);
+    // A scan that cannot tell its total, as the first scan of a folder.
+    // The flag follows the counts, the error, the progress and the rate.
+    constexpr qsizetype totalKnownOffset = 4 * 4 + 1 + 4 + 4 + 4 * 4 + 4 + 4;
+    QCOMPARE(bytes.at(totalKnownOffset), char(1));
+    bytes[totalKnownOffset] = char(0);
+    decoded = {};
+    QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error),
+             qPrintable(error));
+    QCOMPARE(decoded.library.filesTotal, -1);
+    bytes[totalKnownOffset] = char(2);
+    decoded = {};
+    QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(section(BinaryBridgeCodec::SectionLibraryMeta),
+                                                     &decoded, &error));
 
     // The settings section ends with library watching, and older payloads
     // without it default on.

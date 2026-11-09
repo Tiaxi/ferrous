@@ -2133,6 +2133,10 @@ int BridgeClient::libraryScanProcessed() const {
     return m_libraryScanProcessed;
 }
 
+int BridgeClient::libraryScanTotal() const {
+    return m_libraryScanTotal;
+}
+
 double BridgeClient::libraryScanFilesPerSecond() const {
     return m_libraryScanFilesPerSecond;
 }
@@ -6311,6 +6315,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const int rootsTotal = snapshot.library.present ? std::max(0, snapshot.library.rootsTotal) : m_libraryScanRootsTotal;
     const int discovered = snapshot.library.present ? std::max(0, snapshot.library.filesDiscovered) : m_libraryScanDiscovered;
     const int processed = snapshot.library.present ? std::max(0, snapshot.library.filesProcessed) : m_libraryScanProcessed;
+    const int total = snapshot.library.present ? std::max(-1, snapshot.library.filesTotal) : m_libraryScanTotal;
     const double filesPerSecond = snapshot.library.present ? snapshot.library.filesPerSecond : m_libraryScanFilesPerSecond;
     const double etaSeconds = snapshot.library.present ? snapshot.library.etaSeconds : m_libraryScanEtaSeconds;
 
@@ -6331,6 +6336,11 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
     if (m_libraryScanProcessed != processed) {
         m_libraryScanProcessed = processed;
+        changed = true;
+        libraryScanSignalChanged = true;
+    }
+    if (m_libraryScanTotal != total) {
+        m_libraryScanTotal = total;
         changed = true;
         libraryScanSignalChanged = true;
     }

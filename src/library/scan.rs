@@ -41,8 +41,10 @@ use super::{
 struct RootScanProgress {
     discovered: usize,
     processed: usize,
+    /// The files the scan of the root will have processed when it ends; see
+    /// [`ScanProgressReporter::estimated_total`].
+    estimated_total: Option<usize>,
     files_per_second: Option<f32>,
-    eta_seconds: Option<f32>,
 }
 
 struct ScanProgressReporter {
@@ -75,12 +77,15 @@ impl ScanProgressReporter {
         }
     }
 
-    /// The progress to report, if it is `force`d or due.
+    /// The progress to report, if it is `force`d or due. `walked` tells
+    /// whether the walk of the root has ended, so that `discovered` are all
+    /// its files.
     fn emit(
         &mut self,
         force: bool,
         discovered: usize,
         processed: usize,
+        walked: bool,
     ) -> Option<RootScanProgress> {
         if !force && self.last_emit.elapsed() < Duration::from_millis(180) {
             return None;
@@ -99,29 +104,41 @@ impl ScanProgressReporter {
             None
         };
 
-        let eta_seconds = if self.previous_index_count > 0 {
-            let estimated_total = discovered.max(self.previous_index_count);
-            if let Some(rate) = files_per_second {
-                if rate >= 0.5 && processed < estimated_total {
-                    Some(usize_to_f32(estimated_total.saturating_sub(processed)) / rate)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         self.last_emit = Instant::now();
         Some(RootScanProgress {
             discovered,
             processed,
+            estimated_total: self.estimated_total(discovered, walked),
             files_per_second,
-            eta_seconds,
         })
     }
+
+    /// The files the scan will have processed when it ends. Once the walk
+    /// has ended, those are the files it found. Until then, they are the
+    /// files the root had when the scan started, and more than the walk has
+    /// found so far, since it can find another; a root that had none has no
+    /// estimate.
+    fn estimated_total(&self, discovered: usize, walked: bool) -> Option<usize> {
+        if walked {
+            Some(discovered)
+        } else if self.previous_index_count == 0 {
+            None
+        } else {
+            Some(self.previous_index_count.max(discovered.saturating_add(1)))
+        }
+    }
+}
+
+/// The seconds until `processed` files reach `total` at `files_per_second`,
+/// if both are known and the scan is moving.
+fn scan_eta_seconds(
+    total: Option<usize>,
+    processed: usize,
+    files_per_second: Option<f32>,
+) -> Option<f32> {
+    let total = total?;
+    let rate = files_per_second?;
+    (rate >= 0.5 && processed < total).then(|| usize_to_f32(total - processed) / rate)
 }
 
 impl MetadataWorkerPool {
@@ -476,6 +493,7 @@ fn backfill_search_tags_using(
                 roots_total: library.roots().len(),
                 supported_files_discovered: paths.len(),
                 supported_files_processed: ((batch_index + 1) * 256).min(paths.len()),
+                supported_files_total: Some(paths.len()),
                 ..LibraryScanProgress::default()
             });
             library.publish(event_tx);
@@ -604,6 +622,11 @@ pub(super) fn run_scans_with(
         event_tx,
         control,
         problems: Vec::new(),
+        indexed: roots
+            .iter()
+            .map(|root| indexed_track_count(conn, root))
+            .collect(),
+        processed_before: 0,
     };
     for (idx, root) in roots.iter().enumerate() {
         let end = run.scan(root, None, (idx, roots.len()), &roots[idx + 1..]);
@@ -636,9 +659,13 @@ pub(super) fn run_scoped_scan(
         event_tx,
         control,
         problems: Vec::new(),
+        indexed: Vec::new(),
+        processed_before: 0,
     };
     let mut end = run.scan(root, Some(scope), (0, 1), &[]);
     if end.needs_full_scan && !end.stopped_all {
+        // The scan of the root starts over, with its own files.
+        run.processed_before = 0;
         end = run.scan(root, None, (0, 1), &[]);
         end.changed = true;
     }
@@ -660,6 +687,57 @@ struct ScanRun<'a> {
     event_tx: &'a Sender<LibraryEvent>,
     control: &'a mut dyn ScanControl,
     problems: Vec<String>,
+    /// The rows each root of the run had when it started, by position; see
+    /// [`ScanRun::run_progress`].
+    indexed: Vec<usize>,
+    /// The files the scans of the run's earlier roots processed.
+    processed_before: usize,
+}
+
+/// A scan of one root as part of its run, so that the progress the run
+/// shows is of all its roots: one bar that fills once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunProgress {
+    /// The files the scans of the run's earlier roots processed.
+    processed_before: usize,
+    /// The rows the run's later roots had when it started; `None` if one of
+    /// them had none, as a root never scanned, so the run has no estimate.
+    later: Option<usize>,
+}
+
+impl RunProgress {
+    /// The files the run discovered and processed, and the files it will
+    /// have processed when it ends, with `root` the progress of the current
+    /// root.
+    fn of(self, root: &RootScanProgress) -> (usize, usize, Option<usize>) {
+        let total = root.estimated_total.zip(self.later).map(|(root, later)| {
+            self.processed_before
+                .saturating_add(root)
+                .saturating_add(later)
+        });
+        (
+            self.processed_before.saturating_add(root.discovered),
+            self.processed_before.saturating_add(root.processed),
+            total,
+        )
+    }
+}
+
+/// The rows of `root`, a configured root, as the scan of the root counts
+/// them; none if they cannot be counted.
+fn indexed_track_count(conn: &Connection, root: &Path) -> usize {
+    let root_str = root.to_string_lossy();
+    conn.prepare_cached(&format!(
+        "SELECT COUNT(*) FROM tracks WHERE {ROOT_TRACKS_FILTER}"
+    ))
+    .and_then(|mut stmt| {
+        stmt.query_row(params![root_str, descendant_prefix(&root_str)], |row| {
+            row.get::<_, i64>(0)
+        })
+    })
+    .ok()
+    .and_then(|count| usize::try_from(count).ok())
+    .unwrap_or(0)
 }
 
 /// How the scan of one root in a [`ScanRun`] ended.
@@ -674,6 +752,19 @@ struct RootScanEnd {
 }
 
 impl ScanRun<'_> {
+    /// The progress of the run while it scans the root at `idx`.
+    fn run_progress(&self, idx: usize) -> RunProgress {
+        let later = self.indexed.get(idx + 1..).map_or(Some(0), |later| {
+            later.iter().try_fold(0usize, |sum, &rows| {
+                (rows > 0).then(|| sum.saturating_add(rows))
+            })
+        });
+        RunProgress {
+            processed_before: self.processed_before,
+            later,
+        }
+    }
+
     /// Scans `scope` of `root`, or all of it, as root `position.0` of
     /// `position.1`; `remaining` are the roots scanned after it.
     fn scan(
@@ -703,6 +794,7 @@ impl ScanRun<'_> {
         if self.control.defer_walk(root) {
             return RootScanEnd::default();
         }
+        let run_progress = self.run_progress(position.0);
         let mut sink = SnapshotSink::new(
             self.library,
             self.event_tx,
@@ -710,6 +802,7 @@ impl ScanRun<'_> {
             root,
             remaining,
             position,
+            run_progress,
         );
 
         // Roots are independent: a root that fails or cannot be fully read is
@@ -784,19 +877,38 @@ impl ScanRun<'_> {
         if self.control.external_writes(conn) {
             self.library.reload(conn);
         }
+        self.publish_root_done(root, position, run_progress, &final_progress);
+        end
+    }
+
+    /// Publishes the progress of the run once the scan of `root`, at
+    /// `position`, is done: what it processed is all it has.
+    fn publish_root_done(
+        &mut self,
+        root: &Path,
+        position: (usize, usize),
+        run_progress: RunProgress,
+        final_progress: &RootScanProgress,
+    ) {
+        self.processed_before = self
+            .processed_before
+            .saturating_add(final_progress.processed);
         let (idx, roots_total) = position;
+        let processed = self.processed_before;
         self.library.status.scan_in_progress = true;
         self.library.status.scan_progress = Some(LibraryScanProgress {
             current_root: Some(root.to_path_buf()),
             roots_completed: idx + 1,
             roots_total,
-            supported_files_discovered: final_progress.discovered,
-            supported_files_processed: final_progress.processed,
+            supported_files_discovered: processed,
+            supported_files_processed: processed,
+            supported_files_total: run_progress
+                .later
+                .map(|later| processed.saturating_add(later)),
             files_per_second: final_progress.files_per_second,
             eta_seconds: None,
         });
         self.library.publish(self.event_tx);
-        end
     }
 
     /// Record what a finished scan of `root` found, for the command and for
@@ -851,6 +963,7 @@ struct SnapshotSink<'a> {
     remaining: &'a [PathBuf],
     /// The root's index in the run, and the number of roots in the run.
     position: (usize, usize),
+    run_progress: RunProgress,
     emit_interval: Duration,
     min_processed_delta: usize,
     last_emit: Instant,
@@ -870,6 +983,7 @@ impl<'a> SnapshotSink<'a> {
         root: &'a Path,
         remaining: &'a [PathBuf],
         position: (usize, usize),
+        run_progress: RunProgress,
     ) -> Self {
         let emit_interval = scan_snapshot_emit_interval();
         Self {
@@ -879,6 +993,7 @@ impl<'a> SnapshotSink<'a> {
             root,
             remaining,
             position,
+            run_progress,
             emit_interval,
             min_processed_delta: scan_snapshot_min_processed_delta(),
             last_emit: Instant::now()
@@ -895,15 +1010,17 @@ impl<'a> SnapshotSink<'a> {
 impl ScanSink for SnapshotSink<'_> {
     fn progress(&mut self, conn: &Connection, progress: RootScanProgress) {
         let (idx, roots_total) = self.position;
+        let (discovered, processed, total) = self.run_progress.of(&progress);
         self.library.status.scan_in_progress = true;
         self.library.status.scan_progress = Some(LibraryScanProgress {
             current_root: Some(self.root.to_path_buf()),
             roots_completed: idx,
             roots_total,
-            supported_files_discovered: progress.discovered,
-            supported_files_processed: progress.processed,
+            supported_files_discovered: discovered,
+            supported_files_processed: processed,
+            supported_files_total: total,
             files_per_second: progress.files_per_second,
-            eta_seconds: progress.eta_seconds,
+            eta_seconds: scan_eta_seconds(total, processed, progress.files_per_second),
         });
         let processed_delta = progress.processed.saturating_sub(self.last_processed);
         let emit_due = progress.processed == 0
@@ -3556,6 +3673,8 @@ struct RootScan<'a> {
     folders: HashMap<PathBuf, Option<FolderCover>>,
     discovered: usize,
     processed: usize,
+    /// Whether the walk has ended, so that `discovered` are all the files.
+    walked: bool,
     progress: ScanProgressReporter,
     read_failures: ReadFailures,
     identities: IdentityCounts,
@@ -3698,7 +3817,10 @@ impl RootScan<'_> {
     }
 
     fn report(&mut self, sink: &mut dyn ScanSink, force: bool) {
-        if let Some(progress) = self.progress.emit(force, self.discovered, self.processed) {
+        if let Some(progress) =
+            self.progress
+                .emit(force, self.discovered, self.processed, self.walked)
+        {
             sink.progress(self.conn, progress);
         }
     }
@@ -4021,6 +4143,7 @@ fn scan_root_in(
         folders: HashMap::new(),
         discovered: 0,
         processed: 0,
+        walked: false,
         progress: ScanProgressReporter::new(previous_index_count),
         read_failures: ReadFailures::default(),
         identities: IdentityCounts::default(),
@@ -4085,6 +4208,9 @@ fn scan_root_in(
                 break 'scan false;
             }
         }
+        // The files found are all there are: the total is known now.
+        scan.walked = true;
+        scan.report(sink, true);
 
         for (task, existing_state) in std::mem::take(&mut unconfirmed) {
             if sink.should_stop(conn) {
@@ -4956,6 +5082,8 @@ mod batch_tests;
 mod cover_tests;
 #[cfg(test)]
 mod identity_tests;
+#[cfg(test)]
+mod progress_tests;
 #[cfg(test)]
 mod refresh_tests;
 #[cfg(test)]

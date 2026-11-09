@@ -526,7 +526,8 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     // The status bar shows the scan of a connected bridge.
     bridge->setProperty("connected", true);
     bridge->setProperty("libraryScanProcessed", 41);
-    bridge->setProperty("libraryScanDiscovered", 120);
+    bridge->setProperty("libraryScanDiscovered", 41);
+    bridge->setProperty("libraryScanTotal", 120);
     bridge->setProperty("libraryScanInProgress", true);
     QTRY_VERIFY(shown(scanCount));
     QCOMPARE(scanCount->property("text").toString(), QStringLiteral("41 / 120"));

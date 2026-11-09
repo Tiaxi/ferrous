@@ -406,6 +406,8 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     quint32 filesProcessed = 0;
     float filesPerSecond = 0.0f;
     float etaSeconds = -1.0f;
+    quint8 filesTotalKnown = 0;
+    quint32 filesTotal = 0;
     quint16 rootPathCount = 0;
 
     if (!reader.readU32(&rootCount)
@@ -421,6 +423,9 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
         || !reader.readU32(&filesProcessed)
         || !reader.readF32(&filesPerSecond)
         || !reader.readF32(&etaSeconds)
+        || !reader.readU8(&filesTotalKnown)
+        || filesTotalKnown > 1
+        || !reader.readU32(&filesTotal)
         || !reader.readU16(&rootPathCount)) {
         return false;
     }
@@ -490,6 +495,9 @@ bool decodeLibraryMetaSection(const QByteArray &payload, DecodedLibraryMeta *out
     out->filesProcessed = static_cast<int>(filesProcessed);
     out->filesPerSecond = static_cast<double>(filesPerSecond);
     out->etaSeconds = static_cast<double>(etaSeconds);
+    out->filesTotal = filesTotalKnown != 0
+        ? static_cast<int>(std::min<quint32>(filesTotal, std::numeric_limits<int>::max()))
+        : -1;
     out->rootPaths = rootPaths;
     out->rootEntries = rootEntries;
     out->viewStatePresent = viewStatePresent;
