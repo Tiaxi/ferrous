@@ -1612,10 +1612,15 @@ impl AnalysisRuntimeState {
             self.track_io_lost = true;
             let message = "Saved waveforms are unavailable because the analysis file \
                            worker stopped. Restart Ferrous to use them again.";
-            eprintln!("[ferrous] {message}");
-            let _ = ctx
+            // Recent Issues logs it; it is logged here only if it cannot
+            // get there.
+            if ctx
                 .event_tx
-                .send(AnalysisEvent::WorkerFailed(message.to_string()));
+                .send(AnalysisEvent::WorkerFailed(message.to_string()))
+                .is_err()
+            {
+                eprintln!("[ferrous] [analysis] error: {message}");
+            }
         }
         self.pending_candidate = None;
         // Decode the waveform of a track whose load is lost.
@@ -2443,8 +2448,13 @@ fn report_lost_spectrogram_worker(
     let message = format!(
         "The spectrogram is unavailable because {reason}. Restart Ferrous to use it again."
     );
-    eprintln!("[ferrous] {message}");
-    let _ = event_tx.send(AnalysisEvent::WorkerFailed(message));
+    // Recent Issues logs it; it is logged here only if it cannot get there.
+    if event_tx
+        .send(AnalysisEvent::WorkerFailed(message.clone()))
+        .is_err()
+    {
+        eprintln!("[ferrous] [analysis] error: {message}");
+    }
 }
 
 fn small_usize_to_f32(value: usize) -> f32 {

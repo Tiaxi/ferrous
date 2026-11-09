@@ -9,7 +9,7 @@ use crate::playback::{PlaybackCommand, PlaybackEngine, PlaybackState};
 use super::queue_sync::QueueEdit;
 use super::queue_undo::{Before, Change, QueueUndoKind, STALE_UNDO_MESSAGE};
 use super::{
-    sync_queue_details, try_send_event, BridgeError, BridgeEvent, BridgeQueueCommand, BridgeState,
+    send_error, sync_queue_details, BridgeError, BridgeEvent, BridgeQueueCommand, BridgeState,
     ErrorCategory, RowsMove,
 };
 
@@ -109,10 +109,7 @@ pub(super) fn handle_queue_command(
         }
     }
     if let Some(error) = outcome.error {
-        let _ = try_send_event(
-            event_tx,
-            BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, error)),
-        );
+        send_error(event_tx, BridgeError::error(ErrorCategory::Playback, error));
     }
     outcome.changed
 }
@@ -194,12 +191,9 @@ fn undo_queue_change(
 ) -> bool {
     let Some(change) = state.queue_undo.take(id) else {
         // Nothing changed, but the user asked for something that did not happen.
-        let _ = try_send_event(
+        send_error(
             event_tx,
-            BridgeEvent::Error(BridgeError::warning(
-                ErrorCategory::Playback,
-                STALE_UNDO_MESSAGE,
-            )),
+            BridgeError::warning(ErrorCategory::Playback, STALE_UNDO_MESSAGE),
         );
         return false;
     };

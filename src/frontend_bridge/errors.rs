@@ -110,6 +110,25 @@ pub(crate) fn log_info(category: ErrorCategory, message: &str) {
     log_only(category, "info", message);
 }
 
+/// Logs `error`, which could not reach Recent Issues, as
+/// `BridgeClient::reportError` logs the errors it shows. An error that
+/// reaches it is logged there, so only one line is written for each.
+pub(crate) fn log_undelivered(error: &BridgeError) {
+    let level = match error.severity {
+        ErrorSeverity::Warning => "warning",
+        ErrorSeverity::Error => "error",
+    };
+    if error.subject.is_empty() {
+        log_only(error.category, level, &error.message);
+    } else {
+        log_only(
+            error.category,
+            level,
+            &format!("{} ({})", error.message, error.subject),
+        );
+    }
+}
+
 fn log_only(category: ErrorCategory, level: &str, message: &str) {
     // One line each: the log is read line by line.
     let message = message.replace('\n', "\\n").replace('\r', "\\r");

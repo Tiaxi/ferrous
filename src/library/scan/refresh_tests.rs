@@ -5,6 +5,7 @@
 //! backfill, and for the external-track cache.
 
 use super::*;
+use crate::frontend_bridge::test_log;
 use crate::metadata::{encoded_picture, test_cache, write_wav_with_picture};
 use crate::raw_audio::write_test_apev2_file;
 use crate::vorbis_comment_scan::fixtures::{comment_block, flac};
@@ -283,10 +284,12 @@ fn an_inner_root_reclaiming_a_track_whose_reader_panics_keeps_its_row() {
     )
     .expect("scan");
 
-    let problem = outcome.problem.expect("the unreadable file is reported");
+    // The scan keeps the indexed tags, so it only logs the file.
+    assert_eq!(outcome.problem, None);
+    let notes = outcome.notes.join("; ");
     assert!(
-        problem.contains("could not read the tags of 1 file"),
-        "{problem}"
+        notes.contains("could not read the tags of 1 file"),
+        "{notes}"
     );
     assert_eq!(row_tags(&conn, &track), saved_tags());
     let _ = fs::remove_dir_all(outer);
@@ -327,7 +330,22 @@ fn track_with_blocked_cover(
     (track, entry)
 }
 
-fn assert_cover_kept(conn: &Connection, track: &Path, previous: &str, refresh: &TrackRefresh) {
+/// Whether the user is told of a cover a refresh could not cache: after an
+/// album art change, which the user made, but not after a tag edit or a
+/// rename, which keep the previous cover until the next scan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoverFailure {
+    Reported,
+    Logged,
+}
+
+fn assert_cover_kept(
+    conn: &Connection,
+    track: &Path,
+    previous: &str,
+    refresh: &TrackRefresh,
+    failure: CoverFailure,
+) {
     assert_eq!(cover_row(conn, track), (previous.to_string(), false));
     assert_eq!(refresh.indexed[track].cover_path, previous);
     let ((_, cover), state) = external_row_of(conn, track);
@@ -336,7 +354,20 @@ fn assert_cover_kept(conn: &Connection, track: &Path, previous: &str, refresh: &
         (previous, 1),
         "the cache row is not replaced"
     );
-    assert_reports_cover(refresh.problem.as_ref());
+    let logged = test_log::lines_containing(
+        "[ferrous] [library] warning: could not cache the embedded covers of 1 file; \
+         kept their previous covers",
+    );
+    match failure {
+        CoverFailure::Reported => {
+            assert_reports_cover(refresh.problem.as_ref());
+            assert!(logged.is_empty(), "{logged:?}");
+        }
+        CoverFailure::Logged => {
+            assert!(refresh.problem.is_none(), "{:?}", refresh.problem);
+            assert_eq!(logged.len(), 1, "{logged:?}");
+        }
+    }
 }
 
 fn assert_cover_cached(conn: &Connection, track: &Path, entry: &Path, refresh: &TrackRefresh) {
@@ -359,7 +390,7 @@ fn a_metadata_refresh_keeps_the_previous_cover_when_the_picture_cannot_be_cached
     let refresh =
         refresh_indexed_metadata_in_conn(&mut conn, &paths, Some(&cache)).expect("refresh");
 
-    assert_cover_kept(&conn, &track, previous, &refresh);
+    assert_cover_kept(&conn, &track, previous, &refresh, CoverFailure::Logged);
     fs::remove_dir(&entry).expect("unblock the entry");
     let refresh = refresh_indexed_metadata_in_conn(&mut conn, &paths, Some(&cache)).expect("retry");
     assert_cover_cached(&conn, &track, &entry, &refresh);
@@ -385,7 +416,7 @@ fn a_rename_keeps_the_previous_cover_when_the_picture_cannot_be_cached() {
     )
     .expect("rename");
 
-    assert_cover_kept(&conn, &new, previous, &refresh);
+    assert_cover_kept(&conn, &new, previous, &refresh, CoverFailure::Logged);
     fs::remove_dir(&entry).expect("unblock the entry");
     let renames = [(new.clone(), old.clone())];
     let refresh = rename_with_journal(
@@ -411,7 +442,7 @@ fn a_cover_refresh_keeps_the_previous_cover_when_the_picture_cannot_be_cached() 
 
     let refresh = refresh_cover_paths_in_conn(&conn, &paths, Some(&cache)).expect("refresh");
 
-    assert_cover_kept(&conn, &track, previous, &refresh);
+    assert_cover_kept(&conn, &track, previous, &refresh, CoverFailure::Reported);
     fs::remove_dir(&entry).expect("unblock the entry");
     let refresh = refresh_cover_paths_in_conn(&conn, &paths, Some(&cache)).expect("retry");
     assert_cover_cached(&conn, &track, &entry, &refresh);

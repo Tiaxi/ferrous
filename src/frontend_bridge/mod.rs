@@ -58,7 +58,7 @@ use config::{
 };
 #[cfg(test)]
 pub(crate) use errors::test_log;
-pub(crate) use errors::{log_info, log_warning};
+pub(crate) use errors::{log_info, log_undelivered, log_warning};
 pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
     apply_library_events, drain_analysis_events, drain_apply_album_art_events,
@@ -1810,13 +1810,13 @@ impl BridgeLoopRuntime {
             return;
         }
         if self.edit_refreshes.request(paths).is_none() {
-            let _ = try_send_event(
+            send_error(
                 event_tx,
-                BridgeEvent::Error(BridgeError::warning(
+                BridgeError::warning(
                     ErrorCategory::Tags,
                     "The library could not be updated with the saved tag edits; \
                      a rescan of the library will show them.",
-                )),
+                ),
             );
         }
     }
@@ -1829,10 +1829,7 @@ impl BridgeLoopRuntime {
         let refresh = self.edit_refreshes.accept(result);
         self.forget_applied_rows_once_renames_arrived();
         if let Some(problem) = refresh.problem {
-            let _ = try_send_event(
-                event_tx,
-                BridgeEvent::Error(BridgeError::warning(ErrorCategory::Tags, problem)),
-            );
+            send_error(event_tx, BridgeError::warning(ErrorCategory::Tags, problem));
         }
         if !commands::apply_edited_details(
             &mut self.state,
@@ -1871,9 +1868,9 @@ impl BridgeLoopRuntime {
         let mut urgency = SnapshotUrgency::None;
         for change in changes {
             if let Some(warning) = change.warning {
-                let _ = try_send_event(
+                send_error(
                     event_tx,
-                    BridgeEvent::Error(BridgeError::warning(ErrorCategory::Playback, warning)),
+                    BridgeError::warning(ErrorCategory::Playback, warning),
                 );
             }
             let Some(command) = change.command else {
@@ -1965,11 +1962,7 @@ impl BridgeLoopRuntime {
                 worker.feature()
             )
         };
-        eprintln!("[ferrous] {message}");
-        let _ = try_send_event(
-            event_tx,
-            BridgeEvent::Error(BridgeError::error(worker.category(), message)),
-        );
+        send_error(event_tx, BridgeError::error(worker.category(), message));
     }
 
     fn request_tree(&mut self) {
@@ -2037,12 +2030,9 @@ impl BridgeLoopRuntime {
                     Ok(Some(command)) => BridgeCommand::Queue(command),
                     Ok(None) => return SnapshotUrgency::None,
                     Err(message) => {
-                        let _ = try_send_event(
+                        send_error(
                             event_tx,
-                            BridgeEvent::Error(BridgeError::error(
-                                ErrorCategory::Playback,
-                                message,
-                            )),
+                            BridgeError::error(ErrorCategory::Playback, message),
                         );
                         return SnapshotUrgency::None;
                     }
@@ -2054,10 +2044,7 @@ impl BridgeLoopRuntime {
             return match self.imports.submit(request) {
                 Ok(changes) => self.apply_queue_changes(changes, event_tx),
                 Err(error) => {
-                    let _ = try_send_event(
-                        event_tx,
-                        BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, error)),
-                    );
+                    send_error(event_tx, BridgeError::error(ErrorCategory::Playback, error));
                     SnapshotUrgency::None
                 }
             };
@@ -2164,17 +2151,14 @@ impl BridgeLoopRuntime {
                 urgency
             }
             AnalysisEvent::WorkerFailed(message) => {
-                let _ = try_send_event(
+                send_error(
                     event_tx,
-                    BridgeEvent::Error(BridgeError::error(ErrorCategory::Analysis, message)),
+                    BridgeError::error(ErrorCategory::Analysis, message),
                 );
                 SnapshotUrgency::None
             }
             AnalysisEvent::FileEndsEarly { path, message } => {
-                let _ = try_send_event(
-                    event_tx,
-                    BridgeEvent::Error(events::file_ends_early(&path, message)),
-                );
+                send_error(event_tx, events::file_ends_early(&path, message));
                 SnapshotUrgency::None
             }
         }
@@ -2777,10 +2761,9 @@ impl BridgeLoopRuntime {
         );
         // A file whose read has not returned stays open after the app quits.
         if let Some(message) = self.playback.shutdown(PLAYBACK_SHUTDOWN_TIMEOUT).problem() {
-            eprintln!("[ferrous] {message}");
-            let _ = try_send_event(
+            send_error(
                 event_tx,
-                BridgeEvent::Error(BridgeError::error(ErrorCategory::Playback, message)),
+                BridgeError::error(ErrorCategory::Playback, message),
             );
             saved = false;
         }
@@ -2793,11 +2776,7 @@ impl BridgeLoopRuntime {
             ),
         };
         if let Some(message) = lastfm_problem {
-            eprintln!("{message}");
-            let _ = try_send_event(
-                event_tx,
-                BridgeEvent::Error(BridgeError::error(ErrorCategory::LastFm, message)),
-            );
+            send_error(event_tx, BridgeError::error(ErrorCategory::LastFm, message));
             saved = false;
         }
         let _ = try_send_event(event_tx, BridgeEvent::Stopped);
@@ -2846,10 +2825,9 @@ fn report_save(
         return true;
     };
     if reported.as_ref() != Some(&failure.identity) {
-        eprintln!("[ferrous] {}", failure.message);
         let error = BridgeError::error(ErrorCategory::Settings, failure.message)
             .about(failure.identity.0.to_string_lossy());
-        if try_send_event(event_tx, BridgeEvent::Error(error)).is_ok() {
+        if send_error(event_tx, error) {
             *reported = Some(failure.identity);
         }
     }
@@ -2998,6 +2976,21 @@ fn relay_is_behind(event_tx: &Sender<BridgeEvent>) -> bool {
 /// Send an event to the relay without waiting: the bridge thread drives
 /// playback. An event a newer one replaces is refused while the relay is
 /// behind.
+/// Send `error` to Recent Issues; `BridgeClient::reportError` logs it there.
+/// One that cannot be sent is logged here instead. Returns whether it was
+/// sent.
+pub(super) fn send_error(event_tx: &Sender<BridgeEvent>, error: BridgeError) -> bool {
+    match try_send_event(event_tx, BridgeEvent::Error(error)) {
+        Ok(()) => true,
+        Err(unsent) => {
+            if let BridgeEvent::Error(error) = unsent.into_inner() {
+                log_undelivered(&error);
+            }
+            false
+        }
+    }
+}
+
 pub(super) fn try_send_event(
     event_tx: &Sender<BridgeEvent>,
     event: BridgeEvent,
@@ -6960,6 +6953,29 @@ mod tests {
         );
         assert_eq!(logged.len(), 1, "{logged:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_error_is_logged_by_the_bridge_only_when_it_cannot_reach_the_ui() {
+        let delivered = BridgeError::error(ErrorCategory::Settings, "delivered save failure")
+            .about("/fixture/settings.toml");
+        let (event_tx, event_rx) = event_channel();
+        assert!(send_error(&event_tx, delivered.clone()));
+        assert!(matches!(event_rx.try_recv(), Ok(BridgeEvent::Error(error)) if error == delivered));
+        // `BridgeClient::reportError` logs it as it shows it.
+        assert!(test_log::lines_containing("delivered save failure").is_empty());
+
+        drop(event_rx);
+        let undelivered = BridgeError::warning(ErrorCategory::Settings, "undelivered save failure")
+            .about("/fixture/settings.toml");
+        assert!(!send_error(&event_tx, undelivered));
+        assert_eq!(
+            test_log::lines_containing("undelivered save failure"),
+            vec![
+                "[ferrous] [settings] warning: undelivered save failure (/fixture/settings.toml)"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]

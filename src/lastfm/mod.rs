@@ -26,6 +26,9 @@ const LASTFM_ERROR_INVALID_SESSION: i64 = 9;
 const LASTFM_ERROR_SERVICE_OFFLINE: i64 = 11;
 const LASTFM_ERROR_TEMPORARY: i64 = 16;
 const LASTFM_ERROR_RATE_LIMIT: i64 = 29;
+/// The longest wait a `Retry-After` can ask for that is kept to; a longer
+/// one is cut to this, so a bad header cannot stop scrobbling for good.
+const MAX_REQUESTED_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// `ignoredMessage` code for a scrobble refused because the account reached
 /// its daily limit. Unlike the other ignore codes, it can succeed later.
 const LASTFM_IGNORED_DAILY_LIMIT: i64 = 5;
@@ -278,6 +281,9 @@ pub struct ServiceOptions {
 pub(crate) struct HttpReply {
     pub(crate) status: u16,
     pub(crate) body: String,
+    /// How long the reply's `Retry-After` asks to wait before the next
+    /// request, if it has one that can be read; see [`parse_retry_after`].
+    pub(crate) retry_after: Option<Duration>,
 }
 
 /// Tells the service to stop waiting for requests, once it is shutting down.
@@ -436,8 +442,17 @@ impl Transport for HttpTransport {
             .send()
             .map_err(|err| err.to_string())?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| parse_retry_after(value, std::time::SystemTime::now()));
         let body = response.text().map_err(|err| err.to_string())?;
-        Ok(HttpReply { status, body })
+        Ok(HttpReply {
+            status,
+            body,
+            retry_after,
+        })
     }
 }
 
@@ -495,9 +510,13 @@ struct Service {
     /// When the next automatic flush is due, if one is scheduled.
     retry_due: Option<Instant>,
     /// Set by a temporary failure, until a request goes through again with
-    /// nothing left to retry: the scrobbles Last.fm took meanwhile, for the
-    /// line that logs the recovery.
-    recovering: Option<usize>,
+    /// nothing left to retry: what Last.fm answered for the scrobbles sent
+    /// meanwhile, for the line that logs the recovery.
+    recovering: Option<Answered>,
+    /// Until when Last.fm asked for no requests, and why; see
+    /// [`asks_to_wait`]. Only what the user asks for, such as reconnecting,
+    /// is sent before then.
+    hold: Option<Hold>,
     /// Cleared while handling the commands that precede shutdown, so that
     /// shutdown does not wait for the network.
     network_allowed: bool,
@@ -534,16 +553,33 @@ struct Service {
 #[derive(Debug)]
 enum RequestError {
     Transport(String),
-    /// A JSON-less or unsuccessful HTTP status without a Last.fm error code.
+    /// An unsuccessful HTTP status without a Last.fm error code.
     Http {
         status: u16,
+        retry_after: Option<Duration>,
     },
     Api {
         code: i64,
         message: String,
+        retry_after: Option<Duration>,
     },
     InvalidResponse(String),
     Keyring(String),
+}
+
+/// What Last.fm answered for the scrobbles sent since a temporary failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Answered {
+    accepted: usize,
+    ignored: usize,
+}
+
+/// A wait Last.fm asked for; see [`Service::hold`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hold {
+    until: Instant,
+    /// The failure that asked for it, for the latest scrobble's state.
+    message: String,
 }
 
 /// Entries that Last.fm ignored permanently during a flush.
@@ -706,6 +742,7 @@ impl Service {
             retry_attempt: 0,
             retry_due: None,
             recovering: None,
+            hold: None,
             network_allowed: true,
             waiting_commands: None,
             flush_ignored: IgnoredScrobbles::default(),
@@ -924,6 +961,9 @@ impl Service {
                 self.state.auth_url.clear();
                 self.state.status_text = "Last.fm account connected.".to_string();
                 self.retry_attempt = 0;
+                // The user asked for this, so it need not wait for a rate
+                // limit: the queue is sent now.
+                self.hold = None;
                 self.flush_queue();
             }
             Err(err) => {
@@ -1000,6 +1040,7 @@ impl Service {
         if !self.state.enabled || self.is_paused() || !self.network_allowed {
             return;
         }
+        let holding = self.holding();
         let Some(credentials) = self.credentials.as_ref() else {
             return;
         };
@@ -1007,6 +1048,13 @@ impl Service {
             return;
         };
         if track.artist.trim().is_empty() || track.track.trim().is_empty() {
+            return;
+        }
+        if holding {
+            log_warning(
+                ErrorCategory::LastFm,
+                "The now-playing update was not sent: Last.fm asked Ferrous to wait.",
+            );
             return;
         }
         match send_now_playing_request(self.transport.as_ref(), credentials, session, track) {
@@ -1028,11 +1076,16 @@ impl Service {
             // dropped; the user need not act on it.
             Err(err) if is_transient(&err) => {
                 let message = request_error_message(&err);
-                log_warning(
-                    ErrorCategory::LastFm,
-                    &format!("{message}; the now-playing update was not sent."),
-                );
-                self.recovering.get_or_insert(0);
+                let logged = match self.hold_after(&err, &message) {
+                    Some(wait) => format!(
+                        "{message}; the now-playing update was not sent, and nothing is sent \
+                         for {}.",
+                        describe_delay(wait)
+                    ),
+                    None => format!("{message}; the now-playing update was not sent."),
+                };
+                log_warning(ErrorCategory::LastFm, &logged);
+                self.recovering.get_or_insert_with(Answered::default);
                 self.state.status_text = message;
             }
             Err(err) => {
@@ -1054,6 +1107,17 @@ impl Service {
     /// Between batches, commands that are waiting go first; the flush then
     /// resumes.
     fn flush_queue(&mut self) {
+        if self.holding() {
+            // What is queued waits for the end of the wait Last.fm asked
+            // for, when the service loop flushes again.
+            if let Some(hold) = self.hold.clone() {
+                if !self.queue.is_empty() {
+                    self.retry_due = Some(hold.until);
+                    self.set_latest_delivery(ScrobbleDelivery::Waiting, &hold.message, true);
+                }
+            }
+            return;
+        }
         self.retry_due = None;
         if !self.state.enabled || self.is_paused() || !self.network_allowed || self.queue.is_empty()
         {
@@ -1092,7 +1156,7 @@ impl Service {
                 Err(err) if is_transient(&err) => {
                     let message = request_error_message(&err);
                     self.set_latest_delivery(ScrobbleDelivery::Waiting, &message, true);
-                    self.schedule_retry(&message);
+                    self.schedule_retry(&message, Some(&err));
                     return;
                 }
                 Err(err) => {
@@ -1144,12 +1208,14 @@ impl Service {
                 self.set_latest_delivery(ScrobbleDelivery::Accepted, "", false);
             }
         }
-        if let Some(sent) = self.recovering.as_mut() {
-            *sent += outcome
+        if let Some(answered) = self.recovering.as_mut() {
+            let deferred = outcome
                 .deferred
                 .iter()
-                .filter(|deferred| !**deferred)
+                .filter(|deferred| **deferred)
                 .count();
+            answered.ignored += outcome.ignored;
+            answered.accepted += batch_len - deferred - outcome.ignored;
         }
         let mut index = 0;
         self.queue.retain(|_| {
@@ -1170,7 +1236,7 @@ impl Service {
                 "Last.fm daily scrobble limit reached",
                 true,
             );
-            self.schedule_retry("Last.fm daily scrobble limit reached");
+            self.schedule_retry("Last.fm daily scrobble limit reached", None);
             return false;
         }
         self.retry_attempt = 0;
@@ -1189,28 +1255,92 @@ impl Service {
             .is_some_and(|commands| !commands.is_empty())
     }
 
-    /// Retry the flush after a temporary failure, `message`. The scrobbles
-    /// stay queued until Last.fm takes them, so the user need not act: the
-    /// failure is logged, and the status shows when the next retry is.
-    fn schedule_retry(&mut self, message: &str) {
+    /// Retry the flush after a temporary failure, `message`, which `error`
+    /// caused if a request failed. The scrobbles stay queued until Last.fm
+    /// takes them, so the user need not act: the failure is logged, and the
+    /// status shows when the next retry is. The retry waits as long as the
+    /// reply's `Retry-After` asks, and after a rate limit nothing but what
+    /// the user asks for is sent before then.
+    fn schedule_retry(&mut self, message: &str, error: Option<&RequestError>) {
         self.retry_attempt = self.retry_attempt.saturating_add(1);
-        let delay = self.retry_policy.delay(self.retry_attempt);
-        self.retry_due = Some(Instant::now() + delay);
-        self.recovering.get_or_insert(0);
+        let delay = error
+            .and_then(requested_wait)
+            .unwrap_or_else(|| self.retry_policy.delay(self.retry_attempt));
+        let due = Instant::now() + delay;
+        self.retry_due = Some(due);
+        if error.is_some_and(asks_to_wait) {
+            self.hold = Some(Hold {
+                until: due,
+                message: message.to_string(),
+            });
+        }
+        self.recovering.get_or_insert_with(Answered::default);
         let status = format!("{message}; retrying in {}.", describe_delay(delay));
         log_warning(ErrorCategory::LastFm, &status);
         self.state.status_text = status;
     }
 
-    /// Log, once, that requests go through again after a temporary failure.
+    /// Hold back requests after a request other than a flush failed with
+    /// `error`, if it asks to wait; see [`asks_to_wait`]. Returns the wait.
+    /// The queue, if any, is flushed again once it is over.
+    fn hold_after(&mut self, error: &RequestError, message: &str) -> Option<Duration> {
+        if !asks_to_wait(error) {
+            return None;
+        }
+        let wait = requested_wait(error).unwrap_or_else(|| {
+            self.retry_policy
+                .delay(self.retry_attempt.saturating_add(1))
+        });
+        let until = Instant::now() + wait;
+        self.hold = Some(Hold {
+            until,
+            message: message.to_string(),
+        });
+        if !self.queue.is_empty() {
+            self.retry_due = Some(self.retry_due.map_or(until, |due| due.max(until)));
+        }
+        Some(wait)
+    }
+
+    /// Whether a wait Last.fm asked for is still going on. Forgets one that
+    /// is over.
+    fn holding(&mut self) -> bool {
+        if self
+            .hold
+            .as_ref()
+            .is_some_and(|hold| Instant::now() < hold.until)
+        {
+            return true;
+        }
+        self.hold = None;
+        false
+    }
+
+    /// Log, once, that requests go through again after a temporary failure,
+    /// with what Last.fm answered for the scrobbles sent since.
     fn log_recovery(&mut self) {
-        let Some(sent) = self.recovering.take() else {
+        let Some(Answered { accepted, ignored }) = self.recovering.take() else {
             return;
         };
-        let message = match sent {
-            0 => "Last.fm is reachable again.".to_string(),
-            1 => "Last.fm is reachable again; sent 1 queued scrobble.".to_string(),
-            sent => format!("Last.fm is reachable again; sent {sent} queued scrobbles."),
+        let scrobbles = |count: usize| {
+            if count == 1 {
+                "1 queued scrobble".to_string()
+            } else {
+                format!("{count} queued scrobbles")
+            }
+        };
+        let message = match (accepted, ignored) {
+            (0, 0) => "Last.fm is reachable again.".to_string(),
+            (accepted, 0) => {
+                format!(
+                    "Last.fm is reachable again; it accepted {}.",
+                    scrobbles(accepted)
+                )
+            }
+            (accepted, ignored) => format!(
+                "Last.fm is reachable again; it accepted {} and ignored {ignored}.",
+                scrobbles(accepted)
+            ),
         };
         log_info(ErrorCategory::LastFm, &message);
     }
@@ -1568,36 +1698,89 @@ fn send_signed_request(
     interpret_reply(&reply)
 }
 
-/// Last.fm reports API errors as JSON, sometimes with a 4xx status. A reply
-/// that is not JSON, such as a proxy error page or a captive portal, says
-/// nothing about the request.
+/// Last.fm reports API errors as JSON, sometimes with a 4xx status, and its
+/// error code says most. Otherwise the HTTP status decides, whatever the
+/// body: an unsuccessful one is an HTTP error, so a 403 with an HTML page is
+/// as permanent as one with no body. A successful status with a body that is
+/// not JSON, such as a captive portal's page, is an invalid response.
 fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
-    let Ok(payload) = serde_json::from_str::<Value>(&reply.body) else {
-        return Err(if is_temporary_status(reply.status) {
-            RequestError::Http {
-                status: reply.status,
-            }
-        } else {
-            RequestError::InvalidResponse(format!(
-                "unexpected non-JSON reply (HTTP {})",
-                reply.status
-            ))
-        });
-    };
-    if let Some(code) = payload.get("error").and_then(json_integer) {
-        let message = payload
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Last.fm request failed")
-            .to_string();
-        return Err(RequestError::Api { code, message });
+    let payload = serde_json::from_str::<Value>(&reply.body).ok();
+    if let Some(payload) = &payload {
+        if let Some(code) = payload.get("error").and_then(json_integer) {
+            let message = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Last.fm request failed")
+                .to_string();
+            return Err(RequestError::Api {
+                code,
+                message,
+                retry_after: reply.retry_after,
+            });
+        }
     }
     if !(200..300).contains(&reply.status) {
         return Err(RequestError::Http {
             status: reply.status,
+            retry_after: reply.retry_after,
         });
     }
-    Ok(payload)
+    payload.ok_or_else(|| {
+        RequestError::InvalidResponse(format!("unexpected non-JSON reply (HTTP {})", reply.status))
+    })
+}
+
+/// How long a `Retry-After` header with `value` asks to wait, at `now`:
+/// whole seconds, or an HTTP date in the IMF-fixdate form, such as
+/// `Sun, 06 Nov 1994 08:49:37 GMT`, which senders must use. A date that has
+/// passed asks for no wait. Anything else is not read.
+fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    let at = std::time::UNIX_EPOCH + Duration::from_secs(parse_imf_fixdate(value)?);
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
+}
+
+/// The seconds since the Unix epoch of an IMF-fixdate.
+fn parse_imf_fixdate(value: &str) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_weekday, rest) = value.split_once(", ")?;
+    let fields: Vec<&str> = rest.split(' ').collect();
+    let [day, month, year, time, "GMT"] = fields.as_slice() else {
+        return None;
+    };
+    let number = |text: &str, digits: usize| {
+        (text.len() == digits && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<u64>().ok())
+            .flatten()
+    };
+    let day = number(day, 2)?;
+    let month = MONTHS.iter().position(|name| name == month)? as u64 + 1;
+    let year = number(year, 4)?;
+    let [hour, minute, second] = time.split(':').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let (hour, minute, second) = (number(hour, 2)?, number(minute, 2)?, number(second, 2)?);
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 || year < 1970 {
+        return None;
+    }
+    // Days from the epoch to the date, counting years from March so that
+    // the leap day comes last.
+    let (year, month) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = year / 400;
+    let year_of_era = year % 400;
+    let day_of_year = (153 * month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = (era * 146_097 + day_of_era).checked_sub(719_468)?;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
 /// Reads an integer that Last.fm may send as a number or a string.
@@ -1632,12 +1815,38 @@ fn is_invalid_session(error: &RequestError) -> bool {
     )
 }
 
+/// Whether `error` asks for no requests for a while: Last.fm's rate limit,
+/// or a temporary failure with a `Retry-After`. Until the wait is over,
+/// nothing is sent but what the user asks for.
+fn asks_to_wait(error: &RequestError) -> bool {
+    matches!(error, RequestError::Http { status: 429, .. })
+        || matches!(
+            error,
+            RequestError::Api {
+                code: LASTFM_ERROR_RATE_LIMIT,
+                ..
+            }
+        )
+        || (is_transient(error) && requested_wait(error).is_some())
+}
+
+/// The wait the reply that failed with `error` asked for, at most
+/// [`MAX_REQUESTED_WAIT`].
+fn requested_wait(error: &RequestError) -> Option<Duration> {
+    match error {
+        RequestError::Http { retry_after, .. } | RequestError::Api { retry_after, .. } => {
+            retry_after.map(|wait| wait.min(MAX_REQUESTED_WAIT))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a failure is expected to clear up by itself, so that a flush
 /// should be retried on a timer.
 fn is_transient(error: &RequestError) -> bool {
     match error {
         RequestError::Transport(_) | RequestError::InvalidResponse(_) => true,
-        RequestError::Http { status } => is_temporary_status(*status),
+        RequestError::Http { status, .. } => is_temporary_status(*status),
         RequestError::Api { code, .. } => matches!(
             *code,
             LASTFM_ERROR_OPERATION_FAILED
@@ -1658,8 +1867,8 @@ fn is_temporary_status(status: u16) -> bool {
 fn request_error_message(error: &RequestError) -> String {
     match error {
         RequestError::Transport(message) => format!("Last.fm transport error: {message}"),
-        RequestError::Http { status } => format!("Last.fm HTTP error {status}"),
-        RequestError::Api { code, message } => format!("Last.fm API error {code}: {message}"),
+        RequestError::Http { status, .. } => format!("Last.fm HTTP error {status}"),
+        RequestError::Api { code, message, .. } => format!("Last.fm API error {code}: {message}"),
         RequestError::InvalidResponse(message) => format!("Last.fm response error: {message}"),
         RequestError::Keyring(message) => format!("Last.fm keyring error: {message}"),
     }
@@ -1920,6 +2129,16 @@ mod tests {
         Ok(HttpReply {
             status,
             body: body.to_string(),
+            retry_after: None,
+        })
+    }
+
+    /// A reply with a `Retry-After` that asks to wait `seconds`.
+    fn reply_retry_after(status: u16, body: &str, seconds: u64) -> Result<HttpReply, String> {
+        Ok(HttpReply {
+            status,
+            body: body.to_string(),
+            retry_after: Some(Duration::from_secs(seconds)),
         })
     }
 
@@ -2145,11 +2364,260 @@ mod tests {
         assert!(service.problems.is_empty(), "{:?}", service.problems);
         assert_eq!(
             test_log::lines_containing(recovered),
-            vec![format!("{recovered}; sent 2 queued scrobbles.")]
+            vec![format!("{recovered}; it accepted 2 queued scrobbles.")]
         );
         service.handle_command(Command::QueueScrobble(entry(2)));
         assert!(service.queue.is_empty());
         assert_eq!(test_log::lines_containing(recovered).len(), 1);
+    }
+
+    #[test]
+    fn a_recovery_tells_the_accepted_scrobbles_from_the_ignored_ones() {
+        let transport = ScriptedTransport::with_replies([
+            Err("offline".to_string()),
+            scrobble_reply(&[0, 1, 0]),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..3));
+
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::Flush);
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] info: Last.fm is reachable again"),
+            vec![
+                "[ferrous] [lastfm] info: Last.fm is reachable again; it accepted 2 queued \
+                 scrobbles and ignored 1."
+                    .to_string()
+            ]
+        );
+        // The ignored one is still told to the user.
+        assert_eq!(service.problems.len(), 1, "{:?}", service.problems);
+        assert!(service.problems[0].message.contains("ignored 1 scrobble"));
+    }
+
+    #[test]
+    fn unsuccessful_statuses_without_last_fm_json_are_permanent_whatever_the_body() {
+        for (status, body) in [
+            (401, "<html><body>Unauthorized</body></html>"),
+            (403, "\u{0}garbage{"),
+            (404, ""),
+        ] {
+            let transport = ScriptedTransport::with_replies([reply(status, body)]);
+            let mut service = connected_service(&transport, None, entries(0..2));
+
+            service.handle_command(Command::Flush);
+
+            // Kept for the next flush, but not retried on a timer, and the
+            // user is told.
+            assert_eq!(service.queue, entries(0..2), "{status}");
+            assert!(service.retry_due.is_none(), "{status}");
+            assert_eq!(
+                service.problems.len(),
+                1,
+                "{status}: {:?}",
+                service.problems
+            );
+            assert!(!service.problems[0].warning, "{status}");
+            assert!(
+                service.problems[0]
+                    .message
+                    .contains(&format!("Last.fm HTTP error {status}")),
+                "{:?}",
+                service.problems
+            );
+
+            let transport = ScriptedTransport::with_replies([reply(status, body)]);
+            let mut service = connected_service(&transport, None, Vec::new());
+            service.handle_command(Command::SendNowPlaying(now_playing_track()));
+            assert_eq!(
+                service.problems,
+                vec![Problem {
+                    message: format!("Last.fm HTTP error {status}"),
+                    warning: true,
+                }],
+                "{status}"
+            );
+        }
+        // Successful, server-error and too-many-requests statuses with such
+        // a body are still temporary.
+        for (status, body) in [
+            (200, "<html>Sign in</html>"),
+            (502, "<html>"),
+            (429, "slow"),
+        ] {
+            let error = interpret_reply(&HttpReply {
+                status,
+                body: body.to_string(),
+                retry_after: None,
+            })
+            .expect_err("not a reply");
+            assert!(is_transient(&error), "{status}: {error:?}");
+        }
+    }
+
+    /// Ends the wait Last.fm asked `service` for, as time passing would.
+    fn end_hold(service: &mut Service) {
+        let past = Instant::now() - Duration::from_millis(1);
+        service.hold.as_mut().expect("a hold").until = past;
+        service.retry_due = Some(past);
+    }
+
+    #[test]
+    fn a_rate_limit_holds_back_every_automatic_request_until_its_retry_after() {
+        let transport = ScriptedTransport::with_replies([
+            reply_retry_after(429, "<html>Too Many Requests</html>", 120),
+            accepted_reply(3),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..2));
+
+        service.handle_command(Command::Flush);
+        let due = service.retry_due.expect("a retry");
+        assert!(due >= Instant::now() + Duration::from_secs(110));
+        assert_eq!(service.hold.as_ref().map(|hold| hold.until), Some(due));
+        assert!(service
+            .published_state()
+            .status_text
+            .contains("retrying in 2 min"));
+
+        // A new scrobble queues behind the wait, and neither it, a flush, a
+        // resume nor a now-playing update sends anything.
+        service.handle_command(Command::QueueScrobble(entry(2)));
+        service.handle_command(Command::Flush);
+        set_paused(&mut service, true);
+        set_paused(&mut service, false);
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(service.queue, entries(0..3));
+        assert_eq!(service.retry_due, Some(due));
+        assert_eq!(latest(&service).1, ScrobbleDelivery::Waiting);
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+
+        // Once it is over, the retry sends the queue.
+        end_hold(&mut service);
+        service.flush_queue();
+        assert!(service.queue.is_empty());
+        assert_eq!(scrobble_requests(&transport).len(), 2);
+        assert_eq!(batch_size(&scrobble_requests(&transport)[1]), 3);
+        assert_eq!(service.hold, None);
+    }
+
+    #[test]
+    fn last_fm_s_rate_limit_code_holds_back_requests_for_the_backoff_delay() {
+        let transport = ScriptedTransport::with_replies([reply(
+            200,
+            r#"{"error":29,"message":"Rate limit exceeded"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        service.handle_command(Command::Flush);
+        let due = service.retry_due.expect("a retry");
+        assert!(due >= Instant::now() + Duration::from_secs(25));
+        assert_eq!(service.hold.as_ref().map(|hold| hold.until), Some(due));
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(service.queue, entries(0..2));
+    }
+
+    #[test]
+    fn a_rate_limited_now_playing_update_holds_back_the_queue() {
+        let transport = ScriptedTransport::with_replies([reply_retry_after(
+            503,
+            r#"{"error":16,"message":"Temporary error"}"#,
+            600,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::QueueScrobble(entry(0)));
+
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(service.queue, entries(0..1));
+        let due = service
+            .retry_due
+            .expect("the queue is flushed after the wait");
+        assert!(due >= Instant::now() + Duration::from_secs(590));
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+        assert_eq!(
+            test_log::lines_containing(
+                "[ferrous] [lastfm] warning: Last.fm API error 16: Temporary error; the \
+                 now-playing update was not sent, and nothing is sent for 10 min."
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_wait_longer_than_a_day_is_cut_to_a_day() {
+        let transport =
+            ScriptedTransport::with_replies([reply_retry_after(429, "", 3 * 24 * 60 * 60)]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+
+        service.handle_command(Command::Flush);
+
+        let due = service.retry_due.expect("a retry");
+        assert!(due <= Instant::now() + MAX_REQUESTED_WAIT);
+        assert!(due >= Instant::now() + MAX_REQUESTED_WAIT - Duration::from_secs(10));
+    }
+
+    #[test]
+    fn reconnecting_sends_the_queue_during_a_rate_limit() {
+        let transport = ScriptedTransport::with_replies([
+            reply_retry_after(429, "", 3600),
+            reply(200, r#"{"session":{"name":"tester","key":"new-key"}}"#),
+            accepted_reply(1),
+        ]);
+        let mut service = connected_service(&transport, None, entries(0..1));
+        service.handle_command(Command::Flush);
+        assert!(service.hold.is_some());
+
+        // The user asked for it, so it does not wait.
+        service.pending_auth = Some(PendingAuth {
+            token: "token".to_string(),
+            auth_url: String::new(),
+        });
+        service.handle_command(Command::CompleteDesktopAuth);
+
+        assert_eq!(service.state.auth_state, AuthState::Connected);
+        assert!(service.queue.is_empty());
+        assert_eq!(scrobble_requests(&transport).len(), 2);
+    }
+
+    #[test]
+    fn retry_after_is_read_as_seconds_or_as_an_http_date() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(784_111_777); // Sun, 06 Nov 1994 08:49:37 GMT
+        assert_eq!(
+            parse_retry_after("120", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(parse_retry_after(" 0 ", now), Some(Duration::ZERO));
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:51:37 GMT", now),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_retry_after("Tue, 01 Mar 2000 00:00:00 GMT", std::time::UNIX_EPOCH),
+            Some(Duration::from_secs(951_868_800))
+        );
+        // A date that has passed asks for no wait.
+        assert_eq!(
+            parse_retry_after("Sat, 05 Nov 1994 08:49:37 GMT", now),
+            Some(Duration::ZERO)
+        );
+        for unreadable in [
+            "",
+            "-5",
+            "1.5",
+            "soon",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Foo 1994 08:49:37 GMT",
+        ] {
+            assert_eq!(parse_retry_after(unreadable, now), None, "{unreadable}");
+        }
     }
 
     #[test]

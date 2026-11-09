@@ -26,10 +26,10 @@ use super::queue::handle_queue_command;
 use super::queue_sync::QueueEdit;
 use super::search::{keyed_roots, tree_path_parts, TreePathParts};
 use super::{
-    library_tree, try_send_event, ApplyAlbumArtRequest, BridgeAnalysisCommand, BridgeCommand,
-    BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand, BridgeQueueCommand,
-    BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode, SearchWorkerQuery,
-    SettingsSaveTiming,
+    library_tree, log_warning, send_error, ApplyAlbumArtRequest, BridgeAnalysisCommand,
+    BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
+    BridgeQueueCommand, BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode,
+    SearchWorkerQuery, SettingsSaveTiming,
 };
 use crate::collation::CollationKey;
 
@@ -512,12 +512,12 @@ fn handle_library_view_command(
                 })
                 .is_err()
             {
-                let _ = try_send_event(
+                send_error(
                     runtime.event_tx,
-                    BridgeEvent::Error(BridgeError::error(
+                    BridgeError::error(
                         ErrorCategory::Library,
                         "failed to queue album art apply request",
-                    )),
+                    ),
                 );
             }
             Some(false)
@@ -863,13 +863,20 @@ impl ImportExpandOutcome {
         }
     }
 
+    /// Every entry skipped, also those only logged.
+    #[cfg(test)]
     fn skipped_count(&self) -> usize {
+        self.reported_skipped_count() + self.enclosing_link_count
+    }
+
+    /// The entries skipped that the user is told about: all but the links
+    /// to enclosing folders, which only lead to tracks the import has.
+    fn reported_skipped_count(&self) -> usize {
         self.missing_count
             + self.unsupported_count
             + self.unreadable_count
             + self.non_local_url_count
             + self.invalid_playlist_count
-            + self.enclosing_link_count
     }
 
     fn push_missing(&mut self) {
@@ -1143,8 +1150,10 @@ pub(super) fn expand_import_paths_cancellable(
     outcome
 }
 
+/// What the user is told about the entries an import of `outcome` skipped,
+/// if any; see [`log_skipped_import_links`] for those that are only logged.
 pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome) -> Option<String> {
-    let skipped = outcome.skipped_count();
+    let skipped = outcome.reported_skipped_count();
     if skipped == 0 {
         return None;
     }
@@ -1169,13 +1178,6 @@ pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome)
             outcome.invalid_playlist_count
         ));
     }
-    match outcome.enclosing_link_count {
-        0 => {}
-        1 => parts.push("1 link to a folder that holds the imported folder".to_string()),
-        count => parts.push(format!(
-            "{count} links to folders that hold the imported folder"
-        )),
-    }
     let joined = parts.join(", ");
     if outcome.tracks.is_empty() {
         Some(format!("Import {action} skipped all entries ({joined})"))
@@ -1187,6 +1189,21 @@ pub(super) fn format_import_warning(action: &str, outcome: &ImportExpandOutcome)
             skipped,
         ))
     }
+}
+
+/// Logs the links to folders that hold the imported folder, which an import
+/// of `outcome` did not follow: they would import the folder again, so
+/// skipping them loses nothing and the user need not be told.
+pub(super) fn log_skipped_import_links(action: &str, outcome: &ImportExpandOutcome) {
+    let links = match outcome.enclosing_link_count {
+        0 => return,
+        1 => "1 link to a folder that holds the imported folder".to_string(),
+        count => format!("{count} links to folders that hold the imported folder"),
+    };
+    log_warning(
+        ErrorCategory::Playback,
+        &format!("Import {action} did not follow {links}"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,10 +1420,7 @@ pub(super) fn refresh_renamed_paths(
         return false;
     }
     if let Some(problem) = details.problem.take() {
-        let _ = try_send_event(
-            event_tx,
-            BridgeEvent::Error(BridgeError::warning(ErrorCategory::Tags, problem)),
-        );
+        send_error(event_tx, BridgeError::warning(ErrorCategory::Tags, problem));
     }
 
     let mut changed = false;
@@ -2002,10 +2016,23 @@ mod tests {
         assert_eq!(outcome.tracks, tracks);
         assert_eq!(outcome.unreadable_count, unreadable);
         assert_eq!(outcome.enclosing_link_count, 1);
-        let warning = format_import_warning("folder", &outcome).expect("warning");
-        assert!(
-            warning.contains("1 link to a folder that holds the imported folder"),
-            "{warning}"
+        // The skipped link loses nothing, so it is only logged.
+        let warning = format_import_warning("folder", &outcome);
+        if readable {
+            assert_eq!(warning, None);
+        } else {
+            let warning = warning.expect("the unreadable folder is reported");
+            assert!(warning.contains("1 unreadable"), "{warning}");
+            assert!(!warning.contains("link"), "{warning}");
+        }
+        log_skipped_import_links("folder", &outcome);
+        assert_eq!(
+            crate::frontend_bridge::test_log::lines_containing(
+                "[ferrous] [playback] warning: Import folder did not follow 1 link to a folder \
+                 that holds the imported folder"
+            )
+            .len(),
+            1
         );
         let _ = fs::remove_dir_all(base);
     }

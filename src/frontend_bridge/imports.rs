@@ -16,7 +16,8 @@
 //! input paths follow the renames that finish before it reads them.
 
 use super::commands::{
-    expand_import_paths_cancellable, format_import_warning, ImportExpandOutcome,
+    expand_import_paths_cancellable, format_import_warning, log_skipped_import_links,
+    ImportExpandOutcome,
 };
 use super::{BridgeQueueCommand, QueuePlacement};
 use crate::library::{next_file_sequence, IndexedTrack, TrackFileFingerprint};
@@ -504,14 +505,13 @@ impl ImportWorker {
         else {
             return Vec::new();
         };
-        let warning = format_import_warning(
-            if result.placement == QueuePlacement::Replace {
-                "open"
-            } else {
-                "append"
-            },
-            &result.outcome,
-        );
+        let action = if result.placement == QueuePlacement::Replace {
+            "open"
+        } else {
+            "append"
+        };
+        log_skipped_import_links(action, &result.outcome);
+        let warning = format_import_warning(action, &result.outcome);
         pending.change = Some(QueueChange {
             command: tracks_command(result.outcome.tracks, result.placement),
             warning,

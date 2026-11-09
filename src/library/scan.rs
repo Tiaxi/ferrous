@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 use crate::file_edit_lock;
 use crate::file_identity::FileId;
 use crate::folder_cover::{CoverStamp, FolderImages};
+use crate::frontend_bridge::{log_warning, ErrorCategory};
 use crate::metadata::EmbeddedCoverCache;
 use crate::no_replace::rename_no_replace;
 use crate::raw_audio::{
@@ -754,6 +755,7 @@ impl ScanRun<'_> {
                         stale_set.contains(track.path.to_string_lossy().as_ref())
                     });
                 }
+                RootScanOutcome::log_notes(&outcome.notes);
                 if stopped.is_none() {
                     self.note_root_problem(root, scope.is_some(), outcome.problem);
                 } else {
@@ -1433,7 +1435,7 @@ fn refresh_indexed_metadata_in_conn(
 
     tx.commit()
         .map_err(|e| format!("failed to finalize metadata refresh transaction: {e}"))?;
-    refreshed.problem = failures.refresh_problem();
+    refreshed.problem = failures.edited_files_problem();
     Ok(refreshed)
 }
 
@@ -2066,7 +2068,7 @@ fn update_renamed_track_rows(
         }
         refreshed.indexed.insert(new_path.to_path_buf(), indexed);
     }
-    refreshed.problem = failures.refresh_problem();
+    refreshed.problem = failures.edited_files_problem();
     Ok(refreshed)
 }
 
@@ -2377,8 +2379,10 @@ impl ReadFailures {
         self.covers.note(path, read.cover_failure.as_ref());
     }
 
-    /// The failures of a scan of `root`.
-    fn problems(&self, root: &Path) -> impl Iterator<Item = String> {
+    /// The failures of a scan of `root`, for the diagnostics log only: the
+    /// files keep what was indexed before, or their names, and the next
+    /// scan reads them again.
+    fn scan_notes(&self, root: &Path) -> impl Iterator<Item = String> {
         let root = root.display();
         let tags = self.tags.describe(|files| {
             format!(
@@ -2393,6 +2397,24 @@ impl ReadFailures {
             )
         });
         tags.into_iter().chain(covers)
+    }
+
+    /// The failures of a refresh of files the user edited or renamed. Tags
+    /// that could not be read leave the library showing the old ones, which
+    /// the user is told; covers keep the previous ones and the next scan
+    /// retries them, so those are only logged.
+    fn edited_files_problem(&self) -> Option<String> {
+        if let Some(covers) = self.covers.describe(|files| {
+            format!(
+                "could not cache the embedded covers of {files}; kept their previous covers \
+                 and will retry at the next scan"
+            )
+        }) {
+            log_warning(ErrorCategory::Library, &covers);
+        }
+        self.tags.describe(|files| {
+            format!("could not read the tags of {files}; kept the tags indexed before")
+        })
     }
 
     /// The failures of a refresh of chosen files, for the user.
@@ -3441,6 +3463,10 @@ struct RootScanOutcome {
     removed: Vec<String>,
     /// A condition that kept the scan from verifying tracks, for the user.
     problem: Option<String>,
+    /// What the scan worked around by itself, for the diagnostics log only:
+    /// files whose tags or covers it could not read, which keep what was
+    /// indexed before, and links it did not follow.
+    notes: Vec<String>,
     /// Whether a scoped scan kept paths that only a scan of the whole root
     /// can index correctly; see [`LibraryWalk`].
     needs_full_scan: bool,
@@ -3450,11 +3476,19 @@ struct RootScanOutcome {
 }
 
 impl RootScanOutcome {
+    /// Log `notes`, which the user is not shown.
+    fn log_notes(notes: &[String]) {
+        for note in notes {
+            log_warning(ErrorCategory::Library, note);
+        }
+    }
+
     /// The outcome of a scan that `sink` stopped: nothing removed, no problem.
     fn stopped() -> Self {
         Self {
             removed: Vec::new(),
             problem: None,
+            notes: Vec::new(),
             needs_full_scan: false,
             hard_linked: None,
         }
@@ -4175,7 +4209,8 @@ fn scan_root_in(
         )),
         None => None,
     };
-    let link_problem = walk.first_enclosing_link.map(|first| {
+    // Skipping such a link loses nothing: the root's own tracks are indexed.
+    let link_note = walk.first_enclosing_link.map(|first| {
         format!(
             "did not follow {} in '{}': a link to a folder that holds a library root \
              would index the root again (first: {first})",
@@ -4183,14 +4218,14 @@ fn scan_root_in(
             root.display()
         )
     });
-    let problems: Vec<String> = walk_problem
+    let notes: Vec<String> = link_note
         .into_iter()
-        .chain(link_problem)
-        .chain(scan.read_failures.problems(&root))
+        .chain(scan.read_failures.scan_notes(&root))
         .collect();
     Ok(RootScanOutcome {
         removed,
-        problem: (!problems.is_empty()).then(|| problems.join("; ")),
+        problem: walk_problem,
+        notes,
         needs_full_scan: walk.needs_full_scan,
         hard_linked: scope.is_none().then_some(walk.hard_linked),
     })
@@ -4929,6 +4964,7 @@ mod scope_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend_bridge::test_log;
     use crate::library::LibraryCommand;
     use crate::raw_audio::write_test_apev2_file;
     use std::io::Write;
@@ -5799,7 +5835,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_panics_its_reader_is_indexed_by_name_and_reported() {
+    fn a_file_that_panics_its_reader_is_indexed_by_name_and_logged() {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
         let root = test_dir("reader-panic");
@@ -5816,18 +5852,19 @@ mod tests {
 
         let expected: Vec<PathBuf> = names.iter().map(|name| root.join(name)).collect();
         assert_eq!(indexed_paths(&conn), expected);
-        let problem = outcome.problem.expect("the unreadable file is reported");
-        assert!(
-            problem.contains("could not read the tags of 1 file"),
-            "{problem}"
-        );
-        assert!(problem.contains(&broken.display().to_string()), "{problem}");
-        assert!(problem.contains("test panic"), "{problem}");
+        // Indexed by its name, it needs nothing from the user: only logged.
+        assert_eq!(outcome.problem, None);
+        let [note] = outcome.notes.as_slice() else {
+            panic!("one note: {:?}", outcome.notes);
+        };
+        assert!(note.contains("could not read the tags of 1 file"), "{note}");
+        assert!(note.contains(&broken.display().to_string()), "{note}");
+        assert!(note.contains("test panic"), "{note}");
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn a_tag_reader_panic_keeps_the_indexed_tags_and_is_reported() {
+    fn a_tag_reader_panic_keeps_the_indexed_tags_and_is_logged() {
         use crate::vorbis_comment_scan::fixtures::{comment_block, flac};
 
         let conn = Connection::open_in_memory().expect("db");
@@ -5874,23 +5911,23 @@ mod tests {
         let new = root.join("new.flac");
         fs::write(&new, crate::panic_guard::fixtures::short_coverart_flac()).expect("write new");
 
-        let problem = scan(&conn, &root)
-            .problem
-            .expect("the unreadable files are reported");
+        let outcome = scan(&conn, &root);
 
+        assert_eq!(outcome.problem, None);
+        let notes = outcome.notes.join("; ");
         assert!(
-            problem.contains("could not read the tags of 2 files"),
-            "{problem}"
+            notes.contains("could not read the tags of 2 files"),
+            "{notes}"
         );
-        assert!(problem.contains("the tag reader for"), "{problem}");
+        assert!(notes.contains("the tag reader for"), "{notes}");
         let mut expected = vec![(new, "new".to_string(), String::new(), String::new())];
         expected.extend(indexed);
         assert_eq!(saved_tags(&conn), expected);
         // The row keeps its old file state, so the next scan tries again.
-        let problem = scan(&conn, &root).problem.expect("still reported");
+        let notes = scan(&conn, &root).notes.join("; ");
         assert!(
-            problem.contains("could not read the tags of 1 file"),
-            "{problem}"
+            notes.contains("could not read the tags of 1 file"),
+            "{notes}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -5938,7 +5975,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cover_that_cannot_be_cached_is_reported_once_and_retried_by_the_next_scan() {
+    fn a_cover_that_cannot_be_cached_is_logged_once_and_retried_by_the_next_scan() {
         use crate::metadata::{encoded_picture, write_wav_with_picture};
 
         let conn = Connection::open_in_memory().expect("db");
@@ -5961,15 +5998,15 @@ mod tests {
         fs::create_dir_all(&entry).expect("block the entry");
         let mut snapshot = WorkerLibrary::default();
 
-        let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
-            .expect_err("the uncached covers are reported");
+        // The tracks keep their previous covers, so only the log is told.
+        scan_with_cache(&conn, &root, cache, &mut snapshot).expect("nothing to report");
 
-        assert!(
-            error.contains("could not cache the embedded covers of 2 files")
-                && error.contains("embedded cover cache"),
-            "{error}"
-        );
-        assert_eq!(error.matches("could not cache").count(), 1, "{error}");
+        let logged = test_log::lines_containing(&format!(
+            "[ferrous] [library] warning: could not cache the embedded covers of 2 files in '{}'",
+            root.display()
+        ));
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].contains("embedded cover cache"), "{logged:?}");
         for track in &tracks {
             assert_eq!(
                 cover_row(&conn, track),
@@ -6034,12 +6071,16 @@ mod tests {
         let mut snapshot = WorkerLibrary::default();
         snapshot.reload(&conn);
 
-        let error = scan_with_cache(&conn, &root, cache, &mut snapshot)
-            .expect_err("the uncached cover is reported");
+        scan_with_cache(&conn, &root, cache, &mut snapshot).expect("nothing to report");
 
-        assert!(
-            error.contains("could not cache the embedded covers of 1 file"),
-            "{error}"
+        assert_eq!(
+            test_log::lines_containing(&format!(
+                "[ferrous] [library] warning: could not cache the embedded covers of 1 file in \
+                 '{}'",
+                root.display()
+            ))
+            .len(),
+            1
         );
         assert_eq!(cover_row(&conn, &track), (legacy_string.clone(), false));
         assert_eq!(snapshot_cover(&snapshot, &track), legacy_string);
@@ -6098,12 +6139,16 @@ mod tests {
         let mut snapshot = WorkerLibrary::default();
         snapshot.reload(&conn);
 
-        let error = scan_with_cache(&conn, &inner, cache, &mut snapshot)
-            .expect_err("the uncached cover is reported");
+        scan_with_cache(&conn, &inner, cache, &mut snapshot).expect("nothing to report");
 
-        assert!(
-            error.contains("could not cache the embedded covers of 1 file"),
-            "{error}"
+        assert_eq!(
+            test_log::lines_containing(&format!(
+                "[ferrous] [library] warning: could not cache the embedded covers of 1 file in \
+                 '{}'",
+                inner.display()
+            ))
+            .len(),
+            1
         );
         assert_eq!(cover_row(&conn, &track), (legacy_string.clone(), false));
         assert_eq!(snapshot_cover(&snapshot, &track), legacy_string);
@@ -6898,7 +6943,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_link_to_a_folder_holding_the_root_is_skipped_and_reported() {
+    fn a_link_to_a_folder_holding_the_root_is_skipped_and_logged() {
         let conn = Connection::open_in_memory().expect("db");
         init_schema(&conn).expect("schema");
         let base = test_dir("link-up");
@@ -6914,11 +6959,15 @@ mod tests {
         let outcome = scan(&conn, &root);
 
         assert_eq!(indexed_paths(&conn), [root.join("Album/01.mp3")]);
-        let problem = outcome.problem.expect("the skipped link is reported");
+        // The root's own tracks are indexed, so nothing is lost: only logged.
+        assert_eq!(outcome.problem, None);
+        let [note] = outcome.notes.as_slice() else {
+            panic!("one note: {:?}", outcome.notes);
+        };
         assert!(
-            problem.contains("did not follow 1 link in")
-                && problem.contains(&format!("'{}'", root.join("Up").display())),
-            "{problem}"
+            note.contains("did not follow 1 link in")
+                && note.contains(&format!("'{}'", root.join("Up").display())),
+            "{note}"
         );
         let _ = fs::remove_dir_all(base);
     }
