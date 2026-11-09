@@ -1135,10 +1135,19 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QQuickItem *back = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"));
     QQuickItem *apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
     QVERIFY2(label != nullptr && back != nullptr && apply != nullptr, at.constData());
-    const QRectF columnRect = column->mapRectToScene(QRectF(0, 0, column->width(), column->height()));
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
+    // The buttons' layout places them on its next polish after they show,
+    // so wait for it: until then Apply can still be where it was laid out
+    // before, past the column's end.
+    const auto settled = [&]() {
+        const QRectF rect = rectOf(column);
+        return rect.contains(rectOf(label)) && rect.contains(rectOf(back))
+            && rect.contains(rectOf(apply));
+    };
+    QTRY_VERIFY2(settled(), at.constData());
+    const QRectF columnRect = rectOf(column);
     for (QQuickItem *item : {label, back, apply}) {
         QVERIFY2(isWithin(item, column), at.constData());
         QVERIFY2(columnRect.contains(rectOf(item)), at.constData());
@@ -1657,8 +1666,16 @@ void AlbumArtSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {
     QVERIFY(surface != nullptr);
     // Image.Error.
     QTRY_COMPARE(surface->property("imageStatus").toInt(), 3);
-    // The viewer's warning for it, which the test expects.
-    const QStringList decodeWarnings = takeCapturedMessagesText().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    // The two warnings for it, which the test expects. The viewer's and the
+    // dialog's images decode on their own, so the second can come after the
+    // viewer shows the error: wait for both.
+    QStringList decodeWarnings;
+    const auto bothDecodeWarnings = [&decodeWarnings]() {
+        decodeWarnings += takeCapturedMessagesText().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        return decodeWarnings.size() >= 2;
+    };
+    QTRY_VERIFY2(bothDecodeWarnings(), qPrintable(decodeWarnings.join(QLatin1Char('\n'))));
+    QCOMPARE(decodeWarnings.size(), 2);
     for (const QString &warning : decodeWarnings) {
         QVERIFY2(warning.contains(QStringLiteral("Error decoding")) && warning.contains(QStringLiteral("broken.png")),
                  qPrintable(warning));
