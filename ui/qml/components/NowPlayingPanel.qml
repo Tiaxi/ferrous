@@ -125,9 +125,10 @@ Item {
     property bool coverCameWhileEmpty: false
     // What fades out, or null: `lines`, each line that fades by its key
     // in `trackLines` (see `_fadingLine`); `covers`, the covers before,
-    // oldest first, each {coverPath, from}, fading out from `from`; and
+    // oldest first, each {coverPath, from}, fading out from `from`;
     // whether the fade is a track change (`track`), which lines that come
-    // to differ join.
+    // to differ join; and whether it runs over longDuration (`long`): for
+    // another cover or another album, even when the two look alike.
     property var outgoing: null
     // How far the fade has come: 0 when it starts, 1 once the playing
     // track alone shows.
@@ -281,14 +282,16 @@ Item {
     // The covers before in a fade that starts now, as they show when the
     // playing track's cover goes from `was`'s to `next`'s: each goes on
     // from the opacity it has, and the cover that showed whole goes out
-    // from there, under them, over the playing track's. A cover image
-    // right over the same image adds nothing, so the one it replaces goes.
+    // from there, under them, over the playing track's, when that differs:
+    // a cover over the same one adds nothing to an image and doubles the
+    // tint of the translucent placeholder. A cover image right over the
+    // same image adds nothing either, so the one it replaces goes.
     function _nextCovers(was, next) {
         const level = 1 - root.handover
         const covers = root.outgoing === null ? [] : root.outgoing.covers
             .map(cover => ({ coverPath: cover.coverPath, from: cover.from * level }))
             .filter(cover => cover.from > 0)
-        if (was.coverPath !== next.coverPath || was.album !== next.album) {
+        if (was.coverPath !== next.coverPath) {
             const newest = covers.length > 0 ? covers[covers.length - 1] : null
             if (newest !== null && was.coverPath.length > 0 && newest.coverPath === was.coverPath)
                 covers.pop()
@@ -339,7 +342,7 @@ Item {
             return
         }
         const fading = root.outgoing
-        if (coverChange || (fading !== null && fading.covers.length === 0 && was.album !== next.album)
+        if (coverChange || (fading !== null && !fading.long && was.album !== next.album)
                 || (fading !== null && fading.track && root._linesJoin(was, next))) {
             // A cover that changed, an album named after the track itself
             // while only its lines fade, or a line of the track change
@@ -367,8 +370,8 @@ Item {
 
     // The fade starts again from what shows, for another track (`newTrack`)
     // or, for the same one, its cover, album or a line that changed: every
-    // layer goes on from the opacity it has, the cover on the long curve
-    // while one fades. No layer jumps. A track change runs even before any
+    // layer goes on from the opacity it has, on the long curve once the
+    // cover or the album changed. No layer jumps. A track change runs even before any
     // of its lines differs, for the lines its metadata changes once it
     // comes.
     function handOver(was, next, track, newTrack) {
@@ -378,9 +381,15 @@ Item {
             if (line !== null)
                 lines[key] = line
         }
-        const out = { lines: lines, covers: root._nextCovers(was, next), track: track }
-        const duration = out.covers.length > 0 ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
-        const fades = out.track || out.covers.length > 0 || Object.keys(out.lines).length > 0
+        const covers = root._nextCovers(was, next)
+        const out = {
+            lines: lines,
+            covers: covers,
+            track: track,
+            long: covers.length > 0 || was.album !== next.album || (root.outgoing !== null && root.outgoing.long)
+        }
+        const duration = out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
+        const fades = out.track || out.long || Object.keys(out.lines).length > 0
         if (!fades || duration <= 0) {
             root.endHandover()
             return
