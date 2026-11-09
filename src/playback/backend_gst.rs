@@ -8547,6 +8547,42 @@ mod engine_tests {
     }
 
     #[test]
+    fn stopped_track_plays_again_under_its_token_after_a_stopped_snapshot() {
+        // The bridge counts a new play of a stopped track by the stopped
+        // snapshot before it, since the engine reports no track change and
+        // the track keeps its token.
+        let fixtures = Fixtures::new("stop-replay");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = Engine::start();
+        engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
+        engine.send(PlaybackCommand::Play);
+        let first = engine.wait_for_changes(1);
+        engine.wait_until("the track did not play 1 s", |engine| {
+            engine.snapshot.position >= Duration::from_secs(1)
+        });
+        engine.send(PlaybackCommand::Stop);
+        engine.wait_until("the track did not stop", |engine| {
+            engine.snapshot.state == PlaybackState::Stopped
+        });
+        let stopped_at = engine.snapshots.len() - 1;
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the stopped track did not play again", |engine| {
+            engine.snapshot.state == PlaybackState::Playing && engine.snapshot.position_advancing
+        });
+        assert_eq!(engine.changes.len(), 1, "{:?}", engine.changes);
+        let replay = &engine.snapshots[stopped_at..];
+        assert_eq!(replay[0].state, PlaybackState::Stopped);
+        assert!(
+            replay
+                .iter()
+                .all(|snapshot| snapshot.track_token == first.token
+                    && snapshot.current.as_ref() == Some(&a)),
+            "{replay:?}"
+        );
+        assert!(engine.snapshot.position < Duration::from_secs(1));
+    }
+
+    #[test]
     fn same_file_queued_twice_advances_to_the_second_row() {
         let fixtures = Fixtures::new("duplicate");
         let a = fixtures.wav("a.wav", 4_000);

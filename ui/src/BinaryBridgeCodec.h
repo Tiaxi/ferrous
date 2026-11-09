@@ -243,6 +243,9 @@ struct DecodedPlayback {
     // positionAdvancing is set. See PlaybackClock.
     qint64 positionSampledAtNs{0};
     bool positionAdvancing{false};
+    // Advances whenever a play starts, also when the same file plays again
+    // or a stopped track plays again, which keeps its trackToken.
+    quint64 playSerial{0};
 };
 
 struct DecodedQueueTrack {

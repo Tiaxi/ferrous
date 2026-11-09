@@ -61,6 +61,10 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int queueUndoKind READ queueUndoKind NOTIFY queueUndoChanged)
     Q_PROPERTY(int playingQueueIndex READ playingQueueIndex NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackPath READ currentTrackPath NOTIFY trackIdentityChanged)
+    // Changes whenever a play starts: on every track change, also when the
+    // same file plays again, and when a stopped track plays again. A seek, a
+    // pause or a queue edit that keeps the playing track leaves it.
+    Q_PROPERTY(double currentPlaySerial READ currentPlaySerial NOTIFY trackIdentityChanged)
     Q_PROPERTY(QString currentTrackCoverPath READ currentTrackCoverPath NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackTitle READ currentTrackTitle NOTIFY trackMetadataChanged)
     Q_PROPERTY(QString currentTrackArtist READ currentTrackArtist NOTIFY trackMetadataChanged)
@@ -215,6 +219,7 @@ public:
     QString durationText() const;
     // Changes on every track change, also when the same file plays again.
     quint64 currentTrackToken() const { return m_currentTrackToken; }
+    double currentPlaySerial() const { return static_cast<double>(m_currentPlaySerial); }
     double durationSeconds() const;
     double volume() const;
     int queueLength() const;
@@ -826,6 +831,8 @@ private:
     // Backend track token of the current track; it also changes when the
     // same file starts again, as with repeat-one.
     quint64 m_currentTrackToken{0};
+    // The bridge's play serial; see currentPlaySerial.
+    quint64 m_currentPlaySerial{0};
     QString m_currentTrackCoverPath;
     QString m_currentTrackTitle;
     QString m_currentTrackArtist;

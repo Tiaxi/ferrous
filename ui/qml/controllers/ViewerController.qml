@@ -35,11 +35,12 @@ QtObject {
     // Close: the results show again.
     signal albumArtPreviewClosed()
     // Set while the viewer shows a cover applied from a preview to an album
-    // playback had moved on from: the applied image, until the track
-    // changes from the one playing then, when the viewer follows playback
-    // again.
+    // playback had moved on from: the applied image, until the next play
+    // starts, when the viewer follows playback again. The next play can be
+    // of the same file, as with Repeat One, so plays are told apart by the
+    // bridge's play serial, not by the track's path.
     property bool albumArtShowsAppliedCover: false
-    property string albumArtAppliedDuringTrack: ""
+    property real albumArtAppliedDuringPlay: 0
     // Where the album art viewer's image is from: "itunes" for a candidate
     // from the iTunes artwork search, "embedded" for art the track's file
     // holds, "folder" for an image beside the music.
@@ -157,7 +158,7 @@ QtObject {
         root.albumArtViewerInfoSource = PathUtils.pathFromAnyUrl(root.albumArtViewerSource)
         root.albumArtViewerShowsCurrentTrack = !showsApplied
         root.albumArtShowsAppliedCover = showsApplied
-        root.albumArtAppliedDuringTrack = showsApplied ? (root.uiBridge.currentTrackPath || "") : ""
+        root.albumArtAppliedDuringPlay = showsApplied ? root.currentPlaySerial() : 0
         root.comparisonModeAvailable = false
         root.comparisonCurrentSource = ""
         root.comparisonCurrentInfoSource = ""
@@ -311,11 +312,15 @@ QtObject {
         })
     }
 
+    function currentPlaySerial() {
+        return Number(root.uiBridge.currentPlaySerial || 0)
+    }
+
     function handleSnapshotChanged() {
-        // An applied cover shows until the track changes; then the viewer
+        // An applied cover shows until the next play starts; then the viewer
         // follows playback again.
         if (root.albumArtShowsAppliedCover
-                && (root.uiBridge.currentTrackPath || "") !== root.albumArtAppliedDuringTrack) {
+                && root.currentPlaySerial() !== root.albumArtAppliedDuringPlay) {
             root.albumArtShowsAppliedCover = false
             root.albumArtViewerShowsCurrentTrack = true
         }
@@ -348,8 +353,16 @@ QtObject {
         }
     }
 
-    property var imageDetailsConnection: Connections {
+    property var bridgeConnection: Connections {
         target: root.uiBridge
+
+        // A new play, which may be of the same file and so change neither
+        // the track's path nor its art.
+        function onTrackIdentityChanged() {
+            if (root.albumArtShowsAppliedCover) {
+                root.handleSnapshotChanged()
+            }
+        }
 
         function onImageFileDetailsChanged(path) {
             const infoSource = root.albumArtViewerInfoSource || ""

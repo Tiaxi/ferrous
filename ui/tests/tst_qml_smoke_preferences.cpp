@@ -197,6 +197,7 @@ Item {
         property string currentTrackCoverPath: "image://covers//tmp/Front%20Cover.png#w=600&r=4"
         property bool embedded: false
         signal imageFileDetailsChanged(string path)
+        signal trackIdentityChanged()
 
         function requestImageFileDetails(path) {
             harness.requestedPath = path
@@ -305,6 +306,7 @@ ApplicationWindow {
         property string itunesArtworkStatusText: ""
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
+        signal trackIdentityChanged()
         signal snapshotChanged()
         function itunesArtworkResultAt(index) { return itunesArtworkResults[index] || ({}) }
         function applyItunesArtworkSuggestion(index) { window.applied = window.applied.concat([index]) }

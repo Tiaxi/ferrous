@@ -289,6 +289,7 @@ private slots:
     void trackSwitchReanchorsBeforeSpectrogramData();
     void sameFileReplayReanchorsByTrackToken_data();
     void sameFileReplayReanchorsByTrackToken();
+    void playSerialFollowsTheBridge();
     void noOpNextPreservesPosition();
     void playWhilePlayingSendsOnePlayCommandAndNoError();
     void queueSnapshotKeepsRawCoverPathsInRows();
@@ -2666,6 +2667,42 @@ void BridgeClientTest::sameFileReplayReanchorsByTrackToken() {
         // Rolling history remains continuous until the worker resets it.
         QVERIFY(item.m_positionJumpHoldActive);
     }
+}
+
+void BridgeClientTest::playSerialFollowsTheBridge() {
+    // The bridge advances the serial for each play, also of the same file
+    // and of a stopped track played again; the client passes it on as a
+    // change of the track's identity.
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString path = QStringLiteral("/fixture/track.wav");
+    auto snapshot = playbackSnapshot(path, 10.0, 4);
+    snapshot.playback.currentQueueIndex = 0;
+    snapshot.playback.playSerial = 3;
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentPlaySerial(), 3.0);
+    QVERIFY(client.m_pollTrackIdentityChanged);
+
+    // A snapshot of the same play, as after a seek or a pause, keeps it and
+    // tells of no new track.
+    snapshot = playbackSnapshot(path, 90.0, 4);
+    snapshot.playback.currentQueueIndex = 0;
+    snapshot.playback.state = 2;
+    snapshot.playback.playSerial = 3;
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentPlaySerial(), 3.0);
+    QVERIFY(!client.m_pollTrackIdentityChanged);
+
+    // Played again: same path, row and track token, a new play.
+    snapshot = playbackSnapshot(path, 0.0, 4);
+    snapshot.playback.currentQueueIndex = 0;
+    snapshot.playback.playSerial = 4;
+    client.resetPollChanges();
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentPlaySerial(), 4.0);
+    QVERIFY(client.m_pollTrackIdentityChanged);
 }
 
 void BridgeClientTest::noOpNextPreservesPosition() {
@@ -7371,6 +7408,16 @@ void BridgeClientTest::testPlaybackTrackTokenDecoding()
     QCOMPARE(withSample.playback.positionSampledAtNs, qint64(123'456'789'012LL));
     QVERIFY(withSample.playback.positionAdvancing);
     QVERIFY(!decode(payload.left(payload.size() - 1), &truncated));
+    QCOMPARE(withSample.playback.playSerial, quint64(0));
+
+    // The play serial ends the section.
+    appendLe(quint64(0xFFFF'FFFF'0000'000AULL));
+    BinaryBridgeCodec::DecodedSnapshot withPlaySerial;
+    QVERIFY(decode(payload, &withPlaySerial));
+    QCOMPARE(withPlaySerial.playback.playSerial, quint64(0xFFFF'FFFF'0000'000AULL));
+    QVERIFY(withPlaySerial.playback.positionAdvancing);
+    QVERIFY(!decode(payload.left(payload.size() - 3), &truncated));
+    payload.chop(8);
     payload[payload.size() - 1] = char(2);
     QVERIFY(!decode(payload, &truncated));
 }

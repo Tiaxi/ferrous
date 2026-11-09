@@ -2932,6 +2932,7 @@ fn encode_playback_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     // advances from it in real time while the flag is set.
     push_u64(&mut out, snapshot.playback.position_sampled_at.as_nanos());
     push_u8(&mut out, u8::from(snapshot.playback.position_advancing));
+    push_u64(&mut out, snapshot.play_serial);
     out
 }
 
@@ -3623,6 +3624,7 @@ mod tests {
 
     fn sample_snapshot() -> BridgeSnapshot {
         BridgeSnapshot {
+            play_serial: 0,
             playback: PlaybackSnapshot {
                 state: PlaybackState::Playing,
                 position: Duration::from_secs(12),
@@ -7753,6 +7755,7 @@ mod tests {
         playback_position: f64,
         playback_position_sampled_at_ns: u64,
         playback_position_advancing: bool,
+        playback_play_serial: u64,
         settings_channel_buttons_visibility: u8,
     }
 
@@ -7766,6 +7769,7 @@ mod tests {
             playback_position: 0.0,
             playback_position_sampled_at_ns: 0,
             playback_position_advancing: false,
+            playback_play_serial: 0,
             settings_channel_buttons_visibility: 1,
         };
         // Skip 12-byte header (magic 4 + total_len 4 + section_mask 2 + reserved 2).
@@ -7809,10 +7813,12 @@ mod tests {
                 1 => true,
                 other => panic!("advancing flag {other}"),
             };
+            p += 1;
+            result.playback_play_serial = u64::from_le_bytes(s[p..p + 8].try_into().unwrap());
             assert_eq!(
-                p + 1,
+                p + 8,
                 section_len,
-                "the position sample ends the playback section"
+                "the play serial ends the playback section"
             );
             offset += section_len;
         }
@@ -7883,6 +7889,17 @@ mod tests {
         let decoded = decode_binary_snapshot_for_test(&encoded);
         assert_eq!(decoded.playback_track_token, u64::MAX - 1);
         assert_eq!(decoded.playback_soloed_channels_mask, 0);
+    }
+
+    #[test]
+    fn snapshot_encodes_play_serial() {
+        let mut snapshot = sample_snapshot();
+        snapshot.play_serial = u64::MAX - 4;
+        let encoded = encode_binary_snapshot(&snapshot, None);
+        let decoded = decode_binary_snapshot_for_test(&encoded);
+        assert_eq!(decoded.playback_play_serial, u64::MAX - 4);
+        assert_eq!(decoded.playback_track_token, 7);
+        assert!(decoded.playback_position_advancing);
     }
 
     #[test]

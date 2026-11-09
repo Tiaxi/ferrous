@@ -259,6 +259,7 @@ ApplicationWindow {
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1
         property string currentTrackPath: ""
+        property real currentPlaySerial: 0
         property string currentTrackCoverPath: ""
         property string currentTrackTitle: ""
         property string currentTrackArtist: ""
