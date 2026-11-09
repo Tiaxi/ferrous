@@ -22,6 +22,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::worker_thread::JoinableThread;
 
+pub(crate) use db::civil_from_days;
 pub(crate) use file_id::{file_id_columns, file_id_from_columns, identity_changed};
 pub(crate) use keyed_text::KeyedText;
 #[cfg(test)]

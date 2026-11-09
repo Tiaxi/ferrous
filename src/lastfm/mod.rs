@@ -33,6 +33,9 @@ const MAX_REQUESTED_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// its daily limit. Unlike the other ignore codes, it can succeed later.
 const LASTFM_IGNORED_DAILY_LIMIT: i64 = 5;
 const UNKNOWN_ALBUM_PLACEHOLDER: &str = "Unknown album";
+/// How many tracks a line of the diagnostics log names; the rest are
+/// counted.
+const LOGGED_TRACKS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppCredentials {
@@ -1092,8 +1095,19 @@ impl Service {
             );
             return;
         }
+        let logged = logged_track(&track.artist, &track.track);
+        log_info(
+            ErrorCategory::LastFm,
+            &format!("Sending now playing: {logged}."),
+        );
         match send_now_playing_request(self.transport.as_ref(), credentials, session, track) {
-            Ok(()) => {
+            Ok(ignored) => {
+                // The failures are logged where they are handled.
+                let result = match ignored {
+                    None => format!("Last.fm accepted now playing: {logged}."),
+                    Some(reason) => format!("Last.fm ignored now playing: {logged} ({reason})."),
+                };
+                log_info(ErrorCategory::LastFm, &result);
                 self.state.status_text = format!("Now playing: {} - {}", track.artist, track.track);
                 // Last.fm is reachable again; do not wait for the scheduled retry.
                 if self.retry_due.is_some() {
@@ -1170,6 +1184,11 @@ impl Service {
                 return;
             }
             let batch_len = self.queue.len().min(MAX_SCROBBLES_PER_BATCH);
+            log_info(
+                ErrorCategory::LastFm,
+                &scrobbles_sent_line(&self.queue[..batch_len]),
+            );
+            // A failure is logged with its retry, or in Recent Issues.
             let result = send_scrobble_batch(
                 self.transport.as_ref(),
                 &credentials,
@@ -1228,6 +1247,10 @@ impl Service {
     /// Takes Last.fm's answer to the batch of the queue's first
     /// `batch_len` entries. Returns whether the flush goes on now.
     fn take_batch_outcome(&mut self, batch_len: usize, outcome: ScrobbleOutcome) -> bool {
+        log_info(
+            ErrorCategory::LastFm,
+            &scrobbles_answered_line(&self.queue[..batch_len], &outcome),
+        );
         // The latest scrobble is the queue's last entry.
         if batch_len == self.queue.len() {
             let last = batch_len - 1;
@@ -1581,12 +1604,13 @@ fn request_session(
     })
 }
 
+/// Sends `track` as now playing. Returns why Last.fm ignored it, if it did.
 fn send_now_playing_request(
     transport: &dyn Transport,
     credentials: &AppCredentials,
     session: &Session,
     track: &NowPlayingTrack,
-) -> Result<(), RequestError> {
+) -> Result<Option<String>, RequestError> {
     let album = normalize_album_for_submission(&track.album);
     let mut params = vec![
         ("artist".to_string(), track.artist.clone()),
@@ -1602,8 +1626,11 @@ fn send_now_playing_request(
     if let Some(duration_seconds) = track.duration_seconds {
         params.push(("duration".to_string(), duration_seconds.to_string()));
     }
-    let _ = send_signed_request(transport, credentials, "track.updateNowPlaying", params)?;
-    Ok(())
+    let payload = send_signed_request(transport, credentials, "track.updateNowPlaying", params)?;
+    Ok(payload
+        .get("nowplaying")
+        .and_then(|nowplaying| nowplaying.get("ignoredMessage"))
+        .and_then(ignored_reason))
 }
 
 fn send_scrobble_batch(
@@ -1697,13 +1724,9 @@ fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome
             LASTFM_IGNORED_DAILY_LIMIT => outcome.deferred[index] = true,
             _ => {
                 outcome.ignored += 1;
-                let text = ignored_message
-                    .and_then(|message| message.get("#text"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty());
-                let reason =
-                    text.map_or_else(|| format!("ignore code {code}"), ToString::to_string);
+                let reason = ignored_message
+                    .and_then(ignored_reason)
+                    .unwrap_or_else(|| format!("ignore code {code}"));
                 if outcome.ignored_reason.is_none() {
                     outcome.ignored_reason = Some(reason.clone());
                 }
@@ -1712,6 +1735,120 @@ fn scrobble_outcome(payload: &Value, batch_len: usize) -> Result<ScrobbleOutcome
         }
     }
     Ok(outcome)
+}
+
+/// Why Last.fm ignored a scrobble or a now-playing update, from its
+/// `ignoredMessage`; `None` for one it accepted, with code 0.
+fn ignored_reason(ignored_message: &Value) -> Option<String> {
+    let code = ignored_message.get("code").and_then(json_integer)?;
+    if code == 0 {
+        return None;
+    }
+    let text = ignored_message
+        .get("#text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    Some(text.map_or_else(|| format!("ignore code {code}"), ToString::to_string))
+}
+
+/// `artist – title`, as the diagnostics log names a track.
+fn logged_track(artist: &str, title: &str) -> String {
+    format!("{artist} – {title}")
+}
+
+/// The first [`LOGGED_TRACKS`] of `items`, then how many more there are.
+fn logged_list(items: impl ExactSizeIterator<Item = String>) -> String {
+    let count = items.len();
+    let mut listed = items.take(LOGGED_TRACKS).collect::<Vec<_>>();
+    if count > LOGGED_TRACKS {
+        listed.push(format!("+{} more", count - LOGGED_TRACKS));
+    }
+    listed.join("; ")
+}
+
+/// `timestamp`, seconds since the epoch, as `2023-11-14T22:13:20Z`.
+fn logged_utc_time(timestamp: i64) -> String {
+    let of_day = timestamp.rem_euclid(86_400);
+    let (year, month, day) = crate::library::civil_from_days(timestamp.div_euclid(86_400));
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        of_day / 3_600,
+        of_day % 3_600 / 60,
+        of_day % 60
+    )
+}
+
+fn scrobbles_count(count: usize) -> String {
+    if count == 1 {
+        "1 scrobble".to_string()
+    } else {
+        format!("{count} scrobbles")
+    }
+}
+
+/// The diagnostics log's line for sending `batch` to Last.fm. It names the
+/// tracks and when they were played, and nothing of the request itself,
+/// whose session key and signature must not be logged.
+fn scrobbles_sent_line(batch: &[ScrobbleEntry]) -> String {
+    let tracks = logged_list(batch.iter().map(|entry| {
+        format!(
+            "{} at {}",
+            logged_track(&entry.artist, &entry.track),
+            logged_utc_time(entry.timestamp_utc)
+        )
+    }));
+    format!("Sending {}: {tracks}.", scrobbles_count(batch.len()))
+}
+
+/// The diagnostics log's line for Last.fm's answer, `outcome`, to `batch`.
+fn scrobbles_answered_line(batch: &[ScrobbleEntry], outcome: &ScrobbleOutcome) -> String {
+    let deferred = outcome
+        .deferred
+        .iter()
+        .filter(|deferred| **deferred)
+        .count();
+    let accepted = batch.len() - deferred - outcome.ignored;
+    let mut line = if accepted == batch.len() {
+        format!("Last.fm accepted {}", scrobbles_count(accepted))
+    } else {
+        format!(
+            "Last.fm accepted {accepted} of {}",
+            scrobbles_count(batch.len())
+        )
+    };
+    let mut parts = Vec::new();
+    if outcome.ignored > 0 {
+        let ignored = batch
+            .iter()
+            .zip(&outcome.ignored_reasons)
+            .filter_map(|(entry, reason)| {
+                reason.as_ref().map(|reason| {
+                    format!("{}: {reason}", logged_track(&entry.artist, &entry.track))
+                })
+            })
+            .collect::<Vec<_>>();
+        parts.push(format!(
+            "ignored {} ({})",
+            outcome.ignored,
+            logged_list(ignored.into_iter())
+        ));
+    }
+    if deferred > 0 {
+        parts.push(format!(
+            "deferred {deferred} (daily scrobble limit reached)"
+        ));
+    }
+    if let Some((last, rest)) = parts.split_last() {
+        for part in rest {
+            line.push_str(", ");
+            line.push_str(part);
+        }
+        line.push_str(" and ");
+        line.push_str(last);
+    }
+    line.push('.');
+    line
 }
 
 fn send_signed_request(
@@ -4200,5 +4337,255 @@ mod tests {
             handle.shutdown(Duration::from_secs(5)),
             ShutdownOutcome::Stopped
         );
+    }
+
+    /// The info lines this thread logged about Last.fm.
+    fn lastfm_info_lines() -> Vec<String> {
+        test_log::lines_containing("[ferrous] [lastfm] info: ")
+            .into_iter()
+            .filter(|line| !line.contains("reachable again"))
+            .collect()
+    }
+
+    fn info(message: &str) -> String {
+        format!("[ferrous] [lastfm] info: {message}")
+    }
+
+    #[test]
+    fn now_playing_updates_are_logged_with_what_last_fm_did_with_them() {
+        let transport = ScriptedTransport::with_replies([
+            reply(
+                200,
+                r##"{"nowplaying":{"ignoredMessage":{"code":"0","#text":""}}}"##,
+            ),
+            reply(
+                200,
+                r##"{"nowplaying":{"ignoredMessage":{"code":"1","#text":"Artist ignored"}}}"##,
+            ),
+        ]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info("Sending now playing: Artist 0 – Track 0."),
+                info("Last.fm accepted now playing: Artist 0 – Track 0."),
+                info("Sending now playing: Artist 0 – Track 0."),
+                info("Last.fm ignored now playing: Artist 0 – Track 0 (Artist ignored)."),
+            ]
+        );
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+    }
+
+    #[test]
+    fn a_now_playing_update_that_fails_logs_its_failure_once() {
+        let transport = ScriptedTransport::with_replies([reply(502, "")]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        // The warning that #510 logs is the result.
+        assert_eq!(
+            lastfm_info_lines(),
+            [info("Sending now playing: Artist 0 – Track 0.")]
+        );
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] warning: "),
+            [
+                "[ferrous] [lastfm] warning: Last.fm HTTP error 502; the now-playing update was \
+              not sent."
+            ]
+        );
+    }
+
+    #[test]
+    fn an_accepted_scrobble_is_logged_with_its_track_and_time() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(1)]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info("Sending 1 scrobble: Artist 0 – Track 0 at 2023-11-14T22:13:20Z."),
+                info("Last.fm accepted 1 scrobble."),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scrobble_batch_is_logged_as_one_line_with_its_count() {
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[0, 1, 0, 0, 1])]);
+        let mut service = connected_service(&transport, None, entries(0..5));
+
+        service.handle_command(Command::Flush);
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info(
+                    "Sending 5 scrobbles: Artist 0 – Track 0 at 2023-11-14T22:13:20Z; \
+                     Artist 1 – Track 1 at 2023-11-14T22:13:21Z; \
+                     Artist 2 – Track 2 at 2023-11-14T22:13:22Z; +2 more."
+                ),
+                info(
+                    "Last.fm accepted 3 of 5 scrobbles and ignored 2 (Artist 1 – Track 1: \
+                     Ignored for testing; Artist 4 – Track 4: Ignored for testing)."
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_ignored_scrobble_is_logged_with_the_reason() {
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[1])]);
+        let mut service = connected_service(&transport, None, Vec::new());
+
+        service.handle_command(Command::QueueScrobble(entry(0)));
+
+        assert!(service.queue.is_empty());
+        assert_eq!(
+            lastfm_info_lines(),
+            [
+                info("Sending 1 scrobble: Artist 0 – Track 0 at 2023-11-14T22:13:20Z."),
+                info(
+                    "Last.fm accepted 0 of 1 scrobble and ignored 1 (Artist 0 – Track 0: \
+                     Ignored for testing)."
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn scrobbles_deferred_for_the_daily_limit_are_logged_with_their_batch() {
+        let transport = ScriptedTransport::with_replies([scrobble_reply(&[0, 5, 1])]);
+        let mut service = connected_service(&transport, None, entries(0..3));
+
+        service.handle_command(Command::Flush);
+
+        assert_eq!(service.queue, vec![entry(1)]);
+        assert_eq!(
+            lastfm_info_lines()[1],
+            info(
+                "Last.fm accepted 1 of 3 scrobbles, ignored 1 (Artist 2 – Track 2: Ignored \
+                 for testing) and deferred 1 (daily scrobble limit reached)."
+            )
+        );
+    }
+
+    #[test]
+    fn a_failed_scrobble_batch_logs_its_failure_once() {
+        // A temporary failure: the retry line #510 logs is the result.
+        let transport = ScriptedTransport::with_replies([reply(503, "")]);
+        let mut service = connected_service(&transport, None, Vec::new());
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        assert_eq!(service.queue, vec![entry(0)]);
+        assert_eq!(
+            lastfm_info_lines(),
+            [info(
+                "Sending 1 scrobble: Artist 0 – Track 0 at 2023-11-14T22:13:20Z."
+            )]
+        );
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] warning: "),
+            ["[ferrous] [lastfm] warning: Last.fm HTTP error 503; retrying in 30 s."]
+        );
+
+        // A refused request goes to Recent Issues, which logs it.
+        let transport = ScriptedTransport::with_replies([reply(
+            403,
+            r#"{"error":10,"message":"Invalid API key"}"#,
+        )]);
+        let mut service = connected_service(&transport, None, entries(1..2));
+        service.handle_command(Command::Flush);
+        assert_eq!(service.queue, entries(1..2));
+        assert_eq!(
+            lastfm_info_lines()[1..],
+            [info(
+                "Sending 1 scrobble: Artist 1 – Track 1 at 2023-11-14T22:13:21Z."
+            )]
+        );
+        assert_eq!(
+            service.problems,
+            [Problem {
+                message: "Last.fm API error 10: Invalid API key. Scrobbles stay queued."
+                    .to_string(),
+                warning: false,
+            }]
+        );
+        assert_eq!(
+            test_log::lines_containing("[ferrous] [lastfm] warning: ").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn no_secret_reaches_the_logged_lines() {
+        const API_KEY: &str = "api-key-7c1f";
+        const SHARED_SECRET: &str = "shared-secret-9e2d";
+        const SESSION_KEY: &str = "session-key-4b8a";
+        let transport = ScriptedTransport::with_replies([
+            reply(200, r#"{"nowplaying":{}}"#),
+            reply(502, ""),
+            accepted_reply(1),
+            scrobble_reply(&[1]),
+            reply(503, ""),
+            reply(403, r#"{"error":10,"message":"Invalid API key"}"#),
+        ]);
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: None,
+                initial_enabled: true,
+            },
+            ServiceBackends {
+                transport: Box::new(transport.clone()),
+                session_keys: Box::new(MemorySessionKeys::with_key(USERNAME, SESSION_KEY)),
+                credentials: Some(AppCredentials {
+                    api_key: API_KEY.to_string(),
+                    shared_secret: SHARED_SECRET.to_string(),
+                }),
+                retry: RetryPolicy::DEFAULT,
+            },
+        );
+        service.handle_command(Command::LoadStoredSession {
+            username: USERNAME.to_string(),
+        });
+
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        service.handle_command(Command::QueueScrobble(entry(0)));
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        service.handle_command(Command::QueueScrobble(entry(2)));
+        service.handle_command(Command::Flush);
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 6);
+        let mut secrets = vec![
+            API_KEY.to_string(),
+            SHARED_SECRET.to_string(),
+            SESSION_KEY.to_string(),
+        ];
+        secrets.extend(requests.iter().flat_map(|form| {
+            form.iter()
+                .filter(|(name, _)| name == "api_sig")
+                .map(|(_, signature)| signature.clone())
+        }));
+        let logged = test_log::lines_containing("[ferrous] [lastfm] ");
+        assert!(logged.len() >= 10, "{logged:?}");
+        let problems = service
+            .problems
+            .iter()
+            .map(|problem| problem.message.clone());
+        for line in logged.iter().cloned().chain(problems) {
+            for secret in &secrets {
+                assert!(!line.contains(secret.as_str()), "{line}");
+            }
+        }
     }
 }
