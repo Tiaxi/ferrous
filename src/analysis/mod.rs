@@ -7503,9 +7503,17 @@ mod tests {
         let (audio, frames, _) = flac_with_a_short_last_block();
         #[allow(clippy::cast_precision_loss)] // A few seconds of frames.
         let whole = frames as f32 / 44_100.0;
+        // A footer-only APEv2 tag with `TAG` where an ID3v1 tag would
+        // start, 128 bytes before the end.
+        let mut value = vec![b'x'; 120];
+        value[24..27].copy_from_slice(b"TAG");
         for (name, tags) in [
             ("ID3v1", test_flac::id3v1_tag()),
             ("APEv2 footer", test_flac::apev2_tag(false)),
+            (
+                "APEv2 footer with TAG in it",
+                test_flac::apev2_tag_with(false, &value),
+            ),
             (
                 "APEv2 and ID3v1",
                 [test_flac::apev2_tag(true), test_flac::id3v1_tag()].concat(),
@@ -7520,6 +7528,23 @@ mod tests {
                 "{name}: covers {coverage} s"
             );
         }
+    }
+
+    #[test]
+    fn a_flac_with_tag_in_the_audio_of_its_last_frame_is_complete() {
+        // `TAG` 128 bytes before the end, in the samples of the last
+        // frame: no ID3v1 tag, and no frame to drop.
+        let frames = 9 * 4_096 + 3_852;
+        let mut samples = tone(frames, 2);
+        test_flac::with_tag_marker_at_the_end(&mut samples);
+        let bytes = test_flac::flac_bytes(&samples, 44_100, 2, 16, None);
+        assert_eq!(&bytes[bytes.len() - 128..bytes.len() - 125], b"TAG");
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+        let (_, coverage, progress) = updates.last().expect("final update");
+        assert_eq!(*progress, OverviewProgress::Complete);
+        #[allow(clippy::cast_precision_loss)] // A few seconds of frames.
+        let whole = frames as f32 / 44_100.0;
+        assert!((coverage - whole).abs() < 1e-4, "covers {coverage} s");
     }
 
     #[test]
