@@ -143,7 +143,8 @@ Usage: $(basename "$0") [options] [-- <ui-args...>]
 
 Options:
   --no-configure    Skip cmake configure step
-  --no-build        Skip cmake build step
+  --no-build        Skip cmake build step (the build is of the app only; the
+                    tests build with run-tests.sh)
   --no-run          Only configure/build; do not launch UI
   --spectrogram-instrumentation
                     Build with UI profiling logs and export FERROUS_PROFILE_UI=1 on launch
@@ -166,6 +167,8 @@ Environment:
   XDG_CACHE_HOME           Base path for thumbnail cleanup target (default: \$HOME/.cache)
   CMAKE_BUILD_TYPE         Build type for single-config generators (default: RelWithDebInfo)
   CMAKE_GENERATOR          Override generator (default: Ninja)
+  CMAKE_BUILD_PARALLEL_LEVEL
+                           Build jobs (default: the build tool's own default)
 USAGE
 }
 
@@ -239,7 +242,13 @@ if [[ ${DO_CONFIGURE} -eq 1 ]]; then
 fi
 
 if [[ ${DO_BUILD} -eq 1 ]]; then
-    cmake --build "${BUILD_DIR}" -j
+    # Only the app and what it links; run-tests.sh builds the tests in the
+    # same build directory. A bare -j would override CMAKE_BUILD_PARALLEL_LEVEL.
+    BUILD_ARGS=(--build "${BUILD_DIR}" --target ferrous)
+    if [[ -z "${CMAKE_BUILD_PARALLEL_LEVEL:-}" ]]; then
+        BUILD_ARGS+=(-j)
+    fi
+    cmake "${BUILD_ARGS[@]}"
 fi
 
 if [[ ${DO_RUN} -eq 1 ]]; then

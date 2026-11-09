@@ -54,7 +54,7 @@ cd ferrous
 ./scripts/run-ui.sh
 ```
 
-The launcher loads optional `build.env` settings, configures CMake, builds Rust and Qt, and launches Ferrous. Use `./scripts/run-ui.sh --no-run` to build without launching. See [development](DEVELOPMENT.md) for Last.fm build credentials, tests, debugging, and profiling.
+The launcher loads optional `build.env` settings, configures CMake, builds the Rust library and the app (not the tests), and launches Ferrous. Use `./scripts/run-ui.sh --no-run` to build without launching. See [development](DEVELOPMENT.md) for Last.fm build credentials, tests, debugging, and profiling.
 
 ## Manual build and install
 
