@@ -19,6 +19,7 @@
 
 #include "HeapAllocator.h"
 #include "HeapTrimmer.h"
+#include "TestSessionIsolation.h"
 
 // Sanitizers that replace malloc intercept mallopt (it returns 0) and serve
 // allocations mallinfo2 cannot see, so the allocator policy cannot be checked
@@ -352,6 +353,8 @@ int main(int argc, char *argv[]) {
         return runAllocatorProbe(std::strcmp(mode, "configured") == 0);
     }
 #endif
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QCoreApplication app(argc, argv);
     HeapAllocatorTest test;
     QTEST_SET_MAIN_SOURCE_PATH

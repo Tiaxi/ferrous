@@ -46,6 +46,7 @@
 #include "../src/WaveformItem.h"
 #include "../src/WindowPresence.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -3665,6 +3666,9 @@ int main(int argc, char **argv) {
     // Accessible interfaces exist while assistive technology is active.
     qputenv("QT_LINUX_ACCESSIBILITY_ALWAYS_ON", "1");
 
+    // No desktop session's platform theme, which would choose the
+    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QApplication app(argc, argv);
     QAccessible::setActive(true);
     AccessibilityTest test;

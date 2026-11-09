@@ -9,6 +9,7 @@
 #include "../src/AppInstanceController.h"
 #include "../src/WindowActivation.h"
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 #include <memory>
 
@@ -272,6 +273,8 @@ void AppInstanceControllerTest::drawsOffscreenUnlessAPlatformIsChosen() {
 
 int main(int argc, char **argv) {
     useOffscreenPlatformByDefault(argc, argv);
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QGuiApplication app(argc, argv);
     AppInstanceControllerTest test;
     return QTest::qExec(&test, argc, argv);

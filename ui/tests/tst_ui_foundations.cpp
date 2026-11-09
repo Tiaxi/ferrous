@@ -7,14 +7,12 @@
 #include <QAccessible>
 #include <QApplication>
 #include <QColor>
-#include <QIcon>
 #include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
-#include <QQuickStyle>
 #include <QStandardPaths>
 #include <QQuickWindow>
 #include <QDir>
@@ -27,6 +25,7 @@
 #include <memory>
 
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -1093,10 +1092,13 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
-    // The app's controls style, which it needs to start (docs/INSTALL.md).
-    // With it, Kirigami draws theme icons in the colour asked for, as the
-    // plot tool buttons' glyphs need.
-    QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
+    // The app's controls style and Breeze icons, whatever the desktop the
+    // tests run in; TestSessionIsolation.h. With the style, Kirigami draws
+    // theme icons in the colour asked for, as the plot tool buttons' glyphs
+    // need. KDE's icon loader recolours an icon by name when the theme
+    // follows the colour scheme, as Breeze does. Without a theme, it looks
+    // for the Breeze that an app can embed, which this one does not.
+    isolateFromDesktopSessionWithAppLook();
     // Settings, data and caches of the test's own: no developer's icon
     // theme, colours or caches reach the tests.
     QTemporaryDir fixtures;
@@ -1110,16 +1112,7 @@ int main(int argc, char **argv) {
     if (!installIconFixture(fixtures.filePath(QStringLiteral("data-dirs")))) {
         return 1;
     }
-    // The same platform whatever the desktop the tests run in: without a
-    // desktop, Qt loads no desktop's platform theme.
-    qunsetenv("XDG_CURRENT_DESKTOP");
-    qunsetenv("QT_QPA_PLATFORMTHEME");
     QApplication app(argc, argv);
-    // Breeze, as a KDE session's platform theme sets it: KDE's icon loader
-    // recolours an icon by name when the theme follows the colour scheme,
-    // as Breeze does. Without a theme, it looks for the Breeze that an app
-    // can embed, which this one does not.
-    QIcon::setThemeName(QStringLiteral("breeze"));
     UiFoundationsTest test;
     return QTest::qExec(&test, argc, argv);
 }

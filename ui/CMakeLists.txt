@@ -1208,6 +1208,14 @@ if(BUILD_TESTING)
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
         TIMEOUT 120
     )
+    # As in a KDE Plasma session, which CI has not; tests/TestSessionIsolation.h.
+    add_test(NAME ferrous_qml_module_kde_session
+        COMMAND ferrous_qml_module_tests looksTheSameWhateverTheDesktopSession
+    )
+    set_tests_properties(ferrous_qml_module_kde_session PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;XDG_CURRENT_DESKTOP=KDE;QT_QPA_PLATFORMTHEME=kde"
+        TIMEOUT 60
+    )
     ferrous_add_default_platform_test(ferrous_qml_module_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The translation template, and the x-test pseudo-translation made from it,

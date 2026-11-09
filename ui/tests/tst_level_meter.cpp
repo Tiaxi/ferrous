@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 #include "TestPlatform.h"
+#include "TestSessionIsolation.h"
 #include "WaveformReaderLog.h"
 #define private public
 #include "LevelMeterItem.h"
@@ -1010,6 +1011,8 @@ int main(int argc, char **argv) {
     qputenv("XDG_DATA_HOME", QFile::encodeName(testStorage.filePath("data")));
     qputenv("XDG_CONFIG_HOME", QFile::encodeName(testStorage.filePath("config")));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QGuiApplication app(argc, argv);
     LevelMeterTest test;
     return QTest::qExec(&test, argc, argv);

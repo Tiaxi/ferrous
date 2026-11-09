@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "ConsoleTee.h"
+#include "TestSessionIsolation.h"
 
 namespace {
 
@@ -223,6 +224,13 @@ void ConsoleTeeTest::shutdownDoesNotWaitForOtherWriters() {
              (QStringList{QStringLiteral("from the child"), QStringLiteral("from the app")}));
 }
 
-QTEST_GUILESS_MAIN(ConsoleTeeTest)
+int main(int argc, char **argv) {
+    // No desktop session's platform theme; TestSessionIsolation.h.
+    isolateFromDesktopSession();
+    QCoreApplication app(argc, argv);
+    ConsoleTeeTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 
 #include "tst_console_tee.moc"

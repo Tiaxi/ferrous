@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "QmlSmokeTest.h"
+#include "TestSessionIsolation.h"
 
 // Offscreen screens at 2x, 1.5x and 1.25x beside the default one, so that a
 // HiDPI test can move a window to another scale as on a desktop. The first
@@ -218,6 +219,9 @@ int main(int argc, char **argv) {
     // not the one that this desktop's xdg-mime names.
     BridgeClient::setFileBrowserNameDetector(nullptr);
 
+    // No desktop session's platform theme, which would choose the
+    // controls style: Qt's own, as in CI; TestSessionIsolation.h.
+    isolateFromDesktopSession();
     QApplication app(argc, argv);
     QStringList arguments;
     for (int i = 0; i < argc; ++i) {
