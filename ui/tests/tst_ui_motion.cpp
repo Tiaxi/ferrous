@@ -6,6 +6,7 @@
 // drag. Each uses Kirigami's durations with an OutCubic curve, is instant
 // with Plasma's animations off, and leaves nothing running once it is done.
 
+#include <QAbstractAnimation>
 #include <QApplication>
 #include <QColor>
 #include <QEasingCurve>
@@ -323,10 +324,34 @@ bool rowsSettled(QQuickItem *view, int count) {
     return true;
 }
 
-// How long a list transition takes in the tests that watch one part of the
-// way, in ms: transitions cannot be paused, so the test sees them in real
-// time, and this leaves a test held up on a busy machine time to see one.
-constexpr int kSlowSlide = 2000;
+// The time of every animation of the GUI thread, while it lives: it stands
+// still but for the steps the test takes, however busy the machine. For the
+// lists' transitions, whose animations cannot be paused or set to a point.
+class SteppedAnimationDriver : public QAnimationDriver {
+public:
+    SteppedAnimationDriver() { install(); }
+    ~SteppedAnimationDriver() override { uninstall(); }
+    SteppedAnimationDriver(const SteppedAnimationDriver &) = delete;
+    SteppedAnimationDriver &operator=(const SteppedAnimationDriver &) = delete;
+
+    qint64 elapsed() const override { return m_elapsed; }
+
+    // Lets `ms` of animation time pass, a frame of 16 ms at a time, as the
+    // window would draw them.
+    void step(int ms) {
+        for (int done = 0; done < ms; done += kFrame) {
+            // The animations that started since: they run from the next
+            // frame on.
+            QCoreApplication::processEvents();
+            m_elapsed += std::min(kFrame, ms - done);
+            advance();
+        }
+    }
+
+private:
+    static constexpr int kFrame = 16;
+    qint64 m_elapsed = 0;
+};
 
 // The frames `window` draws over `ms` of wall time.
 int framesOver(QQuickWindow *window, int ms) {
@@ -2347,12 +2372,9 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     const double albumAY = albumA->y();
     QCOMPARE(albumB->y(), 2 * rowHeight);
 
-    // The rows slide in a transition, whose animations can be neither
-    // paused nor set to a point, so the slide takes the test's real time:
-    // long enough that even a test held up on a busy machine sees Album B
-    // between where it was and where it goes.
-    const int shortDuration = units->shortDuration();
-    units->setShortDuration(kSlowSlide);
+    // The slide's time, in the test's steps.
+    SteppedAnimationDriver driver;
+    const int duration = units->shortDuration();
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     // Laid out at once: the children are in place, Album A has not moved,
     // and Album B starts where it was, over the children.
@@ -2363,20 +2385,24 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
-    QVERIFY(QTest::qWaitFor([&]() {
-        return albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight;
-    }));
+    // Half-way, it is on its way down, still over the children.
+    driver.step(duration / 2);
+    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    QVERIFY(albumB->z() > firstChild->z());
     QCOMPARE(albumA->y(), albumAY);
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->y() == 4 * rowHeight; }, 2 * kSlowSlide));
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->z() == 1.0; }));
+    driver.step(duration);
+    QCOMPARE(albumB->y(), 4 * rowHeight);
+    QCOMPARE(albumB->z(), 1.0);
 
     // Collapsing: Album B slides back up over the children as they fade.
-    units->setShortDuration(shortDuration);
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    QVERIFY(QTest::qWaitFor([&]() { return albumB->y() == 2 * rowHeight; }));
+    driver.step(duration / 2);
+    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    driver.step(duration);
+    QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
 }
 
@@ -2429,10 +2455,8 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
     QCOMPARE(slide->property("duration").toInt(), units->shortDuration());
     QCOMPARE(easingOf(slide), QEasingCurve::OutCubic);
     const double rowHeight = view->property("rowHeight").toDouble();
-    // A transition, which takes real time: long enough to be seen part of
-    // the way, as in treeToggleOpensDownwardAndKeepsTheRowPut.
-    units->setShortDuration(kSlowSlide);
-    QCOMPARE(slide->property("duration").toInt(), kSlowSlide);
+    // The slide's time, in the test's steps.
+    SteppedAnimationDriver driver;
 
     // Row 0 dropped before row 3; the backend moves it there.
     QMetaObject::invokeMethod(controller, "dropQueueRows", Q_ARG(QVariant, 0), Q_ARG(QVariant, 3));
@@ -2446,8 +2470,10 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
     QCOMPARE(moved->y(), 2 * rowHeight);
     QCOMPARE(displaced->y(), 1 * rowHeight);
     QVERIFY(moved->z() > displaced->z());
-    QVERIFY(QTest::qWaitFor([&]() { return displaced->y() < rowHeight && displaced->y() > 0; }));
-    QVERIFY(QTest::qWaitFor([&]() { return rowsSettled(view, 5); }, 2 * kSlowSlide));
+    driver.step(units->shortDuration() / 2);
+    QVERIFY2(displaced->y() < rowHeight && displaced->y() > 0, qPrintable(QString::number(displaced->y())));
+    driver.step(units->shortDuration());
+    QVERIFY(rowsSettled(view, 5));
     QCOMPARE(itemAtIndex(view, 2), moved);
 }
 
