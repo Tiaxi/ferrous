@@ -54,6 +54,51 @@ inline QSize plateSize(int textWidth, const QFontMetrics &metrics, const Colors 
     return {textWidth + 2 * kPadding + edge, metrics.height() + 2 * kPadding + edge};
 }
 
+// How wide `text` can be with other digits in it: as wide as it is with each
+// digit the font's widest. A readout's text changes its digits as the
+// pointer moves, so whether its plate fits is decided by this width, not by
+// the text's own.
+inline int widestDigitsWidth(const QString &text, const QFontMetrics &metrics) {
+    QChar widest(u'0');
+    for (char16_t digit = u'1'; digit <= u'9'; ++digit) {
+        if (metrics.horizontalAdvance(QChar(digit)) > metrics.horizontalAdvance(widest)) {
+            widest = QChar(digit);
+        }
+    }
+    QString widened = text;
+    for (QChar &character : widened) {
+        if (character.isDigit()) {
+            character = widest;
+        }
+    }
+    return metrics.horizontalAdvance(widened);
+}
+
+// A widest width (see widestDigitsWidth), measured in the readout's font and
+// kept until that font, or what it is the width of (`key`), changes: the
+// application's font, which the readout's takes its family and style from,
+// can change while the app runs. The width is of a pixel-sized font, as the
+// readout's text is measured, so the device pixel ratio doesn't change it.
+class WidestWidth {
+public:
+    template <typename Measure>
+    int get(const QFont &font, double key, Measure &&measure) {
+        if (!m_measured || font != m_font || key != m_key) {
+            m_width = measure(QFontMetrics(font));
+            m_font = font;
+            m_key = key;
+            m_measured = true;
+        }
+        return m_width;
+    }
+
+private:
+    QFont m_font;
+    double m_key{0.0};
+    int m_width{0};
+    bool m_measured{false};
+};
+
 // A scale along a plot's right edge: how far its labels reach from the
 // edge, and whether one is beside the bottom edge, where the time's plate
 // goes.
@@ -61,6 +106,27 @@ struct RightScale {
     int width{0};
     bool reachesBottom{false};
 };
+
+// The rows a plate's top can be on: `first` to `last`, none where
+// `last < first`.
+struct Rows {
+    int first{0};
+    int last{-1};
+
+    bool isEmpty() const { return last < first; }
+    int count() const { return last - first + 1; }
+};
+
+// The part of `rows` where a plate `plateHeight` tall keeps `kGap` clear of
+// `head`'s rows: the larger of the parts below and above it, below on a tie.
+inline Rows rowsClearOf(const Rows &rows, const QRect &head, int plateHeight) {
+    const Rows below{std::max(rows.first, head.bottom() + 1 + kGap), rows.last};
+    const Rows above{rows.first, std::min(rows.last, head.top() - kGap - plateHeight)};
+    if (below.isEmpty()) {
+        return above;
+    }
+    return above.isEmpty() || below.count() >= above.count() ? below : above;
+}
 
 // Where the value's and the time's plates go on a plot `width` by `height`,
 // for the crosshair's lines at `x` and `y`; an empty size leaves its plate
@@ -74,42 +140,81 @@ struct RightScale {
 //   `laneHead` (the lowest lane's label and buttons) where that reaches down
 //   beside it, and in a lane too short to have the value above it, left of
 //   the value.
+// Neither plate goes under `laneHead` or out of the plot. A plot too narrow
+// for both leaves a plate out, the same one wherever the pointer is: the
+// value where the time doesn't fit beside it or above it, and the time where
+// it doesn't fit right of `laneHead` on its own. Over the lane head, which is
+// drawn above the plot, the time would be hidden and cover its buttons.
+// Whether a plate fits is decided by `widestValue` and `widestTime`, the
+// widths of the widest plates the readout shows (see widestDigitsWidth), so
+// a plate doesn't come and go, or move the other, as its text changes.
 inline std::pair<QRect, QRect> plateRects(
     int width, int height, int x, int y,
     const QSize &valuePlate, const QSize &timePlate,
     const QSizeF &reservedCorner = QSizeF(), const RightScale &scale = RightScale(),
-    const QRect &laneHead = QRect()) {
+    const QRect &laneHead = QRect(), int widestValue = 0, int widestTime = 0) {
     const int leftOfScale = width - scale.width - kGap;
-    const bool hasTime = !timePlate.isEmpty();
-    const int timeTop = hasTime ? std::max(0, height - kEdgeMargin - timePlate.height()) : height;
-    // How low the value's plate goes: above the time where there is room.
-    const int valueLowest = std::max(kEdgeMargin, height - kEdgeMargin - valuePlate.height());
-    const int valueAboveTime = timeTop - kGap - valuePlate.height();
-    const bool valueAbove = hasTime && valueAboveTime >= kEdgeMargin;
+    const int valueRoom = std::max(valuePlate.width(), widestValue);
+    const int timeRoom = std::max(timePlate.width(), widestTime);
+
+    // The time's band along the bottom edge, between the lane head and the
+    // scale; a time that doesn't fit in it is left out.
+    int timeTop = height;
+    int timeLeft = 0;
+    int timeRight = width;
+    bool hasTime = !timePlate.isEmpty();
+    if (hasTime) {
+        timeTop = std::max(0, height - kEdgeMargin - timePlate.height());
+        if (laneHead.isValid() && laneHead.bottom() + kGap >= timeTop) {
+            timeLeft = laneHead.right() + 1 + kGap;
+        }
+        if (scale.width > 0 && scale.reachesBottom) {
+            timeRight = leftOfScale;
+        }
+        hasTime = timeRight - timeLeft >= timeRoom;
+    }
 
     QRect value;
     if (!valuePlate.isEmpty()) {
         const int right = scale.width > 0 ? leftOfScale : width - kEdgeMargin;
-        const int top = std::clamp(y - valuePlate.height() / 2, kEdgeMargin,
-                                   valueAbove ? valueAboveTime : valueLowest);
-        const int left = std::max(0, right - valuePlate.width());
-        value = QRect(
-            std::max(0, ViewCorner::labelXClearOfCorner(
-                left, top, valuePlate.width(), valuePlate.height(), width, reservedCorner)),
-            top, valuePlate.width(), valuePlate.height());
+        const int home = right - valuePlate.width();
+        // Where the widest value goes at the top of the lane, out from under
+        // the corner: the leftmost spot of any, which places the time, so
+        // that doesn't move as the pointer moves.
+        const int widestHome = right - valueRoom;
+        const int leftmost = ViewCorner::labelXClearOfCorner(
+            widestHome, kEdgeMargin, valueRoom, valuePlate.height(), width, reservedCorner);
+        const bool besideHead = laneHead.isValid() && leftmost < laneHead.right() + 1 + kGap;
+        const auto clearOfHead = [&](const Rows &rows) {
+            return besideHead ? rowsClearOf(rows, laneHead, valuePlate.height()) : rows;
+        };
+        // Above the time where there is room, beside it where the time
+        // fits between the lane head and the value, and otherwise left out.
+        const Rows above = hasTime
+            ? clearOfHead({kEdgeMargin, timeTop - kGap - valuePlate.height()})
+            : Rows();
+        const Rows anywhere = clearOfHead(
+            {kEdgeMargin, std::max(kEdgeMargin, height - kEdgeMargin - valuePlate.height())});
+        const bool beside = above.isEmpty();
+        const Rows rows = !beside ? above
+            : !hasTime || leftmost - kGap - timeLeft >= timeRoom ? anywhere
+            : Rows();
+        if (widestHome >= 0 && !rows.isEmpty()) {
+            const int top = std::clamp(y - valuePlate.height() / 2, rows.first, rows.last);
+            value = QRect(
+                std::max(0, ViewCorner::labelXClearOfCorner(
+                    home, top, valuePlate.width(), valuePlate.height(), width, reservedCorner)),
+                top, valuePlate.width(), valuePlate.height());
+            if (hasTime && beside) {
+                timeRight = std::min(timeRight, leftmost - kGap);
+            }
+        }
     }
 
     QRect time;
     if (hasTime) {
-        int right = scale.width > 0 && scale.reachesBottom ? leftOfScale : width;
-        if (value.isValid() && !valueAbove) {
-            right = std::min(right, value.left() - kGap);
-        }
-        const int left = laneHead.isValid() && laneHead.bottom() + kGap >= timeTop
-            ? laneHead.right() + 1 + kGap
-            : 0;
         time = QRect(
-            std::clamp(x - timePlate.width() / 2, left, std::max(left, right - timePlate.width())),
+            std::clamp(x - timePlate.width() / 2, timeLeft, timeRight - timePlate.width()),
             timeTop, timePlate.width(), timePlate.height());
     }
     return {value, time};
@@ -118,6 +223,10 @@ inline std::pair<QRect, QRect> plateRects(
 // Draws a plate at `rect` with `text` in `font`.
 inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
                       const QFont &font, const Colors &colors) {
+    // A plate left out has no rect, and draws nothing.
+    if (rect.isEmpty()) {
+        return;
+    }
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, true);
     painter.setRenderHint(QPainter::TextAntialiasing, true);

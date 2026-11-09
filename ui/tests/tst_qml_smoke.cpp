@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
+#include <QFontDatabase>
 #include "../src/GlobalSearchResultsModel.h"
 #include <QDateTime>
 #include <QDeadlineTimer>
@@ -45,11 +46,14 @@
 #include <QMutexLocker>
 #include <QScopedPointer>
 #include <QSemaphore>
+#include <QScopeGuard>
+#include <QSet>
 #include <QDir>
 #include <QTemporaryFile>
 #include <QFutureWatcher>
 #include <atomic>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <QtEndian>
 #include <QtTest/QtTest>
@@ -1266,6 +1270,13 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly_data();
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
+    void crosshairReadoutLeavesAPlateOutInNarrowPlots_data();
+    void crosshairReadoutLeavesAPlateOutInNarrowPlots();
+    void spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data();
+    void spectrogramCrosshairReadoutStaysReadableInNarrowLanes();
+    void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
+    void crosshairReadoutWidestWidthsFollowTheFont();
+    void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
     void spectrogramCrosshairReadoutReadsEachView();
     void spectrogramCrosshairReadoutAcrossAGaplessBoundary();
@@ -1439,6 +1450,8 @@ private slots:
     void waveformEditorHoverDrawsCrosshairAndReadouts();
     void waveformEditorCrosshairLabelsMatchSpectrogramMargins();
     void waveformEditorCrosshairLabelsKeepApartInShortPlots();
+    void waveformEditorCrosshairLabelsStayReadableInNarrowPlots();
+    void waveformEditorDrawsNoCrosshairLabelItLeavesOut();
     void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -9862,6 +9875,128 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsKeepApartInShortPlots() {
             width, 220, x, 219, 42, 48, 12, reserved, head);
         QVERIFY2(!time.intersects(head), qPrintable(QTest::toString(QRectF(time))));
         QVERIFY(!value.intersects(time));
+    }
+}
+
+void WaveformSmokeTest::waveformEditorCrosshairLabelsStayReadableInNarrowPlots() {
+    // The waveform shares the spectrogram's layout: in a plot too narrow for
+    // its lane head, the level and the time side by side, it leaves the
+    // level out, and the time too where it doesn't fit right of the head.
+    // The plates never meet each other or the head and never leave the plot,
+    // wherever the pointer is.
+    const QFont font = CrosshairReadout::font();
+    const QFontMetrics metrics(font);
+    // The level changes with the pointer's height; whether it shows goes by
+    // the widest it can be.
+    const QStringList levels{QStringLiteral("0.0 dB"), QStringLiteral("-6.0 dB"),
+                             QStringLiteral("-12.5 dB"), QStringLiteral("-100.0 dB"),
+                             QStringLiteral("-∞ dB")};
+    const int widestValue = std::max(
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("-100.0 dB"), metrics),
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("-∞ dB"), metrics));
+    const int timeText = metrics.horizontalAdvance(QStringLiteral("0:28.980"));
+    const int widestTime = CrosshairReadout::widestDigitsWidth(QStringLiteral("0:28.980"), metrics);
+    const auto valueText = [&](int y) {
+        return metrics.horizontalAdvance(levels[y % levels.size()]);
+    };
+    WaveformEditorItem item;
+    item.setLaneHeadBounds(QRectF(4.0, 3.0, 82.0, 26.0));
+    for (const int height : {27, 36}) {
+        QRect head;
+        {
+            QMutexLocker lock(&item.m_stateMutex);
+            head = item.lowestLaneHeadLocked(height, 1);
+        }
+        QVERIFY(head.isValid());
+        for (const int width : {160, 180, 200, 220, 240}) {
+            const QRect plot(0, 0, width, height);
+            const auto [firstValue, firstTime] = WaveformEditorItem::crosshairLabelRects(
+                width, height, 0, 0, valueText(0), timeText, metrics.height(), QSizeF(), head,
+                widestValue, widestTime);
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+                        width, height, x, y, valueText(y), timeText, metrics.height(), QSizeF(),
+                        head, widestValue, widestTime);
+                    const QByteArray where = QByteArray::number(width) + "x"
+                        + QByteArray::number(height) + " at " + QByteArray::number(x) + ", "
+                        + QByteArray::number(y) + ": value " + QTest::toString(QRectF(value))
+                        + ", time " + QTest::toString(QRectF(time));
+                    for (const QRect &plate : {value, time}) {
+                        if (plate.isNull()) continue;
+                        if (!plot.contains(plate) || plate.intersects(head)) {
+                            QFAIL(where.constData());
+                        }
+                    }
+                    if (value.isValid() && value.intersects(time)) QFAIL(where.constData());
+                    // The same plates wherever the pointer is.
+                    if (value.isNull() != firstValue.isNull()
+                        || time.isNull() != firstTime.isNull()) {
+                        QFAIL(where.constData());
+                    }
+                }
+            }
+            // 200 px leave the time room right of the head, if not the level.
+            if (width >= 200) {
+                QVERIFY(firstTime.isValid());
+            }
+        }
+    }
+}
+
+void WaveformSmokeTest::waveformEditorDrawsNoCrosshairLabelItLeavesOut() {
+    // A plate the layout leaves out draws nothing: its text doesn't show
+    // without its plate in the top left corner. At 180 px the level is left
+    // out; at 120 px the time is too.
+    const QFontMetrics metrics(CrosshairReadout::font());
+    const int widestValue = std::max(
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("-100.0 dB"), metrics),
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("-∞ dB"), metrics));
+    const int widestTime = CrosshairReadout::widestDigitsWidth(QStringLiteral("0:00.000"), metrics);
+    const QRect head(4, 3, 82, 26);
+    constexpr int height = 27;
+    for (const int width : {180, 120}) {
+        const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+            width, height, width - 5, 24, widestValue, widestTime, metrics.height(), QSizeF(),
+            head, widestValue, widestTime);
+        QVERIFY(value.isEmpty());
+        QCOMPARE(time.isEmpty(), width == 120);
+
+        WaveformEditorItem item;
+        item.setWidth(width);
+        item.setHeight(height);
+        item.setDurationSeconds(10.0);
+        item.setCrosshairEnabled(true);
+        item.setLaneHeadBounds(QRectF(head));
+        const auto paint = [&]() {
+            QImage image(width, height, QImage::Format_RGB32);
+            image.fill(Qt::black);
+            QPainter painter(&image);
+            item.paint(&painter);
+            painter.end();
+            return image;
+        };
+        const QImage baseline = paint();
+        // The lines at the right and the bottom, away from the top left.
+        item.setHoverPosition(width - 5.0, 24.0, true);
+        const QImage hovered = paint();
+        const auto changedIn = [&](const QRect &area) {
+            int changed = 0;
+            for (int y = area.top(); y <= area.bottom(); ++y) {
+                for (int x = area.left(); x <= area.right(); ++x) {
+                    changed += hovered.pixel(x, y) != baseline.pixel(x, y) ? 1 : 0;
+                }
+            }
+            return changed;
+        };
+        const QByteArray where = QByteArray::number(width) + " px";
+        // The crosshair shows, and nothing where a plate without a rect
+        // would draw its text.
+        QVERIFY2(changedIn(QRect(0, 24, width, 1)) > width / 4, where.constData());
+        QCOMPARE(changedIn(QRect(0, 0, 80, 22)), 0);
+        // Right of the head, the time where it shows, and nothing else.
+        const int timeArea = changedIn(QRect(90, 0, width - 90 - 6, 24));
+        QVERIFY2(width == 120 ? timeArea == 0 : timeArea > 40, where.constData());
     }
 }
 
@@ -19338,6 +19473,380 @@ void SpectrogramSmokeTest::crosshairReadoutPlatesFollowThePointerSmoothly() {
             if (!check(x, y, false)) return;
         }
     }
+}
+
+void SpectrogramSmokeTest::crosshairReadoutLeavesAPlateOutInNarrowPlots_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<int>("valueWidth");
+    QTest::addColumn<bool>("scaleShown");
+    for (int width = 120; width <= 240; width += 10) {
+        for (const int height : {27, 31, 36}) {
+            for (const int valueWidth : {66, 100}) {
+                for (const bool scaleShown : {false, true}) {
+                    QTest::addRow("%dx%d, value %d px%s", width, height, valueWidth,
+                                  scaleShown ? ", frequency scale" : "")
+                        << width << height << valueWidth << scaleShown;
+                }
+            }
+        }
+    }
+}
+
+void SpectrogramSmokeTest::crosshairReadoutLeavesAPlateOutInNarrowPlots() {
+    // A lane too narrow for the lane head, the value and the time side by
+    // side leaves a plate out rather than overlap them: the value, where the
+    // time fits right of the head, and the time too where it doesn't. Which
+    // plates show doesn't depend on the pointer, and those that show follow
+    // it smoothly.
+    QFETCH(int, width);
+    QFETCH(int, height);
+    QFETCH(int, valueWidth);
+    QFETCH(bool, scaleShown);
+    const QSize value(valueWidth, 22);
+    const QSize time(40, 22);
+    // The lowest lane's label and buttons at x = 4 to 86, down the lane.
+    const QRect laneHead(4, 3, 83, 26);
+    CrosshairReadout::RightScale scale;
+    if (scaleShown) {
+        scale.width = 48;
+        scale.reachesBottom = true;
+    }
+    const QRect lane(0, 0, width, height);
+    const QRect scaleColumn(width - scale.width, 0, scale.width, height);
+    // Right of the head, and left of the scale or the plot's right edge.
+    const int timeRoom = (scaleShown ? width - scale.width - CrosshairReadout::kGap : width)
+        - (laneHead.right() + 1 + CrosshairReadout::kGap);
+    const bool timeFits = timeRoom >= time.width();
+    const int valueRight = scaleShown ? width - scale.width - CrosshairReadout::kGap
+                                      : width - CrosshairReadout::kEdgeMargin;
+    const bool bothFit = valueRight - value.width() - CrosshairReadout::kGap
+            - (laneHead.right() + 1 + CrosshairReadout::kGap)
+        >= time.width();
+
+    bool started = false;
+    bool hasValue = false;
+    bool hasTime = false;
+    QRect lastValue;
+    QRect lastTime;
+    const auto check = [&](int x, int y, bool steppingX) {
+        const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
+            width, height, x, y, value, time, QSizeF(), scale, laneHead);
+        const QByteArray where = QByteArray("pointer at ") + QByteArray::number(x) + ", "
+            + QByteArray::number(y) + ": value " + QTest::toString(QRectF(valueRect))
+            + ", time " + QTest::toString(QRectF(timeRect));
+        const auto clear = [&](const QRect &plate) {
+            return !plate.isValid()
+                || (lane.contains(plate) && !plate.intersects(laneHead)
+                    && !(scaleShown && plate.intersects(scaleColumn)));
+        };
+        if (!clear(valueRect) || !clear(timeRect)
+            || (valueRect.isValid() && valueRect.intersects(timeRect))) {
+            QTest::qFail(where.constData(), __FILE__, __LINE__);
+            return false;
+        }
+        // The same plates wherever the pointer is: the time where it fits,
+        // and the value beside it where both do.
+        if (!started) {
+            started = true;
+            hasValue = valueRect.isValid();
+            hasTime = timeRect.isValid();
+            if (hasTime != timeFits || (timeFits && hasValue != bothFit)) {
+                QTest::qFail(("plates shown at " + where).constData(), __FILE__, __LINE__);
+                return false;
+            }
+        } else if (valueRect.isValid() != hasValue || timeRect.isValid() != hasTime) {
+            QTest::qFail(("a plate comes or goes at " + where).constData(), __FILE__, __LINE__);
+            return false;
+        }
+        if (!lastValue.isNull() || !lastTime.isNull()) {
+            const int valueMove = std::abs(valueRect.left() - lastValue.left())
+                + std::abs(valueRect.top() - lastValue.top());
+            const int timeMove = std::abs(timeRect.left() - lastTime.left())
+                + std::abs(timeRect.top() - lastTime.top());
+            if (valueMove > (steppingX ? 0 : 1) || timeMove > (steppingX ? 1 : 0)) {
+                QTest::qFail(("jumps at " + where).constData(), __FILE__, __LINE__);
+                return false;
+            }
+        }
+        lastValue = valueRect;
+        lastTime = timeRect;
+        return true;
+    };
+    for (const int y : {height - 1, height / 2, 0}) {
+        lastValue = lastTime = QRect();
+        for (int x = 0; x < width; ++x) {
+            if (!check(x, y, true)) return;
+        }
+        for (int x = width - 1; x >= 0; --x) {
+            if (!check(x, y, true)) return;
+        }
+    }
+    for (const int x : {width - 1, width - 40, width / 2, 0}) {
+        lastValue = lastTime = QRect();
+        for (int y = 0; y < height; ++y) {
+            if (!check(x, y, false)) return;
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("laneHeight");
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("scaleShown");
+    for (const int width : {160, 200, 240}) {
+        for (const int laneHeight : {27, 36}) {
+            for (const double scale : {1.0, 2.0}) {
+                for (const bool scaleShown : {false, true}) {
+                    QTest::addRow("%dx%d, %gx%s", width, laneHeight, scale,
+                                  scaleShown ? ", frequency scale" : "")
+                        << width << laneHeight << scale << scaleShown;
+                }
+            }
+        }
+    }
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadoutStaysReadableInNarrowLanes() {
+    // The lowest lane of a narrow pane, as a small windowed viewer of a 5.1
+    // or 7.1 track has it: the plates never meet each other, the lane head
+    // or the scale, and never leave the lane, as the pointer moves along the
+    // bottom edge and through the middle a pixel at a time.
+    QFETCH(int, width);
+    QFETCH(int, laneHeight);
+    QFETCH(double, scale);
+    QFETCH(bool, scaleShown);
+    SpectrogramItem item;
+    feedReadoutFixture(item);
+    item.setGridEnabled(scaleShown);
+    const QRectF laneHead(4.0, 3.0, 82.0, 26.0);
+    item.setLaneHeadBounds(laneHead);
+    const QSize lane(width, laneHeight);
+    const QRectF laneRect(QPointF(0.0, 0.0), QSizeF(lane));
+    for (const double y : {laneHeight - 0.5, laneHeight * 0.5}) {
+        bool started = false;
+        bool hasValue = false;
+        bool hasTime = false;
+        QRectF lastValue;
+        QRectF lastTime;
+        for (int step = 0; step < width; ++step) {
+            const double x = step + 0.5;
+            layOutReadout(item, lane, scale, QPointF(x, y));
+            QRectF value;
+            QRectF time;
+            QStringList texts;
+            for (const SpectrogramOverlayImage &plate : readoutPlatesOf(item.m_crosshair)) {
+                // The time is the plate with minutes and seconds.
+                (plate.text.contains(QLatin1Char(':')) ? time : value) = plate.rect;
+                texts.push_back(plate.text);
+            }
+            const QByteArray where = QByteArray("pointer at ") + QByteArray::number(x) + ", "
+                + QByteArray::number(y) + ": value " + QTest::toString(value) + ", time "
+                + QTest::toString(time);
+            QCOMPARE(item.m_crosshairLaidOutReadout, texts.join(QLatin1Char('\n')));
+            for (const QRectF &plate : {value, time}) {
+                if (plate.isNull()) continue;
+                QVERIFY2(laneRect.contains(plate), where.constData());
+                QVERIFY2(!plate.intersects(laneHead), where.constData());
+                for (const SpectrogramOverlayImage &label : item.m_freqGrid.images) {
+                    QVERIFY2(!label.rect.intersects(plate),
+                             (where + ", scale label " + QTest::toString(label.rect)).constData());
+                }
+            }
+            QVERIFY2(value.isNull() || time.isNull() || !value.intersects(time),
+                     where.constData());
+            // Without the scale, 200 px leave the time room right of the head.
+            if (width >= 200 && !scaleShown) {
+                QVERIFY2(!time.isNull(), where.constData());
+            }
+            // No plate comes or goes, the value stays, and the time moves a
+            // pixel at most.
+            if (!started) {
+                started = true;
+                hasValue = !value.isNull();
+                hasTime = !time.isNull();
+            } else {
+                QVERIFY2(value.isNull() != hasValue && time.isNull() != hasTime,
+                         where.constData());
+                QVERIFY2(value == lastValue, where.constData());
+                QVERIFY2(std::abs(time.left() - lastTime.left()) <= 1.0, where.constData());
+            }
+            lastValue = value;
+            lastTime = time;
+        }
+    }
+
+    // The example of #494: a 200 px lane 27 px tall, its head at x = 4 to 86,
+    // a value plate 100 px wide and a time plate 40: the value is left out.
+    const auto [value, time] = CrosshairReadout::plateRects(
+        200, 27, 199, 26, QSize(100, 22), QSize(40, 22), QSizeF(),
+        CrosshairReadout::RightScale(), QRect(4, 3, 83, 24));
+    QVERIFY(value.isNull());
+    QCOMPARE(time, QRect(160, 3, 40, 22));
+    // At 120 px neither fits right of the head: both are left out.
+    const auto [narrowValue, narrowTime] = CrosshairReadout::plateRects(
+        120, 27, 60, 26, QSize(100, 22), QSize(40, 22), QSizeF(),
+        CrosshairReadout::RightScale(), QRect(4, 3, 83, 24));
+    QVERIFY(narrowValue.isNull() && narrowTime.isNull());
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges() {
+    // Across audio whose level changes from column to column, the readout
+    // shows the same plates wherever the pointer is: whether the value fits
+    // beside the time goes by the widest frequency and level, not by the
+    // text under the pointer. Narrow lanes around the width where the value
+    // stops fitting, as in a small windowed viewer of a 7.1 track.
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 4'097;
+    constexpr int columns = 400;
+    // Silence, −150, −75 and −3 dB in turn: 1..255 span −150..0 dB.
+    constexpr unsigned char levels[] = {0, 1, 128, 250};
+    QByteArray data(bins * columns, '\0');
+    for (int column = 0; column < columns; ++column) {
+        std::fill_n(data.data() + column * bins, bins,
+                    static_cast<char>(levels[column % std::size(levels)]));
+    }
+    item.feedPrecomputedChunk(data, bins, 0, columns, 0, 1'000, 48'000, 1'024, false, true, 1,
+                              false);
+    const QRectF laneHead(4.0, 3.0, 82.0, 26.0);
+    item.setLaneHeadBounds(laneHead);
+    constexpr int laneHeight = 27;
+    bool valueShown = false;
+    bool valueLeftOut = false;
+    for (const double scale : {1.0, 2.0}) {
+        for (int width = 196; width <= 264; width += 4) {
+            const QSize lane(width, laneHeight);
+            const QRectF laneRect(QPointF(0.0, 0.0), QSizeF(lane));
+            bool started = false;
+            bool hasValue = false;
+            bool hasTime = false;
+            QSet<QString> values;
+            for (int step = 0; step < width; ++step) {
+                const QPointF pointer(step + 0.5, laneHeight * 0.5);
+                layOutReadout(item, lane, scale, pointer);
+                QRectF value;
+                QRectF time;
+                for (const SpectrogramOverlayImage &plate : readoutPlatesOf(item.m_crosshair)) {
+                    if (plate.text.contains(QLatin1Char(':'))) {
+                        time = plate.rect;
+                    } else {
+                        value = plate.rect;
+                        values.insert(plate.text);
+                    }
+                }
+                const QByteArray where = QByteArray::number(width) + " px at "
+                    + QByteArray::number(scale) + "x, pointer at "
+                    + QByteArray::number(pointer.x()) + ": value " + QTest::toString(value)
+                    + ", time " + QTest::toString(time) + ", readout "
+                    + item.m_crosshairLaidOutReadout.toUtf8();
+                for (const QRectF &plate : {value, time}) {
+                    if (plate.isNull()) continue;
+                    QVERIFY2(laneRect.contains(plate) && !plate.intersects(laneHead),
+                             where.constData());
+                }
+                QVERIFY2(value.isNull() || time.isNull() || !value.intersects(time),
+                         where.constData());
+                if (!started) {
+                    started = true;
+                    hasValue = !value.isNull();
+                    hasTime = !time.isNull();
+                } else {
+                    QVERIFY2(value.isNull() != hasValue && time.isNull() != hasTime,
+                             ("a plate comes or goes at " + where).constData());
+                }
+            }
+            QVERIFY2(hasTime, QByteArray::number(width).constData());
+            if (hasValue) {
+                // The level under the pointer changed as it moved.
+                QVERIFY2(values.size() >= 3, QByteArray::number(width).constData());
+                valueShown = true;
+            } else {
+                valueLeftOut = true;
+            }
+        }
+    }
+    // The widths reach both sides of where the value stops fitting.
+    QVERIFY(valueShown && valueLeftOut);
+}
+
+void SpectrogramSmokeTest::crosshairReadoutWidestWidthsFollowTheFont() {
+    // The readout's font takes its family and style from the application's,
+    // which can change while the app runs: the widest frequency and level
+    // the spectrogram and the waveform measured are measured again in it.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    SpectrogramItem spectrogram;
+    feedReadoutFixture(spectrogram);
+    WaveformEditorItem waveform;
+    const auto widest = [](SpectrogramItem &spectrogram, WaveformEditorItem &waveform) {
+        QMutexLocker spectrogramLock(&spectrogram.m_stateMutex);
+        QMutexLocker waveformLock(&waveform.m_stateMutex);
+        return std::pair(spectrogram.crosshairWidestValueWidthLocked(),
+                         waveform.crosshairWidestLevelWidthLocked());
+    };
+    const auto before = widest(spectrogram, waveform);
+    QVERIFY(before.first > 0 && before.second > 0);
+    QCOMPARE(widest(spectrogram, waveform), before);
+
+    // Another family, its letters 2 px further apart.
+    QFont font(QFontDatabase::systemFont(QFontDatabase::FixedFont).family());
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
+    QGuiApplication::setFont(font);
+    QCOMPARE(CrosshairReadout::font().letterSpacing(), 2.0);
+    const auto after = widest(spectrogram, waveform);
+    QVERIFY2(after.first > before.first && after.second > before.second,
+             qPrintable(QStringLiteral("before %1, %2; after %3, %4")
+                            .arg(before.first).arg(before.second)
+                            .arg(after.first).arg(after.second)));
+    // As items that never measured in the old font measure them.
+    SpectrogramItem freshSpectrogram;
+    feedReadoutFixture(freshSpectrogram);
+    WaveformEditorItem freshWaveform;
+    QCOMPARE(after, widest(freshSpectrogram, freshWaveform));
+
+    // And back.
+    QGuiApplication::setFont(applicationFont);
+    QCOMPARE(widest(spectrogram, waveform), before);
+}
+
+void SpectrogramSmokeTest::spectrogramCrosshairWidestValueCoversRoundedHertz() {
+    // At 11,025 Hz with 8,192-point FFTs, the bin at 999.948 Hz reads
+    // "1000 Hz": a frequency of more digits than "999 Hz", which the widest
+    // value the readout measures covers, with the lowest level, as every
+    // other frequency of the band.
+    SpectrogramItem item;
+    item.setSampleRateHz(11'025);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 4'097;
+    constexpr int columns = 50;
+    // −150 dB throughout: the level of the most digits.
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x01'), bins, 0, columns, 0, 1'000,
+                              11'025, 1'024, false, true, 1, false);
+    const QFontMetrics metrics(CrosshairReadout::font());
+    // A row for each bin.
+    const QSize lane(300, bins);
+    int widest = 0;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        QCOMPARE(item.binHzLocked(), 11'025.0 / 8'192.0);
+        widest = item.crosshairWidestValueWidthLocked();
+    }
+    bool sawThousandHertz = false;
+    for (int row = 0; row < bins; ++row) {
+        layOutReadout(item, lane, 1.0, QPointF(20.5, row + 0.5));
+        for (const SpectrogramOverlayImage &plate : readoutPlatesOf(item.m_crosshair)) {
+            if (plate.text.contains(QLatin1Char(':'))) continue;
+            sawThousandHertz = sawThousandHertz
+                || plate.text.startsWith(QStringLiteral("1000 Hz, "));
+            QVERIFY2(CrosshairReadout::widestDigitsWidth(plate.text, metrics) <= widest,
+                     qPrintable(plate.text + QStringLiteral(" is wider than %1").arg(widest)));
+        }
+    }
+    QVERIFY(sawThousandHertz);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairTimeKeepsClearOfTheLaneHead() {

@@ -5338,11 +5338,19 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
             rightScale.reachesBottom = rightScale.reachesBottom || label.rect.bottom() > timeTop;
         }
     }
+    // Whether a plate shows goes by the widest text it can have, so it
+    // doesn't come and go as the level and time under the pointer change.
+    const auto widestPlate = [&](int textWidth) {
+        return CrosshairReadout::plateSize(textWidth, metrics, m_readoutColors).width();
+    };
     const auto [valueRect, timeRect] = CrosshairReadout::plateRects(
         logicalWidth, logicalHeight,
         static_cast<int>(std::floor(lineX)), static_cast<int>(std::floor(lineY)),
         plateFor(valueText), timePlate, m_reservedCorner, rightScale,
-        m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect());
+        m_laneHeadBounds.isEmpty() ? QRect() : m_laneHeadBounds.toAlignedRect(),
+        widestPlate(crosshairWidestValueWidthLocked()),
+        timeText.isEmpty()
+            ? 0 : widestPlate(CrosshairReadout::widestDigitsWidth(timeText, metrics)));
     QStringList readout;
     if (valueRect.isValid()) {
         m_crosshair.images.push_back({SpectrogramOverlayImage::ReadoutPlate, valueText, 0,
@@ -5356,6 +5364,28 @@ void SpectrogramItem::updateCrosshairOverlayLocked(
     }
     publishCrosshairReadoutLocked(readout.join(QLatin1Char('\n')));
     nameOverlayImagesLocked(m_crosshair);
+}
+
+int SpectrogramItem::crosshairWidestValueWidthLocked() {
+    const double topHz = topFrequencyHzLocked();
+    return m_crosshairWidestValue.get(
+        CrosshairReadout::font(), topHz, [topHz](const QFontMetrics &metrics) {
+            // Each form at its most digits, as the readout's formatters write
+            // them: the hertz just under a kilohertz, which round up to
+            // "1000 Hz", and the top of the band, which can round up in
+            // kilohertz. A lower frequency has no more digits in its form.
+            const double underKilohertz = std::nextafter(1000.0, 0.0);
+            int widest = 0;
+            for (const double hz : {std::min(topHz, underKilohertz), topHz}) {
+                for (const double db : {-150.0, -std::numeric_limits<double>::infinity()}) {
+                    widest = std::max(widest, CrosshairReadout::widestDigitsWidth(
+                        i18nc("@info %1 is a frequency, %2 a level", "%1, %2",
+                              crosshairFrequency(hz), crosshairDecibels(db)),
+                        metrics));
+                }
+            }
+            return widest;
+        });
 }
 
 void SpectrogramItem::publishCrosshairReadoutLocked(const QString &readout) {
