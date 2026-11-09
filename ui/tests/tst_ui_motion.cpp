@@ -334,12 +334,14 @@ int framesOver(QQuickWindow *window, int ms) {
 }
 
 // Covers, as image files of the test's own, each of one colour: `first`
-// and `second`, then more for the tracks after them.
+// and `second`, then more for the tracks after them, all square; and
+// `landscape`, twice as wide as it is high.
 struct Covers {
     QTemporaryDir dir;
     QString first;
     QString second;
     QStringList all;
+    QString landscape;
 
     Covers() {
         const QList<QColor> colors{QColor(200, 40, 40), QColor(40, 40, 200), QColor(40, 160, 40),
@@ -353,6 +355,10 @@ struct Covers {
         }
         first = all.at(0);
         second = all.at(1);
+        QImage wide(128, 64, QImage::Format_RGB32);
+        wide.fill(QColor(40, 160, 160));
+        wide.save(dir.filePath(QStringLiteral("landscape.png")));
+        landscape = QUrl::fromLocalFile(dir.filePath(QStringLiteral("landscape.png"))).toString();
     }
 };
 
@@ -585,8 +591,9 @@ QList<std::pair<QString, double>> coverLook(QQuickItem *panel) {
                               cover->opacity()});
         }
     }
-    // The cover images are opaque: one at full opacity hides all under it.
-    // The placeholder is a faint tint, which hides nothing.
+    // A cover image draws on the colour behind the tile, around it too: one
+    // at full opacity hides all under it, whatever its shape. The
+    // placeholder is a faint tint, which hides nothing.
     qsizetype whole = 0;
     for (qsizetype index = 0; index < layers.size(); ++index) {
         if (!layers.at(index).first.isEmpty() && qFuzzyCompare(layers.at(index).second, 1.0)) {
@@ -743,6 +750,7 @@ private slots:
     void nowPlayingThirdTrackWithAnimationsOffIsInstant();
     void nowPlayingInterruptedFadeAddsNoPlaceholderOverItself();
     void nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong();
+    void nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt();
     void treeToggleOpensDownwardAndKeepsTheRowPut();
     void treeChangesOtherThanAToggleAreInstant();
     void queueRowsADragDisplacesSlide();
@@ -2199,6 +2207,99 @@ void UiMotionTest::nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong() {
     QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{{QString(), 1.0}}));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     QVERIFY(panelIdle(panel, kWideLines));
+}
+
+// A, with a square cover, fades to B, with a landscape one, and A comes
+// back during that fade. B's cover goes out whole, as it showed, over A's
+// own: around B's image, where the tile shows the colour behind it, A's
+// cover must not show through, or A would jump there from its opacity to
+// full. Read from the drawn pixels, above B's image and in it, on both
+// sides; idle, the space around a landscape cover is the sidebar's colour.
+void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
+    const QColor view =
+        qvariant_cast<QObject *>(panel->property("uiPalette"))->property("view").value<QColor>();
+    QCOMPARE(view.alpha(), 255);
+    // Whether every cover image that shows has loaded.
+    const auto loaded = [&]() {
+        QList<QQuickItem *> images{tile->childItems().first()};
+        for (QQuickItem *cover : itemsNamed(tile, QStringLiteral("albumArtOutgoing"))) {
+            if (cover->isVisible()) {
+                images.push_back(cover->childItems().first());
+            }
+        }
+        return std::all_of(images.begin(), images.end(), [](QQuickItem *image) {
+            return image->property("source").toUrl().isEmpty() || image->property("status").toInt() == 1;
+        });
+    };
+    // The colours drawn above the middle of the tile, where a landscape
+    // cover leaves it bare, and at its middle.
+    const auto drawn = [&]() {
+        const QImage frame = window->grabWindow();
+        const qreal ratio = frame.devicePixelRatio();
+        const auto at = [&](double x, double y) {
+            const QPointF point = tile->mapToScene(QPointF(x, y)) * ratio;
+            return frame.pixelColor(point.toPoint());
+        };
+        return std::pair{at(tile->width() / 2, tile->height() * 0.1), at(tile->width() / 2, tile->height() / 2)};
+    };
+    const auto near = [](const QColor &left, const QColor &right) {
+        return std::abs(left.red() - right.red()) <= 3 && std::abs(left.green() - right.green()) <= 3
+            && std::abs(left.blue() - right.blue()) <= 3;
+    };
+    const auto mixed = [](const QColor &over, double opacity, const QColor &under) {
+        return QColor::fromRgbF(over.redF() * opacity + under.redF() * (1 - opacity),
+                                over.greenF() * opacity + under.greenF() * (1 - opacity),
+                                over.blueF() * opacity + under.blueF() * (1 - opacity));
+    };
+    const QColor squareColor(200, 40, 40);
+    const QColor wideColor(40, 160, 160);
+
+    tellTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), 2007, 1, covers.landscape);
+    QTRY_VERIFY(tile->width() > 0 && loaded());
+    // Idle, around a landscape cover: the sidebar's colour, as before.
+    QTRY_VERIFY(near(drawn().first, view) && near(drawn().second, wideColor));
+
+    tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(panelIdle(panel, kWideLines));
+    tellTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), 2007, 1, covers.landscape);
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.4);
+    QTRY_VERIFY(loaded());
+    // A at 0.6 over B, around B's image over the colour behind it.
+    const QColor bare = mixed(squareColor, 0.6, view);
+    const QColor inImage = mixed(squareColor, 0.6, wideColor);
+    QTRY_VERIFY(near(drawn().first, bare) && near(drawn().second, inImage));
+
+    // A again.
+    tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    QCOMPARE(panel->property("handover").toDouble(), 0.0);
+    QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{{covers.landscape, 1.0}, {covers.first, 0.6}}));
+    // B's cover shows at once, not its backdrop: the image cache has it, as
+    // it showed.
+    QVERIFY(loaded());
+    const auto [above, middle] = drawn();
+    QVERIFY2(near(above, bare), qPrintable(QStringLiteral("around B's image: %1, not %2").arg(above.name(), bare.name())));
+    QVERIFY2(near(middle, inImage), qPrintable(QStringLiteral("in B's image: %1, not %2").arg(middle.name(), inImage.name())));
+
+    // Half-way: B's cover at 0.5 over A's own, A's going out at 0.3 over it.
+    panel->setProperty("handover", 0.5);
+    const QColor overA = mixed(squareColor, 0.3, mixed(view, 0.5, squareColor));
+    QTRY_VERIFY(near(drawn().first, overA));
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+    QVERIFY(panelIdle(panel, kWideLines));
+    QTRY_VERIFY(near(drawn().first, squareColor) && near(drawn().second, squareColor));
 }
 
 // Expanding a row opens its children downward: the toggled row stays put,

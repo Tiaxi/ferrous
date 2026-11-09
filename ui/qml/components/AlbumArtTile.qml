@@ -19,6 +19,11 @@ Rectangle {
     // panel passes the palette's.
     property color placeholderColor: "transparent"
     property color placeholderGlyphColor: Kirigami.Theme.textColor
+    // What shows around a cover that does not fill the tile, or through
+    // one that is partly transparent: the colour behind the tile, which the
+    // now-playing panel passes. Each cover draws on it, so a cover at full
+    // opacity hides all under it, the covers fading out under it too.
+    property color backdropColor: "transparent"
     readonly property bool hasCover: root.uiBridge.currentTrackCoverPath.length > 0
     // The covers before, or their placeholder for none, over this one
     // while they fade out: the now-playing panel's album change. Oldest
@@ -35,7 +40,7 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: root.hasCover ? "transparent" : root.placeholderColor
+    color: root.hasCover ? root.backdropColor : root.placeholderColor
     Accessible.role: Accessible.Graphic
     Accessible.name: root.hasCover
         ? I18n.i18nc("@info", "Album art")
@@ -86,7 +91,11 @@ Rectangle {
                 anchors.fill: parent
                 visible: outgoing.cover !== null && outgoing.opacity > 0
                 opacity: outgoing.cover !== null ? outgoing.cover.from * root.outgoingLevel : 0
-                color: outgoing.coverPath.length > 0 ? "transparent" : root.placeholderColor
+                color: outgoing.coverPath.length > 0 ? root.backdropColor : root.placeholderColor
+                // A cover fades out as one, on its backdrop: without a layer
+                // the opacity would take the backdrop and the image apart,
+                // and the backdrop would show through the image.
+                layer.enabled: outgoing.visible && outgoing.coverPath.length > 0
 
                 // The same size as the cover had, so the image cache still has it.
                 Image {

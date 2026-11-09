@@ -670,6 +670,8 @@ Item {
         placeholderColor: Qt.rgba(root.uiPalette.text.r, root.uiPalette.text.g,
                                   root.uiPalette.text.b, 0.04)
         placeholderGlyphColor: root.uiPalette.textTertiary
+        // The sidebar's, which shows around the cover.
+        backdropColor: root.uiPalette.view
         replaceFromItunesAction: root.replaceFromItunesAction
         currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
         openAlbumArtViewer: root.openAlbumArtViewer
