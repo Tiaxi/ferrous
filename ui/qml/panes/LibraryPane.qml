@@ -508,7 +508,7 @@ Rectangle {
                     Text {
                         objectName: "libraryRowTitle"
                         x: libraryRow.titleX
-                        width: Math.max(0, yearText.x - x - (yearText.visible ? root.thumbnailGap : 0))
+                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0))
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight
@@ -530,13 +530,20 @@ Rectangle {
                     Text {
                         id: yearText
                         objectName: "libraryRowYear"
-                        visible: libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
+                        // From the row's data, not from `visible`, which
+                        // also follows the row's own visibility. A row
+                        // without a year has no text, so its width is 0
+                        // and the title reaches the right end.
+                        readonly property bool shown: libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
+                        visible: shown
                         // The right end: the scrollbar lane and the inset.
-                        x: libraryRow.width - Kirigami.Units.largeSpacing - root.rowInset - width
-                        width: visible ? implicitWidth : 0
+                        // The width is the implicit one: binding it again
+                        // relays out the text, whose implicit width the
+                        // binding reads (#474).
+                        x: libraryRow.width - Kirigami.Units.largeSpacing - root.rowInset - implicitWidth
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
-                        text: visible ? String(libraryRow.yearResolved) : ""
+                        text: shown ? String(libraryRow.yearResolved) : ""
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
