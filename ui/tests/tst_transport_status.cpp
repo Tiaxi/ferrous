@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 
 #include "Localization.h"
@@ -373,6 +374,22 @@ QByteArray fullScalePeaks() {
     return QByteArray(800, static_cast<char>(255));
 }
 
+// The window drawn, with the scale of its image to the scene.
+QImage grabbed(QQuickWindow *window, qreal *scale) {
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    *scale = window->width() > 0 && !image.isNull() ? static_cast<qreal>(image.width()) / window->width() : 1.0;
+    return image;
+}
+
+// The scene x of the playhead's line at `fraction` of the way along the
+// seek bar: its left edge moves over the bar's whole device pixels less
+// the line's two.
+qreal playheadLeftAt(QQuickItem *seek, double fraction) {
+    const QRectF bar = sceneRect(seek);
+    return bar.left() + std::round(fraction * (std::floor(bar.width() + 1e-6) - 2.0));
+}
+
 } // namespace
 
 class TransportStatusTest : public QObject {
@@ -392,6 +409,11 @@ private slots:
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
     void seekWithoutATrackIsALineAndNoTime();
+    void seekPlayheadMovesAcrossAShortTrack_data();
+    void seekPlayheadMovesAcrossAShortTrack();
+    void seekPlayheadWaitsAtTheStartWithoutALength_data();
+    void seekPlayheadWaitsAtTheStartWithoutALength();
+    void seekPlayheadThroughAZeroLengthFileThatFails();
     void timeReadoutShowsPositionAndLength();
     void volumeDrawsGrooveHoverAndFocus_data();
     void volumeDrawsGrooveHoverAndFocus();
@@ -753,6 +775,174 @@ void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
     QCOMPARE(time->property("text").toString(), QStringLiteral("–:––"));
     QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(!seek->isEnabled());
+}
+
+// #541: a clip of a second or less has a length, so the playhead is drawn
+// and moves across the waveform, its length shows and the bar seeks.
+void TransportStatusTest::seekPlayheadMovesAcrossAShortTrack_data() {
+    QTest::addColumn<double>("duration");
+    QTest::addColumn<QString>("durationText");
+    QTest::addColumn<QString>("lengthShown");
+    QTest::newRow("one second") << 1.0 << QStringLiteral("00:01") << QStringLiteral("0:01");
+    QTest::newRow("under a second") << 0.4 << QStringLiteral("00:00") << QStringLiteral("0:00");
+}
+
+void TransportStatusTest::seekPlayheadMovesAcrossAShortTrack() {
+    QFETCH(double, duration);
+    QFETCH(QString, durationText);
+    QFETCH(QString, lengthShown);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    harness.root->setProperty("positionSeconds", 0.0);
+    harness.root->setProperty("positionText", QStringLiteral("00:00"));
+    harness.bridge->setProperty("durationSeconds", duration);
+    harness.bridge->setProperty("durationText", durationText);
+    harness.bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    harness.bridge->setProperty("waveformCoverageSeconds", duration);
+    harness.bridge->setProperty("waveformComplete", true);
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *casing = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QQuickItem *unplayed = harness.item(QStringLiteral("seekUnplayed"));
+    QQuickItem *length = harness.item(QStringLiteral("transportTimeLength"));
+    QVERIFY(seek && waveform && casing && line && unplayed && length);
+    QVERIFY(seek->isEnabled());
+    QCOMPARE(length->property("text").toString(), QStringLiteral(" / ") + lengthShown);
+
+    qreal previousLeft = -1;
+    for (const double fraction : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        const QByteArray at = QByteArray::number(fraction);
+        harness.root->setProperty("positionSeconds", duration * fraction);
+        QVERIFY2(casing->isVisible() && line->isVisible() && unplayed->isVisible(), at.constData());
+        QCOMPARE(line->width(), 2.0);
+        QCOMPARE(line->height(), 28.0);
+        const QRectF lineRect = sceneRect(line);
+        const QRectF waveRect = sceneRect(waveform);
+        QVERIFY2(qFuzzyCompare(lineRect.left() + 1, playheadLeftAt(seek, fraction) + 1),
+                 qPrintable(QStringLiteral("%1 at %2").arg(lineRect.left()).arg(fraction)));
+        QVERIFY2(lineRect.left() > previousLeft, at.constData());
+        QVERIFY2(lineRect.left() >= waveRect.left() && lineRect.right() <= waveRect.right(), at.constData());
+        // The unplayed part starts at the line.
+        QCOMPARE(sceneRect(unplayed).left(), lineRect.left());
+        previousLeft = lineRect.left();
+    }
+    // At the end, the line is at the bar's end, cut by nothing.
+    QCOMPARE(sceneRect(line).right(), sceneRect(seek).left() + std::floor(sceneRect(seek).width() + 1e-6));
+
+    // Drawn halfway, in the playhead's amber over the waveform.
+    harness.root->setProperty("positionSeconds", duration / 2);
+    qreal scale = 1.0;
+    const QImage image = grabbed(harness.window, &scale);
+    QVERIFY(!image.isNull());
+    const QRectF lineRect = sceneRect(line);
+    const QColor drawn = pixelAt(image, QPointF(lineRect.left() + 0.5, sceneRect(waveform).center().y()), scale);
+    QVERIFY2(channelDistance(drawn, harness.token("now")) <= 1, qPrintable(drawn.name()));
+
+    // The keys seek within the short track.
+    seek->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(harness.window, Qt::Key_Right);
+    const QVariantList seeks = harness.root->property("seeks").value<QJSValue>().toVariant().toList();
+    QCOMPARE(seeks.size(), 1);
+    QCOMPARE(seeks.first().toDouble(), duration);
+}
+
+// #541: until the length is known, or when what the engine reports is no
+// length, the playhead stays drawn at the start with the whole waveform
+// unplayed, the bar does not seek, and the length shows as unknown. When
+// the length comes, the playhead moves to the position.
+void TransportStatusTest::seekPlayheadWaitsAtTheStartWithoutALength_data() {
+    QTest::addColumn<double>("duration");
+    QTest::newRow("not yet known") << 0.0;
+    QTest::newRow("not a number") << std::numeric_limits<double>::quiet_NaN();
+    QTest::newRow("infinite") << std::numeric_limits<double>::infinity();
+}
+
+void TransportStatusTest::seekPlayheadWaitsAtTheStartWithoutALength() {
+    QFETCH(double, duration);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    harness.bridge->setProperty("durationSeconds", duration);
+    harness.bridge->setProperty("durationText", QStringLiteral("00:00"));
+    harness.bridge->setProperty("waveformPeaksPacked", fullScalePeaks());
+    harness.bridge->setProperty("waveformCoverageSeconds", 0.6);
+    harness.bridge->setProperty("waveformComplete", false);
+    harness.root->setProperty("positionSeconds", 1.0);
+    harness.root->setProperty("positionText", QStringLiteral("00:01"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *casing = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QQuickItem *unplayed = harness.item(QStringLiteral("seekUnplayed"));
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QVERIFY(seek && waveform && casing && line && unplayed && time);
+
+    QVERIFY(casing->isVisible() && line->isVisible());
+    QCOMPARE(line->width(), 2.0);
+    QCOMPARE(line->height(), 28.0);
+    QCOMPARE(sceneRect(line).left(), sceneRect(seek).left());
+    QVERIFY(unplayed->isVisible());
+    QCOMPARE(sceneRect(unplayed).left(), sceneRect(waveform).left());
+    QCOMPARE(sceneRect(unplayed).right(), sceneRect(waveform).right());
+    QVERIFY(!seek->isEnabled());
+    QCOMPARE(seek->property("value").toDouble(), 0.0);
+    QCOMPARE(time->property("text").toString(), QStringLiteral("0:01 / –:––"));
+    qreal scale = 1.0;
+    const QImage image = grabbed(harness.window, &scale);
+    QVERIFY(!image.isNull());
+    const QColor drawn = pixelAt(image, QPointF(sceneRect(line).left() + 0.5, sceneRect(waveform).center().y()), scale);
+    QVERIFY2(channelDistance(drawn, harness.token("now")) <= 1, qPrintable(drawn.name()));
+
+    // The length comes: a 2 s track, 1 s in.
+    harness.bridge->setProperty("durationSeconds", 2.0);
+    harness.bridge->setProperty("durationText", QStringLiteral("00:02"));
+    QVERIFY(seek->isEnabled());
+    QCOMPARE(sceneRect(line).left(), playheadLeftAt(seek, 0.5));
+    QCOMPARE(sceneRect(unplayed).left(), sceneRect(line).left());
+    QCOMPARE(time->property("text").toString(), QStringLiteral("0:01 / 0:02"));
+}
+
+// #541: a zero-length file plays with no length and no waveform, so the
+// playhead waits at the start over the empty line; when it fails, playback
+// stops and the bar is empty; the next track's playhead is drawn again.
+void TransportStatusTest::seekPlayheadThroughAZeroLengthFileThatFails() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    harness.bridge->setProperty("durationSeconds", 0.0);
+    harness.bridge->setProperty("durationText", QStringLiteral("00:00"));
+    harness.root->setProperty("positionSeconds", 0.0);
+    harness.root->setProperty("positionText", QStringLiteral("00:00"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *emptyLine = harness.item(QStringLiteral("seekEmptyLine"));
+    QQuickItem *casing = harness.item(QStringLiteral("seekPlayhead"));
+    QQuickItem *line = harness.item(QStringLiteral("seekPlayheadLine"));
+    QQuickItem *time = harness.item(QStringLiteral("transportTime"));
+    QVERIFY(seek && emptyLine && casing && line && time);
+    QVERIFY(emptyLine->isVisible());
+    QVERIFY(casing->isVisible() && line->isVisible());
+    QCOMPARE(sceneRect(line).left(), sceneRect(seek).left());
+    QVERIFY(!seek->isEnabled());
+    QCOMPARE(time->property("text").toString(), QStringLiteral("0:00 / –:––"));
+
+    // It fails: playback stops.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    for (const char *name : {"seekPlayhead", "seekUnplayed", "seekWaveform"}) {
+        QVERIFY2(!harness.item(QString::fromLatin1(name))->isVisible(), name);
+    }
+    QVERIFY(emptyLine->isVisible());
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:––"));
+
+    // The next track, a second long, half played.
+    harness.bridge->setProperty("durationSeconds", 1.0);
+    harness.bridge->setProperty("durationText", QStringLiteral("00:01"));
+    harness.root->setProperty("positionSeconds", 0.5);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QVERIFY(casing->isVisible() && line->isVisible());
+    QCOMPARE(sceneRect(line).left(), playheadLeftAt(seek, 0.5));
+    QVERIFY(seek->isEnabled());
 }
 
 void TransportStatusTest::timeReadoutShowsPositionAndLength() {

@@ -309,10 +309,15 @@ ToolBar {
             topPadding: 0
             bottomPadding: 0
             from: 0
-            to: Math.max(root.uiBridge.durationSeconds, 1.0)
-            readonly property bool durationKnown: root.uiBridge.durationSeconds > 1.0
-            readonly property bool seekAllowed: durationKnown
-                && root.uiBridge.playbackState !== "Stopped"
+            to: durationKnown ? root.uiBridge.durationSeconds : 1.0
+            // Any length, however short: a clip of a second or less has one
+            // as much as a long track.
+            readonly property bool durationKnown: isFinite(root.uiBridge.durationSeconds)
+                && root.uiBridge.durationSeconds > 0
+            // A track is loaded, playing or paused: the bar shows its
+            // playhead, at the start until its length is known.
+            readonly property bool trackLoaded: root.uiBridge.playbackState !== "Stopped"
+            readonly property bool seekAllowed: durationKnown && trackLoaded
             // The bar: 28 px, with the ±12 px waveform in its middle and
             // the playhead across its height, 2 px past the waveform's
             // peaks on either side.
@@ -336,7 +341,10 @@ ToolBar {
             readonly property real travelDevicePixels: Math.max(1, barDevicePixels - playheadLineDevicePixels)
             // The left edge of the line on the bar, on whole device pixels,
             // so the line moves only by whole pixels and the window draws no
-            // frame for a move it would not show.
+            // frame for a move it would not show. Without a length no time
+            // has a place on the bar, so the line waits at the start, where
+            // every track begins; the decoded part of the waveform measures
+            // the analysis, not playback.
             readonly property real playheadX: !seekAllowed ? 0.0
                 : Math.round(visualPosition * travelDevicePixels) / windowDevicePixelRatio
             // The handle is a grab target wider than the line and not drawn.
@@ -469,7 +477,7 @@ ToolBar {
                 // playhead's line, which leaves it at the unplayed opacity.
                 Rectangle {
                     objectName: "seekUnplayed"
-                    visible: seekSlider.seekAllowed
+                    visible: seekSlider.trackLoaded
                     antialiasing: false
                     x: seekSlider.playheadX
                     width: Math.max(0, parent.width - x)
@@ -482,7 +490,7 @@ ToolBar {
                 // with the line in it.
                 Rectangle {
                     objectName: "seekPlayhead"
-                    visible: seekSlider.seekAllowed
+                    visible: seekSlider.trackLoaded
                     antialiasing: false
                     y: root.snapped((parent.height - seekSlider.playheadHeight) / 2)
                     height: seekSlider.playheadHeight
