@@ -1631,6 +1631,8 @@ private slots:
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void itunesPreviewAppliesOrGoesBackToTheResults();
+    void itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut();
+    void itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide();
     void itunesPreviewCannotApplyACandidateThatIsNotReady();
     void itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMovesOn();
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
@@ -28765,6 +28767,197 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     bridge->setProperty("currentTrackCoverPath", candidateUrl);
     QVERIFY(QMetaObject::invokeMethod(bridge, "snapshotChanged"));
     QTRY_COMPARE(viewer->property("albumArtViewerSource").toString(), candidateUrl);
+}
+
+void TransportInputSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
+    // Space on a focused Back to Results or Apply presses it; the viewer's
+    // Play/Pause shortcut does not take it.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    const QString coverUrl = QUrl::fromLocalFile(coverPath).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
+    QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr && playPause != nullptr);
+    QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+    QVERIFY(fake != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", coverUrl);
+    const QVariantMap target{
+        {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+        {QStringLiteral("album"), QStringLiteral("Small Hours")},
+        {QStringLiteral("artist"), QStringLiteral("The Quiet Meridian")},
+        {QStringLiteral("coverPath"), coverUrl},
+    };
+    QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
+
+    // Over the whole screen first, as in itunesPreviewAppliesOrGoesBackToTheResults.
+    for (const int fullscreenMode : {1, 0}) {
+        const QByteArray at = QByteArray("fullscreen ") + QByteArray::number(fullscreenMode);
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        const auto viewerHost = [&]() -> QQuickWindow * {
+            return fullscreenMode == 0
+                ? window : viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
+        };
+        const auto preview = [&]() -> QQuickWindow * {
+            if (!openItunesArtworkDialog(window, dialog, fake, fixture, target)) {
+                return nullptr;
+            }
+            QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1));
+            if (!QTest::qWaitFor([&]() { return viewer->property("albumArtPreviewActive").toBool()
+                                         && !dialog->property("visible").toBool(); })) {
+                return nullptr;
+            }
+            QQuickWindow *host = viewerHost();
+            return host != nullptr && QTest::qWaitForWindowActive(host) ? host : nullptr;
+        };
+        const QString playbackBefore = bridge->property("playbackState").toString();
+
+        // Back to Results.
+        QQuickWindow *host = preview();
+        QVERIFY2(host != nullptr, at.constData());
+        QQuickItem *back = nullptr;
+        QTRY_VERIFY2((back = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"))) != nullptr,
+                     at.constData());
+        QVERIFY2(tabTo(host, back), at.constData());
+        QTest::keyClick(host, Qt::Key_Space);
+        QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
+        QVERIFY2(!viewer->property("albumArtPreviewActive").toBool(), at.constData());
+        QCOMPARE(toggled.count(), 0);
+        QCOMPARE(bridge->property("playbackState").toString(), playbackBefore);
+
+        // Apply: the album has art, so it asks first.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        host = preview();
+        QVERIFY2(host != nullptr, at.constData());
+        QQuickItem *apply = nullptr;
+        QTRY_VERIFY2((apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"))) != nullptr
+                         && apply->isEnabled(), at.constData());
+        QVERIFY2(tabTo(host, apply), at.constData());
+        QTest::keyClick(host, Qt::Key_Space);
+        QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+                     at.constData());
+        QCOMPARE(toggled.count(), 0);
+        QCOMPARE(bridge->property("playbackState").toString(), playbackBefore);
+        QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogCancelButton")), at.constData());
+        QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
+                     at.constData());
+
+        // Away from the buttons, Space still plays and pauses.
+        QQuickItem *viewFocus = itemNamed(host->contentItem(), QStringLiteral("albumArtFullscreenViewFocus"));
+        if (viewFocus != nullptr) {
+            viewFocus->forceActiveFocus();
+            QTest::keyClick(host, Qt::Key_Space);
+            QTRY_COMPARE(toggled.count(), 1);
+            toggled.clear();
+        }
+        QTest::keyClick(host, Qt::Key_Escape);
+        QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+void TransportInputSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
+    // Back to Results and Apply stay whole inside the details column at
+    // larger fonts. With the usual font they share a row at its end; with
+    // one too large for that, they stack. Breeze's buttons no longer fit
+    // side by side at 14 pt; the test's style's are narrower, so 24 pt
+    // makes sure they stack.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir);
+    QVERIFY(!coverPath.isEmpty());
+    const QString coverUrl = QUrl::fromLocalFile(coverPath).toString();
+    const QVariantList fixture = itunesArtworkFixture(dir, 3);
+
+    for (const qreal pointSize : {0.0, 14.0, 24.0}) {
+        const QByteArray at = QByteArray("point size ") + QByteArray::number(pointSize);
+        if (pointSize > 0) {
+            QFont larger = applicationFont;
+            larger.setPointSizeF(pointSize);
+            QGuiApplication::setFont(larger);
+        }
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+        QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+        QObject *dialog = window->findChild<QObject *>(QStringLiteral("itunesArtworkDialog"));
+        QVERIFY(bridge != nullptr && viewer != nullptr && dialog != nullptr);
+        QObject *fake = injectItunesArtworkFake(engine, dialog, bridge);
+        QVERIFY(fake != nullptr);
+        setPlayingTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", coverUrl);
+        const QVariantMap target{
+            {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
+            {QStringLiteral("coverPath"), coverUrl},
+        };
+        QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, target));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
+        QTRY_VERIFY(viewer->property("albumArtPreviewActive").toBool());
+        QQuickItem *column = nullptr;
+        QQuickItem *back = nullptr;
+        QQuickItem *apply = nullptr;
+        QTRY_VERIFY2((column = visibleItemNamed(window, QStringLiteral("albumArtInfoColumn"))) != nullptr
+                         && (back = visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton"))) != nullptr
+                         && (apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))) != nullptr,
+                     at.constData());
+        if (pointSize > 0) {
+            QCOMPARE(qvariant_cast<QFont>(back->property("font")).pointSizeF(), pointSize);
+        }
+        QCoreApplication::processEvents();
+        const QRectF columnRect = sceneRectOf(column);
+        // Both whole, inside the column with its margins, apart.
+        QTRY_VERIFY2(columnRect.adjusted(15.5, 0, -15.5, 0).contains(sceneRectOf(back))
+                         && columnRect.adjusted(15.5, 0, -15.5, 0).contains(sceneRectOf(apply)),
+                     qPrintable(QStringLiteral("%1: column %2..%3, back %4..%5, apply %6..%7")
+                                    .arg(QString::fromLatin1(at))
+                                    .arg(columnRect.left()).arg(columnRect.right())
+                                    .arg(sceneRectOf(back).left()).arg(sceneRectOf(back).right())
+                                    .arg(sceneRectOf(apply).left()).arg(sceneRectOf(apply).right())));
+        QVERIFY2(!sceneRectOf(back).intersects(sceneRectOf(apply)), at.constData());
+        QVERIFY2(back->width() >= back->implicitWidth() - 0.5 && apply->width() >= apply->implicitWidth() - 0.5,
+                 at.constData());
+        const bool fitsInARow = back->implicitWidth() + apply->implicitWidth() + 4
+            <= columnRect.width() - 32;
+        if (fitsInARow) {
+            // One row, Back to Results then Apply, at the column's end.
+            QCOMPARE(sceneRectOf(back).top(), sceneRectOf(apply).top());
+            QVERIFY(sceneRectOf(back).right() <= sceneRectOf(apply).left());
+            QVERIFY(columnRect.right() - 16.5 <= sceneRectOf(apply).right());
+        } else {
+            // Stacked, Back to Results above Apply, each the column's width.
+            QVERIFY2(pointSize > 0, "the usual font fits them in a row");
+            QVERIFY(columnRect.contains(sceneRectOf(back).adjusted(0, -0.5, 0, 0)));
+            QVERIFY(sceneRectOf(back).bottom() <= sceneRectOf(apply).top());
+            QCOMPARE(sceneRectOf(back).width(), sceneRectOf(apply).width());
+            QCOMPARE(sceneRectOf(back).width(), columnRect.width() - 32);
+        }
+        if (pointSize >= 24.0) {
+            QVERIFY2(!fitsInARow, "24 pt does not fit them in a row");
+        }
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QVERIFY(finishIncubation(engine));
+    }
 }
 
 void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {

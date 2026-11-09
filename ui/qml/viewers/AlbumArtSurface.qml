@@ -7,6 +7,7 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
+import "../logic/KeyUtils.js" as KeyUtils
 import "../logic/PathUtils.js" as PathUtils
 import "../logic/WheelUtils.js" as WheelUtils
 
@@ -50,6 +51,21 @@ Item {
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
+
+    // A push button of the details, reached with Tab, with its tooltip.
+    // Space presses it rather than playing or pausing, which the viewer's
+    // shortcuts would take; keys with modifiers stay the shortcuts'.
+    component DetailsButton: Button {
+        property string toolTipText: ""
+
+        focusPolicy: Qt.TabFocus
+        Keys.onShortcutOverride: function(event) {
+            event.accepted = KeyUtils.isPlainSpace(event)
+        }
+        ToolTip.text: toolTipText
+        ToolTip.visible: (hovered || visualFocus) && toolTipText.length > 0
+        ToolTip.delay: Kirigami.Units.toolTipDelay
+    }
 
     property real zoom: 1.0
     // One wheel notch zooms by this factor; smaller steps by part of it.
@@ -486,26 +502,26 @@ Item {
             }
 
             // From the iTunes artwork dialog: the other image to compare.
-            Button {
+            DetailsButton {
                 objectName: "albumArtCompareButton"
                 visible: root.comparisonModeAvailable
                 Layout.topMargin: 12
                 flat: true
-                focusPolicy: Qt.TabFocus
                 icon.name: "view-refresh"
                 text: root.sourceKind === "itunes"
                     ? I18n.i18nc("@action:button", "Show Current Album Art")
                     : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
-                ToolTip.text: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
-                ToolTip.visible: hovered || visualFocus
-                ToolTip.delay: Kirigami.Units.toolTipDelay
+                toolTipText: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
                 onClicked: root.switchComparisonImage()
             }
         }
 
         // The preview's foot, as a dialog's: a separator, what the preview
-        // shows, then its buttons at the end of the row.
+        // shows, then its buttons at the end of a row. When they do not fit
+        // side by side, with a larger font or a longer translation, they
+        // stack, each the column's width, Back to Results first.
         ColumnLayout {
+            id: previewFooter
             objectName: "albumArtPreviewFooter"
             visible: root.previewActive
             anchors.left: parent.left
@@ -531,39 +547,43 @@ Item {
                 elide: Text.ElideRight
             }
 
-            RowLayout {
-                Layout.fillWidth: true
+            GridLayout {
+                id: previewButtons
+                objectName: "albumArtPreviewButtons"
+                readonly property real room: previewFooter.width - 32
+                readonly property bool oneRow: previewBackButton.implicitWidth
+                    + (previewApplyButton.visible
+                        ? columnSpacing + previewApplyButton.implicitWidth : 0) <= room
+                Layout.alignment: Qt.AlignRight
+                Layout.fillWidth: !oneRow
+                Layout.maximumWidth: room
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
                 Layout.topMargin: 8
                 Layout.bottomMargin: 16
-                spacing: Kirigami.Units.smallSpacing
+                columns: oneRow ? 2 : 1
+                columnSpacing: Kirigami.Units.smallSpacing
+                rowSpacing: Kirigami.Units.smallSpacing
 
-                Item {
-                    Layout.fillWidth: true
-                }
-
-                Button {
+                DetailsButton {
+                    id: previewBackButton
                     objectName: "albumArtPreviewBackButton"
-                    focusPolicy: Qt.TabFocus
+                    Layout.fillWidth: !previewButtons.oneRow
                     icon.name: "go-previous"
                     text: I18n.i18nc("@action:button", "Back to Results")
-                    ToolTip.text: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
-                    ToolTip.visible: hovered || visualFocus
-                    ToolTip.delay: Kirigami.Units.toolTipDelay
+                    toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
                     onClicked: root.closeViewer()
                 }
 
-                Button {
+                DetailsButton {
+                    id: previewApplyButton
                     objectName: "albumArtPreviewApplyButton"
+                    Layout.fillWidth: !previewButtons.oneRow
                     visible: root.previewHasCandidate
                     enabled: root.previewCanApply
-                    focusPolicy: Qt.TabFocus
                     icon.name: "dialog-ok-apply"
                     text: I18n.i18nc("@action:button", "Apply")
-                    ToolTip.text: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
-                    ToolTip.visible: hovered || visualFocus
-                    ToolTip.delay: Kirigami.Units.toolTipDelay
+                    toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
                     onClicked: root.applyPreview()
                 }
             }
