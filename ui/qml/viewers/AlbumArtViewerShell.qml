@@ -32,14 +32,14 @@ Item {
     // The art's zoom, 1 when it fits, and what fits it again.
     property real zoomLevel: 1.0
     property var resetView: null
-    // A preview from Replace from iTunes: what it shows, such as "iTunes
-    // Candidate", and Back to Results, which closeViewer does then too.
-    // With a candidate, Apply calls applyPreview while previewCanApply.
+    // A preview from Replace from iTunes, whose label and buttons are in
+    // the image's details (AlbumArtSurface), which show throughout it: the
+    // Image Details button hides meanwhile, and Escape goes back to the
+    // results, as closeViewer does then.
     property bool previewActive: false
-    property string previewLabel: ""
-    property bool previewHasCandidate: false
-    property bool previewCanApply: false
-    property var applyPreview: null
+    // Whether the title strip shows over the whole screen when the pointer
+    // moves: the Preferences setting.
+    property bool stripEnabled: true
 
     property alias popupHost: albumArtPopupHost
     // The window of the viewer over the whole screen, and the item in it
@@ -54,8 +54,8 @@ Item {
         && root.fullscreenWindow.visibility === Window.FullScreen
     readonly property bool wholeScreenOpen: root.viewerOpen && root.useWholeScreenViewerMode
     // The title strip's height over the whole screen, which it takes of the
-    // art's top edge while it shows.
-    readonly property real stripHeight: root.fullscreenWindow
+    // art's top edge while it shows; none while it is turned off.
+    readonly property real stripHeight: root.fullscreenWindow && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
@@ -79,8 +79,8 @@ Item {
     }
 
     onViewerOpenChanged: Qt.callLater(root.syncPresentation)
-    // A preview shows its strip, with Apply and Back to Results, and takes
-    // the keys from the dialog it came from.
+    // A preview shows the viewer's controls and takes the keys from the
+    // dialog it came from.
     onPreviewActiveChanged: {
         if (root.previewActive) {
             fullscreenControlsAutoHide.wake()
@@ -121,8 +121,11 @@ Item {
     }
 
     // The info toggle: the tint while the details show, the ring only for
-    // keyboard focus.
+    // keyboard focus. Hidden during a preview, whose details always show,
+    // it takes no room.
     component InfoButton: Components.ViewerToolButton {
+        visible: !root.previewActive
+        width: visible ? implicitWidth : 0
         uiPalette: root.uiPalette
         // Checked follows the viewer, which the I key toggles too.
         checked: root.infoVisible
@@ -132,65 +135,6 @@ Item {
         Accessible.checkable: true
         Accessible.checked: root.infoVisible
         onClicked: root.toggleInfoVisible()
-    }
-
-    // During a preview, before the info toggle: what the preview shows, Back
-    // to Results and, for a candidate, Apply. The items are placed by
-    // bindings, as ViewerControls places its own. Hidden, it takes no room.
-    component PreviewControls: Item {
-        id: previewControls
-
-        property var plotColors: null
-        property string namePrefix: ""
-        readonly property real spacing: 4
-
-        visible: root.previewActive
-        width: visible ? implicitWidth : 0
-        implicitWidth: root.previewHasCandidate
-            ? applyButton.x + applyButton.width
-            : backButton.x + backButton.width
-        implicitHeight: 24
-        height: 24
-
-        Label {
-            id: previewLabel
-            objectName: previewControls.namePrefix + "PreviewLabel"
-            x: 0
-            height: 24
-            leftPadding: 2
-            rightPadding: 4
-            verticalAlignment: Text.AlignVCenter
-            text: root.previewLabel
-            font.pointSize: root.uiPalette.smallPointSize
-            color: previewControls.plotColors
-                ? previewControls.plotColors.plotTextSecondary : root.uiPalette.textSecondary
-        }
-
-        Components.ViewerToolButton {
-            id: backButton
-            objectName: previewControls.namePrefix + "BackButton"
-            x: previewLabel.width + previewControls.spacing
-            uiPalette: root.uiPalette
-            plotColors: previewControls.plotColors
-            display: AbstractButton.TextOnly
-            text: I18n.i18nc("@action:button", "Back to Results")
-            toolTipText: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
-            onClicked: root.closeViewer()
-        }
-
-        Components.ViewerToolButton {
-            id: applyButton
-            objectName: previewControls.namePrefix + "ApplyButton"
-            x: backButton.x + backButton.width + previewControls.spacing
-            visible: root.previewHasCandidate
-            enabled: root.previewCanApply
-            uiPalette: root.uiPalette
-            plotColors: previewControls.plotColors
-            display: AbstractButton.TextOnly
-            text: I18n.i18nc("@action:button", "Apply")
-            toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
-            onClicked: root.applyPreview()
-        }
     }
 
     Popup {
@@ -308,14 +252,8 @@ Item {
                 errorController: root.errorController
                 closeViewer: root.closeViewer
 
-                PreviewControls {
-                    id: popupPreviewControls
-                    namePrefix: "albumArtPopup"
-                }
-
                 InfoButton {
                     objectName: "albumArtPopupInfoButton"
-                    x: popupPreviewControls.visible ? popupPreviewControls.width + 4 : 0
                 }
             }
         }
@@ -444,6 +382,7 @@ Item {
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
+                        available: root.stripEnabled
                         pointerActivity: fullscreenControlsAutoHide.pointerMoved
                         zoomLevel: root.zoomLevel
                         resetView: root.resetView
@@ -451,15 +390,8 @@ Item {
                         errorController: root.errorController
                         closeViewer: root.closeViewer
 
-                        PreviewControls {
-                            id: fullscreenPreviewControls
-                            namePrefix: "albumArtFullscreen"
-                            plotColors: albumArtStrip.plotColors
-                        }
-
                         InfoButton {
                             objectName: "albumArtFullscreenInfoButton"
-                            x: fullscreenPreviewControls.visible ? fullscreenPreviewControls.width + 4 : 0
                             plotColors: albumArtStrip.plotColors
                         }
                     }

@@ -61,6 +61,10 @@ Double-click the visualization or the album art to open its viewer, and press Es
 
 A viewer over the whole screen fills it, with its buttons in a title strip over its top edge; one in the main window has them in its top right corner. The buttons hide while the pointer rests, the title strip with them, except those of the album art viewer in the main window; a key press brings them back, and Tab moves through them, then to the visualization's mode switch. They stay while one of them has keyboard focus. Space presses the focused button.
 
+With **Show the title strip when the pointer moves** turned off (**Edit > Preferences > Appearance**, for **Fill the screen**), a viewer over the whole screen never shows its title strip, and the visualization's mode switch and the first channel's Mute and Solo move up to the top edge. The keys and the pointer do what the strip's buttons did. Escape closes either viewer; so do F11 and a double-click in the visualization viewer, and Shift+F11 and a click beside the art in the album art viewer. A middle click resets the visualization's zoom, and a double-click fits zoomed album art again. I shows the album art's details, and Left and Right switch between the current and suggested artwork. New issues show in the status bar's indicator once the viewer closes.
+
+While the album art viewer previews artwork from **Replace from iTunes**, the image's details always show, and I does not hide them. At their foot are what the viewer shows, such as "iTunes Candidate", then Back to Results and, for a candidate, Apply. Escape also goes back to the results.
+
 The visualization's mode switch, in its top right corner, shows while the pointer is over the visualization or keyboard focus is on it, as the channels' Mute and Solo buttons do. It takes keyboard focus with Tab while hidden, which shows it; Space or Enter picks the focused mode. Ctrl+1 and Ctrl+2, and the **View** menu, pick the mode without it.
 
 ## Scrolling and zooming

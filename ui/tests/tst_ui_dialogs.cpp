@@ -359,6 +359,7 @@ private slots:
     void enterPressesConfiguresOkButtonUnlessAControlTakesIt();
     void enterInATextFieldTakesTheTextNotTheDefaultButton();
     void everyConfigureSettingReachesTheBridge();
+    void titleStripSettingIsOnlyForTheWholeScreen();
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void lastFmPageShowsOnlyTheButtonsThatApply();
@@ -793,6 +794,8 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     QObject *bridge = bridgeOf(window);
     QVERIFY(bridge->setProperty("lastFmAuthState", 2));
     QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
+    // The title strip's setting is for viewers over the whole screen.
+    QVERIFY(bridge->setProperty("viewerFullscreenMode", 1));
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QTRY_VERIFY(visibleNamed(window, QStringLiteral("preferencesPages")) != nullptr);
@@ -806,6 +809,7 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         {1, "spectrogramCrosshairCheckBox", "showSpectrogramCrosshair"},
         {1, "spectrogramFpsCheckBox", "showFps"},
         {1, "spectrogramZoomCheckBox", "spectrogramZoomEnabled"},
+        {2, "showFullscreenTitleStripCheckBox", "showFullscreenTitleStrip"},
         {2, "preventDisplaySleepInFullscreenCheckBox", "preventDisplaySleepInFullscreen"},
         {2, "showLevelMeterCheckBox", "showLevelMeter"},
         {3, "lastFmScrobblingCheckBox", "lastFmScrobblingEnabled"},
@@ -835,7 +839,7 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         {1, "spectrogramDisplayComboBox", 1, "spectrogramDisplayMode", 1},
         {1, "spectrogramFftComboBox", 1, "fftSize", 1024},
         {1, "channelButtonsComboBox", 2, "channelButtonsVisibility", 2},
-        {2, "viewerFullscreenComboBox", 1, "viewerFullscreenMode", 1},
+        {2, "viewerFullscreenComboBox", 0, "viewerFullscreenMode", 0},
     };
     for (const Choice &choice : choices) {
         QVERIFY(dialog->setProperty("pageIndex", choice.page));
@@ -861,6 +865,47 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         QVERIFY2(bridge->property(choice.property) == choice.value, choice.property);
     }
     QCOMPARE(bridge->property("dbRange").toDouble(), 145.0);
+}
+
+void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("viewerFullscreenMode", 0));
+    QVERIFY(bridge->property("showFullscreenTitleStrip").toBool());
+    QObject *dialog = openPreferences(window, 2);
+    QVERIFY(dialog != nullptr);
+    QQuickItem *box = nullptr;
+    QTRY_VERIFY((box = visibleNamed(window, QStringLiteral("showFullscreenTitleStripCheckBox"))) != nullptr);
+    QCOMPARE(box->property("text").toString(), QStringLiteral("Show the title strip when the pointer moves"));
+    QVERIFY(box->property("checked").toBool());
+    // Fill the window: viewers in the window have corner buttons, no strip.
+    QVERIFY(!box->isEnabled());
+
+    // Fill the screen, chosen and not yet applied, enables it.
+    QQuickItem *combo = visibleNamed(window, QStringLiteral("viewerFullscreenComboBox"));
+    QVERIFY(combo != nullptr);
+    QVERIFY(combo->setProperty("currentIndex", 1));
+    QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 1)));
+    QTRY_VERIFY(box->isEnabled());
+    click(window, box);
+    QTRY_VERIFY(!box->property("checked").toBool());
+    QVERIFY(bridge->property("showFullscreenTitleStrip").toBool());
+
+    // Fill the window again disables it, keeping the change.
+    QVERIFY(combo->setProperty("currentIndex", 0));
+    QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 0)));
+    QTRY_VERIFY(!box->isEnabled());
+    QVERIFY(!box->property("checked").toBool());
+    QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 1)));
+    QTRY_VERIFY(box->isEnabled());
+
+    click(window, visibleNamed(window, QStringLiteral("preferencesOkButton")));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    QVERIFY(!bridge->property("showFullscreenTitleStrip").toBool());
+    QCOMPARE(bridge->property("viewerFullscreenMode").toInt(), 1);
 }
 
 void UiDialogsTest::configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange() {

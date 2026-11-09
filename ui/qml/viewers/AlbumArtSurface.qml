@@ -14,6 +14,9 @@ import "../logic/WheelUtils.js" as WheelUtils
 // and panned; while `infoVisible`, a 280 px column of the image's details
 // behind a 1 px seam over its right edge. The details lie over the art and
 // take nothing from its view, so the art keeps its place, zoom and pan.
+// During a preview from Replace from iTunes, the column ends with what the
+// preview shows and its buttons, as a dialog's: Back to Results and, for a
+// candidate, Apply.
 Item {
     id: root
 
@@ -37,6 +40,14 @@ Item {
     property var switchComparisonImage: function() {}
     // How far the details keep below the top, clear of controls over them.
     property real infoTopInset: 0
+    // A preview from Replace from iTunes: what it shows, such as "iTunes
+    // Candidate", and Back to Results, which closeViewer does then. With a
+    // candidate, Apply calls applyPreview while previewCanApply.
+    property bool previewActive: false
+    property string previewLabel: ""
+    property bool previewHasCandidate: false
+    property bool previewCanApply: false
+    property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
 
@@ -489,6 +500,72 @@ Item {
                 ToolTip.visible: hovered || visualFocus
                 ToolTip.delay: Kirigami.Units.toolTipDelay
                 onClicked: root.switchComparisonImage()
+            }
+        }
+
+        // The preview's foot, as a dialog's: a separator, what the preview
+        // shows, then its buttons at the end of the row.
+        ColumnLayout {
+            objectName: "albumArtPreviewFooter"
+            visible: root.previewActive
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            spacing: 0
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                color: root.uiPalette.seam
+            }
+
+            Label {
+                objectName: "albumArtPreviewLabel"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                Layout.topMargin: 12
+                text: root.previewLabel
+                font.weight: Font.DemiBold
+                color: root.uiPalette.text
+                elide: Text.ElideRight
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                Layout.topMargin: 8
+                Layout.bottomMargin: 16
+                spacing: Kirigami.Units.smallSpacing
+
+                Item {
+                    Layout.fillWidth: true
+                }
+
+                Button {
+                    objectName: "albumArtPreviewBackButton"
+                    focusPolicy: Qt.TabFocus
+                    icon.name: "go-previous"
+                    text: I18n.i18nc("@action:button", "Back to Results")
+                    ToolTip.text: I18n.i18nc("@info:tooltip %1 is the key", "Back to Results (%1)", "Esc")
+                    ToolTip.visible: hovered || visualFocus
+                    ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: root.closeViewer()
+                }
+
+                Button {
+                    objectName: "albumArtPreviewApplyButton"
+                    visible: root.previewHasCandidate
+                    enabled: root.previewCanApply
+                    focusPolicy: Qt.TabFocus
+                    icon.name: "dialog-ok-apply"
+                    text: I18n.i18nc("@action:button", "Apply")
+                    ToolTip.text: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
+                    ToolTip.visible: hovered || visualFocus
+                    ToolTip.delay: Kirigami.Units.toolTipDelay
+                    onClicked: root.applyPreview()
+                }
             }
         }
     }

@@ -161,6 +161,9 @@ enum CommandId : quint16 {
     CmdSetLastFmScrobblingPaused = 74,
     // Whether the status bar shows the scrobble progress indicator (u8).
     CmdSetLastFmShowScrobbleProgress = 75,
+    // Whether a viewer over the whole screen shows its title strip when the
+    // pointer moves (u8).
+    CmdSetShowFullscreenTitleStrip = 76,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -397,6 +400,7 @@ struct DecodedSettings {
     bool libraryWatchEnabled{true};
     bool spectrogramFrequencyCap{false};
     bool lastFmShowScrobbleProgress{true};
+    bool showFullscreenTitleStrip{true};
     // Whether the section ended with the queue's column widths, which
     // older backends do not send, and the generation of the latest widths
     // the UI sent that the backend had taken.

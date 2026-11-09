@@ -641,6 +641,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&lastFmShowScrobbleProgress)) {
         return false;
     }
+    quint8 showFullscreenTitleStrip = 1;
+    if (!reader.atEnd() && !reader.readU8(&showFullscreenTitleStrip)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }
@@ -662,6 +666,7 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     out->libraryWatchEnabled = libraryWatchEnabled != 0;
     out->spectrogramFrequencyCap = spectrogramFrequencyCap != 0;
     out->lastFmShowScrobbleProgress = lastFmShowScrobbleProgress != 0;
+    out->showFullscreenTitleStrip = showFullscreenTitleStrip != 0;
     return true;
 }
 

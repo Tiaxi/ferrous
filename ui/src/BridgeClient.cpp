@@ -1889,6 +1889,10 @@ bool BridgeClient::preventDisplaySleepInFullscreen() const {
     return m_preventDisplaySleepInFullscreen;
 }
 
+bool BridgeClient::showFullscreenTitleStrip() const {
+    return m_showFullscreenTitleStrip;
+}
+
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -2371,6 +2375,16 @@ void BridgeClient::setPreventDisplaySleepInFullscreen(bool value) {
         static_cast<quint8>(value)));
 }
 
+void BridgeClient::setShowFullscreenTitleStrip(bool value) {
+    if (m_showFullscreenTitleStrip != value) {
+        m_showFullscreenTitleStrip = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetShowFullscreenTitleStrip,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
 void BridgeClient::setDbRange(double value) {
     // The range the backend keeps (src/frontend_bridge/commands.rs).
     const double clamped = std::clamp(value, 50.0, 150.0);
@@ -2399,6 +2413,7 @@ QVariantMap BridgeClient::settingDefaults() const {
         {QStringLiteral("librarySortMode"), defaults.librarySortMode},
         {QStringLiteral("systemMediaControlsEnabled"), defaults.systemMediaControlsEnabled},
         {QStringLiteral("preventDisplaySleepInFullscreen"), defaults.preventDisplaySleepInFullscreen},
+        {QStringLiteral("showFullscreenTitleStrip"), defaults.showFullscreenTitleStrip},
         {QStringLiteral("showSpectrogramCrosshair"), defaults.showSpectrogramCrosshair},
         {QStringLiteral("showSpectrogramScale"), defaults.showSpectrogramScale},
         {QStringLiteral("channelButtonsVisibility"), defaults.channelButtonsVisibility},
@@ -5888,6 +5903,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : m_preventDisplaySleepInFullscreen;
     if (m_preventDisplaySleepInFullscreen != preventDisplaySleepInFullscreen) {
         m_preventDisplaySleepInFullscreen = preventDisplaySleepInFullscreen;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool showFullscreenTitleStrip = snapshot.settings.present
+        ? snapshot.settings.showFullscreenTitleStrip
+        : m_showFullscreenTitleStrip;
+    if (m_showFullscreenTitleStrip != showFullscreenTitleStrip) {
+        m_showFullscreenTitleStrip = showFullscreenTitleStrip;
         changed = true;
         snapshotSignalChanged = true;
     }

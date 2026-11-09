@@ -269,8 +269,10 @@ QtObject {
         root.refreshAlbumArtFileInfo()
     }
 
+    // Shows or hides the image's details; not during a preview, whose
+    // details hold its Apply and Back to Results.
     function toggleAlbumArtInfoVisible(focusFullscreen) {
-        if (!root.albumArtViewerOpen) {
+        if (!root.albumArtViewerOpen || root.albumArtPreviewActive) {
             return
         }
         if (!root.albumArtInfoVisible) {

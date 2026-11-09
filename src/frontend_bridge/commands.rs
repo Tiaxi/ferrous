@@ -304,11 +304,62 @@ fn handle_settings_bridge_command(
             state.settings.viewer_fullscreen_mode = *mode;
             *context.settings_dirty = true;
         }
+        BridgeSettingsCommand::SetDbRange(value) => {
+            state.settings.db_range = value.clamp(50.0, 150.0);
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(_)
+        | BridgeSettingsCommand::SetShowFullscreenTitleStrip(_)
+        | BridgeSettingsCommand::SetLogScale(_)
+        | BridgeSettingsCommand::SetShowLevelMeter(_)
+        | BridgeSettingsCommand::SetShowFps(_)
+        | BridgeSettingsCommand::SetShowSpectrogramCrosshair(_)
+        | BridgeSettingsCommand::SetShowSpectrogramScale(_)
+        | BridgeSettingsCommand::SetChannelButtonsVisibility(_)
+        | BridgeSettingsCommand::SetSpectrogramZoomEnabled(_) => {
+            handle_display_settings_command(cmd, state, context);
+        }
+        BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
+            state.settings.integrations.system_media_controls_enabled = *enabled;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLibrarySortMode(mode) => {
+            state.settings.library_sort_mode = *mode;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetLibraryWatchEnabled(enabled) => {
+            set_library_watching(state, context, *enabled);
+        }
+        BridgeSettingsCommand::SetWindowLayout(layout) => {
+            set_window_layout(state, context, *layout);
+        }
+        BridgeSettingsCommand::SetQueueColumnWidths { widths, generation } => {
+            set_queue_column_widths(state, context, *widths, *generation);
+        }
+        BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
+        | BridgeSettingsCommand::BeginLastFmAuth
+        | BridgeSettingsCommand::CompleteLastFmAuth
+        | BridgeSettingsCommand::DisconnectLastFm
+        | BridgeSettingsCommand::SetLastFmScrobblingPaused(_)
+        | BridgeSettingsCommand::SetLastFmShowScrobbleProgress(_) => {
+            handle_lastfm_settings_command(cmd, state, context);
+        }
+    }
+}
+
+/// The display settings that only the UI acts on, which are saved with the
+/// rest.
+fn handle_display_settings_command(
+    cmd: &BridgeSettingsCommand,
+    state: &mut BridgeState,
+    context: &mut BridgeCommandContext<'_>,
+) {
+    match cmd {
         BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(enabled) => {
             set_display_sleep_prevention(state, context, *enabled);
         }
-        BridgeSettingsCommand::SetDbRange(value) => {
-            state.settings.db_range = value.clamp(50.0, 150.0);
+        BridgeSettingsCommand::SetShowFullscreenTitleStrip(show) => {
+            state.settings.display.show_fullscreen_title_strip = *show;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetLogScale(enabled) => {
@@ -339,31 +390,7 @@ fn handle_settings_bridge_command(
             state.settings.display.spectrogram_zoom_enabled = *enabled;
             *context.settings_dirty = true;
         }
-        BridgeSettingsCommand::SetSystemMediaControlsEnabled(enabled) => {
-            state.settings.integrations.system_media_controls_enabled = *enabled;
-            *context.settings_dirty = true;
-        }
-        BridgeSettingsCommand::SetLibrarySortMode(mode) => {
-            state.settings.library_sort_mode = *mode;
-            *context.settings_dirty = true;
-        }
-        BridgeSettingsCommand::SetLibraryWatchEnabled(enabled) => {
-            set_library_watching(state, context, *enabled);
-        }
-        BridgeSettingsCommand::SetWindowLayout(layout) => {
-            set_window_layout(state, context, *layout);
-        }
-        BridgeSettingsCommand::SetQueueColumnWidths { widths, generation } => {
-            set_queue_column_widths(state, context, *widths, *generation);
-        }
-        BridgeSettingsCommand::SetLastFmScrobblingEnabled(_)
-        | BridgeSettingsCommand::BeginLastFmAuth
-        | BridgeSettingsCommand::CompleteLastFmAuth
-        | BridgeSettingsCommand::DisconnectLastFm
-        | BridgeSettingsCommand::SetLastFmScrobblingPaused(_)
-        | BridgeSettingsCommand::SetLastFmShowScrobbleProgress(_) => {
-            handle_lastfm_settings_command(cmd, state, context);
-        }
+        _ => {}
     }
 }
 

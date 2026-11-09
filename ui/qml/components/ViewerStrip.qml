@@ -18,6 +18,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 // the strip, from the left, each taking the strip's `plotColors`) and
 // Close. The whole strip shows and hides with the viewer's controls,
 // fading as they do; it is drawn over the view, which never resizes for it.
+// Turned off in Preferences (`available` false), it never shows: the
+// viewer's keys, a double-click and a middle click do what its buttons do.
 Rectangle {
     id: root
 
@@ -29,6 +31,8 @@ Rectangle {
     // The playback clock's text of the position, which changes once a second.
     property string positionText: "00:00"
     property bool controlsVisible: true
+    // Whether the strip may show at all.
+    property bool available: true
     property var pointerActivity: null
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
@@ -76,10 +80,10 @@ Rectangle {
 
     implicitHeight: 33
     color: root.plotColors.plotPlate
-    opacity: root.controlsVisible ? 1 : 0
+    opacity: root.available && root.controlsVisible ? 1 : 0
     // Shown at once, so the key that brings the controls back can move
     // focus to them; it fades out, and hidden it takes no pointer.
-    visible: root.controlsVisible || opacity > 0
+    visible: root.available && (root.controlsVisible || opacity > 0)
 
     // Kirigami's durations are 0 with animations turned off.
     Behavior on opacity {

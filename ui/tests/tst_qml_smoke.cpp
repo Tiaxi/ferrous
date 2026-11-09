@@ -1638,6 +1638,7 @@ private slots:
     void albumArtDetailsLieOverTheArt();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtInfoButtonIsTintedOnlyWhileChecked();
+    void fullscreenViewersCanKeepTheirTitleStripHidden();
     void albumArtStaysPutWhenTheDetailsOpen_data();
     void albumArtStaysPutWhenTheDetailsOpen();
     void menuMnemonicsOpenTheMenusAndShowShortcuts();
@@ -1927,6 +1928,7 @@ Item {
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
         property bool preventDisplaySleepInFullscreen: true
+        property bool showFullscreenTitleStrip: true
         property bool showLevelMeter: true
         property int libraryArtistCount: 0
         property int libraryAlbumCount: 0
@@ -1999,6 +2001,7 @@ Item {
         function unregisterSpectrogramItem(item) {}
         function setViewerFullscreenMode(mode) {}
         function setPreventDisplaySleepInFullscreen(value) {}
+        function setShowFullscreenTitleStrip(value) { showFullscreenTitleStrip = value }
         function setShowLevelMeter(value) { showLevelMeter = value }
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}
@@ -27103,6 +27106,103 @@ Window {
              qPrintable(log));
 }
 
+void TransportInputSmokeTest::fullscreenViewersCanKeepTheirTitleStripHidden() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *plotLayer = window->findChild<QObject *>(QStringLiteral("plotLayer"));
+    QObject *autoHide =
+        window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    auto *albumArt = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && plotLayer != nullptr && autoHide != nullptr
+            && albumArt != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(bridge->property("showFullscreenTitleStrip").toBool());
+    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
+
+    // The visualization: the pointer brings the controls back, without the
+    // strip, and the mode switch sits on the top edge.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QQuickItem *strip = itemNamed(fullscreen->contentItem(), QStringLiteral("spectrogramFullscreenStrip"));
+    QVERIFY(strip != nullptr);
+    QCOMPARE(plotLayer->property("topInset").toReal(), 0.0);
+    for (const QPoint at : {QPoint(200, 200), QPoint(240, 260)}) {
+        QTest::mouseMove(fullscreen, at);
+    }
+    QTest::keyClick(fullscreen, Qt::Key_Shift);
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QCoreApplication::processEvents();
+    QVERIFY(!strip->isVisible());
+    QQuickItem *modeSwitch = nullptr;
+    QTRY_VERIFY((modeSwitch = firstVisibleItemNamed(fullscreen->contentItem(),
+                                                    QStringLiteral("visualizationModeSwitch")))
+                != nullptr);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY(sceneRectOf(modeSwitch).top() >= 0.0);
+    QVERIFY2(sceneRectOf(modeSwitch).top() < 33.0, qPrintable(QString::number(sceneRectOf(modeSwitch).top())));
+    // They still hide as the pointer rests.
+    autoHide->setProperty("hideDelay", 50);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(!modeSwitch->isVisible());
+    QVERIFY(!strip->isVisible());
+
+    // Turned on again, it shows with the controls, which keep below it.
+    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
+    QTRY_COMPARE(plotLayer->property("topInset").toReal(), 33.0);
+    autoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(fullscreen, QPoint(300, 300));
+    QTRY_VERIFY(strip->isVisible());
+    QTRY_VERIFY(modeSwitch->isVisible());
+    QTRY_VERIFY(sceneRectOf(modeSwitch).top() >= 33.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!fullscreen->isVisible());
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+
+    // The album art: no strip, the details from the top edge, and I still
+    // shows and hides them.
+    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", false));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QQuickWindow *albumArtWindow = viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
+    QVERIFY(albumArtWindow != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(albumArtWindow));
+    QQuickItem *albumArtStrip =
+        itemNamed(albumArtWindow->contentItem(), QStringLiteral("albumArtFullscreenStrip"));
+    QVERIFY(albumArtStrip != nullptr);
+    QTest::mouseMove(albumArtWindow, QPoint(200, 200));
+    QTest::mouseMove(albumArtWindow, QPoint(220, 240));
+    QCoreApplication::processEvents();
+    QVERIFY(!albumArtStrip->isVisible());
+    QCOMPARE(albumArt->property("infoTopInset").toReal(), 0.0);
+    QTest::keyClick(albumArtWindow, Qt::Key_I);
+    QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
+    QTRY_VERIFY(visibleItemNamed(albumArtWindow, QStringLiteral("albumArtInfoColumn")) != nullptr);
+    QVERIFY(!albumArtStrip->isVisible());
+    QTest::keyClick(albumArtWindow, Qt::Key_I);
+    QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
+    // With the strip on, the details keep below it.
+    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
+    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), 33.0);
+    QTest::mouseMove(albumArtWindow, QPoint(300, 300));
+    QTRY_VERIFY(albumArtStrip->isVisible());
+    QTest::keyClick(albumArtWindow, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
 void TransportInputSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -28408,6 +28508,51 @@ bool openItunesArtworkDialog(QQuickWindow *window, QObject *dialog, QObject *fak
         && QTest::qWaitFor([dialog]() { return dialog->property("opened").toBool(); });
 }
 
+// Whether `item` is `ancestor` or inside it.
+bool isWithin(const QQuickItem *item, const QQuickItem *ancestor) {
+    for (; item != nullptr; item = item->parentItem()) {
+        if (item == ancestor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// During a preview in `host`: its label and buttons are at the foot of the
+// image's details, Back to Results before Apply on one row, and the
+// viewer's controls named by `prefix` have none of them, nor Image Details.
+void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
+                                      const QByteArray &at) {
+    QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
+    QVERIFY2(column != nullptr, at.constData());
+    QQuickItem *label = visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"));
+    QQuickItem *back = visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton"));
+    QQuickItem *apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
+    QVERIFY2(label != nullptr && back != nullptr && apply != nullptr, at.constData());
+    const QRectF columnRect = column->mapRectToScene(QRectF(0, 0, column->width(), column->height()));
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    for (QQuickItem *item : {label, back, apply}) {
+        QVERIFY2(isWithin(item, column), at.constData());
+        QVERIFY2(columnRect.contains(rectOf(item)), at.constData());
+    }
+    // At the foot: the buttons near the bottom edge, the label above them,
+    // Back to Results then Apply, ending at the column's end.
+    QVERIFY2(columnRect.bottom() - rectOf(back).bottom() <= 24.0, at.constData());
+    QCOMPARE(rectOf(back).top(), rectOf(apply).top());
+    QVERIFY2(rectOf(label).bottom() <= rectOf(back).top(), at.constData());
+    QVERIFY2(rectOf(back).right() <= rectOf(apply).left(), at.constData());
+    QVERIFY2(columnRect.right() - rectOf(apply).right() <= 24.0, at.constData());
+    QVERIFY2(rectOf(back).top() > columnRect.center().y(), at.constData());
+    // Nothing of the preview on the strip or the corner plate.
+    for (const QString &name : {QStringLiteral("PreviewLabel"), QStringLiteral("BackButton"),
+                                QStringLiteral("ApplyButton"), QStringLiteral("InfoButton")}) {
+        QVERIFY2(visibleItemNamed(host, prefix + name) == nullptr,
+                 qPrintable(QStringLiteral("%1: %2").arg(QString::fromUtf8(at), prefix + name)));
+    }
+}
+
 } // namespace
 
 void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
@@ -28457,6 +28602,8 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 return fullscreenMode == 0
                     ? window : viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
             };
+            // The viewer's controls: the corner plate in the main window, or
+            // the title strip over the whole screen.
             const QString prefix = fullscreenMode == 0 ? QStringLiteral("albumArtPopup")
                                                        : QStringLiteral("albumArtFullscreen");
             if (viewerOpenBefore) {
@@ -28474,7 +28621,9 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QTRY_COMPARE(resultsView()->property("contentY").toReal(), 400.0);
 
             // Preview hides the dialog, keeping it, and shows the candidate
-            // in the viewer, with Back to Results and Apply on its strip.
+            // in the viewer, with its details and, at their foot, Back to
+            // Results and Apply; the viewer's controls have none of them,
+            // nor the Image Details button, and I keeps the details.
             const auto preview = [&]() {
                 QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview",
                                                   Q_ARG(QVariant, previewed)));
@@ -28485,16 +28634,22 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 QVERIFY(!viewer->property("albumArtViewerShowsCurrentTrack").toBool());
                 QQuickWindow *host = viewerHost();
                 QVERIFY2(host != nullptr && QTest::qWaitForWindowActive(host), at.constData());
-                QTRY_VERIFY2(visibleItemNamed(host, prefix + QStringLiteral("BackButton")) != nullptr,
+                QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton")) != nullptr,
                              at.constData());
-                QQuickItem *label = visibleItemNamed(host, prefix + QStringLiteral("PreviewLabel"));
+                QQuickItem *label = visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"));
                 QVERIFY2(label != nullptr, at.constData());
                 QCOMPARE(label->property("text").toString(), QStringLiteral("iTunes Candidate"));
                 QCOMPARE(host->title(),
                          QStringLiteral("Morning Tide Field — iTunes Candidate — Ferrous Album Art"));
-                QQuickItem *apply = visibleItemNamed(host, prefix + QStringLiteral("ApplyButton"));
+                QQuickItem *apply = visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"));
                 QVERIFY2(apply != nullptr, at.constData());
                 QTRY_VERIFY2(apply->isEnabled(), at.constData());
+                checkPreviewControlsInTheDetails(host, prefix, at);
+                QTest::keyClick(host, Qt::Key_I);
+                QCoreApplication::processEvents();
+                QVERIFY2(viewer->property("albumArtInfoVisible").toBool(), at.constData());
+                QVERIFY2(visibleItemNamed(host, QStringLiteral("albumArtInfoColumn")) != nullptr,
+                         at.constData());
                 // The results stay as they were, hidden.
                 QCOMPARE(resultsView()->property("count").toInt(), 12);
             };
@@ -28526,14 +28681,14 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QQuickWindow *host = viewerHost();
             QTest::keyClick(host, Qt::Key_Left);
             QTRY_VERIFY2(viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
-            QCOMPARE(visibleItemNamed(host, prefix + QStringLiteral("PreviewLabel"))->property("text").toString(),
+            QCOMPARE(visibleItemNamed(host, QStringLiteral("albumArtPreviewLabel"))->property("text").toString(),
                      QStringLiteral("Current Album Art"));
-            QVERIFY(visibleItemNamed(host, prefix + QStringLiteral("ApplyButton"))->isEnabled());
+            QVERIFY(visibleItemNamed(host, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
             QTest::keyClick(host, Qt::Key_Right);
             QTRY_VERIFY2(!viewer->property("albumArtViewerShowsCurrentTrack").toBool(), at.constData());
 
             // Back to Results, clicked: the preview is in front of the dialog.
-            QVERIFY2(clickVisibleButton(host, prefix + QStringLiteral("BackButton")), at.constData());
+            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewBackButton")), at.constData());
             backAtTheResults();
 
             // Escape goes back too; the popup viewer stays open for it, rather
@@ -28553,7 +28708,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             // and leaves the viewer showing the cover.
             preview();
             host = viewerHost();
-            QVERIFY2(clickVisibleButton(host, prefix + QStringLiteral("ApplyButton")), at.constData());
+            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY(applied().isEmpty());
@@ -28562,7 +28717,7 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                          at.constData());
             QVERIFY(dialog->property("previewShown").toBool());
             QVERIFY(viewer->property("albumArtPreviewActive").toBool());
-            QVERIFY2(clickVisibleButton(host, prefix + QStringLiteral("ApplyButton")), at.constData());
+            QVERIFY2(clickVisibleButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
             QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogConfirmButton")), at.constData());
@@ -28574,7 +28729,10 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
             QVERIFY(viewer->property("albumArtViewerShowsCurrentTrack").toBool());
             QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
-            QTRY_VERIFY2(visibleItemNamed(host, prefix + QStringLiteral("BackButton")) == nullptr,
+            QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton")) == nullptr,
+                         at.constData());
+            // Out of the preview, the Image Details button is back.
+            QTRY_VERIFY2(visibleItemNamed(host, prefix + QStringLiteral("InfoButton")) != nullptr,
                          at.constData());
 
             // Closing the viewer now closes it, with no dialog to go back to.
@@ -28596,9 +28754,9 @@ void TransportInputSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, bareTarget));
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, previewed)));
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton")) != nullptr);
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton"))->isEnabled());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr);
+    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QTRY_COMPARE(applied(), (QVariantList{previewed}));
     QVERIFY(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) == nullptr);
     QVERIFY(!dialog->property("visible").toBool());
@@ -28654,7 +28812,7 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     };
     const auto applied = [fake]() { return fake->property("appliedItunesArtwork").toList(); };
     const auto applyButton = [window]() {
-        return visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton"));
+        return visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
     };
     QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, target));
 
@@ -28678,7 +28836,7 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     // Loading again, or failed, it cannot be applied from the preview.
     updateItunesArtworkRow(fake, 2, {{QStringLiteral("assetLoading"), true}});
     QTRY_VERIFY(!applyButton()->isEnabled());
-    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     updateItunesArtworkRow(fake, 2, {
         {QStringLiteral("assetLoading"), false},
         {QStringLiteral("assetError"), QStringLiteral("The artwork could not be downloaded.")},
@@ -28710,7 +28868,7 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     }
     QTRY_VERIFY(applyButton() != nullptr);
     QVERIFY(!applyButton()->isEnabled());
-    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QVERIFY(applied().isEmpty());
     // Nor while the viewer shows the current art to compare, which decodes.
     QTest::keyClick(window, Qt::Key_Left);
@@ -28719,10 +28877,10 @@ void TransportInputSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady()
     QTRY_COMPARE(surface->property("imageStatus").toInt(), 1);
     QVERIFY(!applyButton()->isEnabled());
     QVERIFY(!dialog->property("previewCandidateReady").toBool());
-    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+    QVERIFY(!clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QVERIFY(QMetaObject::invokeMethod(dialog, "applyPreviewedSuggestion"));
     QVERIFY(applied().isEmpty());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupBackButton")));
+    QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewBackButton")));
     QTRY_VERIFY(dialog->property("opened").toBool());
 }
 
@@ -28759,7 +28917,7 @@ void TransportInputSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybac
         QMetaObject::invokeMethod(bridge, "snapshotChanged");
     };
     const auto backToTheResults = [&]() {
-        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupBackButton")));
+        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewBackButton")));
         QTRY_VERIFY(dialog->property("opened").toBool());
         QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
     };
@@ -28774,7 +28932,7 @@ void TransportInputSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybac
         QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
         QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
         QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);
-        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupBackButton")) != nullptr,
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton")) != nullptr,
                      at.constData());
         // It stays on that art while playback goes on.
         QMetaObject::invokeMethod(bridge, "snapshotChanged");
@@ -28854,10 +29012,10 @@ void TransportInputSmokeTest::itunesPreviewApplyShowsTheAppliedCoverAfterPlaybac
         // cover applied to A, not B's art, nor nothing.
         QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, 1)));
         QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
-        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton")) != nullptr
-                         && visibleItemNamed(window, QStringLiteral("albumArtPopupApplyButton"))->isEnabled(),
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) != nullptr
+                         && visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"))->isEnabled(),
                      at.constData());
-        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPopupApplyButton")));
+        QVERIFY(clickVisibleButton(window, QStringLiteral("albumArtPreviewApplyButton")));
         QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                      at.constData());
         QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
@@ -28866,7 +29024,7 @@ void TransportInputSmokeTest::itunesPreviewApplyShowsTheAppliedCoverAfterPlaybac
         QVERIFY(viewer->property("albumArtViewerOpen").toBool());
         QVERIFY(!viewer->property("albumArtPreviewActive").toBool());
         QCOMPARE(viewerSource(), appliedUrl);
-        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPopupBackButton")) == nullptr,
+        QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton")) == nullptr,
                      at.constData());
 
         // It stays while B plays on, and follows playback at the next track.

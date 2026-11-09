@@ -571,6 +571,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
                 value,
                 &mut settings.display.prevent_display_sleep_in_fullscreen,
             ),
+            "show_fullscreen_title_strip" => {
+                parse_flag(value, &mut settings.display.show_fullscreen_title_strip);
+            }
             "show_spectrogram_crosshair" => {
                 parse_flag(value, &mut settings.display.show_spectrogram_crosshair);
             }
@@ -677,7 +680,7 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
     let mut text = format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_fullscreen_title_strip={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -689,6 +692,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         i32::from(settings.display.show_fps),
         i32::from(settings.display.show_level_meter),
         i32::from(settings.display.prevent_display_sleep_in_fullscreen),
+        i32::from(settings.display.show_fullscreen_title_strip),
         i32::from(settings.display.show_spectrogram_crosshair),
         i32::from(settings.display.show_spectrogram_scale),
         settings.display.channel_buttons_visibility,
@@ -775,6 +779,7 @@ mod tests {
                 show_fps: true,
                 show_level_meter: true,
                 prevent_display_sleep_in_fullscreen: false,
+                show_fullscreen_title_strip: false,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
@@ -810,6 +815,7 @@ mod tests {
         assert!(parsed.display.log_scale);
         assert!(parsed.display.show_fps);
         assert!(!parsed.display.prevent_display_sleep_in_fullscreen);
+        assert!(!parsed.display.show_fullscreen_title_strip);
         assert!(parsed.display.show_spectrogram_crosshair);
         assert!(parsed.display.show_spectrogram_scale);
         assert!(parsed.display.spectrogram_zoom_enabled);
@@ -861,6 +867,40 @@ mod tests {
             let mut parsed = BridgeSettings::default();
             parse_settings_text(&mut parsed, &text);
             assert_eq!(parsed.display.spectrogram_frequency_cap, enabled);
+        }
+    }
+
+    #[test]
+    fn fullscreen_title_strip_defaults_on_and_roundtrips_both_values() {
+        assert!(
+            BridgeSettings::default()
+                .display
+                .show_fullscreen_title_strip
+        );
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(
+            &mut settings,
+            "volume=0.5\nviewer_fullscreen_mode=whole_screen\n",
+        );
+        assert!(
+            settings.display.show_fullscreen_title_strip,
+            "on in older settings files"
+        );
+        for show in [false, true] {
+            settings.display.show_fullscreen_title_strip = show;
+            let text = format_settings_text(&settings);
+            assert!(text.contains(&format!(
+                "show_fullscreen_title_strip={}\n",
+                i32::from(show)
+            )));
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &text);
+            assert_eq!(parsed.display.show_fullscreen_title_strip, show);
+            assert!(
+                parsed.unknown_lines.is_empty(),
+                "{:?}",
+                parsed.unknown_lines
+            );
         }
     }
 
@@ -1067,6 +1107,7 @@ mod tests {
                 show_fps: false,
                 show_level_meter: true,
                 prevent_display_sleep_in_fullscreen: true,
+                show_fullscreen_title_strip: true,
                 show_spectrogram_crosshair: true,
                 show_spectrogram_scale: true,
                 channel_buttons_visibility: 1,
