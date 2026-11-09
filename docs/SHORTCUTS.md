@@ -15,6 +15,7 @@ These work in the main window and in the fullscreen viewers. Text fields, such a
 | Open or close the visualization viewer | F11 |
 | Open or close the album art viewer | Shift+F11 |
 | Show the spectrogram or the waveform | Ctrl+1, Ctrl+2 |
+| Reset the visualization's zoom | Ctrl+0 |
 | Quit | Ctrl+Q |
 
 These work in the main window only:
@@ -61,7 +62,7 @@ Double-click the visualization or the album art to open its viewer, and press Es
 
 A viewer over the whole screen fills it, with its buttons in a title strip over its top edge; one in the main window has them in its top right corner. The buttons hide while the pointer rests, the title strip with them, except those of the album art viewer in the main window; a key press brings them back, and Tab moves through them, then to the visualization's mode switch. They stay while one of them has keyboard focus. Space presses the focused button.
 
-With **Show the title strip when the pointer moves** turned off (**Edit > Preferences > Appearance**, for **Fill the screen**), a viewer over the whole screen never shows its title strip, and the visualization's mode switch and the first channel's Mute and Solo move up to the top edge. The keys and the pointer do what the strip's buttons did. Escape closes either viewer; so do F11 and a double-click in the visualization viewer, and Shift+F11 and a click beside the art in the album art viewer. A middle click resets the visualization's zoom, and a double-click fits zoomed album art again. I shows the album art's details, and Left and Right switch between the current and suggested artwork. New issues show in the status bar's indicator once the viewer closes.
+With **Show the title strip when the pointer moves** turned off (**Edit > Preferences > Appearance**, for **Fill the screen**), a viewer over the whole screen never shows its title strip, and the visualization's mode switch and the first channel's Mute and Solo move up to the top edge. The keys and the pointer do what the strip's buttons did. Escape closes either viewer; so do F11 and a double-click in the visualization viewer, and Shift+F11 and a click beside the art in the album art viewer. A middle click resets the visualization's zoom, as Ctrl+0 does, and a double-click fits zoomed album art again. I shows the album art's details, and Left and Right switch between the current and suggested artwork. New issues show in the status bar's indicator once the viewer closes.
 
 While the album art viewer previews artwork from **Replace from iTunes**, the image's details always show, and I does not hide them. At their foot are what the viewer shows, such as "iTunes Candidate", then Back to Results and, for a candidate, Apply. Escape also goes back to the results.
 
@@ -71,4 +72,4 @@ The visualization's mode switch, in its top right corner, shows while the pointe
 
 Lists scroll by what touchpads and high-resolution wheels report, so small movements scroll a little.
 
-The wheel zooms the spectrogram, the waveform and the album art viewer; a smaller movement zooms less. The spectrogram shows its current image at the new zoom at once and replaces it when the new zoom's data arrives. Its view follows playback, so it zooms about the playhead. The album art zooms about the pointer. Horizontal scrolling does not zoom, and a middle click resets the visualization's zoom, as **View > Reset Visualization View** does. While a viewer is zoomed, it shows the zoom and a Reset button, which fits the album art again or resets the visualization.
+The wheel zooms the spectrogram, the waveform and the album art viewer; a smaller movement zooms less. The spectrogram shows its current image at the new zoom at once and replaces it when the new zoom's data arrives. Its view follows playback, so it zooms about the playhead. The album art zooms about the pointer. Horizontal scrolling does not zoom. A middle click, Ctrl+0 or **View > Reset Zoom** resets the zoom of the visualization that shows, and the spectrogram keeps what it has drawn; the menu item is available only while it is zoomed. While a viewer is zoomed, it shows the zoom and a Reset button, which fits the album art again or resets the visualization's zoom.

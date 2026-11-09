@@ -950,12 +950,17 @@ ApplicationWindow {
         checked: queueController.autoCenterSelection
         onTriggered: queueController.autoCenterSelection = checked
     }
+    // The shown plot's zoom back to the default, as a middle click and the
+    // viewer's Reset do. Ctrl+0 is KDE's Actual Size key. The album art
+    // viewer zooms the art, not the plot, so it leaves the key alone.
     Action {
-        id: resetSpectrogramAction
-        objectName: "resetVisualizationAction"
-        text: I18n.i18nc("@action:inmenu", "&Reset Visualization View")
+        id: resetZoomAction
+        objectName: "resetZoomAction"
+        text: I18n.i18nc("@action:inmenu", "&Reset Zoom")
         icon.name: "zoom-original"
-        onTriggered: visualizationSurface.resetView()
+        shortcut: "Ctrl+0"
+        enabled: visualizationSurface.zoomed && !viewerController.albumArtViewerOpen
+        onTriggered: visualizationSurface.resetZoom()
     }
 
     // Playback
@@ -1157,7 +1162,7 @@ ApplicationWindow {
         seekBackwardAction, seekForwardAction,
         volumeUpAction, volumeDownAction, muteAction,
         visualizationViewerAction, albumArtViewerAction,
-        spectrogramModeAction, waveformModeAction, quitAction
+        spectrogramModeAction, waveformModeAction, resetZoomAction, quitAction
     ]
     // The menus take the style's size, icons and motion.
     menuBar: MenuBar {
@@ -1208,7 +1213,7 @@ ApplicationWindow {
             MenuItem { action: showScaleAction }
             MenuSeparator {}
             MenuItem { action: autoCenterSelectionAction }
-            MenuItem { action: resetSpectrogramAction }
+            MenuItem { action: resetZoomAction }
         }
         Components.AppMenu {
             objectName: "playbackMenu"
@@ -1555,12 +1560,14 @@ ApplicationWindow {
             ? spectrogramSurface.zoomLevel
             : waveformSurface.waveformItem.zoomLevel
 
-        // View › Reset Visualization View, and the viewers' Reset: the
-        // shown plot at its default zoom, the spectrogram drawn afresh.
-        function resetView() {
+        readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001
+
+        // View › Reset Zoom, and the viewer's Reset: the shown plot at its
+        // default zoom, as a middle click leaves it. Nothing else changes;
+        // the spectrogram keeps what it has drawn.
+        function resetZoom() {
             if (visualizationSurface.spectrogramShown) {
                 spectrogramSurface.resetZoom()
-                spectrogramSurface.resetForCurrentMode()
             } else {
                 waveformSurface.waveformItem.resetZoom()
             }
@@ -1659,7 +1666,7 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
         zoomLevel: visualizationSurface.zoomLevel
-        resetView: visualizationSurface.resetView
+        resetView: visualizationSurface.resetZoom
         cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }

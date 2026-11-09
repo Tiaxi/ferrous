@@ -524,7 +524,7 @@ void UiMenusTest::menusListTheirItemsInOrder() {
                  QStringLiteral("check|Show Frequency and Time Scale||"),
                  QStringLiteral("sep"),
                  QStringLiteral("check|Follow Current Track in Queue||"),
-                 QStringLiteral("item|Reset Visualization View||zoom-original"),
+                 QStringLiteral("item|Reset Zoom|Ctrl+0|zoom-original"),
              }));
     QCOMPARE(rowsOf(menuNamed(window, "playbackMenu")),
              (QStringList{

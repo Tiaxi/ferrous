@@ -30,7 +30,7 @@ Item {
     property var uiBridge: null
     property string positionText: "00:00"
     // The view's zoom, 1 at the default, and what resets it: the same as
-    // View › Reset Visualization View.
+    // View › Reset Zoom.
     property real zoomLevel: 1.0
     property var resetView: null
     // How far the corner controls keep from the right edge, clear of the
