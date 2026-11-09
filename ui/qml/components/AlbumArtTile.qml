@@ -19,12 +19,20 @@ Rectangle {
     // panel passes the palette's.
     property color placeholderColor: "transparent"
     property color placeholderGlyphColor: Kirigami.Theme.textColor
+    // What shows around a cover that does not fill the tile, or through
+    // one that is partly transparent: the colour behind the tile, which the
+    // now-playing panel passes. Each cover draws on it, so a cover at full
+    // opacity hides all under it, the covers fading out under it too.
+    property color backdropColor: "transparent"
     readonly property bool hasCover: root.uiBridge.currentTrackCoverPath.length > 0
-    // The cover before, or its placeholder for none, over this one while it
-    // fades out: the now-playing panel's album change.
-    property bool outgoingShown: false
-    property string outgoingCoverPath: ""
-    property real outgoingOpacity: 0
+    // The covers before, or their placeholder for none, over this one
+    // while they fade out: the now-playing panel's album change. Oldest
+    // first, each {coverPath, from}, showing at `from` times
+    // `outgoingLevel`, and over the ones after it.
+    property var outgoingCovers: []
+    property real outgoingLevel: 0
+    // The most covers before that fade out at once.
+    property int outgoingSlots: 0
     readonly property real coverSourceSize: Math.max(256, root.width)
 
     implicitWidth: 320
@@ -32,7 +40,7 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: root.hasCover ? "transparent" : root.placeholderColor
+    color: root.hasCover ? root.backdropColor : root.placeholderColor
     Accessible.role: Accessible.Graphic
     Accessible.name: root.hasCover
         ? I18n.i18nc("@info", "Album art")
@@ -61,35 +69,56 @@ Rectangle {
         visible: !root.hasCover
     }
 
-    // The cover before fades out over this one, which shows whole all along,
-    // so the panel never shows through between the two.
-    Rectangle {
-        objectName: "albumArtOutgoing"
+    // The covers before fade out over this one, which shows whole all
+    // along, so the panel never shows through between them. Each keeps its
+    // slot while it fades, so its image is not loaded again.
+    Item {
         anchors.fill: parent
-        visible: root.outgoingShown && root.outgoingOpacity > 0
-        opacity: root.outgoingOpacity
-        color: root.outgoingCoverPath.length > 0 ? "transparent" : root.placeholderColor
 
-        // The same size as the cover had, so the image cache still has it.
-        Image {
-            anchors.fill: parent
-            source: parent.visible ? root.outgoingCoverPath : ""
-            fillMode: Image.PreserveAspectFit
-            smooth: true
-            asynchronous: true
-            cache: true
-            sourceSize.width: root.coverSourceSize
-            sourceSize.height: root.coverSourceSize
-        }
+        Repeater {
+            model: root.outgoingSlots
 
-        Kirigami.Icon {
-            anchors.centerIn: parent
-            width: Math.round(Math.min(parent.width, parent.height) / 3)
-            height: width
-            source: "media-album-track"
-            isMask: true
-            color: root.placeholderGlyphColor
-            visible: root.outgoingCoverPath.length === 0
+            delegate: Rectangle {
+                id: outgoing
+
+                required property int index
+                readonly property var cover: root.outgoingCovers[outgoing.index] || null
+                readonly property string coverPath: outgoing.cover !== null ? outgoing.cover.coverPath : ""
+
+                objectName: "albumArtOutgoing"
+                // The older over the newer.
+                z: -outgoing.index
+                anchors.fill: parent
+                visible: outgoing.cover !== null && outgoing.opacity > 0
+                opacity: outgoing.cover !== null ? outgoing.cover.from * root.outgoingLevel : 0
+                color: outgoing.coverPath.length > 0 ? root.backdropColor : root.placeholderColor
+                // A cover fades out as one, on its backdrop: without a layer
+                // the opacity would take the backdrop and the image apart,
+                // and the backdrop would show through the image.
+                layer.enabled: outgoing.visible && outgoing.coverPath.length > 0
+
+                // The same size as the cover had, so the image cache still has it.
+                Image {
+                    anchors.fill: parent
+                    source: outgoing.visible ? outgoing.coverPath : ""
+                    fillMode: Image.PreserveAspectFit
+                    smooth: true
+                    asynchronous: true
+                    cache: true
+                    sourceSize.width: root.coverSourceSize
+                    sourceSize.height: root.coverSourceSize
+                }
+
+                Kirigami.Icon {
+                    anchors.centerIn: parent
+                    width: Math.round(Math.min(parent.width, parent.height) / 3)
+                    height: width
+                    source: "media-album-track"
+                    isMask: true
+                    color: root.placeholderGlyphColor
+                    visible: outgoing.coverPath.length === 0
+                }
+            }
         }
     }
 
