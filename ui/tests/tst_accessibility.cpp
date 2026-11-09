@@ -185,6 +185,27 @@ QAccessible::Role accessibleRole(QObject *object) {
     return iface != nullptr ? iface->role() : QAccessible::NoRole;
 }
 
+// `object`'s interface where assistive technology finds it: in the tree that
+// starts at `window`. Null when it is not there.
+QAccessibleInterface *inAccessibleTree(QQuickWindow *window, QObject *object) {
+    const std::function<QAccessibleInterface *(QAccessibleInterface *)> visit =
+        [&](QAccessibleInterface *iface) -> QAccessibleInterface * {
+        if (iface == nullptr) {
+            return nullptr;
+        }
+        if (iface->object() == object) {
+            return iface;
+        }
+        for (int i = 0; i < iface->childCount(); ++i) {
+            if (QAccessibleInterface *found = visit(iface->child(i))) {
+                return found;
+            }
+        }
+        return nullptr;
+    };
+    return visit(QAccessible::queryAccessibleInterface(window));
+}
+
 // Evaluates `expression` in `item`'s own QML scope, as for its attached
 // properties.
 QVariant evaluateOn(QQuickItem *item, const QString &expression) {
@@ -3628,6 +3649,11 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QVERIFY(!analysing->isVisible());
     QTRY_VERIFY(analysing->isVisible());
     QCOMPARE(analysing->property("text").toString(), QStringLiteral("Analysing…"));
+    // Assistive technology reads it.
+    QAccessibleInterface *analysingIface = inAccessibleTree(window, analysing);
+    QVERIFY(analysingIface != nullptr);
+    QCOMPARE(analysingIface->role(), QAccessible::StaticText);
+    QCOMPARE(analysingIface->text(QAccessible::Name), QStringLiteral("Analysing…"));
     // The file ends early: its message, in the empty part after the cut,
     // as Recent Issues says it, with the way there.
     QVERIFY(bridge->setProperty("waveformCoverageSeconds", 242.6));
@@ -3640,6 +3666,10 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QQuickItem *link = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarlyLink"));
     QVERIFY(text != nullptr && link != nullptr);
     QCOMPARE(text->property("text").toString(), QStringLiteral("The file ends at 4:02."));
+    QAccessibleInterface *textIface = inAccessibleTree(window, text);
+    QVERIFY(textIface != nullptr);
+    QCOMPARE(textIface->role(), QAccessible::StaticText);
+    QCOMPARE(textIface->text(QAccessible::Name), QStringLiteral("The file ends at 4:02."));
     QCOMPARE(accessibleRole(link), QAccessible::Link);
     // The messages over the plot take no hover from the view under them, as
     // a Label of the app's style would, with its hover handler.

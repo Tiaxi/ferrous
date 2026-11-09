@@ -161,7 +161,8 @@ Item {
     }
 
     // Over the plot, a Text rather than a Label: the desktop style's Label
-    // has a hover handler, which would take the hover from the view.
+    // has a hover handler, which would take the hover from the view. Unlike
+    // a Label, a Text is not read by assistive technology unless it says so.
     Text {
         objectName: "plotAnalysingText"
         anchors.centerIn: parent
@@ -170,6 +171,8 @@ Item {
         text: I18n.i18nc("@info:status the visualization waits for its data", "Analysing…")
         font: root.uiPalette.baseFont
         color: root.plotColors.plotTextSecondary
+        Accessible.role: Accessible.StaticText
+        Accessible.name: text
     }
 
     // A file that ends early: centred in the empty part of the plot after
@@ -208,6 +211,8 @@ Item {
                                      "The file ends at %1.", root.formatCut(root.cutSeconds))
                     font: root.uiPalette.baseFont
                     color: root.plotColors.plotTextSecondary
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: text
                 }
             }
 
