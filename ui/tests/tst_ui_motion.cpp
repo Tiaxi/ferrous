@@ -11,6 +11,7 @@
 #include <QEasingCurve>
 #include <QFile>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QImage>
 #include <QMutex>
 #include <QMutexLocker>
@@ -375,6 +376,92 @@ bool shownIn(QQuickItem *panel, const char *name) {
     return itemNamed(panel, QString::fromLatin1(name))->isVisible();
 }
 
+// The lines of the now-playing panel, by their items' names.
+const QStringList kWideLines{QStringLiteral("Title"), QStringLiteral("ArtistAlbum"), QStringLiteral("Details")};
+const QStringList kNarrowLines{QStringLiteral("NarrowTitle"), QStringLiteral("NarrowArtist"),
+                               QStringLiteral("NarrowAlbum"), QStringLiteral("NarrowDetails")};
+
+// A line of the now-playing panel as it draws: the playing track's text
+// where it stays still, the rest of it fading in, and the line before
+// fading out over that.
+struct PanelLine {
+    QQuickItem *line = nullptr;
+    QQuickItem *stillText = nullptr;
+    QQuickItem *still = nullptr;
+    QQuickItem *incoming = nullptr;
+    QQuickItem *outgoing = nullptr;
+    QQuickItem *outgoingText = nullptr;
+
+    bool valid() const {
+        return line != nullptr && incoming != nullptr && outgoing != nullptr && outgoingText != nullptr;
+    }
+    // The opacity of the line before, 0 when it does not fade.
+    double outgoingOpacity() const { return outgoing->isVisible() ? outgoing->opacity() : 0.0; }
+    double incomingOpacity() const { return incoming->isVisible() ? incoming->opacity() : 1.0; }
+    bool fades() const { return outgoingOpacity() > 0; }
+    double stillWidth() const { return still->width(); }
+    QFont font() const { return stillText->property("font").value<QFont>(); }
+};
+
+PanelLine panelLine(QQuickItem *panel, const QString &name) {
+    PanelLine line;
+    line.stillText = itemNamed(panel, QStringLiteral("nowPlaying") + name);
+    if (line.stillText == nullptr) {
+        return line;
+    }
+    line.still = line.stillText->parentItem();
+    line.line = line.still->parentItem();
+    line.incoming = itemNamed(line.line, QStringLiteral("nowPlayingIncoming") + name);
+    line.outgoing = itemNamed(line.line, QStringLiteral("nowPlayingOutgoing") + name + QStringLiteral("Part"));
+    line.outgoingText = itemNamed(line.line, QStringLiteral("nowPlayingOutgoing") + name);
+    return line;
+}
+
+// The opacity `item` draws with, up to `top`.
+double opacityUpTo(QQuickItem *item, QQuickItem *top) {
+    double opacity = 1.0;
+    for (QQuickItem *at = item; at != nullptr && at != top; at = at->parentItem()) {
+        opacity *= at->opacity();
+    }
+    return opacity;
+}
+
+// Whether `name` shows the playing track's line whole, at full opacity,
+// with nothing of the line before over it: none fades, or none of the
+// line is left to.
+bool lineStill(QQuickItem *panel, const QString &name) {
+    const PanelLine line = panelLine(panel, name);
+    return line.valid() && qFuzzyCompare(line.stillWidth() + 1.0, line.line->width() + 1.0)
+        && qFuzzyCompare(opacityUpTo(line.stillText, panel), 1.0);
+}
+
+bool anyLineFades(QQuickItem *panel) {
+    for (const QString &name : kWideLines + kNarrowLines) {
+        if (panelLine(panel, name).fades()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool allLinesStill(QQuickItem *panel) {
+    for (const QString &name : kWideLines + kNarrowLines) {
+        if (!lineStill(panel, name)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `line` keeps `start`, all of its leading fields that do not
+// change, still: up to the space after it, and no further.
+bool keepsStill(const PanelLine &line, const QString &start) {
+    const QFontMetricsF metrics(line.font());
+    const double width = line.stillWidth();
+    return width >= metrics.horizontalAdvance(start)
+        && width <= metrics.horizontalAdvance(start + QLatin1Char(' '));
+}
+
 } // namespace
 
 class UiMotionTest : public QObject {
@@ -392,8 +479,13 @@ private slots:
     void queueEditsMovingThePlayingRowFadeNothing();
     void treeTrackChangeHandsTheAmberOver();
     void reusedTreeRowsShowNoStaleFade();
-    void nowPlayingCrossFadesTheTextForTheNextTrackOfAnAlbum();
+    void nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges();
+    void nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges_data();
     void nowPlayingCrossFadesCoverAndTextForAnotherAlbum();
+    void nowPlayingLineThatComesToDifferJoinsTheFade();
+    void nowPlayingLineCutOffWithinWhatItSharesStaysStill();
+    void nowPlayingSharedStartIsWholeFields();
+    void nowPlayingSharedStartIsWholeFields_data();
     void nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack();
     void nowPlayingLateCoverJoinsTheFadeOfTheLines();
     void nowPlayingRapidChangesFadeFromWhatShows();
@@ -656,59 +748,141 @@ void UiMotionTest::reusedTreeRowsShowNoStaleFade() {
     QCOMPARE(colorOf(libraryRowLook(libraryRowWithPath(window, kTrackB1)).title), nowHex(window));
 }
 
-// The next track of the same album: only the lines cross-fade, over
-// shortDuration; the cover stays.
-void UiMotionTest::nowPlayingCrossFadesTheTextForTheNextTrackOfAnAlbum() {
+void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("wide") << false;
+    QTest::newRow("narrow") << true;
+}
+
+// The next track of the same album: the cover stays, and of the lines only
+// what changes cross-fades, in place, over shortDuration: the title, and
+// the track number in the details, past the year and the genre. The artist
+// and the album stay at full opacity in every frame.
+void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
+    QFETCH(bool, narrow);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY(window != nullptr);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    if (narrow) {
+        window->resize(1000, 720);
+    }
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("currentTrackPath", kTrackA1);
     bridge->setProperty("currentTrackTitle", QStringLiteral("First"));
     bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Album A"));
+    bridge->setProperty("currentTrackYear", 2005);
+    bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
     bridge->setProperty("currentTrackNumber", 1);
+    bridge->setProperty("currentTrackTotal", 2);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
-    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QTRY_COMPARE(panel->property("layoutMode").toString(),
+                 narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(handover != nullptr);
     QVERIFY(!handover->property("running").toBool());
-    QVERIFY(!itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"))->isVisible());
+    QVERIFY(allLinesStill(panel));
+    QTRY_VERIFY(panelLine(panel, narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details")).line->width() > 0);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Slow enough for some frames.
+    units->setShortDuration(600);
 
+    const QString title = narrow ? QStringLiteral("NarrowTitle") : QStringLiteral("Title");
+    const QString details = narrow ? QStringLiteral("NarrowDetails") : QStringLiteral("Details");
+    const QString sharedDetails = narrow ? QStringLiteral("Classical ·") : QStringLiteral("2005 · Classical ·");
+    const QStringList stillLines = narrow
+        ? QStringList{QStringLiteral("NarrowArtist"), QStringLiteral("NarrowAlbum")}
+        : QStringList{QStringLiteral("ArtistAlbum")};
+    QString failure;
+    int frames = 0;
+    int midFrames = 0;
+    const auto checkFrame = [&]() {
+        if (!failure.isEmpty() || !handover->property("running").toBool()) {
+            return;
+        }
+        ++frames;
+        for (const QString &name : stillLines) {
+            if (!lineStill(panel, name)) {
+                failure = QStringLiteral("%1 is not still in frame %2").arg(name).arg(frames);
+            }
+        }
+        for (const QString &name : {title, details}) {
+            const PanelLine line = panelLine(panel, name);
+            if (!qFuzzyCompare(line.incomingOpacity() + line.outgoingOpacity() + 1.0, 2.0)) {
+                failure = QStringLiteral("%1 fades in at %2 and out at %3 in frame %4")
+                              .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(frames);
+            }
+        }
+        const PanelLine titleLine = panelLine(panel, title);
+        if (titleLine.fades() && titleLine.stillWidth() != 0) {
+            failure = QStringLiteral("the title keeps %1 px still").arg(titleLine.stillWidth());
+        }
+        const PanelLine detailsLine = panelLine(panel, details);
+        if (detailsLine.fades() && !keepsStill(detailsLine, sharedDetails)) {
+            failure = QStringLiteral("the details keep %1 px still").arg(detailsLine.stillWidth());
+        }
+        const double out = titleLine.outgoingOpacity();
+        if (out > 0.1 && out < 0.9) {
+            ++midFrames;
+        }
+    };
+    const QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, checkFrame);
+
+    // As BridgeClient tells it: the path, then the metadata.
     bridge->setProperty("currentTrackPath", kTrackA2);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
     bridge->setProperty("currentTrackNumber", 2);
 
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
     QVERIFY(handover->property("running").toBool());
-    QCOMPARE(handover->property("duration").toInt(), units->shortDuration());
+    QCOMPARE(handover->property("duration").toInt(), 600);
     QCOMPARE(easingOf(handover), QEasingCurve::OutCubic);
-    // The playing track's lines, coming in; the track before's going out.
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingTitle"))->property("text").toString(),
-             QStringLiteral("Second"));
-    QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"));
-    QVERIFY(outgoing->isVisible());
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingOutgoingTitle"))->property("text").toString(),
-             QStringLiteral("First"));
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingOutgoingDetails"))->property("text").toString(),
-             QStringLiteral("Track 1"));
+    // The playing track's lines, coming in; the track before's going out
+    // where they differ.
+    const PanelLine titleLine = panelLine(panel, title);
+    const PanelLine detailsLine = panelLine(panel, details);
+    QCOMPARE(titleLine.stillText->property("text").toString(), QStringLiteral("Second"));
+    QVERIFY(titleLine.fades());
+    QCOMPARE(titleLine.outgoingText->property("text").toString(), QStringLiteral("First"));
+    QVERIFY(detailsLine.fades());
+    QCOMPARE(detailsLine.stillText->property("text").toString(),
+             narrow ? QStringLiteral("Classical · Track 2 of 2") : QStringLiteral("2005 · Classical · Track 2 of 2"));
+    QCOMPARE(detailsLine.outgoingText->property("text").toString(),
+             narrow ? QStringLiteral("Classical · Track 1 of 2") : QStringLiteral("2005 · Classical · Track 1 of 2"));
+    QVERIFY(keepsStill(detailsLine, sharedDetails));
+    for (const QString &name : stillLines) {
+        QVERIFY2(lineStill(panel, name), qPrintable(name));
+    }
     QVERIFY(!itemNamed(panel, QStringLiteral("albumArtOutgoing"))->isVisible());
 
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
-    QVERIFY(!itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"))->isVisible());
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY(frames > 0);
+    QVERIFY(midFrames > 0);
+    QVERIFY(allLinesStill(panel));
 
     // Metadata that comes later changes the lines in place.
-    bridge->setProperty("currentTrackGenre", QStringLiteral("Classical"));
+    bridge->setProperty("currentTrackGenre", QStringLiteral("Baroque"));
     QVERIFY(!handover->property("running").toBool());
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingDetails"))->property("text").toString(),
-             QStringLiteral("Classical · Track 2"));
+    QCOMPARE(detailsLine.stillText->property("text").toString(),
+             narrow ? QStringLiteral("Baroque · Track 2 of 2") : QStringLiteral("2005 · Baroque · Track 2 of 2"));
+    QVERIFY(allLinesStill(panel));
+
+    // Repeat-One: the same track again, its metadata told again, fades
+    // nothing.
+    bridge->setProperty("currentTrackPath", kTrackA2);
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
+    bridge->setProperty("currentTrackNumber", 2);
+    QVERIFY(!handover->property("running").toBool());
+    QVERIFY(allLinesStill(panel));
 }
 
-// Another album: the cover and the lines cross-fade together, on one curve
-// over longDuration.
+// Another album: every line that differs cross-fades, on one curve with
+// the cover over longDuration; the artist both share stays still.
 void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -717,14 +891,20 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     QObject *bridge = bridgeOf(window);
     bridge->setProperty("currentTrackPath", kTrackA2);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Album A"));
+    bridge->setProperty("currentTrackYear", 2005);
+    bridge->setProperty("currentTrackNumber", 2);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QTRY_VERIFY(panelLine(panel, QStringLiteral("ArtistAlbum")).line->width() > 0);
 
     bridge->setProperty("currentTrackPath", kTrackB1);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Third"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Album B"));
+    bridge->setProperty("currentTrackYear", 2007);
+    bridge->setProperty("currentTrackNumber", 1);
 
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
@@ -732,21 +912,155 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
     QCOMPARE(easingOf(handover), QEasingCurve::OutCubic);
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
-    QQuickItem *outgoingText = itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"));
     QVERIFY(outgoingCover->isVisible());
-    QVERIFY(outgoingText->isVisible());
-    // One curve: the cover and the lines going out are at the same point.
-    QCOMPARE(outgoingCover->opacity(), outgoingText->parentItem()->opacity());
+    // One curve: the cover and every line going out are at the same point.
+    const auto oneCurve = [&]() {
+        for (const QString &name : kWideLines) {
+            const PanelLine line = panelLine(panel, name);
+            if (!line.fades() || line.outgoingOpacity() != outgoingCover->opacity()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    QVERIFY(oneCurve());
     QVERIFY(QTest::qWaitFor([&]() {
         const double cover = outgoingCover->opacity();
         return cover < 0.9 && cover > 0.1;
     }));
-    QCOMPARE(outgoingCover->opacity(), outgoingText->parentItem()->opacity());
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingOutgoingArtistAlbum"))->property("text").toString(),
-             QStringLiteral("Album A"));
+    QVERIFY(oneCurve());
+    QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("Second"));
+    QCOMPARE(textOf(panel, "nowPlayingOutgoingArtistAlbum"), QStringLiteral("Artist A — Album A"));
+    QCOMPARE(textOf(panel, "nowPlayingOutgoingDetails"), QStringLiteral("2005 · Track 2"));
+    QCOMPARE(panelLine(panel, QStringLiteral("Title")).stillWidth(), 0.0);
+    QCOMPARE(panelLine(panel, QStringLiteral("Details")).stillWidth(), 0.0);
+    QVERIFY(keepsStill(panelLine(panel, QStringLiteral("ArtistAlbum")), QStringLiteral("Artist A —")));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(!outgoingCover->isVisible());
-    QVERIFY(!outgoingText->isVisible());
+    QVERIFY(allLinesStill(panel));
+}
+
+// A line of the track change that was still and comes to differ while the
+// others fade (its metadata comes late) joins the fade: the line before
+// fades out from full opacity, the lines fading go on from where they are,
+// and nothing jumps.
+void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    units->setShortDuration(1500);
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
+    showTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"));
+    QVERIFY(handover->property("running").toBool());
+    const PanelLine title = panelLine(panel, QStringLiteral("Title"));
+    const PanelLine artistAlbum = panelLine(panel, QStringLiteral("ArtistAlbum"));
+    QVERIFY(QTest::qWaitFor([&]() { return title.outgoingOpacity() < 0.6; }, 5000));
+    QVERIFY(title.outgoingOpacity() > 0.05);
+    QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
+    const double titleBefore = title.outgoingOpacity();
+
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist B"));
+    QVERIFY(handover->property("running").toBool());
+    QCOMPARE(handover->property("duration").toInt(), 1500);
+    // At once: the line before shows whole, as the line did; the title
+    // where it was.
+    QVERIFY(artistAlbum.fades());
+    QCOMPARE(artistAlbum.outgoingOpacity(), 1.0);
+    QCOMPARE(artistAlbum.incomingOpacity(), 0.0);
+    QCOMPARE(artistAlbum.stillWidth(), 0.0);
+    QCOMPARE(artistAlbum.outgoingText->property("text").toString(), QStringLiteral("Artist A — Album A"));
+    QCOMPARE(artistAlbum.stillText->property("text").toString(), QStringLiteral("Artist B — Album A"));
+    QCOMPARE(title.outgoingOpacity(), titleBefore);
+    QCOMPARE(title.outgoingText->property("text").toString(), QStringLiteral("First"));
+
+    // Then each goes one way only, on the one curve, to the playing track.
+    double titleOut = titleBefore;
+    double lineOut = 1.0;
+    QVERIFY(QTest::qWaitFor([&]() {
+        const double nextTitle = title.outgoingOpacity();
+        const double nextLine = artistAlbum.outgoingOpacity();
+        if (nextTitle > titleOut || nextLine > lineOut
+            || !qFuzzyCompare(nextTitle / titleBefore + 1.0, nextLine + 1.0)) {
+            qWarning("title %f -> %f, line %f -> %f", titleOut, nextTitle, lineOut, nextLine);
+            return true;
+        }
+        titleOut = nextTitle;
+        lineOut = nextLine;
+        return !handover->property("running").toBool();
+    }, 6000));
+    QVERIFY(!handover->property("running").toBool());
+    QVERIFY(allLinesStill(panel));
+}
+
+// A line cut off within the fields the two share looks the same for both
+// tracks: it stays still.
+void UiMotionTest::nowPlayingLineCutOffWithinWhatItSharesStaysStill() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    const QString genre = QStringLiteral(
+        "A Genre Named At Such Length That No Sidebar Will Ever Show All Of It, Not Even The Widest One");
+    bridge->setProperty("currentTrackGenre", genre);
+    bridge->setProperty("currentTrackNumber", 1);
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
+    const PanelLine details = panelLine(panel, QStringLiteral("Details"));
+    QTRY_VERIFY(details.stillText->property("truncated").toBool());
+
+    bridge->setProperty("currentTrackPath", kTrackA2);
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
+    bridge->setProperty("currentTrackNumber", 2);
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(panelLine(panel, QStringLiteral("Title")).fades());
+    QCOMPARE(details.outgoingText->property("text").toString(), genre + QStringLiteral(" · Track 1"));
+    QVERIFY(lineStill(panel, QStringLiteral("Details")));
+    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
+    QVERIFY(allLinesStill(panel));
+}
+
+void UiMotionTest::nowPlayingSharedStartIsWholeFields_data() {
+    QTest::addColumn<QString>("before");
+    QTest::addColumn<QString>("after");
+    QTest::addColumn<QString>("separator");
+    QTest::addColumn<QString>("shared");
+    QTest::newRow("the last field") << "2005 · Rock · Track 1" << "2005 · Rock · Track 2" << " · "
+                                    << "2005 · Rock ·";
+    QTest::newRow("a field more") << "2005 · Rock" << "2005 · Rock · Track 2" << " · " << "2005 · Rock";
+    QTest::newRow("a field fewer") << "2005 · Rock · Track 1" << "2005 · Rock" << " · " << "2005 · Rock";
+    QTest::newRow("the first field") << "1999 · Rock" << "2005 · Rock" << " · " << "";
+    QTest::newRow("not part of a field") << "Track 1" << "Track 12" << " · " << "";
+    QTest::newRow("the artist") << "Artist — Album A" << "Artist — Album B" << " — " << "Artist —";
+    QTest::newRow("the same") << "2005 · Rock" << "2005 · Rock" << " · " << "2005 · Rock";
+    QTest::newRow("one field, the same") << "First" << "First" << "" << "First";
+    QTest::newRow("one field, another") << "First" << "Firsts" << "" << "";
+}
+
+// What stays still of a line that changes: its whole leading fields that
+// are the same, never part of one.
+void UiMotionTest::nowPlayingSharedStartIsWholeFields() {
+    QFETCH(QString, before);
+    QFETCH(QString, after);
+    QFETCH(QString, separator);
+    QFETCH(QString, shared);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QVariant result;
+    QVERIFY(QMetaObject::invokeMethod(named(window, "nowPlayingPanel"), "_sharedStart",
+                                      Q_RETURN_ARG(QVariant, result), Q_ARG(QVariant, before),
+                                      Q_ARG(QVariant, after), Q_ARG(QVariant, separator)));
+    QCOMPARE(result.toString(), shared);
 }
 
 // Playback cleared and a track loaded while a fade runs: nothing of the
@@ -774,13 +1088,13 @@ void UiMotionTest::nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack() {
 
     showTrack(bridge, kTrackA2, QStringLiteral("Third"), QStringLiteral("Album C"), covers.first);
     QVERIFY(!handover->property("running").toBool());
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
+    QVERIFY(!anyLineFades(panel));
     QVERIFY(!shownIn(panel, "albumArtOutgoing"));
     QCOMPARE(textOf(panel, "nowPlayingTitle"), QStringLiteral("Third"));
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QVERIFY(allLinesStill(panel));
     // And none comes later either.
     QTest::qWait(300);
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
+    QVERIFY(!anyLineFades(panel));
     QVERIFY(!shownIn(panel, "albumArtOutgoing"));
 }
 
@@ -807,19 +1121,21 @@ void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
-    QQuickItem *outgoingText = itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"));
+    const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     QVERIFY(outgoingCover->isVisible());
-    QVERIFY(outgoingText->isVisible());
+    QVERIFY(title.fades());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
-    QCOMPARE(outgoingCover->opacity(), outgoingText->parentItem()->opacity());
+    QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
     QVERIFY(QTest::qWaitFor([&]() {
         const double cover = outgoingCover->opacity();
         return cover < 0.9 && cover > 0.1;
     }));
-    QCOMPARE(outgoingCover->opacity(), outgoingText->parentItem()->opacity());
+    QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
+    // The album line is the same: it stays still all along.
+    QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(!outgoingCover->isVisible());
-    QVERIFY(!outgoingText->isVisible());
+    QVERIFY(allLinesStill(panel));
 }
 
 void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows_data() {
@@ -858,7 +1174,7 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(panel->property("handover").toDouble(), 0.0);
     QCOMPARE(textOf(panel, "nowPlayingTitle"), QStringLiteral("Third"));
-    QVERIFY(shownIn(panel, "nowPlayingOutgoingWideText"));
+    QVERIFY(anyLineFades(panel));
     QVERIFY(shownIn(panel, "albumArtOutgoing"));
     // What fades out is what showed more: A's lines and cover early, B's
     // late.
@@ -870,9 +1186,9 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
                  ->property("source").toUrl().toString(),
              pastHalf ? covers.second : covers.first);
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
+    QVERIFY(!anyLineFades(panel));
     QVERIFY(!shownIn(panel, "albumArtOutgoing"));
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QVERIFY(allLinesStill(panel));
 }
 
 // A cover that comes after the fade of the lines is done fades in alone,
@@ -900,8 +1216,8 @@ void UiMotionTest::nowPlayingCoverAfterTheFadeFadesAlone() {
     QVERIFY(outgoingCover->isVisible());
     QCOMPARE(outgoingCover->childItems().first()->property("source").toUrl().toString(), covers.first);
     // The lines did not change: they neither fade nor dim.
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QVERIFY(!anyLineFades(panel));
+    QVERIFY(allLinesStill(panel));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(!outgoingCover->isVisible());
 }
@@ -932,13 +1248,13 @@ void UiMotionTest::nowPlayingLeavesNothingPlayingWithoutAFade() {
               coverFirst ? Order::CoverFirst : Order::PathFirst);
     QVERIFY(!handover->property("running").toBool());
     QVERIFY(!shownIn(panel, "albumArtOutgoing"));
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QVERIFY(!anyLineFades(panel));
+    QVERIFY(allLinesStill(panel));
 
     bridge->setProperty("currentTrackCoverPath", covers.second);
     QVERIFY(handover->property("running").toBool());
     QVERIFY(shownIn(panel, "albumArtOutgoing"));
-    QVERIFY(!shownIn(panel, "nowPlayingOutgoingWideText"));
+    QVERIFY(!anyLineFades(panel));
 }
 
 void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous_data() {
@@ -971,13 +1287,12 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     showTrack(bridge, kTrackA2, QStringLiteral("Second"), QStringLiteral("Album A"), covers.first);
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), 1500);
-    QQuickItem *liveText = itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem();
-    QQuickItem *outgoingText = itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"))->parentItem();
+    const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
-    QVERIFY(QTest::qWaitFor([&]() { return outgoingText->opacity() < linesLeft; }, 5000));
-    QVERIFY(outgoingText->opacity() > 0.05);
-    const double outgoingBefore = outgoingText->opacity();
-    const double liveBefore = liveText->opacity();
+    QVERIFY(QTest::qWaitFor([&]() { return title.outgoingOpacity() < linesLeft; }, 5000));
+    QVERIFY(title.outgoingOpacity() > 0.05);
+    const double outgoingBefore = title.outgoingOpacity();
+    const double liveBefore = title.incomingOpacity();
     QVERIFY(!outgoingCover->isVisible());
 
     bridge->setProperty("currentTrackCoverPath", covers.second);
@@ -985,10 +1300,10 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     // the new one, as it did before.
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), 3000);
-    QVERIFY(outgoingText->isVisible());
+    QVERIFY(title.fades());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
-    QCOMPARE(outgoingText->opacity(), outgoingBefore);
-    QCOMPARE(liveText->opacity(), liveBefore);
+    QCOMPARE(title.outgoingOpacity(), outgoingBefore);
+    QCOMPARE(title.incomingOpacity(), liveBefore);
     QVERIFY(outgoingCover->isVisible());
     QCOMPARE(outgoingCover->opacity(), 1.0);
     QCOMPARE(outgoingCover->childItems().first()->property("source").toUrl().toString(), covers.first);
@@ -997,13 +1312,14 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     double lines = outgoingBefore;
     double cover = 1.0;
     QVERIFY(QTest::qWaitFor([&]() {
-        const double nextLines = outgoingText->isVisible() ? outgoingText->opacity() : 0.0;
+        const double nextLines = title.outgoingOpacity();
         const double nextCover = outgoingCover->isVisible() ? outgoingCover->opacity() : 0.0;
         if (nextLines > lines || nextCover > cover
-            || !qFuzzyCompare(liveText->opacity() + nextLines + 1.0, 2.0)
-            || (nextCover > 0 && !qFuzzyCompare(nextLines / outgoingBefore + 1.0, nextCover + 1.0))) {
+            || !qFuzzyCompare(title.incomingOpacity() + nextLines + 1.0, 2.0)
+            || (nextCover > 0 && !qFuzzyCompare(nextLines / outgoingBefore + 1.0, nextCover + 1.0))
+            || !lineStill(panel, QStringLiteral("ArtistAlbum"))) {
             qWarning("lines %f -> %f, cover %f -> %f, live %f", lines, nextLines, cover, nextCover,
-                     liveText->opacity());
+                     title.incomingOpacity());
             return true;
         }
         lines = nextLines;
@@ -1011,9 +1327,8 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
         return !handover->property("running").toBool();
     }, 6000));
     QVERIFY(!handover->property("running").toBool());
-    QVERIFY(!outgoingText->isVisible());
     QVERIFY(!outgoingCover->isVisible());
-    QCOMPARE(liveText->opacity(), 1.0);
+    QVERIFY(allLinesStill(panel));
 }
 
 // Expanding a row opens its children downward: the toggled row stays put,
@@ -1216,9 +1531,9 @@ void UiMotionTest::animationsOffMakeEveryChangeInstant() {
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     playQueueRow(bridge, 3);
     QVERIFY(!handover->property("running").toBool());
-    QVERIFY(!itemNamed(panel, QStringLiteral("nowPlayingOutgoingWideText"))->isVisible());
+    QVERIFY(!anyLineFades(panel));
     QVERIFY(!itemNamed(panel, QStringLiteral("albumArtOutgoing"))->isVisible());
-    QCOMPARE(itemNamed(panel, QStringLiteral("nowPlayingWideText"))->parentItem()->opacity(), 1.0);
+    QVERIFY(allLinesStill(panel));
 
     // The tree's toggle.
     QQuickItem *tree = named(window, "libraryView");
