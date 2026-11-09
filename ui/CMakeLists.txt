@@ -310,7 +310,7 @@ endforeach()
 install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo COMPONENT desktop_integration)
 
 if(BUILD_TESTING)
-    find_package(Qt6 6.6 REQUIRED COMPONENTS Test)
+    find_package(Qt6 6.6 REQUIRED COMPONENTS Test QuickTest)
 
     # The line a Qt test prints for a skipped test function, for any test
     # class name.
@@ -876,6 +876,7 @@ if(BUILD_TESTING)
         Qt6::Network
         Qt6::Widgets
         Qt6::Test
+        Qt6::QuickTest
         KF6::Kirigami
         KF6::I18n
         KF6::I18nQml

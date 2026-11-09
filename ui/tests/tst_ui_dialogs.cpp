@@ -21,6 +21,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
 #include <qqml.h>
 #include <algorithm>
@@ -196,18 +197,33 @@ QString describe(QQuickItem *item) {
                                          item->objectName());
 }
 
-// Clicks `button` once it is enabled and nothing covers it, and checks that
-// the click reached it: a failure names what took the press instead.
+// Whether `item` or an item it sits in still waits for its polish, where
+// layouts and positioners place their children. A Row culls a child that is
+// hidden and takes it back only there: until then, a child shown again says
+// it is visible, but Qt neither draws it nor gives it presses.
+bool layoutPending(const QQuickItem *item) {
+    for (; item != nullptr; item = item->parentItem()) {
+        if (QQuickTest::qIsPolishScheduled(item)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Clicks `button` once it is enabled, laid out and nothing covers it, and
+// checks that the click reached it: a failure names what took the press
+// instead.
 bool clickButtonWhenReachable(QQuickWindow *window, QQuickItem *button, QString *failure) {
     const auto reachable = [&]() {
-        return button->isVisible() && button->isEnabled()
+        return button->isVisible() && button->isEnabled() && !layoutPending(button)
             && pressTargetAt(window, sceneRect(button).center()) == button;
     };
     if (!QTest::qWaitFor(reachable)) {
-        *failure = QStringLiteral("%1 is %2, %3; a press there goes to %4")
+        *failure = QStringLiteral("%1 is %2, %3, %4; a press there goes to %5")
                        .arg(describe(button),
                             button->isVisible() ? QStringLiteral("shown") : QStringLiteral("hidden"),
                             button->isEnabled() ? QStringLiteral("enabled") : QStringLiteral("disabled"),
+                            layoutPending(button) ? QStringLiteral("not laid out") : QStringLiteral("laid out"),
                             describe(pressTargetAt(window, sceneRect(button).center())));
         return false;
     }
@@ -369,6 +385,7 @@ private slots:
     void theQueuesPathIndexFollowsEveryEdit();
     void recentIssuesLookUpALargeQueueAtTheSameCost();
     void editTagsMarksAChangedFieldAndColumnAndReverts();
+    void editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut();
     void editTagsTableHeaderUsesTheQueuesHeaderStyle();
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
     void dialogsPutTheirButtonsInKdesOrder();
@@ -1562,6 +1579,41 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     QCOMPARE(editor.m_tableModel.fieldValue(7, QStringLiteral("genre")), QStringLiteral("Classical"));
     QTRY_VERIFY(!columnRevert->isVisible());
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::Normal);
+    QVERIFY(!editor.dirty());
+    editor.close();
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+// The column's Revert shows as soon as an edit changes the column, but its
+// header row takes it back only when it is next laid out: a click before
+// that went to the column's label (#516).
+void UiDialogsTest::editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(8); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    QQuickItem *columnRevert = named(window, QStringLiteral("tagEditorColumnRevert_genre"));
+    QVERIFY(columnRevert != nullptr);
+    QTRY_VERIFY(!layoutPending(columnRevert));
+    QVERIFY(!columnRevert->isVisible());
+
+    // Changed with no event processed since: shown, but not yet laid out.
+    editor.applyBulkFieldToRows({0, 1, 2, 3, 4, 5, 6, 7}, QStringLiteral("genre"), QStringLiteral("Ambient"));
+    QVERIFY(columnRevert->isVisible());
+    QVERIFY2(layoutPending(columnRevert), "the header row was laid out before the test could click");
+    QString failure;
+    QVERIFY2(clickButtonWhenReachable(window, columnRevert, &failure), qPrintable(failure));
+    for (int row = 0; row < 8; ++row) {
+        QCOMPARE(editor.m_tableModel.fieldValue(row, QStringLiteral("genre")), QStringLiteral("Classical"));
+    }
+    QTRY_VERIFY(!columnRevert->isVisible());
     QVERIFY(!editor.dirty());
     editor.close();
     QTRY_VERIFY(!dialog->property("visible").toBool());
