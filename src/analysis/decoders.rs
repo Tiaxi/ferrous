@@ -9,7 +9,7 @@ use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::conv::IntoSample;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::sample::Sample;
@@ -694,26 +694,37 @@ impl GstFallback {
     }
 }
 
-/// Open an audio file with symphonia, returning the format reader,
-/// decoder, track info, and an estimated total column count.  A single
-/// file open + probe avoids the double-open latency that is visible on
-/// network-mounted storage during gapless transitions.
-pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
+/// The format reader of the audio `source` reads, a file of `extension`.
+/// The stream ends where the audio does, before tags appended after it.
+pub(super) fn probe_audio(
+    source: Box<dyn MediaSource>,
+    extension: Option<&str>,
+) -> symphonia::core::errors::Result<Box<dyn symphonia::core::formats::FormatReader>> {
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = extension {
         hint.with_extension(ext);
     }
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-    let format = symphonia::default::get_probe()
+    let mss = MediaSourceStream::new(
+        super::stream_end::without_trailing_tags(source),
+        MediaSourceStreamOptions::default(),
+    );
+    Ok(symphonia::default::get_probe()
         .format(
             &hint,
             mss,
             &analysis_format_options(),
             &MetadataOptions::default(),
-        )
-        .ok()?
-        .format;
+        )?
+        .format)
+}
+
+/// Open an audio file with symphonia, returning the format reader,
+/// decoder, track info, and an estimated total column count.  A single
+/// file open + probe avoids the double-open latency that is visible on
+/// network-mounted storage during gapless transitions.
+pub(super) fn open_symphonia_file(path: &Path) -> Option<SymphoniaFile> {
+    let file = File::open(path).ok()?;
+    let format = probe_audio(Box::new(file), path.extension().and_then(|e| e.to_str())).ok()?;
     let track = format.default_track()?;
     let track_id = track.id;
     let (native_sample_rate, native_channels) = symphonia_track_shape(&track.codec_params);

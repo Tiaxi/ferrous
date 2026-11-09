@@ -571,6 +571,20 @@ mod tests {
     }
 
     #[test]
+    fn the_service_reads_a_flac_to_its_last_frame_before_a_tag_after_it() {
+        use super::super::test_flac::{flac_bytes, id3v1_tag};
+        let frames = 3 * usize::try_from(TILE_FRAMES).unwrap() + 3_852;
+        let samples: Vec<i32> = pcm16(frames, 2).into_iter().map(i32::from).collect();
+        let path = fixture_path("2-16-id3v1.flac");
+        let bytes = [flac_bytes(&samples, 44_100, 2, 16, None), id3v1_tag()].concat();
+        std::fs::write(&path, bytes).expect("write FLAC fixture");
+        let (_, eof, _) = service_tiles(&path);
+        assert_eq!(eof, u64::try_from(frames).unwrap());
+        assert_prefill_matches_service("16-bit stereo FLAC with an ID3v1 tag", &path);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
     fn prefilled_tiles_equal_the_service_tiles_for_compressed_fixtures() {
         for (name, bytes, extension) in [
             (

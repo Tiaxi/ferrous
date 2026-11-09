@@ -119,3 +119,39 @@ pub(super) fn flac_bytes(
     }
     out.bytes
 }
+
+/// An ID3v1 tag, as appended to a file.
+pub(super) fn id3v1_tag() -> Vec<u8> {
+    let mut tag = b"TAG".to_vec();
+    tag.resize(128, b' ');
+    tag
+}
+
+/// An APEv2 tag of one item, as appended to a file, with a header before
+/// the item if `header`.
+pub(super) fn apev2_tag(header: bool) -> Vec<u8> {
+    const HAS_HEADER: u32 = 1 << 31;
+    const IS_HEADER: u32 = 1 << 29;
+    let mut item = 5_u32.to_le_bytes().to_vec();
+    item.extend(0_u32.to_le_bytes());
+    item.extend(b"Title\0Tone!");
+    // The size counts the item and the footer.
+    let size = u32::try_from(item.len()).unwrap() + 32;
+    let block = |flags: u32| {
+        let mut block = b"APETAGEX".to_vec();
+        block.extend(2_000_u32.to_le_bytes());
+        block.extend(size.to_le_bytes());
+        block.extend(1_u32.to_le_bytes());
+        block.extend(flags.to_le_bytes());
+        block.extend([0_u8; 8]);
+        block
+    };
+    let has_header = if header { HAS_HEADER } else { 0 };
+    let mut tag = Vec::new();
+    if header {
+        tag.extend(block(has_header | IS_HEADER));
+    }
+    tag.extend(item);
+    tag.extend(block(has_header));
+    tag
+}

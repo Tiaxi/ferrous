@@ -18,6 +18,7 @@ mod gst_lifecycle;
 mod gst_waveform;
 mod session;
 mod stft_batch;
+pub(crate) mod stream_end;
 #[cfg(test)]
 mod test_flac;
 mod track_io;
@@ -44,7 +45,7 @@ use symphonia::core::audio::SampleBuffer;
 
 use cache::{usize_to_u64, WaveformSourceStamp};
 use centered_view::CenteredView;
-use decoders::{analysis_format_options, packet_first_frame, symphonia_track_shape};
+use decoders::{packet_first_frame, probe_audio, symphonia_track_shape};
 use fft::{ensure_sample_buffer, CutOff, OverviewProgress, WaveformAccumulator, MIN_PREVIEW_PEAKS};
 #[cfg(feature = "gst")]
 use gst_waveform::decode_waveform_peaks_stream_gst;
@@ -55,9 +56,7 @@ use session::{
 };
 use symphonia::core::codecs::{CodecType, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use symphonia::core::io::MediaSource;
 use track_io::{
     format_from_name, spawn_track_io, stamp_of, FormatCache, TrackFormat, TrackIoReply,
     TrackIoRequest,
@@ -2580,21 +2579,7 @@ where
     if is_cancelled() {
         return Ok(true);
     }
-    let mut hint = Hint::new();
-    if let Some(ext) = extension {
-        hint.with_extension(ext);
-    }
-
-    let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
-
-    let mut format = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &analysis_format_options(),
-            &MetadataOptions::default(),
-        )?
-        .format;
+    let mut format = probe_audio(source, extension)?;
 
     let track = format
         .default_track()
@@ -7501,6 +7486,56 @@ mod tests {
             panic!("{progress:?}");
         };
         assert_eq!(cut.end_frame, 8 * 4_096);
+    }
+
+    /// A 44.1 kHz stereo FLAC of nine whole blocks and a last one of
+    /// 3,852 frames, and the length of its last frame in bytes.
+    fn flac_with_a_short_last_block() -> (Vec<u8>, usize, usize) {
+        let frames = 9 * 4_096 + 3_852;
+        let bytes = test_flac::flac_bytes(&tone(frames, 2), 44_100, 2, 16, None);
+        let whole = test_flac::flac_bytes(&tone(9 * 4_096, 2), 44_100, 2, 16, None);
+        let last_frame = bytes.len() - whole.len();
+        (bytes, frames, last_frame)
+    }
+
+    #[test]
+    fn a_flac_with_tags_after_its_last_frame_is_complete() {
+        let (audio, frames, _) = flac_with_a_short_last_block();
+        #[allow(clippy::cast_precision_loss)] // A few seconds of frames.
+        let whole = frames as f32 / 44_100.0;
+        for (name, tags) in [
+            ("ID3v1", test_flac::id3v1_tag()),
+            ("APEv2 footer", test_flac::apev2_tag(false)),
+            (
+                "APEv2 and ID3v1",
+                [test_flac::apev2_tag(true), test_flac::id3v1_tag()].concat(),
+            ),
+        ] {
+            let bytes = [audio.clone(), tags].concat();
+            let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+            let (_, coverage, progress) = updates.last().expect("final update");
+            assert_eq!(*progress, OverviewProgress::Complete, "{name}");
+            assert!(
+                (coverage - whole).abs() < 1e-4,
+                "{name}: covers {coverage} s"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cut_off_flac_with_a_tag_after_it_still_ends_early() {
+        // The last frame is cut in half, and an ID3v1 tag follows.
+        let (mut bytes, _, last_frame) = flac_with_a_short_last_block();
+        bytes.truncate(bytes.len() - last_frame / 2);
+        bytes.extend(test_flac::id3v1_tag());
+        let updates = symphonia_overview(Box::new(std::io::Cursor::new(bytes)), "flac");
+        let (_, coverage, progress) = updates.last().expect("final update");
+        let OverviewProgress::EndsEarly(cut) = *progress else {
+            panic!("{progress:?}");
+        };
+        assert_eq!(cut.frames, Some("FLAC"));
+        assert_eq!(cut.end_frame, 9 * 4_096);
+        assert!(*coverage <= cut.seconds() + 1e-6, "covers {coverage} s");
     }
 
     #[test]

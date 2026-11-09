@@ -407,7 +407,10 @@ fn probe_stream_details(track_path: &Path) -> Option<StreamTechnicalDetails> {
     }
 
     let file = File::open(track_path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let mss = MediaSourceStream::new(
+        crate::analysis::stream_end::without_trailing_tags(Box::new(file)),
+        MediaSourceStreamOptions::default(),
+    );
     let mut format = symphonia::default::get_probe()
         .format(
             &hint,
