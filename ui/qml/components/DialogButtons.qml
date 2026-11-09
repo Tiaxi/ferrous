@@ -14,14 +14,38 @@ DialogButtonBox {
 
     property Item primary: null
 
-    function _applyPrimary() {
-        // Qt 6.8 and later keep one default button for the box, and take
-        // the mark from the others.
-        if ("defaultButton" in root) {
-            root.defaultButton = root.primary
+    function _indexOfButton(button) {
+        for (let i = 0; i < root.count; ++i) {
+            if (root.itemAt(i) === button) {
+                return i
+            }
         }
-        if (root.primary) {
-            root.primary.Accessible.defaultButton = true
+        return -1
+    }
+
+    function _applyPrimary() {
+        // Qt 6.11 added the box's defaultButton, which it highlights and
+        // gives the focus. Its setter removes the button it takes the mark
+        // from with removeItem(), which destroys that button, so the old
+        // default leaves the row while the mark moves and then comes back.
+        if ("defaultButton" in root) {
+            const previous = root.defaultButton
+            const index = previous && previous !== root.primary ? root._indexOfButton(previous) : -1
+            if (index >= 0) {
+                root.takeItem(index)
+            }
+            root.defaultButton = root.primary
+            if (index >= 0) {
+                root.insertItem(index, previous)
+            }
+        }
+        // Breeze draws the button marked default as such; only the primary
+        // one keeps the mark.
+        for (let i = 0; i < root.count; ++i) {
+            const button = root.itemAt(i)
+            if (button) {
+                button.Accessible.defaultButton = button === root.primary
+            }
         }
     }
 
