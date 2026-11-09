@@ -583,6 +583,13 @@ enum RequestError {
         retry_after: Option<Duration>,
     },
     InvalidResponse(String),
+    /// A reply whose body could not be read, for example because the
+    /// connection closed before its end. Its `Retry-After` still counts.
+    UnreadableReply {
+        status: u16,
+        error: String,
+        retry_after: Option<Duration>,
+    },
     Keyring(String),
 }
 
@@ -1729,7 +1736,9 @@ fn send_signed_request(
 /// error code says most. Otherwise the HTTP status decides, whatever the
 /// body: an unsuccessful one is an HTTP error, so a 403 with an HTML page is
 /// as permanent as one with no body. A successful status with a body that is
-/// not JSON, such as a captive portal's page, is an invalid response.
+/// not JSON, such as a captive portal's page, is an invalid response, and one
+/// whose body cannot be read is an unreadable reply that keeps the reply's
+/// `Retry-After`.
 fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
     let payload = reply
         .body_error
@@ -1756,11 +1765,16 @@ fn interpret_reply(reply: &HttpReply) -> Result<Value, RequestError> {
             retry_after: reply.retry_after,
         });
     }
-    payload.ok_or_else(|| {
-        RequestError::InvalidResponse(match &reply.body_error {
-            Some(error) => format!("could not read the reply (HTTP {}): {error}", reply.status),
-            None => format!("unexpected non-JSON reply (HTTP {})", reply.status),
-        })
+    payload.ok_or_else(|| match &reply.body_error {
+        Some(error) => RequestError::UnreadableReply {
+            status: reply.status,
+            error: error.clone(),
+            retry_after: reply.retry_after,
+        },
+        None => RequestError::InvalidResponse(format!(
+            "unexpected non-JSON reply (HTTP {})",
+            reply.status
+        )),
     })
 }
 
@@ -1868,7 +1882,9 @@ fn asks_to_wait(error: &RequestError) -> bool {
 /// [`MAX_REQUESTED_WAIT`].
 fn requested_wait(error: &RequestError) -> Option<Duration> {
     match error {
-        RequestError::Http { retry_after, .. } | RequestError::Api { retry_after, .. } => {
+        RequestError::Http { retry_after, .. }
+        | RequestError::Api { retry_after, .. }
+        | RequestError::UnreadableReply { retry_after, .. } => {
             retry_after.map(|wait| wait.min(MAX_REQUESTED_WAIT))
         }
         _ => None,
@@ -1879,7 +1895,9 @@ fn requested_wait(error: &RequestError) -> Option<Duration> {
 /// should be retried on a timer.
 fn is_transient(error: &RequestError) -> bool {
     match error {
-        RequestError::Transport(_) | RequestError::InvalidResponse(_) => true,
+        RequestError::Transport(_)
+        | RequestError::InvalidResponse(_)
+        | RequestError::UnreadableReply { .. } => true,
         RequestError::Http { status, .. } => is_temporary_status(*status),
         RequestError::Api { code, .. } => matches!(
             *code,
@@ -1904,6 +1922,9 @@ fn request_error_message(error: &RequestError) -> String {
         RequestError::Http { status, .. } => format!("Last.fm HTTP error {status}"),
         RequestError::Api { code, message, .. } => format!("Last.fm API error {code}: {message}"),
         RequestError::InvalidResponse(message) => format!("Last.fm response error: {message}"),
+        RequestError::UnreadableReply { status, error, .. } => {
+            format!("Last.fm response error: could not read the reply (HTTP {status}): {error}")
+        }
         RequestError::Keyring(message) => format!("Last.fm keyring error: {message}"),
     }
 }
@@ -2661,13 +2682,10 @@ mod tests {
         (url, server)
     }
 
-    #[test]
-    fn a_rate_limit_whose_body_is_cut_off_still_holds_back_requests() {
-        let (url, server) = serve_once(
-            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\n\
-              Content-Type: application/json\r\nContent-Length: 200\r\n\
-              Connection: close\r\n\r\n{\"error\":29,\"mess",
-        );
+    /// Posts to a loopback server that answers with `response`, and returns
+    /// the reply as [`HttpTransport`] reads it.
+    fn loopback_reply(response: &'static [u8]) -> HttpReply {
+        let (url, server) = serve_once(response);
         let transport = HttpTransport {
             client: reqwest::blocking::Client::builder()
                 .no_proxy()
@@ -2683,6 +2701,16 @@ mod tests {
             )
             .expect("the status and headers arrived");
         server.join().expect("server");
+        reply
+    }
+
+    #[test]
+    fn a_rate_limit_whose_body_is_cut_off_still_holds_back_requests() {
+        let reply = loopback_reply(
+            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\n\
+              Content-Type: application/json\r\nContent-Length: 200\r\n\
+              Connection: close\r\n\r\n{\"error\":29,\"mess",
+        );
 
         assert_eq!(reply.status, 429);
         assert_eq!(reply.retry_after, Some(Duration::from_secs(120)));
@@ -2699,6 +2727,43 @@ mod tests {
         service.handle_command(Command::QueueScrobble(entry(1)));
         assert_eq!(scripted.requests().len(), 1);
         assert!(service.problems.is_empty(), "{:?}", service.problems);
+    }
+
+    #[test]
+    fn a_successful_reply_whose_body_is_cut_off_keeps_its_retry_after() {
+        let reply = loopback_reply(
+            b"HTTP/1.1 200 OK\r\nRetry-After: 120\r\n\
+              Content-Type: application/json\r\nContent-Length: 200\r\n\
+              Connection: close\r\n\r\n{\"scrobbles\":{\"@attr",
+        );
+
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.retry_after, Some(Duration::from_secs(120)));
+        assert!(reply.body_error.is_some(), "{reply:?}");
+        assert!(reply.body.is_empty());
+
+        // The flush waits as long as the reply asked, and nothing automatic
+        // is sent before then: not a new scrobble, a flush nor a now-playing
+        // update.
+        let scripted = ScriptedTransport::with_replies([Ok(reply), accepted_reply(2)]);
+        let mut service = connected_service(&scripted, None, entries(0..1));
+        service.handle_command(Command::Flush);
+        let hold = service.hold.clone().expect("a hold");
+        assert!(hold.until >= Instant::now() + Duration::from_secs(110));
+        assert_eq!(service.retry_due, Some(hold.until));
+        service.handle_command(Command::QueueScrobble(entry(1)));
+        service.handle_command(Command::Flush);
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+        assert_eq!(scripted.requests().len(), 1);
+        assert_eq!(service.queue, entries(0..2));
+        assert!(service.problems.is_empty(), "{:?}", service.problems);
+
+        // Once it is over, the retry sends the queue.
+        end_hold(&mut service);
+        service.flush_queue();
+        assert!(service.queue.is_empty());
+        assert_eq!(scrobble_requests(&scripted).len(), 2);
+        assert_eq!(service.hold, None);
     }
 
     #[test]
