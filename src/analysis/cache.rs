@@ -21,18 +21,35 @@ pub(super) const PERSISTENT_WAVEFORM_CACHE_PRUNE_INTERVAL: usize = 24;
 // decodes the DTS of DTS-CD rips, which earlier versions read as the PCM
 // their WAV header tells. Version 5 takes the peaks of what GStreamer
 // decodes at the stream's own rate, where earlier versions resampled it to
-// 44.1 kHz; see `is_current_format`.
-const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 5;
+// 44.1 kHz. Version 6 reads a FLAC file to the end of its last frame when
+// tags follow it, where earlier versions dropped that frame and could save
+// the short waveform as complete; see `is_current_format`.
+const WAVEFORM_CACHE_FORMAT_VERSION: i64 = 6;
 
 /// Whether a waveform of `path` saved in format `version` is that of the
-/// current one. Versions 4 and 5 changed only the waveforms that `GStreamer`
-/// decodes, so those of versions 3 and 4 of other files are kept. That
-/// tells by the extension: raw AC3 and DTS files, and Opus, which Symphonia
-/// cannot read. The resampled overview of another file that only `GStreamer`
-/// reads, such as Opus in an `.ogg` file, is kept.
+/// current one. Each version since 3 changed only the waveforms of some
+/// files, and keeps those of the others, as far as the extension tells:
+/// version 6 those of FLAC files, and versions 4 and 5 those that
+/// `GStreamer` decodes. Those are raw AC3 and DTS files, and Opus, which
+/// Symphonia cannot read; the resampled overview of another file that only
+/// `GStreamer` reads, such as Opus in an `.ogg` file, is kept.
+///
+/// A FLAC file has its waveform decoded again once, the next time it is
+/// played, though only those with tags after the audio change: a saved
+/// waveform does not tell which file had them.
 fn is_current_format(version: i64, path: &Path) -> bool {
-    version == WAVEFORM_CACHE_FORMAT_VERSION
-        || (matches!(version, 3 | 4) && !gstreamer_decodes(path))
+    match version {
+        WAVEFORM_CACHE_FORMAT_VERSION => true,
+        5 => !is_flac(path),
+        3 | 4 => !is_flac(path) && !gstreamer_decodes(path),
+        _ => false,
+    }
+}
+
+/// Whether `path` is that of a FLAC file, as far as its extension tells.
+fn is_flac(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flac"))
 }
 
 /// Whether the overview of `path` is one that `GStreamer` decodes, as far as
@@ -437,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn only_waveforms_gstreamer_decodes_of_previous_formats_are_decoded_again() {
+    fn only_the_waveforms_a_format_changed_are_decoded_again() {
         let conn = Connection::open_in_memory().expect("database");
         init_waveform_cache_schema(&conn).expect("schema");
         let stamp = WaveformSourceStamp {
@@ -446,15 +463,19 @@ mod tests {
             modified_nanos: 0,
             file_id: None,
         };
+        // Whether the waveform of each file is kept from versions 3, 4
+        // and 5.
         for (name, kept) in [
-            ("a.flac", true),
-            ("b.mp3", true),
-            ("c.dts", false),
-            ("d.DTS", false),
-            ("e.ac3", false),
-            ("f.Opus", false),
+            ("a.flac", [false, false, false]),
+            ("A.FLAC", [false, false, false]),
+            ("b.mp3", [true, true, true]),
+            ("b.wav", [true, true, true]),
+            ("c.dts", [false, false, true]),
+            ("d.DTS", [false, false, true]),
+            ("e.ac3", [false, false, true]),
+            ("f.Opus", [false, false, true]),
         ] {
-            for version in [3, 4] {
+            for (version, kept) in [3, 4, 5].into_iter().zip(kept) {
                 let path = Path::new(name);
                 persist_waveform_to_db(&conn, path, stamp, &[0.5], 1.0).expect("save");
                 assert!(
@@ -473,6 +494,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_flac_waveform_saved_as_complete_before_the_last_frame_was_read_is_decoded_again() {
+        // A FLAC file with a tag after its audio, whose last frame an
+        // earlier version dropped: short by less than the allowance for a
+        // cut, the waveform was saved as complete.
+        let conn = Connection::open_in_memory().expect("database");
+        init_waveform_cache_schema(&conn).expect("schema");
+        let stamp = WaveformSourceStamp {
+            size_bytes: 1_000,
+            modified_secs: 1,
+            modified_nanos: 0,
+            file_id: None,
+        };
+        let path = Path::new("/music/tagged.flac");
+        persist_waveform_to_db(&conn, path, stamp, &[0.5; 8], 9.96).expect("save");
+        conn.execute("UPDATE waveform_cache SET format_version = 5", [])
+            .expect("version 5");
+        assert!(load_waveform_from_db(&conn, path, stamp).is_none());
+        // The waveform of the decode again is kept.
+        persist_waveform_to_db(&conn, path, stamp, &[0.5; 8], 10.0).expect("save again");
+        assert_eq!(
+            load_waveform_from_db(&conn, path, stamp),
+            Some(vec![0.5; 8])
+        );
     }
 
     #[test]

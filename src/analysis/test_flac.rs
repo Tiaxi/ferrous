@@ -119,3 +119,57 @@ pub(super) fn flac_bytes(
     }
     out.bytes
 }
+
+/// An ID3v1 tag, as appended to a file.
+pub(super) fn id3v1_tag() -> Vec<u8> {
+    let mut tag = b"TAG".to_vec();
+    tag.resize(128, b' ');
+    tag
+}
+
+/// An APEv2 tag of one item, as appended to a file, with a header before
+/// the item if `header`.
+pub(super) fn apev2_tag(header: bool) -> Vec<u8> {
+    apev2_tag_with(header, b"Tone!")
+}
+
+/// An APEv2 tag of one item of `value`, as appended to a file, with a
+/// header before the item if `header`.
+pub(super) fn apev2_tag_with(header: bool, value: &[u8]) -> Vec<u8> {
+    const HAS_HEADER: u32 = 1 << 31;
+    const IS_HEADER: u32 = 1 << 29;
+    let mut item = u32::try_from(value.len()).unwrap().to_le_bytes().to_vec();
+    item.extend(0_u32.to_le_bytes());
+    item.extend(b"Title\0");
+    item.extend(value);
+    // The size counts the item and the footer.
+    let size = u32::try_from(item.len()).unwrap() + 32;
+    let block = |flags: u32| {
+        let mut block = b"APETAGEX".to_vec();
+        block.extend(2_000_u32.to_le_bytes());
+        block.extend(size.to_le_bytes());
+        block.extend(1_u32.to_le_bytes());
+        block.extend(flags.to_le_bytes());
+        block.extend([0_u8; 8]);
+        block
+    };
+    let has_header = if header { HAS_HEADER } else { 0 };
+    let mut tag = Vec::new();
+    if header {
+        tag.extend(block(has_header | IS_HEADER));
+    }
+    tag.extend(item);
+    tag.extend(block(has_header));
+    tag
+}
+
+/// Interleaved 16-bit stereo `samples`, changed so that their FLAC file
+/// from [`flac_bytes`] has `TAG` 128 bytes before its end, where an ID3v1
+/// tag would start, in the audio of its last frame. The frame ends with
+/// the samples of the second channel and the CRC-16 of the frame.
+pub(super) fn with_tag_marker_at_the_end(samples: &mut [i32]) {
+    let frames = samples.len() / 2;
+    // 126 bytes before the CRC: 63 samples before the end of the channel.
+    samples[2 * (frames - 63) + 1] = 0x5441;
+    samples[2 * (frames - 62) + 1] = 0x4741;
+}
