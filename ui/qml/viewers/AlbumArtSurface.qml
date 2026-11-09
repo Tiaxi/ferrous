@@ -356,6 +356,9 @@ Item {
 
     // The details: the file's name, then label and value rows; the folder
     // on its own line, then its path, elided in the middle, with Copy Path.
+    // The rows' labels share a column as wide as the widest of them, up to
+    // two fifths of the row, so every value starts at the same x and keeps
+    // the rest; a label wider than that wraps.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -386,6 +389,7 @@ Item {
         }
 
         ColumnLayout {
+            id: infoLayout
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
@@ -393,6 +397,9 @@ Item {
             anchors.rightMargin: 16
             anchors.topMargin: 12 + root.infoTopInset
             spacing: 0
+
+            readonly property real labelColumnWidth: Math.min(Math.ceil(infoRows.widestLabel),
+                                                              Math.floor(infoLayout.width * 0.4))
 
             Label {
                 objectName: "albumArtInfoTitle"
@@ -408,6 +415,19 @@ Item {
             }
 
             Repeater {
+                id: infoRows
+                // Of every row, shown or not, so the values stay where they
+                // are when a row hides for another image.
+                readonly property real widestLabel: {
+                    let widest = 0
+                    for (let i = 0; i < infoRows.count; ++i) {
+                        const row = infoRows.itemAt(i)
+                        if (row) {
+                            widest = Math.max(widest, row.labelImplicitWidth)
+                        }
+                    }
+                    return widest
+                }
                 model: [
                     { name: I18n.i18nc("@label image width and height", "Dimensions"),
                       value: root.fileInfo && root.fileInfo.width > 0 && root.fileInfo.height > 0
@@ -429,6 +449,7 @@ Item {
 
                 delegate: RowLayout {
                     required property var modelData
+                    readonly property real labelImplicitWidth: infoLabel.implicitWidth
                     objectName: "albumArtInfoRow"
                     Layout.fillWidth: true
                     Layout.topMargin: 5
@@ -437,17 +458,23 @@ Item {
                     spacing: 12
 
                     Label {
-                        Layout.preferredWidth: 76
+                        id: infoLabel
+                        objectName: "albumArtInfoLabel"
+                        // Exactly the column's width, however long the value.
+                        Layout.minimumWidth: infoLayout.labelColumnWidth
+                        Layout.preferredWidth: infoLayout.labelColumnWidth
+                        Layout.maximumWidth: infoLayout.labelColumnWidth
                         Layout.alignment: Qt.AlignTop
                         text: modelData.name
                         font.pointSize: root.uiPalette.smallPointSize
                         color: root.uiPalette.textSecondary
-                        elide: Text.ElideRight
+                        wrapMode: Text.Wrap
                     }
 
                     Label {
                         objectName: "albumArtInfoValue"
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
                         text: modelData.value
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
