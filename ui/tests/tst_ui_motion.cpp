@@ -327,6 +327,8 @@ bool rowsSettled(QQuickItem *view, int count) {
 // The time of every animation of the GUI thread, while it lives: it stands
 // still but for the steps the test takes, however busy the machine. For the
 // lists' transitions, whose animations cannot be paused or set to a point.
+// Qt takes it only while no other driver is installed: main() keeps Qt
+// Quick on the basic render loop, whose window installs none.
 class SteppedAnimationDriver : public QAnimationDriver {
 public:
     SteppedAnimationDriver() { install(); }
@@ -337,15 +339,20 @@ public:
     qint64 elapsed() const override { return m_elapsed; }
 
     // Lets `ms` of animation time pass, a frame of 16 ms at a time, as the
-    // window would draw them.
-    void step(int ms) {
+    // window would draw them. Whether this driver ran the animations: Qt
+    // starts the installed driver once one runs, so it is false when Qt
+    // left it out, and the animations ran on real time instead.
+    [[nodiscard]] bool step(int ms) {
+        bool drove = false;
         for (int done = 0; done < ms; done += kFrame) {
             // The animations that started since: they run from the next
             // frame on.
             QCoreApplication::processEvents();
+            drove = drove || isRunning();
             m_elapsed += std::min(kFrame, ms - done);
             advance();
         }
+        return drove;
     }
 
 private:
@@ -1084,22 +1091,25 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         ? QStringList{QStringLiteral("NarrowArtist"), QStringLiteral("NarrowAlbum")}
         : QStringList{QStringLiteral("ArtistAlbum")};
     QString failure;
+    // The frames the window drew while the fade ran, and the looks
+    // checked, at those frames and at the points the test sets.
     int frames = 0;
+    int checks = 0;
     const auto checkFrame = [&]() {
         if (!failure.isEmpty() || !handover->property("running").toBool()) {
             return;
         }
-        ++frames;
+        ++checks;
         for (const QString &name : stillLines) {
             if (!lineStill(panel, name)) {
-                failure = QStringLiteral("%1 is not still in frame %2").arg(name).arg(frames);
+                failure = QStringLiteral("%1 is not still in check %2").arg(name).arg(checks);
             }
         }
         for (const QString &name : {title, details}) {
             const PanelLine line = panelLine(panel, name);
             if (!qFuzzyCompare(line.incomingOpacity() + line.outgoingOpacity() + 1.0, 2.0)) {
-                failure = QStringLiteral("%1 fades in at %2 and out at %3 in frame %4")
-                              .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(frames);
+                failure = QStringLiteral("%1 fades in at %2 and out at %3 in check %4")
+                              .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(checks);
             }
         }
         const PanelLine titleLine = panelLine(panel, title);
@@ -1112,7 +1122,12 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         }
     };
     const QMetaObject::Connection connection =
-        QObject::connect(window, &QQuickWindow::frameSwapped, window, checkFrame);
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (handover->property("running").toBool()) {
+                ++frames;
+            }
+            checkFrame();
+        });
 
     // As BridgeClient tells it: the path, then the metadata.
     bridge->setProperty("currentTrackPath", kTrackA2);
@@ -2386,11 +2401,11 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
     // Half-way, it is on its way down, still over the children.
-    driver.step(duration / 2);
+    QVERIFY(driver.step(duration / 2));
     QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
     QVERIFY(albumB->z() > firstChild->z());
     QCOMPARE(albumA->y(), albumAY);
-    driver.step(duration);
+    QVERIFY(driver.step(duration));
     QCOMPARE(albumB->y(), 4 * rowHeight);
     QCOMPARE(albumB->z(), 1.0);
 
@@ -2399,9 +2414,9 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    driver.step(duration / 2);
+    QVERIFY(driver.step(duration / 2));
     QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
-    driver.step(duration);
+    QVERIFY(driver.step(duration));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
 }
@@ -2470,9 +2485,9 @@ void UiMotionTest::queueRowsADragDisplacesSlide() {
     QCOMPARE(moved->y(), 2 * rowHeight);
     QCOMPARE(displaced->y(), 1 * rowHeight);
     QVERIFY(moved->z() > displaced->z());
-    driver.step(units->shortDuration() / 2);
+    QVERIFY(driver.step(units->shortDuration() / 2));
     QVERIFY2(displaced->y() < rowHeight && displaced->y() > 0, qPrintable(QString::number(displaced->y())));
-    driver.step(units->shortDuration());
+    QVERIFY(driver.step(units->shortDuration()));
     QVERIFY(rowsSettled(view, 5));
     QCOMPARE(itemAtIndex(view, 2), moved);
 }
@@ -2668,6 +2683,10 @@ int main(int argc, char **argv) {
     disableGpuShaderCaches();
     qputenv("QT_NO_XDG_DESKTOP_PORTAL", "1");
     qputenv("KDE_KIRIGAMI_TABLET_MODE", "0");
+    // The basic render loop, whatever the environment asks for: the threaded
+    // one installs an animation driver of its own for the GUI thread, and Qt
+    // then takes no SteppedAnimationDriver.
+    qputenv("QSG_RENDER_LOOP", "basic");
     // The app's controls style and Breeze icons, whatever the desktop the
     // tests run in; TestSessionIsolation.h.
     isolateFromDesktopSessionWithAppLook();
