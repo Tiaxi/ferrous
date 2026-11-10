@@ -5,6 +5,7 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../components" as Components
 
 // Help › About KDE: the KDE community that makes the frameworks Ferrous is
 // built on, in the words of KDE's own About KDE dialog.
@@ -23,6 +24,12 @@ Dialog {
     focus: true
     title: I18n.i18nc("@title:window", "About KDE")
     standardButtons: Dialog.Close
+
+    // The dialogs' one heading style, in place of the style's larger one.
+    header: Components.DialogHeader {
+        dialog: root
+        uiPalette: root.uiPalette
+    }
     width: Math.min(Kirigami.Units.gridUnit * 26,
                     (parent ? parent.width : Kirigami.Units.gridUnit * 28) - 2 * Kirigami.Units.gridUnit)
 

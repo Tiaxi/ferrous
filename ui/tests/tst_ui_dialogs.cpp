@@ -442,6 +442,7 @@ private slots:
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
+    void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
 };
 
@@ -2299,6 +2300,73 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
         }
         QMetaObject::invokeMethod(dialog, "close");
     }
+}
+
+// The dialogs have one heading style (#373 H3): a dialog in a window of its
+// own has its title in KWin's title bar only, and one drawn in a window,
+// such as a question, has it in Configure's page titles' 15 px semibold,
+// not the style's larger regular heading. Its close button rejects it.
+void UiDialogsTest::dialogsShareOneHeadingStyle() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(2); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+
+    // Configure's page title: the style.
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QQuickItem *pageTitle = nullptr;
+    QTRY_VERIFY((pageTitle = visibleNamed(windowOf(preferences), QStringLiteral("preferencesPageTitle"))) != nullptr);
+    const QFont titleFont = pageTitle->property("font").value<QFont>();
+    QCOMPARE(titleFont.weight(), QFont::DemiBold);
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!preferences->property("visible").toBool());
+
+    // The windows: no heading of their own.
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    for (const char *name : {"preferencesDialog", "aboutDialog", "tagEditorDialog", "itunesArtworkDialog"}) {
+        QQuickWindow *dialogWindow = windowOf(object(window, QString::fromLatin1(name)));
+        QVERIFY2(dialogWindow != nullptr, name);
+        QVERIFY2(itemsNamed(dialogWindow->contentItem(), QStringLiteral("dialogHeaderTitle")).isEmpty(), name);
+        QVERIFY2(textsHolding(dialogWindow->contentItem(), dialogWindow->title()).isEmpty(), name);
+    }
+
+    // The dialogs drawn in a window: the title in Configure's style. The
+    // library page's question opens over Configure.
+    QVERIFY(openPreferences(window, 0) != nullptr);
+    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+    editor.selectAllRows();
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    for (const char *name : {"quitSaveFailedDialog", "tagEditorCloseConfirmDialog", "tagEditorQuitWaitDialog",
+                             "autoNumberDialog", "renamePreviewDialog", "libraryRootNameDialog", "aboutKdeDialog",
+                             "removeLibraryRootConfirmDialog"}) {
+        QObject *dialog = object(window, QString::fromLatin1(name));
+        QVERIFY2(dialog != nullptr, name);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QTRY_VERIFY2(dialog->property("opened").toBool(), name);
+        auto *header = qvariant_cast<QQuickItem *>(dialog->property("header"));
+        QVERIFY2(header != nullptr && header->isVisible(), name);
+        const QList<QQuickItem *> titles = itemsNamed(header, QStringLiteral("dialogHeaderTitle"));
+        QVERIFY2(titles.size() == 1, name);
+        QCOMPARE(titles.first()->property("text").toString(), dialog->property("title").toString());
+        const QFont font = titles.first()->property("font").value<QFont>();
+        QCOMPARE(font.pointSizeF(), titleFont.pointSizeF());
+        QCOMPARE(font.weight(), titleFont.weight());
+        QCOMPARE(hex(titles.first()->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+        QQuickItem *close = itemsNamed(header, QStringLiteral("dialogHeaderCloseButton")).value(0);
+        QVERIFY2(close != nullptr && close->isVisible(), name);
+        QSignalSpy rejected(dialog, SIGNAL(rejected()));
+        QVERIFY(emitClicked(close));
+        QCOMPARE(rejected.count(), 1);
+        QTRY_VERIFY2(!dialog->property("visible").toBool(), name);
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    editor.close();
 }
 
 namespace {
