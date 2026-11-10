@@ -1123,6 +1123,14 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QVERIFY(letter != nullptr);
     QVERIFY(letter->implicitHeight() <= buttonSize);
 
+    // The plot's text, the lane label's and the M, at least 11 px at the
+    // default font and growing with a larger one, as the rest of the
+    // design's small text.
+    for (QQuickItem *item : {text, letter}) {
+        const int pixels = QFontInfo(item->property("font").value<QFont>()).pixelSize();
+        QVERIFY2(pixels >= std::max(11.0, 11.0 * pointSize / 10.0), qPrintable(QString::number(pixels)));
+    }
+
     // The lane label's plate: its text whole inside it, 6 px either side.
     QCOMPARE(label->width(), std::max(20.0, text->width() + 12.0));
     QVERIFY2(text->implicitHeight() <= label->height(),

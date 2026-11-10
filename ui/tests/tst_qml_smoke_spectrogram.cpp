@@ -38,6 +38,7 @@ private slots:
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes();
     void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
     void crosshairReadoutWidestWidthsFollowTheFont();
+    void crosshairReadoutTextIsTheSmallTextOfTheDesign();
     void spectrogramSurfaceFollowsTheStretchedDefaultZoom();
     void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
@@ -1717,6 +1718,42 @@ void SpectrogramSmokeTest::spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelCh
     }
     // The widths reach both sides of where the value stops fitting.
     QVERIFY(valueShown && valueLeftOut);
+}
+
+void SpectrogramSmokeTest::crosshairReadoutTextIsTheSmallTextOfTheDesign() {
+    // The readout's text is the design's small text, as the lane labels':
+    // 12 px at the default 10 pt font, never under 11 px, and larger with
+    // a larger font; its plates grow to hold it.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    const auto readoutAt = [](qreal points) {
+        QFont font = QGuiApplication::font();
+        font.setPointSizeF(points);
+        QGuiApplication::setFont(font);
+        return CrosshairReadout::font();
+    };
+    const QFont atDefault = readoutAt(10.0);
+    QCOMPARE(atDefault.pixelSize(), 12);
+    QCOMPARE(atDefault.family(), QGuiApplication::font().family());
+    const QFont atLarge = readoutAt(24.0);
+    QCOMPARE(atLarge.pixelSize(), 29);
+    const CrosshairReadout::Colors colors{Qt::black, Qt::white, Qt::transparent};
+    const QFontMetrics defaultMetrics(atDefault);
+    const QFontMetrics largeMetrics(atLarge);
+    const QString time = QStringLiteral("1:23.4");
+    const QSize defaultPlate =
+        CrosshairReadout::plateSize(defaultMetrics.horizontalAdvance(time), defaultMetrics, colors);
+    const QSize largePlate =
+        CrosshairReadout::plateSize(largeMetrics.horizontalAdvance(time), largeMetrics, colors);
+    QCOMPARE(defaultPlate.height(), defaultMetrics.height() + 2 * CrosshairReadout::kPadding);
+    QVERIFY(largePlate.width() > defaultPlate.width() && largePlate.height() > defaultPlate.height());
+    // A larger plate still goes in the plot's bottom-right corner, inside it.
+    const auto [value, timeRect] =
+        CrosshairReadout::plateRects(400, 200, 399, 199, largePlate, largePlate);
+    for (const QRect &plate : {value, timeRect}) {
+        QVERIFY(plate.isValid());
+        QVERIFY(QRect(0, 0, 400, 200).contains(plate));
+    }
 }
 
 void SpectrogramSmokeTest::crosshairReadoutWidestWidthsFollowTheFont() {
