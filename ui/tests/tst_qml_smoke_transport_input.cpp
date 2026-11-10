@@ -1019,7 +1019,8 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(waveformButton).center().toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
     QTRY_VERIFY(waveform->isVisible());
-    QVERIFY(!spectrogram->isVisible());
+    // The spectrogram goes once the waveform has faded in over it.
+    QTRY_VERIFY(!spectrogram->isVisible());
     QVERIFY(waveformButton->property("checked").toBool());
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
