@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 32 px. The 64-unit drawing, snapped to Breeze's 2 px margin: a 3 px floor, the fundamental 2 px wide on whole rows where it starts, its harmonics 1.3 and 1.1 px. -->
+<!-- Ferrous, 32 px. The 64-unit drawing, snapped to Breeze's 2 px margin: the fundamental 2 px wide on whole rows where it starts, its harmonics 1.3 and 1.1 px. -->
 <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
   <rect id="tile" fill="#3a1490" x="2" y="2" width="28" height="28" rx="2.5"/>
-  <rect id="floor" fill="#a6006e" x="5" y="24" width="22" height="3"/>
-  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.1" stroke-linecap="round" d="M7 15 L25 6"/>
-  <path id="h2" fill="none" stroke="#f0602a" stroke-width="1.3" stroke-linecap="round" d="M7 18 L25 12"/>
-  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="2" stroke-linecap="round" d="M7 21 L25 18"/>
+  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.1" stroke-linecap="round" d="M7 17 L25 8"/>
+  <path id="h2" fill="none" stroke="#f0602a" stroke-width="1.3" stroke-linecap="round" d="M7 20 L25 14"/>
+  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="2" stroke-linecap="round" d="M7 23 L25 20"/>
 </svg>

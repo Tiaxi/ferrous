@@ -2,8 +2,7 @@
 <!-- Ferrous, 256 px. The 64-unit drawing at 4 px a unit. -->
 <svg width="256" height="256" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
   <rect id="tile" fill="#3a1490" x="6" y="6" width="52" height="52" rx="5"/>
-  <rect id="floor" fill="#a6006e" x="12" y="45" width="40" height="7"/>
-  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.6" stroke-linecap="round" d="M15 31.5 L49 12"/>
-  <path id="h2" fill="none" stroke="#f0602a" stroke-width="2.1" stroke-linecap="round" d="M15 36 L49 23"/>
-  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="3.5" stroke-linecap="round" d="M15 40.5 L49 34"/>
+  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.6" stroke-linecap="round" d="M15 36.5 L49 17"/>
+  <path id="h2" fill="none" stroke="#f0602a" stroke-width="2.1" stroke-linecap="round" d="M15 41 L49 28"/>
+  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="3.5" stroke-linecap="round" d="M15 45.5 L49 39"/>
 </svg>
