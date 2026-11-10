@@ -330,6 +330,21 @@ enum RunRestart {
     Seeking,
 }
 
+/// How the output comes up to the volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputRise {
+    /// At the volume, or fading to it after a volume change.
+    Steady,
+    /// Silenced for a new pipeline run or a restart, and silent until that
+    /// run plays: no fade steps it up while the run prerolls, so the buffer
+    /// it prerolls is not held at a partial gain. The run then plays at
+    /// once, or fades in from silence; see `begin_track_start` and
+    /// `begin_startup_ramp`.
+    Silenced,
+    /// Fading in from silence, with the fade-in of a start.
+    StartupFade,
+}
+
 struct GstPlaybackRuntime {
     playbin: gst::Element,
     /// Shared with the about-to-finish callback, which hands a successor
@@ -348,13 +363,8 @@ struct GstPlaybackRuntime {
     target_volume: f32,
     /// Linear gain currently set on playbin.
     applied_volume: f32,
-    /// The output was silenced for a new pipeline run or a restart, and
-    /// stays silent until that run plays: no fade steps it up while the run
-    /// prerolls, so the buffer it prerolls is not held at a partial gain.
-    /// The run then plays at once, or fades in from silence; see
-    /// `begin_track_start` and `begin_startup_ramp`.
-    output_silenced: bool,
-    startup_gain_ramp: bool,
+    /// How the output comes up to the volume.
+    output_rise: OutputRise,
     /// Silence still to hold before the fade-in of an AC3/DTS track start.
     /// It counts down only while the pipeline plays.
     startup_ramp_hold_left: Option<Duration>,
@@ -615,8 +625,7 @@ impl GstPlaybackRuntime {
             },
             target_volume: 1.0,
             applied_volume: 1.0,
-            output_silenced: false,
-            startup_gain_ramp: false,
+            output_rise: OutputRise::Steady,
             startup_ramp_hold_left: None,
             volume_ramp_tick_at: None,
             buffering_active: false,
@@ -1027,7 +1036,7 @@ impl GstPlaybackRuntime {
         self.mute();
         let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.reset_channel_mute_state();
@@ -1326,7 +1335,9 @@ impl GstPlaybackRuntime {
         if resumed_at_track_start {
             self.begin_track_start();
         }
-        self.output_silenced = false;
+        if self.output_rise == OutputRise::Silenced {
+            self.output_rise = OutputRise::Steady;
+        }
         // A state change that fails, such as for a file that is missing,
         // posts the error, which skips the track or stops. Until then
         // playback plays, so the track skipped to plays.
@@ -1351,7 +1362,7 @@ impl GstPlaybackRuntime {
         // The position advances once the pipeline has reached Playing.
         self.sample_pipeline_position();
         if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
-            self.startup_gain_ramp = true;
+            self.output_rise = OutputRise::StartupFade;
         }
         self.emit_snapshot();
     }
@@ -1398,7 +1409,7 @@ impl GstPlaybackRuntime {
                 self.set_run_uri(path, &uri);
             }
         }
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.clear_recent_seek_trace();
@@ -1463,7 +1474,7 @@ impl GstPlaybackRuntime {
             self.snapshot.current_queue_index = state.current_index();
         }
         self.snapshot.state = PlaybackState::Paused;
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.queued_seek = Some(SeekTarget {
             position,
@@ -1810,7 +1821,7 @@ impl GstPlaybackRuntime {
         }
         let _ = self.set_pipeline_state(gst::State::Playing);
         self.playing_state_requested_at = Some(Instant::now());
-        if self.output_silenced {
+        if self.output_rise == OutputRise::Silenced {
             self.begin_startup_ramp();
         } else {
             // Re-asserted after the state change, as `play` does.
@@ -1870,8 +1881,7 @@ impl GstPlaybackRuntime {
         self.applied_volume = self.target_volume;
         self.playbin
             .set_property("volume", f64::from(self.applied_volume));
-        self.output_silenced = false;
-        self.startup_gain_ramp = false;
+        self.output_rise = OutputRise::Steady;
         self.startup_ramp_hold_left = None;
         self.volume_ramp_tick_at = None;
     }
@@ -1880,8 +1890,7 @@ impl GstPlaybackRuntime {
     fn begin_startup_ramp(&mut self) {
         self.applied_volume = 0.0;
         self.playbin.set_property("volume", 0.0_f64);
-        self.output_silenced = false;
-        self.startup_gain_ramp = true;
+        self.output_rise = OutputRise::StartupFade;
         // The fade-in starts its own clock. Otherwise the first step would
         // count the time since a running fade last stepped, which can span
         // a track switch, and jump to the target.
@@ -2133,8 +2142,7 @@ impl GstPlaybackRuntime {
     /// output holds, which the change would not reach, plays first.
     fn applies_volume_while_paused(&self) -> bool {
         self.snapshot.state == PlaybackState::Paused
-            && !self.output_silenced
-            && !self.startup_gain_ramp
+            && self.output_rise == OutputRise::Steady
             && self.startup_ramp_hold_left.is_none()
             && self.output_applies_volume()
     }
@@ -2165,10 +2173,23 @@ impl GstPlaybackRuntime {
         self.emit_snapshot();
     }
 
+    /// Whether the output fades in with the fade-in of a start.
+    fn startup_gain_ramp(&self) -> bool {
+        self.output_rise == OutputRise::StartupFade
+    }
+
+    /// End the fade-in of a start, leaving an output that is silenced for
+    /// a run silenced.
+    fn end_startup_fade(&mut self) {
+        if self.output_rise == OutputRise::StartupFade {
+            self.output_rise = OutputRise::Steady;
+        }
+    }
+
     /// Whether the engine loop must wake on [`VOLUME_RAMP_TICK`] to drive a
     /// silence hold or fade.
     fn volume_ramp_pending(&self) -> bool {
-        !self.output_silenced
+        self.output_rise != OutputRise::Silenced
             && !self.startup_fade_held()
             && (self.startup_ramp_hold_left.is_some()
                 || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
@@ -2182,7 +2203,7 @@ impl GstPlaybackRuntime {
     /// or fade before its first sample did. The bus wakes the engine when
     /// the pipeline plays.
     fn startup_fade_held(&self) -> bool {
-        (self.startup_gain_ramp || self.startup_ramp_hold_left.is_some())
+        (self.startup_gain_ramp() || self.startup_ramp_hold_left.is_some())
             && (self.snapshot.state != PlaybackState::Playing
                 || self.playing_state_requested_at.is_some())
     }
@@ -2193,7 +2214,7 @@ impl GstPlaybackRuntime {
     /// commands or bridge polls arrive.  Fades run on the volume-level scale,
     /// so they sound even.
     fn poll_volume_ramp(&mut self, now: Instant) {
-        if self.output_silenced || self.startup_fade_held() {
+        if self.output_rise == OutputRise::Silenced || self.startup_fade_held() {
             self.volume_ramp_tick_at = None;
             return;
         }
@@ -2221,7 +2242,7 @@ impl GstPlaybackRuntime {
         }
 
         if !self.volume_ramp_pending() {
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.volume_ramp_tick_at = None;
             return;
         }
@@ -2229,7 +2250,7 @@ impl GstPlaybackRuntime {
         let Some(previous_tick) = self.volume_ramp_tick_at.replace(now) else {
             return;
         };
-        let full_scale = if self.startup_gain_ramp {
+        let full_scale = if self.startup_gain_ramp() {
             STARTUP_FADE_FULL_SCALE
         } else {
             VOLUME_FADE_FULL_SCALE
@@ -2243,7 +2264,7 @@ impl GstPlaybackRuntime {
             self.applied_volume = super::volume_level_to_gain(level);
         } else {
             self.applied_volume = self.target_volume;
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.volume_ramp_tick_at = None;
         }
         self.playbin
@@ -2252,7 +2273,7 @@ impl GstPlaybackRuntime {
 
     fn poll(&mut self) {
         if self.snapshot.state == PlaybackState::Stopped
-            && !self.startup_gain_ramp
+            && !self.startup_gain_ramp()
             && self.startup_ramp_hold_left.is_none()
         {
             return;
@@ -2742,7 +2763,7 @@ impl GstPlaybackRuntime {
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
                 self.clear_recent_seek_trace();
-                self.startup_gain_ramp = false;
+                self.end_startup_fade();
                 self.startup_ramp_hold_left = None;
                 let _ = self.set_pipeline_state(gst::State::Ready);
                 self.begin_pipeline_run(false);
@@ -2877,10 +2898,10 @@ impl GstPlaybackRuntime {
     /// Silence the pipeline before it is stopped or restarted. The samples
     /// it has queued are dropped with the run, so a stepped fade would only
     /// delay the switch. The output stays silent until the next run plays;
-    /// see `output_silenced`.
+    /// see `OutputRise::Silenced`.
     fn mute(&mut self) {
         self.applied_volume = 0.0;
-        self.output_silenced = true;
+        self.output_rise = OutputRise::Silenced;
         self.volume_ramp_tick_at = None;
         self.playbin.set_property("volume", 0.0_f64);
     }
@@ -2908,10 +2929,10 @@ impl GstPlaybackRuntime {
                 .set_property("volume", f64::from(self.applied_volume));
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.startup_ramp_hold_left = None;
         } else {
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.startup_ramp_hold_left = None;
         }
         // The new run starts at the beginning and advances once it plays.
@@ -4640,7 +4661,7 @@ mod tests {
         runtime.snapshot.state = PlaybackState::Playing;
         runtime.applied_volume = 0.0;
         runtime.playbin.set_property("volume", 0.0_f64);
-        runtime.startup_gain_ramp = true;
+        runtime.output_rise = OutputRise::StartupFade;
         runtime.startup_ramp_hold_left = Some(Duration::from_millis(80));
 
         runtime.poll_volume_ramp(start);
@@ -4657,7 +4678,7 @@ mod tests {
         assert_gain(&runtime, 0.5);
         runtime.poll_volume_ramp(hold_end + Duration::from_millis(90));
         assert_gain(&runtime, 0.8);
-        assert!(!runtime.startup_gain_ramp);
+        assert!(!runtime.startup_gain_ramp());
         assert_eq!(
             runtime.command_wait_timeout(Instant::now()),
             Some(Duration::from_millis(20))
@@ -11994,7 +12015,7 @@ mod engine_tests {
         #[track_caller]
         fn assert_plays_at_once_at(&mut self, level: f32) {
             let gain = super::super::volume_level_to_gain(level);
-            assert!(!self.runtime.startup_gain_ramp);
+            assert!(!self.runtime.startup_gain_ramp());
             assert_eq!(self.runtime.startup_ramp_hold_left, None);
             assert!(
                 (self.runtime.applied_volume - gain).abs() < f32::EPSILON,
@@ -12023,7 +12044,7 @@ mod engine_tests {
         /// last.
         #[track_caller]
         fn assert_fades_in_from_silence(&mut self) {
-            assert!(self.runtime.startup_gain_ramp);
+            assert!(self.runtime.startup_gain_ramp());
             self.wait_until_confirmed_playing();
             let later = Instant::now() + Duration::from_secs(2);
             self.runtime.poll_volume_ramp(later);
@@ -12197,7 +12218,7 @@ mod engine_tests {
             .apply_command(PlaybackCommand::SetVolume(0.0));
         assert!((engine.runtime.applied_volume - 1.0).abs() < f32::EPSILON);
         engine.runtime.apply_command(PlaybackCommand::Play);
-        assert!(engine.runtime.startup_gain_ramp);
+        assert!(engine.runtime.startup_gain_ramp());
         engine.wait_until_confirmed_playing();
         let now = Instant::now();
         engine.runtime.poll_volume_ramp(now);
