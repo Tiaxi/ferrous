@@ -45,6 +45,13 @@ Dialog {
         popup: root
     }
 
+    // The keyboard in the content, whose Enter presses the default button,
+    // from the moment the dialog shows.
+    Components.PopupInitialFocus {
+        popup: root
+        item: root.contentItem
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }

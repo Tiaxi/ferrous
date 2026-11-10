@@ -60,6 +60,13 @@ Dialog {
     title: I18n.i18nc("@title:window", "Rename Files")
     closePolicy: Popup.CloseOnEscape
 
+    // The keyboard in the content, whose Enter presses the default button,
+    // from the moment the dialog shows.
+    Components.PopupInitialFocus {
+        popup: root
+        item: root.contentItem
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }

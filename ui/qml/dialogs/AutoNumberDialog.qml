@@ -48,6 +48,13 @@ Dialog {
     width: Math.min(Kirigami.Units.gridUnit * 26, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Auto Number")
 
+    // The keyboard in the content, whose Enter presses the default button,
+    // from the moment the dialog shows.
+    Components.PopupInitialFocus {
+        popup: root
+        item: root.contentItem
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }

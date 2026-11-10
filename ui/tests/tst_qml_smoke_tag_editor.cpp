@@ -31,6 +31,10 @@ private slots:
     void askingToCloseAfterAReloadQuestionOffersSaveAndDiscard_data();
     void askingToCloseAfterAReloadQuestionOffersSaveAndDiscard();
     void switchingTheTagEditorQuestionsKeepsEveryButton();
+    void enterAnswersTheTagEditorsQuestionAsSoonAsItShows();
+    void enterKeepsWaitingOnceTheQuitWaitOffersIt();
+    void enterNumbersTracksAsSoonAsAutoNumberShows();
+    void enterRenamesAsSoonAsThePreviewShows();
     void autoNumberRejectsStartsThatAreNotNumbers();
     void tagEditorRowsFollowTheKeyboard();
     void tagEditorShowsEveryValueOfMultiValueFields();
@@ -972,6 +976,144 @@ void TagEditorSmokeTest::switchingTheTagEditorQuestionsKeepsEveryButton() {
     QVERIFY(save && discard && keepEditing);
 }
 
+// Enter answers the tag editor's question as soon as it shows, before the
+// keyboard has moved into it, and only once; Escape and Tab still work
+// (#562).
+void TagEditorSmokeTest::enterAnswersTheTagEditorsQuestionAsSoonAsItShows() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    QSignalSpy saves(fixture.confirm, SIGNAL(saveRequested()));
+    QSignalSpy discards(fixture.confirm, SIGNAL(discardRequested()));
+    QSignalSpy kept(fixture.confirm, SIGNAL(keepEditingRequested()));
+    QVERIFY(saves.isValid() && discards.isValid() && kept.isValid());
+
+    // Escape, at once, keeps editing.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    QVERIFY(fixture.confirmShown());
+    QVERIFY(keyboardInPopupContent(fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!fixture.confirmShown());
+    QCOMPARE(kept.count(), 1);
+    QVERIFY(fixture.editorShown());
+    QVERIFY(fixture.editor.dirty());
+
+    // Tab goes on from the content through the dialog to its buttons.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    QTRY_VERIFY(fixture.confirm->property("opened").toBool());
+    QVERIFY(tabToPopupFooter(fixture.window, fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(kept.count(), 2);
+
+    // The reload question, asked next, has the keyboard in its content, not
+    // on the button Tab left it on. Enter, as it fades in, discards and
+    // reloads once, and Enter again, as it fades out, does nothing more.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
+    QVERIFY(fixture.confirmShown() && !fixture.confirm->property("opened").toBool());
+    QVERIFY(keyboardInPopupContent(fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QCOMPARE(discards.count(), 1);
+    QVERIFY(popupFadingOut(fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(discards.count(), 1);
+    QTRY_VERIFY(!fixture.editor.loading());
+    QVERIFY(!fixture.editor.dirty());
+    QVERIFY(fixture.editorShown());
+
+    // The close question: Enter, at once, saves once and closes the editor.
+    fixture.editor.setCell(0, QStringLiteral("title"), QStringLiteral("Edited again"));
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
+    QVERIFY(fixture.confirmShown());
+    QVERIFY(keyboardInPopupContent(fixture.confirm));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_VERIFY(!fixture.editorShown());
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(saves.count(), 1);
+    QCOMPARE(fixture.saves->saveCount(), 1);
+    QVERIFY(!fixture.editor.isOpen());
+    QCOMPARE(discards.count(), 1);
+    QCOMPARE(kept.count(), 2);
+}
+
+// The quit wait takes Enter for Keep Waiting once it offers the choice,
+// with the keyboard where it was when the wait showed (#562).
+void TagEditorSmokeTest::enterKeepsWaitingOnceTheQuitWaitOffersIt() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, true));
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(fixture.bridge->setProperty("holdStateSaveAnswers", true));
+    QVERIFY(fixture.startStalledSave());
+    fixture.window->close();
+    QTRY_VERIFY(fixture.quitWaitShown());
+    QObject *wait = fixture.quitWait();
+    QSignalSpy keepWaiting(wait, SIGNAL(keepWaitingRequested()));
+    QSignalSpy quits(wait, SIGNAL(quitAnywayRequested()));
+    QSignalSpy stops(wait, SIGNAL(stopQuittingRequested()));
+    QVERIFY(keepWaiting.isValid() && quits.isValid() && stops.isValid());
+    QVERIFY(keyboardInPopupContent(wait));
+
+    // Before there is a choice, Enter does nothing.
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QVERIFY(fixture.quitWaitShown());
+    QCOMPARE(keepWaiting.count(), 0);
+
+    QVERIFY(fixture.passQuitWaitBound());
+    QTRY_VERIFY(fixture.quitAnywayOffered());
+    QVERIFY(keyboardInPopupContent(wait));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QCOMPARE(keepWaiting.count(), 1);
+    QVERIFY(!wait->property("offerChoice").toBool());
+    QVERIFY(fixture.quitWaitShown());
+    QCOMPARE(quits.count(), 0);
+    QCOMPARE(stops.count(), 0);
+    QCOMPARE(fixture.stateSaves(), 0);
+
+    // The save finishing still quits.
+    fixture.saves->release.release();
+    QTRY_COMPARE(fixture.stateSaves(), 1);
+    QCOMPARE(quits.count(), 0);
+    QCOMPARE(stops.count(), 0);
+}
+
+// Enter numbers the tracks as soon as Auto Number shows, before the keyboard
+// has moved into it, and only once (#562).
+void TagEditorSmokeTest::enterNumbersTracksAsSoonAsAutoNumberShows() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectAllRows();
+    QObject *dialog = fixture.window->findChild<QObject *>(QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    // Out of order, so that numbering shows.
+    fixture.editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("7"));
+    fixture.editor.setCell(2, QStringLiteral("trackNo"), QStringLiteral("8"));
+
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
+    QVERIFY(dialog->property("visible").toBool() && !dialog->property("opened").toBool());
+    QVERIFY(keyboardInPopupContent(dialog));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("1"));
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(2, QStringLiteral("trackNo")), QStringLiteral("3"));
+    // Enter again, as the dialog fades out, numbers nothing more.
+    QVERIFY(popupFadingOut(dialog));
+    fixture.editor.setCell(0, QStringLiteral("trackNo"), QStringLiteral("7"));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("7"));
+    QCOMPARE(fixture.saves->saveCount(), 0);
+
+    // Escape, at once, numbers nothing.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorAutoNumberButton")));
+    QVERIFY(dialog->property("visible").toBool());
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("trackNo")), QStringLiteral("7"));
+}
+
 void TagEditorSmokeTest::autoNumberRejectsStartsThatAreNotNumbers() {
     TagEditorWindow fixture;
     QVERIFY(fixture.open(3, false));
@@ -1163,6 +1305,54 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     QVERIFY(clickVisibleButton(fixture.window, QStringLiteral("renamePreviewRenameButton")));
     QCOMPARE(renameRequested.count(), 1);
     QTRY_VERIFY(!previewDialog->property("visible").toBool());
+}
+
+// Enter renames as soon as the preview shows, before the keyboard has moved
+// into it, and only once (#562).
+void TagEditorSmokeTest::enterRenamesAsSoonAsThePreviewShows() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, false));
+    const QByteArray loadResponse = tagEditorLoadResponse(2);
+    const QByteArray preview(R"({"results":[{"path":"/fixture/Album 000/01 Song.flac",)"
+        R"("newPath":"/fixture/Album 000/01 Intro.flac","ok":true}],"successfulPaths":[]})");
+    fixture.editor.m_executeOperation = [=](TagEditorController::Operation operation, const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        if (operation == TagEditorController::Operation::PreviewRename) {
+            return preview;
+        }
+        if (operation == TagEditorController::Operation::Rename) {
+            return QByteArray(R"({"results":[],"successfulPaths":[]})");
+        }
+        return loadResponse;
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    QSignalSpy renameRequested(previewDialog, SIGNAL(renameRequested()));
+    QVERIFY(renameRequested.isValid());
+
+    // Escape, at once, renames nothing.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("visible").toBool());
+    QVERIFY(keyboardInPopupContent(previewDialog));
+    QTest::keyClick(fixture.window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!previewDialog->property("visible").toBool());
+    QCOMPARE(renameRequested.count(), 0);
+
+    // Renaming needs the bridge this fixture lacks; BridgeClientTest covers
+    // the rename itself.
+    QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+    QTRY_VERIFY(previewDialog->property("visible").toBool());
+    QVERIFY(keyboardInPopupContent(previewDialog));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QCOMPARE(renameRequested.count(), 1);
+    // Enter again, as the preview fades out, renames nothing more.
+    QVERIFY(popupFadingOut(previewDialog));
+    QTest::keyClick(fixture.window, Qt::Key_Return);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(renameRequested.count(), 1);
+    QTRY_VERIFY(!fixture.editor.saving());
 }
 
 void TagEditorSmokeTest::renameRenamesThePreviewedFilesAfterTheSelectionChanged() {

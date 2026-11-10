@@ -773,6 +773,31 @@ bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObje
     return true;
 }
 
+bool keyboardInPopupContent(QObject *popup) {
+    auto *content = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("contentItem")));
+    return content != nullptr && content->hasActiveFocus();
+}
+
+bool tabToPopupFooter(QQuickWindow *window, QObject *popup) {
+    auto *content = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("contentItem")));
+    auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("footer")));
+    QQuickItem *popupItem = content != nullptr ? content->parentItem() : nullptr;
+    if (popupItem == nullptr || footer == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < 10; ++i) {
+        QTest::keyClick(window, Qt::Key_Tab);
+        QQuickItem *focused = window->activeFocusItem();
+        if (focused == nullptr || !popupItem->isAncestorOf(focused)) {
+            return false;
+        }
+        if (footer->isAncestorOf(focused)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool popupsSettled() {
     for (QWindow *window : QGuiApplication::topLevelWindows()) {
         for (QObject *object : window->findChildren<QObject *>()) {
