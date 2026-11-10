@@ -361,6 +361,7 @@ pub(crate) const ANALYSIS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const ESTIMATE_COLUMN_FRAMES: usize = 1024;
 
 pub use centered_view::decoded_end_column as spectrogram_decoded_end_column;
+pub use centered_view::fit_zoom as spectrogram_fit_zoom;
 pub use column_hop::effective_zoom as spectrogram_effective_zoom;
 pub use column_hop::reference_hop as spectrogram_reference_hop;
 pub use column_hop::render_zoom as spectrogram_render_zoom;
@@ -5435,7 +5436,8 @@ mod tests {
         assert_eq!(accepted_spectrogram_zoom(0.1, 0.101_2), Some(0.101_2));
         // Clamped first, so a request below the floor at the floor is kept.
         assert_eq!(accepted_spectrogram_zoom(0.05, 0.01), None);
-        assert_eq!(accepted_spectrogram_zoom(1.0, 40.0), Some(16.0));
+        assert_eq!(accepted_spectrogram_zoom(1.0, 40.0), Some(40.0));
+        assert_eq!(accepted_spectrogram_zoom(1.0, 100.0), Some(64.0));
     }
 
     #[test]
@@ -5462,7 +5464,7 @@ mod tests {
         assert_eq!(spectrogram_column_hop(96_000, 1.0), 2048);
         assert_eq!(spectrogram_column_hop(44_100, 0.1), 10240);
         // The backend's clamp applies.
-        assert_eq!(spectrogram_column_hop(48_000, 64.0), 64);
+        assert_eq!(spectrogram_column_hop(48_000, 256.0), 16);
         assert_eq!(spectrogram_column_hop(48_000, 0.001), 20480);
     }
 

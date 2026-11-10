@@ -305,6 +305,17 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
     Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
+    // Whether the default zoom stretches a track shorter than the view to
+    // its width.
+    Q_PROPERTY(bool stretchShortTracks READ stretchShortTracks WRITE setStretchShortTracks NOTIFY stretchShortTracksChanged)
+    // The zoom of the initial view of a track and of Reset Zoom: 1, or with
+    // stretchShortTracks the zoom at which a track shorter than the view
+    // fills its width. A track change moves the view to it (unless a rolling
+    // view goes on gaplessly); the view's owner follows it otherwise.
+    Q_PROPERTY(double defaultZoomLevel READ defaultZoomLevel NOTIFY defaultZoomLevelChanged)
+    // The deepest zoom: 16, or the default zoom where that is deeper. A zoom
+    // deeper than it comes back to it when it drops.
+    Q_PROPERTY(double maximumZoomLevel READ maximumZoomLevel NOTIFY maximumZoomLevelChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -377,6 +388,10 @@ public:
     bool zoomEnabled() const;
     void setZoomEnabled(bool value);
 
+    bool stretchShortTracks() const;
+    void setStretchShortTracks(bool value);
+    double defaultZoomLevel() const;
+
     double pixelToFrequencyHz(int pixelY, int viewHeight) const;
 
     // `sessionWidth` is the width the chunk's session decodes for (0 if
@@ -407,6 +422,9 @@ public:
     Q_INVOKABLE void appendRows(const QVariantList &rows);
 
     Q_INVOKABLE double minimumZoomLevel() const;
+    // The deepest zoom the wheel goes to: 16, or the default zoom where that
+    // is deeper.
+    double maximumZoomLevel() const;
 
     // Frees the ring and the canvas, which nothing uses while analysis is
     // off because no pane is shown, and takes no columns until retained:
@@ -450,6 +468,9 @@ signals:
     void seekRequested(double seconds);
     void zoomLevelChanged();
     void zoomEnabledChanged();
+    void stretchShortTracksChanged();
+    void defaultZoomLevelChanged();
+    void maximumZoomLevelChanged();
     void zoomRequested(double newZoomLevel);
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
@@ -713,6 +734,27 @@ private:
     double windowDevicePixelRatio() const;
     void applyCanvasScaleLocked(double scale);
     double minimumZoomLevelLocked() const;
+    double maximumZoomLevelLocked() const;
+    // The zoom at which the track's columns fill the view
+    // (ferrous_ffi_spectrogram_fit_zoom), of the frames its data tells or
+    // else the clock's duration of the same track; below 0 while its length,
+    // rate, FFT size or the width is unknown.
+    double fitZoomLocked() const;
+    // Brings the default zoom up to date; true if it changed. While the
+    // track's length is unknown, it stays, unless the data is of a new track
+    // (`trackChanged`), whose default is 1 until its length is known.
+    bool refreshDefaultZoomLocked(bool trackChanged);
+    // The column hop of the default zoom's data, and the zoom it is drawn
+    // at, for audio at `sampleRate` (the data's rate if 0): the reference
+    // hop and 1 at zoom 1.
+    int defaultZoomHopLocked(int sampleRate) const;
+    double defaultRenderZoomLocked(int sampleRate) const;
+    // A track change's reset of the zoom to the default: until the data at
+    // its hop arrives, the data on hand is drawn as if it were.
+    void resetZoomToDefaultLocked();
+    // Tells of a new default zoom, and brings a zoom deeper than the new
+    // limit back within it. Without the state locked.
+    void publishDefaultZoomChange();
     double backendZoomForRequestLocked() const;
     int columnHopForZoomLocked(double zoom) const;
     double renderZoomForZoomLocked(double zoom) const;
@@ -1047,6 +1089,8 @@ private:
     double m_zoomLevel{1.0};
     double m_renderZoomLevel{1.0};
     bool m_zoomEnabled{false};
+    bool m_stretchShortTracks{true};
+    double m_defaultZoomLevel{1.0};
     // Canvas freeze during zoom transition.  Independent of
     // m_awaitingZoomData (which controls the zoom snap).  Set when a
     // session restart changes the hop; cleared when the ring covers

@@ -350,6 +350,7 @@ Item {
         property real durationSeconds: 10
         property int spectrogramViewMode: 1
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property bool showSpectrogramScale: true
         property bool showSpectrogramCrosshair: true
         property bool showFps: true
@@ -2996,6 +2997,7 @@ Window {
         property real durationSeconds: 100
         property int spectrogramViewMode: 1
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property bool showSpectrogramScale: false
         property bool showSpectrogramCrosshair: true
         property bool showFps: false

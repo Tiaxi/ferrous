@@ -28,9 +28,13 @@ const BASE_HOP: f64 = 1024.0;
 /// dominate.
 pub(super) const MIN_COLUMN_HOP: usize = 16;
 
-/// The zoom levels the backend accepts.
+/// The zoom levels the backend accepts. The wheel zooms in up to 16 times
+/// (`kMaxWheelZoom` in `ui/src/SpectrogramItem.cpp`); only the default zoom
+/// that stretches a short track to the view's width
+/// ([`super::centered_view::fit_zoom`]) goes deeper, to a column every 16
+/// samples at 44.1 and 48 kHz.
 pub(super) const MIN_ZOOM: f32 = 0.05;
-pub(super) const MAX_ZOOM: f32 = 16.0;
+pub(super) const MAX_ZOOM: f32 = 64.0;
 
 /// The base rate of the family `sample_rate` belongs to.
 pub(super) fn family_base_rate(sample_rate: u32) -> u32 {
@@ -283,9 +287,9 @@ mod tests {
 
     #[test]
     fn zoom_is_clamped_to_what_the_backend_accepts() {
-        assert_eq!(column_hop(48_000, 64.0), 64);
+        assert_eq!(column_hop(48_000, 256.0), 16);
         assert_eq!(column_hop(48_000, 0.001), 20_480);
-        assert_eq!(column_hop(96_000, 64.0), 128);
+        assert_eq!(column_hop(96_000, 256.0), 32);
         // 384 kHz zoomed out all the way is more than 16 bits.
         assert_eq!(column_hop(384_000, 0.001), 163_840);
         assert_eq!(column_hop(48_000, f32::NAN), 1024);

@@ -38,6 +38,7 @@ private slots:
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes();
     void spectrogramCrosshairReadoutKeepsItsPlatesAsTheLevelChanges();
     void crosshairReadoutWidestWidthsFollowTheFont();
+    void spectrogramSurfaceFollowsTheStretchedDefaultZoom();
     void spectrogramCrosshairWidestValueCoversRoundedHertz();
     void spectrogramCrosshairReadoutReadsEachView_data();
     void spectrogramCrosshairReadoutReadsEachView();
@@ -46,6 +47,7 @@ private slots:
     void spectrogramCrosshairReadoutPlatesTakeThePlotColors();
     void spectrogramCrosshairReadoutShowsAfterEveryClick();
     void spectrogramGridOverlayGeneratesWhenEnabled();
+    void spectrogramTimeScaleOfAStretchedShortTrackShowsTenths();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
     void spectrogramOverlayDirtiedByLogScaleChange();
@@ -177,6 +179,7 @@ Item {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 2
         property var mutedChannels: []
         property bool showLevelMeter: false
@@ -326,6 +329,7 @@ Window {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 1
         property var soloedChannels: []
         property int muteCalls: 0
@@ -485,6 +489,7 @@ ApplicationWindow {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 2
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
@@ -635,6 +640,7 @@ Item {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 2
         property var soloedChannels: []
         property bool showLevelMeter: false
@@ -1822,6 +1828,7 @@ Window {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 1
         property var mutedChannels: []
         property var soloedChannels: []
@@ -2158,6 +2165,7 @@ Window {
         property bool showSpectrogramCrosshair: true
         property bool showSpectrogramScale: true
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 1
         property var soloedChannels: []
         property bool showLevelMeter: false
@@ -2330,6 +2338,53 @@ void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {
     QCOMPARE(item.m_timeGrid.images[0].text, QStringLiteral("0:00"));
     QCOMPARE(item.m_timeGrid.images[1].text, QStringLiteral("0:10"));
     QCOMPARE(item.m_timeGrid.images[1].rect.top(), 5.0);
+}
+
+void SpectrogramSmokeTest::spectrogramTimeScaleOfAStretchedShortTrackShowsTenths() {
+    // A second stretched to 1000 px, 44 samples a column at 48 kHz: a label
+    // every half second, with its tenths, rather than one at 0:00.
+    SpectrogramItem item;
+    item.setWidth(1000);
+    item.setHeight(100);
+    item.setSampleRateHz(48000);
+    item.setGridEnabled(true);
+    const double fit = ferrous_ffi_spectrogram_fit_zoom(48'000, 8192, 48'000, 1000);
+    QCOMPARE(ferrous_ffi_spectrogram_column_hop(48'000, static_cast<float>(fit)), 44u);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_showTimeLabels = true;
+        item.m_precomputedSampleRateHz = 48000;
+        item.m_precomputedHopSize = 44;
+        item.m_renderZoomLevel = 1024.0 / 44.0;
+        item.updateTimeGridOverlayLocked(1000, 100, 0, 0, false, 48000.0 / 44.0, 0.0);
+    }
+    QVERIFY(item.m_timeGrid.valid);
+    QStringList labels;
+    for (const auto &image : item.m_timeGrid.images) {
+        labels.push_back(image.text);
+    }
+    QCOMPARE(labels, (QStringList{QStringLiteral("0:00.0"), QStringLiteral("0:00.5")}));
+    // Half a second is 545 px in.
+    QCOMPARE(item.m_timeGrid.lines.size(), 2);
+    QCOMPARE(item.m_timeGrid.lines[1].left(), 545);
+
+    // Zoomed in 16 times, as the wheel goes, labels are half a second apart
+    // too; at zoom 1, ten seconds as before.
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedHopSize = 64;
+        item.m_renderZoomLevel = 16.0;
+        item.updateTimeGridOverlayLocked(1000, 100, 0, 0, false, 48000.0 / 64.0, 0.0);
+    }
+    QCOMPARE(item.m_timeGrid.images[1].text, QStringLiteral("0:00.5"));
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_precomputedHopSize = 1024;
+        item.m_renderZoomLevel = 1.0;
+        item.updateTimeGridOverlayLocked(1000, 100, 0, 0, false, 48000.0 / 1024.0, 0.0);
+    }
+    QCOMPARE(item.m_timeGrid.images[0].text, QStringLiteral("0:00"));
+    QCOMPARE(item.m_timeGrid.images[1].text, QStringLiteral("0:10"));
 }
 
 void SpectrogramSmokeTest::spectrogramOverlayDisabledProducesNullImage() {
@@ -3046,6 +3101,155 @@ void SpectrogramSmokeTest::spectrogramClickToSeekMatchesCrosshairAtDevicePixels(
     const double column = static_cast<double>(displayLeft) + (147.0 - drawX * 2.0) / 2.0;
     QVERIFY(std::abs(seconds * columnsPerSecond - column) < 1e-9);
     delete node;
+}
+
+void SpectrogramSmokeTest::spectrogramSurfaceFollowsTheStretchedDefaultZoom() {
+    qmlRegisterType<SpectrogramItem>("FerrousUi", 1, 0, "SpectrogramItem");
+
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import "components" as Components
+import "viewers" as Viewers
+
+Item {
+    id: paletteRoot
+    width: 1000
+    height: 200
+    property alias bridge: bridge
+
+    QtObject {
+        id: bridge
+        property string playbackState: "Playing"
+        property int spectrogramViewMode: 0
+        property int spectrogramDisplayMode: 1
+        property real dbRange: 90
+        property bool logScale: false
+        property bool spectrogramFrequencyCap: false
+        property bool showFps: false
+        property int sampleRateHz: 48000
+        property bool showSpectrogramCrosshair: false
+        property bool showSpectrogramScale: true
+        property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
+        property int channelButtonsVisibility: 1
+        property var mutedChannels: []
+        property var soloedChannels: []
+        property real lastZoomRequest: 0
+        property int zoomRequests: 0
+        signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)
+        signal playbackChanged()
+        function isChannelSilent(channelIndex) { return false }
+        function setSpectrogramZoomLevel(level) { lastZoomRequest = level; ++zoomRequests }
+        function registerSpectrogramItem(item, channelIndex) {}
+        function unregisterSpectrogramItem(item) {}
+        function setSpectrogramWidgetWidth(width) {}
+    }
+
+    Components.UiPalette { id: palette; windowRoot: paletteRoot }
+
+    Viewers.SpectrogramSurface {
+        id: surface
+        objectName: "spectrogramSurface"
+        anchors.fill: parent
+        uiBridge: bridge
+        uiPalette: palette
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    auto *surface = qobject_cast<QQuickItem *>(root->findChild<QObject *>(QStringLiteral("spectrogramSurface")));
+    QVERIFY(bridge != nullptr && surface != nullptr);
+    SpectrogramItem *item = nullptr;
+    QTRY_VERIFY((item = qobject_cast<SpectrogramItem *>(findQuickItemByObjectName(
+                     surface, QStringLiteral("spectrogramPaneItem")))) != nullptr);
+    QCOMPARE(item->width(), 1000.0);
+    const auto zoom = [surface]() { return surface->property("zoomLevel").toDouble(); };
+    QCOMPARE(zoom(), 1.0);
+    QCOMPARE(surface->property("defaultZoomLevel").toDouble(), 1.0);
+
+    // A second at 48 kHz, which the backend starts at zoom 1 and does not
+    // know the length of yet.
+    constexpr int bins = 4;
+    constexpr quint64 frames = 48'000;
+    const int end = static_cast<int>(ferrous_ffi_spectrogram_decoded_end_column(frames, 8192, 1.0f, 48'000));
+    item->feedPrecomputedChunk(QByteArray(), bins, 0, 0, 0, end, 48'000, 1024, false, true, 5, true,
+                               0, 0, 8192, 0, 0);
+    item->feedPrecomputedChunk(QByteArray(16 * bins, '\x40'), bins, 0, 16, 0, end, 48'000, 1024,
+                               false, false, 5, false, 0, 0, 8192, 0, 0);
+    QCOMPARE(zoom(), 1.0);
+    const int requestsBefore = bridge->property("zoomRequests").toInt();
+
+    // Its length arrives: the view follows the stretched default, as a
+    // zoom of the wheel does, and the backend restarts for it.
+    item->feedPrecomputedChunk(QByteArray(16 * bins, '\x40'), bins, 0, 16, 16, end, 48'000, 1024,
+                               false, false, 5, false, 0, 0, 8192, frames, end);
+    const double fit = ferrous_ffi_spectrogram_fit_zoom(frames, 8192, 48'000, 1000);
+    QVERIFY(fit > 16.0);
+    QCOMPARE(surface->property("defaultZoomLevel").toDouble(), fit);
+    QCOMPARE(zoom(), fit);
+    QCOMPARE(item->zoomLevel(), fit);
+    QTRY_VERIFY(bridge->property("zoomRequests").toInt() > requestsBefore);
+    QCOMPARE(static_cast<float>(bridge->property("lastZoomRequest").toDouble()), static_cast<float>(fit));
+
+    // The wheel zooms out from it, and back in no further than it.
+    const auto wheel = [item](int angle) {
+        QWheelEvent event(QPointF(500, 100), QPointF(500, 100), QPoint(), QPoint(0, angle),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        item->wheelEvent(&event);
+    };
+    wheel(-120);
+    QVERIFY(qAbs(zoom() - fit / 1.25) < 1e-9);
+    for (int i = 0; i < 3; ++i) {
+        wheel(120);
+    }
+    QCOMPARE(zoom(), fit);
+
+    // A zoom the user chose stays when the default moves.
+    QVERIFY(surface->setProperty("_widgetZoomLevel", 3.0));
+    QCOMPARE(item->zoomLevel(), 3.0);
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(surface->property("defaultZoomLevel").toDouble(), 1.0);
+    QCOMPARE(zoom(), 3.0);
+    bridge->setProperty("stretchShortTracks", true);
+    QCOMPARE(zoom(), 3.0);
+
+    // Reset Zoom returns to the stretched default, which follows the
+    // setting and the plot's width from then on.
+    QVERIFY(QMetaObject::invokeMethod(surface, "resetZoom"));
+    QCOMPARE(zoom(), fit);
+    QCOMPARE(item->zoomLevel(), fit);
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(zoom(), 1.0);
+    QCOMPARE(item->zoomLevel(), 1.0);
+    bridge->setProperty("stretchShortTracks", true);
+    QCOMPARE(zoom(), fit);
+    root->setProperty("width", 1500);
+    QTRY_COMPARE(item->width(), 1500.0);
+    const double wider = ferrous_ffi_spectrogram_fit_zoom(frames, 8192, 48'000, 1500);
+    QVERIFY(wider > fit);
+    QCOMPARE(zoom(), wider);
+    QCOMPARE(item->zoomLevel(), wider);
+
+    // A zoom the user chose deeper than 16x keeps to the limit once it
+    // drops, in the surface and the item alike; one within it stays.
+    QVERIFY(surface->setProperty("_widgetZoomLevel", wider));
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(surface->property("maximumZoomLevel").toDouble(), 16.0);
+    QCOMPARE(zoom(), 16.0);
+    QCOMPARE(item->zoomLevel(), 16.0);
+    QCOMPARE(surface->property("_widgetZoomLevel").toDouble(), 16.0);
+    bridge->setProperty("stretchShortTracks", true);
+    QCOMPARE(zoom(), 16.0);
+    QCOMPARE(item->zoomLevel(), 16.0);
+    QVERIFY(surface->setProperty("_widgetZoomLevel", 8.0));
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(zoom(), 8.0);
+    QCOMPARE(item->zoomLevel(), 8.0);
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramSmokeTest(const QString &userDirectoriesParent) {

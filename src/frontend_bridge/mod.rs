@@ -329,6 +329,9 @@ pub enum BridgeSettingsCommand {
     /// Whether a viewer over the whole screen shows its title strip when
     /// the pointer moves.
     SetShowFullscreenTitleStrip(bool),
+    /// Whether the spectrogram's default zoom stretches a track shorter
+    /// than its view to the view's width.
+    SetStretchShortTracks(bool),
     SetDbRange(f32),
     SetLogScale(bool),
     SetShowFps(bool),
@@ -670,6 +673,9 @@ pub struct BridgeDisplaySettings {
     /// Whether the spectrogram shows only the audible band of the track's
     /// rate family (22.05 kHz for the 44.1 kHz family, 24 kHz otherwise).
     pub spectrogram_frequency_cap: bool,
+    /// Whether the spectrogram's default zoom (the initial view and Reset
+    /// Zoom) stretches a track shorter than the view to its width.
+    pub stretch_short_tracks: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -732,6 +738,7 @@ impl Default for BridgeSettings {
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
                 spectrogram_frequency_cap: false,
+                stretch_short_tracks: true,
             },
             library_sort_mode: LibrarySortMode::Year,
             library_watch_enabled: true,
@@ -3884,6 +3891,23 @@ mod tests {
                     .lastfm_show_scrobble_progress,
                 show
             );
+            assert!(runtime.flags.settings_dirty);
+        }
+    }
+
+    #[test]
+    fn stretch_short_tracks_setting_updates_and_marks_it_for_persistence() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        assert!(runtime.state.settings.display.stretch_short_tracks);
+        for stretch in [false, true] {
+            runtime.flags.settings_dirty = false;
+            runtime.handle_command(
+                BridgeCommand::Settings(BridgeSettingsCommand::SetStretchShortTracks(stretch)),
+                &event_tx,
+            );
+            assert_eq!(runtime.state.settings.display.stretch_short_tracks, stretch);
             assert!(runtime.flags.settings_dirty);
         }
     }

@@ -54,15 +54,43 @@ Item {
         : Qt.BlankCursor
     property var channelDescriptors: []
     property double _crosshairSharedX: -1.0
-    property double _widgetZoomLevel: 1.0
-    property double _viewerZoomLevel: 1.0
-    // The zoom shown: the viewer keeps one of its own. 1 is the default.
-    readonly property real zoomLevel: root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
+    // The zooms the user chose, or 0 for the default zoom, which a view
+    // then follows: that of a short track changes with the plot's width and
+    // once the track's length is known.
+    property double _widgetZoomLevel: 0
+    property double _viewerZoomLevel: 0
+    // The default zoom: 1, or what stretches a track shorter than the view
+    // to the plot's width (Preferences › Appearance).
+    readonly property real defaultZoomLevel: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return first && first.spectrogramItem ? first.spectrogramItem.defaultZoomLevel : 1.0
+    }
+    // The deepest zoom: 16, or the default where that is deeper. A chosen
+    // zoom deeper than it, such as a short track's kept through a rolling
+    // gapless transition to a long one, comes back to it.
+    readonly property real maximumZoomLevel: {
+        const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
+        return first && first.spectrogramItem ? first.spectrogramItem.maximumZoomLevel : 16.0
+    }
+    readonly property real _chosenZoomLevel: root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
+    // The zoom shown: the viewer keeps one of its own.
+    readonly property real zoomLevel: root._chosenZoomLevel > 0
+        ? Math.min(root._chosenZoomLevel, root.maximumZoomLevel) : root.defaultZoomLevel
+    onMaximumZoomLevelChanged: {
+        // The zoom shown keeps to the new limit from now on.
+        if (root.viewerMode) {
+            if (root._viewerZoomLevel > root.maximumZoomLevel) {
+                root._viewerZoomLevel = root.maximumZoomLevel
+            }
+        } else if (root._widgetZoomLevel > root.maximumZoomLevel) {
+            root._widgetZoomLevel = root.maximumZoomLevel
+        }
+    }
 
     // Both zooms back to the default, as a middle click does.
     function resetZoom() {
-        root._widgetZoomLevel = 1.0
-        root._viewerZoomLevel = 1.0
+        root._widgetZoomLevel = 0
+        root._viewerZoomLevel = 0
     }
 
     // Debounced backend restart after significant width changes
@@ -77,8 +105,7 @@ Item {
         onTriggered: {
             // The restart decodes for the width it is for.
             root.sendBackendWidth()
-            const zoom = root.viewerMode ? root._viewerZoomLevel : root._widgetZoomLevel
-            root.uiBridge.setSpectrogramZoomLevel(zoom)
+            root.uiBridge.setSpectrogramZoomLevel(root.zoomLevel)
         }
     }
 
@@ -331,11 +358,15 @@ Item {
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
-                    zoomLevel: root.zoomLevel
+                    stretchShortTracks: root.uiBridge.stretchShortTracks
+                    // Each lane at its own default, which its data tells.
+                    zoomLevel: root._chosenZoomLevel > 0
+                        ? Math.min(root._chosenZoomLevel, spectrogramPaneItem.maximumZoomLevel)
+                        : spectrogramPaneItem.defaultZoomLevel
                     onZoomRequested: (newZoomLevel) => {
                         const minZoom = spectrogramPaneItem.minimumZoomLevel()
                         const clamped = Math.max(minZoom,
-                            Math.min(16.0, newZoomLevel))
+                            Math.min(spectrogramPaneItem.maximumZoomLevel, newZoomLevel))
                         if (root.viewerMode) {
                             root._viewerZoomLevel = clamped
                         } else {

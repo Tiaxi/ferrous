@@ -592,6 +592,9 @@ pub(super) fn parse_settings_text(settings: &mut BridgeSettings, text: &str) {
             "spectrogram_frequency_cap" => {
                 parse_flag(value, &mut settings.display.spectrogram_frequency_cap);
             }
+            "stretch_short_tracks" => {
+                parse_flag(value, &mut settings.display.stretch_short_tracks);
+            }
             "system_media_controls_enabled" => parse_flag(
                 value,
                 &mut settings.integrations.system_media_controls_enabled,
@@ -681,7 +684,7 @@ fn write_config_file(path: &Path, bytes: &[u8]) -> Result<(), SaveFailure> {
 pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
     // `volume` keeps the linear gain so older builds play at the same loudness.
     let mut text = format!(
-        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_fullscreen_title_strip={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
+        "volume_cubic={:.4}\nvolume={:.6}\nfft_size={}\nspectrogram_view_mode={}\nspectrogram_display_mode={}\nviewer_fullscreen_mode={}\ndb_range={:.2}\nlog_scale={}\nshow_fps={}\nshow_level_meter={}\nprevent_display_sleep_in_fullscreen={}\nshow_fullscreen_title_strip={}\nshow_spectrogram_crosshair={}\nshow_spectrogram_scale={}\nchannel_buttons_visibility={}\nspectrogram_zoom_enabled={}\nspectrogram_frequency_cap={}\nstretch_short_tracks={}\nsystem_media_controls_enabled={}\nlibrary_sort_mode={}\nlastfm_scrobbling_enabled={}\nlastfm_username={}\nlastfm_show_scrobble_progress={}\nlibrary_watch_enabled={}\n",
         settings.volume,
         volume_level_to_gain(settings.volume),
         settings.fft_size,
@@ -699,6 +702,7 @@ pub(super) fn format_settings_text(settings: &BridgeSettings) -> String {
         settings.display.channel_buttons_visibility,
         i32::from(settings.display.spectrogram_zoom_enabled),
         i32::from(settings.display.spectrogram_frequency_cap),
+        i32::from(settings.display.stretch_short_tracks),
         i32::from(settings.integrations.system_media_controls_enabled),
         settings.library_sort_mode.to_i32(),
         i32::from(settings.integrations.lastfm_scrobbling_enabled),
@@ -786,6 +790,7 @@ mod tests {
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
                 spectrogram_frequency_cap: true,
+                stretch_short_tracks: false,
             },
             library_sort_mode: LibrarySortMode::Title,
             library_watch_enabled: false,
@@ -821,6 +826,7 @@ mod tests {
         assert!(parsed.display.show_spectrogram_scale);
         assert!(parsed.display.spectrogram_zoom_enabled);
         assert!(parsed.display.spectrogram_frequency_cap);
+        assert!(!parsed.display.stretch_short_tracks);
         assert!(!parsed.integrations.system_media_controls_enabled);
         assert_eq!(parsed.library_sort_mode, LibrarySortMode::Title);
         assert!(parsed.integrations.lastfm_scrobbling_enabled);
@@ -868,6 +874,30 @@ mod tests {
             let mut parsed = BridgeSettings::default();
             parse_settings_text(&mut parsed, &text);
             assert_eq!(parsed.display.spectrogram_frequency_cap, enabled);
+        }
+    }
+
+    #[test]
+    fn stretch_short_tracks_defaults_on_and_roundtrips_both_values() {
+        assert!(BridgeSettings::default().display.stretch_short_tracks);
+        let mut settings = BridgeSettings::default();
+        parse_settings_text(&mut settings, "volume=0.5\nspectrogram_zoom_enabled=1\n");
+        assert!(
+            settings.display.stretch_short_tracks,
+            "on in older settings files"
+        );
+        for stretch in [false, true] {
+            settings.display.stretch_short_tracks = stretch;
+            let text = format_settings_text(&settings);
+            assert!(text.contains(&format!("stretch_short_tracks={}\n", i32::from(stretch))));
+            let mut parsed = BridgeSettings::default();
+            parse_settings_text(&mut parsed, &text);
+            assert_eq!(parsed.display.stretch_short_tracks, stretch);
+            assert!(
+                parsed.unknown_lines.is_empty(),
+                "{:?}",
+                parsed.unknown_lines
+            );
         }
     }
 
@@ -1114,6 +1144,7 @@ mod tests {
                 channel_buttons_visibility: 1,
                 spectrogram_zoom_enabled: true,
                 spectrogram_frequency_cap: false,
+                stretch_short_tracks: true,
             },
             ..BridgeSettings::default()
         };

@@ -93,6 +93,9 @@ struct SpectrogramRasterMailbox {
 
 namespace {
 constexpr double kMinFreqHz = 25.0;
+// The deepest zoom the wheel zooms to. The default zoom of a short track can
+// be deeper, up to MAX_ZOOM in src/analysis/column_hop.rs.
+constexpr double kMaxWheelZoom = 16.0;
 constexpr double kPositionJumpHoldThresholdSeconds = 0.75;
 
 // The column hop of a session of audio at sampleRate at zoom 1, which zoom
@@ -888,9 +891,19 @@ QString formatFrequencyLabel(double hz) {
     return hertzFormat().arg(qRound(hz));
 }
 
-QString formatTimeLabel(double seconds) {
+// A label of the time scale: "1:46", or with labels less than a second
+// apart (`interval`), its tenths too, as the crosshair shows them: "0:00.5".
+QString formatTimeLabel(double seconds, double interval) {
     if (seconds < 0.0) {
         return {};
+    }
+    if (interval < 1.0) {
+        const long tenths = std::lround(seconds * 10.0);
+        const long whole = tenths / 10;
+        return QStringLiteral("%1:%2.%3")
+            .arg(whole / 60)
+            .arg(whole % 60, 2, 10, QLatin1Char('0'))
+            .arg(tenths % 10);
     }
     const int totalSeconds = static_cast<int>(std::floor(seconds));
     const int h = totalSeconds / 3600;
@@ -1968,6 +1981,7 @@ void SpectrogramItem::setClock(PlaybackClock *value) {
 void SpectrogramItem::clockStateChanged() {
     const PlaybackClockState next = m_clock ? m_clock->state() : PlaybackClockState{};
     bool courseCorrection = false;
+    bool defaultChanged = false;
     {
         QMutexLocker lock(&m_stateMutex);
         const auto now = m_now();
@@ -1983,6 +1997,12 @@ void SpectrogramItem::clockStateChanged() {
             m_previousTrackPositionOffset = held ? m_positionHoldOffset : m_gaplessPositionOffset;
         }
         m_clockState = next;
+        if (next.trackToken != previous.trackToken
+            || next.durationSeconds != previous.durationSeconds) {
+            // The clock's length stands in for the data's, which a rolling
+            // view's gapless successor does not tell.
+            defaultChanged = refreshDefaultZoomLocked(false);
+        }
         if (m_displayMode != 0) {
             // Centered views are random access: a seek or a new track moves
             // them at once, even before its data arrives.
@@ -2027,6 +2047,9 @@ void SpectrogramItem::clockStateChanged() {
             && held == positionHeldLocked(nowNs);
     }
     emit positionSecondsChanged();
+    if (defaultChanged) {
+        publishDefaultZoomChange();
+    }
     if (courseCorrection) {
         schedulePlaybackFrame();
     } else {
@@ -2680,7 +2703,7 @@ bool SpectrogramItem::zoomPreviewWantedLocked() const {
 void SpectrogramItem::setZoomLevel(double value) {
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
-    value = std::clamp(value, minZoom, 16.0);
+    value = std::clamp(value, minZoom, maximumZoomLevelLocked());
     if (std::abs(m_zoomLevel - value) < 0.0001) {
         return;
     }
@@ -2727,6 +2750,147 @@ void SpectrogramItem::setZoomEnabled(bool value) {
     }
     m_zoomEnabled = value;
     emit zoomEnabledChanged();
+}
+
+bool SpectrogramItem::stretchShortTracks() const {
+    return m_stretchShortTracks;
+}
+
+void SpectrogramItem::setStretchShortTracks(bool value) {
+    bool defaultChanged = false;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_stretchShortTracks == value) {
+            return;
+        }
+        m_stretchShortTracks = value;
+        defaultChanged = refreshDefaultZoomLocked(false);
+    }
+    emit stretchShortTracksChanged();
+    if (defaultChanged) {
+        publishDefaultZoomChange();
+    }
+}
+
+double SpectrogramItem::defaultZoomLevel() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_defaultZoomLevel;
+}
+
+double SpectrogramItem::fitZoomLocked() const {
+    const int rate = m_precomputedSampleRateHz;
+    std::uint64_t frames = m_precomputedTrackFrames;
+    if (frames == 0
+        && rate > 0
+        && m_clockState.trackToken != 0
+        && m_clockState.trackToken == m_precomputedTrackToken
+        && std::isfinite(m_clockState.durationSeconds)
+        && m_clockState.durationSeconds > 0.0) {
+        // The data does not tell its file's frames, as a rolling session's
+        // after a gapless continuation does not: the clock's length of the
+        // same track does.
+        frames = static_cast<std::uint64_t>(
+            std::llround(m_clockState.durationSeconds * static_cast<double>(rate)));
+    }
+    const double w = std::floor(width());
+    if (frames == 0 || rate <= 0 || m_precomputedFftSize <= 0 || !(w > 0.0)) {
+        return -1.0;
+    }
+    return static_cast<double>(ferrous_ffi_spectrogram_fit_zoom(
+        frames,
+        static_cast<std::uint32_t>(m_precomputedFftSize),
+        static_cast<std::uint32_t>(rate),
+        static_cast<std::uint32_t>(std::min(w, 1.0e9))));
+}
+
+bool SpectrogramItem::refreshDefaultZoomLocked(bool trackChanged) {
+    double next = m_defaultZoomLevel;
+    if (!m_stretchShortTracks) {
+        next = 1.0;
+    } else if (const double fit = fitZoomLocked(); fit > 0.0) {
+        next = fit;
+    } else if (trackChanged) {
+        next = 1.0;
+    }
+    if (std::abs(next - m_defaultZoomLevel) < 1e-9) {
+        return false;
+    }
+    m_defaultZoomLevel = next;
+    return true;
+}
+
+int SpectrogramItem::defaultZoomHopLocked(int sampleRate) const {
+    const int rate = sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz;
+    return static_cast<int>(ferrous_ffi_spectrogram_column_hop(
+        static_cast<std::uint32_t>(std::max(0, rate)),
+        static_cast<float>(m_defaultZoomLevel)));
+}
+
+double SpectrogramItem::defaultRenderZoomLocked(int sampleRate) const {
+    if (std::abs(m_defaultZoomLevel - 1.0) < 1e-9) {
+        return 1.0;
+    }
+    const int rate = sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz;
+    return ferrous_ffi_spectrogram_render_zoom(
+        static_cast<std::uint32_t>(std::max(0, rate)),
+        static_cast<std::uint32_t>(std::max(0, defaultZoomHopLocked(rate))),
+        m_defaultZoomLevel);
+}
+
+void SpectrogramItem::resetZoomToDefaultLocked() {
+    const double target = m_defaultZoomLevel;
+    m_zoomLevel = target;
+    m_awaitingZoomData = false;
+    m_zoomFillActive = false;
+    m_lastBackendZoom =
+        ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, static_cast<float>(target));
+    // The data on hand is drawn as the default zoom's data will be, which
+    // the restart the reset asks for brings.
+    m_renderZoomLevel = std::abs(target - 1.0) < 1e-9
+        ? 1.0
+        : renderZoomForZoomLocked(backendZoomForRequestLocked());
+    // Cancel any pending debounced setZoomLevel that would
+    // otherwise overwrite this reset 150 ms later.  Scenario: the
+    // QML zoomLevel binding pushes the SpectrogramSurface's
+    // zoom into freshly-instantiated SpectrogramItems
+    // (channel-count change recreated the Repeater children).  If
+    // that zoom was still at the prior track's max value
+    // (e.g. 16), setZoomLevel(16) on the new instance arms the
+    // debounce timer with m_pendingBackendZoom = 16 — which we
+    // must null out here so the timer doesn't fire after our
+    // reset and restart the backend at the old zoom.
+    m_pendingBackendZoom = static_cast<float>(target);
+    if (m_zoomDebounceTimer) {
+        m_zoomDebounceTimer->stop();
+    }
+}
+
+void SpectrogramItem::publishDefaultZoomChange() {
+    emit defaultZoomLevelChanged();
+    emit maximumZoomLevelChanged();
+    // A zoom kept from before, such as the user's through a rolling gapless
+    // transition, comes within the limit when it drops: with a track's
+    // length that arrives, the setting turned off, or a narrower view. The
+    // view's owner clamps the zoom it keeps alike (SpectrogramSurface).
+    double zoom = 1.0;
+    double maximum = 1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        zoom = m_zoomLevel;
+        maximum = maximumZoomLevelLocked();
+    }
+    if (zoom > maximum + 1e-9) {
+        setZoomLevel(maximum);
+    }
+}
+
+double SpectrogramItem::maximumZoomLevelLocked() const {
+    return std::max(kMaxWheelZoom, m_defaultZoomLevel);
+}
+
+double SpectrogramItem::maximumZoomLevel() const {
+    QMutexLocker lock(&m_stateMutex);
+    return maximumZoomLevelLocked();
 }
 
 bool SpectrogramItem::ringHoldsColumnsLocked(qint64 firstColumn, qint64 lastColumn) const {
@@ -3115,13 +3279,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         // track's per-pane render caches alive until the first data chunk,
         // so one stereo pane can visibly lag behind on track changes.
         const bool wasReady = m_precomputedReady;
-        const bool qtRenderNotAtDefault =
-            std::abs(m_renderZoomLevel - 1.0) > 0.001;
-        const bool backendNotAtReferenceHop = hopSize > 0
-            && hopSize != static_cast<int>(referenceHopSamples(
-                sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz));
-        const bool needsZoomReset =
-            qtRenderNotAtDefault || backendNotAtReferenceHop;
+        // The render zoom the old track's data is drawn at.
+        const double renderZoomBefore = m_renderZoomLevel;
 
         m_zoomFillActive = false;
         applyPrecomputedResetLocked(
@@ -3155,16 +3314,19 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedLastDisplaySeq = -1;
         m_timeGridDirty = true;
 
+        // The new track's default zoom, which the view resets to unless its
+        // data is already the default's.
+        const bool defaultChanged = refreshDefaultZoomLocked(true);
+        const bool qtRenderNotAtDefault =
+            std::abs(renderZoomBefore - defaultRenderZoomLocked(sampleRate)) > 0.001;
+        const bool backendNotAtDefaultHop = hopSize > 0
+            && hopSize != defaultZoomHopLocked(sampleRate);
+        const bool needsZoomReset =
+            qtRenderNotAtDefault || backendNotAtDefaultHop;
+        const auto defaultZoom = static_cast<float>(m_defaultZoomLevel);
+
         if (needsZoomReset) {
-            m_zoomLevel = 1.0;
-            m_renderZoomLevel = 1.0;
-            m_awaitingZoomData = false;
-            m_pendingBackendZoom = 1.0f;
-            m_lastBackendZoom =
-                ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, 1.0f);
-            if (m_zoomDebounceTimer) {
-                m_zoomDebounceTimer->stop();
-            }
+            resetZoomToDefaultLocked();
             if (qtRenderNotAtDefault) {
                 m_precomputedTotalColumnsEstimate = 0;
             }
@@ -3174,10 +3336,13 @@ void SpectrogramItem::feedPrecomputedChunk(
         }
 
         lock.unlock();
+        if (defaultChanged) {
+            publishDefaultZoomChange();
+        }
         if (needsZoomReset) {
             emit zoomLevelChanged();
             emit zoomResetRequested();
-            emit backendZoomRequested(1.0f);
+            emit backendZoomRequested(defaultZoom);
         }
         if (wasReady) {
             emit precomputedReadyChanged();
@@ -3642,14 +3807,24 @@ void SpectrogramItem::feedPrecomputedChunk(
 
     updateCanvasFillReadinessLocked();
 
-    // Reset zoom to 1.0 on any track change (gapless or user-initiated).
-    // Check m_renderZoomLevel (not m_zoomLevel) because in multi-channel
-    // layouts the first pane's signal may have already set m_zoomLevel=1.0
-    // on this pane via QML, but m_renderZoomLevel is still at the old
-    // value and m_awaitingZoomData still needs clearing.
+    // The track's default zoom: of a new track, or of this one once its
+    // length is known, or at the clock's length of the track a rolling
+    // view goes on to gaplessly, whose data does not tell it. A chunk
+    // without columns, such as a reset that waits for its data, does not
+    // describe the ring's track yet.
+    const bool rollingGapless = m_displayMode == 0 && isGaplessTrackChange;
+    const bool defaultChanged = columns > 0
+        && refreshDefaultZoomLocked((isTrackChange || isGaplessTrackChange) && !rollingGapless);
+
+    // Reset zoom to the default on any track change (gapless or
+    // user-initiated). Check m_renderZoomLevel (not m_zoomLevel) because in
+    // multi-channel layouts the first pane's signal may have already set
+    // m_zoomLevel to the default on this pane via QML, but
+    // m_renderZoomLevel is still at the old value and m_awaitingZoomData
+    // still needs clearing.
     //
     // Also reset when the arriving chunk's hop size is not the default
-    // reference hop: this catches the case where the SpectrogramItem
+    // zoom's: this catches the case where the SpectrogramItem
     // instance is fresh (channel-count change tore down the previous
     // widgets) so m_renderZoomLevel defaults to 1.0 even though the
     // backend persisted a non-default zoom from the previous track.
@@ -3658,38 +3833,21 @@ void SpectrogramItem::feedPrecomputedChunk(
     // cols, and the right side of the widget stays un-backed while the
     // previous canvas smears through the gap.
     const bool qtRenderNotAtDefault =
-        std::abs(m_renderZoomLevel - 1.0) > 0.001;
-    const bool backendNotAtReferenceHop = hopSize > 0
-        && hopSize != static_cast<int>(referenceHopSamples(
-            sampleRate > 0 ? sampleRate : m_precomputedSampleRateHz));
-    const bool preserveRollingGaplessZoom =
-        m_displayMode == 0 && isGaplessTrackChange;
+        std::abs(m_renderZoomLevel - defaultRenderZoomLocked(sampleRate)) > 0.001;
+    const bool backendNotAtDefaultHop = hopSize > 0
+        && hopSize != defaultZoomHopLocked(sampleRate);
+    // A rolling view goes on through a gapless transition at its zoom; one
+    // deeper than the new track allows comes back within its limit with the
+    // new default (publishDefaultZoomChange).
+    const bool preserveRollingGaplessZoom = rollingGapless;
     const bool resetForTrackTransition =
         isTrackChange || (isGaplessTrackChange && !preserveRollingGaplessZoom);
     const bool needsZoomReset =
         resetForTrackTransition
-        && (qtRenderNotAtDefault || backendNotAtReferenceHop);
+        && (qtRenderNotAtDefault || backendNotAtDefaultHop);
+    const auto defaultZoom = static_cast<float>(m_defaultZoomLevel);
     if (needsZoomReset) {
-        m_zoomLevel = 1.0;
-        m_renderZoomLevel = 1.0;
-        m_awaitingZoomData = false;
-        m_zoomFillActive = false;
-        m_lastBackendZoom =
-            ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, 1.0f);
-        // Cancel any pending debounced setZoomLevel that would
-        // otherwise overwrite this reset 150 ms later.  Scenario: the
-        // QML zoomLevel binding pushes the SpectrogramSurface's
-        // _widgetZoomLevel into freshly-instantiated SpectrogramItems
-        // (channel-count change recreated the Repeater children).  If
-        // _widgetZoomLevel was still at the prior track's max value
-        // (e.g. 16), setZoomLevel(16) on the new instance arms the
-        // debounce timer with m_pendingBackendZoom = 16 — which we
-        // must null out here so the timer doesn't fire after our
-        // reset and restart the backend at the old zoom.
-        m_pendingBackendZoom = 1.0f;
-        if (m_zoomDebounceTimer) {
-            m_zoomDebounceTimer->stop();
-        }
+        resetZoomToDefaultLocked();
         // Clear the estimate only when Qt's render zoom was actually
         // changing.  The pre-reset estimate came from a different zoom's
         // decimation and would otherwise be stale.  If we're only
@@ -3718,15 +3876,20 @@ void SpectrogramItem::feedPrecomputedChunk(
     // setZoomLevel which re-acquires the mutex.
     lock.unlock();
 
+    if (defaultChanged) {
+        // The view's owner follows the default unless the user zoomed: a
+        // zoom to it, as the wheel's, once a track's length is known.
+        publishDefaultZoomChange();
+    }
     if (needsZoomReset) {
         emit zoomLevelChanged();
         emit zoomResetRequested();
-        // Tell the backend to restart at zoom=1.0.  The QML handler
-        // for zoomResetRequested sets the zoom property to 1.0, but
-        // setZoomLevel(1.0) is a no-op because the reset above already
-        // set m_zoomLevel=1.0.  Without this explicit signal the
+        // Tell the backend to restart at the default zoom.  The QML
+        // handler for zoomResetRequested sets the zoom property to the
+        // default, but setZoomLevel() is then a no-op because the reset
+        // above already set m_zoomLevel.  Without this explicit signal the
         // backend continues at the old zoom level.
-        emit backendZoomRequested(1.0f);
+        emit backendZoomRequested(defaultZoom);
     }
     if (readyChanged) {
         emit precomputedReadyChanged();
@@ -5322,6 +5485,7 @@ void SpectrogramItem::itemChange(ItemChange change, const ItemChangeData &value)
 
 void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
+    bool defaultChanged = false;
     if (newGeometry.size() != oldGeometry.size()) {
         QMutexLocker lock(&m_stateMutex);
         invalidateMapping();
@@ -5329,6 +5493,11 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
         m_freqGridDirty = true;
         m_timeGridDirty = true;
         m_crosshairDirty = true;
+        // A short track fills the view at a zoom of the view's width.
+        defaultChanged = refreshDefaultZoomLocked(false);
+    }
+    if (defaultChanged) {
+        publishDefaultZoomChange();
     }
     const int newWidth = static_cast<int>(newGeometry.width());
     const int oldWidth = static_cast<int>(oldGeometry.width());
@@ -5515,14 +5684,14 @@ void SpectrogramItem::wheelEvent(QWheelEvent *event) {
     event->accept();
 
     constexpr double kZoomStepFactor = 1.25;
-    constexpr double kMaxZoom = 16.0;
     QMutexLocker lock(&m_stateMutex);
     const double minZoom = minimumZoomLevelLocked();
+    const double maxZoom = maximumZoomLevelLocked();
     const double currentZoom = m_zoomLevel;
     lock.unlock();
     const double newZoom = std::clamp(
         currentZoom * std::pow(kZoomStepFactor, steps),
-        minZoom, kMaxZoom);
+        minZoom, maxZoom);
     emit zoomRequested(newZoom);
 }
 
@@ -5879,11 +6048,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     // instead of laying it out again; the frame clips what it shifts out.
     const int renderWidth = width + padding;
     // At zoom 1, a label every 10 s, about 430 px apart; closer labels as
-    // the view zooms in, and further ones as it zooms out.
+    // the view zooms in, down to tenths of a second for a short track
+    // stretched to the view's width, and further ones as it zooms out.
     constexpr int minPixelSpacing = 240;
 
     static constexpr double kTimeCandidates[] = {
-        1, 2, 5, 10, 15, 30, 60, 120, 300, 600
+        0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600
     };
     // Spacing in logical pixels; positions in device pixels.
     const double secondsPerPixel = 1.0 / (columnsPerSecond * effectiveZoomLocked());
@@ -5908,10 +6078,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
     const double trackTimeLeft = timeLeft - m_gaplessPositionOffset;
     const double trackTimeRight = timeRight - m_gaplessPositionOffset;
 
-    const double startTrackTime = std::max(0.0,
-        std::ceil(std::max(0.0, trackTimeLeft) / timeInterval) * timeInterval);
-
-    for (double trackT = startTrackTime; trackT <= trackTimeRight; trackT += timeInterval) {
+    // Counted in steps, so that tenths do not drift from their labels.
+    const auto firstStep = static_cast<qint64>(
+        std::ceil(std::max(0.0, trackTimeLeft) / timeInterval - 1e-9));
+    for (qint64 step = firstStep; static_cast<double>(step) * timeInterval <= trackTimeRight;
+         ++step) {
+        const double trackT = static_cast<double>(step) * timeInterval;
         // Convert per-track time back to continuous time for pixel positioning.
         const double continuousT = trackT + m_gaplessPositionOffset;
         const double pxF = timeToPixelX(
@@ -5922,7 +6094,7 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
             continue;
         }
         m_timeGrid.lines.push_back(QRect(pixelX, 0, lineWidth, tickHeight));
-        const QString label = formatTimeLabel(trackT);
+        const QString label = formatTimeLabel(trackT, timeInterval);
         const QSize size = scaleLabelSize(label);
         m_timeGrid.images.push_back({SpectrogramOverlayImage::ScaleLabel, label, 0,
             QRectF(std::round(pixelX / scale) - size.width() / 2, 5.0,

@@ -201,6 +201,7 @@ Item {
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property var soloedChannels: []
         property int channelButtonsVisibility: 1
         property int viewerFullscreenMode: 0
@@ -279,6 +280,7 @@ Item {
         function setViewerFullscreenMode(mode) {}
         function setPreventDisplaySleepInFullscreen(value) {}
         function setShowFullscreenTitleStrip(value) { showFullscreenTitleStrip = value }
+        function setStretchShortTracks(value) { stretchShortTracks = value }
         function setShowLevelMeter(value) { showLevelMeter = value }
         function setLastFmScrobblingEnabled(value) {}
         function beginLastFmAuth() {}

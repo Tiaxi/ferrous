@@ -310,6 +310,7 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SetPreventDisplaySleepInFullscreen(_)
         | BridgeSettingsCommand::SetShowFullscreenTitleStrip(_)
+        | BridgeSettingsCommand::SetStretchShortTracks(_)
         | BridgeSettingsCommand::SetLogScale(_)
         | BridgeSettingsCommand::SetShowLevelMeter(_)
         | BridgeSettingsCommand::SetShowFps(_)
@@ -360,6 +361,10 @@ fn handle_display_settings_command(
         }
         BridgeSettingsCommand::SetShowFullscreenTitleStrip(show) => {
             state.settings.display.show_fullscreen_title_strip = *show;
+            *context.settings_dirty = true;
+        }
+        BridgeSettingsCommand::SetStretchShortTracks(stretch) => {
+            state.settings.display.stretch_short_tracks = *stretch;
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetLogScale(enabled) => {

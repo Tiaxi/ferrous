@@ -1912,6 +1912,10 @@ bool BridgeClient::showFullscreenTitleStrip() const {
     return m_showFullscreenTitleStrip;
 }
 
+bool BridgeClient::stretchShortTracks() const {
+    return m_stretchShortTracks;
+}
+
 double BridgeClient::dbRange() const {
     return m_dbRange;
 }
@@ -2408,6 +2412,16 @@ void BridgeClient::setShowFullscreenTitleStrip(bool value) {
         static_cast<quint8>(value ? 1 : 0)));
 }
 
+void BridgeClient::setStretchShortTracks(bool value) {
+    if (m_stretchShortTracks != value) {
+        m_stretchShortTracks = value;
+        scheduleSnapshotChanged();
+    }
+    sendBinaryCommand(BinaryBridgeCodec::encodeCommandU8(
+        BinaryBridgeCodec::CmdSetStretchShortTracks,
+        static_cast<quint8>(value ? 1 : 0)));
+}
+
 void BridgeClient::setDbRange(double value) {
     // The range the backend keeps (src/frontend_bridge/commands.rs).
     const double clamped = std::clamp(value, 50.0, 150.0);
@@ -2437,6 +2451,7 @@ QVariantMap BridgeClient::settingDefaults() const {
         {QStringLiteral("systemMediaControlsEnabled"), defaults.systemMediaControlsEnabled},
         {QStringLiteral("preventDisplaySleepInFullscreen"), defaults.preventDisplaySleepInFullscreen},
         {QStringLiteral("showFullscreenTitleStrip"), defaults.showFullscreenTitleStrip},
+        {QStringLiteral("stretchShortTracks"), defaults.stretchShortTracks},
         {QStringLiteral("showSpectrogramCrosshair"), defaults.showSpectrogramCrosshair},
         {QStringLiteral("showSpectrogramScale"), defaults.showSpectrogramScale},
         {QStringLiteral("channelButtonsVisibility"), defaults.channelButtonsVisibility},
@@ -6084,6 +6099,15 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         : m_showFullscreenTitleStrip;
     if (m_showFullscreenTitleStrip != showFullscreenTitleStrip) {
         m_showFullscreenTitleStrip = showFullscreenTitleStrip;
+        changed = true;
+        snapshotSignalChanged = true;
+    }
+
+    const bool stretchShortTracks = snapshot.settings.present
+        ? snapshot.settings.stretchShortTracks
+        : m_stretchShortTracks;
+    if (m_stretchShortTracks != stretchShortTracks) {
+        m_stretchShortTracks = stretchShortTracks;
         changed = true;
         snapshotSignalChanged = true;
     }

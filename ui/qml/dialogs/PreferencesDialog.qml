@@ -79,7 +79,7 @@ Dialog {
             "showSpectrogramCrosshair", "showFps", "spectrogramZoomEnabled",
             "channelButtonsVisibility",
             "viewerFullscreenMode", "showFullscreenTitleStrip", "preventDisplaySleepInFullscreen",
-            "showLevelMeter",
+            "showLevelMeter", "stretchShortTracks",
             "lastFmScrobblingEnabled", "lastFmShowScrobbleProgress",
             "systemMediaControlsEnabled"
         ]

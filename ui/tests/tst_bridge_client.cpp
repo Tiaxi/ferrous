@@ -244,6 +244,7 @@ private slots:
     void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
     void scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt();
     void fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHasIt();
+    void stretchShortTracksSettingIsSentAndDecodedAsTheBackendHasIt();
     void lastFmScrobbleIndicatorIsDecodedAsTheBackendSendsIt();
     void lastFmScrobbleIndicatorFollowsSnapshotsAndPausingIsSent();
     void queueColumnWidthsKeepTheNewestWhileAcksAreLate();
@@ -1865,9 +1866,10 @@ void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt(
                  qPrintable(error));
         QCOMPARE(decoded.settings.spectrogramFrequencyCap, capped);
         QCOMPARE(decoded.settings.queueColumnWidthsGeneration, quint32(12));
-        // Only the scrobble progress and title strip settings may follow it.
+        // Only the scrobble progress, title strip and stretch settings may
+        // follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(3, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(4, '\0')),
             &decoded, &error));
     }
     BinaryBridgeCodec::DecodedSnapshot older;
@@ -1916,9 +1918,9 @@ void BridgeClientTest::scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt(
                      &error),
                  qPrintable(error));
         QCOMPARE(decoded.settings.lastFmShowScrobbleProgress, show);
-        // Only the title strip setting may follow it.
+        // Only the title strip and stretch settings may follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(2, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(3, '\0')),
             &decoded, &error));
     }
     QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
@@ -1969,8 +1971,9 @@ void BridgeClientTest::fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHa
                  qPrintable(error));
         QCOMPARE(decoded.settings.showFullscreenTitleStrip, show);
         QVERIFY(decoded.settings.lastFmShowScrobbleProgress);
+        // Only the stretch setting may follow it.
         QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
-            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(2, '\0')),
             &decoded, &error));
     }
     QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
@@ -2005,6 +2008,64 @@ void BridgeClientTest::fullscreenTitleStripSettingIsSentAndDecodedAsTheBackendHa
     snapshot.settings.showFullscreenTitleStrip = true;
     QVERIFY(client.processBinarySnapshot(snapshot));
     QVERIFY(client.showFullscreenTitleStrip());
+}
+
+void BridgeClientTest::stretchShortTracksSettingIsSentAndDecodedAsTheBackendHasIt() {
+    // The settings section ends with it, after the title strip's setting;
+    // older backends end it before, and short tracks are stretched.
+    for (const bool stretch : {false, true}) {
+        QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+        payload.append('\0');
+        payload.append('\1');
+        payload.append('\0');
+        payload.append(static_cast<char>(stretch ? 1 : 0));
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QString error;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload), &decoded,
+                     &error),
+                 qPrintable(error));
+        QCOMPARE(decoded.settings.stretchShortTracks, stretch);
+        QVERIFY(!decoded.settings.showFullscreenTitleStrip);
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + QByteArray(1, '\0')),
+            &decoded, &error));
+    }
+    QByteArray older = settingsSectionPayload({300, 190, 0}, 12);
+    older.append('\0');
+    older.append('\1');
+    older.append('\0');
+    BinaryBridgeCodec::DecodedSnapshot decoded;
+    QString error;
+    QVERIFY(BinaryBridgeCodec::decodeSnapshotPacket(
+        packetWithSection(BinaryBridgeCodec::SectionSettings, older), &decoded, &error));
+    QVERIFY(decoded.settings.stretchShortTracks);
+    QVERIFY(!decoded.settings.showFullscreenTitleStrip);
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    QSignalSpy changed(&client, &BridgeClient::snapshotChanged);
+    QVERIFY(client.stretchShortTracks());
+    client.setStretchShortTracks(false);
+    QVERIFY(!client.stretchShortTracks());
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(sent[0].size(), BinaryBridgeCodec::kCommandHeaderBytes + 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(77));
+    QCOMPARE(quint16(BinaryBridgeCodec::CmdSetStretchShortTracks), quint16(77));
+    QCOMPARE(sent[0].at(BinaryBridgeCodec::kCommandHeaderBytes), char(0));
+    QTRY_VERIFY(changed.count() > 0);
+
+    // The backend's value wins.
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.stretchShortTracks = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.stretchShortTracks());
 }
 
 namespace {
@@ -7811,7 +7872,7 @@ void BridgeClientTest::settingDefaultsAreANewBackendsSettings() {
     QVERIFY(snapshots.wait(5000));
     // Configure Ferrous's Defaults: what the backend starts with.
     const QVariantMap defaults = client->settingDefaults();
-    QCOMPARE(defaults.size(), 20);
+    QCOMPARE(defaults.size(), 21);
     // The level meter is off for new installs.
     QCOMPARE(defaults.value(QStringLiteral("showLevelMeter")), QVariant(false));
     for (auto it = defaults.cbegin(); it != defaults.cend(); ++it) {
@@ -8674,6 +8735,7 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
     // Without the field, the default the Rust settings have.
     QCOMPARE(decoded.settings.showLevelMeter, false);
     QCOMPARE(decoded.settings.showFullscreenTitleStrip, true);
+    QCOMPARE(decoded.settings.stretchShortTracks, true);
 }
 
 void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {
