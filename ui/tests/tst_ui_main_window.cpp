@@ -1173,12 +1173,32 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     }
     QVERIFY(!named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 
-    // With a library folder, the first run is over: a quiet line in each.
+    // With a library folder, the first run is over: the library's quiet
+    // line, and the queue's two-line hint, centred as the first-run
+    // message is, in its type: what is empty, then what fills it.
     bridge->setProperty("libraryRootCount", 1);
     QTRY_VERIFY(!message->isVisible());
+    QQuickItem *queueEmptyMessage = named(window, "queueEmptyMessage");
     QQuickItem *queueEmpty = named(window, "queueEmptyLabel");
+    QQuickItem *queueEmptyExplanation = named(window, "queueEmptyExplanation");
     QTRY_VERIFY(shown(queueEmpty));
+    QVERIFY(shown(queueEmptyExplanation));
     QCOMPARE(queueEmpty->property("text").toString(), QStringLiteral("The queue is empty"));
+    QCOMPARE(queueEmptyExplanation->property("text").toString(),
+             QStringLiteral("Double-click music in the library to play it, or drag it here."));
+    QCOMPARE(queueEmpty->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(queueEmpty->property("font").value<QFont>().pointSizeF(),
+             title->property("font").value<QFont>().pointSizeF());
+    QCOMPARE(colorOf(queueEmpty), tokenHex(window, "text"));
+    QCOMPARE(colorOf(queueEmptyExplanation), tokenHex(window, "textSecondary"));
+    QCOMPARE(queueEmptyExplanation->property("font").value<QFont>().pointSizeF(),
+             explanation->property("font").value<QFont>().pointSizeF());
+    QVERIFY(sceneRect(queueEmptyExplanation).top() >= sceneRect(queueEmpty).bottom());
+    QVERIFY(std::abs(sceneRect(queueEmptyMessage).center().x() - sceneRect(queue).center().x()) <= 1);
+    QVERIFY(std::abs(sceneRect(queueEmptyMessage).center().y() - sceneRect(queue).center().y()) <= 1);
+    // Each line on one line in a window of the default size.
+    const QFontMetricsF explanationMetrics(queueEmptyExplanation->property("font").value<QFont>());
+    QVERIFY(queueEmptyExplanation->height() < 2 * explanationMetrics.lineSpacing());
     QQuickItem *libraryEmpty = named(window, "libraryEmptyStateLabel");
     QTRY_VERIFY(shown(libraryEmpty));
     QCOMPARE(libraryEmpty->property("text").toString(), QStringLiteral("Loading library…"));
