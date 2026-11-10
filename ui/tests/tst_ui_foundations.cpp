@@ -13,6 +13,7 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QQuickWindow>
 #include <QDir>
@@ -262,6 +263,8 @@ private slots:
     void rowBackgroundShowsEachState();
     void rowBackgroundDrawsTheRingAndTintAsOneRectangle();
     void regionHeaderLaysOutNameTotalsAndHairline();
+    void regionHeaderGivesUpTheTotalsBeforeTheName_data();
+    void regionHeaderGivesUpTheTotalsBeforeTheName();
     void plotPlateLabelHasAnEdgeOutside();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
@@ -779,6 +782,92 @@ void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {
     header->setWidth(180);
     QTRY_VERIFY(totals->property("truncated").toBool());
     QVERIFY(totals->mapToItem(header, QPointF(totals->width(), 0)).x() <= trailing->mapToItem(header, QPointF(0, 0)).x());
+}
+
+void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// However narrow the header, its name stays whole while there is room for
+// it: the totals elide first, down to their first total, and then go. They
+// never run into the name or the items at the right end.
+void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, QStringLiteral(R"QML(
+        Components.RegionHeader {
+            objectName: "header"
+            width: 900
+            uiPalette: tokens
+            title: "Library"
+            totals: "13 artists · 29 albums · 180 tracks"
+
+            Label {
+                objectName: "trailingLabel"
+                text: "Length"
+            }
+        }
+)QML")),
+                                                       &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *header = itemNamed(root.get(), QStringLiteral("header"));
+    QVERIFY(header != nullptr);
+    QQuickItem *title = childNamed(header, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *totals = childNamed(header, QStringLiteral("regionHeaderTotals"));
+    QQuickItem *trailing = childNamed(header, QStringLiteral("trailingLabel"));
+    QVERIFY(title != nullptr && totals != nullptr && trailing != nullptr);
+    const qreal titleWidth = std::ceil(title->implicitWidth());
+    const qreal leftInset = header->property("leftInset").toReal();
+    const qreal fixed = leftInset + titleWidth + header->property("rightInset").toReal() + trailing->implicitWidth();
+    const QFont totalsFont = totals->property("font").value<QFont>();
+    const qreal firstTotal = QFontMetricsF(totalsFont).horizontalAdvance(QStringLiteral("13 artists"));
+
+    bool sawElided = false;
+    bool sawDropped = false;
+    for (qreal width = std::ceil(fixed + 8 + totals->implicitWidth() + 40); width >= fixed; width -= 3) {
+        header->setWidth(width);
+        const QByteArray at = QByteArray("width ") + QByteArray::number(width);
+        // Laid out again; the items declared inside stay at the right end.
+        QTRY_COMPARE(trailing->mapToItem(header, QPointF(trailing->width(), 0)).x(), width);
+        // Shown while there is room for the first total, give or take the
+        // rounding of a pixel.
+        const qreal room = width - fixed - 8;
+        if (room >= firstTotal + 1) {
+            QTRY_VERIFY2(totals->isVisible(), at.constData());
+        } else if (room < firstTotal - 1) {
+            QTRY_VERIFY2(!totals->isVisible(), at.constData());
+        }
+        // The whole name, from the inset.
+        QTRY_COMPARE(title->width(), titleWidth);
+        QVERIFY2(!title->property("truncated").toBool(), at.constData());
+        QCOMPARE(title->mapToItem(header, QPointF(0, 0)).x(), leftInset);
+        const qreal trailingLeft = trailing->mapToItem(header, QPointF(0, 0)).x();
+        if (totals->isVisible()) {
+            const qreal totalsLeft = totals->mapToItem(header, QPointF(0, 0)).x();
+            QVERIFY2(totalsLeft >= leftInset + titleWidth + 8 - 1, at.constData());
+            QVERIFY2(totalsLeft + totals->width() <= trailingLeft + 0.5, at.constData());
+            // At least its first total shows.
+            QVERIFY2(totals->width() >= std::floor(firstTotal) - 1, at.constData());
+            sawElided = sawElided || totals->property("truncated").toBool();
+        } else {
+            sawDropped = true;
+        }
+    }
+    QVERIFY(sawElided);
+    QVERIFY(sawDropped);
 }
 
 namespace {
