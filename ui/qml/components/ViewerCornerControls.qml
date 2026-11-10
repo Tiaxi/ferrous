@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
-import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
@@ -23,6 +22,9 @@ Item {
     required property var uiPalette
     required property var closeViewer
     property bool controlsVisible: true
+    // The controls as they fade (FullscreenControlsAutoHide's level); at
+    // once without one.
+    property real controlsLevel: root.controlsVisible ? 1 : 0
     property var pointerActivity: null
     property real zoomLevel: 1.0
     property var resetView: null
@@ -42,17 +44,8 @@ Item {
     // As the title strip of the viewer over the whole screen: shown at once,
     // so the key that brings the controls back can move focus to them; it
     // fades out on the strip's curve, and hidden it takes no pointer.
-    opacity: root.controlsVisible ? 1 : 0
-    visible: root.controlsVisible || opacity > 0
-
-    // Kirigami's durations are 0 with animations turned off.
-    Behavior on opacity {
-        enabled: Kirigami.Units.shortDuration > 0
-        NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
-        }
-    }
+    opacity: root.controlsLevel
+    visible: root.controlsVisible || root.controlsLevel > 0
 
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Viewer")
@@ -75,22 +68,17 @@ Item {
         Accessible.ignored: true
     }
 
-    Label {
+    Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
         x: root.spacing
         y: root.spacing
         visible: root.readoutShown
-        height: root.uiPalette.toolButtonSize
+        uiPalette: root.uiPalette
+        plotColors: root.plotColors
+        zoomLevel: root.zoomLevel
         leftPadding: 4
         rightPadding: 2
-        verticalAlignment: Text.AlignVCenter
-        text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
-            Math.round(root.zoomLevel * 100))
-        font.family: root.uiPalette.baseFont.family
-        font.pointSize: root.uiPalette.smallPointSize
-        font.features: root.uiPalette.tabularFigures
-        color: root.plotColors.plotTextSecondary
     }
 
     Components.PlotToolButton {

@@ -429,6 +429,7 @@ Item {
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
+                        controlsLevel: fullscreenControlsAutoHide.level
                         available: root.stripEnabled
                         pointerActivity: fullscreenControlsAutoHide.pointerMoved
                         zoomLevel: root.zoomLevel

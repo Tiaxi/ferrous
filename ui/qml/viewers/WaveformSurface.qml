@@ -128,7 +128,9 @@ Item {
         HoverHandler {
             id: waveformHover
             objectName: "waveformSurfaceHoverHandler"
-            cursorShape: root.interactiveOverlaysVisible ? Qt.ArrowCursor : Qt.BlankCursor
+            // The pointer hides once the overlays have faded out.
+            cursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
+                ? Qt.ArrowCursor : Qt.BlankCursor
             // A touch ends without a hover leave for the item.
             onHoveredChanged: {
                 if (!hovered) {

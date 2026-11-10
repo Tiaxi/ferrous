@@ -32,6 +32,9 @@ Item {
     property bool paneHovered: false
     // Whether the viewer's controls show; the main pane's always do.
     property bool controlsVisible: true
+    // Those controls as they fade (FullscreenControlsAutoHide's level),
+    // which the mode switch and the lanes' buttons take as their opacity.
+    property real controlsLevel: root.controlsVisible ? 1 : 0
     property var pointerActivity: null
     // What the viewer keeps clear on the right of the mode switch.
     property real trailingInset: 0
@@ -44,18 +47,18 @@ Item {
     property real markerX: NaN
     // Opens Recent Issues.
     property var openIssues: function() {}
-    // Whether no track has given the plots data yet this session.
-    property bool awaitingFirstData: false
+    // The shown plot's zoom, 1 at the default, and what resets it. While it
+    // is zoomed, a readout shows it beside the mode switch, unless
+    // `zoomReadoutAvailable` is false, as in a viewer, whose own controls
+    // show it.
+    property real zoomLevel: 1.0
+    property var resetZoom: null
+    property bool zoomReadoutAvailable: true
 
-    // In the light theme, until the session's first audio data, the bare
-    // pane is the view colour rather than the spectrogram's black floor: a
-    // slab of black would be the strongest shape on the first screen. What
-    // is drawn on it then takes the colours of a plot on the view, the
-    // waveform's. The dark theme's floor is dark either way.
-    readonly property bool viewFloor: root.awaitingFirstData && !root.uiPalette.themeIsDark
-    readonly property var plotColors: root.viewFloor
-        ? root.uiPalette.waveformPlot
-        : root.uiPalette.plotColors(root.visualizationMode)
+    // The mode's plot colours, also while the plot is bare, before any
+    // audio and while it waits for its data: the floor is the mode's own
+    // then too (#373 H4 P5), so the first data never changes it.
+    readonly property var plotColors: root.uiPalette.plotColors(root.visualizationMode)
     readonly property bool meterShown: root.uiBridge.showLevelMeter
     // The meter takes 10 px of the plot's width while it is shown, also
     // when nothing plays: the plot narrows only when the option changes.
@@ -69,10 +72,13 @@ Item {
     readonly property real cutSeconds: root.uiBridge.waveformEndsEarly
         ? root.uiBridge.waveformCoverageSeconds : -1
     // What the mode switch takes of the top right corner, with the gap
-    // beside it, for the plot's own overlays to keep clear of.
+    // beside it and the zoom readout left of it while that shows, for the
+    // plot's own overlays to keep clear of.
     readonly property size reservedCorner: Qt.size(
-        modeSwitch.anchors.rightMargin + modeSwitch.width,
-        modeSwitch.anchors.topMargin + modeSwitch.height)
+        modeSwitch.anchors.rightMargin + modeSwitch.width
+            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0),
+        modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
+                                                zoomPlate.visible ? zoomPlate.height : 0))
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
@@ -88,28 +94,6 @@ Item {
             : minutes + ":" + secs
     }
 
-    // The view colour over the plot and the meter's column while the floor
-    // is the view's, under everything else here. The first data fades it
-    // out over longDuration: the plot's floor and data come in as one.
-    // The seam above the pane is the split handle's.
-    Rectangle {
-        objectName: "plotViewFloor"
-        z: 1
-        anchors.fill: parent
-        color: root.uiPalette.view
-        opacity: root.viewFloor ? 1 : 0
-        visible: opacity > 0
-
-        // Animations off make the short duration 0; the long one stays 1 ms.
-        Behavior on opacity {
-            enabled: Kirigami.Units.shortDuration > 0
-            NumberAnimation {
-                duration: Kirigami.Units.longDuration
-                easing.type: Easing.InOutQuad
-            }
-        }
-    }
-
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
@@ -122,16 +106,33 @@ Item {
         anchors.right: parent.right
         anchors.topMargin: root.topInset + 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
-        // In a viewer, it hides and shows with the viewer's controls, on
-        // their curve; hidden, it takes no pointer.
-        visible: root.controlsVisible || opacity > 0
-        revealed: root.controlsVisible
-            && (root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
-                || modeSwitch.pointerHovered || modeSwitch.focusInside)
+        // In a viewer, it hides and shows with the viewer's controls, at
+        // their level; hidden, it takes no pointer.
+        visible: root.controlsVisible || root.controlsLevel > 0
+        revealed: root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
+            || modeSwitch.pointerHovered || modeSwitch.focusInside
+        fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode
         setMode: root.setVisualizationMode
+        pointerActivity: root.pointerActivity
+    }
+
+    // The zoom, 8 px left of the mode switch: shown whenever the plot is
+    // zoomed, not only with the switch, as nothing else shows it. It keeps
+    // its place while the switch hides.
+    Components.PlotZoomPlate {
+        id: zoomPlate
+        z: 2
+        anchors.top: modeSwitch.top
+        anchors.right: modeSwitch.left
+        anchors.rightMargin: 8
+        available: root.zoomReadoutAvailable
+        plotColors: root.plotColors
+        uiPalette: root.uiPalette
+        zoomLevel: root.zoomLevel
+        resetView: root.resetZoom
         pointerActivity: root.pointerActivity
     }
 
@@ -169,6 +170,7 @@ Item {
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             buttonsVisibility: root.uiBridge.channelButtonsVisibility
             controlsShown: root.controlsVisible
+            controlsLevel: root.controlsLevel
             laneHovered: root.hoveredLane === index
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }

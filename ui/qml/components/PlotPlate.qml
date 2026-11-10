@@ -23,15 +23,20 @@ Item {
     // buttons too, stay on it rather than reach the view under it.
     property bool takesPointer: false
     property bool revealed: true
+    // A level the plate fades with besides its own reveal, such as a
+    // viewer's controls as they hide: from 1 to 0.
+    property real fadeLevel: 1
     default property alias contentData: content.data
+    // How far the plate is revealed, from 0 to 1, as it fades in or out.
+    property real revealLevel: root.revealed ? 1 : 0
 
     implicitWidth: Math.max(20, content.implicitWidth + 2 * root.horizontalPadding)
     implicitHeight: Math.max(20, content.implicitHeight + 2 * root.verticalPadding)
 
-    opacity: root.revealed ? 1 : 0
+    opacity: root.revealLevel * root.fadeLevel
 
     // Kirigami's durations are 0 with animations turned off.
-    Behavior on opacity {
+    Behavior on revealLevel {
         enabled: Kirigami.Units.shortDuration > 0
         NumberAnimation {
             duration: Kirigami.Units.shortDuration

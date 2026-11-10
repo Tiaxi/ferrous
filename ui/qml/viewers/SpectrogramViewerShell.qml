@@ -66,18 +66,10 @@ Item {
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
-    // The controls as they fade, on the title strip's curve: 1 shown, 0
-    // hidden. What the visualization draws for the pointer, the crosshair
-    // and its readout, fades with them rather than going at once.
-    property real fullscreenControlsLevel: root.fullscreenControlsVisible ? 1 : 0
-    // Kirigami's durations are 0 with animations turned off.
-    Behavior on fullscreenControlsLevel {
-        enabled: Kirigami.Units.shortDuration > 0
-        NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
-        }
-    }
+    // The controls as they fade: 1 shown, 0 hidden. Everything that hides
+    // with them takes it, the strip, the corner controls, the mode switch,
+    // the lanes' buttons and what the plot draws for the pointer.
+    readonly property real fullscreenControlsLevel: fullscreenControlsAutoHide.level
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
         && root.useWholeScreenViewerMode
@@ -276,6 +268,7 @@ Item {
                 uiPalette: root.uiPalette
                 closeButtonName: "spectrogramPopupCloseButton"
                 controlsVisible: root.fullscreenControlsVisible
+                controlsLevel: root.fullscreenControlsLevel
                 pointerActivity: root.noteFullscreenPointerActivity
                 zoomLevel: root.zoomLevel
                 resetView: root.resetView
@@ -394,6 +387,7 @@ Item {
                         positionText: root.positionText
                         closeButtonName: "spectrogramFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
+                        controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
                         zoomLevel: root.zoomLevel

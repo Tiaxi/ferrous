@@ -32,6 +32,9 @@ Rectangle {
     // The playback clock's text of the position, which changes once a second.
     property string positionText: "00:00"
     property bool controlsVisible: true
+    // The controls as they fade (FullscreenControlsAutoHide's level); at
+    // once without one.
+    property real controlsLevel: root.controlsVisible ? 1 : 0
     // Whether the strip may show at all.
     property bool available: true
     property var pointerActivity: null
@@ -86,19 +89,10 @@ Rectangle {
         controls.implicitHeight + 8)
     implicitHeight: root.bandHeight + 1
     color: root.plotColors.plotPlate
-    opacity: root.available && root.controlsVisible ? 1 : 0
+    opacity: root.available ? root.controlsLevel : 0
     // Shown at once, so the key that brings the controls back can move
     // focus to them; it fades out, and hidden it takes no pointer.
-    visible: root.available && (root.controlsVisible || opacity > 0)
-
-    // Kirigami's durations are 0 with animations turned off.
-    Behavior on opacity {
-        enabled: Kirigami.Units.shortDuration > 0
-        NumberAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.OutCubic
-        }
-    }
+    visible: root.available && (root.controlsVisible || root.controlsLevel > 0)
 
     Accessible.role: Accessible.ToolBar
     Accessible.name: I18n.i18nc("@label", "Viewer")

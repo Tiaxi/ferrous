@@ -950,8 +950,8 @@ private slots:
     void nowPlayingTextBlockIsNotEmptyForLong();
     void visualizationModeSwitchKeepsAPlotOnScreen();
     void visualizationModeSwitchKeepsAPlotOnScreen_data();
-    void visualizationPaneIsTheViewUntilTheFirstData();
-    void visualizationPaneIsTheViewUntilTheFirstData_data();
+    void visualizationPaneFloorFollowsTheMode();
+    void visualizationPaneFloorFollowsTheMode_data();
     void viewerControlsFadeWithTheStrip();
     void viewerControlsFadeWithTheStrip_data();
 };
@@ -4068,22 +4068,23 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     QCOMPARE(spectrogram->opacity(), 1.0);
 }
 
-void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData_data() {
+void UiMotionTest::visualizationPaneFloorFollowsTheMode_data() {
     QTest::addColumn<bool>("dark");
     QTest::addColumn<bool>("animated");
     QTest::newRow("light") << false << true;
     QTest::newRow("light, animations off") << false << false;
     QTest::newRow("dark") << true << true;
+    QTest::newRow("dark, animations off") << true << false;
 }
 
-// The empty pane (#373 H2, P1): in the light theme, before the session's
-// first audio data, the pane is the view colour, not a slab of the
-// spectrogram's black floor; what is drawn on it, the mode switch, takes
-// the colours of a plot on the view. The first data fades it out over
-// longDuration into the plot's floor and data, at once with animations
-// off, and the floor stays the plot's from then on, also once playback
-// stops. The dark theme's pane is its floor throughout.
-void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData() {
+// The empty pane's floor follows the mode (#373 H4, P5; H2's P1 made the
+// light theme's bare pane the view colour): before any audio and while the
+// first track is analysed, the spectrogram's pane is its colour map's
+// floor, black, as silence draws it, and the waveform's the view colour,
+// in both themes. Switching modes on the empty pane switches the floor with
+// the mode's cross-fade, and the first data never changes it. What is drawn
+// on it, the mode switch, takes the mode's plot colours.
+void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     QFETCH(bool, dark);
     QFETCH(bool, animated);
     const QPalette before = QGuiApplication::palette();
@@ -4112,16 +4113,24 @@ void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData() {
     QObject *bridge = bridgeOf(window);
     QQuickItem *pane = named(window, "spectrogramPane");
     QQuickItem *layer = named(window, "plotLayer");
-    QQuickItem *cover = named(window, "plotViewFloor");
+    QQuickItem *surface = named(window, "visualizationSurface");
     QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
-    QVERIFY(pane && layer && cover && spectrogram);
+    QQuickItem *waveform = named(window, "mainWaveformSurface");
+    QVERIFY(pane && layer && surface && spectrogram && waveform);
+    // H2's view-colour layer is gone.
+    QVERIFY(itemNamed(window->contentItem(), QStringLiteral("plotViewFloor")) == nullptr);
+    QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
+    QVERIFY(fade != nullptr);
     auto *spectrogramSet = qvariant_cast<QObject *>(tokens->property("spectrogramPlot"));
     auto *waveformSet = qvariant_cast<QObject *>(tokens->property("waveformPlot"));
-    const QColor black = spectrogramSet->property("plotBg").value<QColor>();
-    QCOMPARE(black, QColor(Qt::black));
+    const QColor black(QStringLiteral("#000000"));
+    QCOMPARE(spectrogramSet->property("plotBg").value<QColor>(), black);
+    QCOMPARE(waveformSet->property("plotBg").value<QColor>(), view);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QVERIFY(viewer != nullptr);
     QCOMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
 
     // Clear of the mode switch in the top right corner.
     const auto drawnInPane = [&]() {
@@ -4130,36 +4139,74 @@ void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData() {
         const QPointF at = pane->mapToScene(QPointF(pane->width() * 0.25, pane->height() * 0.6)) * scale;
         return image.pixelColor(at.toPoint());
     };
+    // The mode's floor, as the pane says it, as the layer's colours say it,
+    // and as drawn.
+    const auto expectFloor = [&](int mode, const char *when) -> bool {
+        const QColor wanted = mode == 1 ? view : black;
+        QObject *set = mode == 1 ? waveformSet : spectrogramSet;
+        if (pane->property("color").value<QColor>() != wanted) {
+            qWarning() << when << "pane" << pane->property("color").value<QColor>() << "wanted" << wanted;
+            return false;
+        }
+        if (layer->property("plotColors").value<QObject *>() != set
+            || modeSwitch->property("plotColors").value<QObject *>() != set) {
+            qWarning() << when << "the layer is not in the mode's plot colours";
+            return false;
+        }
+        const QColor drawn = drawnInPane();
+        if (drawn != wanted) {
+            qWarning() << when << "drawn" << drawn << "wanted" << wanted;
+            return false;
+        }
+        return true;
+    };
+    // Switches to `mode` on an empty pane: with animations, the chosen plot
+    // comes in over the other, its floor over the other's; then it settles.
+    const auto switchTo = [&](int mode) {
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
+        if (animated) {
+            QVERIFY(fade->property("running").toBool());
+            QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
+            surface->setProperty("modeFade", 0.5);
+            // Halfway between the two floors.
+            const QColor drawn = drawnInPane();
+            const QColor from = mode == 1 ? black : view;
+            const QColor to = mode == 1 ? view : black;
+            const auto between = [](int value, int a, int b) {
+                return value > std::min(a, b) && value < std::max(a, b);
+            };
+            QVERIFY2(between(drawn.red(), from.red(), to.red()) && between(drawn.blue(), from.blue(), to.blue()),
+                     qPrintable(drawn.name()));
+            QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+        } else {
+            QVERIFY(!fade->property("running").toBool());
+        }
+        QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+        QTRY_VERIFY(!(mode == 1 ? spectrogram : waveform)->isVisible());
+    };
 
-    // Before any audio.
+    // Before any audio: the spectrogram's floor, with the mode switch on it.
     QTest::qWait(50);
-    if (dark) {
-        QVERIFY(!cover->isVisible());
-        QCOMPARE(pane->property("color").value<QColor>(), black);
-        QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
-        QCOMPARE(drawnInPane(), black);
-    } else {
-        QVERIFY(cover->isVisible());
-        QCOMPARE(cover->opacity(), 1.0);
-        QCOMPARE(cover->property("color").value<QColor>(), view);
-        QCOMPARE(pane->property("color").value<QColor>(), view);
-        QCOMPARE(layer->property("plotColors").value<QObject *>(), waveformSet);
-        QTRY_COMPARE(drawnInPane(), view);
-        // The mode switch shows on it.
-        QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
-        QVERIFY(modeSwitch != nullptr);
-        QVERIFY(modeSwitch->isVisible());
-        QVERIFY(modeSwitch->z() > cover->z());
-    }
+    QVERIFY(modeSwitch->isVisible());
+    QTRY_VERIFY(expectFloor(0, "before audio"));
 
-    // A track, before its data: the pane stays as it is.
+    // The waveform, on the empty pane: its floor, the view colour.
+    switchTo(1);
+    QTRY_VERIFY(expectFloor(1, "before audio, waveform"));
+    // And back.
+    switchTo(0);
+    QTRY_VERIFY(expectFloor(0, "before audio, back to the spectrogram"));
+
+    // A track, while it is analysed: the floor stays the mode's.
     bridge->setProperty("durationSeconds", 60.0);
     bridge->setProperty("currentTrackChannels", 2);
     playQueueRow(bridge, 0);
     QTest::qWait(50);
-    QCOMPARE(cover->isVisible(), !dark);
+    QVERIFY(spectrogram->property("awaitingData").toBool());
+    QVERIFY(expectFloor(0, "analysing"));
 
-    // The first data: the spectrogram's columns.
+    // The first data: the spectrogram's columns, at the floor's level. The
+    // floor is the same, at once and after.
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
                                       Q_ARG(bool, true)));
     QList<SpectrogramItem *> lanes;
@@ -4173,35 +4220,26 @@ void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData() {
     constexpr int bins = 4'097;
     constexpr int columns = 200;
     for (qsizetype index = 0; index < lanes.size(); ++index) {
-        lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index),
+        lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\0'), bins, static_cast<int>(index),
                                               columns, 0, 2'000, 48'000, 1'024, false, true, 1, false);
     }
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
-    // The floor is the plot's, and what is drawn on it in the plot's
-    // colours, at once.
     QCOMPARE(pane->property("color").value<QColor>(), black);
     QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
-    if (!dark && animated) {
-        // The view fades out over longDuration.
-        QVERIFY(cover->isVisible());
-        QTRY_VERIFY(cover->opacity() > 0.05 && cover->opacity() < 0.95);
-        QTRY_VERIFY_WITH_TIMEOUT(!cover->isVisible(), 2000);
-    } else {
-        QVERIFY(!cover->isVisible());
-    }
-    QCOMPARE(cover->opacity(), 0.0);
-    QVERIFY(drawnInPane() != view || dark);
+    QTest::qWait(animated ? 450 : 50);
+    QCOMPARE(pane->property("color").value<QColor>(), black);
 
-    // Stopped, with the track's data gone, the floor stays the plot's.
+    // Stopped, with the track's data gone: the mode's floor still, in each
+    // mode.
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     bridge->setProperty("currentTrackPath", QString());
     for (SpectrogramItem *lane : lanes) {
         lane->releaseStorage();
     }
     QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
-    QTest::qWait(50);
-    QVERIFY(!cover->isVisible());
-    QCOMPARE(pane->property("color").value<QColor>(), black);
+    QTRY_VERIFY(expectFloor(0, "stopped"));
+    switchTo(1);
+    QTRY_VERIFY(expectFloor(1, "stopped, waveform"));
 }
 
 void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
@@ -4215,7 +4253,9 @@ void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
 // corner plate in the window, the mode switch and the lanes' Mute and Solo
 // all fade on one curve, at the same opacity in every frame, shown at once
 // for the key that wakes them and hidden only once faded out. The plots'
-// crosshair and its readout fade with them too (#373 H3: it went at once).
+// crosshair and its readouts fade with them too (#373 H3: it went at once).
+// All of them take the auto-hide's one level as their opacity, and the
+// pointer hides once it is 0, not as the fade starts (#373 H4).
 void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QFETCH(bool, wholeScreen);
     LibraryTreeModel libraryModel;
@@ -4279,10 +4319,28 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
         QVERIFY(crosshair->property("crosshairEnabled").toBool());
     }
 
+    // The pointer over each plot.
+    QObject *waveformHover = waveform->findChild<QObject *>(QStringLiteral("waveformSurfaceHoverHandler"));
+    QVERIFY(waveformHover != nullptr);
+
     QString failure;
     int frames = 0;
+    int fadingFrames = 0;
     // Where a follower is not at the controls' opacity, or "".
     const auto apart = [&]() -> QString {
+        const double level = autoHide->property("level").toDouble();
+        if (std::abs(controls->opacity() - level) > 1e-9) {
+            return QStringLiteral("the controls at %1, the level at %2").arg(controls->opacity()).arg(level);
+        }
+        // The pointer shows while anything does.
+        const int shape = controls->isVisible() ? Qt::ArrowCursor : Qt::BlankCursor;
+        if (spectrogram->property("pointerCursorShape").toInt() != shape
+            || waveformHover->property("cursorShape").toInt() != shape) {
+            return QStringLiteral("the pointer %1 / %2, the controls at %3 (%4)")
+                .arg(spectrogram->property("pointerCursorShape").toInt())
+                .arg(waveformHover->property("cursorShape").toInt())
+                .arg(controls->opacity()).arg(controls->isVisible());
+        }
         for (QQuickItem *follower : followers) {
             if (std::abs(follower->opacity() - controls->opacity()) > 1e-9
                 || follower->isVisible() != controls->isVisible()) {
@@ -4304,6 +4362,10 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     };
     const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
         ++frames;
+        const double level = autoHide->property("level").toDouble();
+        if (level > 0.0 && level < 1.0) {
+            ++fadingFrames;
+        }
         if (failure.isEmpty()) {
             failure = apart();
         }
@@ -4315,9 +4377,15 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QVERIFY(controls->isVisible());
     QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    // The pointer stays while they fade.
+    QCOMPARE(spectrogram->property("pointerCursorShape").toInt(), int(Qt::ArrowCursor));
     QTRY_VERIFY(!controls->isVisible());
+    QCOMPARE(autoHide->property("level").toDouble(), 0.0);
+    QCOMPARE(spectrogram->property("pointerCursorShape").toInt(), int(Qt::BlankCursor));
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    // Frames along the fade, not only its ends.
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
 
     // A key wakes them: shown at once, fading in together.
     autoHide->setProperty("hideDelay", 600000);
