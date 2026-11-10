@@ -33,12 +33,15 @@
 #include <utility>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QtTest/QtTest>
 
 #include <poll.h>
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/DiagnosticsLog.h"
 #include "../src/TagEditorController.h"
 #include "../src/CoverImageProvider.h"
 #include "../src/CoverRevisionLinks.h"
@@ -391,6 +394,9 @@ private slots:
     void mprisPositionReadsThePlaybackClock();
     void mprisRateWritePausesOnlyForZero();
     void mprisOpenUriOpensOnlyLocalFiles();
+    void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
+    void loggingDoesNotWaitForAStalledDisk();
+    void readingTheLogDoesNotWaitForAStalledDisk();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -4923,12 +4929,111 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     QVERIFY(!QFileInfo::exists(logPath));
 
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
     const QString contents = QString::fromUtf8(file.readAll());
     QVERIFY(contents.contains(QStringLiteral("[ui] first line")));
     QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
+}
+
+void BridgeClientTest::loggingDoesNotWaitForAStalledDisk() {
+    // Outlive the client, whose writer waits on them.
+    QSemaphore writing;
+    QSemaphore diskAnswers;
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = logPath;
+    client.m_pendingDiagnosticsDiskLines.clear();
+    // A disk that does not answer until the test lets it.
+    client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
+        [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
+            writing.release();
+            diskAnswers.acquire();
+            return DiagnosticsLog::appendLines(path, lines);
+        });
+
+    client.logInfo(QStringLiteral("app"), QStringLiteral("line 0"));
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY(writing.tryAcquire(1, 5000));
+    // The writer is held up in its write; logging goes on without waiting.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    MprisController controller(&client);
+    for (int n = 1; n <= 200; ++n) {
+        client.logInfo(QStringLiteral("app"), QStringLiteral("line %1").arg(n));
+        client.flushPendingDiagnosticDiskLines();
+    }
+    controller.next();
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY2(elapsed.elapsed() < 1000, qPrintable(QString::number(elapsed.elapsed())));
+    QVERIFY(!QFileInfo::exists(logPath));
+
+    // Once the disk answers, every line is there, in order.
+    diskAnswers.release(1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines =
+        QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 202);
+    for (int n = 0; n <= 200; ++n) {
+        QVERIFY2(lines[n].endsWith(QStringLiteral("[app] info: line %1").arg(n)), qPrintable(lines[n]));
+    }
+    QVERIFY(lines[201].endsWith(QStringLiteral("[mpris] info: Next.")));
+}
+
+void BridgeClientTest::readingTheLogDoesNotWaitForAStalledDisk() {
+    // Outlive the client, whose writer waits on them.
+    QSemaphore writing;
+    QSemaphore diskAnswers;
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // The read the client starts with is done.
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
+        [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
+            writing.release();
+            diskAnswers.acquire();
+            return DiagnosticsLog::appendLines(path, lines);
+        });
+    client.logInfo(QStringLiteral("app"), QStringLiteral("before the reload"));
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY(writing.tryAcquire(1, 5000));
+
+    // Opening Diagnostics, then Reload, while the disk does not answer.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    client.reloadDiagnosticsFromDisk();
+    client.reloadDiagnosticsFromDisk();
+    QVERIFY2(elapsed.elapsed() < 1000, qPrintable(QString::number(elapsed.elapsed())));
+    QVERIFY(client.diagnosticsLoading());
+    // The event loop goes on meanwhile.
+    bool ticked = false;
+    QTimer::singleShot(10, &client, [&ticked]() { ticked = true; });
+    QTRY_VERIFY(ticked);
+    QVERIFY(client.diagnosticsLoading());
+    client.logInfo(QStringLiteral("app"), QStringLiteral("during the reload"));
+
+    // Once the disk answers, the latest reload shows each line once.
+    diskAnswers.release(1000);
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    const QString text = client.diagnosticsText();
+    QCOMPARE(text.count(QStringLiteral("[app] info: before the reload")), 1);
+    QCOMPARE(text.count(QStringLiteral("[app] info: during the reload")), 1);
+    QVERIFY(text.indexOf(QStringLiteral("before the reload")) < text.indexOf(QStringLiteral("during the reload")));
 }
 
 void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
@@ -4971,6 +5076,7 @@ void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
 
     // The diagnostics log has each too, one line each, with what it is about.
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
     const QStringList lines =
@@ -5027,6 +5133,7 @@ void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
     QVERIFY(client.m_diagnosticsFlushTimer.isActive());
 
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -6741,6 +6848,71 @@ void BridgeClientTest::mprisOpenUriOpensOnlyLocalFiles() {
     QCOMPARE(sentCommands.count(), 0);
     QVERIFY(controller.openUri(QStringLiteral("file:///music/track.flac")));
     QCOMPARE(sentCommands.count(), 1);
+}
+
+void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.push_back(payload);
+        return true;
+    };
+    const QString root = QStringLiteral("/srv/fixture-music");
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.library.present = true;
+    BinaryBridgeCodec::DecodedLibraryRoot entry;
+    entry.path = root;
+    snapshot.library.rootEntries = {entry};
+    snapshot.library.rootPaths = {root};
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.libraryRoots(), QStringList{root});
+
+    const QString song =
+        root + QStringLiteral("/Fixture Artist/Fixture Album \"Deluxe\" (1999)/01 Fixture Song.flac");
+    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning %1.").arg(DiagnosticsLog::quotedPath(song)));
+    MprisController controller(&client);
+    controller.next();
+    controller.setShuffle(true);
+    const auto uri = [](const QString &path) { return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded); };
+    QVERIFY(controller.openUri(uri(root + QStringLiteral("/Other/02 Other Song.ogg"))));
+    QVERIFY(controller.openUri(uri(QStringLiteral("/media/stick/03 Loose Song.mp3"))));
+    client.reportError(BinaryBridgeCodec::ErrorCategoryPlayback, QStringLiteral("Could not play the file."),
+                       song, BinaryBridgeCodec::ErrorSeverityWarning);
+    client.logDebug(QStringLiteral("app"), QStringLiteral("only with FERROUS_LOG=debug"));
+    client.reloadDiagnosticsFromDisk();
+    QTRY_VERIFY(!client.diagnosticsLoading());
+
+    const QStringList lines = client.diagnosticsText().split(QLatin1Char('\n'));
+    const auto lineEnding = [&lines](const QString &tail) {
+        return std::any_of(lines.begin(), lines.end(), [&tail](const QString &line) {
+            return line.startsWith(QLatin1Char('[')) && line.endsWith(tail);
+        });
+    };
+    QVERIFY2(lineEnding(QStringLiteral("] [library] info: Scanning %1.").arg(DiagnosticsLog::quotedPath(song))),
+             qPrintable(client.diagnosticsText()));
+    QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Next.")));
+    QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Shuffle set on.")));
+    QVERIFY(!client.diagnosticsText().contains(QStringLiteral("only with FERROUS_LOG=debug")));
+
+    // The copy keeps the events and drops every path and file name.
+    const QString copied = client.diagnosticsTextWithoutPaths();
+    QCOMPARE(copied.count(QLatin1Char('\n')), client.diagnosticsText().count(QLatin1Char('\n')));
+    for (const QString &leak : {root, QStringLiteral("Fixture Artist"), QStringLiteral("Fixture Album"),
+                                QStringLiteral("Fixture Song"), QStringLiteral("Other Song"),
+                                QStringLiteral("Loose Song"), QStringLiteral("/media/stick"),
+                                QStringLiteral("Deluxe")}) {
+        QVERIFY2(!copied.contains(leak), qPrintable(leak + QStringLiteral(" in:\n") + copied));
+    }
+    QVERIFY2(copied.contains(QStringLiteral("[library] info: Scanning \"<library 1>/\u2026.flac\".")),
+             qPrintable(copied));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: OpenUri \"<library 1>/\u2026.ogg\".")));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: OpenUri \"<path>.mp3\".")));
+    QVERIFY(copied.contains(QStringLiteral("[playback] warning: Could not play the file. (<library 1>/\u2026.flac)")));
+    QVERIFY(copied.contains(QStringLiteral("[mpris] info: Next.")));
+
+    client.copyDiagnosticsWithoutPaths();
+    QCOMPARE(QGuiApplication::clipboard()->text(), copied);
 }
 
 namespace {

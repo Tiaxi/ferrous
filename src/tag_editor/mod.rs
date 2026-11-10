@@ -27,6 +27,7 @@ use validation::TagTarget;
 
 #[cfg(test)]
 mod concurrency_tests;
+mod edit_log;
 #[cfg(test)]
 mod rename_tests;
 #[cfg(test)]
@@ -947,8 +948,10 @@ pub(crate) fn parse_rename_request(blob: &[u8]) -> Result<RenameRequest, String>
 pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
     let mut results = Vec::new();
     let mut successful_paths = Vec::new();
+    let mut saved_fields = HashSet::new();
     for save_row in request.rows {
         let changed = save_row.changed_fields();
+        saved_fields.extend(changed.iter().copied());
         let row = save_row.row;
         let path = PathBuf::from(&row.path);
         // A panic while saving one file fails that file, and the others are
@@ -979,6 +982,7 @@ pub(crate) fn save_rows(request: SaveRequest) -> SaveResponse {
             }
         }
     }
+    edit_log::log_tag_save(&results, &saved_fields);
     SaveResponse {
         results,
         successful_paths,
@@ -1141,6 +1145,7 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
                     error: Some(error.clone()),
                 });
             }
+            edit_log::log_renames(&results);
             let response = RenameResponse {
                 results,
                 successful_paths: Vec::new(),
@@ -1171,6 +1176,7 @@ pub(crate) fn rename_rows_with_refresh(request: RenameRequest) -> (RenameRespons
         });
     }
 
+    edit_log::log_renames(&results);
     let response = RenameResponse {
         results,
         successful_paths,

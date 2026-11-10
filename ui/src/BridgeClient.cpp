@@ -27,6 +27,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QBuffer>
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
@@ -637,6 +638,7 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_queueRowsModel, &QAbstractItemModel::rowsMoved, this, followQueueRows);
     connect(&m_queueRowsModel, &QAbstractItemModel::modelReset, this, followQueueRows);
     connect(&m_queueRowsModel, &QAbstractItemModel::dataChanged, this, followQueueRows);
+    m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
     m_diagnosticsFlushTimer.setSingleShot(true);
     m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
@@ -794,6 +796,8 @@ BridgeClient::~BridgeClient() {
                 QStringLiteral("the backend did not stop cleanly before exiting; recent "
                                "settings, the queue, or Last.fm scrobbles may be missing, or "
                                "playback left a file open that it could not close"));
+        } else {
+            logInfo(QStringLiteral("app"), QStringLiteral("Ferrous quit cleanly."));
         }
         m_ffiBridge = nullptr;
     }
@@ -4219,32 +4223,54 @@ void BridgeClient::clearDiagnostics() {
     m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
     m_diagnosticsText.clear();
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        QFile::remove(m_diagnosticsLogPath);
-    }
+    // A read asked for before is of the old log.
+    ++m_diagnosticsReadGeneration;
+    m_diagnosticsLoading = false;
+    // After the lines already handed to the writer.
+    m_diagnosticsWriter->removeLog(m_diagnosticsLogPath);
     emit diagnosticsChanged();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("diagnostics cleared"));
 }
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
     flushPendingDiagnosticDiskLines();
-    QStringList lines;
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        QFile file(m_diagnosticsLogPath);
-        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&file);
-            while (!in.atEnd()) {
-                const QString line = in.readLine();
-                if (!line.isNull()) {
-                    lines.push_back(line);
-                }
-            }
-        }
+    const quint64 generation = ++m_diagnosticsReadGeneration;
+    const quint64 loggedBefore = m_diagnosticsLinesLogged;
+    const QString logPath = m_diagnosticsLogPath;
+    if (!m_diagnosticsLoading) {
+        m_diagnosticsLoading = true;
+        emit diagnosticsChanged();
     }
+    // The writer reads after the lines it was given before, and the GUI
+    // thread never waits for the disk. The writer is this object's, and
+    // stops before it is gone, so `this` outlives the task; the result is
+    // posted to it, and dropped with it.
+    m_diagnosticsWriter->then([this, generation, loggedBefore, logPath]() {
+        QStringList lines = DiagnosticsLog::readLastLines(logPath, kMaxDiagnosticsLines);
+        QMetaObject::invokeMethod(
+            this,
+            [this, generation, loggedBefore, logPath, lines = std::move(lines)]() mutable {
+                applyDiagnosticsRead(generation, loggedBefore, logPath, std::move(lines));
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore,
+                                        const QString &logPath, QStringList lines) {
+    if (generation != m_diagnosticsReadGeneration || logPath != m_diagnosticsLogPath) {
+        return;
+    }
+    // The lines logged since the read was asked for came after it.
+    const auto since = static_cast<qsizetype>(
+        std::min<quint64>(m_diagnosticsLinesLogged - loggedBefore,
+                          static_cast<quint64>(m_diagnosticsLines.size())));
+    lines += m_diagnosticsLines.mid(m_diagnosticsLines.size() - since);
     if (lines.size() > kMaxDiagnosticsLines) {
         lines = lines.mid(lines.size() - kMaxDiagnosticsLines);
     }
     m_diagnosticsLines = std::move(lines);
+    m_diagnosticsLoading = false;
     rebuildDiagnosticsText();
     emit diagnosticsChanged();
 }
@@ -4268,6 +4294,52 @@ void BridgeClient::logDiagnostic(const QString &category, const QString &message
     }
 }
 
+void BridgeClient::logInfo(const QString &category, const QString &message) {
+    logDiagnostic(category, QStringLiteral("info: ") + message);
+}
+
+bool BridgeClient::debugLoggingEnabled() {
+    static const bool enabled =
+        qEnvironmentVariable("FERROUS_LOG").trimmed().compare(QLatin1String("debug"), Qt::CaseInsensitive)
+        == 0;
+    return enabled;
+}
+
+void BridgeClient::logDebug(const QString &category, const QString &message) {
+    if (debugLoggingEnabled()) {
+        logDiagnostic(category, QStringLiteral("debug: ") + message);
+    }
+}
+
+QString BridgeClient::diagnosticsTextWithoutPaths() const {
+    DiagnosticsLog::PathRedaction redaction;
+    redaction.libraryRoots = m_libraryRoots;
+    redaction.homePath = QDir::homePath();
+    // Ferrous's own folders tell nothing about the library.
+    for (const auto location : {QStandardPaths::GenericConfigLocation,
+                                QStandardPaths::GenericDataLocation,
+                                QStandardPaths::GenericCacheLocation}) {
+        const QString base = QStandardPaths::writableLocation(location);
+        if (!base.isEmpty()) {
+            redaction.keptFolders.push_back(QDir(base).filePath(QStringLiteral("ferrous")));
+        }
+    }
+    if (!m_diagnosticsLogPath.isEmpty()) {
+        redaction.keptFolders.push_back(QFileInfo(m_diagnosticsLogPath).absolutePath());
+    }
+    return DiagnosticsLog::withoutPaths(m_diagnosticsText, redaction);
+}
+
+void BridgeClient::copyDiagnosticsWithoutPaths() {
+    // The clipboard is a GUI application's.
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()) == nullptr) {
+        return;
+    }
+    if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+        clipboard->setText(diagnosticsTextWithoutPaths());
+    }
+}
+
 void BridgeClient::logProfileDiagnostic(const QString &category, const QString &message) const {
     QString msg = message;
     msg.replace(QLatin1Char('\n'), QStringLiteral("\\n"));
@@ -4282,6 +4354,7 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
         return;
     }
     m_diagnosticsLines.push_back(line);
+    ++m_diagnosticsLinesLogged;
     if (m_diagnosticsLines.size() > kMaxDiagnosticsLines) {
         const int removeCount = m_diagnosticsLines.size() - kMaxDiagnosticsLines;
         m_diagnosticsLines.erase(
@@ -4294,10 +4367,10 @@ void BridgeClient::flushPendingDiagnosticDiskLines() {
     if (m_diagnosticsLogPath.isEmpty() || m_pendingDiagnosticsDiskLines.isEmpty()) {
         return;
     }
-    const QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
+    QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
     m_pendingDiagnosticsDiskLines.clear();
-    const bool written = DiagnosticsLog::appendLines(m_diagnosticsLogPath, lines);
-    (void)written;
+    // The disk is the writer's: the GUI thread never waits for it.
+    m_diagnosticsWriter->post(m_diagnosticsLogPath, std::move(lines));
 }
 
 void BridgeClient::rebuildDiagnosticsText() {

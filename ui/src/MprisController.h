@@ -76,6 +76,8 @@ public:
     static QString localPathForOpenUri(const QString &uri);
 
 private:
+    // Logs a command a D-Bus client sent, such as a media key's.
+    void logCommand(const QString &command) const;
     struct PublishedPlayerState {
         QString playbackStatus;
         QString loopStatus;

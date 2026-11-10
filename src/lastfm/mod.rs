@@ -583,6 +583,9 @@ struct Service {
     /// the [`Handle`], which sets it; see [`Handle::set_paused`]. Never
     /// saved.
     paused: Arc<AtomicBool>,
+    /// The authentication state the diagnostics log last told; see
+    /// [`Service::log_auth_change`].
+    logged_auth_state: AuthState,
 }
 
 #[derive(Debug)]
@@ -798,6 +801,7 @@ impl Service {
             latest_queued: false,
             latest_on_first_send: false,
             paused: Arc::new(AtomicBool::new(false)),
+            logged_auth_state: AuthState::Disconnected,
             state: RuntimeState {
                 enabled: options.initial_enabled,
                 build_configured,
@@ -878,6 +882,7 @@ impl Service {
     /// shows and logs. When nothing receives it any more, they are logged
     /// here instead.
     fn publish(&mut self, event_tx: &Sender<Event>) {
+        self.log_auth_change();
         let mut state = self.published_state();
         state.problems = std::mem::take(&mut self.problems);
         if let Err(unsent) = event_tx.send(Event::State(state)) {
@@ -887,6 +892,29 @@ impl Service {
                 }
             }
         }
+    }
+
+    /// Log the authentication state once it changed, one line per change.
+    /// The line never holds the session key, the token, or the address of
+    /// the browser's approval page, which has the token.
+    fn log_auth_change(&mut self) {
+        let now = self.state.auth_state;
+        if now == self.logged_auth_state {
+            return;
+        }
+        self.logged_auth_state = now;
+        let line = match now {
+            AuthState::Disconnected => "Authentication: disconnected.",
+            AuthState::AwaitingBrowserApproval => {
+                "Authentication: waiting for approval in the browser."
+            }
+            AuthState::Connected => "Authentication: connected.",
+            AuthState::ReauthRequired => {
+                "Authentication: Last.fm no longer accepts the session; reconnecting is needed."
+            }
+            AuthState::Error => "Authentication: failed; the reason is in Recent Issues.",
+        };
+        log_info(ErrorCategory::LastFm, line);
     }
 
     /// Tell the user about `message` with the next state; see
@@ -1046,19 +1074,26 @@ impl Service {
                 self.state.status_text.clear();
                 self.flush_queue();
             }
+            // The log is shared in bug reports, so it never names the
+            // account.
             Ok(None) => {
-                eprintln!(
-                    "Last.fm: no session key found in keyring for user \"{username}\" — \
-                     was the keyring cleared or is the keyring daemon unavailable?"
+                log_warning(
+                    ErrorCategory::LastFm,
+                    "No session key was found in the keyring for the saved account. Was the \
+                     keyring cleared, or is the keyring daemon unavailable?",
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Disconnected;
                 self.fail("Reconnect Last.fm to resume scrobbling.".to_string(), true);
             }
             Err(err) => {
-                let message = request_error_message(&RequestError::Keyring(err));
-                eprintln!(
-                    "Last.fm: keyring error loading session for user \"{username}\": {message}"
+                // The keyring's own error may name its entry, the account.
+                let message = request_error_message(&RequestError::Keyring(
+                    keyring_error_without_account(&err, &username),
+                ));
+                log_warning(
+                    ErrorCategory::LastFm,
+                    &format!("The saved account's session key could not be read: {message}"),
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Error;
@@ -1614,6 +1649,27 @@ fn request_token(
         .ok_or_else(|| {
             RequestError::InvalidResponse("Last.fm token missing from response".to_string())
         })
+}
+
+/// The keyring's error `error` for the session key of `account`, for the
+/// user and the log, which never name the account: when the error names it,
+/// as a word of its own, a description that does not stands in for it. A
+/// word is a run of letters, digits, `_` and `-`, which a user name is made
+/// of, so the name inside a longer word, such as "in" in "keyring", is not
+/// the account.
+fn keyring_error_without_account(error: &str, account: &str) -> String {
+    let in_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let names_account = !account.is_empty()
+        && error.match_indices(account).any(|(at, _)| {
+            let before = error[..at].chars().next_back();
+            let after = error[at + account.len()..].chars().next();
+            !before.is_some_and(in_word) && !after.is_some_and(in_word)
+        });
+    if names_account {
+        "the keyring could not give the saved account's session key".to_string()
+    } else {
+        error.to_string()
+    }
 }
 
 fn request_session(
@@ -2938,6 +2994,57 @@ mod tests {
     }
 
     #[test]
+    fn authentication_changes_are_logged_once_each_without_secrets() {
+        crate::frontend_bridge::test_log::clear();
+        let transport = ScriptedTransport::with_replies([
+            reply(200, r#"{"token":"fixture-token-123"}"#),
+            reply(
+                200,
+                r#"{"session":{"name":"tester","key":"fixture-session-key-456"}}"#,
+            ),
+        ]);
+        let mut service = Service::new(
+            ServiceOptions {
+                queue_path: None,
+                initial_enabled: true,
+            },
+            backends(&transport, MemorySessionKeys::default()),
+        );
+        let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+        service.publish(&event_tx);
+        service.handle_command(Command::BeginDesktopAuth);
+        assert_eq!(service.state.auth_state, AuthState::AwaitingBrowserApproval);
+        service.publish(&event_tx);
+        service.publish(&event_tx);
+        service.handle_command(Command::CompleteDesktopAuth);
+        assert_eq!(service.state.auth_state, AuthState::Connected);
+        service.publish(&event_tx);
+        service.handle_command(Command::Disconnect { clear_queue: false });
+        service.publish(&event_tx);
+
+        let lines = crate::frontend_bridge::test_log::lines_containing("Authentication");
+        assert_eq!(
+            lines,
+            [
+                "waiting for approval in the browser.",
+                "connected.",
+                "disconnected.",
+            ]
+            .map(|state| format!("[ferrous] [lastfm] info: Authentication: {state}"))
+        );
+        for line in crate::frontend_bridge::test_log::all() {
+            for secret in [
+                "fixture-token-123",
+                "fixture-session-key-456",
+                "secret",
+                "api-key",
+            ] {
+                assert!(!line.contains(secret), "{secret} in {line}");
+            }
+        }
+    }
+
+    #[test]
     fn reconnecting_sends_the_queue_during_a_rate_limit() {
         let transport = ScriptedTransport::with_replies([
             reply_retry_after(429, "", 3600),
@@ -3937,13 +4044,58 @@ mod tests {
             service.state
         };
 
+        test_log::clear();
         let missing = load(MemorySessionKeys::default());
         assert_eq!(missing.auth_state, AuthState::Disconnected);
         assert_eq!(missing.username, USERNAME);
 
-        let failing = load(MemorySessionKeys::failing("keyring locked"));
+        let failing = load(MemorySessionKeys::failing(&format!(
+            "keyring locked for entry ferrous.lastfm/{USERNAME}"
+        )));
         assert_eq!(failing.auth_state, AuthState::Error);
-        assert!(failing.status_text.contains("keyring locked"));
+        // The keyring's error named the account, so it is described.
+        assert!(failing.status_text.contains("the keyring could not give"));
+
+        // The log tells both, without the account's name.
+        let logged = test_log::lines_containing("[ferrous] [lastfm] warning: ");
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged[0].contains("No session key was found"), "{logged:?}");
+        assert!(logged[1].contains("could not be read: "), "{logged:?}");
+        assert!(
+            logged[1].contains("the keyring could not give"),
+            "{logged:?}"
+        );
+        for line in test_log::all() {
+            assert!(!line.contains(USERNAME), "{line}");
+        }
+
+        // A short name is told from the words it is part of: the message
+        // is never changed inside a word.
+        let load_short = |keys| {
+            let mut service = Service::new(ServiceOptions::default(), backends(&transport, keys));
+            service.handle_command(Command::LoadStoredSession {
+                username: "in".to_string(),
+            });
+            service.state
+        };
+        let locked = load_short(MemorySessionKeys::failing("keyring locked"));
+        assert_eq!(locked.status_text, "Last.fm keyring error: keyring locked");
+        test_log::clear();
+        let named = load_short(MemorySessionKeys::failing(
+            "no entry ferrous.lastfm/in in the login keyring",
+        ));
+        assert_eq!(
+            named.status_text,
+            "Last.fm keyring error: the keyring could not give the saved account's session key"
+        );
+        assert_eq!(
+            test_log::lines_containing("could not be read: "),
+            [format!(
+                "[ferrous] [lastfm] warning: The saved account's session key could not be read: \
+                 {}",
+                named.status_text
+            )]
+        );
     }
 
     #[test]

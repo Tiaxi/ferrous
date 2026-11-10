@@ -354,6 +354,38 @@ fn watching_starts_with_a_rescan_of_the_roots_that_are_there() {
 }
 
 #[test]
+fn the_log_tells_when_watching_starts_and_when_a_root_goes_and_comes_back() {
+    let folder = test_folder("log");
+    let present = folder.join("present");
+    std::fs::create_dir(&present).expect("root");
+    let gone = folder.join("gone");
+    let (mut watcher, _commands) = watcher();
+    crate::frontend_bridge::test_log::clear();
+    watcher.handle(WatchMessage::Enabled(true));
+    watcher.handle(WatchMessage::Roots(vec![present.clone(), gone.clone()]));
+    watcher.report();
+    // Reported again with nothing changed, it logs nothing.
+    watcher.report();
+    std::fs::create_dir(&gone).expect("the root comes back");
+    watcher.watch_root(&gone);
+    watcher.report();
+
+    let quoted = crate::frontend_bridge::quoted_path(&gone);
+    assert_eq!(
+        crate::frontend_bridge::test_log::lines_containing("[library] info:"),
+        [
+            "Rescanning 1 library root: watching started, and they may have changed while it \
+             was off."
+                .to_string(),
+            format!("Library root {quoted} is unavailable."),
+            format!("Library root {quoted} is available again."),
+        ]
+        .map(|line| format!("[ferrous] [library] info: {line}"))
+    );
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_root_whose_folder_is_replaced_when_mounts_change_is_watched_again_and_rescanned() {
     let folder = test_folder("remount");
     let root = folder.join("drive");

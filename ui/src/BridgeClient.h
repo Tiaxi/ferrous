@@ -41,6 +41,9 @@ class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
 class QQuickWindow;
+namespace DiagnosticsLog {
+class Writer;
+}
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -194,6 +197,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantMap itunesArtworkTarget READ itunesArtworkTarget NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString diagnosticsText READ diagnosticsText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString diagnosticsLogPath READ diagnosticsLogPath NOTIFY diagnosticsChanged)
+    // Whether reloadDiagnosticsFromDisk is still reading the log.
+    Q_PROPERTY(bool diagnosticsLoading READ diagnosticsLoading NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
     // Why the backend stopped without being asked to; empty while it runs.
     Q_PROPERTY(QString backendFailure READ backendFailure NOTIFY backendFailureChanged)
@@ -216,6 +221,17 @@ public:
 
     // Adds a line to the diagnostics log (Help > Diagnostics).
     void logDiagnostic(const QString &category, const QString &message);
+    // Adds an event to the log, as "[category] info: message", in the form
+    // the backend's lines have. One line per event, never per frame.
+    void logInfo(const QString &category, const QString &message);
+    // Adds "[category] debug: message" to the log with FERROUS_LOG=debug
+    // only: details that would crowd the trace logInfo writes.
+    void logDebug(const QString &category, const QString &message);
+    // Whether FERROUS_LOG=debug asks for logDebug's lines.
+    static bool debugLoggingEnabled();
+    // The log as the Diagnostics dialog shows it, without the library's
+    // paths and file names; see DiagnosticsLog::withoutPaths.
+    QString diagnosticsTextWithoutPaths() const;
 
     QString playbackState() const;
     PlaybackClock *playbackClock() const { return m_playbackClock; }
@@ -334,6 +350,7 @@ public:
     QVariantMap itunesArtworkTarget() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
+    bool diagnosticsLoading() const { return m_diagnosticsLoading; }
     bool connected() const;
     QString backendFailure() const;
     bool profileLogsEnabled() const { return m_profileUiEnabled; }
@@ -493,7 +510,11 @@ public:
     // window can close once they are on disk.
     Q_INVOKABLE quint32 saveStateBeforeQuit();
     Q_INVOKABLE void clearDiagnostics();
+    // Reads the log again for diagnosticsText, on the log's writer, after
+    // the lines logged before; diagnosticsChanged tells when it is read.
     Q_INVOKABLE void reloadDiagnosticsFromDisk();
+    // Puts diagnosticsTextWithoutPaths on the clipboard, for a bug report.
+    Q_INVOKABLE void copyDiagnosticsWithoutPaths();
     // Show an error from the UI in Recent Issues, as the bridge's are: it is
     // logged, then sent with bridgeError. `category` and `severity` are
     // BinaryBridgeCodec's; an unknown one counts as a system error.
@@ -753,6 +774,11 @@ private:
     void flushGlobalSearchQuery();
     void logProfileDiagnostic(const QString &category, const QString &message) const;
     void appendDiagnosticLine(const QString &line);
+    // Shows `lines`, the log as read for the reload numbered `generation`
+    // from `logPath`, with the lines logged since `loggedBefore`, unless a
+    // later reload or a clear came since.
+    void applyDiagnosticsRead(quint64 generation, quint64 loggedBefore, const QString &logPath,
+                              QStringList lines);
     void flushPendingDiagnosticDiskLines();
     void rebuildDiagnosticsText();
     static QString resolveDiagnosticsLogPath();
@@ -977,6 +1003,16 @@ private:
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
     QStringList m_pendingDiagnosticsDiskLines;
+    // Writes the log's lines off the GUI thread. Destroyed after the
+    // destructor's last flush, it writes what still waits.
+    std::unique_ptr<DiagnosticsLog::Writer> m_diagnosticsWriter;
+    // Numbers the reloads; a read of an earlier one, or from before a
+    // clear, is dropped.
+    quint64 m_diagnosticsReadGeneration{0};
+    // The lines logDiagnostic has added in all, which tells the lines a
+    // reload's read does not have.
+    quint64 m_diagnosticsLinesLogged{0};
+    bool m_diagnosticsLoading{false};
     QString m_libraryLastError;
     // The roots, with their reasons, already reported or logged as not watched.
     QSet<QString> m_reportedUnwatchedRoots;

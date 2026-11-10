@@ -112,6 +112,19 @@ Dialog {
                     }
                 }
             }
+
+            Button {
+                objectName: "diagnosticsCopyWithoutPathsButton"
+                icon.name: "edit-copy"
+                text: I18n.i18nc("@action:button", "Copy Log Without Paths")
+                enabled: (root.diagnosticsText || "").length > 0
+                ToolTip.visible: hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip",
+                    "Copy the log with folders and file names replaced, for a bug report. Artist and track "
+                    + "names in the Last.fm lines are kept.")
+                onClicked: root.uiBridge.copyDiagnosticsWithoutPaths()
+            }
         }
 
         ScrollView {
@@ -121,7 +134,12 @@ Dialog {
 
             TextArea {
                 id: diagnosticsTextArea
+                objectName: "diagnosticsTextArea"
                 text: root.diagnosticsText
+                // The bridge reads the log off the GUI thread.
+                placeholderText: (root.uiBridge.diagnosticsLoading || false)
+                    ? I18n.i18nc("@info:placeholder", "Loading the log\u2026")
+                    : ""
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.NoWrap
@@ -172,6 +190,12 @@ Dialog {
                             diagnosticsTextArea.selectAll()
                             diagnosticsTextArea.copy()
                         }
+                    }
+
+                    MenuItem {
+                        text: I18n.i18nc("@action:inmenu", "Copy Log Without Paths")
+                        enabled: (diagnosticsTextArea.text || "").length > 0
+                        onTriggered: root.uiBridge.copyDiagnosticsWithoutPaths()
                     }
                 }
             }

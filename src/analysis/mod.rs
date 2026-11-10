@@ -122,6 +122,24 @@ impl WaveformUpdate {
     }
 }
 
+/// Logs that the overview decode of the file at `path` stopped at an error
+/// after `coverage_seconds`, once for each play: the waveform shows only
+/// the audio before it. A file cut off is shown to the user instead; see
+/// [`AnalysisEvent::FileEndsEarly`].
+fn log_truncated_overview(path: Option<&Path>, coverage_seconds: f32) {
+    let file = path.map_or_else(
+        || "the track".to_string(),
+        crate::frontend_bridge::quoted_path,
+    );
+    crate::frontend_bridge::log_info(
+        crate::frontend_bridge::ErrorCategory::Analysis,
+        &format!(
+            "The waveform decode of {file} stopped at a read error after {coverage_seconds:.1} s; \
+             the waveform shows the audio before it."
+        ),
+    );
+}
+
 #[derive(Debug, Clone)]
 pub enum AnalysisCommand {
     SetTrack {
@@ -2192,6 +2210,9 @@ impl AnalysisRuntimeState {
             ends_early,
             source,
         } = update;
+        if track_token == self.active_track_token && done && !complete && ends_early.is_none() {
+            log_truncated_overview(self.active_track_path.as_deref(), coverage_seconds);
+        }
         if track_token != self.active_track_token || peaks.is_empty() {
             return;
         }
@@ -7571,6 +7592,43 @@ mod tests {
         assert_eq!(cut.frames, Some("FLAC"));
         assert_eq!(cut.end_frame, 9 * 4_096);
         assert!(*coverage <= cut.seconds() + 1e-6, "covers {coverage} s");
+    }
+
+    #[test]
+    fn a_decode_stopped_by_an_error_is_logged_once() {
+        crate::frontend_bridge::test_log::clear();
+        let (track_io, _track_io_rx) = unbounded();
+        let mut state = AnalysisRuntimeState::with_track_io(track_io);
+        let (tx, _rx) = unbounded::<AnalysisEvent>();
+        state.active_track_token = 7;
+        state.active_track_path = Some(PathBuf::from("/fixture/library/broken.flac"));
+        let update = |done: bool, token: u64| {
+            (
+                token,
+                WaveformUpdate {
+                    peaks: vec![0.5; 12],
+                    coverage_seconds: 61.3,
+                    complete: false,
+                    done,
+                    ends_early: None,
+                    source: None,
+                },
+            )
+        };
+        // Previews, the end, and a stale decode's end.
+        for (token, update) in [
+            update(false, 7),
+            update(false, 7),
+            update(true, 7),
+            update(true, 6),
+        ] {
+            state.handle_waveform_progress(token, update, &tx);
+        }
+        assert_eq!(
+            crate::frontend_bridge::test_log::all(),
+            ["[ferrous] [analysis] info: The waveform decode of \"/fixture/library/broken.flac\" \
+              stopped at a read error after 61.3 s; the waveform shows the audio before it."]
+        );
     }
 
     #[test]

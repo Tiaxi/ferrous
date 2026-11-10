@@ -26,10 +26,10 @@ use super::queue::handle_queue_command;
 use super::queue_sync::QueueEdit;
 use super::search::{keyed_roots, tree_path_parts, TreePathParts};
 use super::{
-    library_tree, log_warning, send_error, ApplyAlbumArtRequest, BridgeAnalysisCommand,
-    BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand, BridgePlaybackCommand,
-    BridgeQueueCommand, BridgeSettingsCommand, BridgeState, ErrorCategory, LibrarySortMode,
-    SearchWorkerQuery, SettingsSaveTiming,
+    library_tree, log_info, log_warning, quoted_path, send_error, ApplyAlbumArtRequest,
+    BridgeAnalysisCommand, BridgeCommand, BridgeError, BridgeEvent, BridgeLibraryCommand,
+    BridgePlaybackCommand, BridgeQueueCommand, BridgeSettingsCommand, BridgeState, ErrorCategory,
+    LibrarySortMode, SearchWorkerQuery, SettingsSaveTiming,
 };
 use crate::collation::CollationKey;
 
@@ -453,10 +453,36 @@ fn handle_library_command(
     handle_library_view_command(cmd, state, runtime).unwrap_or(false)
 }
 
+/// The line that logs a change to the library's roots, or a scan, the user
+/// asked for.
+fn library_root_command_line(cmd: &BridgeLibraryCommand) -> Option<String> {
+    Some(match cmd {
+        BridgeLibraryCommand::ScanRoot(path) | BridgeLibraryCommand::AddRoot { path, .. } => {
+            format!("Adding the library root {}.", quoted_path(path))
+        }
+        BridgeLibraryCommand::RenameRoot { path, .. } => {
+            format!("Renaming the library root {}.", quoted_path(path))
+        }
+        BridgeLibraryCommand::RemoveRoot(path) => {
+            format!("Removing the library root {}.", quoted_path(path))
+        }
+        BridgeLibraryCommand::RescanRoot(path) => {
+            format!("Rescanning {} as the user asked.", quoted_path(path))
+        }
+        BridgeLibraryCommand::RescanAll => {
+            "Rescanning every library root as the user asked.".to_string()
+        }
+        _ => return None,
+    })
+}
+
 fn handle_library_root_command(
     cmd: &BridgeLibraryCommand,
     library: &LibraryService,
 ) -> Option<bool> {
+    if let Some(line) = library_root_command_line(cmd) {
+        log_info(ErrorCategory::Library, &line);
+    }
     match cmd {
         BridgeLibraryCommand::ScanRoot(path) => {
             library.command(LibraryCommand::ScanRoot(path.clone()));

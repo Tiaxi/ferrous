@@ -238,6 +238,7 @@ pub(super) fn process_playback_event(
             track_token,
         } => {
             remap_unacknowledged_engine_path(state, &mut path);
+            super::event_log::log_track_change(state, &path, &kind);
             state.playback.current_queue_index = Some(queue_index);
             state.analysis.waveform_peaks.clear();
             state.analysis.waveform_coverage_seconds = 0.0;
@@ -284,6 +285,7 @@ pub(super) fn process_playback_event(
             SnapshotUrgency::Immediate
         }
         PlaybackEvent::Seeked { position } => {
+            super::event_log::log_seek(position);
             // The engine's next snapshot carries the landing position with
             // the time it was read; the UI takes it from there.
             if state.analysis_track_token != 0 && state.playback.current.is_some() {
@@ -300,6 +302,8 @@ pub(super) fn process_playback_event(
             if let Some(path) = error.path.as_mut() {
                 remap_unacknowledged_engine_path(state, path);
             }
+            // A restore that failed changes no track.
+            state.restored_track_pending = false;
             send_error(event_tx, playback_error(&error));
             SnapshotUrgency::None
         }
@@ -363,6 +367,7 @@ fn process_playback_snapshot_event(
     let mut urgency = SnapshotUrgency::None;
     if state.playback != snapshot {
         urgency = playback_snapshot_urgency(&state.playback, &snapshot);
+        super::event_log::log_playback_changes(&state.playback, &snapshot);
         state.playback = snapshot;
     }
     note_playback_of_playing_file_read(state);

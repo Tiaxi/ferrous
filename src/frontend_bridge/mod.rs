@@ -32,6 +32,7 @@ mod commands;
 mod config;
 mod edit_refresh;
 mod errors;
+mod event_log;
 mod events;
 pub mod ffi;
 mod imports;
@@ -58,7 +59,9 @@ use config::{
 };
 #[cfg(test)]
 pub(crate) use errors::test_log;
-pub(crate) use errors::{log_info, log_undelivered, log_warning};
+pub(crate) use errors::{
+    log_debug, log_info, log_position, log_undelivered, log_warning, quoted_path,
+};
 pub use errors::{BridgeError, ErrorCategory, ErrorSeverity};
 use events::{
     apply_library_events, drain_analysis_events, drain_apply_album_art_events,
@@ -792,6 +795,9 @@ pub(super) struct BridgeState {
     pending_waveform_track: Option<PendingWaveformTrack>,
     analysis_track_token: u64,
     last_track_change: TrackChangeMarker,
+    /// Set when the restored session asked playback for its track, until
+    /// the track changes: the change is the restore, for the log.
+    restored_track_pending: bool,
     /// Advances whenever a play starts: on every track change, also one that
     /// plays the same file again, and when a stopped track plays again,
     /// which keeps its `track_token`. The UI tells a new play from a
@@ -1567,6 +1573,7 @@ impl BridgeLoopRuntime {
     /// Run until shutdown. Returns whether the settings, the session, and
     /// Last.fm's queue were saved then, and playback released its files.
     fn run(&mut self, cmd_rx: &Receiver<BridgeCommand>, event_tx: &Sender<BridgeEvent>) -> bool {
+        log_info(ErrorCategory::System, &event_log::backend_started_line());
         self.emit_initial_snapshot(event_tx);
         while self.flags.running {
             let wake = self.wait_for_wake(cmd_rx);
@@ -1575,7 +1582,16 @@ impl BridgeLoopRuntime {
             self.maybe_log_profile();
             self.maybe_persist();
         }
-        self.shutdown(event_tx)
+        let saved = self.shutdown(event_tx);
+        log_info(
+            ErrorCategory::System,
+            if saved {
+                "Backend stopped cleanly: the settings, the queue and the scrobbles are saved."
+            } else {
+                "Backend stopped, but not everything was saved; the errors logged with this line say what."
+            },
+        );
+        saved
     }
 
     fn emit_initial_snapshot(&mut self, event_tx: &Sender<BridgeEvent>) {
@@ -2032,6 +2048,11 @@ impl BridgeLoopRuntime {
     ) -> SnapshotUrgency {
         #[cfg(test)]
         crate::panic_guard::test_hooks::checkpoint("bridge_command");
+        if !matches!(cmd, BridgeCommand::RequestSnapshot) {
+            log_debug(ErrorCategory::System, || {
+                event_log::debug_command_line(&cmd)
+            });
+        }
         let cmd = match cmd {
             BridgeCommand::SelectQueueAt {
                 revision,
