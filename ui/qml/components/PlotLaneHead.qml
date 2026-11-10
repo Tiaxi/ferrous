@@ -23,15 +23,18 @@ Item {
     // Whether a viewer shows its controls: hidden, the buttons fade out with
     // them, whatever `buttonsVisibility` says, and then take no pointer.
     property bool controlsShown: true
+    // The viewer's controls as they fade, which the buttons fade with.
+    property real controlsLevel: root.controlsShown ? 1 : 0
     property bool laneHovered: false
     property var toggleMute: function() {}
     property var toggleSolo: function() {}
     property var pointerActivity: null
     readonly property bool focusInside: muteButton.activeFocus || soloButton.activeFocus
-    readonly property bool buttonsRevealed: root.controlsShown
-        && (root.buttonsVisibility === 2
-            || (root.buttonsVisibility === 1
-                && (root.laneHovered || buttonsHover.hovered || root.focusInside)))
+    // Whether the buttons show by their own rule; the viewer's controls
+    // hiding fades them through `controlsLevel` instead, on its curve.
+    readonly property bool buttonsRevealed: root.buttonsVisibility === 2
+        || (root.buttonsVisibility === 1
+            && (root.laneHovered || buttonsHover.hovered || root.focusInside))
 
     // The label's box: the buttons' plate, taller, is centred on it and
     // overhangs it above and below.
@@ -65,8 +68,9 @@ Item {
         anchors.verticalCenter: labelPlate.verticalCenter
         plotColors: root.plotColors
         uiPalette: root.uiPalette
-        visible: root.buttonsVisibility !== 0 && (root.controlsShown || opacity > 0)
+        visible: root.buttonsVisibility !== 0 && (root.controlsShown || root.controlsLevel > 0)
         revealed: root.buttonsRevealed
+        fadeLevel: root.controlsLevel
         Accessible.name: I18n.i18nc("@label %1 is a channel", "Channel %1", root.label)
 
         HoverHandler {

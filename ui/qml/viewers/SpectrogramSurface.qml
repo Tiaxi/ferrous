@@ -55,7 +55,8 @@ Item {
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
-    readonly property int pointerCursorShape: root.interactiveOverlaysVisible
+    // The pointer hides once the overlays have faded out, not as they start.
+    readonly property int pointerCursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
         ? Qt.ArrowCursor
         : Qt.BlankCursor
     property var channelDescriptors: []

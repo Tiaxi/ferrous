@@ -1753,6 +1753,7 @@ ApplicationWindow {
             visualizationMode: viewerController.visualizationMode
             setVisualizationMode: viewerController.setVisualizationMode
             controlsVisible: spectrogramViewerShell.fullscreenControlsVisible
+            controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             trailingInset: viewerController.spectrogramViewerOpen
                 ? spectrogramViewerShell.reservedCorner.width : 0

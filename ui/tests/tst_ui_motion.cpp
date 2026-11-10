@@ -4253,7 +4253,9 @@ void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
 // corner plate in the window, the mode switch and the lanes' Mute and Solo
 // all fade on one curve, at the same opacity in every frame, shown at once
 // for the key that wakes them and hidden only once faded out. The plots'
-// crosshair and its readout fade with them too (#373 H3: it went at once).
+// crosshair and its readouts fade with them too (#373 H3: it went at once).
+// All of them take the auto-hide's one level as their opacity, and the
+// pointer hides once it is 0, not as the fade starts (#373 H4).
 void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QFETCH(bool, wholeScreen);
     LibraryTreeModel libraryModel;
@@ -4317,10 +4319,28 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
         QVERIFY(crosshair->property("crosshairEnabled").toBool());
     }
 
+    // The pointer over each plot.
+    QObject *waveformHover = waveform->findChild<QObject *>(QStringLiteral("waveformSurfaceHoverHandler"));
+    QVERIFY(waveformHover != nullptr);
+
     QString failure;
     int frames = 0;
+    int fadingFrames = 0;
     // Where a follower is not at the controls' opacity, or "".
     const auto apart = [&]() -> QString {
+        const double level = autoHide->property("level").toDouble();
+        if (std::abs(controls->opacity() - level) > 1e-9) {
+            return QStringLiteral("the controls at %1, the level at %2").arg(controls->opacity()).arg(level);
+        }
+        // The pointer shows while anything does.
+        const int shape = controls->isVisible() ? Qt::ArrowCursor : Qt::BlankCursor;
+        if (spectrogram->property("pointerCursorShape").toInt() != shape
+            || waveformHover->property("cursorShape").toInt() != shape) {
+            return QStringLiteral("the pointer %1 / %2, the controls at %3 (%4)")
+                .arg(spectrogram->property("pointerCursorShape").toInt())
+                .arg(waveformHover->property("cursorShape").toInt())
+                .arg(controls->opacity()).arg(controls->isVisible());
+        }
         for (QQuickItem *follower : followers) {
             if (std::abs(follower->opacity() - controls->opacity()) > 1e-9
                 || follower->isVisible() != controls->isVisible()) {
@@ -4342,6 +4362,10 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     };
     const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
         ++frames;
+        const double level = autoHide->property("level").toDouble();
+        if (level > 0.0 && level < 1.0) {
+            ++fadingFrames;
+        }
         if (failure.isEmpty()) {
             failure = apart();
         }
@@ -4353,9 +4377,15 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QVERIFY(controls->isVisible());
     QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    // The pointer stays while they fade.
+    QCOMPARE(spectrogram->property("pointerCursorShape").toInt(), int(Qt::ArrowCursor));
     QTRY_VERIFY(!controls->isVisible());
+    QCOMPARE(autoHide->property("level").toDouble(), 0.0);
+    QCOMPARE(spectrogram->property("pointerCursorShape").toInt(), int(Qt::BlankCursor));
     QVERIFY2(apart().isEmpty(), qPrintable(apart()));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    // Frames along the fade, not only its ends.
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
 
     // A key wakes them: shown at once, fading in together.
     autoHide->setProperty("hideDelay", 600000);

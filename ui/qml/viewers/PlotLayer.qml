@@ -32,6 +32,9 @@ Item {
     property bool paneHovered: false
     // Whether the viewer's controls show; the main pane's always do.
     property bool controlsVisible: true
+    // Those controls as they fade (FullscreenControlsAutoHide's level),
+    // which the mode switch and the lanes' buttons take as their opacity.
+    property real controlsLevel: root.controlsVisible ? 1 : 0
     property var pointerActivity: null
     // What the viewer keeps clear on the right of the mode switch.
     property real trailingInset: 0
@@ -103,12 +106,12 @@ Item {
         anchors.right: parent.right
         anchors.topMargin: root.topInset + 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
-        // In a viewer, it hides and shows with the viewer's controls, on
-        // their curve; hidden, it takes no pointer.
-        visible: root.controlsVisible || opacity > 0
-        revealed: root.controlsVisible
-            && (root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
-                || modeSwitch.pointerHovered || modeSwitch.focusInside)
+        // In a viewer, it hides and shows with the viewer's controls, at
+        // their level; hidden, it takes no pointer.
+        visible: root.controlsVisible || root.controlsLevel > 0
+        revealed: root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
+            || modeSwitch.pointerHovered || modeSwitch.focusInside
+        fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode
@@ -167,6 +170,7 @@ Item {
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             buttonsVisibility: root.uiBridge.channelButtonsVisibility
             controlsShown: root.controlsVisible
+            controlsLevel: root.controlsLevel
             laneHovered: root.hoveredLane === index
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }
