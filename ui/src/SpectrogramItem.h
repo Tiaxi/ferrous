@@ -313,6 +313,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // fills its width. A track change moves the view to it (unless a rolling
     // view goes on gaplessly); the view's owner follows it otherwise.
     Q_PROPERTY(double defaultZoomLevel READ defaultZoomLevel NOTIFY defaultZoomLevelChanged)
+    // The deepest zoom: 16, or the default zoom where that is deeper. A zoom
+    // deeper than it comes back to it when it drops.
+    Q_PROPERTY(double maximumZoomLevel READ maximumZoomLevel NOTIFY maximumZoomLevelChanged)
 
 public:
     explicit SpectrogramItem(QQuickItem *parent = nullptr);
@@ -421,7 +424,7 @@ public:
     Q_INVOKABLE double minimumZoomLevel() const;
     // The deepest zoom the wheel goes to: 16, or the default zoom where that
     // is deeper.
-    Q_INVOKABLE double maximumZoomLevel() const;
+    double maximumZoomLevel() const;
 
     // Frees the ring and the canvas, which nothing uses while analysis is
     // off because no pane is shown, and takes no columns until retained:
@@ -467,6 +470,7 @@ signals:
     void zoomEnabledChanged();
     void stretchShortTracksChanged();
     void defaultZoomLevelChanged();
+    void maximumZoomLevelChanged();
     void zoomRequested(double newZoomLevel);
     void zoomResetRequested();
     void backendZoomRequested(float zoomLevel);
@@ -748,6 +752,9 @@ private:
     // A track change's reset of the zoom to the default: until the data at
     // its hop arrives, the data on hand is drawn as if it were.
     void resetZoomToDefaultLocked();
+    // Tells of a new default zoom, and brings a zoom deeper than the new
+    // limit back within it. Without the state locked.
+    void publishDefaultZoomChange();
     double backendZoomForRequestLocked() const;
     int columnHopForZoomLocked(double zoom) const;
     double renderZoomForZoomLocked(double zoom) const;

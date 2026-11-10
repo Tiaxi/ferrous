@@ -2048,7 +2048,7 @@ void SpectrogramItem::clockStateChanged() {
     }
     emit positionSecondsChanged();
     if (defaultChanged) {
-        emit defaultZoomLevelChanged();
+        publishDefaultZoomChange();
     }
     if (courseCorrection) {
         schedulePlaybackFrame();
@@ -2768,7 +2768,7 @@ void SpectrogramItem::setStretchShortTracks(bool value) {
     }
     emit stretchShortTracksChanged();
     if (defaultChanged) {
-        emit defaultZoomLevelChanged();
+        publishDefaultZoomChange();
     }
 }
 
@@ -2862,6 +2862,25 @@ void SpectrogramItem::resetZoomToDefaultLocked() {
     m_pendingBackendZoom = static_cast<float>(target);
     if (m_zoomDebounceTimer) {
         m_zoomDebounceTimer->stop();
+    }
+}
+
+void SpectrogramItem::publishDefaultZoomChange() {
+    emit defaultZoomLevelChanged();
+    emit maximumZoomLevelChanged();
+    // A zoom kept from before, such as the user's through a rolling gapless
+    // transition, comes within the limit when it drops: with a track's
+    // length that arrives, the setting turned off, or a narrower view. The
+    // view's owner clamps the zoom it keeps alike (SpectrogramSurface).
+    double zoom = 1.0;
+    double maximum = 1.0;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        zoom = m_zoomLevel;
+        maximum = maximumZoomLevelLocked();
+    }
+    if (zoom > maximum + 1e-9) {
+        setZoomLevel(maximum);
     }
 }
 
@@ -3318,7 +3337,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         lock.unlock();
         if (defaultChanged) {
-            emit defaultZoomLevelChanged();
+            publishDefaultZoomChange();
         }
         if (needsZoomReset) {
             emit zoomLevelChanged();
@@ -3817,10 +3836,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         std::abs(m_renderZoomLevel - defaultRenderZoomLocked(sampleRate)) > 0.001;
     const bool backendNotAtDefaultHop = hopSize > 0
         && hopSize != defaultZoomHopLocked(sampleRate);
-    // A rolling view goes on through a gapless transition at its zoom, but
-    // not deeper than the wheel goes for the new track.
-    const bool preserveRollingGaplessZoom =
-        rollingGapless && m_zoomLevel <= maximumZoomLevelLocked() + 1e-6;
+    // A rolling view goes on through a gapless transition at its zoom; one
+    // deeper than the new track allows comes back within its limit with the
+    // new default (publishDefaultZoomChange).
+    const bool preserveRollingGaplessZoom = rollingGapless;
     const bool resetForTrackTransition =
         isTrackChange || (isGaplessTrackChange && !preserveRollingGaplessZoom);
     const bool needsZoomReset =
@@ -3860,7 +3879,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     if (defaultChanged) {
         // The view's owner follows the default unless the user zoomed: a
         // zoom to it, as the wheel's, once a track's length is known.
-        emit defaultZoomLevelChanged();
+        publishDefaultZoomChange();
     }
     if (needsZoomReset) {
         emit zoomLevelChanged();
@@ -5478,7 +5497,7 @@ void SpectrogramItem::geometryChange(const QRectF &newGeometry, const QRectF &ol
         defaultChanged = refreshDefaultZoomLocked(false);
     }
     if (defaultChanged) {
-        emit defaultZoomLevelChanged();
+        publishDefaultZoomChange();
     }
     const int newWidth = static_cast<int>(newGeometry.width());
     const int oldWidth = static_cast<int>(oldGeometry.width());

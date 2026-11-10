@@ -65,6 +65,8 @@ private slots:
     void spectrogramGaplessLongToShortTrackStretchesTheView();
     void spectrogramRepeatOneOfAStretchedTrackKeepsItsZoom();
     void spectrogramStretchSettingMovesTheDefaultWhilePlaying();
+    void spectrogramKeptRollingZoomComesWithinTheLongTracksLimit_data();
+    void spectrogramKeptRollingZoomComesWithinTheLongTracksLimit();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void spectrogramStillFramesLeaveTextureNodesAlone();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
@@ -2745,14 +2747,102 @@ void SpectrogramPlaybackSmokeTest::spectrogramStretchSettingMovesTheDefaultWhile
     item.setStretchShortTracks(true);
     QCOMPARE(defaultChanged.count(), 2);
     QCOMPARE(item.defaultZoomLevel(), fit);
+    // A zoom deeper than 16x comes to 16x when the setting goes off, and
+    // stays there when it comes back on.
+    item.setZoomLevel(20.0);
+    item.setStretchShortTracks(false);
+    QCOMPARE(item.zoomLevel(), 16.0);
+    item.setStretchShortTracks(true);
+    QCOMPARE(item.zoomLevel(), 16.0);
+    QCOMPARE(defaultChanged.count(), 4);
     // A wider view fills at a deeper zoom; a narrower one at a shallower.
     item.setWidth(1500);
-    QCOMPARE(defaultChanged.count(), 3);
+    QCOMPARE(defaultChanged.count(), 5);
     QVERIFY(item.defaultZoomLevel() > fit);
     item.setWidth(1000);
     QCOMPARE(item.defaultZoomLevel(), fit);
     // The item leaves its zoom to its owner.
     QCOMPARE(zoomReset.count(), 0);
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramKeptRollingZoomComesWithinTheLongTracksLimit_data() {
+    QTest::addColumn<bool>("clockFirst");
+    QTest::addColumn<double>("chosenZoom");
+    QTest::newRow("data first, at the clip's 64x") << false << 64.0;
+    QTest::newRow("clock first, at the clip's 64x") << true << 64.0;
+    QTest::newRow("data first, within the limit") << false << 8.0;
+    QTest::newRow("clock first, within the limit") << true << 8.0;
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramKeptRollingZoomComesWithinTheLongTracksLimit() {
+    // Regression: a zoom of a short clip, deeper than 16x, kept through a
+    // rolling gapless transition to a long track stayed above the long
+    // track's limit for good once the clock told its length, as the
+    // continuation's data does not.
+    QFETCH(bool, clockFirst);
+    QFETCH(double, chosenZoom);
+    SpectrogramItem item;
+    item.setWidth(1000);
+    item.setHeight(200);
+    item.setDisplayMode(0);
+    item.setPlaying(true);
+    constexpr quint64 clipToken = 5;
+    constexpr quint64 longToken = 6;
+    // A fifth of a second fills the view only at the deepest zoom.
+    constexpr quint64 clipFrames = 9'600;
+    setTestPosition(item, 0.1, clipToken);
+    feedStretchSession(item, clipToken, 1.0, clipFrames, clipFrames, 4);
+    QCOMPARE(item.defaultZoomLevel(), 64.0);
+    feedStretchSession(item, clipToken, 64.0, clipFrames, clipFrames);
+    // The user's zoom: at the default, or out from it with the wheel, and
+    // the backend's session at it.
+    item.setZoomLevel(chosenZoom);
+    QCOMPARE(item.zoomLevel(), chosenZoom);
+    feedStretchSession(item, clipToken, chosenZoom, clipFrames, clipFrames);
+    QVERIFY(!item.m_awaitingZoomData);
+    QSignalSpy maximumChanged(&item, &SpectrogramItem::maximumZoomLevelChanged);
+    QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+
+    const auto clockOnLongTrack = [&item]() {
+        PlaybackClock &clock = testClock(item);
+        PlaybackSample sample;
+        sample.sampledAtNs = clock.nowNs();
+        sample.advancing = true;
+        sample.durationSeconds = 60.0;
+        sample.trackToken = longToken;
+        clock.applySample(sample, false);
+    };
+    const auto continuationData = [&item, chosenZoom]() {
+        const int hop = stretchHop(chosenZoom);
+        const int start = stretchEndColumn(clipFrames, chosenZoom);
+        // The session goes on into the long track without its length.
+        item.feedPrecomputedChunk(
+            QByteArray(16 * kStretchBins, '\x40'), kStretchBins, 0, 16, start, start + 4096,
+            kStretchRate, hop, false, false, longToken, false, 0, 0, kStretchFft, 0, 0);
+    };
+    if (clockFirst) {
+        clockOnLongTrack();
+        continuationData();
+    } else {
+        continuationData();
+        // Until the clock tells the long track's length, the clip's
+        // default stands.
+        QCOMPARE(item.defaultZoomLevel(), 64.0);
+        QCOMPARE(item.zoomLevel(), chosenZoom);
+        clockOnLongTrack();
+    }
+    QCOMPARE(item.defaultZoomLevel(), 1.0);
+    QCOMPARE(item.maximumZoomLevel(), 16.0);
+    QVERIFY(maximumChanged.count() >= 1);
+    // A zoom within the long track's limit stays; a deeper one comes to it.
+    QCOMPARE(item.zoomLevel(), std::min(chosenZoom, 16.0));
+    // The rolling view goes on: nothing resets it.
+    QCOMPARE(zoomReset.count(), 0);
+    if (chosenZoom > 16.0) {
+        // Its data is asked for at the limit.
+        QVERIFY(item.m_awaitingZoomData);
+        QCOMPARE(item.m_pendingBackendZoom, 16.0f);
+    }
 }
 
 void SpectrogramPlaybackSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {

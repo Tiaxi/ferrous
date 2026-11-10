@@ -3234,6 +3234,22 @@ Item {
     QVERIFY(wider > fit);
     QCOMPARE(zoom(), wider);
     QCOMPARE(item->zoomLevel(), wider);
+
+    // A zoom the user chose deeper than 16x keeps to the limit once it
+    // drops, in the surface and the item alike; one within it stays.
+    QVERIFY(surface->setProperty("_widgetZoomLevel", wider));
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(surface->property("maximumZoomLevel").toDouble(), 16.0);
+    QCOMPARE(zoom(), 16.0);
+    QCOMPARE(item->zoomLevel(), 16.0);
+    QCOMPARE(surface->property("_widgetZoomLevel").toDouble(), 16.0);
+    bridge->setProperty("stretchShortTracks", true);
+    QCOMPARE(zoom(), 16.0);
+    QCOMPARE(item->zoomLevel(), 16.0);
+    QVERIFY(surface->setProperty("_widgetZoomLevel", 8.0));
+    bridge->setProperty("stretchShortTracks", false);
+    QCOMPARE(zoom(), 8.0);
+    QCOMPARE(item->zoomLevel(), 8.0);
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramSmokeTest(const QString &userDirectoriesParent) {
