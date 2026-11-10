@@ -137,8 +137,13 @@ bool hasFileExtension(QStringView name) {
     });
 }
 
+// The curly quotes that user-visible messages, such as playback errors,
+// quote a file or path in. Nothing escapes them in a name.
+constexpr QChar kOpenCurlyQuote{0x201c};
+constexpr QChar kCloseCurlyQuote{0x201d};
+
 bool opensPath(QChar c) {
-    return c.isSpace() || QStringView(u"\"'([<=,").contains(c);
+    return c.isSpace() || QStringView(u"\"'([<=,\u201c").contains(c);
 }
 
 // The first quote at or after `from` that no backslash escapes, or -1. The
@@ -229,11 +234,13 @@ PathEnd pathEnd(QStringView line, qsizetype start) {
             }
         }
     } else {
-        // A bracket or a single quote may also be in the path, so the last
-        // one closes it; a path ends there or before.
+        // A bracket, a single quote or a curly quote may also be in the
+        // path, so the last one closes it; a path ends there or before.
         QChar closer;
         if (opener == QLatin1Char('\'')) {
             closer = QLatin1Char('\'');
+        } else if (opener == kOpenCurlyQuote) {
+            closer = kCloseCurlyQuote;
         } else if (opener == QLatin1Char('(')) {
             closer = QLatin1Char(')');
         } else if (opener == QLatin1Char('[')) {
@@ -290,6 +297,14 @@ public:
                     continue;
                 }
             }
+            if (line.at(i) == kOpenCurlyQuote) {
+                const qsizetype close = curlyFileNameClose(line, i);
+                if (close > i) {
+                    out += kOpenCurlyQuote + QStringLiteral("<file>") + extensionOf(line.mid(i + 1, close - i - 1));
+                    i = close;
+                    continue;
+                }
+            }
             out += line.at(i);
             ++i;
         }
@@ -297,6 +312,20 @@ public:
     }
 
 private:
+    // The farthest closing curly quote after the one at `open` that ends a
+    // file name with a known extension, or -1. A name may hold curly quotes
+    // of its own, so the farthest is taken; a path is left to classify.
+    static qsizetype curlyFileNameClose(QStringView line, qsizetype open) {
+        for (qsizetype close = line.lastIndexOf(kCloseCurlyQuote); close > open;
+             close = line.lastIndexOf(kCloseCurlyQuote, close - 1)) {
+            const QStringView quoted = line.mid(open + 1, close - open - 1);
+            if (!quoted.isEmpty() && !startsPath(quoted, 0) && hasFileExtension(quoted)) {
+                return close;
+            }
+        }
+        return -1;
+    }
+
     static bool startsPath(QStringView line, qsizetype i) {
         if (i > 0 && !opensPath(line.at(i - 1))) {
             return false;

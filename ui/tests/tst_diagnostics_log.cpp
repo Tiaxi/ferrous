@@ -123,6 +123,33 @@ void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
     QTest::newRow("a quoted file name")
         << QStringLiteral("[tags] warning: \"01 Fixture Song.flac\" is read-only")
         << QStringLiteral("[tags] warning: \"<file>.flac\" is read-only");
+    // Playback errors quote a file or path in curly quotes, which nothing
+    // escapes in a name.
+    QTest::newRow("a path in curly quotes")
+        << QStringLiteral("[playback] error: Couldn't resume \u201c/home/user/Music/Example Artist/"
+                          "\u00c4\u00e4ni \u2013 Song.flac\u201d where it was left: the file is missing.")
+        << QStringLiteral("[playback] error: Couldn't resume \u201c<path>.flac\u201d where it was left: "
+                          "the file is missing.");
+    QTest::newRow("a library path in curly quotes")
+        << QStringLiteral("[playback] error: Can't release \u201c/srv/fixture-music/Example Artist/Song.flac\u201d: "
+                          "reading it has not finished.")
+        << QStringLiteral("[playback] error: Can't release \u201c<library 1>/\u2026.flac\u201d: "
+                          "reading it has not finished.");
+    QTest::newRow("paths in curly quotes")
+        << QStringLiteral("[playback] error: Couldn't release \u201c/home/user/Music/A/a.flac\u201d, "
+                          "\u201c/home/user/Music/A/b.flac\u201d in time.")
+        << QStringLiteral("[playback] error: Couldn't release \u201c<path>.flac\u201d in time.");
+    QTest::newRow("a file name in curly quotes")
+        << QStringLiteral("[playback] error: Couldn't play \u201c01 S\u00e4vel \u201cLive\u201d Song.flac\u201d "
+                          "(Resource not found); skipped it.")
+        << QStringLiteral("[playback] error: Couldn't play \u201c<file>.flac\u201d (Resource not found); "
+                          "skipped it.");
+    QTest::newRow("a file name in curly quotes, then other curly quotes")
+        << QStringLiteral("Couldn't play \u201cSong.flac\u201d (in \u201cMusic\u201d)")
+        << QStringLiteral("Couldn't play \u201c<file>.flac\u201d (in \u201cMusic\u201d)");
+    QTest::newRow("words in curly quotes stay")
+        << QStringLiteral("Scanning \u201cMusic\u201d: 3 added.")
+        << QStringLiteral("Scanning \u201cMusic\u201d: 3 added.");
     QTest::newRow("words in quotes stay")
         << QStringLiteral("[lastfm] info: Sending now playing: \"Artist\" - \"Title\".")
         << QStringLiteral("[lastfm] info: Sending now playing: \"Artist\" - \"Title\".");
@@ -145,6 +172,11 @@ void DiagnosticsLogTest::noLibraryPathOrFileNameIsLeft() {
                        "\"/srv/fixture-music/Fixture Artist/b.flac\"."),
         QStringLiteral("[2026-11-10T12:00:03.000+02:00] [stderr] [analysis] spectrogram of "
                        "/srv/fixture-music/Fixture Artist/Fixture Album/04 Fixture Song.wv failed: bad frame"),
+        QStringLiteral("[2026-11-10T12:00:04.000+02:00] [playback] error: Couldn't play "
+                       "\u201c05 Fixture Song.flac\u201d (Resource not found); skipped it."),
+        QStringLiteral("[2026-11-10T12:00:05.000+02:00] [playback] error: Couldn't resume "
+                       "\u201c/home/fixture-user/Music/Fixture Artist/06 Fixture Song.flac\u201d where it was left: "
+                       "the file is missing."),
     };
     const QString text = lines.join(QLatin1Char('\n'));
     const QString copied = DiagnosticsLog::withoutPaths(text, fixtureRedaction());
