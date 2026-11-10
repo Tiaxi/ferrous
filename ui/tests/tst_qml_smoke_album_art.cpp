@@ -26,6 +26,8 @@ private slots:
     void itunesPreviewApplyShowsTheAppliedCoverAfterPlaybackMovesOn();
     void itunesAppliedCoverGivesWayWhenTheSameTrackPlaysAgain_data();
     void itunesAppliedCoverGivesWayWhenTheSameTrackPlaysAgain();
+    void itunesArtworkResultsAreAFlatList();
+    void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
     void albumArtDetailsLieOverTheArt();
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -671,6 +673,15 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const QString size = QLocale().toString(1400.0, 'f', 0);
     QCOMPARE(values, (QStringList{QStringLiteral("%1 × %1 px").arg(size), QStringLiteral("412 KiB"),
                                   QStringLiteral("JPEG"), QStringLiteral("Folder image")}));
+    // At the body size, as the file's name, not a footnote's: the column
+    // reads at fullscreen sizes too.
+    const qreal bodySize = qvariant_cast<QFont>(title->property("font")).pointSizeF();
+    for (const QString &name : {QStringLiteral("albumArtInfoLabel"), QStringLiteral("albumArtInfoValue"),
+                                QStringLiteral("albumArtFolderLabel"), QStringLiteral("albumArtFolderPath")}) {
+        for (QQuickItem *text : visibleItemsNamed(column, name)) {
+            QCOMPARE(qvariant_cast<QFont>(text->property("font")).pointSizeF(), bodySize);
+        }
+    }
     QCOMPARE(visibleTextItems(column, QStringLiteral("Dimensions")).size(), 1);
     QCOMPARE(visibleTextItems(column, QStringLiteral("Source")).size(), 1);
 
@@ -771,11 +782,13 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             QQuickItem *label = itemNamed(row, QStringLiteral("albumArtInfoLabel"));
             QQuickItem *value = itemNamed(row, QStringLiteral("albumArtInfoValue"));
             QVERIFY2(label != nullptr && value != nullptr, at.constData());
-            // The design's small text, of the application's font.
+            // The body size, the application's font's.
             QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(),
-                     palette->property("smallPointSize").toReal());
+                     palette->property("basePointSize").toReal());
+            QCOMPARE(qvariant_cast<QFont>(value->property("font")).pointSizeF(),
+                     palette->property("basePointSize").toReal());
             if (pointSize > 0) {
-                QCOMPARE(palette->property("smallPointSize").toReal(), pointSize * 0.9);
+                QCOMPARE(palette->property("basePointSize").toReal(), pointSize);
             }
             labels << label;
             values << value;
@@ -1288,9 +1301,11 @@ bool clickPreviewButton(QQuickWindow *host, const QString &objectName) {
     return settled && clickVisibleButton(host, objectName);
 }
 
-// During a preview in `host`: its label and buttons are at the foot of the
-// image's details, Back to Results before Apply on one row, and the
-// viewer's controls named by `prefix` have none of them, nor Image Details.
+// During a preview in `host`: its label is over the image's details and its
+// buttons 12 px under them, Back to Results before Apply on one row; the art
+// keeps 24 px clear of the details' seam, centred in the space left of it;
+// and the viewer's controls named by `prefix` have none of the preview's,
+// nor Image Details.
 void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
                                       const QByteArray &at) {
     QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
@@ -1314,14 +1329,43 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
         QVERIFY2(isWithin(item, column), at.constData());
         QVERIFY2(columnRect.contains(rectOf(item)), at.constData());
     }
-    // At the foot: the buttons near the bottom edge, the label above them,
-    // Back to Results then Apply, ending at the column's end.
-    QVERIFY2(columnRect.bottom() - rectOf(back).bottom() <= 24.0, at.constData());
+    // The label first, over the file's name; the buttons directly under the
+    // details, 12 px below the last of them, Back to Results then Apply,
+    // ending at the column's end: not pinned to its bottom edge.
+    QQuickItem *title = visibleItemNamed(host, QStringLiteral("albumArtInfoTitle"));
+    QVERIFY2(title != nullptr, at.constData());
+    QVERIFY2(rectOf(label).bottom() <= rectOf(title).top(), at.constData());
+    qreal detailsBottom = rectOf(title).bottom();
+    for (const QString &name : {QStringLiteral("albumArtInfoRow"), QStringLiteral("albumArtCompareButton")}) {
+        for (QQuickItem *item : visibleItemsNamed(column, name)) {
+            detailsBottom = qMax(detailsBottom, rectOf(item).bottom());
+        }
+    }
+    QTRY_VERIFY2(qAbs(rectOf(back).top() - (detailsBottom + 12.0)) <= 0.5,
+                 qPrintable(QStringLiteral("%1: details end at %2, buttons start at %3")
+                                .arg(QString::fromUtf8(at)).arg(detailsBottom).arg(rectOf(back).top())));
+    QVERIFY2(rectOf(back).top() < columnRect.center().y(), at.constData());
     QCOMPARE(rectOf(back).top(), rectOf(apply).top());
-    QVERIFY2(rectOf(label).bottom() <= rectOf(back).top(), at.constData());
     QVERIFY2(rectOf(back).right() <= rectOf(apply).left(), at.constData());
     QVERIFY2(columnRect.right() - rectOf(apply).right() <= 24.0, at.constData());
-    QVERIFY2(rectOf(back).top() > columnRect.center().y(), at.constData());
+    // The art fits the space left of the seam, 24 px clear of it, centred
+    // there.
+    QQuickItem *image = visibleItemNamed(host, QStringLiteral("albumArtImage"));
+    QQuickItem *seam = visibleItemNamed(host, QStringLiteral("albumArtInfoSeam"));
+    QVERIFY2(image != nullptr && seam != nullptr, at.constData());
+    const auto paintedArt = [image]() {
+        const QSizeF painted(image->property("paintedWidth").toReal(),
+                             image->property("paintedHeight").toReal());
+        return QRectF(image->mapToScene(QPointF((image->width() - painted.width()) / 2,
+                                                (image->height() - painted.height()) / 2)),
+                      painted);
+    };
+    QTRY_VERIFY2(paintedArt().width() > 0
+                     && rectOf(seam).left() - paintedArt().right() >= 24.0 - 0.5
+                     && qAbs(paintedArt().center().x() - rectOf(seam).left() / 2) <= 1.0,
+                 qPrintable(QStringLiteral("%1: art %2..%3, seam at %4")
+                                .arg(QString::fromUtf8(at)).arg(paintedArt().left())
+                                .arg(paintedArt().right()).arg(rectOf(seam).left())));
     // Nothing of the preview on the strip or the corner plate.
     for (const QString &name : {QStringLiteral("PreviewLabel"), QStringLiteral("BackButton"),
                                 QStringLiteral("ApplyButton"), QStringLiteral("InfoButton")}) {
@@ -1392,6 +1436,320 @@ QPoint pointOnTheArt(QQuickItem *surface) {
 }
 
 } // namespace
+
+namespace {
+
+// Replace from iTunes on its own, with a stand-in bridge whose state a test
+// sets: the playing track's art, with its details, and the suggestions.
+QObject *createItunesArtworkDialogWindow(QQmlApplicationEngine &engine, const QString &coverUrl,
+                                         QString *errorText) {
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QObject *root = createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: window
+    width: 1000
+    height: 760
+    visible: true
+    property alias dialog: dialog
+    property alias bridge: bridge
+    property string coverUrl: ""
+    Components.UiPalette { id: palette; windowRoot: window }
+    QtObject {
+        id: bridge
+        property string currentTrackPath: "/fixture/Small Hours/01 Lantern Signal.flac"
+        property string currentTrackCoverPath: window.coverUrl
+        property var itunesArtworkTarget: ({})
+        property var itunesArtworkResults: []
+        property bool itunesArtworkLoading: false
+        property string itunesArtworkStatusText: ""
+        signal itunesArtworkChanged()
+        signal imageFileDetailsChanged(string path)
+        signal snapshotChanged()
+        function itunesArtworkResultAt(index) { return itunesArtworkResults[index] || ({}) }
+        function applyItunesArtworkSuggestion(index) {}
+        function prepareItunesArtworkSuggestion(index) {}
+        function requestImageFileDetails(path) {}
+        function cachedImageFileDetails(path) {
+            return { width: 1200, height: 1200, format: "JPEG", fileType: "JPEG image",
+                     fileSizeBytes: 39244, fileSizeText: "38 KiB (39,244 bytes)",
+                     mimeType: "image/jpeg" }
+        }
+        function clearItunesArtworkSuggestions() {}
+    }
+    Dialogs.ItunesArtworkDialog {
+        id: dialog
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: window
+        openAlbumArtViewerForSuggestion: function(row) { return false }
+        openAlbumArtViewerForCurrentArt: function() { return false }
+        endAlbumArtPreview: function(applied) {}
+    }
+}
+)QML"), baseUrl, errorText);
+    if (root != nullptr) {
+        root->setProperty("coverUrl", coverUrl);
+    }
+    return root;
+}
+
+// The visible items under `root` that draw a filled or outlined
+// rectangle, a card's background, leaving out the buttons, which have
+// their style's.
+QList<QQuickItem *> rectanglesIn(QQuickItem *root) {
+    QList<QQuickItem *> found;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (!item->isVisible() || item->objectName().endsWith(QStringLiteral("Button"))) {
+            return;
+        }
+        if (item != root && item->property("radius").isValid() && item->property("border").isValid()) {
+            found.push_back(item);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            visit(child);
+        }
+    };
+    visit(root);
+    return found;
+}
+
+// Every visible text under `root`, but the buttons' labels.
+QStringList visibleTextsIn(QQuickItem *root) {
+    QStringList texts;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (!item->isVisible() || item->objectName().endsWith(QStringLiteral("Button"))) {
+            return;
+        }
+        if (item->property("lineCount").isValid()) {
+            texts << item->property("text").toString();
+        }
+        for (QQuickItem *child : item->childItems()) {
+            visit(child);
+        }
+    };
+    visit(root);
+    return texts;
+}
+
+} // namespace
+
+void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
+    // The results are a flat list on the view colour: no card around a row
+    // or the current art, a 64 px thumbnail, a hairline between rows, the
+    // title and one line of details in plain words, and flat Preview and
+    // Apply at the row's end. The current art is on the same grid.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    QVariantList rows = itunesArtworkFixture(dir, 3);
+    QCOMPARE(rows.size(), 3);
+    QVariantMap ready = rows[0].toMap();
+    ready.insert(QStringLiteral("width"), 1200);
+    ready.insert(QStringLiteral("height"), 1200);
+    ready.insert(QStringLiteral("format"), QStringLiteral("JPEG"));
+    ready.insert(QStringLiteral("fileType"), QStringLiteral("JPEG image"));
+    ready.insert(QStringLiteral("fileSizeBytes"), 412 * 1024);
+    ready.insert(QStringLiteral("fileSizeText"), QStringLiteral("412 KiB (421,888 bytes)"));
+    ready.insert(QStringLiteral("mimeType"), QStringLiteral("image/jpeg"));
+    rows[0] = ready;
+    QVariantMap loading = rows[1].toMap();
+    loading.insert(QStringLiteral("assetLoading"), true);
+    loading.insert(QStringLiteral("detailStatusText"), QStringLiteral("Loading high-resolution artwork..."));
+    rows[1] = loading;
+    QVariantMap failed = rows[2].toMap();
+    failed.insert(QStringLiteral("assetError"), QStringLiteral("The artwork could not be downloaded."));
+    failed.insert(QStringLiteral("detailStatusText"),
+                  QStringLiteral("High-resolution artwork could not be loaded."));
+    rows[2] = failed;
+
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createItunesArtworkDialogWindow(engine, coverUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QVERIFY(dialog != nullptr && bridge != nullptr);
+    bridge->setProperty("itunesArtworkResults", rows);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Found 3 suggestions."));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QTRY_VERIFY(popupsSettled());
+    auto *content = qvariant_cast<QQuickItem *>(dialog->property("contentItem"));
+    QVERIFY(content != nullptr);
+
+    QList<QQuickItem *> rowItems;
+    QTRY_COMPARE((rowItems = visibleItemsNamed(content, QStringLiteral("itunesArtworkResultRow"))).size(), 3);
+    std::sort(rowItems.begin(), rowItems.end(), [](QQuickItem *a, QQuickItem *b) {
+        return sceneRectOf(a).top() < sceneRectOf(b).top();
+    });
+    QQuickItem *frame = itemNamed(content, QStringLiteral("itunesArtworkResultsFrame"));
+    QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
+    QVERIFY(frame != nullptr && currentRow != nullptr);
+    // On the view colour, in a square frame: no card.
+    QCOMPARE(frame->property("radius").toReal(), 0.0);
+    QCOMPARE(frame->property("color").value<QColor>(),
+             qvariant_cast<QObject *>(dialog->property("uiPalette"))->property("view").value<QColor>());
+    // Neither a row nor the current art has a background of its own: the
+    // only rectangles are the hairlines between rows, 1 px high.
+    QVERIFY(!currentRow->property("color").isValid());
+    QVERIFY(rectanglesIn(currentRow).isEmpty());
+    int hairlines = 0;
+    for (QQuickItem *row : rowItems) {
+        QVERIFY(!row->property("color").isValid());
+        for (QQuickItem *rect : rectanglesIn(row)) {
+            QCOMPARE(rect->objectName(), QStringLiteral("itunesArtworkResultHairline"));
+            QCOMPARE(rect->height(), 1.0);
+            QCOMPARE(rect->width(), row->width());
+            QCOMPARE(sceneRectOf(rect).bottom(), sceneRectOf(row).bottom());
+            ++hairlines;
+        }
+    }
+    QCOMPARE(hairlines, 2);
+
+    // Each row: a 64 px thumbnail, the title, and exactly one line of
+    // details, rows as tall as the thumbnail with 8 px above and below.
+    const QStringList expectedDetails{
+        QStringLiteral("The Quiet Meridian · 1200 × 1200 · JPEG · 412 KiB"),
+        QStringLiteral("The Quiet Meridian · Loading high-resolution artwork…"),
+        QStringLiteral("The artwork could not be downloaded."),
+    };
+    for (int i = 0; i < rowItems.size(); ++i) {
+        QQuickItem *row = rowItems[i];
+        const QByteArray at = QByteArray("row ") + QByteArray::number(i);
+        QCOMPARE(row->height(), 80.0);
+        QQuickItem *thumbnail = itemNamed(row, QStringLiteral("itunesArtworkResultThumbnail"));
+        QVERIFY2(thumbnail != nullptr, at.constData());
+        QCOMPARE(sceneRectOf(thumbnail).size(), QSizeF(64, 64));
+        const QList<QQuickItem *> titles = visibleItemsNamed(row, QStringLiteral("itunesArtworkResultTitle"));
+        const QList<QQuickItem *> details = visibleItemsNamed(row, QStringLiteral("itunesArtworkResultDetails"));
+        QCOMPARE(titles.size(), 1);
+        QCOMPARE(details.size(), 1);
+        QCOMPARE(titles[0]->property("text").toString(), QStringLiteral("Small Hours %1").arg(i));
+        QCOMPARE(details[0]->property("text").toString(), expectedDetails[i]);
+        // Two lines of text, and nothing else but the buttons'.
+        QCOMPARE(visibleTextsIn(row).filter(QRegularExpression(QStringLiteral("\\S"))).size(), 2);
+        // Flat Preview, then Apply at the row's end, side by side.
+        QQuickItem *preview = itemNamed(row, QStringLiteral("itunesArtworkPreviewButton"));
+        QQuickItem *apply = itemNamed(row, QStringLiteral("itunesArtworkApplyButton"));
+        QVERIFY2(preview != nullptr && apply != nullptr, at.constData());
+        QVERIFY2(preview->property("flat").toBool() && apply->property("flat").toBool(), at.constData());
+        QCOMPARE(sceneRectOf(preview).center().y(), sceneRectOf(apply).center().y());
+        QVERIFY2(sceneRectOf(preview).right() <= sceneRectOf(apply).left(), at.constData());
+        QVERIFY2(sceneRectOf(row).right() - sceneRectOf(apply).right() <= 16.5, at.constData());
+        QCOMPARE(apply->property("text").toString(), QStringLiteral("Apply"));
+        QCOMPARE(preview->property("text").toString(), QStringLiteral("Preview"));
+        QCOMPARE(apply->isEnabled(), i != 1);
+    }
+    // A failed download says so in the negative colour.
+    QQuickItem *failedDetails = visibleItemsNamed(rowItems[2], QStringLiteral("itunesArtworkResultDetails")).first();
+    QQuickItem *readyDetails = visibleItemsNamed(rowItems[0], QStringLiteral("itunesArtworkResultDetails")).first();
+    QVERIFY(failedDetails->property("color").value<QColor>() != readyDetails->property("color").value<QColor>());
+
+    // No developer's MIME line anywhere.
+    for (const QString &text : visibleTextsIn(content)) {
+        QVERIFY2(!text.contains(QStringLiteral("MIME")) && !text.contains(QStringLiteral("image/")),
+                 qPrintable(text));
+    }
+
+    // The current art: on the same grid, its thumbnail over the results'
+    // and its Preview over theirs, with one line of plain details.
+    QQuickItem *currentThumbnail = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentThumbnail"));
+    QQuickItem *firstThumbnail = itemNamed(rowItems[0], QStringLiteral("itunesArtworkResultThumbnail"));
+    QVERIFY(currentThumbnail != nullptr && firstThumbnail != nullptr);
+    QCOMPARE(sceneRectOf(currentThumbnail).size(), QSizeF(64, 64));
+    QCOMPARE(sceneRectOf(currentThumbnail).left(), sceneRectOf(firstThumbnail).left());
+    QQuickItem *currentPreview = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"));
+    QQuickItem *firstPreview = itemNamed(rowItems[0], QStringLiteral("itunesArtworkPreviewButton"));
+    QVERIFY(currentPreview != nullptr && firstPreview != nullptr);
+    QVERIFY(currentPreview->property("flat").toBool());
+    QCOMPARE(sceneRectOf(currentPreview).left(), sceneRectOf(firstPreview).left());
+    QQuickItem *currentTitle = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentTitle"));
+    QQuickItem *firstTitle = itemNamed(rowItems[0], QStringLiteral("itunesArtworkResultTitle"));
+    QVERIFY(currentTitle != nullptr && firstTitle != nullptr);
+    QCOMPARE(sceneRectOf(currentTitle).left(), sceneRectOf(firstTitle).left());
+    QCOMPARE(visibleItemsNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails")).size(), 1);
+    QTRY_COMPARE(itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails"))->property("text").toString(),
+                 QStringLiteral("1200 × 1200 · JPEG · 38 KiB"));
+    QCOMPARE(currentRow->height(), 80.0);
+    // The dialog's first line, with no space above it.
+    QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());
+    // Nothing to search for or wait on.
+    QVERIFY(visibleItemsNamed(content, QStringLiteral("itunesArtworkPlaceholder")).isEmpty());
+}
+
+void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound() {
+    // While it searches, and when it found nothing, the results' frame
+    // holds a placeholder message, as Kirigami's looks, with a busy
+    // indicator while searching,
+    // under the current art, which stays the dialog's first line.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createItunesArtworkDialogWindow(engine, coverUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    QVERIFY(dialog != nullptr && bridge != nullptr);
+    bridge->setProperty("itunesArtworkLoading", true);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes..."));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    auto *content = qvariant_cast<QQuickItem *>(dialog->property("contentItem"));
+    QVERIFY(content != nullptr);
+    QQuickItem *frame = itemNamed(content, QStringLiteral("itunesArtworkResultsFrame"));
+    QQuickItem *placeholder = itemNamed(content, QStringLiteral("itunesArtworkPlaceholder"));
+    QQuickItem *message = itemNamed(content, QStringLiteral("itunesArtworkPlaceholderMessage"));
+    QQuickItem *busy = itemNamed(content, QStringLiteral("itunesArtworkBusyIndicator"));
+    QQuickItem *results = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
+    QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
+    QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
+            && results != nullptr && currentRow != nullptr);
+    QQuickItem *icon = itemNamed(content, QStringLiteral("itunesArtworkPlaceholderIcon"));
+    QVERIFY(icon != nullptr);
+
+    const auto checkState = [&](bool searching, const QString &text) {
+        const QByteArray at = searching ? "searching" : "nothing found";
+        QTRY_VERIFY2(placeholder->isVisible(), at.constData());
+        QVERIFY2(!results->isVisible(), at.constData());
+        QCOMPARE(message->property("text").toString(), text);
+        QCOMPARE(busy->isVisible(), searching);
+        QCOMPARE(busy->property("running").toBool(), searching);
+        // A placeholder message, as Kirigami's: its icon once nothing was
+        // found, and a centred heading.
+        QCOMPARE(icon->isVisible(), !searching);
+        QCOMPARE(message->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
+        // In the results' frame, centred there.
+        QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
+        QVERIFY2(qAbs(sceneRectOf(placeholder).center().y() - sceneRectOf(frame).center().y()) <= 1.0,
+                 at.constData());
+        if (searching) {
+            QVERIFY2(sceneRectOf(busy).bottom() <= sceneRectOf(message).top(), at.constData());
+        }
+        // The current art first, with no space above it, then the frame.
+        QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());
+        QVERIFY2(sceneRectOf(frame).top() - sceneRectOf(currentRow).bottom() <= 8.0, at.constData());
+        // No other glyph or text stands in for the state.
+        QStringList texts = visibleTextsIn(content);
+        texts.removeAll(QString());
+        QCOMPARE(texts.count(text), 1);
+    };
+    checkState(true, QStringLiteral("Searching iTunes..."));
+
+    bridge->setProperty("itunesArtworkLoading", false);
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
+    checkState(false, QStringLiteral("No iTunes artwork suggestions found."));
+}
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     QTemporaryDir dir;
@@ -1803,7 +2161,8 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
     // larger fonts, in the main window's viewer and over the whole screen.
     // With the usual font they share a row at its end; with one too large
     // for that, they stack. The app's style's buttons no longer fit side by
-    // side at 14 pt.
+    // side at 14 pt. At 24 pt, Back to Results is wider than the usual
+    // column: the column widens for it, so it is not cut short (#535).
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QTemporaryDir dir;
@@ -1813,7 +2172,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
     const QString coverUrl = QUrl::fromLocalFile(coverPath).toString();
     const QVariantList fixture = itunesArtworkFixture(dir, 3);
 
-    for (const qreal pointSize : {0.0, 14.0}) {
+    for (const qreal pointSize : {0.0, 14.0, 24.0}) {
         if (pointSize > 0) {
             QFont larger = applicationFont;
             larger.setPointSizeF(pointSize);
@@ -1867,15 +2226,24 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
                                         .arg(sceneRectOf(back).left()).arg(sceneRectOf(back).right())
                                         .arg(sceneRectOf(apply).left()).arg(sceneRectOf(apply).right())));
             QVERIFY2(!sceneRectOf(back).intersects(sceneRectOf(apply)), at.constData());
+            // Each has all the room it asks for, so the style draws its
+            // label whole, not elided: Back to Results too at 24 pt.
             QVERIFY2(back->width() >= back->implicitWidth() - 0.5 && apply->width() >= apply->implicitWidth() - 0.5,
-                     at.constData());
-            // The footer's buttons, at the foot of the column.
+                     qPrintable(QStringLiteral("%1: back %2 of %3, apply %4 of %5")
+                                    .arg(QString::fromLatin1(at)).arg(back->width()).arg(back->implicitWidth())
+                                    .arg(apply->width()).arg(apply->implicitWidth())));
+            if (pointSize >= 24.0) {
+                QVERIFY2(columnRect.width() > 279.0, at.constData());
+            } else {
+                QCOMPARE(columnRect.width(), 279.0);
+            }
+            // The footer's buttons, under the details, inside the column.
             QQuickItem *footer = visibleItemNamed(host, QStringLiteral("albumArtPreviewFooter"));
             QQuickItem *buttons = visibleItemNamed(host, QStringLiteral("albumArtPreviewButtons"));
             QVERIFY2(footer != nullptr && buttons != nullptr, at.constData());
             QVERIFY2(isWithin(back, buttons) && isWithin(apply, buttons) && isWithin(footer, column),
                      at.constData());
-            QCOMPARE(sceneRectOf(footer).bottom(), columnRect.bottom());
+            QVERIFY2(sceneRectOf(footer).bottom() <= columnRect.bottom(), at.constData());
             QVERIFY2(sceneRectOf(footer).contains(sceneRectOf(back))
                          && sceneRectOf(footer).contains(sceneRectOf(apply)), at.constData());
             const bool fitsInARow = back->implicitWidth() + buttons->property("spacing").toReal()
