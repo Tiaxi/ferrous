@@ -400,6 +400,12 @@ private slots:
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
+    void mprisExportsTheTrackBeforeWholeWhileTheTextIsHeld();
+    void mprisSetPositionDuringTheHoldSeeksThePlayingTrack();
+    void mprisHoldFollowsASecondTrackChangeAndEndsOnStop();
+    void mprisHoldEndsForATrackWhoseTextReadsTheSame();
+    void mprisExportsNoArtOfTheTrackBeforeAfterTheRowEndsTheHold();
+    void mprisExportsNoArtOfTheTrackBeforeAfterAStopEndsTheHold();
     void playbackErrorPacketReachesBridgeError();
     void backendFailurePacketShowsStoppedState();
     void requestedStopIsNotABackendFailure();
@@ -6328,6 +6334,7 @@ void BridgeClientTest::mprisArtUrlConvertsImageProviderToFileUrl() {
     // name has a '#'.
     client.m_currentTrackCoverPath =
         QStringLiteral("image://covers//music/a#b/cover.jpg#v=12");
+    client.m_currentTrackCoverTrackPath = client.m_currentTrackPath;
 
     MprisController controller(&client);
     controller.m_serviceRegistered = true;
@@ -7070,6 +7077,476 @@ void BridgeClientTest::mprisReportsAReplayOfTheSameFileAsSeeked() {
     QVERIFY(client.processBinarySnapshot(snapshot));
     emit client.trackIdentityChanged();
     QCOMPARE(seekedPositions(signalsSent).size(), 1);
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+namespace {
+
+// A track as MPRIS should export it: its ID, URL, length, text and art
+// together.
+struct ExportedTrack {
+    QString path;
+    QString title;
+    QString artist;
+    QString album;
+    qlonglong lengthUs{0};
+    QString albumArtist;
+    QString artUrl;
+};
+
+// What is wrong with `meta` as the metadata of one of `tracks`, or nothing
+// when it is one track's whole: an ID with another track's URL, length,
+// text, album artist or art is a mix of two tracks. The album artist and the
+// art may be left out while they are not known.
+QString incoherence(const QVariantMap &meta, const QList<ExportedTrack> &tracks) {
+    const QString trackId = meta.value(QStringLiteral("mpris:trackid")).value<QDBusObjectPath>().path();
+    for (const ExportedTrack &track : tracks) {
+        if (MprisController::trackIdPathFor(track.path) != trackId) {
+            continue;
+        }
+        QStringList wrong;
+        if (meta.value(QStringLiteral("xesam:url")).toString()
+            != QUrl::fromLocalFile(track.path).toString(QUrl::FullyEncoded)) {
+            wrong.append(QStringLiteral("url"));
+        }
+        if (meta.value(QStringLiteral("xesam:title")).toString() != track.title) {
+            wrong.append(QStringLiteral("title"));
+        }
+        const QStringList artists = track.artist.isEmpty() ? QStringList{} : QStringList{track.artist};
+        if (meta.value(QStringLiteral("xesam:artist")).toStringList() != artists) {
+            wrong.append(QStringLiteral("artist"));
+        }
+        if (meta.value(QStringLiteral("xesam:album")).toString() != track.album) {
+            wrong.append(QStringLiteral("album"));
+        }
+        if (meta.value(QStringLiteral("mpris:length")).toLongLong() != track.lengthUs) {
+            wrong.append(QStringLiteral("length"));
+        }
+        if (meta.contains(QStringLiteral("xesam:albumArtist"))
+            && meta.value(QStringLiteral("xesam:albumArtist")).toStringList()
+                != QStringList{track.albumArtist}) {
+            wrong.append(QStringLiteral("album artist"));
+        }
+        if (meta.contains(QStringLiteral("mpris:artUrl"))
+            && meta.value(QStringLiteral("mpris:artUrl")).toString() != track.artUrl) {
+            wrong.append(QStringLiteral("art"));
+        }
+        return wrong.isEmpty() ? QString{}
+                               : QStringLiteral("%1 with another track's %2").arg(track.path, wrong.join(u','));
+    }
+    return QStringLiteral("unknown track ID %1").arg(trackId);
+}
+
+// The Metadata values of the PropertiesChanged signals among `messages`.
+QList<QVariantMap> publishedMetadata(const QList<QDBusMessage> &messages) {
+    QList<QVariantMap> out;
+    for (const QDBusMessage &message : messages) {
+        if (message.member() != QStringLiteral("PropertiesChanged") || message.arguments().size() < 2) {
+            continue;
+        }
+        const QVariantMap changed = qdbus_cast<QVariantMap>(message.arguments().at(1));
+        if (changed.contains(QStringLiteral("Metadata"))) {
+            out.append(qdbus_cast<QVariantMap>(changed.value(QStringLiteral("Metadata"))));
+        }
+    }
+    return out;
+}
+
+QString trackIdOf(const QVariantMap &meta) {
+    return meta.value(QStringLiteral("mpris:trackid")).value<QDBusObjectPath>().path();
+}
+
+// The art of the tagged track `name` in playingWithMetadataOf().
+QString artOf(const QString &name) {
+    return QStringLiteral("file:///fixture/%1-cover.jpg").arg(name);
+}
+
+// A tagged track playing as play `token`, `durationSeconds` long, with its
+// metadata, or with `metadataOf`'s, which the bridge still has.
+BinaryBridgeCodec::DecodedSnapshot playingWithMetadataOf(const QString &path, const QString &metadataOf,
+                                                         const QString &name, quint64 token,
+                                                         double durationSeconds, double position) {
+    BinaryBridgeCodec::DecodedSnapshot snapshot = playingTaggedTrack(metadataOf, name, 2001, 1);
+    snapshot.metadata.albumArtist = name + QStringLiteral(" Album Artist");
+    snapshot.metadata.coverPath = artOf(name);
+    snapshot.playback.currentPath = path;
+    snapshot.playback.trackToken = token;
+    snapshot.playback.durationSeconds = durationSeconds;
+    snapshot.playback.positionSeconds = position;
+    return snapshot;
+}
+
+bool closeTo(qlonglong left, qlonglong right) {
+    return std::abs(left - right) < 50000;
+}
+
+} // namespace
+
+// While the bridge holds the text of the track before (#563), MPRIS exports
+// that track whole: its ID, URL, length and text. Once the playing track's
+// text is known, it exports the playing one whole, in one change, and never
+// one track's ID with another's text (#565).
+void BridgeClientTest::mprisExportsTheTrackBeforeWholeWhileTheTextIsHeld() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    const QList<ExportedTrack> tracks{
+        {pathA, QStringLiteral("A Title"), QStringLiteral("A Artist"), QStringLiteral("A Album"), 100000000,
+         QStringLiteral("A Album Artist"), artOf(QStringLiteral("A"))},
+        {pathB, QStringLiteral("B Title"), QStringLiteral("B Artist"), QStringLiteral("B Album"), 200000000,
+         QStringLiteral("B Album Artist"), artOf(QStringLiteral("B"))},
+    };
+    QVERIFY(client.processBinarySnapshot(playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9)));
+    client.m_queueLength = 2;
+
+    MprisController controller(&client);
+    QList<QDBusMessage> signalsSent;
+    controller.m_signalSink = [&signalsSent](const QDBusMessage &message) {
+        signalsSent.append(message);
+    };
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.trackMetadataChanged();
+    const QVariantMap metadataOfA = controller.metadata();
+    QCOMPARE(incoherence(metadataOfA, tracks), QString());
+    QCOMPARE(trackIdOf(metadataOfA), MprisController::trackIdPathFor(pathA));
+    signalsSent.clear();
+
+    // B plays, 200 s long, while the bridge still has A's metadata: the
+    // window keeps A's text, and MPRIS A's whole metadata, through the
+    // heartbeats and B's length.
+    for (int pass = 0; pass < 3; ++pass) {
+        QVERIFY(client.processBinarySnapshot(
+            playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 200.0, 0.1 * pass)));
+        QCOMPARE(client.currentTrackTextPath(), pathA);
+        QCOMPARE(client.currentTrackTitle(), QStringLiteral("A Title"));
+        if (pass == 0) {
+            emit client.trackIdentityChanged();
+        }
+        emit client.playbackChanged();
+        QCOMPARE(controller.metadata(), metadataOfA);
+    }
+    QVERIFY(publishedMetadata(signalsSent).isEmpty());
+    // A's position starts over as B starts under A's ID, which clients are
+    // told.
+    QCOMPARE(seekedPositions(signalsSent).size(), 1);
+    QVERIFY(closeTo(seekedPositions(signalsSent).first(), 0));
+    // Position and CanSeek are the playing track's.
+    QVERIFY(controller.canSeek());
+    QVERIFY(closeTo(controller.positionUs(), 200000));
+    signalsSent.clear();
+
+    // B's own metadata: everything changes at once, to B's whole.
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathB, pathB, QStringLiteral("B"), 2, 200.0, 0.5)));
+    QCOMPARE(client.currentTrackTextPath(), pathB);
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    emit client.trackMetadataChanged();
+    emit client.playbackChanged();
+    const QList<QVariantMap> published = publishedMetadata(signalsSent);
+    QCOMPARE(published.size(), 1);
+    QCOMPARE(incoherence(published.first(), tracks), QString());
+    QCOMPARE(trackIdOf(published.first()), MprisController::trackIdPathFor(pathB));
+    QCOMPARE(controller.metadata(), published.first());
+    // B started before its ID was exported, so clients are told where it is.
+    QCOMPARE(seekedPositions(signalsSent).size(), 1);
+    QVERIFY(closeTo(seekedPositions(signalsSent).first(), 500000));
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+// SetPosition during the hold seeks the playing track, whether a client
+// names the exported ID, the track before's, or the playing track's own;
+// another track's ID is stale (#565).
+void BridgeClientTest::mprisSetPositionDuringTheHoldSeeksThePlayingTrack() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    client.m_sendCommandOverride = [&sent](const QByteArray &payload) {
+        sent.append(payload);
+        return true;
+    };
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    QVERIFY(client.processBinarySnapshot(playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9)));
+    client.m_queueLength = 2;
+    MprisController controller(&client);
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 200.0, 1.0)));
+    emit client.trackIdentityChanged();
+    const QString exportedId = trackIdOf(controller.metadata());
+    QCOMPARE(exportedId, MprisController::trackIdPathFor(pathA));
+
+    controller.setPosition(MprisController::trackIdPathFor(QStringLiteral("/fixture/other.flac")), 5000000);
+    QVERIFY(sent.isEmpty());
+
+    // B is 200 s long, so a position past A's 100 s is B's to take.
+    controller.setPosition(exportedId, 150000000);
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(clockPosition(client), 150.0);
+
+    controller.setPosition(MprisController::trackIdPathFor(pathB), 20000000);
+    QCOMPARE(sent.size(), 2);
+    QCOMPARE(clockPosition(client), 20.0);
+
+    // Seek is relative to the playing track's position.
+    controller.seek(5000000);
+    QCOMPARE(sent.size(), 3);
+    QCOMPARE(clockPosition(client), 25.0);
+}
+
+// A second track change during the hold keeps the first track's metadata,
+// and the export moves on to the track whose text comes, never to the one
+// skipped. A stop ends the hold, as it does in the bridge, and so does a
+// track whose tags have nothing (#565).
+void BridgeClientTest::mprisHoldFollowsASecondTrackChangeAndEndsOnStop() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    const QString pathC = QStringLiteral("/fixture/c.flac");
+    const QString pathD = QStringLiteral("/fixture/untitled take.flac");
+    const QString pathE = QStringLiteral("/fixture/e.flac");
+    const QList<ExportedTrack> tracks{
+        {pathA, QStringLiteral("A Title"), QStringLiteral("A Artist"), QStringLiteral("A Album"), 100000000,
+         QStringLiteral("A Album Artist"), artOf(QStringLiteral("A"))},
+        {pathC, QStringLiteral("C Title"), QStringLiteral("C Artist"), QStringLiteral("C Album"), 300000000,
+         QStringLiteral("C Album Artist"), artOf(QStringLiteral("C"))},
+        {pathD, QStringLiteral("untitled take.flac"), QString(), QString(), 400000000, QString(), QString()},
+        {pathE, QStringLiteral("e.flac"), QString(), QString(), 500000000, QString(), QString()},
+    };
+    QVERIFY(client.processBinarySnapshot(playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9)));
+    client.m_queueLength = 4;
+    MprisController controller(&client);
+    QList<QDBusMessage> signalsSent;
+    controller.m_signalSink = [&signalsSent](const QDBusMessage &message) {
+        signalsSent.append(message);
+    };
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.trackMetadataChanged();
+    const QVariantMap metadataOfA = controller.metadata();
+
+    // B, then C, before either's text is known.
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 200.0, 0.0)));
+    emit client.trackIdentityChanged();
+    QCOMPARE(controller.metadata(), metadataOfA);
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathC, pathA, QStringLiteral("A"), 3, 300.0, 0.0)));
+    emit client.trackIdentityChanged();
+    QCOMPARE(controller.metadata(), metadataOfA);
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathC, pathC, QStringLiteral("C"), 3, 300.0, 0.2)));
+    emit client.trackMetadataChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathC));
+
+    // D, whose tags have nothing: its metadata ends the hold, and it is
+    // exported with its file name.
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathD, pathC, QStringLiteral("C"), 4, 400.0, 0.0)));
+    emit client.trackIdentityChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathC));
+    BinaryBridgeCodec::DecodedSnapshot untagged =
+        playingWithMetadataOf(pathD, pathD, QStringLiteral("D"), 4, 400.0, 0.1);
+    untagged.metadata = {};
+    untagged.metadata.present = true;
+    untagged.metadata.sourcePath = pathD;
+    QVERIFY(client.processBinarySnapshot(untagged));
+    emit client.trackMetadataChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathD));
+
+    // E, stopped on before its text is known: the stop ends the hold.
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathE, pathD, QStringLiteral("D"), 5, 500.0, 0.0)));
+    emit client.trackIdentityChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathD));
+    BinaryBridgeCodec::DecodedSnapshot stopped =
+        playingWithMetadataOf(pathE, pathD, QStringLiteral("D"), 5, 500.0, 0.0);
+    stopped.playback.state = 0;
+    stopped.metadata = untagged.metadata;
+    QVERIFY(client.processBinarySnapshot(stopped));
+    emit client.playbackChanged();
+    emit client.trackMetadataChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathE));
+
+    // No published metadata ever named B, or mixed two tracks.
+    const QList<QVariantMap> published = publishedMetadata(signalsSent);
+    QCOMPARE(published.size(), 4);
+    for (const QVariantMap &meta : published) {
+        QCOMPARE(incoherence(meta, tracks), QString());
+    }
+    // Each start under the exported ID of the track before, and each export
+    // of a track that had started, is a seek; the stop is not.
+    const QList<qlonglong> seeked = seekedPositions(signalsSent);
+    QCOMPARE(seeked.size(), 6);
+    QVERIFY(closeTo(seeked.at(2), 200000));
+    QVERIFY(closeTo(seeked.at(4), 100000));
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+// The next track whose text reads the same as the track before's: the text
+// now describes it, which is a change, and MPRIS exports its ID (#565).
+void BridgeClientTest::mprisHoldEndsForATrackWhoseTextReadsTheSame() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    QVERIFY(client.processBinarySnapshot(playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9)));
+    client.m_queueLength = 2;
+    MprisController controller(&client);
+    QVERIFY(client.processBinarySnapshot(
+        playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 100.0, 0.0)));
+    emit client.trackIdentityChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathA));
+
+    // B's own metadata, the same tags as A's.
+    BinaryBridgeCodec::DecodedSnapshot sameText =
+        playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 100.0, 0.1);
+    sameText.metadata.sourcePath = pathB;
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(sameText));
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("A Title"));
+    QCOMPARE(client.currentTrackTextPath(), pathB);
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    emit client.trackMetadataChanged();
+    const QVariantMap meta = controller.metadata();
+    QCOMPARE(trackIdOf(meta), MprisController::trackIdPathFor(pathB));
+    QCOMPARE(meta.value(QStringLiteral("xesam:url")).toString(),
+             QUrl::fromLocalFile(pathB).toString(QUrl::FullyEncoded));
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("A Title"));
+}
+
+// B's queue row comes before its metadata and gives no cover: the row ends
+// the hold of the text, while the bridge keeps A's cover until B's own is
+// known. MPRIS exports B then with no art, rather than A's, and B's art and
+// album artist once its metadata tells them (#565).
+void BridgeClientTest::mprisExportsNoArtOfTheTrackBeforeAfterTheRowEndsTheHold() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    const QList<ExportedTrack> tracks{
+        {pathA, QStringLiteral("A Title"), QStringLiteral("A Artist"), QStringLiteral("A Album"), 100000000,
+         QStringLiteral("A Album Artist"), artOf(QStringLiteral("A"))},
+        {pathB, QStringLiteral("B Title"), QStringLiteral("B Artist"), QStringLiteral("B Album"), 200000000,
+         QStringLiteral("B Album Artist"), artOf(QStringLiteral("B"))},
+    };
+    QueueRowData rowA;
+    rowA.path = pathA;
+    rowA.title = QStringLiteral("A Title");
+    QueueRowData rowB;
+    rowB.path = pathB;
+    rowB.title = QStringLiteral("B Title");
+    rowB.artist = QStringLiteral("B Artist");
+    rowB.album = QStringLiteral("B Album");
+    QVERIFY(client.m_queueRowsModel.setRows({rowA, rowB}));
+    client.m_queueLength = 2;
+    client.m_queuePathFirstIndexStale = true;
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9);
+    snapshot.playback.currentQueueIndex = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    MprisController controller(&client);
+    QList<QDBusMessage> signalsSent;
+    controller.m_signalSink = [&signalsSent](const QDBusMessage &message) {
+        signalsSent.append(message);
+    };
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.trackMetadataChanged();
+    QCOMPARE(controller.metadata().value(QStringLiteral("mpris:artUrl")).toString(), artOf(QStringLiteral("A")));
+
+    // B, with its row and A's metadata.
+    snapshot = playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 200.0, 0.0);
+    snapshot.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTextPath(), pathB);
+    QCOMPARE(client.currentTrackCoverPath(), artOf(QStringLiteral("A")));
+    QCOMPARE(client.currentTrackCoverTrackPath(), pathA);
+    emit client.trackIdentityChanged();
+    emit client.trackMetadataChanged();
+    QVariantMap meta = controller.metadata();
+    QCOMPARE(trackIdOf(meta), MprisController::trackIdPathFor(pathB));
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("B Title"));
+    QVERIFY(!meta.contains(QStringLiteral("mpris:artUrl")));
+    QVERIFY(!meta.contains(QStringLiteral("xesam:albumArtist")));
+
+    // B's own metadata.
+    snapshot = playingWithMetadataOf(pathB, pathB, QStringLiteral("B"), 2, 200.0, 0.2);
+    snapshot.playback.currentQueueIndex = 1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackCoverTrackPath(), pathB);
+    emit client.trackMetadataChanged();
+    meta = controller.metadata();
+    QCOMPARE(meta.value(QStringLiteral("mpris:artUrl")).toString(), artOf(QStringLiteral("B")));
+    QCOMPARE(meta.value(QStringLiteral("xesam:albumArtist")).toStringList(),
+             QStringList{QStringLiteral("B Album Artist")});
+
+    const QList<QVariantMap> published = publishedMetadata(signalsSent);
+    QCOMPARE(published.size(), 3);
+    for (const QVariantMap &each : published) {
+        QCOMPARE(incoherence(each, tracks), QString());
+    }
+
+    controller.m_serviceRegistered = false;
+    controller.m_objectRegistered = false;
+}
+
+// A stop during the hold ends it with B's file name, while the bridge keeps
+// A's cover: MPRIS exports B with no art and no album artist of A's (#565).
+void BridgeClientTest::mprisExportsNoArtOfTheTrackBeforeAfterAStopEndsTheHold() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString pathA = QStringLiteral("/fixture/a.flac");
+    const QString pathB = QStringLiteral("/fixture/b.flac");
+    const QList<ExportedTrack> tracks{
+        {pathA, QStringLiteral("A Title"), QStringLiteral("A Artist"), QStringLiteral("A Album"), 100000000,
+         QStringLiteral("A Album Artist"), artOf(QStringLiteral("A"))},
+        {pathB, QStringLiteral("b.flac"), QString(), QString(), 200000000, QString(), artOf(QStringLiteral("B"))},
+    };
+    QVERIFY(client.processBinarySnapshot(playingWithMetadataOf(pathA, pathA, QStringLiteral("A"), 1, 100.0, 99.9)));
+    client.m_queueLength = 2;
+    MprisController controller(&client);
+    QList<QDBusMessage> signalsSent;
+    controller.m_signalSink = [&signalsSent](const QDBusMessage &message) {
+        signalsSent.append(message);
+    };
+    controller.m_serviceRegistered = true;
+    controller.m_hasPublishedPlayerState = false;
+    emit client.trackMetadataChanged();
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingWithMetadataOf(pathB, pathA, QStringLiteral("A"), 2, 200.0, 0.0);
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    emit client.trackIdentityChanged();
+    QCOMPARE(trackIdOf(controller.metadata()), MprisController::trackIdPathFor(pathA));
+    QCOMPARE(controller.metadata().value(QStringLiteral("mpris:artUrl")).toString(), artOf(QStringLiteral("A")));
+
+    snapshot.playback.state = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTextPath(), pathB);
+    QCOMPARE(client.currentTrackCoverTrackPath(), pathA);
+    emit client.playbackChanged();
+    emit client.trackMetadataChanged();
+    const QVariantMap meta = controller.metadata();
+    QCOMPARE(trackIdOf(meta), MprisController::trackIdPathFor(pathB));
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("b.flac"));
+    QVERIFY(!meta.contains(QStringLiteral("mpris:artUrl")));
+    QVERIFY(!meta.contains(QStringLiteral("xesam:albumArtist")));
+
+    const QList<QVariantMap> published = publishedMetadata(signalsSent);
+    QCOMPARE(published.size(), 2);
+    for (const QVariantMap &each : published) {
+        QCOMPARE(incoherence(each, tracks), QString());
+    }
 
     controller.m_serviceRegistered = false;
     controller.m_objectRegistered = false;

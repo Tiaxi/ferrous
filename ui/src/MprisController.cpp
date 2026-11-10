@@ -507,7 +507,13 @@ void MprisController::setPosition(const QString &trackIdPath, qlonglong position
     if (m_bridge == nullptr || !canSeek()) {
         return;
     }
-    if (trackIdPath != currentTrackIdPath()) {
+    // A client names the track it read from Metadata, and a call naming
+    // another is stale. While the playing track's text is not known yet,
+    // the exported track is the one before, and Position already reports
+    // the playing track's, so a client that read either ID means the
+    // playing track.
+    if (trackIdPath != currentTrackIdPath()
+        && trackIdPath != trackIdPathFor(m_bridge->currentTrackPath().trimmed())) {
         return;
     }
     const double nextSeconds = std::clamp(
@@ -623,7 +629,7 @@ void MprisController::publishPlayerState() {
         emitPropertiesChanged(QString::fromUtf8(kMprisPlayerInterface), changed);
     }
     // Seeks are reported when they land; see the seekLanded connection.
-    if (m_hasPublishedPlayerState && replayedSameTrack(nextState)) {
+    if (m_hasPublishedPlayerState && positionJumped(nextState)) {
         emitSeeked(nextState.positionUs);
     }
     m_lastPlayerState = nextState;
@@ -662,7 +668,10 @@ void MprisController::sendSignal(const QDBusMessage &message) const {
 }
 
 void MprisController::handleBridgeChange(bool trackChanged) {
-    if (trackChanged || currentLengthUs() != m_metadataLengthUs) {
+    const bool exportsPlayingTrack = m_bridge != nullptr
+        && m_exportedTrackPath == m_bridge->currentTrackPath().trimmed();
+    if (trackChanged || exportedTrackPath() != m_exportedTrackPath
+        || (exportsPlayingTrack && currentLengthUs() != m_metadataLengthUs)) {
         rebuildMetadata();
     }
     if (m_serviceRegistered) {
@@ -677,18 +686,50 @@ qlonglong MprisController::currentLengthUs() const {
     return static_cast<qlonglong>(std::llround(m_bridge->durationSeconds() * 1000000.0));
 }
 
-void MprisController::rebuildMetadata() {
-    const QString trackPath = m_bridge != nullptr ? m_bridge->currentTrackPath().trimmed() : QString{};
-    if (trackPath.isEmpty()) {
-        m_trackIdPath = QString::fromUtf8(kNoTrackPath);
-    } else {
-        const QByteArray digest = QCryptographicHash::hash(
-            trackPath.toUtf8(),
-            QCryptographicHash::Sha1).toHex();
-        m_trackIdPath = QStringLiteral("/org/mpris/MediaPlayer2/Track/%1").arg(QString::fromLatin1(digest));
+QString MprisController::exportedTrackPath() const {
+    if (m_bridge == nullptr) {
+        return {};
     }
-    m_metadataLengthUs = currentLengthUs();
-    m_artUrl = currentArtUrl();
+    // With no track before, the text has none to keep, and the playing
+    // track is exported with what is known of it.
+    const QString textPath = m_bridge->currentTrackTextPath().trimmed();
+    return textPath.isEmpty() ? m_bridge->currentTrackPath().trimmed() : textPath;
+}
+
+QString MprisController::trackIdPathFor(const QString &trackPath) {
+    if (trackPath.isEmpty()) {
+        return QString::fromUtf8(kNoTrackPath);
+    }
+    const QByteArray digest = QCryptographicHash::hash(trackPath.toUtf8(), QCryptographicHash::Sha1).toHex();
+    return QStringLiteral("/org/mpris/MediaPlayer2/Track/%1").arg(QString::fromLatin1(digest));
+}
+
+void MprisController::rebuildMetadata() {
+    const QString exportedPath = exportedTrackPath();
+    const QString playingPath = m_bridge != nullptr ? m_bridge->currentTrackPath().trimmed() : QString{};
+    const bool exportsPlayingTrack = exportedPath == playingPath;
+    if (!exportsPlayingTrack && exportedPath == m_exportedTrackPath) {
+        // The track before's whole metadata stays, as its text does in the
+        // bridge: the length, art and album artist the bridge has now are
+        // the playing track's.
+        return;
+    }
+    m_exportedTrackPath = exportedPath;
+    m_trackIdPath = trackIdPathFor(exportedPath);
+    if (exportsPlayingTrack) {
+        m_metadataLengthUs = currentLengthUs();
+        // The bridge keeps the track before's cover until the playing
+        // track's is known, also after its text is: until then the
+        // exported track has no art.
+        const bool coverIsExportedTracks = m_bridge != nullptr
+            && m_bridge->currentTrackCoverTrackPath().trimmed() == exportedPath;
+        m_artUrl = coverIsExportedTracks ? currentArtUrl() : QString{};
+    } else {
+        // A track before that this controller did not export: of it, only
+        // its text is known.
+        m_metadataLengthUs = 0;
+        m_artUrl.clear();
+    }
     m_metadata = buildMetadata();
 }
 
@@ -735,7 +776,7 @@ QVariantMap MprisController::buildMetadata() const {
         return out;
     }
 
-    const QString trackPath = m_bridge->currentTrackPath().trimmed();
+    const QString &trackPath = m_exportedTrackPath;
     if (!trackPath.isEmpty()) {
         out.insert(
             QStringLiteral("xesam:url"),
@@ -787,7 +828,7 @@ MprisController::PublishedPlayerState MprisController::currentPlayerState() cons
     state.playbackStatus = playbackStatus();
     state.loopStatus = loopStatus();
     state.metadata = metadata();
-    state.currentTrackPath = m_bridge != nullptr ? m_bridge->currentTrackPath().trimmed() : QString{};
+    state.exportedTrackPath = m_exportedTrackPath;
     state.trackToken = m_bridge != nullptr ? m_bridge->currentTrackToken() : 0;
     state.positionUs = positionUs();
     state.volume = volume();
@@ -801,12 +842,17 @@ MprisController::PublishedPlayerState MprisController::currentPlayerState() cons
     return state;
 }
 
-bool MprisController::replayedSameTrack(const PublishedPlayerState &nextState) const {
-    // The same file plays again, as with Repeat-One: its track ID stays, but
-    // its position starts over.
-    return nextState.trackToken != m_lastPlayerState.trackToken
-        && !nextState.currentTrackPath.isEmpty()
-        && nextState.currentTrackPath == m_lastPlayerState.currentTrackPath
+bool MprisController::positionJumped(const PublishedPlayerState &nextState) const {
+    // A client takes a new track ID to start from its beginning, and the
+    // same one to play on. The position starts over under the same ID when
+    // the same file plays again, as with Repeat-One, or when the next track
+    // starts while the track before is still exported. It does not start
+    // from the beginning when the export moves on to a track that started
+    // before its text was known.
+    const bool playStarted = nextState.trackToken != m_lastPlayerState.trackToken;
+    const bool exportMoved = nextState.exportedTrackPath != m_lastPlayerState.exportedTrackPath;
+    return playStarted != exportMoved
+        && !nextState.exportedTrackPath.isEmpty()
         && nextState.playbackStatus != QStringLiteral("Stopped");
 }
 

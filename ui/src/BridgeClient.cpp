@@ -5909,7 +5909,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
     }
-    m_currentTrackTextPath = nextTrackTextPath;
+    // The text describing another track is a change of the text, also when
+    // the two tracks' text reads the same.
+    if (m_currentTrackTextPath != nextTrackTextPath) {
+        m_currentTrackTextPath = nextTrackTextPath;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;
@@ -5996,14 +6002,25 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     // a track known to have none. The metadata until then is the track
     // before's, which the backend keeps until it has read the new one's.
     QString currentCover;
+    // The track whose cover it is: the current track's, or the track
+    // before's while it stays.
+    QString currentCoverTrackPath;
     if (!currentPath.isEmpty()) {
         currentCover = metadataCoverUrl.isEmpty() ? queueTrackCover : metadataCoverUrl;
+        currentCoverTrackPath = currentPath;
         if (currentCover.isEmpty() && !metadataMatchesCurrentPath) {
             currentCover = m_currentTrackCoverPath;
+            currentCoverTrackPath = m_currentTrackCoverTrackPath;
         }
     }
     if (m_currentTrackCoverPath != currentCover) {
         m_currentTrackCoverPath = currentCover;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
+    // The same image becoming the current track's own is a change too.
+    if (m_currentTrackCoverTrackPath != currentCoverTrackPath) {
+        m_currentTrackCoverTrackPath = currentCoverTrackPath;
         changed = true;
         trackMetadataSignalChanged = true;
     }

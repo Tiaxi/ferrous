@@ -249,7 +249,14 @@ public:
     int selectedQueueIndex() const;
     int playingQueueIndex() const;
     QString currentTrackPath() const;
+    // The track the title, artist, album, genre, year and number describe:
+    // the current track, or while its own text is not known yet, the track
+    // before (empty when there was none). MPRIS exports this track.
+    QString currentTrackTextPath() const { return m_currentTrackTextPath; }
     QString currentTrackCoverPath() const;
+    // The track the cover is of: the current track, or while its own cover
+    // is not known yet, the track before (see processBinarySnapshot()).
+    QString currentTrackCoverTrackPath() const { return m_currentTrackCoverTrackPath; }
     QString currentTrackTitle() const;
     QString currentTrackArtist() const;
     QString currentTrackAlbum() const;
@@ -873,6 +880,8 @@ private:
     // The bridge's play serial; see currentPlaySerial.
     quint64 m_currentPlaySerial{0};
     QString m_currentTrackCoverPath;
+    // The track m_currentTrackCoverPath is of; see currentTrackCoverTrackPath().
+    QString m_currentTrackCoverTrackPath;
     // The track the title, artist, album, genre, year and number describe:
     // the current track's, or while its own are not known yet, the track
     // before's (see processBinarySnapshot()).
