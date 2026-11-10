@@ -26,6 +26,8 @@ private slots:
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenViewersGiveTheViewTheWholeScreen();
+    void viewerStripHoldsItsTextAtALargeFont_data();
+    void viewerStripHoldsItsTextAtALargeFont();
     void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
@@ -1252,6 +1254,123 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
     QTRY_VERIFY(fullscreen->activeFocusItem() != nullptr);
     QTest::keyClick(fullscreen, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The strip is as tall as its line of text and 4 px above and below it,
+// 32 px and its edge at the least: at 24 pt its text ran 6 px over the top
+// of the screen. It still lies over the view, which keeps the whole
+// window, and what keeps below it moves down with it.
+void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *plotLayer = window->findChild<QObject *>(QStringLiteral("plotLayer"));
+    auto *albumArt = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && plotLayer != nullptr && albumArt != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 1);
+
+    struct Viewer {
+        const char *open;
+        const char *close;
+        const char *openProperty;
+        QString windowName;
+        QString stripName;
+        QString closeName;
+        QString surfaceName;
+    };
+    const QList<Viewer> viewers{
+        {"openSpectrogramViewer", "closeSpectrogramViewer", "spectrogramViewerOpen",
+         QStringLiteral("spectrogramFullscreenWindow"), QStringLiteral("spectrogramFullscreenStrip"),
+         QStringLiteral("spectrogramFullscreenCloseButton"), QStringLiteral("mainSpectrogramSurface")},
+        {"openAlbumArtViewerForCurrentArt", "closeAlbumArtViewer", "albumArtViewerOpen",
+         QStringLiteral("albumArtFullscreenWindow"), QStringLiteral("albumArtFullscreenStrip"),
+         QStringLiteral("albumArtFullscreenCloseButton"), QStringLiteral("albumArtSurface")},
+    };
+    for (const Viewer &shown : viewers) {
+        const QByteArray name = shown.windowName.toUtf8() + QByteArray(" at ") + QByteArray::number(pointSize);
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.open));
+        QTRY_VERIFY(viewer->property(shown.openProperty).toBool());
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, shown.windowName);
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = visibleItemNamed(fullscreen, shown.stripName)) != nullptr);
+        QQuickItem *close = visibleItemNamed(fullscreen, shown.closeName);
+        QVERIFY2(close != nullptr, name.constData());
+
+        qreal line = 0;
+        QList<QQuickItem *> labels;
+        for (const QString &labelName : {QStringLiteral("viewerStripTitle"), QStringLiteral("viewerStripContext"),
+                                         QStringLiteral("viewerStripTime")}) {
+            QQuickItem *label = itemNamed(strip, labelName);
+            QVERIFY2(label != nullptr && label->isVisible(), name.constData());
+            if (pointSize > 0) {
+                QCOMPARE(qvariant_cast<QFont>(label->property("font")).pointSizeF(), pointSize);
+            }
+            line = std::max(line, label->implicitHeight());
+            labels << label;
+        }
+        const qreal band = std::max({32.0, std::ceil(line) + 8.0, close->height() + 8.0});
+        QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), band + 1.0));
+        if (pointSize == 0) {
+            QCOMPARE(band, 32.0);
+        } else {
+            QVERIFY2(band > 32.0, name.constData());
+        }
+        // Each text whole inside the band, over the edge under it.
+        for (QQuickItem *label : std::as_const(labels)) {
+            const QRectF rect = sceneRectOf(label);
+            QVERIFY2(rect.top() >= 0.0 && rect.bottom() <= band,
+                     qPrintable(QStringLiteral("%1: %2 from %3 to %4 in a %5 px band")
+                                    .arg(QString::fromUtf8(name), label->objectName())
+                                    .arg(rect.top()).arg(rect.bottom()).arg(band)));
+        }
+        // Close, centred in the band, 4 px in from the right.
+        QCOMPARE(sceneRectOf(close).right(), fullscreen->width() - 4.0);
+        QVERIFY(std::abs(sceneRectOf(close).center().y() - band / 2) <= 0.5);
+        // Over the view, which keeps the whole window.
+        auto *surface = window->findChild<QQuickItem *>(shown.surfaceName);
+        if (surface == nullptr) {
+            surface = fullscreen->findChild<QQuickItem *>(shown.surfaceName);
+        }
+        QVERIFY2(surface != nullptr, name.constData());
+        QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 0, fullscreen->width(), fullscreen->height()));
+        // The controls under the strip keep below it.
+        if (shown.surfaceName == QStringLiteral("albumArtSurface")) {
+            QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), band + 1.0);
+        } else {
+            QTRY_COMPARE(plotLayer->property("topInset").toReal(), band + 1.0);
+        }
+
+        QVERIFY(QMetaObject::invokeMethod(viewer, shown.close));
+        QTRY_VERIFY(!viewer->property(shown.openProperty).toBool());
+        QTRY_VERIFY(!fullscreen->isVisible());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
 }
 
 void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
