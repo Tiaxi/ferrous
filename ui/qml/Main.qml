@@ -1174,9 +1174,13 @@ ApplicationWindow {
         visualizationViewerAction, albumArtViewerAction,
         spectrogramModeAction, waveformModeAction, resetZoomAction, quitAction
     ]
-    // The menus take the style's size, icons and motion.
+    // The menus take the style's size, icons and motion. The open or hovered
+    // title is lit with the selection tint, as in the lists.
     menuBar: MenuBar {
         objectName: "mainMenuBar"
+        delegate: Components.AppMenuBarItem {
+            uiPalette: root.uiPalette
+        }
 
         Components.AppMenu {
             objectName: "fileMenu"
