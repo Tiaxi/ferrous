@@ -451,20 +451,18 @@ Item {
     }
 
     Dialogs.ItunesArtworkDialog {
-        parent: harness
         uiBridge: bridge
         uiPalette: palette
-        windowRoot: harness
+        windowRoot: viewerWindowRoot
         openAlbumArtViewerForSuggestion: function(row) {}
         openAlbumArtViewerForCurrentArt: function() {}
         endAlbumArtPreview: function(applied) {}
     }
 
     Dialogs.TagEditorDialog {
-        parent: harness
         tagEditorApi: tagEditorApi
         uiPalette: palette
-        windowRoot: harness
+        windowRoot: viewerWindowRoot
     }
 
     Panes.StatusBar {

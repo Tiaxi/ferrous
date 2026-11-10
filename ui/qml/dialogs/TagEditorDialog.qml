@@ -9,14 +9,15 @@ import FerrousUi 1.0
 import "../components" as Components
 import "../logic/FormatUtils.js" as FormatUtils
 import "." as Dialogs
-import "../logic/KeyUtils.js" as KeyUtils
 
-Dialog {
+// Edit Tags, in a window of its own: KWin draws its title bar, and it
+// moves and resizes beyond the main window's edges, which it blocks while
+// it shows. Its questions open over it. Escape and the title bar's close
+// button ask about unsaved edits first, as Cancel does.
+Components.DialogWindow {
     id: root
 
     required property var tagEditorApi
-    required property var uiPalette
-    required property var windowRoot
 
     property int selectionAnchor: -1
     readonly property int totalRows: tagEditorTable.count
@@ -55,9 +56,10 @@ Dialog {
         { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
         { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
     ]
-    // The table's columns, each at its width or wider when the font is
-    // larger; the last one takes the room that is left. `sample` is the
-    // widest value a short column holds whole.
+    // The table's columns, each at its width with the default 10 pt font,
+    // scaled with a larger one, or wider when its header or sample needs
+    // it; the last one takes the room that is left. `sample` is the widest
+    // value a short column holds whole.
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200 },
@@ -83,7 +85,8 @@ Dialog {
         const header = columnHeaderMetrics.advanceWidth(column.label)
             + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : 0)
         const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
-        return Math.max(column.width, Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing)
+        return Math.max(root.uiPalette.scaledSize(column.width),
+            Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing)
     })
     readonly property real fixedColumnsWidth: root.tableColumnWidths.reduce(
         function(sum, width, index) {
@@ -166,14 +169,42 @@ Dialog {
             : I18n.i18nc("@info:tooltip", "Revert")
     }
 
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 80)
-    height: Math.min(root.windowRoot.height - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 46)
     title: I18n.i18nc("@title:window", "Edit Tags")
-    standardButtons: Dialog.NoButton
-    closePolicy: Popup.NoAutoClose
+    asksBeforeClosing: true
+    onCloseRequested: root.requestClose()
+
+    // The content's inset from the window's edges.
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    readonly property real contentSpacing: Kirigami.Units.gridUnit - 2
+    // The table's width up to the end of a column: its frame, its insets
+    // and the columns before it.
+    function tableWidthThrough(key) {
+        let width = 2 + 2 * root.tableInset
+        for (let i = 0; i < root.tableColumns.length; ++i) {
+            width += root.tableColumnWidths[i]
+            if (root.tableColumns[i].key === key) {
+                break
+            }
+        }
+        return width
+    }
+    readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
+    // Wide enough for the fields and every column of the table through
+    // Format, clear of its scroll bar, within the screen; the table scrolls
+    // to the rest.
+    defaultWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
+        + root.tableWidthThrough("formatKind") + Kirigami.Units.gridUnit)
+    // As tall as the fields, or a table of 12 rows, whichever is taller,
+    // and no taller than 46 grid units: a few files leave no wide empty
+    // table, and the user may make it taller.
+    defaultHeight: Math.ceil(Math.min(Kirigami.Units.gridUnit * 46, Math.max(fieldsColumn.implicitHeight,
+            2 + root.tableRowHeight * 13 + Kirigami.Units.gridUnit))
+        + 2 * root.contentPadding + tagEditorFooter.implicitHeight)
+    // The fields at their narrowest beside some of the table, and room for
+    // a few of the fields above the buttons.
+    minimumWidth: Math.ceil(2 * root.contentPadding + Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+        + root.contentSpacing + Kirigami.Units.gridUnit * 16)
+    minimumHeight: Math.ceil(2 * root.contentPadding + Kirigami.Units.gridUnit * 12 + tagEditorFooter.implicitHeight)
 
     // Sent when the edits that held up quitting are saved or dropped.
     signal quitMayProceed()
@@ -187,7 +218,7 @@ Dialog {
             return
         }
         root.tagEditorApi.close()
-        root.close()
+        root.reject()
     }
 
     // A field commits its typed text when it loses focus.
@@ -442,7 +473,7 @@ Dialog {
         }
     }
 
-    onOpened: {
+    onAboutToShow: {
         root.initializeSelection()
         tagEditorTable.forceActiveFocus()
     }
@@ -463,7 +494,7 @@ Dialog {
             if (root.tagEditorApi.open && !root.visible) {
                 root.open()
             } else if (!root.tagEditorApi.open && root.visible) {
-                root.close()
+                root.reject()
             }
         }
 
@@ -543,13 +574,13 @@ Dialog {
         id: autoNumberDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
     }
 
     Dialogs.RenamePreviewDialog {
         id: renamePreviewDialog
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onRenameRequested: root.renameNow()
         onClosed: rows = []
     }
@@ -558,7 +589,7 @@ Dialog {
         id: tagEditorCloseConfirmDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onSaveRequested: root.saveAndClose()
         onDiscardRequested: {
             if (tagEditorCloseConfirmDialog.forReload) {
@@ -575,7 +606,7 @@ Dialog {
         id: tagEditorQuitWaitDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         onKeepWaitingRequested: {
             tagEditorQuitWaitDialog.offerChoice = false
             tagEditorQuitWaitTimeout.restart()
@@ -604,19 +635,7 @@ Dialog {
         id: tagEditorStatusDetailsDialog
         tagEditorApi: root.tagEditorApi
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
-    // The style's header closes at once; this one asks about unsaved edits.
-    header: Components.DialogHeader {
-        title: root.title
-        closeButtonName: "tagEditorCloseButton"
-        closeEnabled: !root.tagEditorApi.saving
-        onCloseRequested: root.requestClose()
+        windowRoot: root
     }
 
     // A text field of a tag: its label turns semibold and a revert button
@@ -772,6 +791,7 @@ Dialog {
     }
 
     footer: RowLayout {
+        id: tagEditorFooter
         spacing: Kirigami.Units.largeSpacing
 
         Button {
@@ -900,11 +920,15 @@ Dialog {
         }
     }
 
-    contentItem: RowLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    RowLayout {
+        id: tagEditorContent
+        anchors.fill: parent
+        anchors.margins: root.contentPadding
 
-        spacing: Kirigami.Units.gridUnit - 2
+        // Enter presses the default button, as in KDE's dialogs.
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
+
+        spacing: root.contentSpacing
 
         Shortcut {
             sequences: ["Ctrl+S"]
@@ -920,20 +944,10 @@ Dialog {
             onActivated: root.selectAllRows()
         }
 
-        Shortcut {
-            sequences: ["Esc"]
-            context: Qt.WindowShortcut
-            enabled: root.visible && !tagEditorCloseConfirmDialog.visible
-                && !autoNumberDialog.visible && !tagEditorStatusDetailsDialog.visible
-                && !tagEditorQuitWaitDialog.visible && !renamePreviewDialog.visible
-                && !toolsMenu.visible
-            onActivated: root.requestClose()
-        }
-
         ScrollView {
             id: tagEditorFieldsScroll
             objectName: "tagEditorFields"
-            Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
+            Layout.preferredWidth: root.fieldsWidth
             Layout.minimumWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
             Layout.fillHeight: true
             clip: true

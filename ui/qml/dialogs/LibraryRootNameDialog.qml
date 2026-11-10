@@ -46,6 +46,12 @@ Dialog {
 
     onRejected: root.dismissed()
 
+    // The dialogs' one heading style, in place of the style's larger one.
+    header: Components.DialogHeader {
+        dialog: root
+        uiPalette: root.uiPalette
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }

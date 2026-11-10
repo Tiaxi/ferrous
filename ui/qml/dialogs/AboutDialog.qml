@@ -44,11 +44,20 @@ Components.DialogWindow {
     title: I18n.i18nc("@title:window", "About Ferrous")
     // The content's inset from the window's edges.
     readonly property real contentPadding: Kirigami.Units.gridUnit
-    // As wide as the tabs and the Components page need, and the buttons;
-    // the texts wrap within it.
+    // The pages' inset beside the tabs' edges, and their gap from the
+    // tabs above.
+    readonly property real pageInset: Kirigami.Units.largeSpacing
+    readonly property real pageTopMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
+    // The room between the last line of a page and the buttons.
+    readonly property real pageBottomGap: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+    // The pages' width, from the window's: their text wraps to it, so their
+    // height is known as soon as the window's width is, before it shows.
+    readonly property real pageWidth: Math.max(0, root.width - 2 * root.contentPadding - 2 * root.pageInset)
+    // As wide as the tabs, the Components page, the links and the buttons
+    // need; the texts wrap within it.
     readonly property real contentMinimumWidth: Math.ceil(Math.max(
         aboutTabs.implicitWidth + 2 * root.contentPadding,
-        root.componentsWidth + 2 * Kirigami.Units.largeSpacing + 2 * root.contentPadding,
+        Math.max(root.componentsWidth, aboutLinks.implicitWidth) + 2 * root.pageInset + 2 * root.contentPadding,
         aboutFooter.implicitWidth))
     // The Components page: the names' column, 9 grid units or as wide as
     // the longest name, and the versions after it.
@@ -70,13 +79,18 @@ Components.DialogWindow {
         id: componentMetrics
         font: root.uiPalette.baseFont
     }
+    // The heading, the tabs and the room around the pages.
+    readonly property real chromeHeight: 2 * root.contentPadding + aboutHeading.implicitHeight
+        + aboutTabs.Layout.topMargin + aboutTabs.implicitHeight + root.pageTopMargin + root.pageBottomGap
+        + aboutFooter.implicitHeight
     minimumWidth: root.contentMinimumWidth
-    minimumHeight: Math.ceil(aboutHeading.implicitHeight + aboutTabs.implicitHeight + aboutFooter.implicitHeight
-        + 2 * root.contentPadding + 3 * Kirigami.Units.gridUnit)
+    // The heading, the tabs and three lines of a page, which scrolls.
+    minimumHeight: Math.ceil(root.chromeHeight + 3 * componentMetrics.height)
     // 29 grid units, or wider when a large font makes the tabs or the
-    // buttons need more; as tall as the tallest tab.
+    // buttons need more; as tall as the tallest page at that width, within
+    // the screen, where the pages scroll.
     defaultWidth: Math.max(Kirigami.Units.gridUnit * 29, root.contentMinimumWidth)
-    defaultHeight: aboutContent.implicitHeight + 2 * root.contentPadding + aboutFooter.implicitHeight
+    defaultHeight: Math.ceil(root.chromeHeight + aboutPages.implicitHeight)
 
     onAboutToShow: {
         root.tabIndex = 0
@@ -134,6 +148,8 @@ Components.DialogWindow {
         id: aboutContent
         anchors.fill: parent
         anchors.margins: root.contentPadding
+        // The pages end this far above the buttons.
+        anchors.bottomMargin: root.contentPadding + root.pageBottomGap
 
         // Enter presses the default button, as in KDE's dialogs.
         Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
@@ -191,114 +207,189 @@ Components.DialogWindow {
             AboutTab { text: I18n.i18nc("@title:tab", "License") }
         }
 
-        StackLayout {
-            objectName: "aboutPages"
+        // The pages, in the room the window leaves them: they scroll when a
+        // smaller window or a large font leaves less than they need, and
+        // never run under the buttons.
+        Flickable {
+            id: aboutPagesView
+            objectName: "aboutPagesView"
             Layout.fillWidth: true
-            Layout.leftMargin: Kirigami.Units.largeSpacing
-            Layout.rightMargin: Kirigami.Units.largeSpacing
-            Layout.topMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
-            currentIndex: root.tabIndex
-
-            ColumnLayout {
-                spacing: Kirigami.Units.largeSpacing + 2
-
-                Label {
-                    objectName: "aboutDescription"
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: I18n.i18nc("@info", "A music player for KDE Plasma with live spectrogram and waveform views.")
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    font.pointSize: root.uiPalette.smallPointSize
-                    color: root.uiPalette.textSecondary
-                    text: I18n.i18nc("@info", "© 2026 The Ferrous authors · GNU GPL, version 3 or later")
-                }
-
-                RowLayout {
-                    spacing: Kirigami.Units.gridUnit - 2
-
-                    Kirigami.UrlButton {
-                        objectName: "aboutHomepageLink"
-                        url: root.homepageUrl
-                        text: I18n.i18nc("@action:button", "Homepage")
-                        color: root.uiPalette.link
-                    }
-
-                    Kirigami.UrlButton {
-                        objectName: "aboutBugReportLink"
-                        url: root.bugReportUrl
-                        text: I18n.i18nc("@action:button", "Report a Bug")
-                        color: root.uiPalette.link
-                    }
-                }
-            }
-
-            ColumnLayout {
-                spacing: Kirigami.Units.smallSpacing
-
-                Repeater {
-                    model: root.components
-
-                    delegate: RowLayout {
-                        required property var modelData
-                        spacing: Kirigami.Units.largeSpacing
-
-                        Label {
-                            text: modelData.name
-                            Layout.preferredWidth: root.componentNameWidth
-                            elide: Text.ElideRight
-                        }
-
-                        Label {
-                            text: modelData.version
-                            font.features: root.uiPalette.tabularFigures
-                            color: root.uiPalette.textSecondary
-                        }
-                    }
-                }
-            }
-
-            ColumnLayout {
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: I18n.i18nc("@info", "The Ferrous authors")
-                }
-
-                Kirigami.UrlButton {
-                    url: root.homepageUrl + "/graphs/contributors"
-                    text: I18n.i18nc("@action:button", "Contributors")
-                    color: root.uiPalette.link
-                }
-            }
-
-            ColumnLayout {
-                Label {
-                    Layout.fillWidth: true
-                    wrapMode: Text.Wrap
-                    text: I18n.i18nc("@info", "Ferrous is free software: you can redistribute it and modify it under "
-                        + "the terms of the GNU General Public License, version 3 or any later version.")
-                }
-
-                Kirigami.UrlButton {
-                    objectName: "aboutLicenseLink"
-                    // Wraps rather than run past the dialog's edge.
-                    Layout.fillWidth: true
-                    Layout.maximumWidth: Math.ceil(implicitWidth)
-                    wrapMode: Text.Wrap
-                    url: root.licenseUrl
-                    text: I18n.i18nc("@action:button", "GNU General Public License, version 3")
-                    color: root.uiPalette.link
-                }
-            }
-        }
-
-        // A taller window leaves the room below the tabs.
-        Item {
             Layout.fillHeight: true
+            Layout.leftMargin: root.pageInset
+            Layout.rightMargin: root.pageInset
+            Layout.topMargin: root.pageTopMargin
+            implicitHeight: aboutPages.implicitHeight
+            contentWidth: width
+            contentHeight: aboutPages.implicitHeight
+            clip: true
+            interactive: contentHeight > height
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar {
+                objectName: "aboutPagesScrollBar"
+                policy: aboutPagesView.interactive ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+            }
+
+            // Each page lays its lines out top to bottom by anchors, which
+            // places them at once: its height is known before the window
+            // shows, so the window opens tall enough for it. As tall as the
+            // tallest page, so the window keeps its height between tabs.
+            Item {
+                id: aboutPages
+                objectName: "aboutPages"
+                readonly property int currentIndex: root.tabIndex
+                width: root.pageWidth
+                implicitHeight: Math.max(aboutPage.implicitHeight, componentsPage.implicitHeight,
+                    authorsPage.implicitHeight, licensePage.implicitHeight)
+                height: implicitHeight
+
+                Item {
+                    id: aboutPage
+                    objectName: "aboutPageAbout"
+                    width: parent.width
+                    visible: aboutPages.currentIndex === 0
+                    implicitHeight: aboutLinks.y + aboutLinks.implicitHeight
+
+                    Label {
+                        id: aboutDescription
+                        objectName: "aboutDescription"
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: I18n.i18nc("@info", "A music player for KDE Plasma with live spectrogram and waveform views.")
+                    }
+
+                    Label {
+                        id: aboutCopyright
+                        objectName: "aboutCopyright"
+                        anchors.top: aboutDescription.bottom
+                        anchors.topMargin: Kirigami.Units.largeSpacing + 2
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        font.pointSize: root.uiPalette.smallPointSize
+                        color: root.uiPalette.textSecondary
+                        text: I18n.i18nc("@info", "© 2026 The Ferrous authors · GNU GPL, version 3 or later")
+                    }
+
+                    RowLayout {
+                        id: aboutLinks
+                        objectName: "aboutLinks"
+                        anchors.top: aboutCopyright.bottom
+                        anchors.topMargin: Kirigami.Units.largeSpacing + 2
+                        spacing: Kirigami.Units.gridUnit - 2
+
+                        Kirigami.UrlButton {
+                            objectName: "aboutHomepageLink"
+                            url: root.homepageUrl
+                            text: I18n.i18nc("@action:button", "Homepage")
+                            color: root.uiPalette.link
+                        }
+
+                        Kirigami.UrlButton {
+                            objectName: "aboutBugReportLink"
+                            url: root.bugReportUrl
+                            text: I18n.i18nc("@action:button", "Report a Bug")
+                            color: root.uiPalette.link
+                        }
+                    }
+                }
+
+                // A line for each library: its name, and its version.
+                Item {
+                    id: componentsPage
+                    objectName: "aboutPageComponents"
+                    readonly property real rowHeight: Math.ceil(componentMetrics.height)
+                    readonly property real rowSpacing: Kirigami.Units.smallSpacing
+                    width: parent.width
+                    visible: aboutPages.currentIndex === 1
+                    implicitHeight: root.components.length > 0
+                        ? root.components.length * (rowHeight + rowSpacing) - rowSpacing
+                        : 0
+
+                    Repeater {
+                        model: root.components
+
+                        delegate: Item {
+                            required property var modelData
+                            required property int index
+                            y: index * (componentsPage.rowHeight + componentsPage.rowSpacing)
+                            width: componentsPage.width
+                            height: componentsPage.rowHeight
+
+                            Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: root.componentNameWidth
+                                text: modelData.name
+                                elide: Text.ElideRight
+                            }
+
+                            Label {
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: root.componentNameWidth + Kirigami.Units.largeSpacing
+                                width: Math.max(0, parent.width - x)
+                                text: modelData.version
+                                elide: Text.ElideRight
+                                font.features: root.uiPalette.tabularFigures
+                                color: root.uiPalette.textSecondary
+                            }
+                        }
+                    }
+                }
+
+                Item {
+                    id: authorsPage
+                    objectName: "aboutPageAuthors"
+                    width: parent.width
+                    visible: aboutPages.currentIndex === 2
+                    implicitHeight: contributorsLink.y + contributorsLink.implicitHeight
+
+                    Label {
+                        id: authorsText
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: I18n.i18nc("@info", "The Ferrous authors")
+                    }
+
+                    Kirigami.UrlButton {
+                        id: contributorsLink
+                        objectName: "aboutContributorsLink"
+                        anchors.top: authorsText.bottom
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        width: Math.min(implicitWidth, parent.width)
+                        wrapMode: Text.Wrap
+                        url: root.homepageUrl + "/graphs/contributors"
+                        text: I18n.i18nc("@action:button", "Contributors")
+                        color: root.uiPalette.link
+                    }
+                }
+
+                Item {
+                    id: licensePage
+                    objectName: "aboutPageLicense"
+                    width: parent.width
+                    visible: aboutPages.currentIndex === 3
+                    implicitHeight: licenseLink.y + licenseLink.implicitHeight
+
+                    Label {
+                        id: licenseText
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: I18n.i18nc("@info", "Ferrous is free software: you can redistribute it and modify it under "
+                            + "the terms of the GNU General Public License, version 3 or any later version.")
+                    }
+
+                    Kirigami.UrlButton {
+                        id: licenseLink
+                        objectName: "aboutLicenseLink"
+                        anchors.top: licenseText.bottom
+                        anchors.topMargin: Kirigami.Units.smallSpacing
+                        // Wraps rather than run past the dialog's edge.
+                        width: Math.min(implicitWidth, parent.width)
+                        wrapMode: Text.Wrap
+                        url: root.licenseUrl
+                        text: I18n.i18nc("@action:button", "GNU General Public License, version 3")
+                        color: root.uiPalette.link
+                    }
+                }
+            }
         }
     }
 }

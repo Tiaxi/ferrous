@@ -23,6 +23,12 @@ Dialog {
     title: I18n.i18nc("@title:window", "Tag Editor Details")
     closePolicy: Popup.CloseOnEscape
 
+    // The dialogs' one heading style, in place of the style's larger one.
+    header: Components.DialogHeader {
+        dialog: root
+        uiPalette: root.uiPalette
+    }
+
     background: Components.DialogSurface {
         uiPalette: root.uiPalette
     }

@@ -11,10 +11,11 @@ import org.kde.kirigami 2.20 as Kirigami
 // stays above the window it is for, which it blocks while it is open.
 //
 // It answers as a Dialog does: open(), accept() and reject(), the
-// accepted() and rejected() signals, and `opened`. Escape and the title
-// bar's close button reject it; a combo box's open list, or a dialog over
-// this one, takes Escape first. It hides at once, so a button clicked twice
-// answers once.
+// accepted(), rejected() and closed() signals, and `opened`. Escape and the
+// title bar's close button reject it, or, in a dialog that asks first how
+// it closes, send closeRequested(); a combo box's open list, or a dialog
+// over this one, takes Escape first. It hides at once, so a button clicked
+// twice answers once.
 ApplicationWindow {
     id: root
 
@@ -27,11 +28,18 @@ ApplicationWindow {
     property real defaultWidth: root.minimumWidth
     property real defaultHeight: root.minimumHeight
     readonly property bool opened: root.visible
+    // Escape and the title bar's close button send closeRequested() rather
+    // than reject it: for a dialog that asks first, such as about unsaved
+    // edits.
+    property bool asksBeforeClosing: false
 
     // As the window shows: the moment to set up what it shows.
     signal aboutToShow()
     signal accepted()
     signal rejected()
+    // As it hides, by an answer or for good.
+    signal closed()
+    signal closeRequested()
 
     property bool _sized: false
     // The screen's room: its size, less the panels where the desktop says
@@ -79,7 +87,17 @@ ApplicationWindow {
         if (root.windowRoot && root.windowRoot.visible) {
             root.windowRoot.requestActivate()
         }
+        root.closed()
         return true
+    }
+
+    // Escape and the title bar's close button.
+    function _cancel() {
+        if (root.asksBeforeClosing) {
+            root.closeRequested()
+        } else {
+            root.reject()
+        }
     }
 
     transientParent: root.windowRoot
@@ -92,13 +110,13 @@ ApplicationWindow {
     // The window hides rather than closes, so it opens again as it was.
     onClosing: function(close) {
         close.accepted = false
-        root.reject()
+        root._cancel()
     }
 
     Shortcut {
         sequences: [StandardKey.Cancel]
         enabled: root.visible
-        onActivated: root.reject()
+        onActivated: root._cancel()
     }
 
     // Qt gives a window's shortcuts to the windows above it too, such as
