@@ -332,6 +332,7 @@ private slots:
     void seekHoverFollowsTheWindowsDevicePixels();
     void seekGesturesShowTheTimeBesideThePlayhead();
     void seekHoverShowsNothingWithoutATrack();
+    void seekTimeFadesOutWhereItWas();
     void seekTouchShowsNoHoverTime();
     void seekBarPlayheadContrastsWithTheBar_data();
     void seekBarPlayheadContrastsWithTheBar();
@@ -2019,6 +2020,180 @@ void AccessibilityTest::seekHoverShowsNothingWithoutATrack() {
     QTest::mouseMove(window, later);
     QVERIFY(!timeBox.shown().isEmpty());
     QVERIFY(recordedValues(root.data(), "seeks").isEmpty());
+}
+
+namespace {
+
+// The seek bar's time as each frame draws it while it fades out.
+struct SeekTimeFade {
+    // The frames the box was drawn in, part faded.
+    int fadingFrames = 0;
+    // Why it changed while it faded out, or an empty text.
+    QString error;
+};
+
+// Hides the seek bar's time, shown in full, by `hide`, and follows its fade
+// out to its end: it fades where it was, with the time it showed.
+SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide) {
+    SeekTimeFade fade;
+    auto *content = box.box->property("contentItem").value<QQuickItem *>();
+    QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
+    if (popup == nullptr || !popup->isVisible() || !QTest::qWaitFor([&]() { return popup->opacity() >= 1.0; })) {
+        fade.error = QStringLiteral("not shown in full");
+        return fade;
+    }
+    const qreal x = box.x();
+    const QString text = box.box->property("text").toString();
+    const QString drawnText = content->property("text").toString();
+    QSignalSpy moves(box.box, SIGNAL(xChanged()));
+    QSignalSpy texts(box.box, SIGNAL(textChanged()));
+    QStringList errors;
+    const auto check = [&]() {
+        if (!popup->isVisible()) {
+            return;
+        }
+        if (popup->opacity() > 0.0 && popup->opacity() < 1.0) {
+            ++fade.fadingFrames;
+        }
+        if (box.x() != x || box.box->property("text").toString() != text
+            || content->property("text").toString() != drawnText) {
+            errors.push_back(QStringLiteral("%1 at %2 at opacity %3")
+                                 .arg(content->property("text").toString())
+                                 .arg(box.x())
+                                 .arg(popup->opacity()));
+        }
+    };
+    const QMetaObject::Connection frames = QObject::connect(window, &QQuickWindow::afterAnimating, window, check);
+    hide();
+    check();
+    const bool ended = QTest::qWaitFor([&]() { return !popup->isVisible(); }, 5000);
+    QObject::disconnect(frames);
+    if (!ended) {
+        errors.push_back(QStringLiteral("did not end"));
+    }
+    if (!box.shown().isEmpty()) {
+        errors.push_back(QStringLiteral("still shows %1").arg(box.shown()));
+    }
+    // Any move or new text, even one that no frame drew.
+    if (!moves.isEmpty() || !texts.isEmpty()) {
+        errors.push_back(QStringLiteral("%1 moves and %2 new texts, now %3 at %4, from %5 at %6")
+                             .arg(moves.size())
+                             .arg(texts.size())
+                             .arg(box.box->property("text").toString())
+                             .arg(box.x())
+                             .arg(text)
+                             .arg(x));
+    }
+    fade.error = errors.join(QStringLiteral("; "));
+    return fade;
+}
+
+} // namespace
+
+void AccessibilityTest::seekTimeFadesOutWhereItWas() {
+    QQmlEngine engine;
+    QScopedPointer<QObject> root;
+    QString errorText;
+    QQuickWindow *window = loadTransportHarness(engine, root, &errorText);
+    QVERIFY2(window != nullptr, qPrintable(errorText));
+    const qreal dpr = window->effectiveDevicePixelRatio();
+    QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
+    QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+    auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
+    SeekTimeBox timeBox;
+    QVERIFY(seek != nullptr && line != nullptr && bridge != nullptr && timeBox.find(window));
+    // The app's style fades a tooltip out.
+    QVERIFY(timeBox.box->property("exit").value<QObject *>() != nullptr);
+    const qreal y = seek->height() / 2;
+    const QPoint away = centerOf(qvariant_cast<QQuickItem *>(root->property("startButton")));
+    const std::optional<SeekPoint> middle = pointBetweenSteps(seek, 0.5);
+    const std::optional<SeekPoint> later = pointBetweenSteps(seek, 0.8);
+    QVERIFY(middle.has_value() && later.has_value());
+    const qreal middleX = seek->mapFromScene(QPointF(middle->scene)).x();
+    const qreal laterX = seek->mapFromScene(QPointF(later->scene)).x();
+    const QString middleTime = minutesAndSeconds(middle->seconds);
+    const QString laterTime = minutesAndSeconds(later->seconds);
+    const auto expectShown = [&](const QString &time, qreal anchorX) {
+        if (timeBox.shown() != time) {
+            return QStringLiteral("shows %1, not %2").arg(timeBox.shown(), time);
+        }
+        return timeBoxPlacementError(seek, timeBox, anchorX, dpr);
+    };
+    const auto expectFade = [&](const std::function<void()> &hide) {
+        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide);
+        if (!fade.error.isEmpty()) {
+            return fade.error;
+        }
+        return fade.fadingFrames > 0 ? QString() : QStringLiteral("drew no frame part faded");
+    };
+    QString error;
+
+    // The pointer leaves the bar from its middle: the time there fades out
+    // there, never at the bar's start or as its 0:00.
+    QTest::mouseMove(window, middle->scene);
+    error = expectShown(middleTime, middleX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    error = expectFade([&]() { QTest::mouseMove(window, away); });
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A hover elsewhere shows its own time there, and so does a hover that
+    // comes back while the last one fades out.
+    QTest::mouseMove(window, later->scene);
+    error = expectShown(laterTime, laterX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QTest::mouseMove(window, away);
+    QTest::mouseMove(window, middle->scene);
+    error = expectShown(middleTime, middleX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A drag shows the playhead's time beside it, and the hover's comes back
+    // at the pointer where it ends.
+    const QPoint dragEnd = seek->mapToScene(QPointF(seek->width() * 0.3, y)).toPoint();
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, middle->scene);
+    QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.4, y)).toPoint());
+    QTest::mouseMove(window, dragEnd);
+    QVERIFY(seek->property("adjusting").toBool());
+    error = expectShown(minutesAndSeconds(seek->property("value").toDouble()),
+                        line->mapToItem(seek, QPointF(line->width() / 2, 0)).x());
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd);
+    const qreal dragEndX = seek->mapFromScene(QPointF(dragEnd)).x();
+    QTRY_COMPARE(timeBox.shown(), minutesAndSeconds(secondsAtX(seek, dragEndX)));
+    error = expectShown(minutesAndSeconds(secondsAtX(seek, dragEndX)), dragEndX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
+
+    // A touch's drag, which has no hover, fades its time out beside the
+    // playhead.
+    QTest::mouseMove(window, away);
+    QPointingDevice *touchScreen = QTest::createTouchDevice();
+    const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.2, y)).toPoint();
+    QTest::touchEvent(window, touchScreen).press(0, touched, window);
+    QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
+    error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); });
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
+
+    // Stopping fades the time out where it was; playing again shows it.
+    QTest::mouseMove(window, later->scene);
+    error = expectFade([&]() { bridge->setProperty("playbackState", QStringLiteral("Stopped")); });
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    error = expectShown(laterTime, laterX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    // A track of another length shows its own time under the pointer; one of
+    // no known length fades the last time out where it was.
+    bridge->setProperty("durationSeconds", 100.0);
+    error = expectShown(minutesAndSeconds(secondsAtX(seek, laterX)), laterX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(minutesAndSeconds(secondsAtX(seek, laterX)) != laterTime);
+    error = expectFade([&]() { bridge->setProperty("durationSeconds", 0.0); });
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    bridge->setProperty("durationSeconds", 200.0);
+    error = expectShown(laterTime, laterX);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
 }
 
 void AccessibilityTest::seekTouchShowsNoHoverTime() {
