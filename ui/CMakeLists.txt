@@ -542,7 +542,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(ferrous_transport_status_tests PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets Qt6::Test
-        KF6::I18n KF6::I18nQml
+        KF6::KirigamiPlatform KF6::I18n KF6::I18nQml
     )
     ferrous_enable_strict_warnings(ferrous_transport_status_tests)
     add_test(NAME ferrous_transport_status_tests COMMAND ferrous_transport_status_tests)

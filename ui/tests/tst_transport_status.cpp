@@ -25,6 +25,8 @@
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
+#include <Kirigami/Platform/Units>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -293,6 +295,13 @@ QVariant evaluateOn(QQuickItem *item, const QString &expression) {
     return evaluated.hasError() || undefined ? QVariant() : value;
 }
 
+// The engine's Kirigami.Units, whose durations Plasma's animation speed
+// sets: with animations off, short is 0 and long is clamped to 1 ms.
+Kirigami::Platform::Units *unitsOf(QQuickItem *item) {
+    return qobject_cast<Kirigami::Platform::Units *>(
+        evaluateOn(item, QStringLiteral("Kirigami.Units")).value<QObject *>());
+}
+
 QString toolTipText(QQuickItem *item) {
     return evaluateOn(item, QStringLiteral("ToolTip.text")).toString();
 }
@@ -424,7 +433,7 @@ private slots:
     void statusBarShowsTheFormatGroupWithoutThePosition();
     void statusBarShowsTheScanWithItsBar();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
-    void statusBarScanWithoutATotalIsBusy();
+    void statusBarScanWithoutATotalIsStill();
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotPausedLooksStruckThrough_data();
@@ -1182,14 +1191,12 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
     QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
     QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
-    QQuickItem *busy = harness.item(QStringLiteral("statusBarScanBarBusy"));
-    QVERIFY(count && fill && busy);
+    QVERIFY(count && fill);
     harness.bridge->setProperty("libraryScanTotal", 1000);
     harness.bridge->setProperty("libraryScanProcessed", 0);
     harness.bridge->setProperty("libraryScanDiscovered", 0);
     harness.bridge->setProperty("libraryScanInProgress", true);
     QTRY_VERIFY(fill->isVisible());
-    QVERIFY(!busy->isVisible());
     QCOMPARE(fill->width(), 0.0);
     QCOMPARE(count->property("text").toString(), QStringLiteral("0 / 1,000"));
 
@@ -1209,44 +1216,78 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
     QCOMPARE(count->property("text").toString(), QStringLiteral("1,000 / 1,000"));
 }
 
-// The first scan of a folder cannot tell its total: a busy bar and the
-// files scanned so far, until the scan can tell.
-void TransportStatusTest::statusBarScanWithoutATotalIsBusy() {
-    Harness harness;
-    QString errorText;
-    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
-    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
-    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
-    QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
-    QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
-    QQuickItem *busy = harness.item(QStringLiteral("statusBarScanBarBusy"));
-    QVERIFY(scan && count && bar && fill && busy);
-    harness.bridge->setProperty("libraryScanTotal", -1);
-    harness.bridge->setProperty("libraryScanProcessed", 0);
-    harness.bridge->setProperty("libraryScanDiscovered", 0);
-    harness.bridge->setProperty("libraryScanInProgress", true);
-    QTRY_VERIFY(scan->isVisible());
-    QVERIFY(bar->isVisible());
-    QVERIFY(busy->isVisible());
-    QVERIFY(!fill->isVisible());
-    QCOMPARE(busy->width(), 24.0);
-    QVERIFY(!count->isVisible());
+// The first scan of a folder cannot tell its total: the files scanned so
+// far, and no bar until the scan can tell, for there is nothing to fill it
+// against. Nothing in the scan moves on its own (#373: no indeterminate
+// animation), with the desktop's animations on or off: Plasma's "off"
+// leaves Kirigami's longDuration at 1 ms, which a guard on it would not
+// stop.
+void TransportStatusTest::statusBarScanWithoutATotalIsStill() {
+    for (const int longDuration : {200, 1}) {
+        Harness harness;
+        QString errorText;
+        QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+        QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+        QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+        QQuickItem *bar = harness.item(QStringLiteral("statusBarScanBar"));
+        QQuickItem *fill = harness.item(QStringLiteral("statusBarScanBarFill"));
+        QVERIFY(scan && count && bar && fill);
+        Kirigami::Platform::Units *units = unitsOf(scan);
+        QVERIFY(units != nullptr);
+        units->setLongDuration(longDuration);
+        units->setShortDuration(longDuration == 1 ? 0 : 100);
+        harness.bridge->setProperty("libraryScanTotal", -1);
+        harness.bridge->setProperty("libraryScanProcessed", 0);
+        harness.bridge->setProperty("libraryScanDiscovered", 0);
+        harness.bridge->setProperty("libraryScanInProgress", true);
+        QTRY_VERIFY(scan->isVisible());
+        QVERIFY(!bar->isVisible());
+        QVERIFY(!count->isVisible());
 
-    harness.bridge->setProperty("libraryScanProcessed", 1);
-    harness.bridge->setProperty("libraryScanDiscovered", 1);
-    QCOMPARE(count->property("text").toString(), QStringLiteral("1 file"));
-    harness.bridge->setProperty("libraryScanProcessed", 1204);
-    harness.bridge->setProperty("libraryScanDiscovered", 1500);
-    QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 files"));
-    QVERIFY(busy->isVisible());
-    QVERIFY(!fill->isVisible());
+        harness.bridge->setProperty("libraryScanProcessed", 1);
+        harness.bridge->setProperty("libraryScanDiscovered", 1);
+        QCOMPARE(count->property("text").toString(), QStringLiteral("1 file"));
+        harness.bridge->setProperty("libraryScanProcessed", 1204);
+        harness.bridge->setProperty("libraryScanDiscovered", 1500);
+        QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 files"));
+        QVERIFY(!bar->isVisible());
 
-    // The walk has ended: the files it found are the total.
-    harness.bridge->setProperty("libraryScanTotal", 1500);
-    QVERIFY(!busy->isVisible());
-    QVERIFY(fill->isVisible());
-    QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 / 1,500"));
-    QCOMPARE(fill->width(), std::floor(72.0 * 1204 / 1500));
+        // No animation in the scan, and over some frames nothing in it
+        // moves.
+        QList<QQuickItem *> parts{scan};
+        for (qsizetype index = 0; index < parts.size(); ++index) {
+            parts.append(parts.at(index)->childItems());
+        }
+        for (QObject *object : scan->findChildren<QObject *>()) {
+            QVERIFY2(!object->inherits("QQuickAbstractAnimation"), object->metaObject()->className());
+        }
+        const auto geometry = [&parts]() {
+            QList<QRectF> rects;
+            for (QQuickItem *part : parts) {
+                rects.push_back(sceneRect(part));
+            }
+            return rects;
+        };
+        // Once the window has drawn the row laid out for the count.
+        QVERIFY(QTest::qWaitForWindowExposed(harness.window));
+        int frames = 0;
+        const QMetaObject::Connection counting = QObject::connect(
+            harness.window, &QQuickWindow::frameSwapped, harness.window, [&frames]() { ++frames; });
+        harness.window->update();
+        QTRY_VERIFY(frames > 0);
+        const QList<QRectF> before = geometry();
+        QTest::qWait(300);
+        QObject::disconnect(counting);
+        QCOMPARE(geometry(), before);
+
+        // The walk has ended: the files it found are the total, and the bar
+        // fills against it.
+        harness.bridge->setProperty("libraryScanTotal", 1500);
+        QVERIFY(bar->isVisible());
+        QVERIFY(fill->isVisible());
+        QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 / 1,500"));
+        QCOMPARE(fill->width(), std::floor(72.0 * 1204 / 1500));
+    }
 }
 
 void TransportStatusTest::lastFmSlotShowsEachState() {

@@ -297,7 +297,10 @@ ToolBar {
 
         // The library scan: "Scanning “Music” 412 / 1,204" and a bar that
         // moves with the scan's batches; narrow: "Scanning 412 / 1,204".
-        // Without a total: "Scanning “Music” 412 files" and a busy bar.
+        // Without a total: "Scanning “Music” 412 files", the count being
+        // the progress; the bar shows once there is a total to fill it
+        // against. Nothing in it moves on its own (#373: no indeterminate
+        // animation), so it is still with the desktop's animations off.
         Row {
             id: scanGroup
             objectName: "statusBarScan"
@@ -328,7 +331,7 @@ ToolBar {
             Rectangle {
                 objectName: "statusBarScanBar"
                 anchors.verticalCenter: parent.verticalCenter
-                visible: !root.narrow
+                visible: !root.narrow && root.scanTotalKnown
                 width: 72
                 height: 4
                 radius: 2
@@ -339,43 +342,11 @@ ToolBar {
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    visible: root.scanTotalKnown
                     // Whole pixels, rounded down: the bar moves with the
                     // batches, and is full only once the scan is.
                     width: Math.floor(parent.width * scanGroup.fraction)
                     radius: 2
                     color: root.uiPalette.textSecondary
-                }
-
-                // Busy: a third of the bar goes back and forth; it stays
-                // at the start when the desktop turns animations off.
-                Rectangle {
-                    id: scanBusy
-                    objectName: "statusBarScanBarBusy"
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    visible: !root.scanTotalKnown
-                    width: Math.round(parent.width / 3)
-                    radius: 2
-                    color: root.uiPalette.textSecondary
-
-                    SequentialAnimation on x {
-                        objectName: "statusBarScanBarBusyAnimation"
-                        running: scanBusy.visible && Kirigami.Units.longDuration > 0
-                        loops: Animation.Infinite
-                        NumberAnimation {
-                            from: 0
-                            to: scanBusy.parent.width - scanBusy.width
-                            duration: Kirigami.Units.veryLongDuration * 3
-                            easing.type: Easing.InOutQuad
-                        }
-                        NumberAnimation {
-                            from: scanBusy.parent.width - scanBusy.width
-                            to: 0
-                            duration: Kirigami.Units.veryLongDuration * 3
-                            easing.type: Easing.InOutQuad
-                        }
-                    }
                 }
             }
 
