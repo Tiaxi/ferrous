@@ -32,13 +32,14 @@ QtObject {
     // (7.1:1 on view).
     readonly property color textSecondary: ColorUtils.mixColor(
         root._inactiveText, root.text, root.themeIsDark ? 0.15 : 0.41)
-    // Counts, years and track numbers. #8f959a (6.0:1 on view) / #646d77
-    // (5.3:1 on view, 4.5:1 on a hovered row).
+    // Counts, years and track numbers. #8f959a (6.0:1 on view, 4.6:1 on a
+    // hovered row) / #5b6570 (5.9:1 on view, darkened from the mix to be
+    // 4.5:1 on a hovered row).
     // On a selected row, use textTertiaryOn(true): it is 3.7:1 on the
     // focused tint.
-    readonly property color textTertiary: root.themeIsDark
+    readonly property color textTertiary: root.readableOn(root.themeIsDark
         ? ColorUtils.mixColor(root._inactiveText, root.view, 0.134)
-        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185)
+        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185), [root.view, root.hoveredRow], 4.5)
     // The artist and album cells of the queue. #c2c2c3 / #5a5c5e.
     readonly property color textColumn: ColorUtils.mixColor(root.text, root.view, 0.25)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
@@ -50,8 +51,13 @@ QtObject {
     // The 1 px line between chrome and content. #383b40 / #c9cdd1.
     readonly property color chromeLine: ColorUtils.mixColor(
         root.chrome, root._inactiveText, root.themeIsDark ? 0.18 : 0.30)
-    // Text over the row: the hover tint.
-    readonly property color hover: ColorUtils.withAlpha(root.text, root.themeIsDark ? 0.065 : 0.08)
+    // Text over the row: the hover tint. The least of it, in whole
+    // percent, that is 1.3:1 on the view, so a hovered row stands out in
+    // any theme: 10% (#2b2d2f) / 14% (#e0e1e1). It stays nearer to the view
+    // than the selection, which is further from it in hue as well.
+    readonly property color hover: root._tintOf(root.text, root.view, 1.3)
+    // A hovered row: the hover tint on the view.
+    readonly property color hoveredRow: ColorUtils.drawnOver(root.hover, root.view)
     // The view mixed with the accent. #1f3e4e / #d4edfa.
     readonly property color selection: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.26 : 0.22)
@@ -78,8 +84,13 @@ QtObject {
     readonly property color wave: ColorUtils.mixColor(root.text, root.accent, 0.35)
     // Fixed: the spectrogram colour map's amber. It marks only what is
     // playing: the playing row's glyph and title, the playing tree row and
-    // the seek playhead.
-    readonly property color now: root.themeIsDark ? "#f2b035" : "#955500"
+    // the seek playhead. The light one is darkened to be 4.5:1 on a hovered
+    // row as well. #f2b035 / #905200.
+    readonly property color now: root.themeIsDark
+        ? "#f2b035"
+        : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection], 4.5)
+    readonly property color _nowLight: "#955500"
+    }
     // The scrim behind the search palette.
     readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.5 : 0.25)
 
@@ -115,6 +126,18 @@ QtObject {
             }
         }
         return darker ? Qt.rgba(0, 0, 0, 1) : Qt.rgba(1, 1, 1, 1)
+    }
+
+    // `color` at the least opacity, in whole percent from 5% up to 30%,
+    // that is `ratio` on the opaque `background`.
+    function _tintOf(color, background, ratio) {
+        for (let percent = 5; percent < 30; ++percent) {
+            const tint = ColorUtils.withAlpha(color, percent / 100)
+            if (ColorUtils.contrastRatio(ColorUtils.drawnOver(tint, background), background) >= ratio) {
+                return tint
+            }
+        }
+        return ColorUtils.withAlpha(color, 0.3)
     }
 
     // Tertiary text steps up to secondary on a selected row.
