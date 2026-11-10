@@ -51,6 +51,7 @@ private slots:
     void waveformEditorDetailStaysAheadOfSamplePlayback_data();
     void waveformEditorDetailStaysAheadOfSamplePlayback();
     void waveformEditorDeferredZoomOutLandsWhilePlaying();
+    void waveformEditorZoomOutWhilePlayingHoldsTheTiledView();
     void waveformEditorLateDetailDrawsNoRasterEachFrame_data();
     void waveformEditorLateDetailDrawsNoRasterEachFrame();
     void waveformEditorPauseRedrawsTheRasterPlaybackLeft_data();
@@ -2639,6 +2640,101 @@ void WaveformSceneGraphSmokeTest::waveformEditorDeferredZoomOutLandsWhilePlaying
         paintFrame();
         QMutexLocker lock(&item.m_stateMutex);
         QCOMPARE(item.m_presentedZoomLevel, target);
+    }
+    item.setSourcePath(QString());
+    gate->release(4);
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+}
+
+void WaveformSceneGraphSmokeTest::waveformEditorZoomOutWhilePlayingHoldsTheTiledView() {
+    // Issue 542: while playing, a zoomed view is drawn in playback tiles,
+    // which leave no cache to hold it on. A zoom out then showed at once,
+    // empty past the detail the view had until the wider view's came. It
+    // holds the view in its tiles instead, as a cached view is held.
+    constexpr int kRate = 48'000;
+    constexpr int kChannels = 2;
+    constexpr int kWidth = 800;
+    TestTime time;
+    WaveformEditorItem item;
+    time.drive(item);
+    item.m_playbackTilesInline = true;
+    item.setWidth(kWidth);
+    item.setHeight(200);
+    item.setDurationSeconds(60.0);
+    item.setViewMode(1);
+    item.setChannelCountHint(kChannels);
+    auto gate = std::make_shared<QSemaphore>();
+    auto held = std::make_shared<std::atomic_bool>(false);
+    item.m_decodeWindow = [gate, held](const QString &, double start, double end, int points,
+                                       const std::shared_ptr<std::atomic_bool> &) {
+        if (held->load()) gate->tryAcquire(1, 5000);
+        return sampleDetailWindow(kRate, kChannels, start, end, points);
+    };
+    setTestPosition(item, 30.0);
+    item.setSourcePath(QStringLiteral("/fixture/stereo.flac"));
+    QTRY_COMPARE_WITH_TIMEOUT(item.sampleRateHz(), kRate, kSlowBuildTimeoutMs);
+    item.setZoomLevel(8.0);
+    const auto viewReady = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        return !item.m_decodeActive && item.detailCoversRangeLocked(start, end)
+            && item.detailResolutionCoversLocked(start, end);
+    };
+    QTRY_VERIFY_WITH_TIMEOUT(viewReady(), kSlowBuildTimeoutMs);
+    QImage canvas(kWidth, 200, QImage::Format_RGB32);
+    const auto paintFrame = [&item, &canvas]() {
+        QPainter painter(&canvas);
+        item.paint(&painter);
+    };
+    // Playing, drawn in tiles.
+    item.setPlaying(true);
+    setTestPosition(item, 30.0);
+    for (int frame = 0; frame < 8; ++frame) {
+        paintFrame();
+    }
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        QVERIFY(item.playbackTilesEligibleLocked(start, end));
+        QVERIFY(item.m_cacheDirty);
+        // Detail of little more than the view, as when playback has nearly
+        // used up its window.
+        giveSampleDetail(item, kRate, kChannels, start - 0.001, end + 0.001, true);
+    }
+    held->store(true);
+    item.setZoomLevel(8.0 / 1.25);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(item.m_zoomOutHandoffPending);
+        QCOMPARE(item.m_presentedZoomLevel, 8.0);
+    }
+    paintFrame();
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        const auto [start, end] = item.visibleRangeLocked();
+        const int playhead = static_cast<int>((item.displayedPositionSecondsLocked() - start)
+            / (end - start) * kWidth);
+        const QString empty = lanesWithEmptyColumns(canvas, kChannels, playhead - 3, playhead + 3);
+        QVERIFY2(empty.isEmpty(), qPrintable(empty));
+    }
+    // The wider view's detail comes, and the zoom shows.
+    held->store(false);
+    gate->release();
+    QTRY_VERIFY_WITH_TIMEOUT(!item.m_decodeActive, kSlowBuildTimeoutMs);
+    for (int frame = 0; frame < 60; ++frame) {
+        time.advance(1.0 / 120.0);
+        item.handleWindowFrameSwapped();
+        QCoreApplication::processEvents();
+        paintFrame();
+        QMutexLocker lock(&item.m_stateMutex);
+        if (!item.m_zoomOutHandoffPending) {
+            break;
+        }
+    }
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        QVERIFY(!item.m_zoomOutHandoffPending);
+        QCOMPARE(item.m_presentedZoomLevel, 8.0 / 1.25);
     }
     item.setSourcePath(QString());
     gate->release(4);

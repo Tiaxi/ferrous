@@ -444,8 +444,12 @@ void WaveformEditorItem::setZoomLevel(double value) {
         const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
             && detailResolutionCoversLocked(visibleStart, visibleEnd);
         const auto [presentedStart, presentedEnd] = visibleRangeLocked();
+        // The view as it is stays on screen until the detail for the zoom
+        // arrives: drawn from the cache, or while playing from the playback
+        // tiles, which leave no cache.
         const bool canHoldPresentation = cacheCoversRangeLocked(
-            presentedStart, presentedEnd);
+            presentedStart, presentedEnd)
+            || playbackTilesEligibleLocked(presentedStart, presentedEnd);
         const bool deferZoomOut = value < previousPresentedZoom
             && !detailReady
             && canHoldPresentation;
@@ -3000,9 +3004,17 @@ void WaveformEditorItem::rebuildCacheLocked(
     const bool detailOverlapsViewport = m_detail.pointCount > 0
         && visibleStart < m_detail.endSeconds
         && visibleEnd > m_detail.startSeconds;
-    const bool useOverview = m_zoomFallbackToOverview
-        || (detailCoversViewport && !detailReady)
-        || !detailOverlapsViewport;
+    // The overview is one envelope of every channel, which the lanes of the
+    // per-channel view do not show (drawOverviewLocked): there the detail
+    // the view has, of another zoom, stands in for the view's own where it
+    // reaches, rather than nothing.
+    const bool detailStandsIn = m_viewMode == 1
+        && displayedChannelCountLocked() > 1
+        && detailOverlapsViewport;
+    const bool useOverview = !detailStandsIn
+        && (m_zoomFallbackToOverview
+            || (detailCoversViewport && !detailReady)
+            || !detailOverlapsViewport);
     CacheGrid grid;
     if (detailReady) {
         grid = cacheGridForRangeLocked(
@@ -3393,9 +3405,23 @@ void WaveformEditorItem::drawDetailSlice(
             }
         }
         if (!sampleCurve) {
+            // Points further apart than a pixel, as a zoom shows the detail
+            // of a wider view until its own arrives, hold until the next:
+            // the pixels between them are of the earlier one's frames.
+            const auto lastSeen = std::find(pixelSeen.rbegin(), pixelSeen.rend(), true);
+            const int lastSeenX = lastSeen == pixelSeen.rend()
+                ? firstX - 1
+                : firstX + static_cast<int>(pixelSeen.rend() - lastSeen) - 1;
+            std::size_t held = pixelSeen.size();
             for (int x = firstX; x < lastX; ++x) {
-                const auto pixel = static_cast<std::size_t>(x - firstX);
-                if (!pixelSeen[pixel]) continue;
+                auto pixel = static_cast<std::size_t>(x - firstX);
+                if (pixelSeen[pixel]) {
+                    held = pixel;
+                } else if (held < pixelSeen.size() && x < lastSeenX) {
+                    pixel = held;
+                } else {
+                    continue;
+                }
                 painter.drawLine(
                     x,
                     static_cast<int>(std::round(

@@ -100,6 +100,8 @@ private slots:
     void spectrogramZoomWithinTheBackendToleranceNeedsNoNewData();
     void spectrogramZoomRequestsTheBackendIgnoresDoNotLeaveAPreview();
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
+    void spectrogramZoomShowsOlderDataUntilTheNewArrives_data();
+    void spectrogramZoomShowsOlderDataUntilTheNewArrives();
 };
 
 namespace {
@@ -139,6 +141,12 @@ void prepareFullscreenForwardSeek(SpectrogramItem &item) {
         QByteArray(bins * columns, '\x50'), bins, 0, columns,
         0, 20'000, 48000, 1024, false, true, 1, false, 1);
     setTestPosition(item, 30.0);
+}
+
+// Whether the reserve under the canvas is being drawn.
+bool spectrogramReservePending(SpectrogramItem &item) {
+    QMutexLocker lock(&item.m_stateMutex);
+    return item.m_reservePending;
 }
 
 // The drawn spans' extent on screen.
@@ -385,7 +393,7 @@ void SpectrogramCanvasSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     bool frozenCanvasHasContent = false;
     for (int y = 0; y < item.m_canvas.height() && !frozenCanvasHasContent; ++y) {
         for (int x = 0; x < item.m_canvas.width(); ++x) {
-            if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
+            if (item.m_canvas.pixel(x, y) != kSpectrogramNoColumn) {
                 frozenCanvasHasContent = true;
                 break;
             }
@@ -417,7 +425,7 @@ void SpectrogramCanvasSmokeTest::spectrogramStoppedZoomResetRefillsCanvas() {
     bool refilledCanvasHasContent = false;
     for (int y = 0; y < item.m_canvas.height() && !refilledCanvasHasContent; ++y) {
         for (int x = 0; x < item.m_canvas.width(); ++x) {
-            if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
+            if (item.m_canvas.pixel(x, y) != kSpectrogramNoColumn) {
                 refilledCanvasHasContent = true;
                 break;
             }
@@ -1731,7 +1739,7 @@ void SpectrogramCanvasSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawn
         0, 400, 48000, 1024, false, true, 1, false, 1);
     QSGNode *node = paintSettled(item, nullptr);
     QCOMPARE(item.m_precomputedCanvasDisplayRight, qint64(199));
-    QCOMPARE(item.m_canvas.pixel(170, 50), kSpectrogramFloor);
+    QCOMPARE(item.m_canvas.pixel(170, 50), kSpectrogramNoColumn);
 
     // Columns the view shows arrive while its canvas rasterizes without them.
     item.setDbRange(120.0);
@@ -1741,7 +1749,7 @@ void SpectrogramCanvasSmokeTest::spectrogramColumnsArrivingDuringARasterAreDrawn
         QByteArray(bins * 50, '\x60'), bins, 0, 50,
         150, 400, 48000, 1024, false, false, 1, false, 1);
     QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramRasterPending(item); }, 5000));
-    QVERIFY(item.m_canvas.pixel(170, 50) != kSpectrogramFloor);
+    QVERIFY(item.m_canvas.pixel(170, 50) != kSpectrogramNoColumn);
     QCOMPARE(item.m_canvas.pixel(170, 50), item.m_canvas.pixel(100, 50));
 
     delete node;
@@ -2174,7 +2182,7 @@ void SpectrogramCanvasSmokeTest::spectrogramUnwrittenRingColumnsDrawAsBackground
 
     const QImage canvas = freshCanvas(item, 200, 16, 0, 199, false);
     QCOMPARE(canvas.width(), 200);
-    const QRgb background = kSpectrogramFloor;
+    const QRgb background = kSpectrogramNoColumn;
     // Each pixel may blend in its neighbour; leave out the two at the edge.
     for (int x = 0; x < written - 1; ++x) {
         for (int y = 0; y < canvas.height(); ++y) {
@@ -2368,11 +2376,11 @@ void SpectrogramCanvasSmokeTest::spectrogramSeekShowsThePlayheadFirstAndFillsThe
     QVERIFY(item.m_precomputedCanvasDirty);
     feedBackfillColumns(item, playhead + 1, 300, 2);
 
-    const QRgb missing = kSpectrogramFloor;
+    const QRgb missing = kSpectrogramNoColumn;
     const auto pixelsAreMissing = [&item](int from, int to) {
         for (int x = from; x < to; ++x) {
             for (int y = 0; y < item.m_canvas.height(); ++y) {
-                if (item.m_canvas.pixel(x, y) != kSpectrogramFloor) {
+                if (item.m_canvas.pixel(x, y) != kSpectrogramNoColumn) {
                     return false;
                 }
             }
@@ -3070,7 +3078,7 @@ void SpectrogramCanvasSmokeTest::releasedSpectrogramFreesItsColumnsAndCanvasUnti
             }
         }
         QVERIFY(!item.m_canvas.isNull());
-        QVERIFY(item.m_canvas.pixel(50, 5) != kSpectrogramFloor);
+        QVERIFY(item.m_canvas.pixel(50, 5) != kSpectrogramNoColumn);
     }
 }
 
@@ -3102,7 +3110,7 @@ void SpectrogramCanvasSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOf
 
     // Column 151 is not decoded yet, so its physical circular slot is black.
     QCOMPARE(item.m_canvasWriteX, 10);
-    QCOMPARE(item.m_canvas.pixel(1, 5), kSpectrogramFloor);
+    QCOMPARE(item.m_canvas.pixel(1, 5), kSpectrogramNoColumn);
 
     QByteArray late(9 * bins, '\x70');
     item.feedPrecomputedChunk(
@@ -3111,7 +3119,7 @@ void SpectrogramCanvasSmokeTest::spectrogramCenteredLateFillUsesCircularCanvasOf
 
     // Logical x=91 maps to physical x=(canvasStart 10 + 91) % 100 = 1.
     // Painting x=91 directly leaves the visible gap permanently black.
-    QVERIFY(item.m_canvas.pixel(1, 5) != kSpectrogramFloor);
+    QVERIFY(item.m_canvas.pixel(1, 5) != kSpectrogramNoColumn);
 }
 
 void SpectrogramCanvasSmokeTest::spectrogramPeakHoldRebuildUsesMaxNotNearest() {
@@ -4372,7 +4380,8 @@ void saveForInspection(const QImage &image, const QString &name) {
 
 // What a window shows of a spectrogram's canvas: where `node`, a scene node
 // of the item drawn at the same time, places its spans, each device pixel
-// sampled at its centre as Nearest filtering does, over black. The pixels
+// sampled at its centre as Nearest filtering does, over the older data under
+// them, the reserve and the backdrop, and black. The pixels
 // under the centered playhead, which blends over them, are left out of
 // `mask`.
 QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSize &size, double scale,
@@ -4385,13 +4394,18 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
     expected.fill(kSpectrogramFloor);
     *mask = QImage(size, QImage::Format_Grayscale8);
     mask->fill(255);
-    const auto draw = [&](const QSGSimpleTextureNode *span) {
-        if (span->rect().isEmpty() || !bandX.contains(span->texture())) {
+    // A span of `image`, its source `x0` pixels into it; transparent pixels
+    // leave what is under them. A layer under the canvas, placed at the
+    // times of its columns, can be magnified by a fraction: its pixels
+    // sampled at a texel's edge, which a renderer's rounding may take from
+    // either side, are left out of `mask`.
+    const auto drawImage = [&](const QSGSimpleTextureNode *span, const QImage &image, int x0,
+                               bool layer) {
+        if (span->rect().isEmpty() || image.isNull()) {
             return;
         }
         const QRectF target(span->rect().topLeft() * scale, span->rect().size() * scale);
         const QRectF source = span->sourceRect();
-        const int x0 = bandX.value(span->texture());
         for (int y = 0; y < expected.height(); ++y) {
             if (y + 0.5 < target.top() || y + 0.5 >= target.bottom()) {
                 continue;
@@ -4402,12 +4416,49 @@ QImage expectedCanvasImage(const SpectrogramItem &item, QSGNode *node, const QSi
                 if (x + 0.5 < target.left() || x + 0.5 >= target.right()) {
                     continue;
                 }
-                const int sx = static_cast<int>(std::floor(
-                    source.left() + (x + 0.5 - target.left()) * source.width() / target.width()));
-                expected.setPixel(x, y, item.m_canvas.pixel(x0 + sx, sy));
+                const double at =
+                    source.left() + (x + 0.5 - target.left()) * source.width() / target.width();
+                const int sx = static_cast<int>(std::floor(at));
+                if (layer && std::abs(at - std::round(at)) < 0.02) {
+                    mask->setPixel(x, y, 0);
+                }
+                // Clamped to the edge, as a texture is sampled.
+                const QRgb pixel = image.pixel(std::min(x0 + sx, image.width() - 1), sy);
+                if (qAlpha(pixel) > 0) {
+                    expected.setPixel(x, y, pixel);
+                }
             }
         }
     };
+    const auto draw = [&](const QSGSimpleTextureNode *span) {
+        if (bandX.contains(span->texture())) {
+            drawImage(span, item.m_canvas, bandX.value(span->texture()), false);
+        }
+    };
+    // Under the canvas, the floor's children: the reserve, then the
+    // backdrop's spans. They are placed at the times of their columns,
+    // which can end within a pixel that a renderer may or may not count as
+    // theirs: those pixels are left out of `mask`.
+    QSGNode *floor = node->childAtIndex(0);
+    const QImage *layers[] = {&item.m_reserve.image, &item.m_backdrop.image, &item.m_backdrop.image};
+    for (int i = 0; i < 3; ++i) {
+        const auto *span = static_cast<QSGSimpleTextureNode *>(floor->childAtIndex(i));
+        drawImage(span, *layers[i], 0, true);
+        if (span->rect().isEmpty()) {
+            continue;
+        }
+        for (const double edge : {span->rect().left() * scale, span->rect().right() * scale}) {
+            const int x = static_cast<int>(std::floor(edge));
+            if (std::abs(edge - std::round(edge)) < 1e-6) {
+                continue;
+            }
+            for (int y = 0; y < size.height(); ++y) {
+                if (x >= 0 && x < size.width()) {
+                    mask->setPixel(x, y, 0);
+                }
+            }
+        }
+    }
     QSGNode *tiles = node->childAtIndex(1);
     for (int i = 0; i < tiles->childCount(); ++i) {
         draw(static_cast<QSGSimpleTextureNode *>(tiles->childAtIndex(i)));
@@ -4541,7 +4592,15 @@ void SpectrogramCanvasSmokeTest::spectrogramSceneGraphDrawsTheCanvas() {
     // Compares what the window shows now with the canvas; `inPlace` is
     // what the window's node should keep it in, with OpenGL.
     const auto shows = [&](const QString &when, bool inPlace) {
-        const QImage shown = grab();
+        // Drawn again once the reserve a frame asks for has come, which
+        // the test's own node, made next, would show.
+        QImage shown = grab();
+        for (int round = 0; round < 8 && spectrogramReservePending(item); ++round) {
+            if (!QTest::qWaitFor([&item]() { return !spectrogramReservePending(item); }, 5000)) {
+                break;
+            }
+            shown = grab();
+        }
         if (shown.isNull()) {
             qWarning("%s: the window drew no frame", qPrintable(when));
             return false;
@@ -4977,6 +5036,192 @@ void SpectrogramCanvasSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRaster
             }
         }
     }
+}
+
+namespace {
+
+// Which of the item's `width` logical pixel columns show data, as `node`
+// draws them: the canvas where its pixel is not transparent, and else the
+// backdrop or the reserve under it. Sampled along the middle row.
+QVector<bool> plotColumnsShown(const SpectrogramItem &item, QSGNode *node, int width) {
+    QHash<QSGTexture *, int> bandX;
+    for (const auto &[x, texture] : SpectrogramItem::canvasTextures(node)) {
+        bandX.insert(texture, x);
+    }
+    // Whether `span` draws an opaque pixel of `image`, its source `offset`
+    // pixels into it, at x.
+    const auto opaque = [](const QSGSimpleTextureNode *span, double x, const QImage &image,
+                            int offset) {
+        const QRectF rect = span->rect();
+        if (rect.isEmpty() || image.isNull() || x < rect.left() || x >= rect.right()) {
+            return false;
+        }
+        const QRectF source = span->sourceRect();
+        const int sx = offset + static_cast<int>(std::floor(
+            source.left() + (x - rect.left()) * source.width() / rect.width()));
+        return sx >= 0 && sx < image.width() && qAlpha(image.pixel(sx, image.height() / 2)) > 0;
+    };
+    QSGNode *floor = node->childAtIndex(0);
+    QSGNode *tiles = node->childAtIndex(1);
+    QVector<bool> shown(width, false);
+    for (int x = 0; x < width; ++x) {
+        const double at = x + 0.5;
+        bool data = false;
+        const auto canvasSpan = [&](QSGNode *child) {
+            const auto *span = static_cast<const QSGSimpleTextureNode *>(child);
+            if (bandX.contains(span->texture())
+                && opaque(span, at, item.m_canvas, bandX.value(span->texture()))) {
+                data = true;
+            }
+        };
+        for (int i = 0; i < tiles->childCount(); ++i) {
+            canvasSpan(tiles->childAtIndex(i));
+        }
+        canvasSpan(node->childAtIndex(2));
+        // Under the floor's children: the reserve, then the backdrop's spans.
+        data = data
+            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(0)), at,
+                item.m_reserve.image, 0)
+            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(1)), at,
+                item.m_backdrop.image, 0)
+            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(2)), at,
+                item.m_backdrop.image, 0);
+        shown[x] = data;
+    }
+    return shown;
+}
+
+} // namespace
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives_data() {
+    QTest::addColumn<bool>("rolling");
+    QTest::newRow("centered") << false;
+    QTest::newRow("rolling") << true;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives() {
+    // Issue 542: zooming in and out, by steps and back to 1, no frame shows
+    // the floor where the frame before showed data, while there is older
+    // data for it: the view before the zoom, scaled, until the zoom's data
+    // arrives, and the ring's columns around it for a zoom out.
+    QFETCH(bool, rolling);
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    constexpr int width = 200;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(rolling ? 0 : 1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr double seconds = 60.0;
+    constexpr int trackColumns = 6000;
+    quint64 generation = 1;
+    // The data for zoom 1: the whole track centered, the history played
+    // so far rolling.
+    const int nowColumn = static_cast<int>(seconds * 48'000 / 1024);
+    if (rolling) {
+        item.feedPrecomputedChunk(QByteArray(bins * 2000, '\x40'), bins, 0, 2000,
+            nowColumn - 1999, trackColumns, 48'000, 1024, false, true, 1, true, generation);
+    } else {
+        item.feedPrecomputedChunk(QByteArray(bins * trackColumns, '\x40'), bins, 0, trackColumns,
+            0, trackColumns, 48'000, 1024, true, true, 1, false, generation);
+    }
+    setTestPosition(item, seconds);
+
+    QSGNode *node = nullptr;
+    // Nothing shows before the first frame.
+    QVector<bool> shown(width, false);
+    // Paints a frame, and checks that it shows data wherever the last did.
+    const auto frame = [&](const char *step) {
+        node = item.updatePaintNode(node, nullptr);
+        const QVector<bool> now = plotColumnsShown(item, node, width);
+        for (int x = 0; x < width; ++x) {
+            if (shown[x] && !now[x]) {
+                QTest::qFail(qPrintable(QStringLiteral("%1: x %2 shows the floor").arg(
+                    QString::fromLatin1(step)).arg(x)), __FILE__, __LINE__);
+                return false;
+            }
+        }
+        shown = now;
+        return true;
+    };
+    // Frames until the rasterizations under way have arrived.
+    const auto settle = [&](const char *step) {
+        for (int round = 0; round < 8; ++round) {
+            if (!frame(step)) {
+                return false;
+            }
+            if (!spectrogramRasterPending(item) && !spectrogramReservePending(item)) {
+                return frame(step);
+            }
+            if (!QTest::qWaitFor([&item]() {
+                    return !spectrogramRasterPending(item) && !spectrogramReservePending(item);
+                }, 5000)) {
+                QTest::qFail("a rasterization did not arrive", __FILE__, __LINE__);
+                return false;
+            }
+        }
+        return frame(step);
+    };
+    // The backend restarts for the zoom asked for: its first columns, at
+    // the playhead, then the rest of the view's.
+    const auto feedZoom = [&](const char *step) {
+        if (!sendPendingBackendZoom(item)) {
+            return false;
+        }
+        const int hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+        const int columns = trackColumns * 1024 / hop;
+        const int now = static_cast<int>(seconds * 48'000 / hop);
+        ++generation;
+        item.feedPrecomputedChunk(QByteArray(bins * 8, '\x70'), bins, 0, 8,
+            now, columns, 48'000, hop, false, true, 1, rolling, generation);
+        if (!settle(step)) {
+            return false;
+        }
+        // The view before the zoom stands in at its own detail for the
+        // columns the canvas lacks, over the ring's around it.
+        if (!item.m_canvasComplete && item.m_backdrop.isNull()) {
+            QTest::qFail(qPrintable(QStringLiteral("%1: no backdrop").arg(QString::fromLatin1(step))),
+                __FILE__, __LINE__);
+            return false;
+        }
+        if (!rolling) {
+            // The rest of the track; a rolling session has no history.
+            item.feedPrecomputedChunk(QByteArray(bins * (columns - now - 8), '\x70'), bins, 0,
+                columns - now - 8, now + 8, columns, 48'000, hop, false, false, 1, false,
+                generation);
+            item.feedPrecomputedChunk(QByteArray(bins * now, '\x70'), bins, 0, now,
+                0, columns, 48'000, hop, true, false, 1, false, generation);
+        }
+        return settle(step);
+    };
+
+    QVERIFY(settle("zoom 1"));
+    QVERIFY(std::all_of(shown.begin(), shown.end(), [](bool data) { return data; }));
+    // Out by two wheel steps, the data for the second, then in past 1, and
+    // back to 1 at once.
+    item.setZoomLevel(0.8);
+    QVERIFY(frame("first step out"));
+    QVERIFY(settle("first step out"));
+    item.setZoomLevel(0.64);
+    QVERIFY(frame("second step out"));
+    QVERIFY(feedZoom("data for the second step out"));
+    if (!rolling) {
+        QVERIFY(item.m_backdrop.isNull());
+    }
+    item.setZoomLevel(1.25);
+    QVERIFY(frame("step in"));
+    QVERIFY(feedZoom("data for the step in"));
+    item.setZoomLevel(1.0);
+    QVERIFY(frame("reset"));
+    QVERIFY(feedZoom("data for the reset"));
+    // Seen over the view.
+    QVERIFY(std::count(shown.begin(), shown.end(), true) > width / 2);
+
+    delete node;
 }
 
 std::unique_ptr<QmlSmokeTest> makeSpectrogramCanvasSmokeTest(const QString &userDirectoriesParent) {

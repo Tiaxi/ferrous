@@ -210,6 +210,10 @@ struct OverlayOnScreen {
 // colour map's floor, black.
 const QRgb kSpectrogramFloor = qRgb(0, 0, 0);
 
+// A canvas pixel without a column: transparent, so that older data drawn
+// under the canvas shows there, and else the floor.
+const QRgb kSpectrogramNoColumn = qRgba(0, 0, 0, 0);
+
 // The children of a spectrogram's scene node: the background, the canvas
 // tiles, the newest columns, the playhead's casing and the playhead, the
 // frequency scale, the time scale, the crosshair and the FPS counter.

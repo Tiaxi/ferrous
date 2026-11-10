@@ -139,6 +139,39 @@ struct SpectrogramRasterTarget {
     // the canvas then shows.
     double capturedTravelSeconds{0.0};
     std::shared_ptr<const SpectrogramProjection> projection;
+    // Pixels of the view it leaves without a column: columns not decoded
+    // yet, or a view wider than the columns.
+    bool missingColumns{false};
+};
+
+// Older data drawn under the canvas, whose missing columns are transparent,
+// at the times its own columns are of, so that it stands in for columns
+// still to come rather than the background: the canvas that a canvas with
+// columns missing replaced, as the view before a zoom was (the backdrop),
+// and the ring's columns around the view (the reserve), which a zoom out
+// shows beside the canvas before the zoom's data arrives.
+struct SpectrogramBackdrop {
+    QImage image;
+    // The pixels drawn: `pixels` of them from `start`, wrapping.
+    int start{0};
+    int pixels{0};
+    // The time pixel `start` starts at, as playback reckons it (see
+    // staleCanvasAlignmentLocked), and the image's pixels a second.
+    double leftSeconds{0.0};
+    double pixelsPerSecond{0.0};
+    bool rolling{false};
+    // A centered canvas's track, which another track's view has nothing of.
+    quint64 trackToken{0};
+    // What its rows and colours are of: another projection's are not this
+    // view's.
+    std::shared_ptr<const SpectrogramProjection> projection;
+    // Which it is, for the scene node's texture of it.
+    quint64 serial{0};
+
+    bool isNull() const { return image.isNull(); }
+    double rightSeconds() const {
+        return pixelsPerSecond > 0.0 ? leftSeconds + pixels / pixelsPerSecond : leftSeconds;
+    }
 };
 
 // A canvas to draw on a worker, with what it reads: copies of the ring's
@@ -152,6 +185,15 @@ struct SpectrogramRasterJob {
     // The columns of each copy of the canvas to make for upload: the scene
     // graph's texture tiles, or 0 for one copy of all of it.
     int tileWidth{0};
+    // Whether to make those copies: a reserve is uploaded whole.
+    bool makeTiles{true};
+    // Older data drawn under the pixels that have no column: the image of
+    // the reserve it replaces, the `underlayPixels` of it from its left,
+    // and their seconds (see SpectrogramBackdrop).
+    QImage underlay;
+    int underlayPixels{0};
+    double underlayLeftSeconds{0.0};
+    double underlayPixelsPerSecond{0.0};
 };
 
 // A small image an overlay places on the pane: a label, or a crosshair's
@@ -504,12 +546,17 @@ private:
         std::chrono::steady_clock::time_point now);
     void releasePositionHoldLocked(std::chrono::steady_clock::time_point now);
     void continueGaplessLocked(std::chrono::steady_clock::time_point now);
+    // At canvasZoom pixels a column, or else the canvas's zoom, of the
+    // ring's columns from heldLeft to heldRight; any others are missing.
     std::shared_ptr<SpectrogramRasterJob> makeRasterJobLocked(
         int width,
         int height,
         qint64 displayLeft,
         qint64 displayRight,
-        bool rollingMode);
+        bool rollingMode,
+        double canvasZoom = 0.0,
+        qint64 heldLeft = std::numeric_limits<qint64>::min(),
+        qint64 heldRight = std::numeric_limits<qint64>::max());
     static std::shared_ptr<SpectrogramRasterResult> rasterize(
         const SpectrogramRasterJob &job,
         const std::atomic<quint64> *latestSerial = nullptr);
@@ -526,6 +573,27 @@ private:
         qint64 displayRight,
         bool rollingMode) const;
     void cancelPendingRasterLocked();
+    // Keeps the canvas, which one with columns missing replaces, as the
+    // backdrop, unless it has columns missing too and there is one.
+    void keepCanvasAsBackdropLocked(const SpectrogramRasterTarget &replacement);
+    void dropBackdropLocked();
+    void dropReserveLocked();
+    // Drops both, and the reserve being drawn: their times are not the
+    // view's any more.
+    void invalidateBackdropLocked();
+    // Draws the ring's columns from `seconds` to `endSeconds`, at most
+    // `pixelsPerSecond` canvas pixels a second and `width` wide, on a
+    // worker, for the reserve.
+    void requestReserveLocked(double seconds, double endSeconds, double pixelsPerSecond,
+        int width, int height, bool rollingMode);
+    // Before a zoom's session clears the ring: its columns around the
+    // canvas's view, for the reserve.
+    void reserveRingBeforeResetLocked();
+    void installReserve(const std::shared_ptr<SpectrogramRasterResult> &result);
+    // Whether the canvas, as it is, shows every column of the view from
+    // displayLeft to displayRight, canvasZoom pixels a column, cw wide.
+    bool canvasShowsWholeViewLocked(
+        qint64 displayLeft, qint64 displayRight, bool rollingMode, double canvasZoom, int cw) const;
     void installRasterResult(const std::shared_ptr<SpectrogramRasterResult> &result);
     bool installRasterResultLocked(const SpectrogramRasterResult &result);
     void drawCenteredColumnsInPlaceLocked(
@@ -795,6 +863,28 @@ private:
     // which goes on until its replacement arrives.
     bool m_rasterHoldsZoomPreview{false};
     bool m_zoomPreviewWantedLastFrame{false};
+    // What the canvas's projection is: a backdrop of it stands in only for
+    // a canvas of the same.
+    std::shared_ptr<const SpectrogramProjection> m_canvasProjection;
+    // Whether the canvas showed every column of its view when it was last
+    // known; a canvas with columns missing does not replace the backdrop.
+    bool m_canvasComplete{false};
+    // The backdrop and the reserve (SpectrogramBackdrop), null without
+    // one, and what tells their images apart.
+    SpectrogramBackdrop m_backdrop;
+    SpectrogramBackdrop m_reserve;
+    quint64 m_backdropSerial{0};
+    // The reserve being drawn: its serial, whether it is under way, the
+    // canvas pixels a second of the zoom it was last drawn for (0 for
+    // none), and the seconds last asked of it. And the validity of what is
+    // drawn, which changes when its times stop being the view's.
+    std::shared_ptr<SpectrogramRasterMailbox> m_reserveMailbox;
+    quint64 m_reserveSerial{0};
+    bool m_reservePending{false};
+    double m_reserveZoomPixelsPerSecond{0.0};
+    double m_reserveRequestedLeft{0.0};
+    double m_reserveRequestedRight{-1.0};
+    quint64 m_backdropValidity{0};
     // Changes whenever the ring's columns are cleared or renumbered, which
     // makes a rasterization of them obsolete.
     quint64 m_ringGeneration{0};
