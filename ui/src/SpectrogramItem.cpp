@@ -1774,6 +1774,10 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
             // to wait for is then still its current zoom's.
             m_lastBackendZoom =
                 ferrous_ffi_spectrogram_zoom_after_request(m_lastBackendZoom, zoom);
+            if (m_awaitingZoomData) {
+                // Its session's reset answers the zoom asked for.
+                m_zoomRequestHops.push_back(columnHopForZoomLocked(m_lastBackendZoom));
+            }
         }
         emit backendZoomRequested(zoom);
     });
@@ -1979,15 +1983,6 @@ void SpectrogramItem::clockStateChanged() {
             m_previousTrackPositionOffset = held ? m_positionHoldOffset : m_gaplessPositionOffset;
         }
         m_clockState = next;
-        // A seek or another track: what stands in for missing columns, of
-        // the times and the track before, goes, and a session that resets
-        // the view from now on is not a zoom's restart.
-        if (next.trackToken != previous.trackToken
-            || std::abs(next.positionAt(nowNs) - previous.positionAt(nowNs))
-                >= kPositionJumpHoldThresholdSeconds) {
-            ++m_timelineSerial;
-            invalidateBackdropLocked();
-        }
         if (m_displayMode != 0) {
             // Centered views are random access: a seek or a new track moves
             // them at once, even before its data arrives.
@@ -2085,6 +2080,11 @@ void SpectrogramItem::continueGaplessLocked(std::chrono::steady_clock::time_poin
             ? previousDuration
             : m_previousTrackClockState.positionAt(startNs));
     m_gaplessPositionOffset = previousEnd - startPosition;
+    if (m_awaitingZoomData && m_zoomClockEpoch == m_previousTrackClockState.epoch) {
+        // Playback goes on in the successor: a zoom asked for before it
+        // still waits for its restart, which may be of the successor.
+        m_zoomClockEpoch = m_clockState.epoch;
+    }
     if (startNs > nowNs) {
         holdPositionLocked(m_previousTrackClockState, m_previousTrackPositionOffset, now);
         m_positionJumpHoldUntilNs = startNs;
@@ -2696,8 +2696,10 @@ void SpectrogramItem::setZoomLevel(double value) {
         updateCanvasFillReadinessLocked();
     } else {
         if (!m_awaitingZoomData) {
-            // Its data comes from a restart at this playback position.
-            m_zoomTimelineSerial = m_timelineSerial;
+            // Its data comes from a restart of this playback.
+            m_zoomClockEpoch = m_clockState.epoch;
+            m_zoomTrackToken = m_precomputedTrackToken;
+            m_zoomRequestHops.clear();
         }
         m_awaitingZoomData = true;
     }
@@ -3006,11 +3008,10 @@ void SpectrogramItem::feedPrecomputedChunk(
         && hopSize > 0
         && (bufferReset || m_precomputedResetPending)
         && resetRestartsForZoomLocked(
-            bufferReset ? startIndex : m_precomputedPendingResetStartIndex,
             bufferReset || m_precomputedPendingResetTrackToken == 0
                 ? trackToken
                 : m_precomputedPendingResetTrackToken,
-            hopSize, sampleRate)
+            hopSize)
         && hopSize != columnHopForZoomLocked(backendZoomForRequestLocked())
         && !m_canvas.isNull()
         && m_precomputedCanvasDisplayRight >= m_precomputedCanvasDisplayLeft) {
@@ -3024,7 +3025,7 @@ void SpectrogramItem::feedPrecomputedChunk(
     bool appliedImplicitReset = false;
     if (!bufferReset && columns > 0 && m_ringCapacity == 0 && !m_precomputedResetPending) {
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, true, hopSize, sampleRate);
+            startIndex, bins, trackToken, generation, true, hopSize);
         appliedImplicitReset = true;
         if (m_centeredColumnBase >= 0) {
             // Where the session's columns start is unknown: the columns
@@ -3116,7 +3117,7 @@ void SpectrogramItem::feedPrecomputedChunk(
 
         m_zoomFillActive = false;
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize, sampleRate);
+            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize);
         invalidateCanvas();
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
@@ -3188,7 +3189,7 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetClearHistory = clearHistoryOnReset;
     } else if (bufferReset) {
         applyPrecomputedResetLocked(
-            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize, sampleRate);
+            startIndex, bins, trackToken, generation, clearHistoryOnReset, hopSize);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
@@ -3220,7 +3221,7 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_precomputedPendingResetGeneration != 0
                 ? m_precomputedPendingResetGeneration
                 : generation,
-            m_precomputedPendingResetClearHistory, hopSize, sampleRate);
+            m_precomputedPendingResetClearHistory, hopSize);
         m_precomputedResetPending = false;
         m_precomputedPendingResetStartIndex = 0;
         m_precomputedPendingResetBins = 0;
@@ -3245,6 +3246,9 @@ void SpectrogramItem::feedPrecomputedChunk(
         // offset, in the ring's continuous coordinate space. The clock and
         // this data may report the new track in either order.
         if (m_displayMode == 0) {
+            if (m_awaitingZoomData && m_zoomTrackToken == m_precomputedTrackToken) {
+                m_zoomTrackToken = trackToken;
+            }
             if (m_clockState.trackToken == trackToken) {
                 continueGaplessLocked(m_now());
             } else {
@@ -3816,6 +3820,7 @@ void SpectrogramItem::clearPrecomputed() {
     // reckons it (ferrous_ffi_spectrogram_render_zoom): at the zoom the
     // backend decodes at.
     m_renderZoomLevel = renderZoomForZoomLocked(backendZoomForRequestLocked());
+    m_streamOrigin += m_gaplessPositionOffset;
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_positionJumpHoldActive = false;
@@ -3843,27 +3848,16 @@ void SpectrogramItem::clearPrecomputed() {
     update();
 }
 
-bool SpectrogramItem::resetRestartsForZoomLocked(
-    int startIndex, quint64 trackToken, int hopSize, int sampleRate) const {
+bool SpectrogramItem::resetRestartsForZoomLocked(quint64 trackToken, int hopSize) const {
     if (!m_awaitingZoomData
-        || (trackToken != 0 && m_precomputedTrackToken != 0
-            && trackToken != m_precomputedTrackToken)
-        || m_timelineSerial != m_zoomTimelineSerial) {
+        || hopSize <= 0
+        || (trackToken != 0 && m_zoomTrackToken != 0 && trackToken != m_zoomTrackToken)
+        || m_clockState.epoch != m_zoomClockEpoch) {
         return false;
     }
-    if (m_displayMode == 0 && hopSize > 0 && sampleRate > 0) {
-        // A rolling zoom's session starts where the backend last had the
-        // playhead, the playback position a moment ago; one at another
-        // position is for a seek the clock has not reported yet.
-        const double startSeconds = static_cast<double>(startIndex)
-            * static_cast<double>(hopSize) / static_cast<double>(sampleRate);
-        const double playheadSeconds =
-            currentRenderPositionSecondsLocked(m_now()) - m_gaplessPositionOffset;
-        if (std::abs(startSeconds - playheadSeconds) > 2.0 * kPositionJumpHoldThresholdSeconds) {
-            return false;
-        }
-    }
-    return true;
+    return hopSize == columnHopForZoomLocked(backendZoomForRequestLocked())
+        || std::find(m_zoomRequestHops.begin(), m_zoomRequestHops.end(), hopSize)
+            != m_zoomRequestHops.end();
 }
 
 void SpectrogramItem::applyPrecomputedResetLocked(
@@ -3872,11 +3866,9 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     quint64 trackToken,
     quint64 generation,
     bool clearHistoryOnReset,
-    int hopSize,
-    int sampleRate) {
+    int hopSize) {
     // Decided before anything of the reset changes what it looks at.
-    const bool restartsForZoom =
-        resetRestartsForZoomLocked(startIndex, trackToken, hopSize, sampleRate);
+    const bool restartsForZoom = resetRestartsForZoomLocked(trackToken, hopSize);
     if (generation != 0) {
         m_precomputedSessionGeneration = generation;
         m_precomputedCommittedGeneration = std::max(m_precomputedCommittedGeneration, generation);
@@ -3914,7 +3906,10 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     // A reset (seek or manual track change) breaks the continuous
     // gapless coordinate space — clear the accumulated offset,
     // per-track column tracking, and canvas display range so the
-    // centered-mode monotonic clamp doesn't stick at old positions.
+    // centered-mode monotonic clamp doesn't stick at old positions. The
+    // times from here on start over at the track's: the layers' times are
+    // counted from the offset's sum (m_streamOrigin).
+    m_streamOrigin += m_gaplessPositionOffset;
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
     m_precomputedMaxColumnIndex = -1;
@@ -4627,7 +4622,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             const auto foreign = [&](const SpectrogramBackdrop &layer) {
                 return !layer.isNull()
                     && (layer.rolling != rollingMode
-                        || layer.trackToken != m_precomputedTrackToken
+                        || (!rollingMode && layer.trackToken != m_precomputedTrackToken)
                         || layer.validity != m_backdropValidity
                         || layer.projection != m_canvasProjection);
             };
@@ -4672,8 +4667,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 const double canvasPixel = (preview.active
                     ? preview.fromX + (x - preview.toX) / preview.scale
                     : x) - canvasDrawX;
+                // Counted from the stream origin, as the layers' times are.
                 return (shownCanvasLeft + canvasPixel / shownZoom
-                    - static_cast<double>(m_precomputedCanvasEpoch)) / shownColumnsPerSecond;
+                    - static_cast<double>(m_precomputedCanvasEpoch)) / shownColumnsPerSecond
+                    + m_precomputedCanvasStreamOrigin;
             };
             // Where a layer's pixel k, from its start, goes on screen.
             const auto place = [&](SpectrogramBackdrop &layer, SpectrogramZoomPreview *map) {
@@ -6514,6 +6511,8 @@ std::shared_ptr<SpectrogramRasterJob> SpectrogramItem::makeRasterJobLocked(
             / static_cast<double>(m_precomputedHopSize)
         : 0.0;
     target.epoch = rollingMode ? m_rollingEpoch : 0;
+    target.streamOrigin = m_streamOrigin;
+    target.validity = m_backdropValidity;
     target.trackToken = m_precomputedTrackToken;
     target.ringGeneration = m_ringGeneration;
     target.capturedTravelSeconds = playbackTravelSecondsLocked(m_now());
@@ -6724,7 +6723,9 @@ void SpectrogramItem::keepCanvasAsBackdropLocked(const SpectrogramRasterTarget &
         || m_precomputedCanvasRolling != replacement.rollingMode
         || m_canvasProjection == nullptr
         || m_canvasProjection != replacement.projection
-        || m_precomputedCanvasTrackToken != replacement.trackToken) {
+        || m_precomputedCanvasValidity != m_backdropValidity
+        || (!m_precomputedCanvasRolling
+            && m_precomputedCanvasTrackToken != replacement.trackToken)) {
         return;
     }
     dropBackdropLocked();
@@ -6735,7 +6736,8 @@ void SpectrogramItem::keepCanvasAsBackdropLocked(const SpectrogramRasterTarget &
     const double left = static_cast<double>(m_precomputedCanvasDisplayLeft)
         - m_precomputedCanvasSubpixelOffset / zoom;
     m_backdrop.leftSeconds =
-        (left - static_cast<double>(m_precomputedCanvasEpoch)) / columnsPerSecond;
+        (left - static_cast<double>(m_precomputedCanvasEpoch)) / columnsPerSecond
+        + m_precomputedCanvasStreamOrigin;
     m_backdrop.pixelsPerSecond = zoom * columnsPerSecond;
     m_backdrop.rolling = m_precomputedCanvasRolling;
     m_backdrop.trackToken = m_precomputedCanvasTrackToken;
@@ -6801,13 +6803,16 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
     const bool keepsReserve = !m_reserve.isNull()
         && m_reserve.rolling == rollingMode
         && m_reserve.projection == projection
-        && m_reserve.trackToken == m_precomputedTrackToken
+        && (rollingMode || m_reserve.trackToken == m_precomputedTrackToken)
         && m_reserve.validity == m_backdropValidity;
+    // The seconds asked for, and the reserve's, are counted from the stream
+    // origin; the ring's columns from the times since the last reset.
+    const double origin = m_streamOrigin;
     if (keepsReserve) {
-        heldLeft = std::min(heldLeft,
-            static_cast<qint64>(std::floor(m_reserve.leftSeconds * columnsPerSecond)) + epoch);
-        heldRight = std::max(heldRight,
-            static_cast<qint64>(std::ceil(m_reserve.rightSeconds() * columnsPerSecond)) + epoch);
+        heldLeft = std::min(heldLeft, static_cast<qint64>(
+            std::floor((m_reserve.leftSeconds - origin) * columnsPerSecond)) + epoch);
+        heldRight = std::max(heldRight, static_cast<qint64>(
+            std::ceil((m_reserve.rightSeconds() - origin) * columnsPerSecond)) + epoch);
         // And its seconds, as far on either side as two views at zoom 1, a
         // reset and a step out from it, or as asked for if more: the
         // reserve does not shrink as a zoom in asks for less, nor grow
@@ -6821,9 +6826,9 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
         endSeconds = std::min(std::max(endSeconds, m_reserve.rightSeconds()), endSeconds + reach);
     }
     const qint64 displayLeft = std::max(heldLeft,
-        static_cast<qint64>(std::floor(seconds * columnsPerSecond)) + epoch);
+        static_cast<qint64>(std::floor((seconds - origin) * columnsPerSecond)) + epoch);
     const qint64 displayRight = std::min(heldRight,
-        static_cast<qint64>(std::ceil(endSeconds * columnsPerSecond)) + epoch);
+        static_cast<qint64>(std::ceil((endSeconds - origin) * columnsPerSecond)) + epoch);
     if (displayRight < displayLeft) {
         return;
     }
@@ -6848,7 +6853,7 @@ void SpectrogramItem::requestReserveLocked(double seconds, double endSeconds,
     if (keepsReserve) {
         job->underlay = m_reserve.image;
         job->underlayPixels = m_reserve.pixels;
-        job->underlayLeftSeconds = m_reserve.leftSeconds;
+        job->underlayLeftSeconds = m_reserve.leftSeconds - origin;
         job->underlayPixelsPerSecond = m_reserve.pixelsPerSecond;
     }
     job->serial = ++m_reserveSerial;
@@ -6898,7 +6903,8 @@ void SpectrogramItem::reserveRingBeforeResetLocked() {
         static_cast<double>(canvasWidthLocked()) / (zoom * columnsPerSecond);
     const double right = (static_cast<double>(
         std::max(m_precomputedCanvasDisplayRight, m_precomputedCanvasViewRight) + 1)
-        - static_cast<double>(m_precomputedCanvasEpoch)) / columnsPerSecond;
+        - static_cast<double>(m_precomputedCanvasEpoch)) / columnsPerSecond
+        + m_precomputedCanvasStreamOrigin;
     const double left = right - viewSeconds;
     double from = left - viewSeconds;
     double to = m_precomputedCanvasRolling ? right : right + viewSeconds;
@@ -6925,7 +6931,7 @@ void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResu
             || target.columnsPerSecond <= 0.0
             || target.effectiveZoom <= 0.0
             || target.rollingMode != (m_displayMode == 0)
-            || target.trackToken != m_precomputedTrackToken) {
+            || (!target.rollingMode && target.trackToken != m_precomputedTrackToken)) {
             return;
         }
         dropReserveLocked();
@@ -6934,7 +6940,7 @@ void SpectrogramItem::installReserve(const std::shared_ptr<SpectrogramRasterResu
         // With what it kept of the reserve before it, past its columns.
         m_reserve.pixels = result->canvas.width();
         m_reserve.leftSeconds = static_cast<double>(target.displayLeft - target.epoch)
-            / target.columnsPerSecond;
+            / target.columnsPerSecond + target.streamOrigin;
         m_reserve.pixelsPerSecond = target.effectiveZoom * target.columnsPerSecond;
         m_reserve.rolling = target.rollingMode;
         m_reserve.trackToken = target.trackToken;
@@ -7032,6 +7038,8 @@ bool SpectrogramItem::installRasterResultLocked(const SpectrogramRasterResult &r
     m_precomputedCanvasSubpixelOffset = 0.0;
     m_precomputedCanvasColumnsPerSecond = target.columnsPerSecond;
     m_precomputedCanvasEpoch = target.epoch;
+    m_precomputedCanvasStreamOrigin = target.streamOrigin;
+    m_precomputedCanvasValidity = target.validity;
     m_precomputedCanvasTrackToken = target.trackToken;
     m_precomputedCanvasRingGeneration = target.ringGeneration;
     m_precomputedCanvasDrawnTravelSeconds = target.capturedTravelSeconds;

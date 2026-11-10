@@ -142,6 +142,9 @@ struct SpectrogramRasterTarget {
     // Pixels of the view it leaves without a column: columns not decoded
     // yet, or a view wider than the columns.
     bool missingColumns{false};
+    // The stream origin and the layers' validity when it was asked for.
+    double streamOrigin{0.0};
+    quint64 validity{0};
 };
 
 // Older data drawn under the canvas, whose missing columns are transparent,
@@ -156,12 +159,15 @@ struct SpectrogramBackdrop {
     int start{0};
     int pixels{0};
     // The time pixel `start` starts at, as playback reckons it (see
-    // staleCanvasAlignmentLocked), and the image's pixels a second.
+    // staleCanvasAlignmentLocked) plus the stream origin then (see
+    // m_streamOrigin), and the image's pixels a second.
     double leftSeconds{0.0};
     double pixelsPerSecond{0.0};
     bool rolling{false};
-    // The track of its columns, which another track's view has nothing of,
-    // rolling too: a track change that is not gapless clears the history.
+    // A centered layer's track, which another track's view has nothing
+    // of. A rolling layer goes on with the history across a gapless or
+    // Repeat-One continuation, and a reset that is not a zoom's restart,
+    // which breaks the history, drops it.
     quint64 trackToken{0};
     // The validity it was made with (m_backdropValidity).
     quint64 validity{0};
@@ -532,15 +538,14 @@ private:
         quint64 trackToken,
         quint64 generation,
         bool clearHistoryOnReset,
-        int hopSize,
-        int sampleRate);
-    // Whether a session reset starting at column startIndex, hopSize frames
-    // a column, is the backend's restart for the zoom asked for: of the
-    // same track, with no seek or track change since the zoom was asked
-    // for, and rolling, from the playhead. Only then is what the view
-    // showed before it of the times the reset's columns are.
-    bool resetRestartsForZoomLocked(
-        int startIndex, quint64 trackToken, int hopSize, int sampleRate) const;
+        int hopSize);
+    // Whether a session reset of trackToken, hopSize frames a column, is
+    // the backend's restart for the zoom being waited for: at the hop of
+    // the zoom asked for or of one sent to the backend since, of the track
+    // the zoom was asked of or the one it goes on in gaplessly, with the
+    // clock's playback unbroken since (its epoch). Only then is what the
+    // view showed before it of the times the reset's columns are.
+    bool resetRestartsForZoomLocked(quint64 trackToken, int hopSize) const;
     qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
     void truncateRollingTailLocked(qint64 newWriteSeq);
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
@@ -897,10 +902,20 @@ private:
     double m_reserveRequestedLeft{0.0};
     double m_reserveRequestedRight{-1.0};
     quint64 m_backdropValidity{0};
-    // Changes with each seek or track change the clock reports, and its
-    // value when the zoom being waited for was asked for.
-    quint64 m_timelineSerial{0};
-    quint64 m_zoomTimelineSerial{0};
+    // What the zoom being waited for was asked of: the clock's epoch and
+    // the data's track then, carried over a gapless or Repeat-One
+    // continuation, and the column hops of the zooms sent to the backend
+    // since.
+    quint64 m_zoomClockEpoch{0};
+    quint64 m_zoomTrackToken{0};
+    std::vector<int> m_zoomRequestHops;
+    // A rolling view's times start over at each session reset, when the
+    // offset of a gapless continuation (m_gaplessPositionOffset) goes:
+    // the sum of those offsets, which the layers' times are counted from,
+    // and the canvas's when it was rasterized.
+    double m_streamOrigin{0.0};
+    double m_precomputedCanvasStreamOrigin{0.0};
+    quint64 m_precomputedCanvasValidity{0};
     // Changes whenever the ring's columns are cleared or renumbered, which
     // makes a rasterization of them obsolete.
     quint64 m_ringGeneration{0};
