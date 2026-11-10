@@ -16,6 +16,9 @@ import "../logic/FormatUtils.js" as FormatUtils
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
 //   lines beside it, then 12 px before the library.
 // - Nothing loaded: one row with the album glyph and "Nothing playing".
+// - A track without a cover or without tags keeps the layout: the tile
+//   on the view colour with a small mark, and a line of space for each
+//   line it has no text for.
 //
 // Lines that do not fit are elided, with the whole text in a tooltip.
 Item {
@@ -716,8 +719,10 @@ Item {
         }
 
         Layout.fillWidth: true
+        // An empty line keeps its place, a line of the font's height, so the
+        // text block, and the library under it, stay where they are for a
+        // track with tags missing (#373 H1).
         implicitHeight: stillText.implicitHeight
-        visible: line.text.length > 0 || line.layers.some(layer => layer.text.length > 0)
 
         FontMetrics {
             id: metrics
@@ -738,6 +743,7 @@ Item {
                 text: line.text
                 Accessible.role: Accessible.StaticText
                 Accessible.name: text
+                Accessible.ignored: text.length === 0
             }
         }
 
@@ -881,8 +887,9 @@ Item {
         width: root.layoutMode === "narrow" ? root.narrowCoverSize : root.width
         height: width
         uiBridge: root.uiBridge
-        placeholderColor: Qt.rgba(root.uiPalette.text.r, root.uiPalette.text.g,
-                                  root.uiPalette.text.b, 0.04)
+        // No surface of its own: the sidebar's view colour, with the mark
+        // in the tertiary text colour.
+        placeholderColor: root.uiPalette.view
         placeholderGlyphColor: root.uiPalette.textTertiary
         // The sidebar's, which shows around the cover.
         backdropColor: root.uiPalette.view

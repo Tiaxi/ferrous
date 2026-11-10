@@ -29,6 +29,7 @@
 
 #include <cmath>
 #include <functional>
+#include <initializer_list>
 
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
@@ -288,6 +289,7 @@ private slots:
     void contentIsOneSheetWithFourSeams();
     void sidebarIs360PxWideAnd260PxInANarrowWindow();
     void nowPlayingHasItsWideNarrowAndEmptyLayouts();
+    void nowPlayingWithoutCoverOrTagsKeepsItsLayout();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
@@ -494,6 +496,72 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // Nor is a total below the number shown.
     bridge->setProperty("currentTrackTotal", 1);
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
+}
+
+// A track without a cover, or without tags, keeps the layout of one with
+// them (#373 H1): the tile keeps its size, on the sidebar's view colour with
+// no surface of its own, and shows a small tertiary mark at its centre, 48 px
+// wide and a third of the narrow 96 px tile; the text block keeps its three
+// lines, so the library under it does not move between tracks.
+void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(panel && cover && header);
+    QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
+    QVERIFY(mark != nullptr);
+
+    for (const bool narrow : {false, true}) {
+        if (narrow) {
+            window->resize(1000, 720);
+            QTRY_COMPARE(window->width(), 1000);
+        }
+        playTrack(bridge);
+        QTRY_COMPARE(panel->property("layoutMode").toString(),
+                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        const QRectF tagged = sceneRect(header);
+        const QRectF tile = sceneRect(cover);
+
+        // No cover: the view colour, and the mark.
+        QVERIFY(bridge->property("currentTrackCoverPath").toString().isEmpty());
+        QCOMPARE(colorOf(cover), tokenHex(window, "view"));
+        QVERIFY(shown(mark));
+        QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
+        QCOMPARE(mark->height(), mark->width());
+        QCOMPARE(sceneRect(mark).center(), tile.center());
+        QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("cover-missing.svg")));
+        QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
+
+        // No tags: the file name for a title, the other lines empty; the
+        // block keeps its height, and the library stays where it was.
+        for (const char *property : {"currentTrackTitle", "currentTrackArtist", "currentTrackAlbum",
+                                     "currentTrackGenre"}) {
+            bridge->setProperty(property, QString());
+        }
+        bridge->setProperty("currentTrackYear", QVariant());
+        bridge->setProperty("currentTrackNumber", 0);
+        bridge->setProperty("currentTrackTotal", 0);
+        QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+        QCOMPARE(panel->property("detailsText").toString(), QString());
+        QCOMPARE(panel->property("layoutMode").toString(),
+                 narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+        QTRY_COMPARE(sceneRect(header), tagged);
+        QCOMPARE(sceneRect(cover), tile);
+        for (const char *name : narrow
+                 ? std::initializer_list<const char *>{"nowPlayingNarrowTitle", "nowPlayingNarrowArtist",
+                                                       "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}
+                 : std::initializer_list<const char *>{"nowPlayingTitle", "nowPlayingArtistAlbum",
+                                                       "nowPlayingDetails"}) {
+            QQuickItem *line = named(window, name);
+            QVERIFY2(line != nullptr && line->height() > 0.0, name);
+        }
+    }
 }
 
 // A track whose tag lacks its title and artist shows its file name as the

@@ -242,6 +242,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/viewers/SpectrogramViewerShell.qml
         qml/viewers/WaveformSurface.qml
     RESOURCES
+        qml/assets/cover-missing.svg
         qml/assets/lastfm.svg
         qml/assets/lastfm-paused.svg
         qml/assets/lastfm-ring.svg
