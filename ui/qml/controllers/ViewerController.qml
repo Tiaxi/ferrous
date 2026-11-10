@@ -298,15 +298,13 @@ QtObject {
         return ""
     }
 
-    function openItunesArtworkDialog(dialog, wholeScreenParent, overlayParent) {
+    // The dialog opens over the window the viewer is in, which it follows
+    // itself.
+    function openItunesArtworkDialog(dialog) {
         // From the viewer's menu during a preview: a new search, over what
         // the viewer showed before the preview.
         root.endAlbumArtPreview(false)
-        const targetParent = root.albumArtViewerOpen && root.useWholeScreenViewerMode
-            ? wholeScreenParent
-            : overlayParent
         Qt.callLater(function() {
-            dialog.parent = targetParent
             root.uiBridge.searchCurrentTrackArtworkSuggestions()
             dialog.open()
         })

@@ -237,10 +237,7 @@ ApplicationWindow {
     }
 
     function openItunesArtworkDialog() {
-        viewerController.openItunesArtworkDialog(
-            itunesArtworkDialog,
-            albumArtViewerShell.windowHost || root.overlayHost,
-            root.overlayHost)
+        viewerController.openItunesArtworkDialog(itunesArtworkDialog)
     }
 
     QtObject {
@@ -1816,7 +1813,11 @@ ApplicationWindow {
         objectName: "itunesArtworkDialog"
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        windowRoot: root
+        // Over the album art viewer while it is open over the whole screen,
+        // as its own window; over the main window otherwise.
+        windowRoot: albumArtViewerShell.wholeScreenOpen && albumArtViewerShell.fullscreenWindow
+            ? albumArtViewerShell.fullscreenWindow
+            : root
         openAlbumArtViewerForSuggestion: viewerController.previewSuggestion
         openAlbumArtViewerForCurrentArt: viewerController.previewCurrentArt
         endAlbumArtPreview: viewerController.endAlbumArtPreview

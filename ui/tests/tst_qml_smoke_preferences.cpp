@@ -375,6 +375,10 @@ ApplicationWindow {
     QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
+    // Replace from iTunes has a window of its own, which its question opens
+    // in.
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
     const auto applied = [&root]() { return root->property("applied").toList(); };
     QObject *bridge = dialog->property("uiBridge").value<QObject *>();
     QVERIFY(bridge != nullptr);
@@ -395,6 +399,7 @@ ApplicationWindow {
     });
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
 
     // The album has art: Apply asks, naming it, and Cancel keeps the art.
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionApply", Q_ARG(QVariant, 0)));
@@ -404,7 +409,9 @@ ApplicationWindow {
     QVERIFY(applied().isEmpty());
     QVERIFY2(confirm->property("details").toString().contains(QStringLiteral("keeps no copy")),
              qPrintable(confirm->property("details").toString()));
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QCOMPARE(qvariant_cast<QQuickItem *>(confirm->property("parent"))->window(), dialogWindow);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(clickVisibleButton(dialogWindow, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(applied().isEmpty());
     QVERIFY(dialog->property("visible").toBool());
@@ -420,7 +427,8 @@ ApplicationWindow {
     QCOMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
     // A quick second click on Replace, as the question fades out, applies
     // nothing more.
-    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(clickTwiceAsItCloses(dialogWindow, QStringLiteral("confirmDialogConfirmButton"), confirm));
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(applied(), (QVariantList{0}));
     QVERIFY(!dialog->property("visible").toBool());
@@ -433,8 +441,14 @@ ApplicationWindow {
     });
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    // Nor does a quick second click on Apply, as the dialog fades out.
-    QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("itunesArtworkApplyButton"), dialog));
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    // Nor does a quick second click on Apply: the window hides at once.
+    QQuickItem *apply = visibleItemNamed(dialogWindow, QStringLiteral("itunesArtworkApplyButton"));
+    QVERIFY(apply != nullptr);
+    const QPoint applyAt = centerInWindow(apply);
+    QTest::mouseClick(dialogWindow, Qt::LeftButton, Qt::NoModifier, applyAt);
+    QVERIFY(!dialog->property("visible").toBool());
+    QTest::mouseClick(dialogWindow, Qt::LeftButton, Qt::NoModifier, applyAt);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(applied(), (QVariantList{0, 0}));
     QVERIFY(!confirm->property("visible").toBool());
@@ -446,10 +460,11 @@ ApplicationWindow {
                         QVariantList{QVariantMap{{QStringLiteral("normalizedPath"), QString()}}});
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("itunesArtworkApplyButton")));
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
+    QVERIFY(clickVisibleButton(dialogWindow, QStringLiteral("itunesArtworkApplyButton")));
     QCOMPARE(dialog->property("pendingApplyIndex").toInt(), 0);
     QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
-    QVERIFY(popupFadingOut(dialog));
+    QVERIFY(!dialog->property("visible").toBool());
     bridge->setProperty("itunesArtworkResults", QVariantList{QVariantMap{
         {QStringLiteral("normalizedPath"), QStringLiteral("/fixture/cache/suggestion.jpg")}}});
     QVERIFY(QMetaObject::invokeMethod(bridge, "itunesArtworkChanged"));

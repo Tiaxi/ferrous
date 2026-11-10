@@ -1271,7 +1271,15 @@ bool openItunesArtworkDialog(QQuickWindow *window, QObject *dialog, QObject *fak
     fake->setProperty("itunesArtworkResults", rows);
     fake->setProperty("itunesArtworkTarget", target);
     return QMetaObject::invokeMethod(window, "openItunesArtworkDialog")
-        && QTest::qWaitFor([dialog]() { return dialog->property("opened").toBool(); });
+        && QTest::qWaitFor([dialog]() { return dialog->property("opened").toBool(); })
+        && QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog));
+}
+
+// Drops what the offscreen platform says when a window's least size
+// changes, as a dialog's does with a larger font: it does not support it.
+void dropSizeHintMessages() {
+    QMutexLocker locker(&capturedMessageMutex());
+    capturedMessages().removeAll(QStringLiteral("This plugin does not support propagateSizeHints()"));
 }
 
 // Whether `item` is `ancestor` or inside it.
@@ -1608,12 +1616,18 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Found 3 suggestions."));
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog)));
     QTRY_VERIFY(popupsSettled());
-    auto *content = qvariant_cast<QQuickItem *>(dialog->property("contentItem"));
+    // The content inside the window's insets.
+    auto *content = itemNamed(qobject_cast<QQuickWindow *>(dialog)->contentItem(),
+                              QStringLiteral("itunesArtworkContent"));
     QVERIFY(content != nullptr);
 
     QList<QQuickItem *> rowItems;
     QTRY_COMPARE((rowItems = visibleItemsNamed(content, QStringLiteral("itunesArtworkResultRow"))).size(), 3);
+    // Laid out in its window, three rows need no scroll bar.
+    QTRY_COMPARE(itemNamed(content, QStringLiteral("itunesArtworkResultsView"))->property("scrollbarLane").toReal(),
+                 0.0);
     std::sort(rowItems.begin(), rowItems.end(), [](QQuickItem *a, QQuickItem *b) {
         return sceneRectOf(a).top() < sceneRectOf(b).top();
     });
@@ -1742,7 +1756,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes..."));
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    auto *content = qvariant_cast<QQuickItem *>(dialog->property("contentItem"));
+    QVERIFY(QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog)));
+    // The content inside the window's insets.
+    auto *content = itemNamed(qobject_cast<QQuickWindow *>(dialog)->contentItem(),
+                              QStringLiteral("itunesArtworkContent"));
     QVERIFY(content != nullptr);
     QQuickItem *frame = itemNamed(content, QStringLiteral("itunesArtworkResultsFrame"));
     QQuickItem *placeholder = itemNamed(content, QStringLiteral("itunesArtworkPlaceholder"));
@@ -1849,7 +1866,20 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             QVERIFY2(openItunesArtworkDialog(window, dialog, fake, fixture, target), at.constData());
             QTRY_VERIFY2(resultsView() != nullptr && resultsView()->property("count").toInt() == 12,
                          at.constData());
-            QCOMPARE(qvariant_cast<QQuickItem *>(dialog->property("parent"))->window(), dialogHost);
+            // A window of its own (#480): a dialog, modal, its title in
+            // the title bar KWin draws and not in its content.
+            auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+            QCOMPARE(dialogWindow->transientParent(), dialogHost);
+            QVERIFY2(dialogWindow->isTopLevel(), at.constData());
+            QCOMPARE(dialogWindow->flags() & Qt::WindowType_Mask, Qt::Dialog);
+            QCOMPARE(dialogWindow->modality(), Qt::ApplicationModal);
+            QCOMPARE(dialogWindow->title(), QStringLiteral("Replace from iTunes"));
+            QList<QQuickItem *> dialogItems;
+            collectQuickItems(dialogWindow->contentItem(), &dialogItems);
+            for (QQuickItem *item : std::as_const(dialogItems)) {
+                QVERIFY2(!item->isVisible() || item->property("text").toString() != dialogWindow->title(),
+                         at.constData());
+            }
             resultsView()->setProperty("contentY", 400.0);
             QTRY_COMPARE(resultsView()->property("contentY").toReal(), 400.0);
 
@@ -1869,12 +1899,14 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
                 QVERIFY2(host != nullptr && QTest::qWaitForWindowActive(host), at.constData());
                 QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("albumArtPreviewBackButton")) != nullptr,
                              at.constData());
-                // The art has the keys, also once the dialog has faded out,
-                // which gives back the keys it closes with.
+                // The art has the keys once the dialog's window has hidden
+                // and the viewer's is active, which the window system says
+                // later: the hidden dialog, a window of the viewer's, makes
+                // it say it is active before then.
                 const QString viewFocus = fullscreenMode == 0 ? QStringLiteral("albumArtPopupViewFocus")
                                                               : QStringLiteral("albumArtFullscreenViewFocus");
                 QTRY_VERIFY2(popupsSettled(), at.constData());
-                QVERIFY2(host->activeFocusItem() != nullptr
+                QTRY_VERIFY2(host->activeFocusItem() != nullptr
                              && host->activeFocusItem()->objectName() == viewFocus,
                          qPrintable(QStringLiteral("%1: %2").arg(QString::fromUtf8(at),
                              host->activeFocusItem() != nullptr ? host->activeFocusItem()->objectName()
@@ -1899,7 +1931,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             const auto backAtTheResults = [&]() {
                 QTRY_VERIFY2(dialog->property("opened").toBool(), at.constData());
                 QVERIFY(!dialog->property("previewShown").toBool());
-                QCOMPARE(qvariant_cast<QQuickItem *>(dialog->property("parent"))->window(), dialogHost);
+                QCOMPARE(qobject_cast<QQuickWindow *>(dialog)->transientParent(), dialogHost);
                 QCOMPARE(resultsView()->property("count").toInt(), 12);
                 QTRY_COMPARE(resultsView()->property("contentY").toReal(), 400.0);
                 QCOMPARE(fake->property("itunesArtworkResults").toList().size(), 12);
@@ -2323,6 +2355,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
         }
         QVERIFY(finishIncubation(engine));
     }
+    dropSizeHintMessages();
 }
 
 void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
@@ -2438,6 +2471,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
         QTRY_VERIFY(!dialog->property("visible").toBool());
         QVERIFY(finishIncubation(engine));
     }
+    dropSizeHintMessages();
 }
 
 void AlbumArtSmokeTest::itunesPreviewCannotApplyACandidateThatIsNotReady() {
@@ -2611,7 +2645,8 @@ void AlbumArtSmokeTest::itunesPreviewShowsTheSearchedAlbumsArtAfterPlaybackMoves
         // album's art, and its Preview shows that art.
         moveOnTo(otherCover);
         QTRY_COMPARE(dialog->property("currentArtworkSource").toString(), coverUrl);
-        QVERIFY2(clickVisibleButton(window, QStringLiteral("itunesArtworkCurrentPreviewButton")), at.constData());
+        QVERIFY2(clickVisibleButton(qobject_cast<QQuickWindow *>(dialog),
+                                    QStringLiteral("itunesArtworkCurrentPreviewButton")), at.constData());
         QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
         QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
         QCOMPARE(viewer->property("albumArtViewerSource").toString(), coverUrl);

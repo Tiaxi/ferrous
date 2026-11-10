@@ -10,12 +10,14 @@ import "../logic/PathUtils.js" as PathUtils
 import "../components" as Components
 import "." as Dialogs
 
-Dialog {
+// Replace from iTunes, in a window of its own: KWin draws its title bar,
+// and it moves and resizes beyond the window it is for, the main window or
+// the album art viewer over the whole screen, which it blocks while it
+// shows.
+Components.DialogWindow {
     id: root
 
     required property var uiBridge
-    required property var uiPalette
-    required property var windowRoot
     // Open the viewer's preview of a candidate row, compared with the current
     // art, or of the current art; each returns whether the preview opened.
     required property var openAlbumArtViewerForSuggestion
@@ -46,29 +48,30 @@ Dialog {
     property var currentArtworkInfo: ({})
     property real _savedContentY: 0
     property int _savedResultCount: 0
-    readonly property real hostWidth: (parent && parent.width > 0) ? parent.width : root.windowRoot.width
-    readonly property real hostHeight: (parent && parent.height > 0) ? parent.height : root.windowRoot.height
 
-    parent: Overlay.overlay
-    modal: true
-    focus: true
-    z: 100
-    width: Math.min(Math.max(320, hostWidth - 48), 920)
-    height: Math.min(Math.max(320, hostHeight - 48), 680)
-    x: Math.round((hostWidth - width) / 2)
-    y: Math.round((hostHeight - height) / 2)
     title: I18n.i18nc("@title:window", "Replace from iTunes")
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    // The content's inset from the window's edges.
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    // 920 by 680 px with the default font, and as much larger as a larger
+    // font makes the rows, within the screen; the user may resize it.
+    defaultWidth: root.uiPalette.scaledSize(920)
+    defaultHeight: root.uiPalette.scaledSize(680)
+    // The current art's row whole, and a result under it.
+    minimumWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 24, itunesArtworkFooter.implicitWidth))
+    minimumHeight: Math.ceil(2 * root.contentPadding + 2 * currentArtworkRow.Layout.preferredHeight
+        + Kirigami.Units.largeSpacing + itunesArtworkFooter.implicitHeight)
 
     footer: Components.DialogButtons {
+        id: itunesArtworkFooter
+        primary: itunesArtworkCloseButton
+
         Button {
+            id: itunesArtworkCloseButton
             objectName: "itunesArtworkCloseButton"
             text: I18n.i18nc("@action:button", "Close")
             icon.name: "window-close"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
         }
     }
 
@@ -133,7 +136,7 @@ Dialog {
         root.previewIndex = index
         root.previewRow = row
         root.previewShown = true
-        root.close()
+        root.reject()
     }
 
     // The viewer went back to the results: the dialog shows again where it
@@ -169,7 +172,7 @@ Dialog {
     // to another album, the applied image itself.
     function finishAfterApply(index) {
         if (!root.previewShown) {
-            root.close()
+            root.accept()
             return
         }
         const targetPath = (root.uiBridge.itunesArtworkTarget || ({})).trackPath || ""
@@ -187,7 +190,6 @@ Dialog {
         root.uiBridge.clearItunesArtworkSuggestions()
         root.previewIndex = -1
         root.previewRow = ({})
-        root.parent = Overlay.overlay
     }
 
     function requestSuggestionPreview(index) {
@@ -217,7 +219,7 @@ Dialog {
         replaceCoverConfirmDialog.suggestionIndex = index
         // Over the viewer during its preview, else over this dialog.
         replaceCoverConfirmDialog.parent = root.previewShown && root.previewHost
-            ? root.previewHost : root.parent
+            ? root.previewHost : root.contentItem
         replaceCoverConfirmDialog.message = (target.album || "").length > 0
             ? ((target.artist || "").length > 0
                 ? I18n.i18nc("@info album, artist", "Replace the album art of \u201c%1\u201d by %2?",
@@ -243,7 +245,7 @@ Dialog {
     }
 
     function processPendingSuggestionAction() {
-        if (!root.visible || closingState.closing) {
+        if (!root.visible) {
             return
         }
         if (root.pendingApplyIndex >= 0) {
@@ -276,16 +278,11 @@ Dialog {
     // preview; shown again after one, it already has none.
     onAboutToShow: root.previewShown = false
 
-    onOpened: {
-        root.clearPendingActionState()
-        root.refreshCurrentArtworkInfo()
-    }
-
-    // Applied, closed or hidden for a preview, it takes no click as it fades
-    // out: Apply again would apply again.
-    Components.PopupClosing {
-        id: closingState
-        popup: root
+    onOpenedChanged: {
+        if (root.opened) {
+            root.clearPendingActionState()
+            root.refreshCurrentArtworkInfo()
+        }
     }
 
     // Hidden for a preview, it keeps its results and where it is.
@@ -448,7 +445,11 @@ Dialog {
         text: I18n.i18nc("@action:button", "Apply")
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        id: itunesArtworkContent
+        objectName: "itunesArtworkContent"
+        anchors.fill: parent
+        anchors.margins: root.contentPadding
         spacing: 0
 
         // Decodes the previewed candidate, small, on a worker thread: one
@@ -510,7 +511,9 @@ Dialog {
                 display: AbstractButton.TextBesideIcon
                 icon.name: "view-preview"
                 text: I18n.i18nc("@action:button", "Preview")
-                enabled: (root.currentArtworkSource || "").length > 0 && !closingState.closing
+                // Hidden, it takes no click: one more, as it hides, would
+                // act again.
+                enabled: (root.currentArtworkSource || "").length > 0 && root.opened
                 onClicked: root.showPreview(-1)
             }
         }
@@ -620,7 +623,7 @@ Dialog {
                             display: AbstractButton.TextBesideIcon
                             icon.name: "view-preview"
                             text: I18n.i18nc("@action:button", "Preview")
-                            enabled: !suggestionRow.assetLoading && !closingState.closing
+                            enabled: !suggestionRow.assetLoading && root.opened
                             onClicked: root.requestSuggestionPreview(suggestionRow.index)
                         }
 
@@ -631,7 +634,7 @@ Dialog {
                             display: AbstractButton.TextBesideIcon
                             icon.name: "dialog-ok-apply"
                             text: I18n.i18nc("@action:button", "Apply")
-                            enabled: !suggestionRow.assetLoading && !closingState.closing
+                            enabled: !suggestionRow.assetLoading && root.opened
                             onClicked: root.requestSuggestionApply(suggestionRow.index)
                         }
                     }
@@ -700,11 +703,11 @@ Dialog {
         id: replaceCoverConfirmDialog
         objectName: "replaceCoverConfirmDialog"
         property int suggestionIndex: -1
-        // Over this dialog, or over the viewer during its preview, which is
-        // in the main window's overlay too in the main window.
-        z: root.z + 1
+        // Over this dialog, or over the viewer during its preview, which in
+        // the main window is a popup in its overlay too.
+        z: 1
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root.previewShown ? root.windowRoot : root
         title: I18n.i18nc("@title:window", "Replace Album Art")
         details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album's cover image, replacing a cover "
             + "image that is there, or embeds it in the album's tracks in place of their artwork. "
