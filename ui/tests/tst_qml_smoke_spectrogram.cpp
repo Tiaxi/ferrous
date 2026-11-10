@@ -16,6 +16,8 @@ private slots:
     void spectrogramHoverChannelButtonsRemainClickable();
     void spectrogramSoloButtonsShowEverySoloedChannel();
     void spectrogramBackgroundsAreThePlotFloor();
+    void emptyPaneIsTheMapFloorInDark_data();
+    void emptyPaneIsTheMapFloorInDark();
     void testMutedChannelRendersGrayscale();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramFpsOverlayToggleKeepsSceneNode();
@@ -608,6 +610,84 @@ ApplicationWindow {
     QCOMPARE(drawn(160, 50), floor);
     QCOMPARE(drawn(160, 150), floor);
     QCOMPARE(drawn(160, 100.5), plot->property("plotLaneSeam").value<QColor>());
+}
+
+void SpectrogramSmokeTest::emptyPaneIsTheMapFloorInDark_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("visualizationMode");
+    QTest::newRow("dark spectrogram") << true << 0;
+    QTest::newRow("dark waveform") << true << 1;
+    QTest::newRow("light spectrogram") << false << 0;
+    QTest::newRow("light waveform") << false << 1;
+}
+
+// Before the session's first audio, and while the first track is analysed,
+// the dark theme's spectrogram pane is the colour map's floor, the colour
+// silence is drawn in, so that the first Play keeps the floor (#373 H3).
+// The light theme's bare pane is the view colour (#373 H2), and the
+// waveform's floor is the view colour in both, with data or without.
+void SpectrogramSmokeTest::emptyPaneIsTheMapFloorInDark() {
+    QFETCH(bool, dark);
+    QFETCH(int, visualizationMode);
+    QQmlApplicationEngine engine;
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "panes" as Panes
+
+ApplicationWindow {
+    id: window
+    property bool darkScheme: false
+
+    width: 320
+    height: 200
+    visible: true
+    palette.window: darkScheme ? "#202326" : "#eff0f1"
+    palette.base: darkScheme ? "#141618" : "#ffffff"
+
+    Components.UiPalette {
+        id: tokens
+        objectName: "tokens"
+        windowRoot: window
+    }
+
+    Panes.SpectrogramPane {
+        objectName: "emptyPane"
+        anchors.fill: parent
+        openViewer: function() {}
+        uiPalette: tokens
+        awaitingFirstData: true
+    }
+}
+)QML"), baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.data());
+    QVERIFY(window != nullptr);
+    window->setProperty("darkScheme", dark);
+    QObject *tokens = root->findChild<QObject *>(QStringLiteral("tokens"));
+    auto *pane = root->findChild<QQuickItem *>(QStringLiteral("emptyPane"));
+    QVERIFY(tokens != nullptr && pane != nullptr);
+    QTRY_COMPARE(tokens->property("themeIsDark").toBool(), dark);
+    pane->setProperty("visualizationMode", visualizationMode);
+
+    // The colour map's floor: the lowest entry of the colour map, which
+    // silence is drawn in.
+    const QColor mapFloor(SpectrogramItem().m_palette32.back());
+    const QColor view = tokens->property("view").value<QColor>();
+    const QColor wanted = visualizationMode == 1 || !dark ? view : mapFloor;
+    QCOMPARE(pane->property("color").value<QColor>(), wanted);
+    // As drawn.
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QTRY_COMPARE(window->grabWindow().pixelColor(160, 100), wanted);
+
+    // Once audio has come, the spectrogram's pane stays the map's floor in
+    // both themes, and the waveform's the view colour.
+    pane->setProperty("awaitingFirstData", false);
+    QCOMPARE(pane->property("color").value<QColor>(), visualizationMode == 1 ? view : mapFloor);
 }
 
 void SpectrogramSmokeTest::spectrogramSoloButtonsShowEverySoloedChannel() {

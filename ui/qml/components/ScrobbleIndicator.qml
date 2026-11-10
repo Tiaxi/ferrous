@@ -11,8 +11,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // The status bar's Last.fm slot (#373, #470): a fixed 20 px box, with a
 // few words before it when something needs saying.
-// - Listening: the Last.fm glyph in a ring that fills with the listening
-//   done towards the scrobble; its tooltip says how much is left. Both
+// - Listening: a small Last.fm glyph in a ring whose arc, in the text
+//   colour over a thin quieter track, grows with the listening done
+//   towards the scrobble; its tooltip says how much is left. Both
 //   come from the scrobbler's listened time, which a seek doesn't move
 //   and a pause holds; a new play (a new track, a replay, Repeat One)
 //   starts it over.
@@ -22,7 +23,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
 // - Being sent: the ring closed, from the moment the play reaches its
-//   scrobble point; the send goes on in the background.
+//   scrobble point, and the glyph still secondary; the send goes on in
+//   the background.
 // - Scrobbled: once Last.fm has accepted it, the closed ring and the glyph
 //   in the text colour. A ring with no gap is the end of the listening
 //   ring, apart from one nearly full by its shape; no fill, as a routine
@@ -96,13 +98,21 @@ AbstractButton {
     readonly property int thresholdSeconds: Math.ceil(Math.max(0, root.thresholdMs) / 1000)
     readonly property int secondsLeft: Math.max(0, root.thresholdSeconds - root.listenedSeconds)
 
-    // The ring around the glyph: its radius in the box, and how much of it
-    // is drawn, 0 to 1. The share moves by whole pixels of the arc too,
-    // so a long scrobble point redraws it more rarely still.
+    // The ring around the glyph (#373 H3): a 16 px ring whose 2 px arc of
+    // the listening done covers a 1 px track, which lies along the arc's
+    // inner edge, so that both sit on whole pixels at the top, bottom and
+    // sides. A thick arc over a thin track tells a quarter from a half
+    // from nearly done at 1x, where two strokes of one width did not.
+    // ringRadius is the arc's centre line; ringProgress how much of it is
+    // drawn, 0 to 1. The share moves by whole pixels of the arc too, so a
+    // long scrobble point redraws it more rarely still.
     readonly property bool ringShown: root.look === "listening" || root.look === "notScrobbled"
         || root.look === "scrobbled" || root.look === "failed"
-    readonly property real ringStroke: 1.5
-    readonly property real ringRadius: (root.boxSize - root.ringStroke) / 2
+    readonly property int ringSize: Kirigami.Units.iconSizes.small
+    readonly property real ringStroke: 2
+    readonly property real ringTrackStroke: 1
+    readonly property real ringRadius: (root.ringSize - root.ringStroke) / 2
+    readonly property real ringTrackRadius: root.ringRadius - (root.ringStroke - root.ringTrackStroke) / 2
     readonly property real ringProgress: {
         if (root.look === "scrobbled" || root.look === "failed") {
             return 1
@@ -115,18 +125,18 @@ AbstractButton {
     }
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    readonly property color ringColor: {
-        if (root.look === "failed") {
-            return root.uiPalette.negative
-        }
-        return root.scrobbleAccepted ? root.uiPalette.text : root.uiPalette.textSecondary
-    }
+    // The arc, and the closed ring: the text colour, or the negative one
+    // when Last.fm refused the scrobble.
+    readonly property color ringColor: root.look === "failed"
+        ? root.uiPalette.negative
+        : root.uiPalette.text
     // The ring's track, where the listening is still to come: opaque, the
-    // least of the arc's colour over the status bar that is 3:1 on it, so
-    // that the empty ring reads (WCAG 1.4.11) and stays quieter than the arc.
+    // least of the arc's colour over the status bar that is 3.5:1 on it,
+    // so that the empty ring reads (WCAG 1.4.11) once the 1 px stroke is
+    // antialiased, and stays far quieter than the arc.
     readonly property color ringTrackColor: ColorUtils.mixColor(root.uiPalette.chrome,
-        root.uiPalette.textSecondary,
-        ColorUtils.opacityForContrast(root.uiPalette.textSecondary, root.uiPalette.chrome, 0.3, 3.05))
+        root.uiPalette.text,
+        ColorUtils.opacityForContrast(root.uiPalette.text, root.uiPalette.chrome, 0.2, 3.5))
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -182,7 +192,8 @@ AbstractButton {
         }
     }
 
-    // The box the glyph and its ring are drawn in.
+    // The box the glyph and its ring are drawn in: the ring, with 2 px
+    // around it.
     readonly property int boxSize: Kirigami.Units.iconSizes.small + 4
     readonly property string glyphSource: {
         switch (root.look) {
@@ -196,11 +207,17 @@ AbstractButton {
                 : Qt.resolvedUrl("../assets/lastfm.svg")
         }
     }
-    // Inside the ring, a 14 px glyph with a heavier stroke; the offline
-    // glyph is a 14 px one too.
-    readonly property int glyphSize: root.ringShown || root.look === "queued"
-        ? Kirigami.Units.iconSizes.small - 2
-        : Kirigami.Units.iconSizes.small
+    // Inside the ring, a 10 px glyph with a heavier stroke, clear of the
+    // track, so that the arc carries the shape; the offline glyph is a
+    // 14 px one.
+    readonly property int glyphSize: {
+        if (root.ringShown) {
+            return root.ringSize - 6
+        }
+        return root.look === "queued"
+            ? Kirigami.Units.iconSizes.small - 2
+            : Kirigami.Units.iconSizes.small
+    }
     readonly property color glyphColor: {
         if (root.scrobbleAccepted) {
             return root.uiPalette.text
@@ -339,20 +356,22 @@ AbstractButton {
                 // the top, clockwise.
                 Shape {
                     objectName: "scrobbleIndicatorRing"
-                    anchors.fill: parent
+                    anchors.centerIn: parent
+                    width: root.ringSize
+                    height: root.ringSize
                     visible: root.ringShown
                     preferredRendererType: Shape.CurveRenderer
 
                     ShapePath {
                         objectName: "scrobbleIndicatorRingTrack"
                         strokeColor: root.ringProgress < 1 ? root.ringTrackColor : "transparent"
-                        strokeWidth: root.ringStroke
+                        strokeWidth: root.ringTrackStroke
                         fillColor: "transparent"
                         PathAngleArc {
-                            centerX: root.boxSize / 2
-                            centerY: root.boxSize / 2
-                            radiusX: root.ringRadius
-                            radiusY: root.ringRadius
+                            centerX: root.ringSize / 2
+                            centerY: root.ringSize / 2
+                            radiusX: root.ringTrackRadius
+                            radiusY: root.ringTrackRadius
                             startAngle: 0
                             sweepAngle: 360
                         }
@@ -364,8 +383,8 @@ AbstractButton {
                         fillColor: "transparent"
                         capStyle: ShapePath.FlatCap
                         PathAngleArc {
-                            centerX: root.boxSize / 2
-                            centerY: root.boxSize / 2
+                            centerX: root.ringSize / 2
+                            centerY: root.ringSize / 2
                             radiusX: root.ringRadius
                             radiusY: root.ringRadius
                             startAngle: -90
