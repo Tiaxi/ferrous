@@ -515,12 +515,16 @@ Dialog {
             }
         }
 
-        // What the search found, under the results it is about.
+        // What the search found, over the results it is about: on the rows'
+        // inset, 8 px clear of the current art above and the results' frame
+        // below.
         Label {
             objectName: "itunesArtworkResultsHeading"
             Layout.fillWidth: true
-            Layout.topMargin: Kirigami.Units.smallSpacing
-            Layout.bottomMargin: Kirigami.Units.smallSpacing
+            Layout.leftMargin: 1 + root.sideInset
+            Layout.rightMargin: 1 + root.sideInset
+            Layout.topMargin: Kirigami.Units.largeSpacing
+            Layout.bottomMargin: Kirigami.Units.largeSpacing
             visible: itunesArtworkResultsView.count > 0 && text.length > 0
             text: root.uiBridge.itunesArtworkStatusText || ""
             color: root.uiPalette.textSecondary

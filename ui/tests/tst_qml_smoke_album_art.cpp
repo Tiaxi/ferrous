@@ -1708,6 +1708,15 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(currentRow->height(), 80.0);
     // The dialog's first line, with no space above it.
     QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());
+    // What the search found: between the current art and the results'
+    // frame, 8 px clear of each, its text on the thumbnails' inset.
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkResultsHeading"));
+    QVERIFY(heading != nullptr && heading->isVisible());
+    QCOMPARE(heading->property("text").toString(), QStringLiteral("Found 3 suggestions."));
+    QCOMPARE(sceneRectOf(heading).top() - sceneRectOf(currentRow).bottom(), 8.0);
+    QCOMPARE(sceneRectOf(frame).top() - sceneRectOf(heading).bottom(), 8.0);
+    QCOMPARE(sceneRectOf(heading).left(), sceneRectOf(firstThumbnail).left());
+    QCOMPARE(sceneRectOf(heading).left() - sceneRectOf(frame).left(), 17.0);
     // Nothing to search for or wait on.
     QVERIFY(visibleItemsNamed(content, QStringLiteral("itunesArtworkPlaceholder")).isEmpty());
 }
