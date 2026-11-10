@@ -2209,6 +2209,12 @@ impl GstPlaybackRuntime {
 
     fn set_volume(&mut self, level: f32) {
         self.volume_commands += 1;
+        // Newer than anything a sink has read of its stream so far, also
+        // while a fade has yet to write it: such a read is not taken in
+        // after this volume, and the `OutsideVolume` of one read later
+        // follows this command.
+        self.stream_volume
+            .mark(f64::from(self.applied_volume), self.stream_muted);
         if self.stream_muted {
             // The volume the user sets plays, also where the stream was
             // muted elsewhere.
@@ -12845,6 +12851,84 @@ mod engine_tests {
         assert_eq!(engine.snapshot.volume, 0.6);
         let gain = f64::from(super::super::volume_level_to_gain(0.6));
         assert!((stream_sink(&engine.playbin).property::<f64>("volume") - gain).abs() < 1e-6);
+    }
+
+    /// Have `sink` tell of its stream again, as pulsesink does from its
+    /// streaming thread as it plays once the server has told it of a
+    /// change.
+    fn renotify_stream(sink: &gst::Element) {
+        change_stream_elsewhere(sink, |sink| sink.notify("volume"));
+    }
+
+    #[test]
+    fn a_volume_set_elsewhere_to_one_the_app_set_while_paused_is_taken() {
+        // At 80 %, muted in the app while paused and set back to 80 %, with
+        // the stream read only before the pause and after the resume.
+        let fixtures = Fixtures::new("outside-volume-repeated");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        renotify_stream(&sink);
+        engine.runtime.handle_stream_volume_reports();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        renotify_stream(&sink);
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.8);
+        // 0 % set in Plasma is the user's volume, not the app's mute.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", 0.0_f64));
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.0);
+        assert!(engine.events.try_iter().any(|event| matches!(
+            event,
+            PlaybackEvent::OutsideVolume { level, .. } if level == 0.0
+        )));
+    }
+
+    #[test]
+    fn a_volume_set_elsewhere_before_one_set_in_the_app_does_not_replace_it() {
+        let fixtures = Fixtures::new("outside-volume-before-app");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        // 66 % in Plasma is read, and waits, as the user's 30 % arrives and
+        // is taken first; its fade has not written yet.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", server_gain(0.66)));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.3));
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        assert!(engine.runtime.volume_ramp_pending());
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.3);
+        assert!(
+            (engine.runtime.target_volume - super::super::volume_level_to_gain(0.3)).abs()
+                < f32::EPSILON
+        );
+        assert!(!engine
+            .events
+            .try_iter()
+            .any(|event| matches!(event, PlaybackEvent::OutsideVolume { .. })));
+        // The fade goes on to the user's volume.
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        let gain = f64::from(super::super::volume_level_to_gain(0.3));
+        assert!((sink.property::<f64>("volume") - gain).abs() < 1e-6);
     }
 
     #[test]

@@ -184,6 +184,14 @@ impl StreamVolumeWatch {
         });
     }
 
+    /// Mark a change of the volume the user picked, which the engine may
+    /// write only later, as by a fade: what a sink read before it is older
+    /// than that volume, and tells nothing. The stream is still at `gain`
+    /// and `muted`.
+    pub(super) fn mark(&self, gain: f64, muted: bool) {
+        self.write(gain, muted, || {});
+    }
+
     /// Write the stream volume with `write`, which leaves the stream at
     /// `gain` and `muted`. The sink's notifications of the write on this
     /// thread are not reported.
@@ -206,6 +214,11 @@ impl StreamVolumeWatch {
 
     /// What `report` tells of the stream. A write the stream shows, and the
     /// writes after it, are all it can show of the engine's from then on.
+    /// A value the engine wrote more than once is taken as its latest write
+    /// of it, so a value the stream went past is not explained by an older
+    /// write of its own; the engine does not write a value again within
+    /// the moment the server takes to apply its writes, apart from writing
+    /// the same value twice in a row.
     /// Called on the engine's thread, which writes, so no write is under
     /// way.
     pub(super) fn classify(&self, report: StreamVolumeReport) -> StreamVolumeChange {
@@ -221,7 +234,10 @@ impl StreamVolumeWatch {
             return StreamVolumeChange::Unchanged;
         }
         let level = gain_to_level(report.gain);
-        let shown = written.iter().position(|state| {
+        // The latest write of the value: an earlier one of the same value
+        // may have been followed by writes the stream never showed, such
+        // as volume changes while paused, which it has gone past too.
+        let shown = written.iter().rposition(|state| {
             state.muted == report.muted && (gain_to_level(state.gain) - level).abs() < SAME_LEVEL
         });
         if let Some(shown) = shown {
@@ -364,6 +380,44 @@ mod tests {
                 gain: 0.3,
                 muted: true
             }
+        );
+    }
+
+    #[test]
+    fn a_value_written_again_after_writes_the_stream_did_not_show_is_the_latest() {
+        gst::init().unwrap();
+        // At 80 %, paused, muted in the app, and back to 80 %, with no read
+        // of the stream meanwhile, as pulsesink reads none while paused.
+        let (watch, _reports) = StreamVolumeWatch::new(0.512);
+        watch.write(0.0, false, || {});
+        watch.write(0.512, false, || {});
+        assert_eq!(
+            watch.classify(report(0.512, false, 2)),
+            StreamVolumeChange::Unchanged
+        );
+        // The stream went past the mute: 0 set in Plasma is a change.
+        assert_eq!(
+            watch.classify(report(0.0, false, 2)),
+            StreamVolumeChange::Outside {
+                gain: 0.0,
+                muted: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_read_before_a_volume_change_the_engine_has_yet_to_write_tells_nothing() {
+        gst::init().unwrap();
+        let (watch, _reports) = StreamVolumeWatch::new(1.0);
+        // Read at 66 %, set in Plasma, before the user's volume change,
+        // whose fade has not written yet.
+        let read = report(0.287_496, false, 0);
+        watch.mark(1.0, false);
+        assert_eq!(watch.classify(read), StreamVolumeChange::Unchanged);
+        // Read after it, the stream still shows the volume before.
+        assert_eq!(
+            watch.classify(report(1.0, false, 1)),
+            StreamVolumeChange::Unchanged
         );
     }
 
