@@ -53,6 +53,7 @@ void WindowPresence::setWindow(QWindow *window) {
     disconnect(m_visibleConnection);
     disconnect(m_visibilityConnection);
     disconnect(m_destroyedConnection);
+    disconnect(m_screenConnection);
     m_unexposedGrace.stop();
     m_window = window;
     if (window != nullptr) {
@@ -62,10 +63,36 @@ void WindowPresence::setWindow(QWindow *window) {
         m_visibleConnection = connect(window, &QWindow::visibleChanged, this, &WindowPresence::update);
         m_visibilityConnection =
             connect(window, &QWindow::visibilityChanged, this, &WindowPresence::update);
-        m_destroyedConnection = connect(window, &QObject::destroyed, this, &WindowPresence::update);
+        m_destroyedConnection = connect(window, &QObject::destroyed, this, [this]() {
+            update();
+            followScreen();
+        });
+        m_screenConnection = connect(window, &QWindow::screenChanged, this, &WindowPresence::followScreen);
     }
     emit windowChanged();
     update();
+    followScreen();
+}
+
+void WindowPresence::followScreen() {
+    QScreen *screen = m_window ? m_window->screen() : nullptr;
+    if (screen != m_screen) {
+        disconnect(m_refreshRateConnection);
+        m_screen = screen;
+        if (screen != nullptr) {
+            m_refreshRateConnection = connect(
+                screen, &QScreen::refreshRateChanged, this, &WindowPresence::updateScreenRefreshRate);
+        }
+    }
+    updateScreenRefreshRate();
+}
+
+void WindowPresence::updateScreenRefreshRate() {
+    const double rate = m_screen ? m_screen->refreshRate() : 0.0;
+    if (rate != m_screenRefreshRate) {
+        m_screenRefreshRate = rate;
+        emit screenRefreshRateChanged();
+    }
 }
 
 bool WindowPresence::eventFilter(QObject *watched, QEvent *event) {

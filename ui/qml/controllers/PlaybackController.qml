@@ -31,6 +31,9 @@ QtObject {
     // The smallest move of the position that is shown, such as a device
     // pixel of the seek bar.
     property real positionStepSeconds: 0
+    // The refresh rate of the screen that shows the position: the clock
+    // changes it no more often. 0 is the clock's default.
+    property real frameRate: 0
 
     // The position now, for what starts from it, such as a relative seek.
     function currentPositionSeconds() {
@@ -49,6 +52,13 @@ QtObject {
         target: root.playbackClock
         property: "positionStepSeconds"
         value: root.positionStepSeconds
+        when: root.playbackClock !== null
+    }
+
+    readonly property Binding clockFrameRate: Binding {
+        target: root.playbackClock
+        property: "frameRate"
+        value: root.frameRate
         when: root.playbackClock !== null
     }
 
