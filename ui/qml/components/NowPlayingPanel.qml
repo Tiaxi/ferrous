@@ -13,7 +13,9 @@ import "../logic/FormatUtils.js" as FormatUtils
 //
 // - Wide: the cover edge to edge, then the title, "Artist — Album" and
 //   "Year · Genre · Track n" under it, inset 12 px, then regionGap before
-//   the seam.
+//   the seam. Where "Artist — Album" would be cut off, as with a large
+//   font, the artist and the album take a line each, so the album is not
+//   lost to the ellipsis.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
 //   lines beside it, or under it when there is no room beside it, then
 //   12 px before the seam.
@@ -96,6 +98,7 @@ Item {
         artistAlbum: root.artistAlbumText,
         details: root.detailsText,
         artist: root.artistText,
+        album: root.albumText,
         narrowAlbum: root.narrowAlbumText,
         narrowDetails: root.narrowDetailsText
     })
@@ -668,6 +671,18 @@ Item {
         font: root.uiPalette.baseFont
     }
 
+    // Wide: the artist and the album on a line each where "Artist — Album"
+    // would be cut off on one, 4 px apart, so the album shows (#373 H3).
+    // With only one of them there is nothing to split.
+    FontMetrics {
+        id: artistAlbumMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
+    }
+    readonly property bool wideArtistAlbumSplit: root.artistText.length > 0 && root.albumText.length > 0
+        && artistAlbumMetrics.advanceWidth(root.artistAlbumText) > wideColumn.width
+    readonly property int wideArtistAlbumGap: 4
+
     // The block follows its text: in narrow, at least the cover's height,
     // and more when the lines need it.
     implicitHeight: (root.layoutMode === "empty"
@@ -1041,7 +1056,10 @@ Item {
         readonly property real wideHeight: wideColumn.implicitHeight
         readonly property real narrowHeight: narrowColumn.implicitHeight
         readonly property bool truncated: root.layoutMode === "wide"
-            ? (wideTitle.truncated || wideArtistAlbum.truncated || wideDetails.truncated)
+            ? (wideTitle.truncated || wideDetails.truncated
+                || (root.wideArtistAlbumSplit
+                    ? wideArtist.truncated || wideAlbum.truncated
+                    : wideArtistAlbum.truncated))
             : (root.layoutMode === "narrow"
                 && (narrowTitle.truncated || narrowArtist.truncated
                     || narrowAlbum.truncated || narrowDetails.truncated))
@@ -1081,7 +1099,24 @@ Item {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
+                visible: !root.wideArtistAlbumSplit
                 text: root.trackLines.artistAlbum
+            }
+            FadingLine {
+                id: wideArtist
+                lineKey: "artist"
+                name: "WideArtist"
+                visible: root.wideArtistAlbumSplit
+                text: root.trackLines.artist
+            }
+            FadingLine {
+                id: wideAlbum
+                lineKey: "album"
+                name: "WideAlbum"
+                visible: root.wideArtistAlbumSplit
+                text: root.trackLines.album
+                // With the column's 2 px spacing, 4 px under the artist.
+                Layout.topMargin: root.wideArtistAlbumGap - wideColumn.spacing
             }
             FadingLine {
                 id: wideDetails

@@ -327,6 +327,8 @@ private slots:
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
     void nowPlayingWithoutCoverOrTagsKeepsItsLayout();
+    void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
+    void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
@@ -654,14 +656,19 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
     QCOMPARE(lineFont.pointSizeF(), pointSize);
     QCOMPARE(lineFont.weight(), QFont::Normal);
     QCOMPARE(details->property("font").value<QFont>().pointSizeF(), pointSize * 0.9);
-    QCOMPARE(colorOf(artistAlbum), tokenHex(window, "text"));
     QCOMPARE(colorOf(details), tokenHex(window, "textTertiary"));
     // The step shows: its capitals are a fifth taller, at least.
     QVERIFY(QFontMetricsF(titleFont).capHeight() >= 1.15 * QFontMetricsF(lineFont).capHeight());
     // Each line takes the height of its font: none overlaps the next.
     QTRY_VERIFY(title->height() >= QFontMetricsF(titleFont).height() - 1);
-    QTRY_VERIFY(sceneRect(artistAlbum).top() >= sceneRect(title).bottom());
-    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(artistAlbum).bottom());
+    // "Artist — Album", or, where that would be cut off, a line each.
+    QQuickItem *firstLine = shown(artistAlbum) ? artistAlbum : named(window, "nowPlayingWideArtist");
+    QQuickItem *lastLine = shown(artistAlbum) ? artistAlbum : named(window, "nowPlayingWideAlbum");
+    QVERIFY(shown(firstLine) && shown(lastLine));
+    QCOMPARE(colorOf(firstLine), tokenHex(window, "text"));
+    QCOMPARE(colorOf(lastLine), tokenHex(window, "text"));
+    QTRY_VERIFY(sceneRect(firstLine).top() >= sceneRect(title).bottom());
+    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
 
     QQuickItem *seam = named(window, "nowPlayingSeam");
     QQuickItem *header = named(window, "libraryHeader");
@@ -805,6 +812,126 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
             QVERIFY2(line != nullptr && line->height() > 0.0, name);
         }
     }
+}
+
+void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("narrow");
+    for (const bool narrow : {false, true}) {
+        for (const qreal pointSize : {10.0, 14.0, 24.0}) {
+            QTest::addRow("%s, %g pt", narrow ? "narrow" : "wide", pointSize) << pointSize << narrow;
+        }
+    }
+}
+
+// The artist and the album both show at any font size (#373 H3: at 24 pt
+// "Artist — Album" was cut off before the album, with room under it): wide,
+// on one line where it fits, and otherwise on a line each, 4 px apart, 12 px
+// in from both sides, each whole where it fits on the width; narrow, on
+// lines of their own as always. Nothing else moves: the details under them,
+// then 28 px to the seam.
+void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, narrow);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QFont font = window->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(window->setProperty("font", font));
+    QObject *palette = paletteOf(window);
+    QTRY_COMPARE(palette->property("basePointSize").toReal(), pointSize);
+    if (narrow) {
+        window->resize(1000, 720);
+        QTRY_COMPARE(window->width(), 1000);
+    }
+    QObject *bridge = bridgeOf(window);
+    playTrack(bridge);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QTRY_COMPARE(panel->property("layoutMode").toString(),
+                 narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    const QRectF block = sceneRect(panel);
+    const QString artist = QStringLiteral("The Quiet Meridian");
+    const QString album = QStringLiteral("Small Hours");
+
+    // Why `line` does not show all of `text` within the panel's 12 px
+    // inset, or "".
+    const auto notWhole = [&](QQuickItem *line, const QString &text) -> QString {
+        const QRectF rect = sceneRect(line);
+        const QFontMetricsF metrics(line->property("font").value<QFont>());
+        if (shown(line) && line->property("text").toString() == text && !line->property("truncated").toBool()
+            && metrics.horizontalAdvance(text) <= rect.width() && rect.left() >= block.left() + 12
+            && rect.right() <= block.right() - 12) {
+            return {};
+        }
+        return QStringLiteral("%1: \"%2\" (%3 px, truncated %4) in %5 to %6 of %7 to %8")
+            .arg(line->objectName(), line->property("text").toString())
+            .arg(metrics.horizontalAdvance(text)).arg(line->property("truncated").toBool())
+            .arg(rect.left()).arg(rect.right()).arg(block.left()).arg(block.right());
+    };
+
+    if (narrow) {
+        QQuickItem *artistLine = named(window, "nowPlayingNarrowArtist");
+        QQuickItem *albumLine = named(window, "nowPlayingNarrowAlbum");
+        QVERIFY(artistLine && albumLine);
+        QVERIFY(shown(artistLine) && shown(albumLine));
+        QCOMPARE(artistLine->property("text").toString(), artist);
+        QVERIFY(albumLine->property("text").toString().startsWith(album));
+        QVERIFY(sceneRect(albumLine).top() >= sceneRect(artistLine).bottom());
+        return;
+    }
+
+    QQuickItem *title = named(window, "nowPlayingTitle");
+    QQuickItem *combined = named(window, "nowPlayingArtistAlbum");
+    QQuickItem *artistLine = named(window, "nowPlayingWideArtist");
+    QQuickItem *albumLine = named(window, "nowPlayingWideAlbum");
+    QQuickItem *details = named(window, "nowPlayingDetails");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QVERIFY(title && combined && artistLine && albumLine && details && seam);
+    const QString both = artist + QStringLiteral(" — ") + album;
+    const QFontMetricsF metrics(combined->property("font").value<QFont>());
+    const qreal width = block.width() - 24;
+    const bool fits = metrics.horizontalAdvance(both) <= width;
+    // The default font fits it on one line; 24 pt does not (Sol, H3).
+    if (pointSize == 10.0) {
+        QVERIFY(fits);
+    }
+    if (pointSize == 24.0) {
+        QVERIFY(!fits);
+    }
+    QCOMPARE(panel->property("wideArtistAlbumSplit").toBool(), !fits);
+    QQuickItem *lastLine = nullptr;
+    if (fits) {
+        QTRY_VERIFY2(notWhole(combined, both).isEmpty(), qPrintable(notWhole(combined, both)));
+        QVERIFY(!artistLine->isVisible() && !albumLine->isVisible());
+        lastLine = combined;
+    } else {
+        QVERIFY(!combined->isVisible());
+        QTRY_VERIFY(shown(artistLine) && shown(albumLine));
+        QCOMPARE(artistLine->property("text").toString(), artist);
+        QCOMPARE(albumLine->property("text").toString(), album);
+        // Each whole, as both fit the width on their own.
+        QTRY_VERIFY2(notWhole(artistLine, artist).isEmpty(), qPrintable(notWhole(artistLine, artist)));
+        QVERIFY2(notWhole(albumLine, album).isEmpty(), qPrintable(notWhole(albumLine, album)));
+        QCOMPARE(sceneRect(artistLine).left(), block.left() + 12);
+        QCOMPARE(sceneRect(albumLine).left(), block.left() + 12);
+        QVERIFY(sceneRect(artistLine).top() >= sceneRect(title).bottom());
+        QTRY_COMPARE(sceneRect(albumLine).top() - sceneRect(artistLine).bottom(), 4.0);
+        QCOMPARE(colorOf(artistLine), tokenHex(window, "text"));
+        QCOMPARE(colorOf(albumLine), tokenHex(window, "text"));
+        lastLine = albumLine;
+    }
+    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+
+    // A track whose artist and album fit on one line goes back to it.
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Ash"));
+    bridge->setProperty("currentTrackAlbum", QStringLiteral("Dusk"));
+    QTRY_VERIFY(!panel->property("wideArtistAlbumSplit").toBool());
+    QTRY_VERIFY2(notWhole(combined, QStringLiteral("Ash — Dusk")).isEmpty(),
+                 qPrintable(notWhole(combined, QStringLiteral("Ash — Dusk"))));
+    QVERIFY(!artistLine->isVisible() && !albumLine->isVisible());
 }
 
 // A track whose tag lacks its title and artist shows its file name as the
