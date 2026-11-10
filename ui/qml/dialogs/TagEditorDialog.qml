@@ -55,33 +55,61 @@ Dialog {
         { key: "totalDiscs", label: I18n.i18nc("@label tag field", "Discs"), formLabel: "", allowTitleCase: false, allowCapitalize: false },
         { key: "comment", label: I18n.i18nc("@label tag field", "Comment"), formLabel: I18n.i18nc("@label:textbox tag field", "Comment:"), allowTitleCase: false, allowCapitalize: false }
     ]
-    // The table's columns; the last one takes the room that is left.
+    // The table's columns, each at its width or wider when the font is
+    // larger; the last one takes the room that is left. `sample` is the
+    // widest value a short column holds whole.
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160 },
         { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140 },
         { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110 },
-        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56 },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48 },
+        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56, sample: "0000" },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48, sample: "00" },
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220 },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156 },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120 }
     ]
     readonly property real tableInset: Kirigami.Units.largeSpacing
-    readonly property real fixedColumnsWidth: root.tableColumns.reduce(
-        function(sum, column, index) {
-            return index === root.tableColumns.length - 1 ? sum : sum + column.width
+    // The room a column's header takes beside its label for the column's
+    // Revert, while it shows.
+    readonly property real columnRevertRoom: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+    // Each column's width: its own, or what its header takes whole, semibold
+    // and with its Revert, or its sample value, with the cell's padding.
+    // The table scrolls sideways when they are wider than the view, rather
+    // than elide a header to a letter.
+    readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
+        const header = columnHeaderMetrics.advanceWidth(column.label)
+            + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : 0)
+        const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
+        return Math.max(column.width, Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing)
+    })
+    readonly property real fixedColumnsWidth: root.tableColumnWidths.reduce(
+        function(sum, width, index) {
+            return index === root.tableColumnWidths.length - 1 ? sum : sum + width
         }, 2 * root.tableInset)
     readonly property real tableContentWidth: Math.max(
-        root.fixedColumnsWidth + root.tableColumns[root.tableColumns.length - 1].width,
+        root.fixedColumnsWidth + root.tableColumnWidths[root.tableColumnWidths.length - 1],
         tagEditorTable.width)
 
     function columnWidth(index) {
         return index === root.tableColumns.length - 1
             ? root.tableContentWidth - root.fixedColumnsWidth
-            : root.tableColumns[index].width
+            : root.tableColumnWidths[index]
+    }
+
+    FontMetrics {
+        id: columnHeaderMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+        font.weight: Font.DemiBold
+    }
+
+    FontMetrics {
+        id: columnValueMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
     }
 
     // The fields the edits changed, by their labels.

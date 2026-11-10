@@ -2107,7 +2107,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QGuiApplication::setFont(large);
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+                                   const TagEditorController::RenameGate &) { return tagRows(12); };
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
@@ -2186,6 +2186,55 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
         QVERIFY2(sceneRect(label).right() <= sceneRect(field).left(), qPrintable(key));
         QVERIFY2(sceneRect(field).right() < sceneRect(table).left(), qPrintable(key));
+    }
+
+    // The table's headers whole, with their Revert beside them once the
+    // edits change their column: at 24 pt Year and Disc elided to a letter.
+    // The columns are wider for them, and the table scrolls sideways
+    // rather than squeeze them; the track numbers are whole too.
+    QVariantList everyRow;
+    for (int row = 0; row < 12; ++row) {
+        everyRow << row;
+    }
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("year"), QStringLiteral("2001"));
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("discNo"), QStringLiteral("1"));
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("trackNo"), QStringLiteral("10"));
+    QQuickItem *header = visibleNamed(window, QStringLiteral("tagEditorTableHeader"));
+    QVERIFY(header != nullptr);
+    qreal columnsWidth = 0;
+    for (const QString &key : {QStringLiteral("trackNo"), QStringLiteral("title"), QStringLiteral("artist"),
+                               QStringLiteral("album"), QStringLiteral("genre"), QStringLiteral("year"),
+                               QStringLiteral("discNo"), QStringLiteral("fileName"), QStringLiteral("formatKind"),
+                               QStringLiteral("directory"), QStringLiteral("status")}) {
+        QQuickItem *column = named(window, QStringLiteral("tagEditorColumn_") + key);
+        QVERIFY2(column != nullptr, qPrintable(key));
+        columnsWidth += column->width();
+        QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
+        QTRY_VERIFY2(!label->property("truncated").toBool() && label->width() >= label->implicitWidth() - 0.5,
+                     qPrintable(describeItem(label)));
+        QVERIFY2(within(sceneRect(label), sceneRect(column)), qPrintable(describeItem(label)));
+        if (QQuickItem *revert = named(window, QStringLiteral("tagEditorColumnRevert_") + key)) {
+            if (revert->isVisible()) {
+                QVERIFY2(within(sceneRect(revert), sceneRect(column)), qPrintable(key));
+                // Beside the label once the header row lays it out.
+                QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(revert).left() + 0.5
+                                 || sceneRect(revert).right() <= sceneRect(label).left() + 0.5,
+                             qPrintable(key));
+            }
+        }
+    }
+    QVERIFY(named(window, QStringLiteral("tagEditorColumnRevert_year"))->isVisible());
+    QVERIFY(table->property("contentWidth").toReal() >= columnsWidth);
+    QVERIFY(table->property("contentWidth").toReal() > table->width());
+    for (QQuickItem *row : itemsNamed(window->contentItem(), QStringLiteral("tagEditorRow"))) {
+        for (QQuickItem *child : row->childItems()) {
+            for (QQuickItem *cell : child->childItems()) {
+                if (cell->property("text").toString() == QStringLiteral("10")
+                    || cell->property("text").toString() == QStringLiteral("2001")) {
+                    QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+                }
+            }
+        }
     }
     editor.close();
     QTRY_VERIFY(!tagEditor->property("visible").toBool());
