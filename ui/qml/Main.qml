@@ -187,6 +187,9 @@ ApplicationWindow {
     }
 
     readonly property int visualizationMinimumHeight: 220
+    // The narrowest window the design is drawn for: at a large font, the
+    // panes give up columns rather than make the window's minimum wider.
+    readonly property int narrowWindowWidth: 1000
     // The split handles are the seams between the panes, 1 px thick.
     readonly property int splitHandleAllowance: 1
     // The smallest window that shows every pane at its own minimum size,
@@ -1528,6 +1531,10 @@ ApplicationWindow {
                     droppedExternalPaths: PathUtils.droppedExternalPaths
                     errorController: errorController
                     addLibraryFolderAction: addLibraryFolderAction
+                    // What the narrow window, 1000 px wide, leaves the queue
+                    // beside the sidebar at its minimum.
+                    minimumWidthLimit: root.narrowWindowWidth - sidebarPane.SplitView.minimumWidth
+                        - root.splitHandleAllowance
                 }
 
                 Panes.SpectrogramPane {

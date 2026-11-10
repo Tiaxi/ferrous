@@ -21,6 +21,7 @@
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtEndian>
@@ -329,6 +330,7 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
+    void narrowWindowAtALargeFontFitsTheQueue();
     void firstRunShowsOneMessage();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
@@ -1279,6 +1281,84 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
     window->resize(1600, 1000);
     QTRY_VERIFY(album->isVisible());
     QVERIFY(albumHandle->isVisible());
+}
+
+// A narrow window at a large font, 1000 x 720 at 24 pt: the window's
+// minimum stays within it, and the queue's columns fit the queue. Length
+// keeps its measured width, the title its minimum, Album drops first, and
+// nothing runs past the queue's right end. An empty queue's hint wraps
+// within the queue, 24 px clear of its sides.
+void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1000, 720);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY2(window->minimumWidth() <= 1000, qPrintable(QString::number(window->minimumWidth())));
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QVERIFY(queue != nullptr);
+    QTRY_VERIFY(sceneRect(queue).right() <= window->width() + 0.5);
+
+    // The empty queue's hint.
+    bridge->setProperty("libraryRootCount", 1);
+    QQuickItem *hint = named(window, "queueEmptyMessage");
+    QQuickItem *explanation = named(window, "queueEmptyExplanation");
+    QVERIFY(hint && explanation);
+    QTRY_VERIFY(shown(hint));
+    const QRectF pane = sceneRect(queue);
+    for (QQuickItem *item : {hint, named(window, "queueEmptyLabel"), explanation}) {
+        const QRectF rect = sceneRect(item);
+        QVERIFY2(rect.left() >= pane.left() + 24 - 0.5 && rect.right() <= pane.right() - 24 + 0.5,
+                 qPrintable(QStringLiteral("%1: %2..%3 in %4..%5")
+                                .arg(item->objectName())
+                                .arg(rect.left()).arg(rect.right()).arg(pane.left()).arg(pane.right())));
+    }
+    QVERIFY2(explanation->property("lineCount").toInt() > 1,
+             qPrintable(QString::number(explanation->property("lineCount").toInt())));
+
+    // Fifty tracks: Length, Title and Artist fit; Album drops.
+    bridge->setProperty("queueRows", sampleQueueRows(50));
+    bridge->setProperty("queueLength", 50);
+    QQuickItem *view = named(window, "playlistView");
+    QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
+    QTRY_VERIFY(!shown(named(window, "queueHeader_album")));
+    QQuickItem *title = named(window, "queueHeader_title");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QQuickItem *length = named(window, "queueHeader_length");
+    QVERIFY(title && artist && length);
+    QVERIFY(shown(length) && shown(artist));
+    QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(title->width())));
+    QVERIFY(length->width() >= queue->property("minimumLengthColumnWidth").toReal() - 0.5);
+    QVERIFY(sceneRect(artist).left() >= sceneRect(title).right());
+    QVERIFY(sceneRect(length).left() >= sceneRect(artist).right());
+    QVERIFY2(sceneRect(length).right() <= pane.right() - 8 + 0.5,
+             qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(pane.right() - 8)));
+    // The row's cells are where the header's columns are.
+    QQuickItem *row = viewRowAt(view, 0);
+    for (const char *cell : {"queueCell_title", "queueCell_artist", "queueCell_length"}) {
+        QQuickItem *item = itemNamed(row, QString::fromLatin1(cell));
+        QVERIFY2(shown(item) && sceneRect(item).right() <= pane.right() - 8 + 0.5, cell);
+    }
+    QVERIFY(!shown(itemNamed(row, QStringLiteral("queueCell_album"))));
+
+    // Narrower still, at the queue's minimum: Artist drops too, and Length
+    // still fits.
+    window->resize(window->minimumWidth(), 720);
+    QTRY_COMPARE(window->width(), window->minimumWidth());
+    QTRY_VERIFY(queue->width() <= queue->property("minimumContentWidth").toReal() + 0.5);
+    const QRectF narrowPane = sceneRect(queue);
+    QVERIFY(narrowPane.right() <= window->width() + 0.5);
+    QVERIFY(shown(length));
+    QVERIFY2(sceneRect(length).right() <= narrowPane.right() - 8 + 0.5,
+             qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(narrowPane.right() - 8)));
+    QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(title->width())));
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {
