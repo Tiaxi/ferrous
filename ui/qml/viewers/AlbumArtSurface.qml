@@ -12,12 +12,13 @@ import "../logic/PathUtils.js" as PathUtils
 import "../logic/WheelUtils.js" as WheelUtils
 
 // The album art viewer's view: the art on the view colour, fitted, zoomed
-// and panned; while `infoVisible`, a 280 px column of the image's details
-// behind a 1 px seam over its right edge. The details lie over the art and
+// and panned; while `infoVisible`, a column of the image's details, 280 px
+// with its 1 px seam, over its right edge. The details lie over the art and
 // take nothing from its view, so the art keeps its place, zoom and pan.
-// During a preview from Replace from iTunes, the column ends with what the
+// During a preview from Replace from iTunes, the details go on with what the
 // preview shows and its buttons, as a dialog's: Back to Results and, for a
-// candidate, Apply.
+// candidate, Apply. The art then fits the space left of the details,
+// centred there, clear of their seam.
 Item {
     id: root
 
@@ -51,6 +52,15 @@ Item {
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
+    // The space the art fits in, across: the whole view, or during a
+    // preview the space left of the details' seam, less 24 px on each side.
+    readonly property real artMargin: root.previewActive && root.infoVisible ? 24 : 0
+    readonly property real fitLeft: root.artMargin
+    readonly property real fitWidth: root.artMargin > 0
+        ? Math.max(1, infoColumn.x - 1 - 2 * root.artMargin)
+        : albumArtViewport.width
+    readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
+    onFitWidthChanged: root.clampPan()
 
     // A push button of the details, reached with Tab, with its tooltip.
     // Space presses it rather than playing or pausing, which the viewer's
@@ -115,7 +125,7 @@ Item {
     function clampPan() {
         const scaledW = albumArtTransform.width * root.zoom
         const scaledH = albumArtTransform.height * root.zoom
-        const limitX = Math.max(0, (scaledW - albumArtViewport.width) / 2)
+        const limitX = Math.max(0, (scaledW - root.fitWidth) / 2)
         const limitY = Math.max(0, (scaledH - albumArtViewport.height) / 2)
         root.panX = Math.max(-limitX, Math.min(limitX, root.panX))
         root.panY = Math.max(-limitY, Math.min(limitY, root.panY))
@@ -123,11 +133,11 @@ Item {
 
     // Zooms to `nextZoom` keeping the image point at (`x`, `y`) in the
     // viewport under that point, as far as the pan limits allow. The image
-    // is centred in the viewport, offset by the pan and scaled about its
-    // centre, so the point at `pivot = (x, y) - viewport centre` shows the
-    // image point `(pivot - pan) / zoom` from the image's centre.
+    // is centred in the space it fits in, offset by the pan and scaled about
+    // its centre, so the point at `pivot = (x, y) - that space's centre`
+    // shows the image point `(pivot - pan) / zoom` from the image's centre.
     function zoomAbout(x, y, nextZoom) {
-        const pivotX = x - albumArtViewport.width / 2
+        const pivotX = x - root.fitCenterX
         const pivotY = y - albumArtViewport.height / 2
         const ratio = nextZoom / root.zoom
         root.zoom = nextZoom
@@ -204,12 +214,12 @@ Item {
             readonly property real aspect: albumArtImageFull.implicitWidth > 0
                     && albumArtImageFull.implicitHeight > 0
                 ? albumArtImageFull.implicitWidth / albumArtImageFull.implicitHeight
-                : Math.max(1, albumArtViewport.width) / Math.max(1, albumArtViewport.height)
+                : Math.max(1, root.fitWidth) / Math.max(1, albumArtViewport.height)
 
-            // Fitted to the view at zoom 1, enlarged if it is smaller.
-            width: Math.max(1, Math.min(albumArtViewport.width, albumArtViewport.height * aspect))
+            // Fitted to its space at zoom 1, enlarged if it is smaller.
+            width: Math.max(1, Math.min(root.fitWidth, albumArtViewport.height * aspect))
             height: Math.max(1, width / aspect)
-            x: (albumArtViewport.width - width) / 2 + root.panX
+            x: root.fitLeft + (root.fitWidth - width) / 2 + root.panX
             y: (albumArtViewport.height - height) / 2 + root.panY
             scale: root.zoom
             transformOrigin: Item.Center
@@ -354,11 +364,13 @@ Item {
         color: root.uiPalette.seam
     }
 
-    // The details: the file's name, then label and value rows; the folder
-    // on its own line, then its path, elided in the middle, with Copy Path.
-    // The rows' labels share a column as wide as the widest of them, up to
-    // two fifths of the row, so every value starts at the same x and keeps
-    // the rest; a label wider than that wraps.
+    // The details: the file's name, then label and value rows at the body
+    // size; the folder on its own line, then its path, elided in the
+    // middle, with Copy Path. The rows' labels share a column as wide as the
+    // widest of them, up to two fifths of the row, so every value starts at
+    // the same x and keeps the rest; a label wider than that wraps.
+    // During a preview, the column widens for a larger font, so neither of
+    // its buttons is cut short, up to half the view.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
@@ -366,7 +378,11 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: 279
+        width: root.previewActive
+            ? Math.max(279, Math.min(Math.floor(root.width / 2),
+                Math.ceil(Math.max(previewBackButton.implicitWidth,
+                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 32))
+            : 279
 
         // Opaque, so the details read the same over any art.
         Rectangle {
@@ -397,6 +413,18 @@ Item {
             anchors.rightMargin: 16
             anchors.topMargin: 12 + root.infoTopInset
             spacing: 0
+
+            // During a preview, what it shows, such as "iTunes Candidate",
+            // over the file's name.
+            Label {
+                objectName: "albumArtPreviewLabel"
+                Layout.fillWidth: true
+                Layout.bottomMargin: 2
+                visible: root.previewActive && text.length > 0
+                text: root.previewLabel
+                color: root.uiPalette.textSecondary
+                elide: Text.ElideRight
+            }
 
             readonly property real labelColumnWidth: Math.min(Math.ceil(infoRows.widestLabel),
                                                               Math.floor(infoLayout.width * 0.4))
@@ -466,7 +494,6 @@ Item {
                         Layout.maximumWidth: infoLayout.labelColumnWidth
                         Layout.alignment: Qt.AlignTop
                         text: modelData.name
-                        font.pointSize: root.uiPalette.smallPointSize
                         color: root.uiPalette.textSecondary
                         wrapMode: Text.Wrap
                     }
@@ -476,7 +503,6 @@ Item {
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignTop
                         text: modelData.value
-                        font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures
                         color: root.uiPalette.text
                         wrapMode: Text.Wrap
@@ -489,7 +515,6 @@ Item {
                 visible: root.folderPath.length > 0
                 Layout.topMargin: 5
                 text: I18n.i18nc("@label the folder the image is in", "Folder")
-                font.pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textSecondary
             }
 
@@ -504,7 +529,6 @@ Item {
                     objectName: "albumArtFolderPath"
                     Layout.fillWidth: true
                     text: root.displayPath(root.folderPath)
-                    font.pointSize: root.uiPalette.smallPointSize
                     color: root.uiPalette.text
                     elide: Text.ElideMiddle
                     // The whole path, however it is elided.
@@ -543,9 +567,9 @@ Item {
             }
         }
 
-        // The preview's foot, as a dialog's: a separator, what the preview
-        // shows, then its buttons at the end of a row. When they do not fit
-        // side by side, with a larger font or a longer translation, they
+        // The preview's buttons, as a dialog's, 12 px under the details: at
+        // the end of a row, the default one, Apply, last. When they do not
+        // fit side by side, with a larger font or a longer translation, they
         // stack, each the column's width, Back to Results first.
         // Anchors and bindings place them, so they are in place the moment
         // Apply shows or hides: a layout would place them only at its next
@@ -557,32 +581,9 @@ Item {
             visible: root.previewActive
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: previewButtons.y + previewButtons.height + 16
-
-            Rectangle {
-                id: previewSeam
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 1
-                color: root.uiPalette.seam
-            }
-
-            Label {
-                id: previewLabelText
-                objectName: "albumArtPreviewLabel"
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: previewSeam.bottom
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
-                anchors.topMargin: 12
-                text: root.previewLabel
-                font.weight: Font.DemiBold
-                color: root.uiPalette.text
-                elide: Text.ElideRight
-            }
+            anchors.top: infoLayout.bottom
+            anchors.topMargin: 12
+            height: previewButtons.y + previewButtons.height
 
             Item {
                 id: previewButtons
@@ -593,10 +594,9 @@ Item {
                         ? spacing + previewApplyButton.implicitWidth : 0) <= width
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: previewLabelText.bottom
+                anchors.top: parent.top
                 anchors.leftMargin: 16
                 anchors.rightMargin: 16
-                anchors.topMargin: 8
                 height: oneRow
                     ? Math.max(previewBackButton.height,
                         previewApplyButton.visible ? previewApplyButton.height : 0)
