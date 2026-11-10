@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
-#include <optional>
 #include <vector>
 
 #include "AppIcon.h"
@@ -29,7 +28,9 @@
 namespace {
 
 constexpr QRgb kTile = 0x3a1490;
-constexpr QRgb kFloor = 0xa6006e;
+// The magenta floor band of the H1 drawing, removed: it meant nothing and
+// read as a stripe glued on (#373 hill climb).
+constexpr QRgb kOldFloor = 0xa6006e;
 constexpr QRgb kGlide = 0xffb000;
 constexpr QRgb kHarmonic = 0xf0602a;
 
@@ -46,14 +47,14 @@ bool near(QRgb pixel, QRgb colour, int tolerance) {
            && std::abs(qBlue(pixel) - qBlue(colour)) <= tolerance;
 }
 
-// At least half the glide's amber, over the tile or the floor: the glide's
-// edge pixels count too.
+// At least half the glide's amber, over the tile: the glide's edge pixels
+// count too.
 bool glideInk(QRgb pixel) {
     return qRed(pixel) >= 150 && qGreen(pixel) >= 100;
 }
 
-// Either stroke over the tile or the floor, edge pixels included: the tile and
-// the floor have almost no green, the glide and the harmonic plenty.
+// Either stroke over the tile, edge pixels included: the tile has almost no
+// green, the glide and the harmonic plenty.
 bool strokeInk(QRgb pixel) {
     return qAlpha(pixel) == 255 && qGreen(pixel) >= 48;
 }
@@ -81,14 +82,34 @@ QRect tileOf(const QImage &image) {
     return tile;
 }
 
-// The first row of the floor band, down the tile's middle.
-std::optional<int> floorTopOf(const QImage &image, const QRect &tile) {
-    for (int y = tile.top(); y <= tile.bottom(); ++y) {
-        if (near(image.pixel(tile.center().x(), y), kFloor, 8)) {
-            return y;
+// Breeze's app-icon margin around the tile at each size: 1 px at 16, 2 px at
+// 22 and 32, 4 px at 48 and 6 px at 64, as Breeze's own app icons sit, and in
+// proportion above.
+int breezeMargin(int size) {
+    switch (size) {
+    case 16:
+        return 1;
+    case 22:
+    case 32:
+        return 2;
+    case 48:
+        return 4;
+    default:
+        return size * 6 / 64;
+    }
+}
+
+// The bounding box of the pixels that pass a test.
+QRect boundsWhere(const QImage &image, const std::function<bool(QRgb)> &test) {
+    QRect bounds;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            if (test(image.pixel(x, y))) {
+                bounds |= QRect(x, y, 1, 1);
+            }
         }
     }
-    return std::nullopt;
+    return bounds;
 }
 
 // The largest difference in any channel between two images of a size.
@@ -136,12 +157,12 @@ class AppIconTest : public QObject {
 private slots:
     void everySizeIsBuiltIn_data() { addSizeRows(); }
     void everySizeIsBuiltIn();
-    void smallSizesRiseFromTheFloorAndStayOffTheCorner_data();
-    void smallSizesRiseFromTheFloorAndStayOffTheCorner();
-    void harmonicAtEverySize_data() { addSizeRows(); }
-    void harmonicAtEverySize();
-    void strokesRiseTogetherFromTheFloor_data() { addSizeRows(); }
-    void strokesRiseTogetherFromTheFloor();
+    void smallSizesDrawOneHeavyGlide_data();
+    void smallSizesDrawOneHeavyGlide();
+    void harmonicFrom32Px_data();
+    void harmonicFrom32Px();
+    void strokesRiseTogetherFromOneOrigin_data() { addSizeRows(); }
+    void strokesRiseTogetherFromOneOrigin();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
@@ -160,82 +181,86 @@ void AppIconTest::everySizeIsBuiltIn() {
     const QImage image = render(path, size);
     QVERIFY2(!image.isNull(), qPrintable(reader.errorString()));
 
-    // The tile fills most of the square; the tile, the floor and the glide
-    // each have pixels of their own colour.
+    // The tile fills most of the square; the tile and the glide each have
+    // pixels of their own colour, and there is no floor band.
     const QRect all = image.rect();
     const int opaque = countWhere(image, all, [](QRgb p) { return qAlpha(p) == 255; });
-    QVERIFY2(opaque >= size * size * 3 / 5, qPrintable(QString::number(opaque)));
+    QVERIFY2(opaque >= size * size / 2, qPrintable(QString::number(opaque)));
     QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kTile, 4); }) >= size * size / 3);
-    QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kFloor, 4); }) >= size);
+    QCOMPARE(countWhere(image, all, [](QRgb p) { return near(p, kOldFloor, 24); }), 0);
     QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kGlide, 24); }) >= size / 2);
-    // Centred, with a margin.
+    // Centred, in Breeze's app-icon margin.
     const QRect tile = tileOf(image);
+    QCOMPARE(tile.left(), breezeMargin(size));
+    QCOMPARE(tile.top(), breezeMargin(size));
     QCOMPARE(tile.left(), all.right() - tile.right());
     QCOMPARE(tile.top(), all.bottom() - tile.bottom());
-    QVERIFY(tile.left() >= 1);
 
     QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(0)));
     QCOMPARE(FerrousAppIcon::resourcePath(24), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
 }
 
-void AppIconTest::smallSizesRiseFromTheFloorAndStayOffTheCorner_data() {
+void AppIconTest::smallSizesDrawOneHeavyGlide_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("16px") << 16;
     QTest::addRow("22px") << 22;
-    QTest::addRow("32px") << 32;
 }
 
-void AppIconTest::smallSizesRiseFromTheFloorAndStayOffTheCorner() {
+// At 16 and 22 px a thin harmonic beside the glide smeared into it: there the
+// icon is the glide alone, at least 2 px of full amber through its length
+// (#373 hill climb).
+void AppIconTest::smallSizesDrawOneHeavyGlide() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
     const QRect tile = tileOf(image);
-    const std::optional<int> floorTop = floorTopOf(image, tile);
-    QVERIFY(floorTop.has_value());
-    // The floor is a band: at most a seventh of the tile.
-    QVERIFY2(tile.bottom() + 1 - *floorTop <= tile.height() / 7 + 1, qPrintable(QString::number(*floorTop)));
+    // No harmonic: none of its red-orange, which no blend of the glide's
+    // amber with the tile comes near.
+    QCOMPARE(countWhere(image, image.rect(), [](QRgb p) { return near(p, kHarmonic, 16); }), 0);
 
-    // Corner to corner reads as a slash: nothing of the glide in the tile's
-    // top-right corner.
-    const int cornerSide = std::lround(tile.width() * 0.3);
-    const QRect corner(tile.right() + 1 - cornerSide, tile.top(), cornerSide, cornerSide);
-    QCOMPARE(countWhere(image, corner, glideInk), 0);
-    // At 22 and 16 px it ends at about 70% of the width.
-    int rightmost = -1;
-    for (int y = tile.top(); y < *floorTop; ++y) {
-        for (int x = tile.left(); x <= tile.right(); ++x) {
-            if (glideInk(image.pixel(x, y))) {
-                rightmost = std::max(rightmost, x);
-            }
+    // Heavy: every column through the glide's middle holds at least two
+    // pixels of its full amber.
+    const QRect ink = boundsWhere(image, [](QRgb p) { return near(p, kGlide, 24); });
+    QVERIFY(ink.isValid());
+    QVERIFY2(ink.width() >= tile.width() / 2, qPrintable(QString::number(ink.width())));
+    for (int x = ink.left() + ink.width() / 4; x <= ink.right() - ink.width() / 4; ++x) {
+        const int full = countWhere(image, QRect(x, tile.top(), 1, tile.height()),
+                                    [](QRgb p) { return near(p, kGlide, 24); });
+        QVERIFY2(full >= 2, qPrintable(QStringLiteral("column %1: %2").arg(x).arg(full)));
+    }
+    // It rises: its left end is lower than its right.
+    const QRect left(ink.left(), tile.top(), 2, tile.height());
+    const QRect right(ink.right() - 1, tile.top(), 2, tile.height());
+    QVERIFY(boundsWhere(image.copy(left), glideInk).center().y()
+            > boundsWhere(image.copy(right), glideInk).center().y());
+}
+
+void AppIconTest::harmonicFrom32Px_data() {
+    QTest::addColumn<int>("size");
+    for (const int size : FerrousAppIcon::kSizes) {
+        if (size >= 32) {
+            QTest::addRow("%dpx", size) << size;
         }
     }
-    if (size < 32) {
-        QVERIFY2(rightmost + 1 <= std::lround(size * 0.84), qPrintable(QString::number(rightmost)));
-        QVERIFY2(rightmost + 1 >= std::lround(size * 0.6), qPrintable(QString::number(rightmost)));
-        // At 22 and 16 px the glide starts at the floor band: its round cap
-        // sits on the band's top row, in the tile's left half.
-        const QRect onFloor(tile.left(), *floorTop - 1, tile.width() / 2, 1);
-        QVERIFY(countWhere(image, onFloor, glideInk) >= 1);
-    }
 }
 
-void AppIconTest::harmonicAtEverySize() {
+void AppIconTest::harmonicFrom32Px() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
-    // The harmonic's red-orange, distinct from the glide's amber; at 16 and
-    // 22 px a stair of whole pixels.
+    // The harmonic's red-orange, distinct from the glide's amber: from 32 px
+    // up a stroke of its own, not a few pixels at the glide's edge. Near the
+    // origin the glide covers it, so two thirds of the size is a stroke
+    // about 2 px wide over half the tile.
     const int harmonic = countWhere(image, image.rect(), [](QRgb p) { return near(p, kHarmonic, 40); });
-    QVERIFY2(harmonic >= 4, qPrintable(QString::number(harmonic)));
+    QVERIFY2(harmonic >= size * 2 / 3, qPrintable(QString::number(harmonic)));
 }
 
-// The glide and its harmonic are one sweep growing out of the floor band, not
-// strokes floating in the tile (#373 hill climb): their ink is one shape, it
-// stands on the band, and it starts in the tile's left third.
-void AppIconTest::strokesRiseTogetherFromTheFloor() {
+// The glide and its harmonic are one sweep from one origin, not strokes
+// floating apart (#373 hill climb): their ink is one shape, it starts low in
+// the tile's left third, and the drawing sits in the middle of the tile.
+void AppIconTest::strokesRiseTogetherFromOneOrigin() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
     const QRect tile = tileOf(image);
-    const std::optional<int> floorTop = floorTopOf(image, tile);
-    QVERIFY(floorTop.has_value());
 
     // The strokes' ink, in shapes of touching pixels, corners included.
     std::vector<int> shape(static_cast<size_t>(size * size), -1);
@@ -272,9 +297,21 @@ void AppIconTest::strokesRiseTogetherFromTheFloor() {
         }
     }
     QCOMPARE(shapes, 1);
-    // It reaches the band's top row, at its start in the tile's left third.
-    QVERIFY2(lowest >= *floorTop - 1, qPrintable(QStringLiteral("%1 above %2").arg(lowest).arg(*floorTop)));
+    // Its lowest point, the origin, is in the tile's left third and lower half.
     QVERIFY2(lowestX < tile.left() + tile.width() / 3, qPrintable(QString::number(lowestX)));
+    QVERIFY2(lowest > tile.center().y(), qPrintable(QString::number(lowest)));
+    // The drawing is centred in the tile, to within a pixel or so.
+    const QRect ink = boundsWhere(image, strokeInk);
+    const double slack = std::max(1.0, size / 32.0);
+    const double dx = (ink.left() + ink.right()) / 2.0 - (tile.left() + tile.right()) / 2.0;
+    const double dy = (ink.top() + ink.bottom()) / 2.0 - (tile.top() + tile.bottom()) / 2.0;
+    QVERIFY2(std::abs(dx) <= slack && std::abs(dy) <= slack,
+             qPrintable(QStringLiteral("off centre by %1, %2").arg(dx).arg(dy)));
+    // Nothing of the glide in the tile's top-right corner: it rises, it does
+    // not slash from corner to corner.
+    const int cornerSide = std::lround(tile.width() * 0.2);
+    const QRect corner(tile.right() + 1 - cornerSide, tile.top(), cornerSide, cornerSide);
+    QCOMPARE(countWhere(image, corner, glideInk), 0);
 }
 
 void AppIconTest::windowIconHasEachSizesDrawing() {

@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 64 px. The 64-unit drawing at 1 px a unit: the glide and its harmonic, at twice the glide's slope, start together on the floor band. -->
+<!-- Ferrous, 64 px. The 64-unit drawing at 1 px a unit, in Breeze's 6 px margin: the glide and its harmonic, at twice the glide's slope, start together. -->
 <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-  <path id="tile" fill="#3a1490" d="M4 55 V9 A5 5 0 0 1 9 4 H55 A5 5 0 0 1 60 9 V55 Z"/>
-  <path id="floor" fill="#a6006e" d="M4 55 H60 V55 A5 5 0 0 1 55 60 H9 A5 5 0 0 1 4 55 Z"/>
-  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="3" stroke-linecap="round" d="M12 53.5 L45 14"/>
-  <path id="glide" fill="none" stroke="#ffb000" stroke-width="5" stroke-linecap="round" d="M12 53.5 L52 29.5"/>
+  <rect id="tile" fill="#3a1490" x="6" y="6" width="52" height="52" rx="5"/>
+  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="3" stroke-linecap="round" d="M15 47 L41 16.4"/>
+  <path id="glide" fill="none" stroke="#ffb000" stroke-width="5" stroke-linecap="round" d="M15 47 L49 27"/>
 </svg>

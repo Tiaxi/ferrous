@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Ferrous, 256 px. The 64-unit drawing at 4 px a unit. -->
 <svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
-  <path id="tile" fill="#3a1490" d="M16 220 V36 A20 20 0 0 1 36 16 H220 A20 20 0 0 1 240 36 V220 Z"/>
-  <path id="floor" fill="#a6006e" d="M16 220 H240 V220 A20 20 0 0 1 220 240 H36 A20 20 0 0 1 16 220 Z"/>
-  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="12" stroke-linecap="round" d="M48 214 L180 56"/>
-  <path id="glide" fill="none" stroke="#ffb000" stroke-width="20" stroke-linecap="round" d="M48 214 L208 118"/>
+  <rect id="tile" fill="#3a1490" x="24" y="24" width="208" height="208" rx="20"/>
+  <path id="harmonic" fill="none" stroke="#f0602a" stroke-width="12" stroke-linecap="round" d="M60 188 L164 65.6"/>
+  <path id="glide" fill="none" stroke="#ffb000" stroke-width="20" stroke-linecap="round" d="M60 188 L196 108"/>
 </svg>
