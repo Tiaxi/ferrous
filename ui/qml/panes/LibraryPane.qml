@@ -41,6 +41,10 @@ Rectangle {
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
     readonly property int stateGlyphSize: 12
+    // The mark of a collapsed row that holds the playing track: an amber
+    // tick at the row's left edge, apart from the chevrons, as tall as the
+    // state glyphs.
+    readonly property int nowTickWidth: 2
 
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
@@ -208,6 +212,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(libraryAlbumView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (libraryAlbumView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
                 onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
 
                 onContentHeightChanged: {
@@ -295,7 +305,7 @@ Rectangle {
                     // The row the keyboard is on, in a list with focus.
                     readonly property bool rowCurrent: libraryAlbumView.activeFocus
                         && selectionKeyResolved.length > 0
-                        && selectionKeyResolved === root.controller.selectedSelectionKey
+                        && selectionKeyResolved === root.controller.currentRowKey
                     readonly property string rowKindText: isTrackRow
                         ? I18n.i18nc("@info library row kind", "Track")
                         : (isAlbumRow
@@ -334,7 +344,7 @@ Rectangle {
                             ? treeNowFade.level : 0
                     }
                     readonly property string stateGlyph: {
-                        if (isNow || holdsNow) {
+                        if (isNow) {
                             return root.playbackState === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                         }
@@ -430,9 +440,8 @@ Rectangle {
                         color: root.uiPalette.textSecondary
                     }
 
-                    // Playing, paused or stopped, or unreadable; a dim
-                    // amber mark on a collapsed row holding the playing
-                    // track.
+                    // A track's state: playing, paused or stopped, or
+                    // unreadable.
                     Kirigami.Icon {
                         objectName: "libraryRowState"
                         readonly property string glyph: libraryRow.stateGlyph
@@ -443,10 +452,7 @@ Rectangle {
                         height: root.stateGlyphSize
                         source: glyph
                         isMask: true
-                        color: libraryRow.isNow || libraryRow.holdsNow
-                            ? root.uiPalette.now
-                            : root.uiPalette.textSecondary
-                        opacity: libraryRow.holdsNow ? 0.6 : 1
+                        color: libraryRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
 
                         ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
                         ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -457,11 +463,11 @@ Rectangle {
                         }
                     }
 
-                    // The glyph the row had while it was now, or held
-                    // what was, fading out over whatever it shows next.
+                    // The glyph a track row had while it was now, fading
+                    // out over whatever it shows next.
                     Kirigami.Icon {
                         objectName: "libraryRowFadingState"
-                        visible: libraryRow.amberLeft > 0
+                        visible: libraryRow.isTrackRow && libraryRow.amberLeft > 0
                         x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
                         y: Math.round((libraryRow.height - height) / 2)
                         width: root.stateGlyphSize
@@ -469,7 +475,24 @@ Rectangle {
                         source: visible ? treeNowFade.target.glyph : ""
                         isMask: true
                         color: root.uiPalette.now
-                        opacity: libraryRow.amberLeft * (libraryRow.isTrackRow ? 1 : 0.6)
+                        opacity: libraryRow.amberLeft
+                    }
+
+                    // A collapsed row that holds the playing track, playing
+                    // or paused: a tick at the row's left edge, away from
+                    // its chevron, so it never reads as a second one. It
+                    // fades out with the amber after a track change.
+                    Rectangle {
+                        objectName: "libraryRowNowTick"
+                        readonly property real level: libraryRow.holdsNow
+                            ? 1 : (libraryRow.isTrackRow ? 0 : libraryRow.amberLeft)
+                        visible: level > 0
+                        x: 0
+                        y: Math.round((libraryRow.height - height) / 2)
+                        width: root.nowTickWidth
+                        height: root.stateGlyphSize
+                        color: root.uiPalette.now
+                        opacity: level
                     }
 
                     Kirigami.ShadowedImage {
@@ -587,6 +610,7 @@ Rectangle {
                             libraryAlbumView.forceActiveFocus()
                             const rowMap = libraryRow.actionRowMap()
                             if (mouse.button === Qt.LeftButton && onChevron(mouse.x)) {
+                                root.controller.focusRow(libraryRow.selectionKeyResolved)
                                 root.controller.toggleNode(key)
                                 return
                             }

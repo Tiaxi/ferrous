@@ -30,10 +30,16 @@ Item {
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
+    // Before any audio, with neither a track nor its channels, there are
+    // no lanes to name: no labels, and so no Mute and Solo. A track change
+    // keeps them while the new track's channels are not known yet.
+    readonly property bool hasLanes: (root.uiBridge.currentTrackPath || "").length > 0
+        || root.uiBridge.currentTrackChannels > 0
     readonly property var laneLabels: {
         const labels = []
+        const named = waveform.viewMode === 1 && root.hasLanes
         for (let i = 0; i < root.laneCount; ++i) {
-            labels.push(waveform.viewMode === 1 ? root.channelLabel(i) : "")
+            labels.push(named ? root.channelLabel(i) : "")
         }
         return labels
     }

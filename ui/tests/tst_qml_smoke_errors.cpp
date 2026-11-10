@@ -887,7 +887,9 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
 
-    // The popup fits the window; the list scrolls, and has the keyboard.
+    // The popup fits the window; the list scrolls. The newest entry's
+    // action has the keyboard, so no focus frame wraps the whole list; the
+    // list's keys scroll it from there.
     QVERIFY(shownInsideItsWindow(content));
     QVERIFY(shownInsideItsWindow(diagnostics));
     QVERIFY(shownInsideItsWindow(clearAll));
@@ -895,7 +897,15 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     auto *flickable = qvariant_cast<QQuickItem *>(view->property("contentItem"));
     QVERIFY(flickable != nullptr);
     QTRY_VERIFY(flickable->property("contentHeight").toReal() > view->height());
-    QTRY_VERIFY(view->hasActiveFocus());
+    QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    QCOMPARE(actions.size(), limit);
+    QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QVERIFY(!view->property("framed").toBool());
+    QQuickItem *frame = itemNamed(view, QStringLiteral("keyScrollViewFrame"));
+    QVERIFY(frame != nullptr);
+    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>().alpha(), 0);
+    // Nor a ring on the action: the keyboard has not been used.
+    QVERIFY(!actions.first()->property("visualFocus").toBool());
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
     QTest::keyClick(window, Qt::Key_End);
@@ -920,7 +930,24 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QCOMPARE(flickable->property("contentY").toReal(), 0.0);
-    QTRY_VERIFY(view->hasActiveFocus());
+    QTRY_VERIFY(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->hasActiveFocus());
+    // The keys scroll the list from the header's and the footer's
+    // controls too.
+    clearAll->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_End);
+    QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
+    diagnostics->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Home);
+    QTRY_COMPARE(flickable->property("contentY").toReal(), 0.0);
+    // Tab from Clear All goes on to the first action, with no frame round
+    // the list; with the keyboard on the list itself, its frame shows.
+    clearAll->forceActiveFocus(Qt::TabFocusReason);
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->hasActiveFocus());
+    QVERIFY(!view->property("framed").toBool());
+    flickable->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(view->property("framed").toBool());
+    QVERIFY(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>().alpha() > 0);
 
     // Everything has a name.
     QAccessibleInterface *popupAccessible = QAccessible::queryAccessibleInterface(content);
@@ -931,7 +958,7 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
              QStringLiteral("Recent issues"));
 
     // Tab goes on to each row's action, scrolling the row into view.
-    QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
+    actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QCOMPARE(actions.size(), limit);
     QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(actions.first()->hasActiveFocus());
@@ -964,15 +991,26 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     // Space presses a focused action rather than playing or pausing.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_VERIFY(view->hasActiveFocus());
     actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QVERIFY(!actions.isEmpty());
-    QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(actions.first()->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QCOMPARE(toggled.count(), 1);
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/track 0.flac")});
+
+    // With no entry that has an action, Open Diagnostics has the keyboard,
+    // never Clear All.
+    QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+    QTRY_COMPARE(errors->property("count").toInt(), 0);
+    QVERIFY(sendBridgeError(bridge, QStringLiteral("Playback stopped unexpectedly"), 1, 1));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+    QCOMPARE(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->isVisible(), false);
+    QTRY_VERIFY(diagnostics->hasActiveFocus());
+    QVERIFY(!view->property("framed").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(finishIncubation(engine));
     const QString log = takeCapturedMessagesText();
     QVERIFY2(log.isEmpty(), qPrintable(log));

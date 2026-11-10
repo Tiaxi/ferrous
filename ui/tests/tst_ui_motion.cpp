@@ -1063,7 +1063,7 @@ void UiMotionTest::queueEditsMovingThePlayingRowFadeNothing() {
 
 // The tree hands the amber over as the queue does: the new track row at
 // once, the old one fading; a collapsed album that held the old track
-// fades its 60% glyph out.
+// fades its tick out.
 void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
@@ -1101,24 +1101,31 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QVERIFY(colorOf(first.title) != nowHex(window));
 
     // Album B is collapsed and holds the next track; then Album A plays
-    // again, and Album B's dim mark fades out.
+    // again, and Album B's tick fades out. A collapsed row shows no glyph.
     QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
     QVERIFY(albumB != nullptr);
     playTreeTrack(bridge, kTrackB1, kAlbumBKey);
     const RowLook album = libraryRowLook(albumB);
-    QVERIFY(album.glyph->isVisible());
-    QCOMPARE(album.glyph->opacity(), 0.6);
+    QQuickItem *albumTick = itemNamed(albumB, QStringLiteral("libraryRowNowTick"));
+    QVERIFY(albumTick != nullptr);
+    QVERIFY(albumTick->isVisible());
+    QCOMPARE(albumTick->opacity(), 1.0);
+    QVERIFY(!album.glyph->isVisible());
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
+    QVERIFY(albumTick->isVisible());
+    QCOMPARE(albumTick->opacity(), 1.0);
+    QCOMPARE(colorOf(albumTick), nowHex(window));
     QVERIFY(!album.glyph->isVisible());
-    QVERIFY(album.fadingGlyph->isVisible());
-    QCOMPARE(album.fadingGlyph->opacity(), 0.6);
-    QCOMPARE(colorOf(album.fadingGlyph), nowHex(window));
+    QVERIFY(!album.fadingGlyph->isVisible());
     // Its title is never amber.
     QVERIFY(colorOf(album.title) != nowHex(window));
     QCOMPARE(colorOf(libraryRowLook(libraryRowWithPath(window, kTrackA1)).title), nowHex(window));
+    QVERIFY(QTest::qWaitFor([&]() {
+        return albumTick->opacity() < 1.0 || !albumTick->isVisible();
+    }));
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
-    QVERIFY(!album.fadingGlyph->isVisible());
+    QVERIFY(!albumTick->isVisible());
 }
 
 // The tree reuses its rows: a row that comes back for another track never

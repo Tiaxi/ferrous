@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFont>
 #include <QImage>
+#include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
@@ -293,6 +294,7 @@ private slots:
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void listsRingARowAsTheKeyboardComesIn();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
@@ -680,35 +682,78 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     QCOMPARE(colorOf(title(track)), tokenHex(window, "text"));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // A collapsed album that holds the playing track: the amber glyph at
-    // 60% in the column left of its chevron. Its title stays un-amber.
+    // The playing track's own row has no tick.
+    QVERIFY(!shown(itemNamed(track, QStringLiteral("libraryRowNowTick"))));
+    // Expanded rows neither.
+    QVERIFY(!shown(itemNamed(libraryRow(window, QStringLiteral("album")), QStringLiteral("libraryRowNowTick"))));
+
+    // A collapsed album that holds the playing track: no glyph, but a
+    // 2 x 12 px amber tick at the row's left edge, vertically centred,
+    // clear of its chevron, so it never reads as a second one. Its title
+    // stays un-amber.
+    const auto tick = [](QQuickItem *row) { return itemNamed(row, QStringLiteral("libraryRowNowTick")); };
+    const auto checkTick = [&](QQuickItem *row) {
+        QQuickItem *mark = tick(row);
+        QVERIFY(shown(mark));
+        QCOMPARE(colorOf(mark), tokenHex(window, "now"));
+        QCOMPARE(mark->opacity(), 1.0);
+        QCOMPARE(mark->width(), 2.0);
+        QCOMPARE(mark->height(), 12.0);
+        const QRectF markRect = mark->mapRectToItem(row, QRectF(0, 0, mark->width(), mark->height()));
+        QCOMPARE(markRect.left(), 0.0);
+        QVERIFY(std::abs(markRect.center().y() - row->height() / 2) <= 0.5);
+        QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
+        QVERIFY(shown(chevron));
+        const QRectF chevronRect =
+            chevron->mapRectToItem(row, QRectF(0, 0, chevron->width(), chevron->height()));
+        // Apart from the chevron by more than a glyph's gap.
+        QVERIFY2(chevronRect.left() - markRect.right() >= 8.0,
+                 qPrintable(QStringLiteral("tick ends at %1, chevron starts at %2")
+                                .arg(markRect.right())
+                                .arg(chevronRect.left())));
+    };
     libraryModel.toggleKey(QStringLiteral("album|Artist A|Album A"));
     QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
     QQuickItem *album = libraryRow(window, QStringLiteral("album"));
     QVERIFY(album != nullptr);
-    QTRY_COMPARE(glyphName(album), QStringLiteral("media-playback-start"));
-    QCOMPARE(colorOf(glyph(album)), tokenHex(window, "now"));
-    QCOMPARE(glyph(album)->opacity(), 0.6);
-    QCOMPARE(glyph(album)->mapToItem(album, QPointF()).x(), 12.0 + 2.0);
+    QTRY_VERIFY(shown(tick(album)));
+    checkTick(album);
+    QCOMPARE(glyphName(album), QString());
     QCOMPARE(colorOf(title(album)), tokenHex(window, "text"));
     QCOMPARE(title(album)->property("font").value<QFont>().weight(), QFont::Normal);
-    // So does a collapsed artist.
+    // On a hovered and a selected row too, in a colour apart from their tints.
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 1)));
+    named(window, "libraryView")->forceActiveFocus();
+    QTest::mouseMove(window, sceneRect(album).center().toPoint());
+    QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundHover"))));
+    QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundTint"))));
+    checkTick(album);
+    // Drawn over both tints.
+    const QList<QQuickItem *> children = album->childItems();
+    QVERIFY(children.indexOf(tick(album)) > children.indexOf(itemNamed(album, QStringLiteral("rowBackgroundTint"))->parentItem()));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QVERIFY(QMetaObject::invokeMethod(controller, "clearPrimarySelection"));
+    libraryModel.clearSelection();
+    // So does a collapsed artist, where the chevron is nearest the edge.
     libraryModel.collapseAll();
     QTRY_VERIFY(libraryRow(window, QStringLiteral("album")) == nullptr);
     QQuickItem *artist = libraryRow(window, QStringLiteral("artist"));
     QVERIFY(artist != nullptr);
-    QTRY_COMPARE(glyphName(artist), QStringLiteral("media-playback-start"));
-    QCOMPARE(glyph(artist)->opacity(), 0.6);
-    // Paused, the pause glyph; stopped, nothing: amber means now.
+    QTRY_VERIFY(shown(tick(artist)));
+    checkTick(artist);
+    QCOMPARE(glyphName(artist), QString());
+    // Paused too; stopped, nothing: amber means now.
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QTRY_COMPARE(glyphName(artist), QStringLiteral("media-playback-pause"));
+    QVERIFY(shown(tick(artist)));
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
-    QTRY_COMPARE(glyphName(artist), QString());
+    QTRY_VERIFY(!shown(tick(artist)));
     // Another track, in other rows: nothing.
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(shown(tick(artist)));
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist B/Album/01.flac"));
     bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("artist|Artist B")});
-    QTRY_COMPARE(glyphName(artist), QString());
+    QTRY_VERIFY(!shown(tick(artist)));
 }
 
 void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath() {
@@ -721,8 +766,8 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     const auto artistMark = [&]() {
         QQuickItem *artist = libraryRow(window, QStringLiteral("artist"));
-        QQuickItem *glyph = artist != nullptr ? itemNamed(artist, QStringLiteral("libraryRowState")) : nullptr;
-        return shown(glyph) ? glyph->property("source").toString() : QString();
+        QQuickItem *tick = artist != nullptr ? itemNamed(artist, QStringLiteral("libraryRowNowTick")) : nullptr;
+        return shown(tick);
     };
     // One artist gathers a loose file right in the library folder, tagged
     // with its name, and an album track in its own folder. Its row has the
@@ -735,16 +780,16 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
         // The loose file.
         bridge->setProperty("currentTrackPath", QStringLiteral("/music/single.flac"));
         bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("root|/music"), kArtistKey});
-        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        QTRY_VERIFY(artistMark());
         // The album track.
         bridge->setProperty("currentTrackPath", kTrackPath);
         bridge->setProperty("currentTrackTreeKeys",
                             QStringList{QStringLiteral("root|/music"), kArtistKey, kAlbumKey});
-        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        QTRY_VERIFY(artistMark());
         // A track the library does not have: no rows hold it.
         bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/elsewhere.flac"));
         bridge->setProperty("currentTrackTreeKeys", QStringList{});
-        QTRY_COMPARE(artistMark(), QString());
+        QTRY_VERIFY(!artistMark());
     }
 }
 
@@ -806,6 +851,130 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// Tab into the library or the queue with no row selected: a row it shows
+// becomes the current one and has the 1 px ring, so the keyboard's place
+// shows. Nothing is selected and the view stays where it is.
+void UiMainWindowTest::listsRingARowAsTheKeyboardComesIn() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, kAllExpanded);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) != nullptr);
+    QQuickItem *libraryView = named(window, "libraryView");
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(libraryView && queueView && library && queue);
+    const auto rowAt = [](QQuickItem *view, int index) {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        return row;
+    };
+    // Whether row `index` of `view` has the ring alone: no selection tint.
+    const auto ringedAlone = [&rowAt](QQuickItem *view, int index) {
+        QQuickItem *row = rowAt(view, index);
+        QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+        return shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() == 1.0
+            && tint->property("color").value<QColor>().alpha() == 0;
+    };
+    const auto ringedRows = [&rowAt](QQuickItem *view) {
+        QList<int> rows;
+        for (int index = 0; index < view->property("count").toInt(); ++index) {
+            QQuickItem *row = rowAt(view, index);
+            QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+            if (shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() > 0) {
+                rows.push_back(index);
+            }
+        }
+        return rows;
+    };
+    const auto tabInto = [window](QQuickItem *view) {
+        named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(!view->hasActiveFocus());
+        view->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(view->hasActiveFocus());
+    };
+
+    // The library: its first row, with nothing selected.
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{0});
+    QVERIFY(ringedAlone(libraryView, 0));
+    QCOMPARE(library->property("selectedSelectionKey").toString(), QString());
+    QCOMPARE(libraryModel.selectedKeys(), QStringList());
+    // The keys go on from it: Down selects the next row.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(library->property("selectedSelectionKey").toString(),
+                 rowAt(libraryView, 1)->property("selectionKeyResolved").toString());
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QVERIFY(!ringedAlone(libraryView, 1));
+    // Deselected, the row stays the current one.
+    QVERIFY(QMetaObject::invokeMethod(library, "clearPrimarySelection"));
+    libraryModel.clearSelection();
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QVERIFY(ringedAlone(libraryView, 1));
+
+    // Playing, a fresh tree rings the playing track's row,
+    playTrack(bridge);
+    library->setProperty("focusSelectionKey", QString());
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{2});
+    QVERIFY(ringedAlone(libraryView, 2));
+    // or the collapsed row that holds it.
+    library->setProperty("focusSelectionKey", QString());
+    libraryModel.toggleKey(kAlbumKey);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QCOMPARE(libraryModel.selectedKeys(), QStringList());
+    // Without the keyboard, no ring.
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{});
+
+    // The queue, scrolled down: its first row shown, and it stays put.
+    bridge->setProperty("queueRows", sampleQueueRows(80));
+    bridge->setProperty("queueLength", 80);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueView->property("count").toInt(), 80);
+    const qreal rowHeight = queueView->property("rowHeight").toReal();
+    QVERIFY(rowHeight > 0);
+    named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+    queueView->setProperty("contentY", 10 * rowHeight);
+    QTRY_VERIFY(rowAt(queueView, 10) != nullptr);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{10});
+    QVERIFY(ringedAlone(queueView, 10));
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    QCOMPARE(queue->property("selectedIndices").toList().size(), 0);
+    // Enter plays the ringed row.
+    QJSValue played = engine.newObject();
+    queue->setProperty("playAt", QVariant::fromValue(
+        engine.evaluate(QStringLiteral("(function(played) { return function(index) { played.index = index } })"))
+            .call({played})));
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(played.property(QStringLiteral("index")).toInt(), 10);
+    // The playing row, when it shows,
+    bridge->setProperty("playingQueueIndex", 14);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    queue->setProperty("focusRowIndex", -1);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{14});
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    // but not one off the view: the queue does not move to it.
+    bridge->setProperty("playingQueueIndex", 2);
+    queue->setProperty("focusRowIndex", -1);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{10});
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    QCOMPARE(queue->property("selectedIndices").toList().size(), 0);
+    // Down goes on from it, selecting the next row.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{11});
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{11});
 }
 
 void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
@@ -995,6 +1164,7 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
                  ->property("text").toString(),
              QString());
     QCOMPARE(colorOf(named(window, "spectrogramPane")), QStringLiteral("#ff000000"));
+    QVERIFY(!shown(named(window, "plotAnalysingText")));
     QVERIFY(shown(named(window, "nowPlayingEmptyRow")));
     // The empty queue's header shows only its name, and Tab skips its
     // resize handles.
@@ -1003,12 +1173,32 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     }
     QVERIFY(!named(window, "queueColumnHandle_artist")->activeFocusOnTab());
 
-    // With a library folder, the first run is over: a quiet line in each.
+    // With a library folder, the first run is over: the library's quiet
+    // line, and the queue's two-line hint, centred as the first-run
+    // message is, in its type: what is empty, then what fills it.
     bridge->setProperty("libraryRootCount", 1);
     QTRY_VERIFY(!message->isVisible());
+    QQuickItem *queueEmptyMessage = named(window, "queueEmptyMessage");
     QQuickItem *queueEmpty = named(window, "queueEmptyLabel");
+    QQuickItem *queueEmptyExplanation = named(window, "queueEmptyExplanation");
     QTRY_VERIFY(shown(queueEmpty));
+    QVERIFY(shown(queueEmptyExplanation));
     QCOMPARE(queueEmpty->property("text").toString(), QStringLiteral("The queue is empty"));
+    QCOMPARE(queueEmptyExplanation->property("text").toString(),
+             QStringLiteral("Double-click music in the library to play it, or drag it here."));
+    QCOMPARE(queueEmpty->property("font").value<QFont>().weight(), QFont::DemiBold);
+    QCOMPARE(queueEmpty->property("font").value<QFont>().pointSizeF(),
+             title->property("font").value<QFont>().pointSizeF());
+    QCOMPARE(colorOf(queueEmpty), tokenHex(window, "text"));
+    QCOMPARE(colorOf(queueEmptyExplanation), tokenHex(window, "textSecondary"));
+    QCOMPARE(queueEmptyExplanation->property("font").value<QFont>().pointSizeF(),
+             explanation->property("font").value<QFont>().pointSizeF());
+    QVERIFY(sceneRect(queueEmptyExplanation).top() >= sceneRect(queueEmpty).bottom());
+    QVERIFY(std::abs(sceneRect(queueEmptyMessage).center().x() - sceneRect(queue).center().x()) <= 1);
+    QVERIFY(std::abs(sceneRect(queueEmptyMessage).center().y() - sceneRect(queue).center().y()) <= 1);
+    // Each line on one line in a window of the default size.
+    const QFontMetricsF explanationMetrics(queueEmptyExplanation->property("font").value<QFont>());
+    QVERIFY(queueEmptyExplanation->height() < 2 * explanationMetrics.lineSpacing());
     QQuickItem *libraryEmpty = named(window, "libraryEmptyStateLabel");
     QTRY_VERIFY(shown(libraryEmpty));
     QCOMPARE(libraryEmpty->property("text").toString(), QStringLiteral("Loading library…"));

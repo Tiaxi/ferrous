@@ -53,6 +53,8 @@ Item {
     readonly property real plotWidth: Math.max(0, root.width - root.meterWidth)
     readonly property bool trackLoaded: (root.uiBridge.currentTrackPath || "").length > 0
         && (root.uiBridge.playbackState || "Stopped") !== "Stopped"
+    // Before any audio: no track, and the plot is its bare floor.
+    readonly property bool beforeAudio: (root.uiBridge.currentTrackPath || "").length === 0
     // The time where the playing file is cut off, or -1.
     readonly property real cutSeconds: root.uiBridge.waveformEndsEarly
         ? root.uiBridge.waveformCoverageSeconds : -1
@@ -79,7 +81,8 @@ Item {
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
-    // the newest part of the plot.
+    // the newest part of the plot. Before any audio the plot has nothing
+    // to cover, and the switch shows, so a mode can be picked first.
     Components.PlotModeSwitch {
         id: modeSwitch
         z: 2
@@ -88,8 +91,8 @@ Item {
         anchors.topMargin: root.topInset + 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
         visible: root.controlsVisible
-        revealed: root.paneHovered || root.hoveredLane >= 0 || modeSwitch.pointerHovered
-            || modeSwitch.focusInside
+        revealed: root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
+            || modeSwitch.pointerHovered || modeSwitch.focusInside
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode

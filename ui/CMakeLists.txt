@@ -251,6 +251,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/ErrorUtils.js
         qml/logic/FormatUtils.js
         qml/logic/KeyUtils.js
+        qml/logic/ListRows.js
         qml/logic/PathUtils.js
         qml/logic/PlotLanes.js
         qml/logic/WheelUtils.js

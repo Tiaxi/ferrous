@@ -633,6 +633,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(playlistView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (playlistView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
 
                 // The row being dragged, which Escape stops.
                 property var draggingRow: null
@@ -1135,17 +1141,40 @@ Rectangle {
                 }
             }
 
-            // Library folders but nothing queued: one quiet line.
-            Text {
-                objectName: "queueEmptyLabel"
+            // Library folders but nothing queued: what fills the queue, as
+            // the first-run message says its first step, with no glyph and
+            // no button.
+            ColumnLayout {
+                id: emptyQueueMessage
+                objectName: "queueEmptyMessage"
                 visible: root.uiBridge.queueLength === 0 && !root.firstRun
                 anchors.centerIn: parent
-                width: Math.min(implicitWidth, parent.width - 2 * Kirigami.Units.gridUnit)
-                horizontalAlignment: Text.AlignHCenter
-                elide: Text.ElideRight
-                text: I18n.i18nc("@info:placeholder", "The queue is empty")
-                font: root.uiPalette.baseFont
-                color: root.uiPalette.textSecondary
+                width: Math.min(parent.width - 2 * Kirigami.Units.gridUnit,
+                                Math.max(implicitWidth, Kirigami.Units.gridUnit * 20))
+                spacing: Kirigami.Units.smallSpacing
+
+                Text {
+                    objectName: "queueEmptyLabel"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder", "The queue is empty")
+                    font.family: root.uiPalette.baseFont.family
+                    font.pointSize: root.uiPalette.basePointSize * 15 / 13
+                    font.weight: Font.DemiBold
+                    color: root.uiPalette.text
+                }
+
+                Text {
+                    objectName: "queueEmptyExplanation"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    text: I18n.i18nc("@info:placeholder",
+                        "Double-click music in the library to play it, or drag it here.")
+                    font: root.uiPalette.baseFont
+                    color: root.uiPalette.textSecondary
+                }
             }
 
             Connections {

@@ -22,6 +22,7 @@ private slots:
     void visualizationModeSwitchTakesKeyboardFocus();
     void visualizationModeSwitchStaysClearOfTheCornerOverlays();
     void visualizationModeSwitchShowsOnlyWithThePointerOrFocus();
+    void visualizationModeSwitchShowsBeforeAnyAudio();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenViewersGiveTheViewTheWholeScreen();
@@ -612,7 +613,10 @@ void TransportInputSmokeTest::visualizationModeSwitchTakesKeyboardFocus() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QObject *playPause = window->findChild<QObject *>(QStringLiteral("playPauseAction"));
-    QVERIFY(viewer != nullptr && playPause != nullptr);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(viewer != nullptr && playPause != nullptr && bridge != nullptr);
+    // A track plays: before any audio, the switch always shows.
+    setPlayingTrack(bridge);
     QSignalSpy toggled(playPause, SIGNAL(triggered(QObject*)));
     QQuickItem *spectrogramButton =
         visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
@@ -680,6 +684,8 @@ void TransportInputSmokeTest::visualizationModeSwitchStaysClearOfTheCornerOverla
     auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
     QVERIFY(bridge != nullptr && viewer != nullptr && autoHide != nullptr && popup != nullptr
             && spectrogramSurface != nullptr && waveformSurface != nullptr);
+    // A track plays, so its lanes have their labels.
+    setPlayingTrack(bridge);
     bridge->setProperty("spectrogramViewMode", 1);
     bridge->setProperty("channelButtonsVisibility", 2);
     // Stays shown while the layouts are checked, until the test hides it.
@@ -869,7 +875,9 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     auto *surface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
     QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr);
-    // Rolling: the plot's right edge is now.
+    // Rolling: the plot's right edge is now. A track plays: before any
+    // audio, the switch always shows.
+    setPlayingTrack(bridge);
     QVERIFY(bridge->setProperty("spectrogramDisplayMode", 0));
     QTRY_VERIFY(surface->isVisible());
     QQuickItem *modeSwitch =
@@ -968,6 +976,67 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     QTest::mouseMove(window, away);
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+}
+
+// Before any audio the pane is its bare floor, with no message, and the
+// mode switch shows in its corner without the pointer, so a mode can be
+// picked first. There are no lanes: no labels, no Mute and Solo.
+void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveform = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && spectrogram != nullptr && waveform != nullptr);
+    QCOMPARE(bridge->property("currentTrackPath").toString(), QString());
+    QVERIFY(bridge->setProperty("showLevelMeter", false));
+    // Per channel, where a track has a lane for each.
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 1));
+    QTRY_VERIFY(spectrogram->isVisible());
+    QQuickItem *modeSwitch =
+        firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QVERIFY(modeSwitch != nullptr && waveformButton != nullptr && spectrogramButton != nullptr);
+
+    // The pointer off the pane: the switch shows, in its corner, 4 px in.
+    QTest::mouseMove(window, QPoint(4, window->height() - 4));
+    QVERIFY(!sceneRectOf(spectrogram).contains(QPointF(4, window->height() - 4)));
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY(modeSwitch->isVisible());
+    const QRectF pane = sceneRectOf(spectrogram);
+    const QRectF plate = sceneRectOf(modeSwitch);
+    QCOMPARE(plate.top() - pane.top(), 4.0);
+    QCOMPARE(pane.right() - plate.right(), 4.0);
+    // No message on the plot, and no lanes to label.
+    QVERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotAnalysingText")) == nullptr);
+    QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 0);
+
+    // It works: a click picks the waveform, which still has no lanes.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(waveformButton).center().toPoint());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QTRY_VERIFY(waveform->isVisible());
+    QVERIFY(!spectrogram->isVisible());
+    QVERIFY(waveformButton->property("checked").toBool());
+    QTest::mouseMove(window, QPoint(4, window->height() - 4));
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 0);
+    // And back.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(spectrogramButton).center().toPoint());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QTRY_VERIFY(spectrogram->isVisible());
+    QTest::mouseMove(window, QPoint(4, window->height() - 4));
+
+    // Once a track plays, the switch steps back to the pointer, and the
+    // waveform's lanes have their labels.
+    setPlayingTrack(bridge);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveform->isVisible());
+    QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).isEmpty());
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {
