@@ -97,20 +97,21 @@ Item {
 
     // A track change fades (#373 Motion), line by line: a line that differs
     // for the next track fades the one before out, in place, then the next
-    // track's in, so that no frame shows both texts at once (#373 H1); its
-    // fields, and the words of a field in which only a number changes,
-    // that are the same for both and do not move stay still (#537); a line
-    // that is the same stays still. The next track of the same album fades
-    // over shortDuration; a track of another album, or with another cover,
-    // fades the cover and the lines together over longDuration: the cover
-    // cross-fades over all of it, the lines go out over its first half and
-    // come in over its second. A line that comes to differ while the track change
-    // fades (the metadata comes after the path) joins the fade from full
-    // opacity, and the lines already fading go on from theirs. A cover
-    // that changes later for the same track fades too: during a track
-    // change it joins it, and every layer goes on from the opacity it has
-    // onto the long curve; after one, the cover fades alone and the lines
-    // change in place. Another track during a fade starts its fade from
+    // track's in, so that no frame shows both texts at once (#373 H1); where
+    // only a word or a number of it changes, its fields, and the words of a
+    // field in which only a number changes, that are the same for both and
+    // do not move stay still (#537), and otherwise it fades whole (see
+    // `_fadesWhole`, #373 H2); a line that is the same stays still. The next
+    // track of the same album fades over shortDuration; a track of another
+    // album, or with another cover, fades the cover and the lines together
+    // over longDuration: the cover cross-fades over all of it, the lines go
+    // out over its first linesOutSpan and come in over the rest. A line
+    // that comes to differ while the track change fades (the metadata
+    // comes after the path) joins the fade from full opacity, and the
+    // lines already fading go on from theirs. A cover that changes later
+    // for the same track fades too: during a track change it joins it, and
+    // every layer goes on from the opacity it has onto the long curve;
+    // after one, the cover fades alone and the lines change in place. Another track during a fade starts its fade from
     // what shows: every layer still fading goes on from its opacity, and
     // what the track before had faded in goes out from where it got to
     // (#463). What shows is always the playing track's; what the panel
@@ -154,15 +155,26 @@ Item {
         const rest = 1 - Math.min(1, Math.max(0, progress))
         return 1 - rest * rest * rest
     }
+    // The InQuad curve, which an exit takes: slow from the start, fast at
+    // the end.
+    function _accelerated(progress) {
+        const done = Math.min(1, Math.max(0, progress))
+        return done * done
+    }
+    // The part of the fade the lines before go out over; the playing
+    // track's come in over the rest. The lines before hold, then go fast,
+    // and the playing track's come fast, then settle, so the text block
+    // is never empty for long, yet no frame shows two texts in a line.
+    readonly property real linesOutSpan: 0.4
     // At `at` of the fade, how much of their opacity the lines before keep,
-    // going out over the first half; how far the playing track's lines have
-    // come in, over the second; and how much of their opacity the covers
+    // going out over linesOutSpan; how far the playing track's lines have
+    // come in, over the rest; and how much of their opacity the covers
     // before keep, going out over all of it.
     function _linesOutLevel(at) {
-        return 1 - root._eased(2 * at)
+        return 1 - root._accelerated(at / root.linesOutSpan)
     }
     function _linesInLevel(at) {
-        return root._eased(2 * at - 1)
+        return root._eased((at - root.linesOutSpan) / (1 - root.linesOutSpan))
     }
     function _coversOutLevel(at) {
         return 1 - root._eased(at)
@@ -334,6 +346,52 @@ Item {
         return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
     }
 
+    // Whether the line of `key` fades whole, as one, going from `before` to
+    // `after` while `still` of it stays still: when its structure changes,
+    // as it has more or fewer fields, or a field with a number more or fewer
+    // words ("Track 2" to "Track 2 of 8"); when what changes is in more than
+    // one place of it; or when less than half of its glyphs would stay
+    // still. A line in which only a word or a number changes fades just
+    // that; otherwise the words that would stay would show alone while the
+    // rest of the line is gone.
+    function _fadesWhole(key, still, before, after) {
+        const separator = root.lineSeparators[key] || ""
+        const fieldsBefore = separator.length > 0 ? before.split(separator) : [before]
+        const fieldsAfter = separator.length > 0 ? after.split(separator) : [after]
+        if (fieldsBefore.length !== fieldsAfter.length)
+            return true
+        for (let field = 0; field < fieldsAfter.length; ++field) {
+            if (/[0-9]/.test(fieldsBefore[field] + fieldsAfter[field])
+                    && fieldsBefore[field].split(" ").length !== fieldsAfter[field].split(" ").length)
+                return true
+        }
+        let glyphs = 0
+        let stillGlyphs = 0
+        let changes = 0
+        let changing = false
+        for (let index = 0; index < after.length; ++index) {
+            if (after[index] === " ")
+                continue
+            ++glyphs
+            if (still.some(run => index >= run[0] && index < run[1])) {
+                ++stillGlyphs
+                changing = false
+            } else {
+                changes += changing ? 0 : 1
+                changing = true
+            }
+        }
+        return changes > 1 || 2 * stillGlyphs < glyphs
+    }
+
+    // What stays still of the line of `key` going from `before` to `after`,
+    // of `still`, what stayed still of it so far: no more, and nothing once
+    // the line fades whole.
+    function _keptStill(key, still, before, after) {
+        const kept = root._commonRuns(still, root._stillRunsOf(key, before, after))
+        return root._fadesWhole(key, kept, before, after) ? [] : kept
+    }
+
     // The runs both `left` and `right` have.
     function _commonRuns(left, right) {
         const common = []
@@ -408,15 +466,16 @@ Item {
     // track before's.
     function _nextLine(key, before, after, track, newTrack) {
         const changes = before !== after
-        const runs = root._stillRunsOf(key, before, after)
         const line = root._shownLine(key)
         if (line === null) {
             if (!track || !changes)
                 return null
-            return root._fadingLine(runs, [root._layer(before, [{ at: 0, from: 1 }])], 1, true)
+            const whole = [[0, Math.max(before.length, after.length)]]
+            return root._fadingLine(root._keptStill(key, whole, before, after),
+                                    [root._layer(before, [{ at: 0, from: 1 }])], 1, true)
         }
         const level = root._linesOutLevel(root.handover)
-        const still = root._commonRuns(line.still, runs)
+        const still = root._keptStill(key, line.still, before, after)
         const givenUp = root._givenUp(line.still, still, before)
         let layers = line.layers
             .map(layer => root._layer(layer.text, layer.parts.map(part => ({ at: part.at, from: part.from * level }))))
@@ -531,8 +590,7 @@ Item {
             const line = root._shownLine(key)
             if (line === null || !line.own)
                 return true
-            const runs = root._stillRunsOf(key, was.lines[key], next.lines[key])
-            if (!root._sameRuns(root._commonRuns(line.still, runs), line.still))
+            if (!root._sameRuns(root._keptStill(key, line.still, was.lines[key], next.lines[key]), line.still))
                 return true
         }
         return false
