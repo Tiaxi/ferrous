@@ -653,8 +653,10 @@ Item {
     readonly property real titlePointSize: root.uiPalette.basePointSize * 1.2
 
     // The space under the wide text block before the seam into the library,
-    // which sets the two apart as regions of one sheet.
-    readonly property int regionGap: 28
+    // which sets the two apart as regions of one sheet: with the details'
+    // descent, about 16 px under their text, as the library's header has
+    // 12 px around its own (#373 H4; 28 px left a dead band).
+    readonly property int regionGap: 14
     // The 1 px seam at the panel's foot, where the library starts.
     readonly property int seamHeight: 1
     // The top of the lines beside the narrow cover.

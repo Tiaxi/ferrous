@@ -618,8 +618,13 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(details->property("font").value<QFont>().pointSizeF(),
              palette->property("smallPointSize").toReal());
     QVERIFY(!emptyRow->isVisible());
-    // Then 28 px, and the seam into the library: two regions of one sheet.
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+    // Then 14 px, about 16 px under the details' text with their descent,
+    // and the seam into the library: two regions of one sheet, with no dead
+    // band between them (#373 H4).
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
+    const QFontMetricsF detailsMetrics(details->property("font").value<QFont>());
+    const qreal underText = sceneRect(seam).top() - (sceneRect(details).top() + detailsMetrics.ascent());
+    QVERIFY2(underText >= 14.0 && underText <= 20.0, qPrintable(QString::number(underText)));
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(panel).bottom());
 
@@ -721,7 +726,7 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
 
     QQuickItem *seam = named(window, "nowPlayingSeam");
     QQuickItem *header = named(window, "libraryHeader");
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 }
 
@@ -881,7 +886,7 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data() {
 // on one line where it fits, and otherwise on a line each, 4 px apart, 12 px
 // in from both sides, each whole where it fits on the width; narrow, on
 // lines of their own as always. Nothing else moves: the details under them,
-// then 28 px to the seam.
+// then 14 px to the seam.
 void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     QFETCH(qreal, pointSize);
     QFETCH(bool, narrow);
@@ -975,7 +980,7 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
         lastLine = albumLine;
     }
     QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
 
     // A track whose artist and album fit on one line goes back to it.
     bridge->setProperty("currentTrackArtist", QStringLiteral("Ash"));
