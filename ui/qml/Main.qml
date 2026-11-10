@@ -1647,6 +1647,13 @@ ApplicationWindow {
             return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
                 ? 1 : visualizationSurface.modeFade
         }
+        // One playhead through the switch (H2: both showed): the settled
+        // plot's goes once the chosen one, with its own, has come in at all.
+        // Until then, the chosen plot is at 0, and the settled one keeps it.
+        function playheadShown(mode) {
+            return !(visualizationSurface.modeSwitching && visualizationSurface.modeFade > 0
+                && visualizationSurface.settledMode === mode)
+        }
 
         // Whether either plot has had a track's data this session. Until
         // then the pane is bare, and in the light theme the view colour
@@ -1698,6 +1705,7 @@ ApplicationWindow {
             // that its analysis runs.
             visible: visualizationSurface.plotShown(0)
             opacity: visualizationSurface.plotOpacity(0)
+            playheadVisible: visualizationSurface.playheadShown(0)
             z: visualizationSurface.settledMode === 0 ? 0 : 1
             // Its lanes, floors and seams fade in as one picture.
             layer.enabled: opacity > 0 && opacity < 1
@@ -1720,6 +1728,7 @@ ApplicationWindow {
             plotWidth: plotLayer.plotWidth
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
+            playheadVisible: visualizationSurface.playheadShown(1)
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible

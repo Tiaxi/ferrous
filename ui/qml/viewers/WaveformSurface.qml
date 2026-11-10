@@ -16,6 +16,8 @@ Item {
     property var clock: null
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
+    // Whether the plot draws the playhead; see Main.qml's mode switch.
+    property bool playheadVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
@@ -107,6 +109,7 @@ Item {
         playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
         playheadCasingColor: root.uiPalette.themeIsDark
             ? Qt.rgba(0, 0, 0, 0.6) : Qt.rgba(1, 1, 1, 0.85)
+        playheadVisible: root.playheadVisible
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)

@@ -3596,6 +3596,26 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     const auto whole = [](QQuickItem *plot) {
         return plot->isVisible() && plot->opacity() == 1.0 && !plot->property("awaitingData").toBool();
     };
+    // The playheads drawn (H2: two through the fade): those of the plots
+    // that show, at any opacity, and draw theirs. Every spectrogram lane
+    // draws the same one.
+    QQuickItem *waveformItem = itemNamed(waveform, QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveformItem != nullptr);
+    const auto playheads = [&]() {
+        int drawn = 0;
+        if (spectrogram->isVisible() && spectrogram->opacity() > 0.0) {
+            bool lanesDraw = false;
+            for (SpectrogramItem *pane : panes()) {
+                lanesDraw = lanesDraw || pane->playheadVisible();
+            }
+            drawn += lanesDraw ? 1 : 0;
+        }
+        if (waveform->isVisible() && waveform->opacity() > 0.0
+            && waveformItem->property("playheadVisible").toBool()) {
+            ++drawn;
+        }
+        return drawn;
+    };
     QString failure;
     int frames = 0;
     const QMetaObject::Connection connection =
@@ -3607,9 +3627,13 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
                               .arg(spectrogram->isVisible()).arg(spectrogram->opacity())
                               .arg(waveform->isVisible()).arg(waveform->opacity());
             }
+            if (failure.isEmpty() && playheads() != 1) {
+                failure = QStringLiteral("%1 playheads at frame %2").arg(playheads()).arg(frames);
+            }
         });
     const auto check = [&](const char *where) {
         QVERIFY2(whole(spectrogram) || whole(waveform), where);
+        QCOMPARE(playheads(), 1);
         QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(where) + QStringLiteral(": ") + failure));
     };
 
@@ -3626,6 +3650,12 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         surface->setProperty("modeFade", 0.5);
         QCOMPARE(waveform->opacity(), 0.5);
         QCOMPARE(spectrogram->opacity(), 1.0);
+        // One playhead: the incoming waveform's; the spectrogram's went as
+        // the fade started.
+        QVERIFY(waveformItem->property("playheadVisible").toBool());
+        for (SpectrogramItem *pane : panes()) {
+            QVERIFY(!pane->playheadVisible());
+        }
         // Its floor and its lanes as one picture.
         QObject *layer = waveform->property("layer").value<QObject *>();
         QVERIFY(layer != nullptr && layer->property("enabled").toBool());
@@ -3674,6 +3704,10 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         surface->setProperty("modeFade", 0.5);
         QCOMPARE(spectrogram->opacity(), 0.5);
         QVERIFY(whole(waveform));
+        QVERIFY(!waveformItem->property("playheadVisible").toBool());
+        for (SpectrogramItem *pane : panes()) {
+            QVERIFY(pane->playheadVisible());
+        }
         QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
         QTRY_VERIFY(!waveform->isVisible());
     } else {
@@ -3682,6 +3716,9 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     }
     QCOMPARE(spectrogram->opacity(), 1.0);
     check("on the spectrogram");
+    // Settled, the plot under it draws its playhead again, for the next
+    // switch.
+    QVERIFY(waveformItem->property("playheadVisible").toBool());
 
     // Back before the spectrogram can draw: the waveform, which never
     // left, stays, and the spectrogram goes.

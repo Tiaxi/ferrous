@@ -45,6 +45,8 @@ Item {
         return !(first && first.spectrogramItem && first.spectrogramItem.precomputedReady)
     }
     property bool interactiveOverlaysVisible: true
+    // Whether the lanes draw the playhead; see Main.qml's mode switch.
+    property bool playheadVisible: true
     property var pointerActivity: null
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
@@ -330,6 +332,7 @@ Item {
                     objectName: "spectrogramPaneItem"
                     anchors.fill: parent
                     channelMuted: modelData.muted || false
+                    playheadVisible: root.playheadVisible
                     maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
                     dbRange: root.uiBridge.dbRange
                     logScale: root.uiBridge.logScale

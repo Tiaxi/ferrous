@@ -90,6 +90,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor laneSeamColor READ laneSeamColor WRITE setLaneSeamColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadColor READ playheadColor WRITE setPlayheadColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadCasingColor READ playheadCasingColor WRITE setPlayheadCasingColor NOTIFY colorsChanged)
+    // Whether the playhead is drawn: the plot going out under another as
+    // the visualization mode switches draws none, so only one shows.
+    Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
@@ -160,6 +163,8 @@ public:
     void setPlayheadColor(const QColor &value);
     QColor playheadCasingColor() const;
     void setPlayheadCasingColor(const QColor &value);
+    bool playheadVisible() const;
+    void setPlayheadVisible(bool value);
 
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE double maximumZoomLevel() const;
@@ -191,6 +196,7 @@ signals:
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
     void colorsChanged();
+    void playheadVisibleChanged();
     void markerSecondsChanged();
     void markerXChanged();
     void seekRequested(double seconds);
@@ -644,6 +650,7 @@ private:
     qulonglong m_soloedChannelsMask{0};
     Colors m_colors;
     double m_markerSeconds{-1.0};
+    bool m_playheadVisible{true};
     double m_markerXLaidOut{std::numeric_limits<double>::quiet_NaN()};
     double m_markerX{std::numeric_limits<double>::quiet_NaN()};
     void publishMarkerX(double x);

@@ -2449,6 +2449,21 @@ void SpectrogramItem::setChannelMuted(bool muted) {
     update();
 }
 
+bool SpectrogramItem::playheadVisible() const {
+    return m_playheadVisible;
+}
+
+void SpectrogramItem::setPlayheadVisible(bool value) {
+    if (m_playheadVisible == value) {
+        return;
+    }
+    // Read while the scene graph synchronizes, with the GUI thread blocked;
+    // the canvas under the playhead keeps.
+    m_playheadVisible = value;
+    emit playheadVisibleChanged();
+    update();
+}
+
 double SpectrogramItem::zoomLevel() const {
     return m_zoomLevel;
 }
@@ -5357,7 +5372,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             node->tileFragments[i], nullptr, QRectF(), QRect(), canvasPlaceholder));
     }
 
-    if (showPlayhead) {
+    if (showPlayhead && m_playheadVisible) {
         // The casing: a line as wide as the core on each side of it, within
         // the item.
         const double casingLeft = std::max(0.0, playheadRect.left() - playheadRect.width());
