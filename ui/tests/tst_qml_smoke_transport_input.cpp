@@ -28,6 +28,8 @@ private slots:
     void fullscreenViewersGiveTheViewTheWholeScreen();
     void viewerStripHoldsItsTextAtALargeFont_data();
     void viewerStripHoldsItsTextAtALargeFont();
+    void albumArtDetailsKeepBelowTheViewerControls_data();
+    void albumArtDetailsKeepBelowTheViewerControls();
     void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
@@ -1371,6 +1373,84 @@ void TransportInputSmokeTest::viewerStripHoldsItsTextAtALargeFont() {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
+}
+
+void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The album art's details start below the viewer's controls, which grow
+// with the font: in the main window, under the plate in its corner, 12 px
+// below it at the default font as before; over the whole screen, under the
+// title strip. At 24 pt the file's name lay 8 px under the plate's buttons.
+void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont larger = applicationFont;
+        larger.setPointSizeF(pointSize);
+        QGuiApplication::setFont(larger);
+    }
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *albumArt = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && albumArt != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+
+    // In the main window.
+    bridge->setProperty("viewerFullscreenMode", 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(viewer->setProperty("albumArtInfoVisible", true));
+    QQuickItem *controls = nullptr;
+    QQuickItem *title = nullptr;
+    QTRY_VERIFY((controls = visibleItemNamed(window, QStringLiteral("albumArtPopupControls"))) != nullptr);
+    QTRY_VERIFY((title = visibleItemNamed(window, QStringLiteral("albumArtInfoTitle"))) != nullptr);
+    const qreal plateBottom = sceneRectOf(controls).bottom();
+    if (pointSize == 0) {
+        QCOMPARE(plateBottom, 32.0);
+        QTRY_COMPARE(sceneRectOf(title).top(), 44.0);
+    } else {
+        QVERIFY2(plateBottom > 32.0, qPrintable(QString::number(plateBottom)));
+    }
+    QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), plateBottom);
+    QTRY_VERIFY2(sceneRectOf(title).top() >= plateBottom + 12 - 0.5,
+                 qPrintable(QStringLiteral("title at %1, plate to %2")
+                                .arg(sceneRectOf(title).top()).arg(plateBottom)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+
+    // Over the whole screen, with the title strip shown.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(bridge->setProperty("showFullscreenTitleStrip", true));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewerForCurrentArt"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QVERIFY(viewer->setProperty("albumArtInfoVisible", true));
+    QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow"));
+    QVERIFY(fullscreen != nullptr);
+    QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+    QTest::mouseMove(fullscreen, QPoint(300, 300));
+    QQuickItem *strip = nullptr;
+    QTRY_VERIFY((strip = visibleItemNamed(fullscreen, QStringLiteral("albumArtFullscreenStrip"))) != nullptr);
+    QTRY_VERIFY((title = visibleItemNamed(fullscreen, QStringLiteral("albumArtInfoTitle"))) != nullptr);
+    QTRY_VERIFY2(sceneRectOf(title).top() >= sceneRectOf(strip).bottom() + 12 - 0.5,
+                 qPrintable(QStringLiteral("title at %1, strip to %2")
+                                .arg(sceneRectOf(title).top()).arg(sceneRectOf(strip).bottom())));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    QTRY_VERIFY(!fullscreen->isVisible());
 }
 
 void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {

@@ -1885,9 +1885,11 @@ ApplicationWindow {
         uiPalette: root.uiPalette
         fileInfo: viewerController.albumArtViewerFileInfo
         sourceKind: viewerController.albumArtSourceKind
-        // Clear of the viewer's controls over the art: the plate in the main
-        // window, or the title strip over the whole screen.
-        infoTopInset: root.useWholeScreenViewerMode ? albumArtViewerShell.stripHeight : 32
+        // Clear of the viewer's controls over the art, at any font: the plate
+        // in the main window, or the title strip over the whole screen.
+        infoTopInset: root.useWholeScreenViewerMode
+            ? albumArtViewerShell.stripHeight
+            : albumArtViewerShell.popupControlsBottom
         previewActive: viewerController.albumArtPreviewActive
         previewLabel: viewerController.comparisonLabel
         previewHasCandidate: itunesArtworkDialog.previewShown && itunesArtworkDialog.previewIndex >= 0
