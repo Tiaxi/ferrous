@@ -8,7 +8,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // The header row of a region, such as the library and the queue: its name,
 // its totals ("12 artists · 28 albums · 176 tracks") and a hairline under
 // it. Items declared inside go at its right end, such as column labels.
-// When the row is short of room, the totals elide, and go once even their
+// When the row is short of room, the totals drop whole totals from the end
+// ("12 artists · 28 albums"), never a part of one, and go once even their
 // first total doesn't fit; the name elides only when it alone doesn't fit.
 Item {
     id: root
@@ -29,15 +30,25 @@ Item {
     // items at the right end.
     readonly property real totalsRoom: root.width - root.leftInset - root.rightInset
         - Math.ceil(titleLabel.implicitWidth) - Kirigami.Units.largeSpacing - trailing.implicitWidth
-    // The first total, "12 artists": the least the totals show.
-    readonly property string firstTotal: root.totals.split(" · ")[0]
-    readonly property bool totalsShown: root.totals.length > 0
-        && root.totalsRoom >= Math.ceil(firstTotalMetrics.advanceWidth)
+    // As many of the totals, from the first, as fit whole in their room;
+    // none when even the first, "12 artists", doesn't.
+    readonly property string shownTotals: {
+        const parts = root.totals.length > 0 ? root.totals.split(" · ") : []
+        let shown = ""
+        for (let i = 0; i < parts.length; ++i) {
+            const candidate = i === 0 ? parts[0] : shown + " · " + parts[i]
+            if (Math.ceil(totalsMetrics.advanceWidth(candidate)) > root.totalsRoom) {
+                break
+            }
+            shown = candidate
+        }
+        return shown
+    }
+    readonly property bool totalsShown: root.shownTotals.length > 0
 
-    TextMetrics {
-        id: firstTotalMetrics
+    FontMetrics {
+        id: totalsMetrics
         font: totalsLabel.font
-        text: root.firstTotal
     }
 
     Accessible.role: Accessible.Heading
@@ -73,7 +84,7 @@ Item {
         Label {
             id: totalsLabel
             objectName: "regionHeaderTotals"
-            text: root.totals
+            text: root.shownTotals
             visible: root.totalsShown
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.uiPalette.smallPointSize
