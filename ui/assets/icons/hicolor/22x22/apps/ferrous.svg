@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 22 px, drawn on the pixel grid. The glide, a 3 px stair at half the slope of a diagonal, rises off a 1 px floor line in the floor band's magenta; the harmonic, a 1 px diagonal at twice its slope, leaves it near the origin. Half-tones in the stair's inner corners, none in the fork between the strokes. Breeze's 2 px margin. -->
+<!-- Ferrous, 22 px, drawn on the pixel grid in Breeze's 2 px margin. A 2 px floor; the fundamental a 2 px stair and its harmonics 1 px stairs, starting in one column at about one, two and three times its height above the floor and rising one, two and three times as far, with a clear row between them. -->
 <svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
   <rect id="tile" fill="#3a1490" x="2" y="2" width="18" height="18" rx="2"/>
-  <path id="floor" fill="#a6006e" d="M3 17h16v1h-16z"/>
-  <path id="harmonic" fill="#f0602a" d="M7 12h1v1h-1z M8 11h1v1h-1z M9 10h1v1h-1z M10 9h1v1h-1z M11 8h1v1h-1z M12 7h1v1h-1z M13 6h1v1h-1z M14 5h1v1h-1z"/>
-  <path id="glide-edge" fill="#9c6248" d="M6 16h1v1h-1z M5 13h1v1h-1z M8 15h1v1h-1z M10 14h1v1h-1z M12 13h1v1h-1z M11 10h1v1h-1z M14 12h1v1h-1z M13 9h1v1h-1z M16 11h1v1h-1z M15 8h1v1h-1z"/>
-  <path id="glide" fill="#ffb000" d="M4 14h2v3h-2z M6 13h2v3h-2z M8 12h2v3h-2z M10 11h2v3h-2z M12 10h2v3h-2z M14 9h2v3h-2z M16 8h2v3h-2z"/>
+  <path id="floor" fill="#a6006e" d="M4 16h14v2h-14z"/>
+  <path id="h3" fill="#d20040" d="M5 9h1v1h-1z M6 8h2v1h-2z M8 7h2v1h-2z M10 6h2v1h-2z M12 5h2v1h-2z M14 4h2v1h-2z M16 3h1v1h-1z"/>
+  <path id="h2" fill="#f0602a" d="M5 11h2v1h-2z M7 10h3v1h-3z M10 9h2v1h-2z M12 8h3v1h-3z M15 7h2v1h-2z"/>
+  <path id="fundamental" fill="#ffb000" d="M5 13h3v2h-3z M8 12h6v2h-6z M14 11h3v2h-3z"/>
 </svg>
