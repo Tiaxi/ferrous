@@ -298,6 +298,21 @@ pub(super) fn process_playback_event(
             state.unacknowledged_engine_renames.pop_front();
             SnapshotUrgency::None
         }
+        PlaybackEvent::OutsideVolume {
+            level,
+            set_volume_commands,
+        } => {
+            // A volume the user set in the app since is newer, and the
+            // engine plays at it.
+            if set_volume_commands != state.volume_commands_sent
+                || state.settings.volume.to_bits() == level.to_bits()
+            {
+                return SnapshotUrgency::None;
+            }
+            super::event_log::log_outside_volume(level);
+            state.settings.volume = level;
+            SnapshotUrgency::Immediate
+        }
         PlaybackEvent::Error(mut error) => {
             if let Some(path) = error.path.as_mut() {
                 remap_unacknowledged_engine_path(state, path);

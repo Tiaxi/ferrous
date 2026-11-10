@@ -227,6 +227,15 @@ pub enum PlaybackEvent {
     /// The engine applied a [`PlaybackCommand::RemapPaths`]. Events sent
     /// before this one may still carry the old paths; later ones do not.
     PathsRemapped,
+    /// The volume was changed outside the app, on the output's stream, such
+    /// as with Plasma's per-app volume slider, and is now `level` (see
+    /// [`volume_level_to_gain`]); a mute there shows as 0. The engine took
+    /// it as the user's volume after `set_volume_commands`
+    /// [`PlaybackCommand::SetVolume`] commands; a later one replaces it.
+    OutsideVolume {
+        level: f32,
+        set_volume_commands: u64,
+    },
     /// A track could not be played, or the engine cannot play at all.
     Error(PlaybackError),
 }
@@ -1656,6 +1665,8 @@ mod queue;
 mod seek_locate;
 #[cfg(feature = "gst")]
 pub(crate) mod source_activation;
+#[cfg(feature = "gst")]
+mod stream_volume;
 
 #[cfg(not(feature = "gst"))]
 #[path = "backend_mock.rs"]

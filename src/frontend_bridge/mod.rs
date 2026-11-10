@@ -814,6 +814,9 @@ pub(super) struct BridgeState {
     /// Renames sent to the playback engine that it has not acknowledged.
     /// Events it sent before the acknowledgement still carry the old paths.
     unacknowledged_engine_renames: VecDeque<Arc<PathRenames>>,
+    /// Number of `SetVolume` commands sent to the playback engine; see
+    /// [`PlaybackEvent::OutsideVolume`].
+    volume_commands_sent: u64,
     /// Keys of the restored session file that this build does not know,
     /// saved again as they were.
     session_unknown_keys: serde_json::Map<String, serde_json::Value>,
@@ -2160,6 +2163,7 @@ impl BridgeLoopRuntime {
         event: PlaybackEvent,
         event_tx: &Sender<BridgeEvent>,
     ) -> SnapshotUrgency {
+        let volume = self.state.settings.volume;
         let urgency = process_playback_event(
             event,
             &self.analysis,
@@ -2167,10 +2171,20 @@ impl BridgeLoopRuntime {
             event_tx,
             &mut self.state,
         );
+        self.note_volume_set_outside(volume);
         if urgency.is_pending() {
             self.flags.session_dirty = true;
         }
         urgency
+    }
+
+    /// Save the settings if playback events changed the user's volume from
+    /// `before`: a volume set outside the app, which is the user's setting
+    /// as much as one set in it.
+    fn note_volume_set_outside(&mut self, before: f32) {
+        if self.state.settings.volume.to_bits() != before.to_bits() {
+            self.flags.settings_dirty = true;
+        }
     }
 
     fn handle_analysis_event(
@@ -2443,6 +2457,7 @@ impl BridgeLoopRuntime {
     }
 
     fn pump_bridge_events(&mut self, event_tx: &Sender<BridgeEvent>) -> SnapshotUrgency {
+        let volume = self.state.settings.volume;
         let mut urgency = drain_playback_events(
             &self.playback_rx,
             &self.analysis,
@@ -2450,6 +2465,7 @@ impl BridgeLoopRuntime {
             event_tx,
             &mut self.state,
         );
+        self.note_volume_set_outside(volume);
         let analysis_urgency = drain_analysis_events(&self.analysis_rx, event_tx, &mut self.state);
         let metadata_urgency = drain_metadata_events(&self.metadata_rx, &mut self.state);
         self.read_playing_metadata_again();
@@ -2911,8 +2927,9 @@ fn restore_initial_bridge_state(
     lastfm: &LastFmHandle,
     persisted_state_enabled: bool,
 ) {
-    state.playback.volume = state.settings.volume;
-    playback.command(PlaybackCommand::SetVolume(state.settings.volume));
+    let volume = state.settings.volume;
+    state.playback.volume = volume;
+    commands::command_volume(state, playback, volume);
     // Display mode first so self.display_mode is correct before
     // SetFftSize / SetSpectrogramViewMode restart the session.
     analysis.command(AnalysisCommand::SetSpectrogramDisplayMode(
@@ -7158,6 +7175,74 @@ mod tests {
             kind: crate::playback::TrackChangeKind::Gapless,
             track_token: 2,
         }
+    }
+
+    #[test]
+    fn a_volume_set_outside_the_app_is_shown_and_saved_unless_the_app_set_one_since() {
+        let _guard = test_guard();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, event_rx) = bounded::<BridgeEvent>(64);
+        drain_initial_events(&mut runtime, &event_tx, &event_rx);
+        let (engine_tx, engine_rx) = unbounded();
+        runtime.playback = PlaybackEngine::from_command_sender(engine_tx);
+        let set_volume = |runtime: &mut BridgeLoopRuntime, volume: f32| {
+            runtime.handle_wake(
+                BridgeLoopWake::Command(BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(
+                    volume,
+                ))),
+                &event_tx,
+            );
+        };
+        set_volume(&mut runtime, 0.5);
+        let sent = runtime.state.volume_commands_sent;
+        assert!(engine_rx
+            .try_iter()
+            .any(|command| matches!(command, PlaybackCommand::SetVolume(volume) if volume == 0.5)));
+        while event_rx.try_recv().is_ok() {}
+        runtime.flags.settings_dirty = false;
+
+        // The engine took a volume set elsewhere after the app's last one:
+        // the UI and MPRIS show it, and it is saved.
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::OutsideVolume {
+                level: 0.66,
+                set_volume_commands: sent,
+            }),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.settings.volume, 0.66);
+        assert!(runtime.flags.settings_dirty);
+        let snapshot = emitted_snapshots(&event_rx)
+            .pop()
+            .expect("a snapshot of the volume set elsewhere");
+        assert_eq!(snapshot.settings.volume, 0.66);
+
+        // One the engine took before the app's latest is older than it.
+        set_volume(&mut runtime, 0.3);
+        runtime.flags.settings_dirty = false;
+        runtime.handle_wake(
+            BridgeLoopWake::Playback(PlaybackEvent::OutsideVolume {
+                level: 0.9,
+                set_volume_commands: sent,
+            }),
+            &event_tx,
+        );
+        assert_eq!(runtime.state.settings.volume, 0.3);
+        assert!(!runtime.flags.settings_dirty);
+
+        // The same holds for events that wait as the loop handles another
+        // wake.
+        let (playback_tx, playback_rx) = unbounded();
+        runtime.playback_rx = playback_rx;
+        playback_tx
+            .send(PlaybackEvent::OutsideVolume {
+                level: 0.0,
+                set_volume_commands: sent + 1,
+            })
+            .unwrap();
+        runtime.handle_wake(BridgeLoopWake::Tick, &event_tx);
+        assert_eq!(runtime.state.settings.volume, 0.0);
+        assert!(runtime.flags.settings_dirty);
     }
 
     #[test]
