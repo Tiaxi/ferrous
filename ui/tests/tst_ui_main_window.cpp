@@ -320,6 +320,8 @@ private slots:
     void contentIsOneSheetWithFourSeams();
     void sidebarIs360PxWideAnd260PxInANarrowWindow();
     void nowPlayingHasItsWideNarrowAndEmptyLayouts();
+    void nothingPlayingShowsWholeAtALargeFont_data();
+    void nothingPlayingShowsWholeAtALargeFont();
     void nowPlayingTitleIsAStepOverItsLines();
     void nowPlayingTitleIsAStepOverItsLines_data();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize();
@@ -438,6 +440,65 @@ void UiMainWindowTest::sidebarIs360PxWideAnd260PxInANarrowWindow() {
     window->resize(1000, 720);
     QTRY_COMPARE(window->width(), 1000);
     QTRY_COMPARE(sidebar->width(), 260.0);
+}
+
+void UiMainWindowTest::nothingPlayingShowsWholeAtALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font") << 0.0 << 1600 << 1000;
+    QTest::newRow("default font, narrow") << 0.0 << 1000 << 720;
+    QTest::newRow("24 pt") << 24.0 << 1600 << 1000;
+    QTest::newRow("24 pt, narrow") << 24.0 << 1000 << 720;
+}
+
+// "Nothing playing" shows whole: in the narrow window at 24 pt it elided;
+// it wraps there, the row as tall as its lines, the glyph by the first, and
+// the library's header still right under the panel.
+void UiMainWindowTest::nothingPlayingShowsWholeAtALargeFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *palette = paletteOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *emptyRow = named(window, "nowPlayingEmptyRow");
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(panel && emptyRow && header);
+    QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("empty"));
+    QQuickItem *label = itemNamed(emptyRow, QStringLiteral("nowPlayingEmptyLabel"));
+    QVERIFY(label != nullptr);
+    QCOMPARE(label->property("text").toString(), QStringLiteral("Nothing playing"));
+    QTRY_VERIFY(label->width() > 0);
+    QVERIFY(!label->property("truncated").toBool());
+    // The whole text inside the row, and the row inside the panel.
+    const QRectF rowRect = sceneRect(emptyRow);
+    const QRectF labelRect = sceneRect(label);
+    QVERIFY2(label->implicitHeight() <= label->height() + 0.5 && labelRect.top() >= rowRect.top() - 0.5
+                 && labelRect.bottom() <= rowRect.bottom() + 0.5,
+             qPrintable(QStringLiteral("text %1..%2 (%3 px) in a row %4..%5")
+                            .arg(labelRect.top()).arg(labelRect.bottom()).arg(label->implicitHeight())
+                            .arg(rowRect.top()).arg(rowRect.bottom())));
+    QVERIFY(rowRect.bottom() <= sceneRect(panel).bottom());
+    QVERIFY(labelRect.right() <= sceneRect(panel).right() - 12 + 0.5);
+    QCOMPARE(sceneRect(header).top(), sceneRect(panel).bottom());
+    const int lines = label->property("lineCount").toInt();
+    if (lines == 1) {
+        QCOMPARE(emptyRow->height(), palette->property("rowHeight").toReal());
+    }
+    if (pointSize == 0.0) {
+        QCOMPARE(lines, 1);
+    }
 }
 
 void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {

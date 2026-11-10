@@ -972,7 +972,9 @@ Item {
         }
     }
 
-    // Nothing loaded.
+    // Nothing loaded: one row, or, where a large font leaves the words no
+    // room on one line, as many lines as they wrap to, whole, with the
+    // glyph by the first.
     Item {
         id: emptyRow
         objectName: "nowPlayingEmptyRow"
@@ -980,11 +982,13 @@ Item {
         x: 0
         y: Kirigami.Units.smallSpacing
         width: root.width
-        height: root.uiPalette.rowHeight
+        height: emptyLabel.lineCount > 1
+            ? Math.max(root.uiPalette.rowHeight, Math.ceil(emptyLabel.implicitHeight) + 2 * Kirigami.Units.smallSpacing)
+            : root.uiPalette.rowHeight
 
         Kirigami.Icon {
             x: root.textInset
-            anchors.verticalCenter: parent.verticalCenter
+            y: emptyLabel.y + Math.round((Math.min(emptyLabel.implicitHeight, baseMetrics.height) - height) / 2)
             width: Kirigami.Units.iconSizes.small
             height: width
             source: "media-album-track"
@@ -993,12 +997,13 @@ Item {
         }
 
         Text {
+            id: emptyLabel
             objectName: "nowPlayingEmptyLabel"
             x: root.textInset + Kirigami.Units.iconSizes.small + Kirigami.Units.largeSpacing
             width: Math.max(0, parent.width - x - root.textInset)
             anchors.verticalCenter: parent.verticalCenter
             text: I18n.i18nc("@info", "Nothing playing")
-            elide: Text.ElideRight
+            wrapMode: Text.Wrap
             font: root.uiPalette.baseFont
             color: root.uiPalette.textSecondary
         }
