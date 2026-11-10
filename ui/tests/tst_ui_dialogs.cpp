@@ -20,6 +20,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
@@ -390,6 +391,7 @@ private slots:
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
+    void dialogsHoldTheirContentsWithALargeFont();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -461,6 +463,11 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
         QQuickItem *tint = itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0);
         QVERIFY(tint != nullptr && tint->isVisible());
         QCOMPARE(tint->width(), row->width());
+        // The dialog is as tall as its tallest page: none scrolls, so
+        // none hides its last line.
+        QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
+                 qPrintable(QStringLiteral("%1: %2 of %3").arg(pages[i])
+                                .arg(page->property("contentHeight").toReal()).arg(page->height())));
     }
 
     // Defaults on the left; OK, Apply and Cancel on the right, in that order.
@@ -1789,6 +1796,181 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
         }
         QMetaObject::invokeMethod(dialog, "close");
     }
+}
+
+namespace {
+
+// Whether `inner` lies within `outer`, give or take half a pixel.
+bool within(const QRectF &inner, const QRectF &outer) {
+    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
+        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
+}
+
+QString describeItem(QQuickItem *item) {
+    const QRectF rect = sceneRect(item);
+    return QStringLiteral("%1 \"%2\" %3 at %4,%5 %6x%7")
+        .arg(QString::fromLatin1(item->metaObject()->className()), item->objectName(),
+             item->property("text").toString())
+        .arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
+// The visible items of the popup whose frame is `frame` that lie outside
+// it, or are text cut short; the frame's own drawing aside.
+QStringList itemsCrossing(QQuickItem *popupItem, QQuickItem *frame) {
+    const QRectF bounds = sceneRect(frame);
+    QStringList crossing;
+    const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+        if (item == frame || !item->isVisible() || item->opacity() <= 0) {
+            return;
+        }
+        if (item->width() > 0 && item->height() > 0 && !within(sceneRect(item), bounds)) {
+            crossing << describeItem(item);
+        }
+        if (item->property("truncated").toBool()) {
+            crossing << QStringLiteral("cut short: ") + describeItem(item);
+        }
+        for (QQuickItem *child : item->childItems()) {
+            visit(child);
+        }
+    };
+    visit(popupItem);
+    return crossing;
+}
+
+} // namespace
+
+// At 24 pt, About, Configure and Edit Tags hold their contents: no tab,
+// text or button crosses a dialog's edge or is cut short, Configure's page
+// list and combo boxes fit their words, and Edit Tags' fields show about 16
+// characters, with the table taking the rest.
+void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 24.0);
+
+    // About, on each of its tabs.
+    QObject *about = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(about != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(about, "open"));
+    QTRY_VERIFY(about->property("opened").toBool());
+    auto *aboutFrame = qvariant_cast<QQuickItem *>(about->property("background"));
+    QVERIFY(aboutFrame != nullptr);
+    QQuickItem *aboutTabs = visibleNamed(window, QStringLiteral("aboutTabs"));
+    QVERIFY(aboutTabs != nullptr);
+    for (int tab = 0; tab < 4; ++tab) {
+        about->setProperty("tabIndex", tab);
+        QTest::qWait(50);
+        const QStringList crossing = itemsCrossing(aboutFrame->parentItem(), aboutFrame);
+        QVERIFY2(crossing.isEmpty(), qPrintable(QStringLiteral("tab %1:\n").arg(tab) + crossing.join(QLatin1Char('\n'))));
+    }
+    // Every tab whole, side by side.
+    for (int i = 0; i < aboutTabs->property("count").toInt(); ++i) {
+        QQuickItem *tab = nullptr;
+        QMetaObject::invokeMethod(aboutTabs, "itemAt", Q_RETURN_ARG(QQuickItem *, tab), Q_ARG(int, i));
+        QVERIFY(tab != nullptr);
+        QVERIFY2(within(sceneRect(tab), sceneRect(aboutTabs)), qPrintable(describeItem(tab)));
+    }
+    QVERIFY(within(sceneRect(visibleNamed(window, QStringLiteral("aboutCloseButton"))), sceneRect(aboutFrame)));
+    QMetaObject::invokeMethod(about, "close");
+    QTRY_VERIFY(!about->property("visible").toBool());
+
+    // Configure, on each of its pages: the page list as wide as its
+    // longest title, and every combo box as wide as its longest option.
+    QObject *preferences = openPreferences(window);
+    QVERIFY(preferences != nullptr);
+    auto *preferencesFrame = qvariant_cast<QQuickItem *>(preferences->property("background"));
+    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
+    QVERIFY(preferencesFrame != nullptr && list != nullptr);
+    QVERIFY(list->width() > 176.0);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
+    for (int page = 0; page < 5; ++page) {
+        preferences->setProperty("pageIndex", page);
+        QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
+        QTest::qWait(50);
+        QQuickItem *pageItem = stack->childItems().at(page);
+        for (QQuickItem *row : itemsNamed(list, QStringLiteral("preferencesPage_%1").arg(page))) {
+            for (QQuickItem *label : itemsNamed(row, QString())) {
+                QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
+            }
+        }
+        const std::function<void(QQuickItem *)> checkCombos = [&](QQuickItem *item) {
+            if (item->isVisible() && item->objectName().endsWith(QStringLiteral("ComboBox"))) {
+                QVERIFY2(item->width() >= item->implicitWidth() - 0.5, qPrintable(describeItem(item)));
+                // A page taller than the window scrolls; across, nothing
+                // may cross the dialog's edge.
+                QVERIFY2(sceneRect(item).right() <= sceneRect(preferencesFrame).right() + 0.5,
+                         qPrintable(describeItem(item)));
+            }
+            for (QQuickItem *child : item->childItems()) {
+                checkCombos(child);
+            }
+        };
+        checkCombos(pageItem);
+        QQuickItem *title = itemsNamed(pageItem, QStringLiteral("preferencesPageTitle")).value(0);
+        QVERIFY(title != nullptr);
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(describeItem(title)));
+        // Nothing in a form in its wide layout runs past the page's visible
+        // width. (Kirigami's narrow layout caps its column at 32 grid
+        // units, which don't follow the application's font here.)
+        const qreal pageRight = sceneRect(pageItem).left() + pageItem->property("leftPadding").toReal()
+            + pageItem->property("availableWidth").toReal();
+        const std::function<void(QQuickItem *)> checkWidth = [&](QQuickItem *item) {
+            if (!item->isVisible()) {
+                return;
+            }
+            if (item->width() > 0) {
+                QVERIFY2(sceneRect(item).right() <= pageRight + 0.5,
+                         qPrintable(QStringLiteral("page %1 ends at %2: ").arg(page).arg(pageRight)
+                                    + describeItem(item)));
+            }
+            for (QQuickItem *child : item->childItems()) {
+                checkWidth(child);
+            }
+        };
+        for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
+            if (form->property("wideMode").toBool()) {
+                checkWidth(form);
+            }
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!preferences->property("visible").toBool());
+
+    // Edit Tags: the fields' column holds its labels and a field of about
+    // 16 characters, and the table starts after it.
+    QObject *tagEditor = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && tagEditor->property("opened").toBool());
+    QQuickItem *title = nullptr;
+    QTRY_VERIFY((title = visibleNamed(window, QStringLiteral("tagEditorField_title"))) != nullptr);
+    const qreal sixteen = 16 * QFontMetricsF(title->property("font").value<QFont>()).averageCharWidth();
+    QQuickItem *table = visibleNamed(window, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album"),
+                               QStringLiteral("albumArtist"), QStringLiteral("genre"), QStringLiteral("year"),
+                               QStringLiteral("comment")}) {
+        QQuickItem *field = visibleNamed(window, QStringLiteral("tagEditorField_") + key);
+        QQuickItem *label = visibleNamed(window, QStringLiteral("tagEditorLabel_") + key);
+        QVERIFY2(field != nullptr && label != nullptr, qPrintable(key));
+        QVERIFY2(field->width() >= sixteen, qPrintable(QStringLiteral("%1: %2 < %3").arg(key).arg(field->width()).arg(sixteen)));
+        QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
+        QVERIFY2(sceneRect(label).right() <= sceneRect(field).left(), qPrintable(key));
+        QVERIFY2(sceneRect(field).right() < sceneRect(table).left(), qPrintable(key));
+    }
+    editor.close();
+    QTRY_VERIFY(!tagEditor->property("visible").toBool());
 }
 
 int main(int argc, char **argv) {

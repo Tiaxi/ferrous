@@ -48,7 +48,34 @@ Dialog {
     modal: true
     focus: true
     title: I18n.i18nc("@title:window", "About Ferrous")
-    width: Math.min(Kirigami.Units.gridUnit * 29, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
+    // 29 grid units, or wider when a large font makes the tabs or the
+    // buttons need more; the texts wrap within it.
+    readonly property real minimumWidth: Math.ceil(Math.max(
+        aboutTabs.implicitWidth + root.leftPadding + root.rightPadding,
+        root.componentsWidth + 2 * Kirigami.Units.largeSpacing + root.leftPadding + root.rightPadding,
+        aboutFooter.implicitWidth))
+    // The Components page: the names' column, 9 grid units or as wide as
+    // the longest name, and the versions after it.
+    readonly property real componentNameWidth: {
+        let widest = 0
+        for (let i = 0; i < root.components.length; ++i) {
+            widest = Math.max(widest, componentMetrics.advanceWidth(String(root.components[i].name)))
+        }
+        return Math.max(Kirigami.Units.gridUnit * 9, Math.ceil(widest))
+    }
+    readonly property real componentsWidth: {
+        let widest = 0
+        for (let i = 0; i < root.components.length; ++i) {
+            widest = Math.max(widest, componentMetrics.advanceWidth(String(root.components[i].version)))
+        }
+        return root.componentNameWidth + Kirigami.Units.largeSpacing + Math.ceil(widest)
+    }
+    FontMetrics {
+        id: componentMetrics
+        font: root.uiPalette.baseFont
+    }
+    width: Math.min(Math.max(Kirigami.Units.gridUnit * 29, root.minimumWidth),
+        root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     closePolicy: Popup.CloseOnEscape
 
     onAboutToShow: root.tabIndex = 0
@@ -77,6 +104,7 @@ Dialog {
     }
 
     footer: RowLayout {
+        id: aboutFooter
         spacing: 0
 
         Button {
@@ -217,7 +245,7 @@ Dialog {
 
                         Label {
                             text: modelData.name
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+                            Layout.preferredWidth: root.componentNameWidth
                             elide: Text.ElideRight
                         }
 
@@ -253,6 +281,11 @@ Dialog {
                 }
 
                 Kirigami.UrlButton {
+                    objectName: "aboutLicenseLink"
+                    // Wraps rather than run past the dialog's edge.
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: Math.ceil(implicitWidth)
+                    wrapMode: Text.Wrap
                     url: root.licenseUrl
                     text: I18n.i18nc("@action:button", "GNU General Public License, version 3")
                     color: root.uiPalette.link

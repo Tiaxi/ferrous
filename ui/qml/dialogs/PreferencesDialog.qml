@@ -161,8 +161,33 @@ Dialog {
     // KConfigDialog's caption: "Configure", with the application's name.
     title: I18n.i18nc("@title:window %1 is the application name", "Configure — %1", "Ferrous")
     parent: Overlay.overlay
-    width: Math.min(Kirigami.Units.gridUnit * 49, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    height: Math.min(Kirigami.Units.gridUnit * 31, root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
+    // The page list's rows: the icon and the title, with its insets.
+    readonly property real pageRowLeftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+    readonly property real pageRowSpacing: Kirigami.Units.largeSpacing + 2
+    // The page list: 176 px, or as wide as its longest title needs.
+    readonly property real pageListWidth: {
+        let widest = 0
+        for (let i = 0; i < root.pages.length; ++i) {
+            widest = Math.max(widest, pageTitleMetrics.advanceWidth(root.pages[i].title))
+        }
+        return Math.max(176, Math.ceil(root.pageRowLeftPadding + Kirigami.Units.iconSizes.small
+            + root.pageRowSpacing + widest + root.pageRowLeftPadding))
+    }
+    FontMetrics {
+        id: pageTitleMetrics
+        font: root.uiPalette.baseFont
+    }
+
+    // The pages' sizes are for the default 10 pt font; a larger font
+    // widens them, and a smaller one keeps them.
+    readonly property real fontScale: Math.max(1, root.uiPalette.basePointSize / 10)
+    // 49 grid units, or the page list and 39 of them for the pages when the
+    // list is wider or the font larger. As tall as the tallest page, so
+    // that none scrolls when the window has the room.
+    width: Math.min(Math.max(Kirigami.Units.gridUnit * 49,
+            root.pageListWidth + 1 + Kirigami.Units.gridUnit * 39 * root.fontScale),
+        root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
+    height: Math.min(Math.ceil(root.implicitHeight), root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
     x: Math.round(((parent ? parent.width : root.windowRoot.width) - width) / 2)
     y: Math.round(((parent ? parent.height : root.windowRoot.height) - height) / 2)
     padding: 0
@@ -277,8 +302,9 @@ Dialog {
         // The page list: Tab reaches it, and the arrow keys move between
         // the pages.
         Rectangle {
-            Layout.preferredWidth: 176
+            Layout.preferredWidth: root.pageListWidth
             Layout.fillHeight: true
+            implicitHeight: pageList.anchors.topMargin + pageList.contentHeight
             color: root.uiPalette.view
 
             ListView {
@@ -305,7 +331,7 @@ Dialog {
                     width: ListView.view.width
                     implicitHeight: root.uiPalette.rowHeight + Kirigami.Units.smallSpacing
                     padding: 0
-                    leftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+                    leftPadding: root.pageRowLeftPadding
                     focusPolicy: Qt.NoFocus
                     text: pageRow.modelData.title
                     highlighted: ListView.isCurrentItem
@@ -327,7 +353,7 @@ Dialog {
                     }
 
                     contentItem: RowLayout {
-                        spacing: Kirigami.Units.largeSpacing + 2
+                        spacing: root.pageRowSpacing
 
                         Kirigami.Icon {
                             implicitWidth: Kirigami.Units.iconSizes.small

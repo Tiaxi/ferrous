@@ -905,8 +905,8 @@ Dialog {
         ScrollView {
             id: tagEditorFieldsScroll
             objectName: "tagEditorFields"
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 19
-            Layout.minimumWidth: Kirigami.Units.gridUnit * 16
+            Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
+            Layout.minimumWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
             Layout.fillHeight: true
             clip: true
             contentWidth: availableWidth
@@ -1129,6 +1129,19 @@ Dialog {
             widest = Math.max(widest, boldLabelMetrics.advanceWidth(root.editorFields[i].formLabel))
         }
         return Math.ceil(widest)
+    }
+
+    // The least the fields' column takes: the labels and a field that shows
+    // about 16 characters, so a large font doesn't squeeze the fields. The
+    // table has the rest.
+    readonly property real fieldsMinimumWidth: Math.ceil(root.fieldLabelWidth
+        + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+        + 16 * fieldMetrics.averageCharacterWidth + 2 * Kirigami.Units.largeSpacing)
+
+    FontMetrics {
+        id: fieldMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.basePointSize
     }
 
     FontMetrics {

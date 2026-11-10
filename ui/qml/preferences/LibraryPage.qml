@@ -328,7 +328,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "librarySortComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Sort albums by:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 9
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 9, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox album sort", "Year"),
             I18n.i18nc("@item:inlistbox album sort", "Title")
