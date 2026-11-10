@@ -42,6 +42,7 @@
 #define private public
 #include "../src/BridgeClient.h"
 #include "../src/DiagnosticsLog.h"
+#include "../src/MprisController.h"
 #include "../src/TagEditorController.h"
 #include "../src/CoverImageProvider.h"
 #include "../src/CoverRevisionLinks.h"
@@ -428,6 +429,7 @@ private slots:
     void testPlaybackTrackTokenDecoding();
     void testChannelButtonsVisibilityDecoding();
     void libraryViewStateAvailabilityFollowsSnapshot();
+    void volumeTheBackendSendsReachesTheSliderAndMpris();
     void libraryChangesNotifyOnlyLibraryProperties();
     void testBinariesSetNoFileBrowserNameDetector();
     void detectedFileBrowserNameNotifiesOnlyWhenItChanges();
@@ -8736,6 +8738,31 @@ void BridgeClientTest::testChannelButtonsVisibilityDecoding()
     QCOMPARE(decoded.settings.showLevelMeter, false);
     QCOMPARE(decoded.settings.showFullscreenTitleStrip, true);
     QCOMPARE(decoded.settings.stretchShortTracks, true);
+}
+
+// A volume set outside the app, such as with Plasma's per-app slider, comes
+// as the volume setting: the slider and MPRIS show it.
+void BridgeClientTest::volumeTheBackendSendsReachesTheSliderAndMpris() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // Not registered on the bus: the test reads its properties.
+    MprisController mpris(&client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.settings.present = true;
+    snapshot.settings.systemMediaControlsEnabled = false;
+    snapshot.settings.volume = 0.66f;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.m_pollSnapshotChanged);
+    QCOMPARE(client.volume(), double(0.66f));
+    QCOMPARE(mpris.volume(), double(0.66f));
+
+    // A mute there shows as the volume 0.
+    client.m_pollSnapshotChanged = false;
+    snapshot.settings.volume = 0.0f;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.m_pollSnapshotChanged);
+    QCOMPARE(client.volume(), 0.0);
+    QCOMPARE(mpris.volume(), 0.0);
 }
 
 void BridgeClientTest::libraryViewStateAvailabilityFollowsSnapshot() {

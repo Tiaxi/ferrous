@@ -110,6 +110,18 @@ pub(super) fn log_playback_changes(previous: &PlaybackSnapshot, now: &PlaybackSn
     }
 }
 
+/// Logs that the volume was changed outside the app to `level`, such as
+/// with Plasma's per-app volume slider.
+pub(super) fn log_outside_volume(level: f32) {
+    log_info(
+        ErrorCategory::Playback,
+        &format!(
+            "Volume changed outside the app: {:.0}%.",
+            f64::from(level) * 100.0
+        ),
+    );
+}
+
 /// Logs a seek that landed at `position`.
 pub(super) fn log_seek(position: std::time::Duration) {
     log_info(

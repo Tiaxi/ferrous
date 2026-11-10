@@ -121,6 +121,17 @@ pub(super) fn handle_bridge_command(
     }
 }
 
+/// Set the user's volume to `volume`, and have the playback engine play at
+/// it. Every `SetVolume` the engine gets is sent here, so that the bridge
+/// can tell a volume changed outside the app from one it sent since; see
+/// [`crate::playback::PlaybackEvent::OutsideVolume`].
+pub(super) fn command_volume(state: &mut BridgeState, playback: &PlaybackEngine, volume: f32) {
+    let volume = volume.clamp(0.0, 1.0);
+    state.settings.volume = volume;
+    state.volume_commands_sent += 1;
+    playback.command(PlaybackCommand::SetVolume(volume));
+}
+
 fn handle_playback_bridge_command(
     cmd: &BridgePlaybackCommand,
     state: &mut BridgeState,
@@ -136,9 +147,7 @@ fn handle_playback_bridge_command(
             context.playback.command(PlaybackCommand::Seek(*pos));
         }
         BridgePlaybackCommand::SetVolume(volume) => {
-            let volume = volume.clamp(0.0, 1.0);
-            context.playback.command(PlaybackCommand::SetVolume(volume));
-            state.settings.volume = volume;
+            command_volume(state, context.playback, *volume);
             *context.settings_dirty = true;
         }
         BridgePlaybackCommand::SetRepeatMode(mode) => {
@@ -183,9 +192,8 @@ fn handle_load_settings_from_disk(state: &mut BridgeState, context: &mut BridgeC
         .library
         .set_watching(state.settings.library_watch_enabled);
     state.lastfm.enabled = state.settings.integrations.lastfm_scrobbling_enabled;
-    context
-        .playback
-        .command(PlaybackCommand::SetVolume(state.settings.volume));
+    let volume = state.settings.volume;
+    command_volume(state, context.playback, volume);
     apply_analysis_spectrogram_settings(state, context.analysis);
     context.lastfm.command(LastFmCommand::SetEnabled(
         state.settings.integrations.lastfm_scrobbling_enabled,
@@ -273,9 +281,7 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SaveToDisk => save_settings_now(context),
         BridgeSettingsCommand::SetVolume(volume) => {
-            let volume = volume.clamp(0.0, 1.0);
-            state.settings.volume = volume;
-            context.playback.command(PlaybackCommand::SetVolume(volume));
+            command_volume(state, context.playback, *volume);
             *context.settings_dirty = true;
         }
         BridgeSettingsCommand::SetFftSize(size) => set_fft_size(state, context, *size),

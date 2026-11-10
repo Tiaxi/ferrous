@@ -31,6 +31,7 @@ use super::queue::{
 };
 use super::seek_locate::{Located, LocatedFrame, SeekLocator};
 use super::source_activation::SourceActivation;
+use super::stream_volume::{self, StreamVolumeChange, StreamVolumeReport, StreamVolumeWatch};
 use super::{
     EngineExit, FileStamp, PathRenames, PlaybackCommand, PlaybackError, PlaybackErrorOutcome,
     PlaybackEvent, PlaybackSnapshot, PlaybackState, RepeatMode, TrackChangeKind,
@@ -376,6 +377,20 @@ struct GstPlaybackRuntime {
     /// Time of the previous step of a fade or silence hold; `None` while
     /// neither runs.
     volume_ramp_tick_at: Option<Instant>,
+    /// Tells the engine's writes of the stream volume from changes made
+    /// elsewhere, such as in Plasma's volume applet, to an output that
+    /// controls the volume of its stream; see `stream_volume`.
+    stream_volume: Arc<StreamVolumeWatch>,
+    /// What the output's sinks read when they told of a change of their
+    /// stream's volume or mute.
+    stream_volume_rx: Receiver<StreamVolumeReport>,
+    /// Whether the stream was muted elsewhere. The user's volume is shown
+    /// as 0 meanwhile; the stream keeps its volume, which an unmute
+    /// elsewhere brings back. A volume the user sets in the app unmutes it.
+    stream_muted: bool,
+    /// Number of `SetVolume` commands handled, which a
+    /// [`PlaybackEvent::OutsideVolume`] tells.
+    volume_commands: u64,
     buffering_active: bool,
     /// Number of `Seek` commands received, which numbers each seek.
     seek_requests: u64,
@@ -617,6 +632,7 @@ impl GstPlaybackRuntime {
         let (located_tx, located_rx) = unbounded();
         let flac_parsers = track_flac_parsers(&playbin);
         releases.track(&playbin);
+        let (stream_volume, stream_volume_rx) = StreamVolumeWatch::new(1.0);
         Self {
             playbin,
             queue_state,
@@ -633,6 +649,10 @@ impl GstPlaybackRuntime {
             output_rise: OutputRise::Steady,
             startup_ramp_hold_left: None,
             volume_ramp_tick_at: None,
+            stream_volume,
+            stream_volume_rx,
+            stream_muted: false,
+            volume_commands: 0,
             buffering_active: false,
             seek_requests: 0,
             queued_seek: None,
@@ -1377,8 +1397,7 @@ impl GstPlaybackRuntime {
         if was_stopped || resumed_at_track_start {
             // Re-assert the volume after the state transition, so that
             // elements the new run created also have it.
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+            self.write_applied_volume();
         }
         self.snapshot.state = PlaybackState::Playing;
         // The position advances once the pipeline has reached Playing.
@@ -1865,8 +1884,7 @@ impl GstPlaybackRuntime {
             self.begin_startup_ramp();
         } else {
             // Re-asserted after the state change, as `play` does.
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+            self.write_applied_volume();
         }
     }
 
@@ -1923,8 +1941,7 @@ impl GstPlaybackRuntime {
             return;
         }
         self.applied_volume = self.target_volume;
-        self.playbin
-            .set_property("volume", f64::from(self.applied_volume));
+        self.write_applied_volume();
         self.output_rise = OutputRise::Steady;
         self.startup_ramp_hold_left = None;
         self.volume_ramp_tick_at = None;
@@ -1933,7 +1950,7 @@ impl GstPlaybackRuntime {
     /// Silence the output and fade the current track in from silence.
     fn begin_startup_ramp(&mut self) {
         self.applied_volume = 0.0;
-        self.playbin.set_property("volume", 0.0_f64);
+        self.write_applied_volume();
         self.output_rise = OutputRise::StartupFade;
         // The fade-in starts its own clock. Otherwise the first step would
         // count the time since a running fade last stepped, which can span
@@ -1989,9 +2006,12 @@ impl GstPlaybackRuntime {
             // The output sets up its sink again for the next run, and
             // autoaudiosink makes a new one, which starts at its own volume.
             // Playsink gives that sink the volume set since the run ended,
-            // but not one set before, which went to the old sink.
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+            // but not one set before, which went to the old sink. So also
+            // a mute set elsewhere, which the new stream keeps.
+            self.write_applied_volume();
+            if self.stream_muted {
+                self.write_stream_mute();
+            }
             result
         } else {
             let result = change();
@@ -2170,7 +2190,37 @@ impl GstPlaybackRuntime {
         true
     }
 
+    /// Set the output to `applied_volume`.
+    fn write_applied_volume(&self) {
+        let gain = f64::from(self.applied_volume);
+        self.stream_volume.write(gain, self.stream_muted, || {
+            self.playbin.set_property("volume", gain);
+        });
+    }
+
+    /// Mute or unmute the output's stream as `stream_muted` says.
+    fn write_stream_mute(&self) {
+        let muted = self.stream_muted;
+        self.stream_volume
+            .write(f64::from(self.applied_volume), muted, || {
+                self.playbin.set_property("mute", muted);
+            });
+    }
+
     fn set_volume(&mut self, level: f32) {
+        self.volume_commands += 1;
+        // Newer than anything a sink has read of its stream so far, also
+        // while a fade has yet to write it: such a read is not taken in
+        // after this volume, and the `OutsideVolume` of one read later
+        // follows this command.
+        self.stream_volume
+            .mark(f64::from(self.applied_volume), self.stream_muted);
+        if self.stream_muted {
+            // The volume the user sets plays, also where the stream was
+            // muted elsewhere.
+            self.stream_muted = false;
+            self.write_stream_mute();
+        }
         self.snapshot.volume = level.clamp(0.0, 1.0);
         self.target_volume = super::volume_level_to_gain(self.snapshot.volume);
         if self.applies_volume_while_paused() {
@@ -2179,10 +2229,64 @@ impl GstPlaybackRuntime {
             // muted, a resume plays no sample at the old volume.
             self.applied_volume = self.target_volume;
             self.volume_ramp_tick_at = None;
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+            self.write_applied_volume();
+        } else if (self.target_volume - self.applied_volume).abs() <= f32::EPSILON
+            && !self.output_silenced()
+            && self.startup_ramp_hold_left.is_none()
+            && self.output_applies_volume() == Some(true)
+        {
+            // At the volume already, so no fade writes it. The stream can
+            // have been changed elsewhere since the engine last wrote it,
+            // by a change whose report the mark above set aside, and that
+            // need not be told again: the user's volume is the newer.
+            self.write_applied_volume();
         }
         self.emit_snapshot();
+    }
+
+    /// Take in what an output's sink read of its stream: a volume or mute
+    /// set elsewhere, such as with Plasma's per-app volume slider, becomes
+    /// the user's volume, as if set in the app. The stream already plays
+    /// at it, so it applies at once, ending a fade toward the volume
+    /// before. An output silenced until its run plays, or holding the
+    /// silence of a track start, stays silent, and comes up to the new
+    /// volume as it would have to the old one. A mute is shown as the
+    /// volume 0; the stream keeps its volume, which the unmute brings
+    /// back.
+    fn handle_stream_volume(&mut self, report: StreamVolumeReport) {
+        let StreamVolumeChange::Outside { gain, muted } = self.stream_volume.classify(report)
+        else {
+            return;
+        };
+        self.stream_volume.adopt(gain, muted);
+        self.stream_muted = muted;
+        #[allow(clippy::cast_possible_truncation)]
+        let level = (stream_volume::gain_to_level(gain) as f32).clamp(0.0, 1.0);
+        self.target_volume = super::volume_level_to_gain(level);
+        if self.output_silenced() || self.startup_ramp_hold_left.is_some() {
+            // Silent again until the run plays.
+            self.write_applied_volume();
+        } else {
+            self.applied_volume = self.target_volume;
+            self.end_startup_fade();
+            self.volume_ramp_tick_at = None;
+        }
+        let shown = if muted { 0.0 } else { level };
+        if (shown - self.snapshot.volume).abs() > f32::EPSILON {
+            self.snapshot.volume = shown;
+            let _ = self.event_tx.send(PlaybackEvent::OutsideVolume {
+                level: shown,
+                set_volume_commands: self.volume_commands,
+            });
+            self.emit_snapshot();
+        }
+    }
+
+    /// Take in every report of the stream volume that waits.
+    fn handle_stream_volume_reports(&mut self) {
+        while let Ok(report) = self.stream_volume_rx.try_recv() {
+            self.handle_stream_volume(report);
+        }
     }
 
     /// Whether a volume change applies at once rather than when playback
@@ -2300,7 +2404,7 @@ impl GstPlaybackRuntime {
                 self.startup_ramp_hold_left = Some(left);
                 if self.applied_volume != 0.0 {
                     self.applied_volume = 0.0;
-                    self.playbin.set_property("volume", 0.0_f64);
+                    self.write_applied_volume();
                 }
                 return;
             }
@@ -2334,8 +2438,7 @@ impl GstPlaybackRuntime {
             self.end_startup_fade();
             self.volume_ramp_tick_at = None;
         }
-        self.playbin
-            .set_property("volume", f64::from(self.applied_volume));
+        self.write_applied_volume();
     }
 
     fn poll(&mut self) {
@@ -2970,7 +3073,7 @@ impl GstPlaybackRuntime {
         self.applied_volume = 0.0;
         self.output_rise = OutputRise::Silenced;
         self.volume_ramp_tick_at = None;
-        self.playbin.set_property("volume", 0.0_f64);
+        self.write_applied_volume();
     }
 
     fn switch_track(&mut self, path: &Path, uri: &str, force_play: bool) {
@@ -2992,8 +3095,7 @@ impl GstPlaybackRuntime {
             self.snapshot.state = PlaybackState::Playing;
             // Re-assert the volume after the state change, so that elements
             // the new run created also have it.
-            self.playbin
-                .set_property("volume", f64::from(self.applied_volume));
+            self.write_applied_volume();
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
             self.end_startup_fade();
@@ -3062,10 +3164,11 @@ fn start_gst_engine(
     );
     runtime.output_segments = output_segments;
     runtime.input_switches.connect(&runtime.playbin);
-    connect_about_to_finish(&runtime);
     runtime
-        .playbin
-        .set_property("volume", f64::from(runtime.applied_volume));
+        .stream_volume
+        .watch_output(analysis_sink.upcast_ref());
+    connect_about_to_finish(&runtime);
+    runtime.write_applied_volume();
     Ok((runtime, bus))
 }
 
@@ -3128,6 +3231,7 @@ fn run_gst_engine(
     // stopped, there is none.
     let (wake_tx, wake_rx) = bounded::<()>(1);
     let located_rx = runtime.located_rx.clone();
+    let stream_volume_rx = runtime.stream_volume_rx.clone();
     runtime.releases.wake_with(wake_tx.clone());
     // Nothing posts on the bus of the stopped pipeline meanwhile, so every
     // message from here on is counted.
@@ -3168,6 +3272,13 @@ fn run_gst_engine(
                 if let Ok(located) = located {
                     runtime.drain_bus(bus);
                     runtime.handle_located(located);
+                }
+            }
+            recv(stream_volume_rx) -> report => {
+                if let Ok(report) = report {
+                    runtime.drain_bus(bus);
+                    runtime.handle_stream_volume(report);
+                    runtime.handle_stream_volume_reports();
                 }
             }
             recv(timer) -> _ => {}
@@ -6415,6 +6526,85 @@ mod engine_tests {
         });
     }
 
+    /// The sink that the current run of an output made by
+    /// `volume_applying_output` plays to.
+    fn stream_sink(playbin: &gst::Element) -> gst::Element {
+        playbin
+            .clone()
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .iterate_recurse()
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|element| {
+                element
+                    .factory()
+                    .is_some_and(|factory| factory.name() == "fakeaudiosink")
+            })
+            .expect("the output's sink")
+    }
+
+    /// Change the stream of `sink` as another program does through the
+    /// sound server, such as Plasma's per-app volume slider: the sink tells
+    /// of it on a thread of its own, not the engine's.
+    fn change_stream_elsewhere(sink: &gst::Element, change: impl FnOnce(&gst::Element) + Send) {
+        std::thread::scope(|scope| {
+            scope.spawn(|| change(sink));
+        });
+    }
+
+    /// The linear gain of a stream that the sound server, and Plasma, show
+    /// at volume `level`.
+    fn server_gain(level: f64) -> f64 {
+        gstreamer_audio::StreamVolume::convert_volume(
+            gstreamer_audio::StreamVolumeFormat::Cubic,
+            gstreamer_audio::StreamVolumeFormat::Linear,
+            level,
+        )
+    }
+
+    /// Have each sink of the output of `playbin` notify its volume and mute
+    /// again on another thread after every change, as pulsesink does once
+    /// the sound server has told it that its stream changed, which the
+    /// server does for the engine's own writes too.
+    fn echo_stream_changes(playbin: &gst::Element) {
+        const ECHO_THREAD: &str = "ferrous-test-stream-echo";
+        let (echo_tx, echo_rx) = unbounded::<gst::glib::WeakRef<gst::Element>>();
+        std::thread::Builder::new()
+            .name(ECHO_THREAD.to_string())
+            .spawn(move || {
+                while let Ok(sink) = echo_rx.recv() {
+                    if let Some(sink) = sink.upgrade() {
+                        sink.notify("volume");
+                        sink.notify("mute");
+                    }
+                }
+            })
+            .unwrap();
+        let output = playbin
+            .property::<gst::Element>("audio-sink")
+            .downcast::<gst::Bin>()
+            .unwrap();
+        output.connect_deep_element_added(move |_, _, element| {
+            if element
+                .factory()
+                .is_none_or(|factory| factory.name() != "fakeaudiosink")
+            {
+                return;
+            }
+            for property in ["notify::volume", "notify::mute"] {
+                let echo_tx = echo_tx.clone();
+                element.connect(property, false, move |values| {
+                    if std::thread::current().name() != Some(ECHO_THREAD) {
+                        let sink = values.first()?.get::<gst::Element>().ok()?;
+                        let _ = echo_tx.send(sink.downgrade());
+                    }
+                    None
+                });
+            }
+        });
+    }
+
     /// The output a test plays to.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestOutput {
@@ -6548,6 +6738,8 @@ mod engine_tests {
         errors: Vec<PlaybackError>,
         /// Positions of the `Seeked` events.
         seeked: Vec<Duration>,
+        /// Levels of the `OutsideVolume` events.
+        outside_volumes: Vec<f32>,
         prepared: Vec<PathBuf>,
         cancelled_staging: usize,
         trace: Trace,
@@ -6607,6 +6799,7 @@ mod engine_tests {
                 changes: Vec::new(),
                 errors: Vec::new(),
                 seeked: Vec::new(),
+                outside_volumes: Vec::new(),
                 prepared: Vec::new(),
                 cancelled_staging: 0,
                 trace,
@@ -6693,6 +6886,7 @@ mod engine_tests {
                 PlaybackEvent::Error(error) => self.errors.push(error),
                 PlaybackEvent::Seeked { position } => self.seeked.push(position),
                 PlaybackEvent::PathsRemapped => {}
+                PlaybackEvent::OutsideVolume { level, .. } => self.outside_volumes.push(level),
             }
         }
 
@@ -9261,6 +9455,7 @@ mod engine_tests {
                 while let Ok(located) = self.runtime.located_rx.try_recv() {
                     self.runtime.handle_located(located);
                 }
+                self.runtime.handle_stream_volume_reports();
                 self.runtime.poll();
             }
         }
@@ -12487,6 +12682,322 @@ mod engine_tests {
         assert!(engine.runtime.restarting());
         engine.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
         engine.assert_plays_at_once_at(1.0);
+    }
+
+    #[test]
+    fn a_volume_set_on_the_stream_elsewhere_becomes_the_users_volume_and_stays() {
+        let fixtures = Fixtures::new("outside-volume");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let b = fixtures.wav_at("b.wav", 4_000, 48_000);
+        let mut engine = Engine::start_with_output(volume_applying_output);
+        echo_stream_changes(&engine.playbin);
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.5 s", |engine| {
+            engine.snapshot.position >= millis(500)
+        });
+        // 66 % on Plasma's per-app slider reads as 66 %.
+        let gain = server_gain(0.66);
+        let sink = stream_sink(&engine.playbin);
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", gain));
+        engine.wait_until("the volume set elsewhere was not taken", |engine| {
+            engine.snapshot.volume < 1.0
+        });
+        assert_eq!(engine.outside_volumes, [0.66]);
+        assert_eq!(engine.snapshot.volume, 0.66);
+        // The stream plays on at it: no fade takes it back.
+        engine.wait_until("the position did not reach 1 s", |engine| {
+            engine.snapshot.position >= millis(1_000)
+        });
+        assert!((sink.property::<f64>("volume") - gain).abs() < 1e-12);
+
+        // A restart, for a seek that reaches the successor handed over,
+        // plays to a new sink, at the volume set elsewhere.
+        engine.wait_until("the successor was not handed over by 3 s", |engine| {
+            engine.queue.lock().unwrap().successor_handed_to_pipeline()
+                && engine.snapshot.position >= millis(3_000)
+        });
+        engine.send(PlaybackCommand::Seek(millis(1_000)));
+        engine.wait_until("the restarted run did not play to 1.6 s", |engine| {
+            engine.snapshot.seek_landed_serial == 1
+                && engine.snapshot.current_queue_index == Some(0)
+                && engine.snapshot.position >= millis(1_600)
+        });
+        let restarted = stream_sink(&engine.playbin);
+        assert_ne!(restarted, sink, "the run was not restarted");
+        let level_gain = f64::from(super::super::volume_level_to_gain(0.66));
+        assert!((restarted.property::<f64>("volume") - level_gain).abs() < 1e-6);
+
+        // So does a track change.
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until("the next track did not play to 0.5 s", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(500)
+        });
+        let next = stream_sink(&engine.playbin);
+        assert_ne!(next, restarted);
+        assert!((next.property::<f64>("volume") - level_gain).abs() < 1e-6);
+        assert_eq!(engine.snapshot.volume, 0.66);
+        assert_eq!(engine.outside_volumes, [0.66]);
+    }
+
+    #[test]
+    fn a_mute_set_on_the_stream_elsewhere_shows_as_volume_0_and_keeps_the_volume() {
+        let fixtures = Fixtures::new("outside-mute");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let b = fixtures.wav_at("b.wav", 4_000, 48_000);
+        let mut engine = Engine::start_with_output(volume_applying_output);
+        echo_stream_changes(&engine.playbin);
+        let gain = |level: f32| f64::from(super::super::volume_level_to_gain(level));
+        engine.send(PlaybackCommand::SetVolume(0.8));
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.5 s", |engine| {
+            engine.snapshot.position >= millis(500)
+        });
+        let sink = stream_sink(&engine.playbin);
+        change_stream_elsewhere(&sink, |sink| sink.set_property("mute", true));
+        engine.wait_until("the mute set elsewhere was not taken", |engine| {
+            engine.snapshot.volume == 0.0
+        });
+        assert_eq!(engine.outside_volumes, [0.0]);
+        assert!(sink.property::<bool>("mute"));
+        assert!((sink.property::<f64>("volume") - gain(0.8)).abs() < 1e-6);
+
+        // The next track's stream stays muted, at the volume.
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until("the next track did not play to 0.5 s", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+                && engine.snapshot.position >= millis(500)
+        });
+        let sink = stream_sink(&engine.playbin);
+        assert!(sink.property::<bool>("mute"));
+        assert!((sink.property::<f64>("volume") - gain(0.8)).abs() < 1e-6);
+        assert_eq!(engine.snapshot.volume, 0.0);
+
+        // Unmuted elsewhere, the volume comes back.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("mute", false));
+        engine.wait_until("the unmute set elsewhere was not taken", |engine| {
+            engine.snapshot.volume > 0.0
+        });
+        assert_eq!(engine.snapshot.volume, 0.8);
+
+        // A volume set in the app unmutes the stream.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("mute", true));
+        engine.wait_until("the mute set elsewhere was not taken", |engine| {
+            engine.snapshot.volume == 0.0
+        });
+        engine.send(PlaybackCommand::SetVolume(0.4));
+        engine.wait_until("the output did not reach the volume set", |engine| {
+            engine.snapshot.volume == 0.4
+                && (sink.property::<f64>("volume") - gain(0.4)).abs() < 1e-6
+        });
+        assert!(!sink.property::<bool>("mute"));
+        assert_eq!(engine.outside_volumes, [0.0, 0.8, 0.0]);
+    }
+
+    #[test]
+    fn the_engines_own_volume_changes_are_never_taken_for_changes_made_elsewhere() {
+        // Fades, the silence of new runs and restarts, gapless and
+        // Repeat-One switches, with every change notified again later as
+        // pulsesink does.
+        let fixtures = Fixtures::new("own-volume-changes");
+        let a = fixtures.wav_at("a.wav", 2_000, 48_000);
+        let b = fixtures.wav_at("b.wav", 2_000, 48_000);
+        let c = fixtures.wav_at("c.wav", 2_000, 48_000);
+        let mut engine = Engine::start_with_output(volume_applying_output);
+        echo_stream_changes(&engine.playbin);
+        engine.send(PlaybackCommand::SetVolume(0.8));
+        engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone(), c]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 0.3 s", |engine| {
+            engine.snapshot.position >= millis(300)
+        });
+        // A fade while playing.
+        engine.send(PlaybackCommand::SetVolume(0.3));
+        engine.wait_until("the position did not reach 0.7 s", |engine| {
+            engine.snapshot.position >= millis(700)
+        });
+        // Volume changes while paused, and the resume.
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        engine.send(PlaybackCommand::SetVolume(0.0));
+        engine.send(PlaybackCommand::SetVolume(0.6));
+        engine.send(PlaybackCommand::Play);
+        // A seek, then the gapless switch to b, and its Repeat-One replay.
+        engine.send(PlaybackCommand::Seek(millis(1_200)));
+        engine.wait_until("b did not start", |engine| {
+            engine.snapshot.current_queue_index == Some(1)
+        });
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
+        engine.wait_until("b did not play again", |engine| {
+            engine
+                .changes
+                .iter()
+                .filter(|change| change.path == b)
+                .count()
+                >= 2
+        });
+        engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::Off));
+        // A track change, and a stop and start.
+        engine.send(PlaybackCommand::Next);
+        engine.wait_until("c did not play to 0.3 s", |engine| {
+            engine.snapshot.current_queue_index == Some(2)
+                && engine.snapshot.position >= millis(300)
+        });
+        engine.send(PlaybackCommand::Stop);
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("c did not play to 0.5 s again", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= millis(500)
+        });
+        assert!(
+            engine.outside_volumes.is_empty(),
+            "{:?}",
+            engine.outside_volumes
+        );
+        assert_eq!(engine.snapshot.volume, 0.6);
+        let gain = f64::from(super::super::volume_level_to_gain(0.6));
+        assert!((stream_sink(&engine.playbin).property::<f64>("volume") - gain).abs() < 1e-6);
+    }
+
+    /// Have `sink` tell of its stream again, as pulsesink does from its
+    /// streaming thread as it plays once the server has told it of a
+    /// change.
+    fn renotify_stream(sink: &gst::Element) {
+        change_stream_elsewhere(sink, |sink| sink.notify("volume"));
+    }
+
+    #[test]
+    fn a_volume_set_elsewhere_to_one_the_app_set_while_paused_is_taken() {
+        // At 80 %, muted in the app while paused and set back to 80 %, with
+        // the stream read only before the pause and after the resume.
+        let fixtures = Fixtures::new("outside-volume-repeated");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        renotify_stream(&sink);
+        engine.runtime.handle_stream_volume_reports();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        renotify_stream(&sink);
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.8);
+        // 0 % set in Plasma is the user's volume, not the app's mute.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", 0.0_f64));
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.0);
+        assert!(engine.events.try_iter().any(|event| matches!(
+            event,
+            PlaybackEvent::OutsideVolume { level, .. } if level == 0.0
+        )));
+    }
+
+    #[test]
+    fn a_volume_set_elsewhere_before_one_set_in_the_app_does_not_replace_it() {
+        let fixtures = Fixtures::new("outside-volume-before-app");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        // 66 % in Plasma is read, and waits, as the user's 30 % arrives and
+        // is taken first; its fade has not written yet.
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", server_gain(0.66)));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.3));
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        assert!(engine.runtime.volume_ramp_pending());
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.3);
+        assert!(
+            (engine.runtime.target_volume - super::super::volume_level_to_gain(0.3)).abs()
+                < f32::EPSILON
+        );
+        assert!(!engine
+            .events
+            .try_iter()
+            .any(|event| matches!(event, PlaybackEvent::OutsideVolume { .. })));
+        // The fade goes on to the user's volume.
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        let gain = f64::from(super::super::volume_level_to_gain(0.3));
+        assert!((sink.property::<f64>("volume") - gain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_same_volume_set_in_the_app_after_one_set_elsewhere_plays() {
+        // At 80 %, 66 % set in Plasma waits to be taken in as the user sets
+        // 80 % again, such as by releasing the slider where it was.
+        let fixtures = Fixtures::new("outside-volume-then-same");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", server_gain(0.66)));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.runtime.handle_stream_volume_reports();
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        assert_eq!(engine.runtime.snapshot.volume, 0.8);
+        let gain = f64::from(super::super::volume_level_to_gain(0.8));
+        assert!(
+            (sink.property::<f64>("volume") - gain).abs() < 1e-6,
+            "the stream stayed at {}",
+            sink.property::<f64>("volume")
+        );
+    }
+
+    #[test]
+    fn a_volume_set_elsewhere_while_a_run_is_silenced_waits_until_it_plays() {
+        let fixtures = Fixtures::new("outside-volume-silenced");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.play_until_opened(vec![a, b], RepeatMode::Off);
+        engine.finish_fade();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        // A track picked while paused, silenced until it plays.
+        engine.runtime.apply_command(PlaybackCommand::PlayAt(1));
+        engine.wait_until("row 1 did not preroll", |runtime| {
+            runtime.pipeline_prerolled()
+        });
+        assert!(engine.runtime.output_silenced());
+        let sink = stream_sink(&engine.runtime.playbin);
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", server_gain(0.5)));
+        engine.runtime.handle_stream_volume_reports();
+        assert_eq!(engine.runtime.snapshot.volume, 0.5);
+        // The stream is silent again until the run plays, then plays at
+        // once at the volume.
+        assert!(engine.runtime.output_silenced());
+        assert!(sink.property::<f64>("volume").abs() < f64::EPSILON);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_plays_at_once_at(0.5);
     }
 
     #[test]
