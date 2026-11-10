@@ -3467,8 +3467,11 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     // view, and a changed column's header is the text colour.
     QObject *tagEditor = qvariant_cast<QObject *>(root->property("tagEditor"));
     QVERIFY(QMetaObject::invokeMethod(tagEditor, "open"));
+    // Edit Tags has a window of its own.
+    auto *tags = qobject_cast<QQuickWindow *>(tagEditor);
+    QVERIFY(tags != nullptr && QTest::qWaitForWindowExposed(tags));
     QList<QQuickItem *> rows;
-    QTRY_COMPARE((rows = visibleRows(window->contentItem(), QStringLiteral("tagEditorRow"))).size(), 3);
+    QTRY_COMPARE((rows = visibleRows(tags->contentItem(), QStringLiteral("tagEditorRow"))).size(), 3);
     const auto rowTint = [](QQuickItem *row) {
         const QList<QQuickItem *> tints = row->findChildren<QQuickItem *>(QStringLiteral("rowBackgroundTint"));
         return tints.isEmpty() ? nullptr : tints.first();
@@ -3478,8 +3481,8 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
             || sameRgb(rowTint(rows[0])->property("color").value<QColor>(), paletteColor("selection")));
     QVERIFY(!rowTint(rows[1])->isVisible());
     QVERIFY(!rowTint(rows[2])->isVisible());
-    QQuickItem *genre = visibleItemNamed(window, QStringLiteral("tagEditorColumn_genre"));
-    QQuickItem *title = visibleItemNamed(window, QStringLiteral("tagEditorColumn_title"));
+    QQuickItem *genre = visibleItemNamed(tags, QStringLiteral("tagEditorColumn_genre"));
+    QQuickItem *title = visibleItemNamed(tags, QStringLiteral("tagEditorColumn_title"));
     QVERIFY(genre != nullptr && title != nullptr);
     const auto columnLabelColor = [](QQuickItem *column) {
         return column->findChildren<QQuickItem *>(QStringLiteral("tagEditorColumnLabel")).first()
@@ -3487,7 +3490,7 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     QVERIFY(sameRgb(columnLabelColor(genre), paletteColor("text")));
     QVERIFY(sameRgb(columnLabelColor(title), paletteColor("textSecondary")));
-    QQuickItem *status = visibleItemNamed(window, QStringLiteral("tagEditorStatusLabel"));
+    QQuickItem *status = visibleItemNamed(tags, QStringLiteral("tagEditorStatusLabel"));
     QVERIFY(status != nullptr);
     QVERIFY(sameRgb(status->property("color").value<QColor>(), paletteColor("textSecondary")));
 }

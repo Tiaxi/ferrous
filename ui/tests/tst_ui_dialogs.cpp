@@ -438,6 +438,8 @@ private slots:
     void editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut();
     void editTagsTableHeaderUsesTheQueuesHeaderStyle();
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
+    void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
+    void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsHoldTheirContentsWithALargeFont();
@@ -938,15 +940,18 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    // Edit Tags has a window of its own.
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
     editor.selectAllRows();
     QQuickItem *field = nullptr;
-    QTRY_VERIFY((field = visibleNamed(window, QStringLiteral("tagEditorField_genre"))) != nullptr);
+    QTRY_VERIFY((field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"))) != nullptr);
     field->forceActiveFocus(Qt::TabFocusReason);
-    QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(tags, Qt::Key_A, Qt::ControlModifier);
     for (const char letter : QByteArrayLiteral("Ambient")) {
-        QTest::keyClick(window, letter);
+        QTest::keyClick(tags, letter);
     }
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(tags, Qt::Key_Return);
     QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Ambient"));
     QVERIFY(editor.dirty());
     QCoreApplication::processEvents();
@@ -954,9 +959,9 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QVERIFY(!editor.saving());
     QVERIFY(dialog->property("visible").toBool());
     // Out of the field, on the table, Enter presses Save.
-    QQuickItem *table = named(window, QStringLiteral("tagEditorTable"));
+    QQuickItem *table = named(tags, QStringLiteral("tagEditorTable"));
     table->forceActiveFocus(Qt::TabFocusReason);
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(tags, Qt::Key_Return);
     QTRY_COMPARE(saves, 1);
     QTRY_VERIFY(!editor.saving());
     editor.close();
@@ -1887,15 +1892,18 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    // Edit Tags has a window of its own.
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
     editor.selectAllRows();
     QQuickItem *label = nullptr;
-    QTRY_VERIFY((label = visibleNamed(window, QStringLiteral("tagEditorLabel_genre"))) != nullptr);
-    QQuickItem *field = visibleNamed(window, QStringLiteral("tagEditorField_genre"));
-    QQuickItem *revert = named(window, QStringLiteral("tagEditorRevert_genre"));
-    QQuickItem *column = named(window, QStringLiteral("tagEditorColumn_genre"));
+    QTRY_VERIFY((label = visibleNamed(tags, QStringLiteral("tagEditorLabel_genre"))) != nullptr);
+    QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"));
+    QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_genre"));
+    QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_genre"));
     QVERIFY(field != nullptr && revert != nullptr && column != nullptr);
     QQuickItem *columnLabel = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
-    QQuickItem *columnRevert = named(window, QStringLiteral("tagEditorColumnRevert_genre"));
+    QQuickItem *columnRevert = named(tags, QStringLiteral("tagEditorColumnRevert_genre"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Genre:"));
     QCOMPARE(label->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY(!revert->isVisible());
@@ -1906,11 +1914,11 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     // button, and so does the column's header; the cells stay regular and
     // untinted.
     field->forceActiveFocus();
-    QTest::keyClick(window, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(tags, Qt::Key_A, Qt::ControlModifier);
     for (const char letter : QByteArrayLiteral("Ambient")) {
-        QTest::keyClick(window, letter);
+        QTest::keyClick(tags, letter);
     }
-    QTest::keyClick(window, Qt::Key_Tab);
+    QTest::keyClick(tags, Qt::Key_Tab);
     QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Ambient"));
     QTRY_COMPARE(label->property("font").value<QFont>().weight(), QFont::DemiBold);
     QVERIFY(revert->isVisible());
@@ -1918,11 +1926,11 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(hex(columnLabel->property("color").value<QColor>()), hex(tokenOf(window, "text")));
     QVERIFY(columnRevert->isVisible());
-    QQuickItem *status = visibleNamed(window, QStringLiteral("tagEditorStatusLabel"));
+    QQuickItem *status = visibleNamed(tags, QStringLiteral("tagEditorStatusLabel"));
     QTRY_COMPARE(status->property("text").toString(),
                  QStringLiteral("8 files selected. Genre changed from Classical."));
     editor.setSelectedRows({});
-    const QList<QQuickItem *> rows = itemsNamed(window->contentItem(), QStringLiteral("tagEditorRow"));
+    const QList<QQuickItem *> rows = itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"));
     QVERIFY(!rows.isEmpty());
     for (QQuickItem *row : rows) {
         QQuickItem *tint = itemsNamed(row, QStringLiteral("rowBackgroundTint")).at(0);
@@ -1932,7 +1940,7 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     // Only some rows selected: the field reverts those, the column every row.
     editor.setSelectedRows({0, 1});
     QString failure;
-    QVERIFY2(clickButtonWhenReachable(window, revert, &failure), qPrintable(failure));
+    QVERIFY2(clickButtonWhenReachable(tags, revert, &failure), qPrintable(failure));
     // A click reverts at once.
     QCOMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("genre")), QStringLiteral("Classical"));
     QCOMPARE(editor.m_tableModel.fieldValue(1, QStringLiteral("genre")), QStringLiteral("Classical"));
@@ -1941,7 +1949,7 @@ void UiDialogsTest::editTagsMarksAChangedFieldAndColumnAndReverts() {
     QCOMPARE(field->property("text").toString(), QStringLiteral("Classical"));
     QVERIFY(columnRevert->isVisible());
     QVERIFY(editor.dirty());
-    QVERIFY2(clickButtonWhenReachable(window, columnRevert, &failure), qPrintable(failure));
+    QVERIFY2(clickButtonWhenReachable(tags, columnRevert, &failure), qPrintable(failure));
     QCOMPARE(editor.m_tableModel.fieldValue(7, QStringLiteral("genre")), QStringLiteral("Classical"));
     QTRY_VERIFY(!columnRevert->isVisible());
     QCOMPARE(columnLabel->property("font").value<QFont>().weight(), QFont::Normal);
@@ -1965,7 +1973,10 @@ void UiDialogsTest::editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut() {
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    QQuickItem *columnRevert = named(window, QStringLiteral("tagEditorColumnRevert_genre"));
+    // Edit Tags has a window of its own.
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
+    QQuickItem *columnRevert = named(tags, QStringLiteral("tagEditorColumnRevert_genre"));
     QVERIFY(columnRevert != nullptr);
     QTRY_VERIFY(!layoutPending(columnRevert));
     QVERIFY(!columnRevert->isVisible());
@@ -1975,7 +1986,7 @@ void UiDialogsTest::editTagsColumnRevertIsClickedOnceTheHeaderIsLaidOut() {
     QVERIFY(columnRevert->isVisible());
     QVERIFY2(layoutPending(columnRevert), "the header row was laid out before the test could click");
     QString failure;
-    QVERIFY2(clickButtonWhenReachable(window, columnRevert, &failure), qPrintable(failure));
+    QVERIFY2(clickButtonWhenReachable(tags, columnRevert, &failure), qPrintable(failure));
     for (int row = 0; row < 8; ++row) {
         QCOMPARE(editor.m_tableModel.fieldValue(row, QStringLiteral("genre")), QStringLiteral("Classical"));
     }
@@ -1997,16 +2008,12 @@ void UiDialogsTest::editTagsTableHeaderUsesTheQueuesHeaderStyle() {
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
-    // The window's title in the standard header, with no heading of its own
-    // and no text-glyph close button.
-    QCOMPARE(dialog->property("title").toString(), QStringLiteral("Edit Tags"));
-    QQuickItem *closeButton = visibleNamed(window, QStringLiteral("tagEditorCloseButton"));
-    QVERIFY(closeButton != nullptr);
-    QCOMPARE(evaluate(closeButton, QStringLiteral("icon.name")).toString().startsWith(QStringLiteral("window-close")), true);
+    // Edit Tags has a window of its own.
+    QQuickWindow *tags = windowOf(dialog);
     QQuickItem *queueLabel = named(window, QStringLiteral("queueHeader_artist"));
     QVERIFY(queueLabel != nullptr);
     QQuickItem *header = nullptr;
-    QTRY_VERIFY((header = visibleNamed(window, QStringLiteral("tagEditorTableHeader"))) != nullptr);
+    QTRY_VERIFY((header = visibleNamed(tags, QStringLiteral("tagEditorTableHeader"))) != nullptr);
     QCOMPARE(header->height(), paletteOf(window)->property("rowHeight").toReal());
     const QList<QQuickItem *> labels = itemsNamed(header, QStringLiteral("tagEditorColumnLabel"));
     QCOMPARE(labels.size(), 11);
@@ -2020,8 +2027,8 @@ void UiDialogsTest::editTagsTableHeaderUsesTheQueuesHeaderStyle() {
     QCOMPARE(labels.at(0)->property("text").toString(), QStringLiteral("#"));
     QCOMPARE(labels.at(1)->property("text").toString(), QStringLiteral("Title"));
     // The last column takes the room that is left, so nothing is cut off.
-    QQuickItem *table = named(window, QStringLiteral("tagEditorTable"));
-    QQuickItem *last = named(window, QStringLiteral("tagEditorColumn_status"));
+    QQuickItem *table = named(tags, QStringLiteral("tagEditorTable"));
+    QQuickItem *last = named(tags, QStringLiteral("tagEditorColumn_status"));
     QVERIFY(sceneRect(last).right() >= sceneRect(table).right() - 8.5 - 0.5
             || table->property("contentWidth").toReal() > table->width());
     editor.close();
@@ -2040,28 +2047,182 @@ void UiDialogsTest::editTagsToolsMenuHoldsTheToolsAndCaseChanges() {
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    // Edit Tags has a window of its own.
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
     editor.selectAllRows();
     editor.applyBulkField(QStringLiteral("title"), QStringLiteral("the long way home"));
-    QQuickItem *tools = visibleNamed(window, QStringLiteral("tagEditorToolsButton"));
-    QQuickItem *reload = visibleNamed(window, QStringLiteral("tagEditorReloadButton"));
-    QQuickItem *save = visibleNamed(window, QStringLiteral("tagEditorSaveButton"));
-    QQuickItem *cancel = visibleNamed(window, QStringLiteral("tagEditorCancelButton"));
+    QQuickItem *tools = visibleNamed(tags, QStringLiteral("tagEditorToolsButton"));
+    QQuickItem *reload = visibleNamed(tags, QStringLiteral("tagEditorReloadButton"));
+    QQuickItem *save = visibleNamed(tags, QStringLiteral("tagEditorSaveButton"));
+    QQuickItem *cancel = visibleNamed(tags, QStringLiteral("tagEditorCancelButton"));
     QVERIFY(tools != nullptr && reload != nullptr && save != nullptr && cancel != nullptr);
     // Tools and Reload on the left; Save, then Cancel, on the right.
     QVERIFY(sceneRect(tools).right() < sceneRect(reload).left());
     QVERIFY(sceneRect(reload).right() < sceneRect(save).left());
     QVERIFY(sceneRect(save).right() < sceneRect(cancel).left());
     QVERIFY(evaluate(save, QStringLiteral("Accessible.defaultButton")).toBool());
-    click(window, tools);
+    click(tags, tools);
     QObject *menu = object(window, QStringLiteral("tagEditorToolsMenu"));
     QTRY_VERIFY(menu->property("opened").toBool());
     QVERIFY(emitClicked(object(window, QStringLiteral("tagEditorTitleCase_title"))));
     QTRY_COMPARE(editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("The Long Way Home"));
-    QTRY_VERIFY(visibleNamed(window, QStringLiteral("tagEditorField_title"))->property("text").toString()
+    QTRY_VERIFY(visibleNamed(tags, QStringLiteral("tagEditorField_title"))->property("text").toString()
                 == QStringLiteral("The Long Way Home"));
     menu->setProperty("visible", false);
     editor.close();
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+// Edit Tags is a window of its own, as Configure and About (#480): KWin's
+// title bar and no title or close button of its own, above the main window,
+// which it blocks, resizable, and keeping its size. With a few files it is
+// no taller than its fields, with room for a dozen rows. Its table has the
+// keys as it opens. Escape and the title bar's close button ask about
+// unsaved edits first, as Cancel does (#559), and the question opens over
+// it.
+void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *overlay = qvariant_cast<QQuickItem *>(window->property("overlayHost"));
+    QVERIFY(overlay != nullptr);
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QObject *confirm = object(window, QStringLiteral("tagEditorCloseConfirmDialog"));
+    QVERIFY(dialog != nullptr && confirm != nullptr);
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY(tags != nullptr);
+    QVERIFY(!tags->isVisible());
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+
+    QVERIFY(tags->isTopLevel());
+    QCOMPARE(tags->transientParent(), window);
+    QCOMPARE(tags->modality(), Qt::ApplicationModal);
+    QCOMPARE(tags->flags() & Qt::WindowType_Mask, Qt::Dialog);
+    QCOMPARE(tags->title(), QStringLiteral("Edit Tags"));
+    QVERIFY2(textsHolding(tags->contentItem(), tags->title()).isEmpty(),
+             qPrintable(textsHolding(tags->contentItem(), tags->title()).join(QLatin1Char('\n'))));
+    for (const QString &name : {QStringLiteral("dialogHeaderTitle"), QStringLiteral("dialogHeaderCloseButton"),
+                                QStringLiteral("tagEditorCloseButton")}) {
+        QVERIFY2(itemsNamed(tags->contentItem(), name).isEmpty(), qPrintable(name));
+    }
+    for (QQuickItem *item : overlay->childItems()) {
+        QVERIFY2(!item->isVisible() || item->width() * item->height() == 0, qPrintable(describe(item)));
+    }
+    QCOMPARE(tags->width(), qMax(tags->minimumWidth(), qCeil(dialog->property("defaultWidth").toReal())));
+    QCOMPARE(tags->height(), qMax(tags->minimumHeight(), qCeil(dialog->property("defaultHeight").toReal())));
+    QVERIFY(tags->maximumWidth() > tags->minimumWidth() && tags->maximumHeight() > tags->minimumHeight());
+    // No taller than the fields need, or a dozen rows: the table shows its
+    // four files and some room, not a screenful of nothing.
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
+    QVERIFY(table != nullptr && fields != nullptr);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    QTRY_VERIFY(!layoutPending(table));
+    QVERIFY2(table->height() >= 5 * rowHeight, qPrintable(describeItem(table)));
+    QVERIFY2(table->height() <= qMax(fields->property("contentHeight").toReal(), 14 * rowHeight) + rowHeight,
+             qPrintable(QStringLiteral("%1, fields %2").arg(describeItem(table))
+                            .arg(fields->property("contentHeight").toReal())));
+    QTRY_VERIFY(table->hasActiveFocus());
+
+    // Without edits, Escape closes it, and the main window has the keyboard.
+    QTest::keyClick(tags, Qt::Key_Escape);
+    QTRY_VERIFY(!tags->isVisible());
+    QVERIFY(!editor.isOpen());
+    QVERIFY(QTest::qWaitForWindowActive(window));
+
+    // The size the user gives it stays when it opens again.
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    const QSize resized(tags->width() + 120, tags->height() + 60);
+    tags->resize(resized);
+    QTRY_COMPARE(tags->size(), resized);
+    editor.selectAllRows();
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    QVERIFY(editor.dirty());
+
+    // With edits, the title bar's close button asks first, over the editor's
+    // window; Keep Editing keeps it.
+    tags->close();
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(tags->isVisible());
+    QCOMPARE(qvariant_cast<QQuickItem *>(confirm->property("parent"))->window(), tags);
+    QVERIFY(emitClicked(object(window, QStringLiteral("tagEditorCloseConfirmKeepEditingButton"))));
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QVERIFY(tags->isVisible());
+    QVERIFY(editor.dirty());
+    // Escape asks too; Discard closes.
+    QTest::keyClick(tags, Qt::Key_Escape);
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(emitClicked(object(window, QStringLiteral("tagEditorCloseConfirmDiscardButton"))));
+    QTRY_VERIFY(!tags->isVisible());
+    QVERIFY(!editor.isOpen());
+
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    QCOMPARE(tags->size(), resized);
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
+}
+
+// The table's columns at the default font, or a smaller one: Title, Artist
+// and Album at their widths, and the window wide enough, in a 1600 px screen, for every column
+// through Format whole beside the fields. The rest scrolls into view.
+void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    // The tests' font, no larger than the default 10 pt.
+    QVERIFY(paletteOf(window)->property("basePointSize").toReal() <= 10.0);
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *tags = windowOf(dialog);
+    QVERIFY2(tags->width() <= 1600 - 2 * dialog->property("contentPadding").toReal(),
+             qPrintable(QString::number(tags->width())));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(!layoutPending(table));
+    const QList<std::pair<QString, qreal>> widths{{QStringLiteral("title"), 200}, {QStringLiteral("artist"), 160},
+                                                  {QStringLiteral("album"), 140}, {QStringLiteral("fileName"), 220}};
+    for (const auto &[key, width] : widths) {
+        QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
+        QVERIFY2(column != nullptr, qPrintable(key));
+        QCOMPARE(column->width(), width);
+    }
+    // Format whole in view, clear of the scroll bar's lane, with its cells.
+    QQuickItem *format = named(tags, QStringLiteral("tagEditorColumn_formatKind"));
+    QVERIFY(format != nullptr);
+    QVERIFY2(sceneRect(format).right() <= sceneRect(table).right() - 8,
+             qPrintable(QStringLiteral("%1 in %2").arg(describeItem(format), describeItem(table))));
+    QVERIFY2(sceneRect(format).left() >= sceneRect(table).left(), qPrintable(describeItem(format)));
+    for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+        for (QQuickItem *child : row->childItems()) {
+            for (QQuickItem *cell : child->childItems()) {
+                if (cell->property("text").toString() == QStringLiteral("FLAC")) {
+                    QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+                    QVERIFY2(sceneRect(cell).right() <= sceneRect(table).right() + 0.5, qPrintable(describeItem(cell)));
+                }
+            }
+        }
+    }
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
 }
 
 void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
@@ -2338,16 +2499,17 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QObject *tagEditor = object(window, QStringLiteral("tagEditorDialog"));
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && tagEditor->property("opened").toBool());
+    QQuickWindow *tags = windowOf(tagEditor);
     QQuickItem *title = nullptr;
-    QTRY_VERIFY((title = visibleNamed(window, QStringLiteral("tagEditorField_title"))) != nullptr);
+    QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
     const qreal sixteen = 16 * QFontMetricsF(title->property("font").value<QFont>()).averageCharWidth();
-    QQuickItem *table = visibleNamed(window, QStringLiteral("tagEditorTable"));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
     for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album"),
                                QStringLiteral("albumArtist"), QStringLiteral("genre"), QStringLiteral("year"),
                                QStringLiteral("comment")}) {
-        QQuickItem *field = visibleNamed(window, QStringLiteral("tagEditorField_") + key);
-        QQuickItem *label = visibleNamed(window, QStringLiteral("tagEditorLabel_") + key);
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + key);
+        QQuickItem *label = visibleNamed(tags, QStringLiteral("tagEditorLabel_") + key);
         QVERIFY2(field != nullptr && label != nullptr, qPrintable(key));
         QVERIFY2(field->width() >= sixteen, qPrintable(QStringLiteral("%1: %2 < %3").arg(key).arg(field->width()).arg(sixteen)));
         QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
@@ -2366,21 +2528,21 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     editor.applyBulkFieldToRows(everyRow, QStringLiteral("year"), QStringLiteral("2001"));
     editor.applyBulkFieldToRows(everyRow, QStringLiteral("discNo"), QStringLiteral("1"));
     editor.applyBulkFieldToRows(everyRow, QStringLiteral("trackNo"), QStringLiteral("10"));
-    QQuickItem *header = visibleNamed(window, QStringLiteral("tagEditorTableHeader"));
+    QQuickItem *header = visibleNamed(tags, QStringLiteral("tagEditorTableHeader"));
     QVERIFY(header != nullptr);
     qreal columnsWidth = 0;
     for (const QString &key : {QStringLiteral("trackNo"), QStringLiteral("title"), QStringLiteral("artist"),
                                QStringLiteral("album"), QStringLiteral("genre"), QStringLiteral("year"),
                                QStringLiteral("discNo"), QStringLiteral("fileName"), QStringLiteral("formatKind"),
                                QStringLiteral("directory"), QStringLiteral("status")}) {
-        QQuickItem *column = named(window, QStringLiteral("tagEditorColumn_") + key);
+        QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
         QVERIFY2(column != nullptr, qPrintable(key));
         columnsWidth += column->width();
         QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
         QTRY_VERIFY2(!label->property("truncated").toBool() && label->width() >= label->implicitWidth() - 0.5,
                      qPrintable(describeItem(label)));
         QVERIFY2(within(sceneRect(label), sceneRect(column)), qPrintable(describeItem(label)));
-        if (QQuickItem *revert = named(window, QStringLiteral("tagEditorColumnRevert_") + key)) {
+        if (QQuickItem *revert = named(tags, QStringLiteral("tagEditorColumnRevert_") + key)) {
             if (revert->isVisible()) {
                 QVERIFY2(within(sceneRect(revert), sceneRect(column)), qPrintable(key));
                 // Beside the label once the header row lays it out.
@@ -2390,10 +2552,25 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
             }
         }
     }
-    QVERIFY(named(window, QStringLiteral("tagEditorColumnRevert_year"))->isVisible());
+    QVERIFY(named(tags, QStringLiteral("tagEditorColumnRevert_year"))->isVisible());
+    // Title, Artist and Album as much wider as the font is larger than the
+    // default 10 pt, which once left them their 10 pt widths and cut
+    // ordinary values to a few letters.
+    const QFont cellFont = title->property("font").value<QFont>();
+    const QList<std::pair<QString, qreal>> baseWidths{{QStringLiteral("title"), 200},
+                                                      {QStringLiteral("artist"), 160},
+                                                      {QStringLiteral("album"), 140}};
+    for (const auto &[key, width] : baseWidths) {
+        QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
+        QVERIFY2(column->width() >= std::round(width * 2.4) - 0.5, qPrintable(describeItem(column)));
+        // An ordinary value is whole, with the cell's padding.
+        QVERIFY2(QFontMetricsF(cellFont).horizontalAdvance(QStringLiteral("The Quiet Meridian")) + 16
+                     <= column->width(),
+                 qPrintable(describeItem(column)));
+    }
     QVERIFY(table->property("contentWidth").toReal() >= columnsWidth);
     QVERIFY(table->property("contentWidth").toReal() > table->width());
-    for (QQuickItem *row : itemsNamed(window->contentItem(), QStringLiteral("tagEditorRow"))) {
+    for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
         for (QQuickItem *child : row->childItems()) {
             for (QQuickItem *cell : child->childItems()) {
                 if (cell->property("text").toString() == QStringLiteral("10")

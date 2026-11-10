@@ -391,13 +391,16 @@ void TranslationTest::tagEditorTellsMixedValuesByAFlag() {
 
     // The titles differ: the field is empty, and its placeholder, which is
     // translated, says the files keep their own.
-    QQuickItem *title = findQuickItemByObjectName(window->contentItem(), QStringLiteral("tagEditorField_title"));
+    // Edit Tags has a window of its own.
+    auto *tags = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(tags != nullptr);
+    QQuickItem *title = findQuickItemByObjectName(tags->contentItem(), QStringLiteral("tagEditorField_title"));
     QVERIFY(title != nullptr);
     QTRY_COMPARE(title->property("placeholderText").toString(), pseudo(QStringLiteral("Multiple values")));
     QCOMPARE(title->property("text").toString(), QString());
 
     // The albums are the same, whatever their text: it is the field's value.
-    QQuickItem *album = findQuickItemByObjectName(window->contentItem(), QStringLiteral("tagEditorField_album"));
+    QQuickItem *album = findQuickItemByObjectName(tags->contentItem(), QStringLiteral("tagEditorField_album"));
     QVERIFY(album != nullptr);
     QCOMPARE(album->property("text").toString(), QStringLiteral("<keep>"));
     QCOMPARE(album->property("placeholderText").toString(), QString());
