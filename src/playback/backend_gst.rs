@@ -330,6 +330,26 @@ enum RunRestart {
     Seeking,
 }
 
+/// How the output comes up to the volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputRise {
+    /// At the volume, or fading to it after a volume change.
+    Steady,
+    /// Silenced for a new pipeline run or a restart, and silent until that
+    /// run plays: no fade steps it up while the run prerolls, so the buffer
+    /// it prerolls is not held at a partial gain. The run then plays at
+    /// once, or fades in from silence; see `begin_track_start` and
+    /// `begin_startup_ramp`.
+    Silenced,
+    /// Silenced, as `Silenced`, and playing once the run has prerolled:
+    /// Play came before the output had picked its sink, so whether the
+    /// volume reaches the buffer the run prerolls was not known yet; see
+    /// `play`.
+    SilencedUntilPreroll,
+    /// Fading in from silence, with the fade-in of a start.
+    StartupFade,
+}
+
 struct GstPlaybackRuntime {
     playbin: gst::Element,
     /// Shared with the about-to-finish callback, which hands a successor
@@ -348,7 +368,8 @@ struct GstPlaybackRuntime {
     target_volume: f32,
     /// Linear gain currently set on playbin.
     applied_volume: f32,
-    startup_gain_ramp: bool,
+    /// How the output comes up to the volume.
+    output_rise: OutputRise,
     /// Silence still to hold before the fade-in of an AC3/DTS track start.
     /// It counts down only while the pipeline plays.
     startup_ramp_hold_left: Option<Duration>,
@@ -609,7 +630,7 @@ impl GstPlaybackRuntime {
             },
             target_volume: 1.0,
             applied_volume: 1.0,
-            startup_gain_ramp: false,
+            output_rise: OutputRise::Steady,
             startup_ramp_hold_left: None,
             volume_ramp_tick_at: None,
             buffering_active: false,
@@ -1020,7 +1041,7 @@ impl GstPlaybackRuntime {
         self.mute();
         let _ = self.set_pipeline_state(gst::State::Ready);
         self.begin_pipeline_run(false);
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.reset_channel_mute_state();
@@ -1309,6 +1330,36 @@ impl GstPlaybackRuntime {
             self.emit_snapshot();
             return;
         }
+        let applies_volume = self.output_applies_volume();
+        if !was_stopped && self.output_silenced() && applies_volume.is_none() {
+            // A new run of a paused player, such as of a track picked while
+            // paused, whose output picks its sink only as the run prerolls:
+            // autoaudiosink picks it when playsink sets the output up. How
+            // the output comes up is decided once the run has prerolled,
+            // which it does before it can play anyway; see
+            // `handle_async_done`. Play again meanwhile leaves that so. A
+            // run that never prerolls is reported like one that never
+            // plays.
+            self.output_rise = OutputRise::SilencedUntilPreroll;
+            self.playing_state_requested_at
+                .get_or_insert_with(Instant::now);
+            self.snapshot.state = PlaybackState::Playing;
+            self.emit_snapshot();
+            return;
+        }
+        // A paused pipeline that plays from its track's start, with the
+        // volume applied as the output plays, plays the buffer it holds at
+        // the volume, so the track's own attack is heard as recorded.
+        // Otherwise the held buffer keeps the gain it was prerolled at, and
+        // the output fades from there, below.
+        let resumed_at_track_start =
+            !was_stopped && self.resumes_at_track_start() && applies_volume == Some(true);
+        if resumed_at_track_start {
+            self.begin_track_start();
+        }
+        if self.output_silenced() {
+            self.output_rise = OutputRise::Steady;
+        }
         // A state change that fails, such as for a file that is missing,
         // posts the error, which skips the track or stops. Until then
         // playback plays, so the track skipped to plays.
@@ -1323,7 +1374,7 @@ impl GstPlaybackRuntime {
             self.playing_state_requested_at
                 .get_or_insert_with(Instant::now);
         }
-        if was_stopped {
+        if was_stopped || resumed_at_track_start {
             // Re-assert the volume after the state transition, so that
             // elements the new run created also have it.
             self.playbin
@@ -1333,7 +1384,7 @@ impl GstPlaybackRuntime {
         // The position advances once the pipeline has reached Playing.
         self.sample_pipeline_position();
         if (self.target_volume - self.applied_volume).abs() > f32::EPSILON {
-            self.startup_gain_ramp = true;
+            self.output_rise = OutputRise::StartupFade;
         }
         self.emit_snapshot();
     }
@@ -1343,6 +1394,10 @@ impl GstPlaybackRuntime {
             return;
         }
         self.buffering_active = false;
+        if self.output_rise == OutputRise::SilencedUntilPreroll {
+            // The run no longer plays once it has prerolled.
+            self.output_rise = OutputRise::Silenced;
+        }
         if self.restarting() {
             // The restarted run stays in Paused until its seek has landed.
             self.snapshot.state = PlaybackState::Paused;
@@ -1380,7 +1435,7 @@ impl GstPlaybackRuntime {
                 self.set_run_uri(path, &uri);
             }
         }
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.buffering_active = false;
         self.clear_recent_seek_trace();
@@ -1445,7 +1500,7 @@ impl GstPlaybackRuntime {
             self.snapshot.current_queue_index = state.current_index();
         }
         self.snapshot.state = PlaybackState::Paused;
-        self.startup_gain_ramp = false;
+        self.end_startup_fade();
         self.startup_ramp_hold_left = None;
         self.queued_seek = Some(SeekTarget {
             position,
@@ -1613,6 +1668,20 @@ impl GstPlaybackRuntime {
     /// The pipeline prerolled after a state change or a seek. It may still
     /// be on its way to Playing, which does not keep it from taking a seek.
     fn handle_async_done(&mut self) {
+        self.land_async_done();
+        if self.output_rise == OutputRise::SilencedUntilPreroll
+            && self.snapshot.state == PlaybackState::Playing
+            && !self.restarting()
+        {
+            // Play waited for the run to preroll, which has set up the
+            // output; see `play`.
+            self.output_rise = OutputRise::Silenced;
+            self.play();
+        }
+    }
+
+    /// Account for the preroll of a run or seek in the seeks it waited for.
+    fn land_async_done(&mut self) {
         if self.restart == Some(RunRestart::Prerolling) {
             // The restarted run takes its seek now.
             self.restart = Some(RunRestart::Seeking);
@@ -1672,7 +1741,7 @@ impl GstPlaybackRuntime {
         if self.restarting() {
             self.restart = None;
             if self.snapshot.state == PlaybackState::Playing {
-                self.start_playing_muted();
+                self.start_playing_restarted(seek.position.is_zero());
             } else {
                 self.playing_state_requested_at = None;
             }
@@ -1782,12 +1851,60 @@ impl GstPlaybackRuntime {
         }
     }
 
-    /// Set the pipeline playing from silence, with the fade-in of a track
-    /// start.
-    fn start_playing_muted(&mut self) {
+    /// Set the restarted run playing, which prerolled with the output
+    /// silenced: from the start of its track at once if the output applies
+    /// the volume as it plays, which then reaches the held buffer too;
+    /// otherwise with the fade-in from silence of a track start.
+    fn start_playing_restarted(&mut self, from_track_start: bool) {
+        if from_track_start && self.output_applies_volume() == Some(true) {
+            self.begin_track_start();
+        }
         let _ = self.set_pipeline_state(gst::State::Playing);
         self.playing_state_requested_at = Some(Instant::now());
-        self.begin_startup_ramp();
+        if self.output_silenced() {
+            self.begin_startup_ramp();
+        } else {
+            // Re-asserted after the state change, as `play` does.
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
+        }
+    }
+
+    /// Whether the output applies the volume itself as it plays, as a sink
+    /// that controls the volume of its stream does: pulsesink, through the
+    /// sound server. Playsink then gives the volume to that sink, which it
+    /// finds the way this does, and adds no volume element of its own.
+    /// Applied as the output plays, a change reaches the audio that the
+    /// paused output holds: the buffer it prerolled, and what it buffered
+    /// before. Otherwise playsink applies the volume in an element before
+    /// the output, to each buffer as it passes, and a change made while
+    /// paused does not reach the audio that the output holds.
+    ///
+    /// Asked of the output as it is now, and `None` until it has picked its
+    /// sink: autoaudiosink picks it as it leaves Null, and playsink sets the
+    /// output up, from Null, as each run prerolls, asking it again.
+    fn output_applies_volume(&self) -> Option<bool> {
+        let Some(sink) = self.playbin.property::<Option<gst::Element>>("audio-sink") else {
+            return Some(false);
+        };
+        if sink.current_state() < gst::State::Ready {
+            return None;
+        }
+        let stream_volume = gstreamer_audio::StreamVolume::static_type();
+        Some(match sink.downcast_ref::<gst::Bin>() {
+            Some(bin) => bin.by_interface(stream_volume).is_some(),
+            None => sink.type_().is_a(stream_volume),
+        })
+    }
+
+    /// Whether the paused pipeline plays from the start of its track once it
+    /// plays: where the newest seek that waits or is in flight goes, or
+    /// where it rests.
+    fn resumes_at_track_start(&self) -> bool {
+        self.queued_seek
+            .or(self.seek_in_flight)
+            .map_or(self.snapshot.position, |seek| seek.position)
+            .is_zero()
     }
 
     /// Bring the output to the volume for a new pipeline run that plays the
@@ -1808,7 +1925,7 @@ impl GstPlaybackRuntime {
         self.applied_volume = self.target_volume;
         self.playbin
             .set_property("volume", f64::from(self.applied_volume));
-        self.startup_gain_ramp = false;
+        self.output_rise = OutputRise::Steady;
         self.startup_ramp_hold_left = None;
         self.volume_ramp_tick_at = None;
     }
@@ -1817,7 +1934,7 @@ impl GstPlaybackRuntime {
     fn begin_startup_ramp(&mut self) {
         self.applied_volume = 0.0;
         self.playbin.set_property("volume", 0.0_f64);
-        self.startup_gain_ramp = true;
+        self.output_rise = OutputRise::StartupFade;
         // The fade-in starts its own clock. Otherwise the first step would
         // count the time since a running fade last stepped, which can span
         // a track switch, and jump to the target.
@@ -1868,7 +1985,14 @@ impl GstPlaybackRuntime {
     ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
         let change = || self.source_activation.set_state(&self.playbin, state);
         if state <= gst::State::Ready {
-            self.input_switches.end_run(change)
+            let result = self.input_switches.end_run(change);
+            // The output sets up its sink again for the next run, and
+            // autoaudiosink makes a new one, which starts at its own volume.
+            // Playsink gives that sink the volume set since the run ended,
+            // but not one set before, which went to the old sink.
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
+            result
         } else {
             let result = change();
             self.note_run_opened();
@@ -2049,7 +2173,37 @@ impl GstPlaybackRuntime {
     fn set_volume(&mut self, level: f32) {
         self.snapshot.volume = level.clamp(0.0, 1.0);
         self.target_volume = super::volume_level_to_gain(self.snapshot.volume);
+        if self.applies_volume_while_paused() {
+            // Nothing plays to fade, and the output applies the volume to
+            // the audio it holds too, so playback resumes at the volume:
+            // muted, a resume plays no sample at the old volume.
+            self.applied_volume = self.target_volume;
+            self.volume_ramp_tick_at = None;
+            self.playbin
+                .set_property("volume", f64::from(self.applied_volume));
+        }
         self.emit_snapshot();
+    }
+
+    /// Whether a volume change applies at once rather than when playback
+    /// resumes: while paused, with an output that applies the volume as it
+    /// plays, and with the output at the volume rather than silenced for a
+    /// run or held for a fade-in. A fade-in that the pause interrupted
+    /// rises on from where it got to when playback resumes, to a higher
+    /// volume, but a lower one, such as a mute, applies at once: the output
+    /// would otherwise play the audio it holds at the louder level first.
+    /// Otherwise the change waits, and the output fades to it once it plays
+    /// (see `play`): the audio a paused output holds, which the change would
+    /// not reach, plays first.
+    fn applies_volume_while_paused(&self) -> bool {
+        self.snapshot.state == PlaybackState::Paused
+            && self.startup_ramp_hold_left.is_none()
+            && match self.output_rise {
+                OutputRise::Steady => true,
+                OutputRise::StartupFade => self.target_volume < self.applied_volume,
+                OutputRise::Silenced | OutputRise::SilencedUntilPreroll => false,
+            }
+            && self.output_applies_volume() == Some(true)
     }
 
     fn set_repeat_mode(&mut self, mode: RepeatMode) {
@@ -2078,10 +2232,32 @@ impl GstPlaybackRuntime {
         self.emit_snapshot();
     }
 
+    /// Whether the output is silenced for a run; see `OutputRise::Silenced`.
+    fn output_silenced(&self) -> bool {
+        matches!(
+            self.output_rise,
+            OutputRise::Silenced | OutputRise::SilencedUntilPreroll
+        )
+    }
+
+    /// Whether the output fades in with the fade-in of a start.
+    fn startup_gain_ramp(&self) -> bool {
+        self.output_rise == OutputRise::StartupFade
+    }
+
+    /// End the fade-in of a start, leaving an output that is silenced for
+    /// a run silenced.
+    fn end_startup_fade(&mut self) {
+        if self.output_rise == OutputRise::StartupFade {
+            self.output_rise = OutputRise::Steady;
+        }
+    }
+
     /// Whether the engine loop must wake on [`VOLUME_RAMP_TICK`] to drive a
     /// silence hold or fade.
     fn volume_ramp_pending(&self) -> bool {
-        !self.startup_fade_held()
+        !self.output_silenced()
+            && !self.startup_fade_held()
             && (self.startup_ramp_hold_left.is_some()
                 || ((self.target_volume - self.applied_volume).abs() > f32::EPSILON
                     && self.snapshot.state == PlaybackState::Playing))
@@ -2094,7 +2270,7 @@ impl GstPlaybackRuntime {
     /// or fade before its first sample did. The bus wakes the engine when
     /// the pipeline plays.
     fn startup_fade_held(&self) -> bool {
-        (self.startup_gain_ramp || self.startup_ramp_hold_left.is_some())
+        (self.startup_gain_ramp() || self.startup_ramp_hold_left.is_some())
             && (self.snapshot.state != PlaybackState::Playing
                 || self.playing_state_requested_at.is_some())
     }
@@ -2105,7 +2281,7 @@ impl GstPlaybackRuntime {
     /// commands or bridge polls arrive.  Fades run on the volume-level scale,
     /// so they sound even.
     fn poll_volume_ramp(&mut self, now: Instant) {
-        if self.startup_fade_held() {
+        if self.output_silenced() || self.startup_fade_held() {
             self.volume_ramp_tick_at = None;
             return;
         }
@@ -2133,7 +2309,7 @@ impl GstPlaybackRuntime {
         }
 
         if !self.volume_ramp_pending() {
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.volume_ramp_tick_at = None;
             return;
         }
@@ -2141,7 +2317,7 @@ impl GstPlaybackRuntime {
         let Some(previous_tick) = self.volume_ramp_tick_at.replace(now) else {
             return;
         };
-        let full_scale = if self.startup_gain_ramp {
+        let full_scale = if self.startup_gain_ramp() {
             STARTUP_FADE_FULL_SCALE
         } else {
             VOLUME_FADE_FULL_SCALE
@@ -2155,7 +2331,7 @@ impl GstPlaybackRuntime {
             self.applied_volume = super::volume_level_to_gain(level);
         } else {
             self.applied_volume = self.target_volume;
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.volume_ramp_tick_at = None;
         }
         self.playbin
@@ -2164,7 +2340,7 @@ impl GstPlaybackRuntime {
 
     fn poll(&mut self) {
         if self.snapshot.state == PlaybackState::Stopped
-            && !self.startup_gain_ramp
+            && !self.startup_gain_ramp()
             && self.startup_ramp_hold_left.is_none()
         {
             return;
@@ -2654,7 +2830,7 @@ impl GstPlaybackRuntime {
                 self.playing_state_requested_at = None;
                 self.buffering_active = false;
                 self.clear_recent_seek_trace();
-                self.startup_gain_ramp = false;
+                self.end_startup_fade();
                 self.startup_ramp_hold_left = None;
                 let _ = self.set_pipeline_state(gst::State::Ready);
                 self.begin_pipeline_run(false);
@@ -2788,9 +2964,11 @@ impl GstPlaybackRuntime {
 
     /// Silence the pipeline before it is stopped or restarted. The samples
     /// it has queued are dropped with the run, so a stepped fade would only
-    /// delay the switch.
+    /// delay the switch. The output stays silent until the next run plays;
+    /// see `OutputRise::Silenced`.
     fn mute(&mut self) {
         self.applied_volume = 0.0;
+        self.output_rise = OutputRise::Silenced;
         self.volume_ramp_tick_at = None;
         self.playbin.set_property("volume", 0.0_f64);
     }
@@ -2818,10 +2996,10 @@ impl GstPlaybackRuntime {
                 .set_property("volume", f64::from(self.applied_volume));
         } else if self.snapshot.state == PlaybackState::Paused {
             let _ = self.set_pipeline_state(gst::State::Paused);
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.startup_ramp_hold_left = None;
         } else {
-            self.startup_gain_ramp = false;
+            self.end_startup_fade();
             self.startup_ramp_hold_left = None;
         }
         // The new run starts at the beginning and advances once it plays.
@@ -4296,11 +4474,12 @@ fn install_caps_change_probe(element: &gst::Element, analysis_tx: Sender<Analysi
 /// converts to a format `sink` takes, and silences muted channels.
 ///
 /// The bin holds no queue. Playsink already reads ahead into its own queue,
-/// which also gives the output its own streaming thread. When `sink` does
-/// not control the stream volume itself, playsink applies the volume in an
-/// element after that queue, right before this bin, and a queue here would
-/// delay each volume step, and the fade-in of each track, by the second of
-/// audio it holds.
+/// which also gives the output its own streaming thread. When `sink`
+/// controls the volume of its stream, as pulsesink does, playsink gives it
+/// the volume, which the sound server applies as it plays. Otherwise
+/// playsink applies the volume in an element after that queue, right before
+/// this bin, and a queue here would delay each volume step, and the fade-in
+/// of each track, by the second of audio it holds.
 fn build_audio_output_bin(
     analysis_tx: Sender<AnalysisCommand>,
     output_mix: &Arc<OutputMix>,
@@ -4549,7 +4728,7 @@ mod tests {
         runtime.snapshot.state = PlaybackState::Playing;
         runtime.applied_volume = 0.0;
         runtime.playbin.set_property("volume", 0.0_f64);
-        runtime.startup_gain_ramp = true;
+        runtime.output_rise = OutputRise::StartupFade;
         runtime.startup_ramp_hold_left = Some(Duration::from_millis(80));
 
         runtime.poll_volume_ramp(start);
@@ -4566,7 +4745,7 @@ mod tests {
         assert_gain(&runtime, 0.5);
         runtime.poll_volume_ramp(hold_end + Duration::from_millis(90));
         assert_gain(&runtime, 0.8);
-        assert!(!runtime.startup_gain_ramp);
+        assert!(!runtime.startup_gain_ramp());
         assert_eq!(
             runtime.command_wait_timeout(Instant::now()),
             Some(Duration::from_millis(20))
@@ -5898,9 +6077,10 @@ mod engine_tests {
             .into_iter()
             .filter_map(Result::ok)
             .find(|element| {
-                element
-                    .factory()
-                    .is_some_and(|factory| factory.name() == "fakesink")
+                element.is::<late_sink::LateSink>()
+                    || element
+                        .factory()
+                        .is_some_and(|factory| factory.name() == "fakesink")
             })
             .expect("fake output");
         sink.static_pad("sink").unwrap()
@@ -6091,6 +6271,186 @@ mod engine_tests {
         heard
     }
 
+    /// A sink that, as autoaudiosink does, makes the sink it plays to only
+    /// as it leaves Null, and drops it again as it returns there: a
+    /// fakeaudiosink. Until then, the output has no element that controls
+    /// the volume of its stream.
+    mod late_sink {
+        use gstreamer as gst;
+        use gstreamer::glib;
+        use gstreamer::prelude::*;
+        use gstreamer::subclass::prelude::*;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        pub struct LateSinkImp {
+            sink: Mutex<Option<gst::Element>>,
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for LateSinkImp {
+            const NAME: &'static str = "FerrousTestLateSink";
+            type Type = LateSink;
+            type ParentType = gst::Bin;
+        }
+
+        impl ObjectImpl for LateSinkImp {
+            fn constructed(&self) {
+                self.parent_constructed();
+                let ghost = gst::GhostPad::builder(gst::PadDirection::Sink)
+                    .name("sink")
+                    .build();
+                self.obj().add_pad(&ghost).unwrap();
+                self.obj().set_element_flags(gst::ElementFlags::SINK);
+            }
+        }
+
+        impl GstObjectImpl for LateSinkImp {}
+
+        impl ElementImpl for LateSinkImp {
+            fn change_state(
+                &self,
+                transition: gst::StateChange,
+            ) -> Result<gst::StateChangeSuccess, gst::StateChangeError> {
+                let ghost = self
+                    .obj()
+                    .static_pad("sink")
+                    .and_downcast::<gst::GhostPad>()
+                    .unwrap();
+                if transition == gst::StateChange::NullToReady {
+                    let sink = gst::ElementFactory::make("fakeaudiosink")
+                        .property("sync", true)
+                        .build()
+                        .map_err(|_| gst::StateChangeError)?;
+                    self.obj().add(&sink).map_err(|_| gst::StateChangeError)?;
+                    ghost
+                        .set_target(sink.static_pad("sink").as_ref())
+                        .map_err(|_| gst::StateChangeError)?;
+                    *self.sink.lock().unwrap() = Some(sink);
+                }
+                let changed = self.parent_change_state(transition)?;
+                if transition == gst::StateChange::ReadyToNull {
+                    let _ = ghost.set_target(None::<&gst::Pad>);
+                    if let Some(sink) = self.sink.lock().unwrap().take() {
+                        let _ = sink.set_state(gst::State::Null);
+                        let _ = self.obj().remove(&sink);
+                    }
+                }
+                Ok(changed)
+            }
+        }
+
+        impl BinImpl for LateSinkImp {}
+
+        glib::wrapper! {
+            pub struct LateSink(ObjectSubclass<LateSinkImp>)
+                @extends gst::Bin, gst::Element, gst::Object;
+        }
+    }
+
+    /// An output that applies the volume as it renders, as pulsesink does
+    /// through the sound server, and that picks its sink as autoaudiosink
+    /// does: a fakeaudiosink, which controls the volume of its stream, so
+    /// playsink gives it the volume and adds no volume element, made as the
+    /// output leaves Null. `record_rendered_at_volume` applies the volume
+    /// and mute it has to each buffer as it renders it.
+    fn volume_applying_output() -> anyhow::Result<gst::Element> {
+        Ok(gst::glib::Object::new::<late_sink::LateSink>().upcast())
+    }
+
+    /// Record every buffer that the output of `volume_applying_output`
+    /// renders, at the level it plays it: its peak at the output's volume
+    /// as it renders, which reaches the buffer the paused output holds, as
+    /// a sound server's stream volume does. A buffer it prerolls with and
+    /// never plays is left out.
+    fn record_rendered_at_volume(playbin: &gst::Element) -> Arc<Mutex<Vec<OutputBuffer>>> {
+        let buffers = Arc::new(Mutex::new(Vec::new()));
+        let output = playbin
+            .property::<gst::Element>("audio-sink")
+            .downcast::<gst::Bin>()
+            .unwrap();
+        // Each run makes its own sink.
+        let recorded = Arc::clone(&buffers);
+        output.connect_deep_element_added(move |_, _, element| {
+            if element
+                .factory()
+                .is_some_and(|factory| factory.name() == "fakeaudiosink")
+            {
+                record_renders_at_volume(element, Arc::clone(&recorded));
+            }
+        });
+        buffers
+    }
+
+    /// Record every buffer that `sink`, a fakeaudiosink, renders, into
+    /// `recorded`, at its volume as it renders it.
+    fn record_renders_at_volume(sink: &gst::Element, recorded: Arc<Mutex<Vec<OutputBuffer>>>) {
+        sink.set_property("signal-handoffs", true);
+        sink.connect("handoff", false, move |values| {
+            let sink = values.first()?.get::<gst::Element>().ok()?;
+            let buffer = values.get(1)?.get::<gst::Buffer>().ok()?;
+            let pad = values.get(2)?.get::<gst::Pad>().ok()?;
+            let gain = if sink.property::<bool>("mute") {
+                0.0
+            } else {
+                sink.property::<f64>("volume")
+            };
+            let format = pad
+                .current_caps()?
+                .structure(0)?
+                .get::<String>("format")
+                .ok()?;
+            let stream_time = pad
+                .sticky_event::<gst::event::Segment>(0)?
+                .segment()
+                .downcast_ref::<gst::ClockTime>()?
+                .to_stream_time(buffer.pts()?)?;
+            let map = buffer.map_readable().ok()?;
+            let peak = sample_levels(&format, &map).fold(0.0, f64::max) * gain;
+            recorded.lock().ok()?.push(OutputBuffer {
+                stream_time: Duration::from_nanos(stream_time.nseconds()),
+                peak,
+            });
+            None
+        });
+    }
+
+    /// The output a test plays to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TestOutput {
+        /// A fakesink, which does not control the stream volume, so
+        /// playsink applies the volume before it.
+        Fake,
+        /// See `volume_applying_output`.
+        AppliesVolume,
+    }
+
+    impl TestOutput {
+        const ALL: [Self; 2] = [Self::Fake, Self::AppliesVolume];
+
+        fn build(self) -> fn() -> anyhow::Result<gst::Element> {
+            match self {
+                Self::Fake => fake_output,
+                Self::AppliesVolume => volume_applying_output,
+            }
+        }
+
+        /// Record the buffers that the output of `playbin` plays.
+        fn record(self, playbin: &gst::Element) -> Arc<Mutex<Vec<OutputBuffer>>> {
+            match self {
+                Self::Fake => record_output(playbin),
+                Self::AppliesVolume => record_rendered_at_volume(playbin),
+            }
+        }
+    }
+
+    /// Start an engine on `output`, and record the buffers it plays.
+    fn start_recording(output: TestOutput) -> (Engine, Arc<Mutex<Vec<OutputBuffer>>>) {
+        let engine = Engine::start_with_output(output.build());
+        let buffers = output.record(&engine.playbin);
+        (engine, buffers)
+    }
+
     /// Record every buffer that reaches the output.
     fn record_output(playbin: &gst::Element) -> Arc<Mutex<Vec<OutputBuffer>>> {
         let buffers = Arc::new(Mutex::new(Vec::new()));
@@ -6209,11 +6569,25 @@ mod engine_tests {
 
         /// Start an engine whose runtime `configure` sets up.
         fn start_configured(configure: impl FnOnce(&mut GstPlaybackRuntime)) -> Self {
+            Self::start_on(fake_output, configure)
+        }
+
+        /// Start an engine that plays to the output `build_output` makes.
+        fn start_with_output(build_output: fn() -> anyhow::Result<gst::Element>) -> Self {
+            Self::start_on(build_output, |_| {})
+        }
+
+        /// Start an engine that plays to the output `build_output` makes,
+        /// and whose runtime `configure` sets up.
+        fn start_on(
+            build_output: fn() -> anyhow::Result<gst::Element>,
+            configure: impl FnOnce(&mut GstPlaybackRuntime),
+        ) -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
             let (mut runtime, bus) =
-                start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+                start_gst_engine(event_tx, analysis_tx, build_output).expect("engine starts");
             configure(&mut runtime);
             let playbin = runtime.playbin.clone();
             let queue = Arc::clone(&runtime.queue_state);
@@ -8801,11 +9175,23 @@ mod engine_tests {
 
         /// Start a runtime that stamps its position samples with `clock`.
         fn start_with_clock(clock: MonotonicClock) -> Self {
+            Self::start_on(fake_output, clock)
+        }
+
+        /// Start a runtime that plays to the output `build_output` makes.
+        fn start_with_output(build_output: fn() -> anyhow::Result<gst::Element>) -> Self {
+            Self::start_on(build_output, clock::system_clock())
+        }
+
+        fn start_on(
+            build_output: fn() -> anyhow::Result<gst::Element>,
+            clock: MonotonicClock,
+        ) -> Self {
             gst::init().unwrap();
             let (analysis_tx, analysis) = unbounded();
             let (event_tx, events) = unbounded();
             let (mut runtime, bus) =
-                start_gst_engine(event_tx, analysis_tx, fake_output).expect("engine starts");
+                start_gst_engine(event_tx, analysis_tx, build_output).expect("engine starts");
             runtime.clock = clock;
             let trace = Trace::new(&runtime);
             Self {
@@ -11267,10 +11653,15 @@ mod engine_tests {
 
     #[test]
     fn a_cued_start_within_a_track_fades_in() {
-        let fixtures = Fixtures::new("cue-fade-in");
+        for test_output in TestOutput::ALL {
+            a_cued_start_within_a_track_fades_in_on(test_output);
+        }
+    }
+
+    fn a_cued_start_within_a_track_fades_in_on(test_output: TestOutput) {
+        let fixtures = Fixtures::new(&format!("cue-fade-in-{test_output:?}"));
         let a = fixtures.wav_at("a.wav", 4_000, 48_000);
-        let mut engine = Engine::start();
-        let output = record_output(&engine.playbin);
+        let (mut engine, output) = start_recording(test_output);
         // As a restored session does.
         engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
         engine.send(PlaybackCommand::Cue {
@@ -11294,9 +11685,290 @@ mod engine_tests {
         let played = &buffers[cued..];
         assert!(
             played[0].stream_time.abs_diff(millis(2_000)) < millis(100),
-            "{played:?}"
+            "{test_output:?}: {played:?}"
         );
         assert_fades_in(played);
+    }
+
+    /// Assert that `run`, rendered buffers of a track from its start, play
+    /// at linear gain `gain` from the first sample on: no fade, gap or
+    /// louder burst.
+    #[track_caller]
+    fn assert_at_gain_from_the_start(run: &[OutputBuffer], gain: f64) {
+        assert!(run[0].stream_time.is_zero(), "{run:?}");
+        assert_at_gain(run, gain);
+    }
+
+    /// Assert that every buffer of `buffers` plays at linear gain `gain`.
+    #[track_caller]
+    fn assert_at_gain(buffers: &[OutputBuffer], gain: f64) {
+        assert!(!buffers.is_empty());
+        let expected = WAV_PEAK * gain;
+        let off: Vec<_> = buffers
+            .iter()
+            .filter(|buffer| (buffer.peak - expected).abs() > WAV_PEAK * 0.01)
+            .collect();
+        assert!(off.is_empty(), "not at {expected}: {off:?} of {buffers:?}");
+    }
+
+    /// Play the 48 kHz track `a` on an output that applies the volume
+    /// until 1 s, pause it, and return the engine, its rendered buffers,
+    /// and how many it had rendered when it paused.
+    fn pause_mid_track_on_an_output_that_applies_the_volume(
+        a: PathBuf,
+    ) -> (Engine, Arc<Mutex<Vec<OutputBuffer>>>, usize) {
+        let (mut engine, output) = start_recording(TestOutput::AppliesVolume);
+        engine.send(PlaybackCommand::LoadQueue(vec![a]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 1 s", |engine| {
+            engine.snapshot.position >= millis(1_000)
+        });
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        let paused_at = output.lock().unwrap().len();
+        (engine, output, paused_at)
+    }
+
+    #[test]
+    fn muting_while_paused_silences_every_sample_of_the_resume() {
+        let fixtures = Fixtures::new("paused-mute");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let (mut engine, output, paused_at) =
+            pause_mid_track_on_an_output_that_applies_the_volume(a);
+        let resumed_from = engine.snapshot.position;
+        engine.send(PlaybackCommand::SetVolume(0.0));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not resume for 0.6 s", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= resumed_from + millis(600)
+        });
+        let buffers = output.lock().unwrap();
+        assert_at_gain(&buffers[..paused_at], 1.0);
+        let resumed = &buffers[paused_at..];
+        // From the buffer the paused output held on.
+        assert!(
+            resumed[0].stream_time <= resumed_from + millis(100),
+            "{resumed:?}"
+        );
+        assert_at_gain(resumed, 0.0);
+    }
+
+    #[test]
+    fn unmuting_while_paused_resumes_at_the_volume_without_a_gap() {
+        let fixtures = Fixtures::new("paused-unmute");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let (mut engine, output) = start_recording(TestOutput::AppliesVolume);
+        engine.send(PlaybackCommand::SetVolume(0.0));
+        engine.send(PlaybackCommand::LoadQueue(vec![a]));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("the position did not reach 1 s", |engine| {
+            engine.snapshot.position >= millis(1_000)
+        });
+        engine.send(PlaybackCommand::Pause);
+        engine.wait_until("playback did not pause", |engine| {
+            engine.snapshot.state == PlaybackState::Paused
+        });
+        let paused_at = output.lock().unwrap().len();
+        let resumed_from = engine.snapshot.position;
+        engine.send(PlaybackCommand::SetVolume(0.5));
+        engine.send(PlaybackCommand::Play);
+        engine.wait_until("playback did not resume for 0.6 s", |engine| {
+            engine.snapshot.state == PlaybackState::Playing
+                && engine.snapshot.position >= resumed_from + millis(600)
+        });
+        let buffers = output.lock().unwrap();
+        assert_at_gain(&buffers[..paused_at], 0.0);
+        // The resume goes on from the last buffer played, at the volume.
+        let last_played = buffers[paused_at - 1].stream_time;
+        let resumed = &buffers[paused_at..];
+        assert!(resumed[0].stream_time > last_played, "{resumed:?}");
+        assert!(
+            resumed[0].stream_time - last_played < millis(100),
+            "a gap from {last_played:?}: {resumed:?}"
+        );
+        assert_at_gain(resumed, f64::from(super::super::volume_level_to_gain(0.5)));
+    }
+
+    /// How a test brings a paused pipeline to a track's start before Play.
+    #[derive(Debug, Clone, Copy)]
+    enum PausedStart {
+        /// A cue at the start, as a restored session saved there.
+        Cue,
+        /// A cue at the start, then a volume change while paused there.
+        CueThenVolume,
+        /// A track picked while paused.
+        PickedWhilePaused,
+        /// A track picked while paused, and Play pressed before the output
+        /// has picked its sink.
+        PlayBeforeAPickedTrackPrerolls,
+        /// A seek to the start while paused within a track.
+        PausedSeek,
+        /// Play pressed right after a seek to the start while paused within
+        /// a track, before the seek lands.
+        PlayBeforeTheSeekLands,
+    }
+
+    #[test]
+    fn paused_starts_at_a_tracks_start_play_their_attack_at_the_volume() {
+        for start in [
+            PausedStart::Cue,
+            PausedStart::CueThenVolume,
+            PausedStart::PickedWhilePaused,
+            PausedStart::PlayBeforeAPickedTrackPrerolls,
+            PausedStart::PausedSeek,
+            PausedStart::PlayBeforeTheSeekLands,
+        ] {
+            let fixtures = Fixtures::new(&format!("paused-start-{start:?}"));
+            let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+            let b = fixtures.wav_at("b.wav", 4_000, 48_000);
+            let (mut engine, output) = start_recording(TestOutput::AppliesVolume);
+            let cue = |engine: &mut Engine, position| {
+                engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+                engine.send(PlaybackCommand::Cue {
+                    position,
+                    expected: FileStamp::of(&a).expect("stamp"),
+                });
+                engine.wait_until("the cue did not land", |engine| {
+                    !engine.seeked.is_empty() && engine.snapshot.state == PlaybackState::Paused
+                });
+            };
+            let mut gain = 1.0;
+            let mut hold = None;
+            let row = match start {
+                PausedStart::Cue => {
+                    cue(&mut engine, Duration::ZERO);
+                    0
+                }
+                PausedStart::CueThenVolume => {
+                    cue(&mut engine, Duration::ZERO);
+                    engine.send(PlaybackCommand::SetVolume(0.6));
+                    gain = f64::from(super::super::volume_level_to_gain(0.6));
+                    0
+                }
+                PausedStart::PickedWhilePaused => {
+                    engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+                    engine.send(PlaybackCommand::Play);
+                    engine.wait_until("the position did not reach 0.5 s", |engine| {
+                        engine.snapshot.position >= millis(500)
+                    });
+                    engine.send(PlaybackCommand::Pause);
+                    engine.send(PlaybackCommand::PlayAt(1));
+                    engine.wait_until("row 1 was not picked", |engine| {
+                        engine.snapshot.current_queue_index == Some(1)
+                            && engine.snapshot.state == PlaybackState::Paused
+                    });
+                    1
+                }
+                PausedStart::PlayBeforeAPickedTrackPrerolls => {
+                    engine.send(PlaybackCommand::LoadQueue(vec![a.clone(), b.clone()]));
+                    engine.send(PlaybackCommand::Play);
+                    engine.wait_until("the position did not reach 0.5 s", |engine| {
+                        engine.snapshot.position >= millis(500)
+                    });
+                    engine.send(PlaybackCommand::Pause);
+                    let held = hold_reads(&b);
+                    engine.send(PlaybackCommand::PlayAt(1));
+                    engine.wait_until("no read of row 1 was held", |_| held.holds_a_read());
+                    hold = Some(held);
+                    1
+                }
+                PausedStart::PausedSeek => {
+                    cue(&mut engine, millis(2_000));
+                    engine.send(PlaybackCommand::Seek(Duration::ZERO));
+                    engine.wait_until("the seek did not land", |engine| {
+                        engine.snapshot.seek_landed_serial == 1
+                    });
+                    0
+                }
+                PausedStart::PlayBeforeTheSeekLands => {
+                    cue(&mut engine, millis(2_000));
+                    engine.send(PlaybackCommand::Seek(Duration::ZERO));
+                    0
+                }
+            };
+            let played_before = output.lock().unwrap().len();
+            engine.send(PlaybackCommand::Play);
+            if let Some(hold) = hold {
+                engine.wait_until("Play was not taken", |engine| {
+                    engine.snapshot.state == PlaybackState::Playing
+                });
+                // Play again, as a second request over MPRIS does, before
+                // the run has prerolled.
+                let snapshots = engine.snapshots.len();
+                engine.send(PlaybackCommand::Play);
+                engine.wait_until("the second Play was not taken", |engine| {
+                    engine.snapshots.len() > snapshots
+                });
+                hold.release();
+            }
+            engine.wait_until("the track did not play to 0.6 s", |engine| {
+                engine.snapshot.state == PlaybackState::Playing
+                    && engine.snapshot.current_queue_index == Some(row)
+                    && engine.snapshot.seek_serial == engine.snapshot.seek_landed_serial
+                    && engine.snapshot.position >= millis(600)
+            });
+            let buffers = output.lock().unwrap();
+            let played = &buffers[played_before..];
+            assert!(!played.is_empty(), "{start:?}");
+            // The first buffer played is the one the pipeline held.
+            assert!(played[0].stream_time.is_zero(), "{start:?}: {played:?}");
+            assert_at_gain_from_the_start(played, gain);
+        }
+    }
+
+    #[test]
+    fn a_restart_for_a_seek_fades_in_from_a_silent_preroll() {
+        // The seek reaches the successor that the pipeline was handed, so
+        // the run restarts for it. Its preroll mid-track is silent, and the
+        // run fades in from there, rather than playing a buffer at the gain
+        // a fade reached while it prerolled, then dropping to silence.
+        for test_output in TestOutput::ALL {
+            let fixtures = Fixtures::new(&format!("restart-preroll-{test_output:?}"));
+            let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+            let b = fixtures.wav_at("b.wav", 4_000, 48_000);
+            let (mut engine, output) = start_recording(test_output);
+            engine.send(PlaybackCommand::SetVolume(0.7));
+            engine.send(PlaybackCommand::LoadQueue(vec![a, b]));
+            engine.send(PlaybackCommand::Play);
+            engine.wait_until("the successor was not handed over by 3 s", |engine| {
+                engine.queue.lock().unwrap().successor_handed_to_pipeline()
+                    && engine.snapshot.position >= millis(3_000)
+            });
+            let seeked_at = output.lock().unwrap().len();
+            engine.send(PlaybackCommand::Seek(millis(1_000)));
+            engine.wait_until("the restarted run did not play to 1.6 s", |engine| {
+                engine.snapshot.seek_landed_serial == 1
+                    && engine.snapshot.current_queue_index == Some(0)
+                    && engine.snapshot.position >= millis(1_600)
+            });
+            let buffers = output.lock().unwrap();
+            // The restarted run prerolls at its start before it takes the
+            // seek, and the output sees that buffer before the flush.
+            let restarted = seeked_at
+                + buffers[seeked_at..]
+                    .iter()
+                    .position(|buffer| (millis(900)..millis(2_000)).contains(&buffer.stream_time))
+                    .expect("the restarted run played");
+            let run = &buffers[restarted..];
+            assert!(
+                run[0].stream_time.abs_diff(millis(1_000)) < millis(100),
+                "{test_output:?}: {run:?}"
+            );
+            assert!(run[0].peak < WAV_PEAK * 1e-3, "{test_output:?}: {run:?}");
+            let gain = f64::from(super::super::volume_level_to_gain(0.7));
+            let full = run
+                .iter()
+                .position(|buffer| buffer.peak > WAV_PEAK * gain * 0.99)
+                .unwrap_or_else(|| panic!("{test_output:?}: never at the volume: {run:?}"));
+            assert!(
+                run[..=full]
+                    .windows(2)
+                    .all(|pair| pair[1].peak >= pair[0].peak),
+                "{test_output:?}: the fade-in does not rise: {run:?}"
+            );
+        }
     }
 
     #[test]
@@ -11443,11 +12115,16 @@ mod engine_tests {
 
     #[test]
     fn gapless_switch_plays_at_full_level() {
-        let fixtures = Fixtures::new("gapless-level");
+        for test_output in TestOutput::ALL {
+            gapless_switch_plays_at_full_level_on(test_output);
+        }
+    }
+
+    fn gapless_switch_plays_at_full_level_on(test_output: TestOutput) {
+        let fixtures = Fixtures::new(&format!("gapless-level-{test_output:?}"));
         let a = fixtures.wav_at("a.wav", 4_000, 48_000);
         let b = fixtures.wav_at("b.wav", 4_500, 48_000);
-        let mut engine = Engine::start();
-        let output = record_output(&engine.playbin);
+        let (mut engine, output) = start_recording(test_output);
         engine.send(PlaybackCommand::LoadQueue(vec![a, b.clone()]));
         engine.send(PlaybackCommand::Play);
         assert_change(&engine.wait_for_changes(2), &b, 1, Expect::Gapless);
@@ -11460,10 +12137,15 @@ mod engine_tests {
 
     #[test]
     fn repeat_one_replay_plays_at_full_level() {
-        let fixtures = Fixtures::new("repeat-one-level");
+        for test_output in TestOutput::ALL {
+            repeat_one_replay_plays_at_full_level_on(test_output);
+        }
+    }
+
+    fn repeat_one_replay_plays_at_full_level_on(test_output: TestOutput) {
+        let fixtures = Fixtures::new(&format!("repeat-one-level-{test_output:?}"));
         let a = fixtures.wav_at("a.wav", 4_000, 48_000);
-        let mut engine = Engine::start();
-        let output = record_output(&engine.playbin);
+        let (mut engine, output) = start_recording(test_output);
         engine.send(PlaybackCommand::SetRepeatMode(RepeatMode::One));
         engine.send(PlaybackCommand::LoadQueue(vec![a.clone()]));
         engine.send(PlaybackCommand::Play);
@@ -11512,9 +12194,13 @@ mod engine_tests {
         #[track_caller]
         fn assert_plays_at_once_at(&mut self, level: f32) {
             let gain = super::super::volume_level_to_gain(level);
-            assert!(!self.runtime.startup_gain_ramp);
+            assert!(!self.runtime.startup_gain_ramp());
             assert_eq!(self.runtime.startup_ramp_hold_left, None);
-            assert!((self.runtime.applied_volume - gain).abs() < f32::EPSILON);
+            assert!(
+                (self.runtime.applied_volume - gain).abs() < f32::EPSILON,
+                "applied {} rather than {gain}",
+                self.runtime.applied_volume
+            );
             assert!(
                 (self.runtime.playbin.property::<f64>("volume") - f64::from(gain)).abs() < 1e-6
             );
@@ -11525,7 +12211,11 @@ mod engine_tests {
                 self.runtime.command_wait_timeout(Instant::now()),
                 Some(VOLUME_RAMP_TICK)
             );
-            assert!((self.runtime.applied_volume - gain).abs() < f32::EPSILON);
+            assert!(
+                (self.runtime.applied_volume - gain).abs() < f32::EPSILON,
+                "applied {} rather than {gain} once playing",
+                self.runtime.applied_volume
+            );
         }
 
         /// Assert that the fade-in of a start, to volume level 0.5 or
@@ -11533,7 +12223,7 @@ mod engine_tests {
         /// last.
         #[track_caller]
         fn assert_fades_in_from_silence(&mut self) {
-            assert!(self.runtime.startup_gain_ramp);
+            assert!(self.runtime.startup_gain_ramp());
             self.wait_until_confirmed_playing();
             let later = Instant::now() + Duration::from_secs(2);
             self.runtime.poll_volume_ramp(later);
@@ -11591,10 +12281,11 @@ mod engine_tests {
     }
 
     #[test]
-    fn paused_starts_still_fade_in_from_silence() {
+    fn paused_starts_fade_in_from_silence_when_playsink_applies_the_volume() {
         // A paused pipeline holds a buffer prerolled while the output was
-        // silent, which a later volume change does not reach, so these
-        // starts fade in as before.
+        // silent. With the volume applied before an output that does not
+        // apply it itself, a later volume change does not reach that
+        // buffer, so these starts fade in from silence.
         let fixtures = Fixtures::new("paused-starts");
         let a = fixtures.wav("a.wav", 4_000);
         let b = fixtures.wav("b.wav", 4_000);
@@ -11629,18 +12320,357 @@ mod engine_tests {
         engine.assert_fades_in_from_silence();
     }
 
+    impl DirectEngine {
+        /// Assert that the output stays silent, however long the engine
+        /// steps fades: no fade raises it, and the engine does not wake to
+        /// step one.
+        #[track_caller]
+        fn assert_output_held_silent(&mut self) {
+            assert!(!self.runtime.volume_ramp_pending());
+            assert_ne!(
+                self.runtime.command_wait_timeout(Instant::now()),
+                Some(VOLUME_RAMP_TICK)
+            );
+            let now = Instant::now();
+            self.runtime.poll_volume_ramp(now);
+            self.runtime.poll_volume_ramp(now + Duration::from_secs(1));
+            assert!(self.runtime.applied_volume.abs() < f32::EPSILON);
+            assert!(self.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
+        }
+
+        /// Cue the first of `queue` at `position`, as a restored session
+        /// does, and wait until the cue has landed.
+        fn cue_and_wait(&mut self, queue: Vec<PathBuf>, position: Duration) {
+            let first = queue[0].clone();
+            self.runtime
+                .apply_command(PlaybackCommand::LoadQueue(queue));
+            self.runtime.apply_command(PlaybackCommand::Cue {
+                position,
+                expected: FileStamp::of(&first).expect("stamp"),
+            });
+            self.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
+            assert_eq!(self.runtime.snapshot.state, PlaybackState::Paused);
+        }
+    }
+
+    #[test]
+    fn playsink_gives_the_volume_to_an_output_that_applies_it() {
+        for test_output in TestOutput::ALL {
+            let fixtures = Fixtures::new(&format!("volume-owner-{test_output:?}"));
+            let a = fixtures.wav("a.wav", 4_000);
+            let mut engine = DirectEngine::start_with_output(test_output.build());
+            engine.cue_and_wait(vec![a], millis(1_000));
+            let applies = test_output == TestOutput::AppliesVolume;
+            assert_eq!(engine.runtime.output_applies_volume(), Some(applies));
+            // Playsink adds a volume element before the output only for
+            // an output that does not apply the volume itself.
+            let volume_element = engine
+                .runtime
+                .playbin
+                .downcast_ref::<gst::Bin>()
+                .unwrap()
+                .iterate_recurse()
+                .into_iter()
+                .filter_map(Result::ok)
+                .any(|element| {
+                    element
+                        .factory()
+                        .is_some_and(|factory| factory.name() == "volume")
+                });
+            assert_eq!(volume_element, !applies, "{test_output:?}");
+        }
+    }
+
+    #[test]
+    fn a_volume_change_while_paused_waits_for_playback_when_playsink_applies_it() {
+        // The volume element before the output does not reach the buffer
+        // the paused output holds, so the change waits, and the output
+        // fades to it as playback resumes.
+        let fixtures = Fixtures::new("paused-volume-waits");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start();
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        assert!((engine.runtime.applied_volume - 1.0).abs() < f32::EPSILON);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        assert!(engine.runtime.startup_gain_ramp());
+        engine.wait_until_confirmed_playing();
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_volume_change_while_paused_applies_at_once_to_an_output_that_applies_it() {
+        let fixtures = Fixtures::new("paused-volume-at-once");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        // Muted while paused, playback resumes muted.
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        assert!(engine.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
+        assert!(!engine.runtime.volume_ramp_pending());
+        // Unmuted again, it resumes at the volume, without a fade.
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.5));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_plays_at_once_at(0.5);
+    }
+
+    #[test]
+    fn paused_starts_at_a_tracks_start_play_at_once_on_an_output_that_applies_the_volume() {
+        let fixtures = Fixtures::new("paused-starts-at-once");
+        let a = fixtures.wav("a.wav", 4_000);
+        let b = fixtures.wav("b.wav", 4_000);
+
+        // A cue at the track's start, and a volume change while paused
+        // there.
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.cue_and_wait(vec![a.clone(), b.clone()], Duration::ZERO);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_plays_at_once_at(0.8);
+
+        // A track picked while paused.
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.play_until_opened(vec![a.clone(), b.clone()], RepeatMode::Off);
+        engine.finish_fade();
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        engine.runtime.apply_command(PlaybackCommand::PlayAt(1));
+        assert_eq!(engine.runtime.snapshot.current_queue_index, Some(1));
+        engine.wait_until("row 1 did not preroll", |runtime| {
+            runtime.pipeline_prerolled()
+        });
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_plays_at_once_at(1.0);
+
+        // A paused seek to the start, and Play before it lands.
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.cue_and_wait(vec![a.clone(), b.clone()], millis(2_000));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::Seek(Duration::ZERO));
+        assert!(engine.runtime.seek_pending());
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        // The seek can restart the run, which was handed the successor.
+        engine.wait_until("the seek did not land", |runtime| {
+            !runtime.seek_pending() && runtime.restart.is_none()
+        });
+        engine.assert_plays_at_once_at(1.0);
+
+        // Play before a cue at the start has landed: the restarted run
+        // plays at once.
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::LoadQueue(vec![a.clone(), b]));
+        engine.runtime.apply_command(PlaybackCommand::Cue {
+            position: Duration::ZERO,
+            expected: FileStamp::of(&a).expect("stamp"),
+        });
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        assert!(engine.runtime.restarting());
+        engine.wait_until("the cue did not land", |runtime| runtime.restart.is_none());
+        engine.assert_plays_at_once_at(1.0);
+    }
+
+    #[test]
+    fn a_cued_start_within_a_track_fades_in_on_an_output_that_applies_the_volume() {
+        // Within a track, a start from a preroll silenced for the cue fades
+        // in, also after a volume change while paused.
+        let fixtures = Fixtures::new("cue-within-fades");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine.cue_and_wait(vec![a], millis(2_000));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.6));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.assert_fades_in_from_silence();
+    }
+
+    impl DirectEngine {
+        /// Handle bus messages, poll, and step fades as the engine loop
+        /// does, until `done` holds, or panic with a report of `what` was
+        /// awaited.
+        #[track_caller]
+        fn run_until(&mut self, what: &str, mut done: impl FnMut(&GstPlaybackRuntime) -> bool) {
+            let deadline = Instant::now() + TIMEOUT;
+            while !done(&self.runtime) {
+                assert!(Instant::now() < deadline, "{}", self.report(what));
+                if let Some(message) = self.bus.timed_pop(gst::ClockTime::from_mseconds(5)) {
+                    self.runtime.handle_bus_message(&message);
+                }
+                self.runtime.poll();
+                self.runtime.poll_volume_ramp(Instant::now());
+            }
+        }
+    }
+
+    #[test]
+    fn play_before_a_track_picked_while_paused_prerolls_waits_for_its_output() {
+        // The output picks its sink only as the run prerolls, so Play waits
+        // for the preroll to decide how the track comes up: at once from
+        // its start where the output applies the volume, otherwise with the
+        // fade-in from silence.
+        for test_output in TestOutput::ALL {
+            let fixtures = Fixtures::new(&format!("picked-unprerolled-{test_output:?}"));
+            let a = fixtures.wav("a.wav", 4_000);
+            let b = fixtures.wav("b.wav", 4_000);
+            let mut engine = DirectEngine::start_with_output(test_output.build());
+            engine.play_until_opened(vec![a, b.clone()], RepeatMode::Off);
+            engine.finish_fade();
+            engine.runtime.apply_command(PlaybackCommand::Pause);
+            let hold = hold_reads(&b);
+            engine.runtime.apply_command(PlaybackCommand::PlayAt(1));
+            engine.wait_until("no read of row 1 was held", |_| hold.holds_a_read());
+            assert_eq!(engine.runtime.output_applies_volume(), None);
+
+            // Paused again before the preroll, the run stays paused.
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+            assert_eq!(engine.runtime.output_rise, OutputRise::SilencedUntilPreroll);
+            engine.runtime.apply_command(PlaybackCommand::Pause);
+            assert_eq!(engine.runtime.output_rise, OutputRise::Silenced);
+
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            assert_eq!(engine.runtime.output_rise, OutputRise::SilencedUntilPreroll);
+            // Play again, as a second request over MPRIS does, still waits.
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            assert_eq!(engine.runtime.output_rise, OutputRise::SilencedUntilPreroll);
+            // The run is not asked to play before it has prerolled.
+            assert_eq!(engine.runtime.playbin.pending_state(), gst::State::Paused);
+            assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+            assert!(!engine.runtime.volume_ramp_pending());
+            hold.release();
+            engine.wait_until("the run did not preroll", |runtime| {
+                runtime.output_rise != OutputRise::SilencedUntilPreroll
+            });
+            assert_eq!(engine.runtime.snapshot.state, PlaybackState::Playing);
+            match test_output {
+                TestOutput::AppliesVolume => engine.assert_plays_at_once_at(1.0),
+                TestOutput::Fake => engine.assert_fades_in_from_silence(),
+            }
+        }
+    }
+
+    /// Start a fade-in from silence within a track on an output that
+    /// applies the volume, pause it partway, and return the engine, its
+    /// rendered buffers, how many it had rendered when it paused, and the
+    /// fixtures it plays.
+    fn pause_partway_through_a_fade_in(
+    ) -> (DirectEngine, Arc<Mutex<Vec<OutputBuffer>>>, usize, Fixtures) {
+        let fixtures = Fixtures::new("paused-fade-in");
+        let a = fixtures.wav_at("a.wav", 4_000, 48_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        let output = record_rendered_at_volume(&engine.runtime.playbin);
+        engine.cue_and_wait(vec![a], millis(2_000));
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.wait_until_confirmed_playing();
+        // Two thirds of the way up the 90 ms fade.
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine.runtime.poll_volume_ramp(now + millis(60));
+        let gain = f64::from(engine.runtime.applied_volume);
+        assert!(gain > 0.2, "{gain}");
+        engine.wait_until("nothing played at the partway level", |_| {
+            output
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|buffer| (buffer.peak - WAV_PEAK * gain).abs() < WAV_PEAK * 0.01)
+        });
+        engine.runtime.apply_command(PlaybackCommand::Pause);
+        assert!(engine.runtime.startup_gain_ramp());
+        let paused_at = output.lock().unwrap().len();
+        (engine, output, paused_at, fixtures)
+    }
+
+    #[test]
+    fn muting_while_a_fade_in_is_paused_silences_the_resume() {
+        let (mut engine, output, paused_at, _fixtures) = pause_partway_through_a_fade_in();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        assert!(engine.runtime.applied_volume.abs() < f32::EPSILON);
+        assert!(engine.runtime.playbin.property::<f64>("volume").abs() < f64::EPSILON);
+        let resumed_from = engine.runtime.snapshot.position;
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.run_until("playback did not resume for 0.5 s", |runtime| {
+            runtime.playing_state_requested_at.is_none()
+                && runtime.snapshot.position >= resumed_from + millis(500)
+        });
+        let buffers = output.lock().unwrap();
+        assert_at_gain(&buffers[paused_at..], 0.0);
+    }
+
+    #[test]
+    fn unmuting_while_a_fade_in_is_paused_fades_in_on_resume() {
+        let (mut engine, output, paused_at, _fixtures) = pause_partway_through_a_fade_in();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.0));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(1.0));
+        let resumed_from = engine.runtime.snapshot.position;
+        engine.runtime.apply_command(PlaybackCommand::Play);
+        engine.run_until("playback did not resume for 0.5 s", |runtime| {
+            runtime.playing_state_requested_at.is_none()
+                && runtime.snapshot.position >= resumed_from + millis(500)
+        });
+        // The fade-in starts again from the silence of the mute, and rises
+        // to the volume without a step past it.
+        let buffers = output.lock().unwrap();
+        let resumed = &buffers[paused_at..];
+        assert!(resumed[0].peak < WAV_PEAK * 0.1, "{resumed:?}");
+        assert_fades_in(resumed);
+        assert!(
+            resumed.iter().all(|buffer| buffer.peak <= WAV_PEAK * 1.01),
+            "{resumed:?}"
+        );
+    }
+
     #[test]
     fn restart_for_a_seek_during_a_fade_fades_in_from_silence() {
-        let fixtures = Fixtures::new("restart-fade");
+        for test_output in TestOutput::ALL {
+            restart_for_a_seek_during_a_fade_fades_in_from_silence_on(test_output);
+        }
+    }
+
+    fn restart_for_a_seek_during_a_fade_fades_in_from_silence_on(test_output: TestOutput) {
+        let fixtures = Fixtures::new(&format!("restart-fade-{test_output:?}"));
         let a = fixtures.wav("a.wav", 4_000);
         let b = fixtures.wav("b.wav", 4_500);
-        let mut engine = DirectEngine::start();
+        let mut engine = DirectEngine::start_with_output(test_output.build());
         engine
             .runtime
             .apply_command(PlaybackCommand::SetVolume(0.5));
         let mut hold = engine.hold_seek_of_a_restart(vec![a, b]);
-        // The restart silenced the output, and the fade back runs.
-        engine.start_fade_to(0.5);
+        // The restart silenced the output, which stays silent while the run
+        // prerolls, so the buffer it prerolls mid-track is not held at a
+        // partial gain.
+        engine.assert_output_held_silent();
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.6));
+        engine.assert_output_held_silent();
         hold.release();
         engine.wait_until("the restart did not play", |runtime| {
             runtime.restart.is_none()

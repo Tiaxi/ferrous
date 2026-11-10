@@ -30,6 +30,7 @@ Install these tools and development libraries:
 - GLib/GIO and GStreamer development libraries, including app, audio, and pbutils
 - The D-Bus development library (libdbus), which the Last.fm keyring support links
 - GStreamer runtime codec plugins for the formats you want to play
+- For the GStreamer backend tests, the good and bad-free GStreamer plugins (`gstreamer1-plugins-good` and `gstreamer1-plugins-bad-free` on Fedora); the AC-3 and DTS tests also need `gstreamer1-plugin-libav`
 
 To run Ferrous, also install the KDE `qqc2-desktop-style` QML module (`kf6-qqc2-desktop-style` on Fedora). Ferrous uses its `org.kde.desktop` controls style and does not start without it, and the UI tests use it too, with the Breeze icon theme (`breeze-icon-theme`). Plasma desktops include both.
 
