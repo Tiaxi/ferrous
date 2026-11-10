@@ -17,6 +17,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlListReference>
 #include <QQmlProperty>
@@ -30,7 +31,10 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
+#include <memory>
 #include <tuple>
 
 #include "../src/InputModality.h"
@@ -399,6 +403,105 @@ void rightClick(QQuickWindow *window, QQuickItem *item) {
     QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, at);
 }
 
+
+// WCAG's relative luminance and contrast ratio of opaque colours.
+double relativeLuminance(const QColor &color) {
+    const auto linear = [](double channel) {
+        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+}
+
+double contrastRatio(const QColor &a, const QColor &b) {
+    const double la = relativeLuminance(a);
+    const double lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// The largest difference of the colours' 8-bit channels.
+int channelDistance(const QColor &a, const QColor &b) {
+    return std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                     std::abs(a.blue() - b.blue())});
+}
+
+// The menu bar's title at `index`, its delegate.
+QQuickItem *menuBarItemAt(QObject *menuBar, int index) {
+    QQuickItem *item = nullptr;
+    QMetaObject::invokeMethod(menuBar, "itemAt", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, index));
+    return item;
+}
+
+QQuickItem *childNamed(QQuickItem *root, const char *name) {
+    const QList<QQuickItem *> found = itemsNamed(root, QString::fromLatin1(name));
+    return found.isEmpty() ? nullptr : found.first();
+}
+
+// The colours of a Breeze scheme that UiPalette reads, from Breeze's
+// .colors files: window, view, text, inactive text and accent.
+struct Scheme {
+    const char *window;
+    const char *view;
+    const char *text;
+    const char *inactiveText;
+    const char *highlight;
+};
+
+const Scheme kBreezeDark{"#202326", "#141618", "#fcfcfc", "#a1a9b1", "#3daee9"};
+const Scheme kBreezeLight{"#eff0f1", "#ffffff", "#232629", "#707d8a", "#3daee9"};
+
+// A window in `scheme` whose menu bar has Main.qml's titles, File and Edit.
+QByteArray menuBarHarnessQml(const Scheme &scheme) {
+    return QStringLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
+import "components" as Components
+
+ApplicationWindow {
+    id: window
+    width: 600
+    height: 300
+    visible: true
+    palette.window: "%1"
+    palette.base: "%2"
+    palette.text: "%3"
+    palette.windowText: "%3"
+    property alias tokens: tokens
+
+    Item {
+        Kirigami.Theme.inherit: false
+        Kirigami.Theme.textColor: "%3"
+        Kirigami.Theme.disabledTextColor: "%4"
+        Kirigami.Theme.highlightColor: "%5"
+
+        Components.UiPalette {
+            id: tokens
+            windowRoot: window
+        }
+    }
+
+    menuBar: MenuBar {
+        objectName: "harnessMenuBar"
+        delegate: Components.AppMenuBarItem {
+            uiPalette: tokens
+        }
+        Components.AppMenu {
+            objectName: "harnessFileMenu"
+            title: "&File"
+            MenuItem { text: "&Open" }
+        }
+        Components.AppMenu {
+            objectName: "harnessEditMenu"
+            title: "&Edit"
+            MenuItem { text: "&Undo" }
+        }
+    }
+}
+)QML")
+        .arg(QLatin1String(scheme.window), QLatin1String(scheme.view), QLatin1String(scheme.text),
+             QLatin1String(scheme.inactiveText), QLatin1String(scheme.highlight))
+        .toUtf8();
+}
 } // namespace
 
 // Takes the URLs Qt.openUrlExternally would open, so no browser starts.
@@ -422,6 +525,9 @@ private slots:
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void menuBarHasTheSixKdeMenusInOrder();
+    void menuBarTitlesAreLitWithTheSelectionTint();
+    void menuBarTitleReadsWhenOpenOrHovered_data();
+    void menuBarTitleReadsWhenOpenOrHovered();
     void menusListTheirItemsInOrder();
     void wordingIsTitleCaseWithOneCharacterEllipsis();
     void playPauseItemNamesWhatItDoes();
@@ -484,6 +590,147 @@ void UiMenusTest::menuBarHasTheSixKdeMenusInOrder() {
     QCOMPARE(titles, (QStringList{QStringLiteral("&File"), QStringLiteral("&Edit"), QStringLiteral("&View"),
                                   QStringLiteral("&Playback"), QStringLiteral("&Settings"),
                                   QStringLiteral("&Help")}));
+}
+
+// Main.qml's titles are the app's: plain, they show the bar; lit, the
+// selection tint of the lists, with the text colour on both.
+void UiMenusTest::menuBarTitlesAreLitWithTheSelectionTint() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QObject *menuBar = menuBarOf(window);
+    QVERIFY(palette != nullptr && menuBar != nullptr);
+    const QColor text = palette->property("text").value<QColor>();
+    const QColor selection = palette->property("selection").value<QColor>();
+
+    const QList<QObject *> menus = menusOf(window);
+    QCOMPARE(menuBar->property("count").toInt(), menus.size());
+    for (int i = 0; i < menus.size(); ++i) {
+        QQuickItem *title = menuBarItemAt(menuBar, i);
+        QVERIFY(title != nullptr);
+        const QString name = withoutMnemonic(menus.at(i)->property("title").toString());
+        QQuickItem *label = childNamed(title, "menuBarItemLabel");
+        QQuickItem *background = childNamed(title, "menuBarItemBackground");
+        QVERIFY2(label != nullptr && background != nullptr, qPrintable(name));
+        QCOMPARE(label->property("color").value<QColor>(), text);
+        QCOMPARE(background->property("color").value<QColor>(), selection);
+        QVERIFY2(!background->isVisible(), qPrintable(name));
+    }
+
+    // Opened, View is lit; closed, it is plain again. Escape can leave the
+    // keyboard on the bar, with View the current title and lit; a second
+    // Escape leaves the bar.
+    QQuickItem *view = menuBarItemAt(menuBar, 2);
+    QQuickItem *viewBackground = childNamed(view, "menuBarItemBackground");
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(view).center().toPoint());
+    QTRY_VERIFY(menus.at(2)->property("visible").toBool());
+    QTRY_COMPARE(viewBackground->opacity(), 1.0);
+    QTest::mouseMove(window, QPoint(window->width() / 2, window->height() / 2));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!menus.at(2)->property("visible").toBool());
+    if (view->property("highlighted").toBool()) {
+        QTRY_COMPARE(viewBackground->opacity(), 1.0);
+        QTest::keyClick(window, Qt::Key_Escape);
+    }
+    QTRY_VERIFY(!view->property("highlighted").toBool());
+    QTRY_VERIFY(!viewBackground->isVisible());
+}
+
+void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("dark") << true;
+    QTest::newRow("light") << false;
+}
+
+// The open or hovered title is the text colour on the selection tint, as
+// in the lists, and well over 4.5:1 in both themes (#373 H4: the style's
+// white on a translucent accent was 2.08:1 in light). It keeps the style's
+// size, padding and Alt mnemonics, and Alt+letter opens its menu.
+void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
+    QFETCH(bool, dark);
+    const Scheme &scheme = dark ? kBreezeDark : kBreezeLight;
+    QQmlEngine engine;
+    QQmlComponent component(&engine);
+    component.setData(menuBarHarnessQml(scheme),
+                      QUrl::fromLocalFile(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/MenuBarHarness.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    QVERIFY2(root != nullptr, qPrintable(component.errorString()));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    auto *tokens = qvariant_cast<QObject *>(root->property("tokens"));
+    QObject *menuBar = qvariant_cast<QObject *>(root->property("menuBar"));
+    QVERIFY(tokens != nullptr && menuBar != nullptr);
+    QObject *fileMenu = root->findChild<QObject *>(QStringLiteral("harnessFileMenu"));
+    QQuickItem *file = menuBarItemAt(menuBar, 0);
+    QQuickItem *edit = menuBarItemAt(menuBar, 1);
+    QVERIFY(fileMenu != nullptr && file != nullptr && edit != nullptr);
+    QQuickItem *label = childNamed(file, "menuBarItemLabel");
+    QQuickItem *background = childNamed(file, "menuBarItemBackground");
+    QVERIFY(label != nullptr && background != nullptr);
+
+    // The declared colours: the text on the selection tint.
+    const QColor text = tokens->property("text").value<QColor>();
+    const QColor selection = tokens->property("selection").value<QColor>();
+    QCOMPARE(text, QColor(QLatin1String(scheme.text)));
+    QCOMPARE(selection.alpha(), 255);
+    const double ratio = contrastRatio(text, selection);
+    QVERIFY2(ratio >= 4.5, qPrintable(QStringLiteral("%1 on %2 is %3:1")
+                                          .arg(text.name(), selection.name()).arg(ratio, 0, 'f', 2)));
+    QVERIFY2(ratio >= (dark ? 10.0 : 11.0), qPrintable(QString::number(ratio)));
+
+    // The style's size and padding.
+    QCOMPARE(file->property("leftPadding").toReal(), file->property("rightPadding").toReal());
+    QVERIFY(file->property("leftPadding").toReal() > 0.0);
+    QCOMPARE(file->property("topPadding").toReal(), file->property("bottomPadding").toReal());
+    QVERIFY(file->property("topPadding").toReal() > 0.0);
+    QCOMPARE(file->width(), std::max(file->property("implicitBackgroundWidth").toReal(),
+                                     file->property("implicitContentWidth").toReal()
+                                         + file->property("leftPadding").toReal()
+                                         + file->property("rightPadding").toReal()));
+
+    // Plain: the bar shows through, and the text is the text colour.
+    QVERIFY(!background->isVisible());
+    QCOMPARE(label->property("color").value<QColor>(), text);
+
+    // Hovered: lit.
+    QTest::mouseMove(window, sceneRect(file).center().toPoint());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(background->property("color").value<QColor>(), selection);
+    QCOMPARE(label->property("color").value<QColor>(), text);
+    QVERIFY(!childNamed(edit, "menuBarItemBackground")->isVisible());
+
+    // Open: lit, and drawn so.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(file).center().toPoint());
+    QTRY_VERIFY(fileMenu->property("visible").toBool());
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 10));
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QCOMPARE(label->property("color").value<QColor>(), text);
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = static_cast<qreal>(image.width()) / window->width();
+    const QPointF corner = sceneRect(file).topLeft() + QPointF(2, 2);
+    const QColor drawn = image.pixelColor(static_cast<int>(corner.x() * scale), static_cast<int>(corner.y() * scale));
+    QVERIFY2(channelDistance(drawn, selection) <= 1,
+             qPrintable(QStringLiteral("drawn %1, selection %2").arg(drawn.name(), selection.name())));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
+    QTRY_VERIFY(!background->isVisible());
+
+    // Alt underlines the mnemonics, and Alt+F opens File.
+    QVERIFY(!label->property("text").toString().contains(QStringLiteral("<u>")));
+    QTest::keyPress(window, Qt::Key_Alt, Qt::AltModifier);
+    QTRY_VERIFY2(label->property("text").toString().contains(QStringLiteral("<u>F</u>")),
+                 qPrintable(label->property("text").toString()));
+    QTest::keyClick(window, Qt::Key_F, Qt::AltModifier);
+    QTest::keyRelease(window, Qt::Key_Alt, Qt::NoModifier);
+    QTRY_VERIFY(fileMenu->property("visible").toBool());
+    QTRY_COMPARE(background->opacity(), 1.0);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!fileMenu->property("visible").toBool());
 }
 
 void UiMenusTest::menusListTheirItemsInOrder() {

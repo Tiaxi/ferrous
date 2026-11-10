@@ -413,7 +413,7 @@ private slots:
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void narrowTransportShortensTheVolume();
     void playPauseIsOneButtonThatShowsTheState();
-    void playPauseGlyphsNeverDrawTogether();
+    void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
@@ -571,12 +571,12 @@ void TransportStatusTest::playPauseIsOneButtonThatShowsTheState() {
     QTRY_COMPARE(paused.count(), 1);
 }
 
-// The Play/Pause glyph swaps without a frame of both shapes at once: the
-// glyph shown fades out over the first half of shortDuration, then the other
-// fades in over the second (#373 H1: a mashed glyph for a frame or two). A
-// change back while the glyph fades out brings it back; with animations off
-// the swap is instant.
-void TransportStatusTest::playPauseGlyphsNeverDrawTogether() {
+// The Play/Pause glyphs cross-fade: the one shown goes out as the other
+// comes in, over shortDuration, so the button never drops below 0.6 of its
+// ink (#373 H4: a fade out, then in, left it below half for 50 ms). At rest
+// one glyph is whole and the other gone; a change back mid-fade reverses
+// from where it is; with animations off the swap is instant.
+void TransportStatusTest::playPauseGlyphsCrossFadeWithoutABlink() {
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
@@ -587,51 +587,80 @@ void TransportStatusTest::playPauseGlyphsNeverDrawTogether() {
     auto *units = unitsOf(play);
     QVERIFY(swap != nullptr && units != nullptr);
     QCOMPARE(swap->objectName(), QStringLiteral("transportPlayPauseSwap"));
-    // Long enough for frames in each half.
+    // Long enough for many frames of the fade.
     units->setShortDuration(600);
     QTRY_VERIFY(pause->opacity() == 1.0 && !play->isVisible());
 
-    const auto drawn = [](QQuickItem *glyph) { return glyph->isVisible() && glyph->opacity() > 0.0; };
+    const auto drawn = [](QQuickItem *glyph) { return glyph->isVisible() ? glyph->opacity() : 0.0; };
+    // The ink where the glyphs overlap, one drawn over the other; where
+    // only one has ink, the sum is what the eye blends over the button.
+    // Both stay at 0.6 or above.
+    const auto combined = [&]() {
+        const qreal a = drawn(play);
+        const qreal b = drawn(pause);
+        return std::min(a + b, 1.0 - (1.0 - a) * (1.0 - b));
+    };
     QString failure;
     int frames = 0;
+    int framesWithBoth = 0;
     const QMetaObject::Connection connection =
         QObject::connect(harness.window, &QQuickWindow::frameSwapped, harness.window, [&]() {
             ++frames;
-            if (failure.isEmpty() && drawn(play) && drawn(pause)) {
-                failure = QStringLiteral("both glyphs at frame %1: play %2, pause %3")
-                              .arg(frames).arg(play->opacity()).arg(pause->opacity());
+            if (drawn(play) > 0.0 && drawn(pause) > 0.0) {
+                ++framesWithBoth;
+            }
+            if (failure.isEmpty() && combined() < 0.6) {
+                failure = QStringLiteral("combined ink %1 at frame %2: play %3, pause %4")
+                              .arg(combined()).arg(frames).arg(drawn(play)).arg(drawn(pause));
             }
         });
     const auto check = [&](const char *where) {
-        QVERIFY2(!(drawn(play) && drawn(pause)), where);
+        QVERIFY2(combined() >= 0.6, where);
     };
 
-    // Playing to paused: Pause goes out, then Play comes in.
+    // Playing to paused: Pause goes out as Play comes in, at once.
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
     QVERIFY(swap->property("running").toBool());
     check("at the start");
-    QVERIFY(drawn(pause));
-    QTRY_VERIFY(!drawn(pause));
-    check("half-way");
+    QTRY_VERIFY(drawn(play) > 0.0 && drawn(pause) > 0.0);
+    check("both drawn");
     QTRY_VERIFY(!swap->property("running").toBool());
     QCOMPARE(play->opacity(), 1.0);
+    QCOMPARE(pause->opacity(), 0.0);
+    QVERIFY(!pause->isVisible());
+    QVERIFY2(framesWithBoth > 0, "the glyphs never cross-faded");
+
+    // Playing again, and back to paused mid-fade: the fade reverses from
+    // where it is and settles on Play alone.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(play->opacity() < 0.9 && pause->opacity() > 0.1);
+    const qreal turnedAt = pause->opacity();
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(swap->property("running").toBool());
+    // No jump: Pause goes back from where it was.
+    QVERIFY(std::abs(pause->opacity() - turnedAt) < 0.1);
+    check("reversed");
+    QTRY_VERIFY(!swap->property("running").toBool());
+    QCOMPARE(play->opacity(), 1.0);
+    QCOMPARE(pause->opacity(), 0.0);
     QVERIFY(!pause->isVisible());
 
-    // Playing again, and back to paused while Play fades out: Play comes
-    // back, and Pause never shows.
+    // To Pause and all the way.
     harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
-    QTRY_VERIFY(play->opacity() < 1.0);
-    QVERIFY(drawn(play));
-    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QVERIFY(!swap->property("running").toBool());
-    QTRY_COMPARE(play->opacity(), 1.0);
-    QVERIFY(!pause->isVisible());
+    QTRY_VERIFY(!swap->property("running").toBool());
+    QCOMPARE(pause->opacity(), 1.0);
+    QCOMPARE(play->opacity(), 0.0);
+    QVERIFY(!play->isVisible());
     QObject::disconnect(connection);
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
 
     // Animations off: at once.
     units->setShortDuration(0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(!swap->property("running").toBool());
+    QCOMPARE(play->opacity(), 1.0);
+    QVERIFY(!pause->isVisible());
     harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QVERIFY(!swap->property("running").toBool());
     QCOMPARE(pause->opacity(), 1.0);

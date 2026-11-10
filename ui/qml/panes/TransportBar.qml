@@ -300,10 +300,12 @@ ToolBar {
             }
 
             // One button that shows the state: Pause while playing,
-            // otherwise Play. Its glyph swaps without ever drawing both:
-            // the one shown fades out over the first half of shortDuration,
-            // then the other fades in over the second. A change back while
-            // the glyph fades out brings it back from where it is.
+            // otherwise Play. Its two glyphs cross-fade over shortDuration,
+            // the one shown going out as the other comes in, so the button
+            // never goes blank (#373 H4: a sequential swap left it below
+            // half its ink for 50 ms). Both opacities come from one
+            // progress, so a change back mid-fade reverses from where it
+            // is, and at rest one glyph is whole and the other gone.
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
@@ -315,54 +317,30 @@ ToolBar {
                     implicitWidth: playPauseButton.glyphSize
                     implicitHeight: playPauseButton.glyphSize
 
-                    // The glyph drawn, Pause or Play, and its opacity: set
-                    // from the state as it is first, then by follow().
-                    property bool showsPause: false
-                    property real glyphOpacity: 1
-                    readonly property int halfDuration: Math.round(Kirigami.Units.shortDuration / 2)
-                    readonly property SequentialAnimation swap: SequentialAnimation {
+                    // 1 shows Pause, 0 Play: set from the state as it is
+                    // first, then by follow().
+                    property real pauseProgress: 0
+                    readonly property NumberAnimation swap: NumberAnimation {
                         objectName: "transportPlayPauseSwap"
-                        NumberAnimation {
-                            target: playPauseGlyphs
-                            property: "glyphOpacity"
-                            to: 0
-                            duration: playPauseGlyphs.halfDuration
-                            easing.type: Easing.OutCubic
-                        }
-                        ScriptAction {
-                            script: playPauseGlyphs.showsPause = root.playing
-                        }
-                        NumberAnimation {
-                            target: playPauseGlyphs
-                            property: "glyphOpacity"
-                            to: 1
-                            duration: playPauseGlyphs.halfDuration
-                            easing.type: Easing.OutCubic
-                        }
-                    }
-                    readonly property NumberAnimation comeBack: NumberAnimation {
                         target: playPauseGlyphs
-                        property: "glyphOpacity"
-                        to: 1
-                        duration: playPauseGlyphs.halfDuration
+                        property: "pauseProgress"
+                        duration: Kirigami.Units.shortDuration
                         easing.type: Easing.OutCubic
                     }
 
                     function follow() {
+                        const target = root.playing ? 1 : 0
                         playPauseGlyphs.swap.stop()
-                        playPauseGlyphs.comeBack.stop()
                         // Kirigami's durations are 0 with animations off.
-                        if (playPauseGlyphs.halfDuration <= 0) {
-                            playPauseGlyphs.showsPause = root.playing
-                            playPauseGlyphs.glyphOpacity = 1
-                        } else if (playPauseGlyphs.showsPause === root.playing) {
-                            playPauseGlyphs.comeBack.start()
-                        } else {
+                        if (Kirigami.Units.shortDuration <= 0) {
+                            playPauseGlyphs.pauseProgress = target
+                        } else if (playPauseGlyphs.pauseProgress !== target) {
+                            playPauseGlyphs.swap.to = target
                             playPauseGlyphs.swap.start()
                         }
                     }
 
-                    Component.onCompleted: playPauseGlyphs.showsPause = root.playing
+                    Component.onCompleted: playPauseGlyphs.pauseProgress = root.playing ? 1 : 0
 
                     Connections {
                         target: root
@@ -377,7 +355,7 @@ ToolBar {
                         source: root.playAction ? root.playAction.icon.name : ""
                         color: playPauseButton.glyphColor
                         isMask: true
-                        opacity: playPauseGlyphs.showsPause ? 0 : playPauseGlyphs.glyphOpacity
+                        opacity: 1 - playPauseGlyphs.pauseProgress
                         visible: opacity > 0
                     }
 
@@ -389,7 +367,7 @@ ToolBar {
                         source: root.pauseAction ? root.pauseAction.icon.name : ""
                         color: playPauseButton.glyphColor
                         isMask: true
-                        opacity: playPauseGlyphs.showsPause ? playPauseGlyphs.glyphOpacity : 0
+                        opacity: playPauseGlyphs.pauseProgress
                         visible: opacity > 0
                     }
                 }
