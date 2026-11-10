@@ -80,7 +80,8 @@ private:
         QString playbackStatus;
         QString loopStatus;
         QVariantMap metadata;
-        QString currentTrackPath;
+        // The track the metadata describes; see exportedTrackPath().
+        QString exportedTrackPath;
         quint64 trackToken{0};
         qlonglong positionUs{0};
         double volume{1.0};
@@ -105,13 +106,23 @@ private:
     void handleBridgeChange(bool trackChanged);
     qlonglong currentLengthUs() const;
     void rebuildMetadata();
+    // The track MPRIS exports: the one the bridge's now-playing text
+    // describes. While that text is still the track before's, it is the
+    // track before, whose whole metadata stays until the playing track's
+    // text is known, so that no client shows one track's ID, URL or length
+    // with another's title.
+    QString exportedTrackPath() const;
+    static QString trackIdPathFor(const QString &trackPath);
+    // The ID of the exported track.
     QString currentTrackIdPath() const;
     QVariantMap buildMetadata() const;
     // The art URL of the current track, which starts making its revision's
     // link; see CoverRevisionLinks.
     QString currentArtUrl();
     PublishedPlayerState currentPlayerState() const;
-    bool replayedSameTrack(const PublishedPlayerState &nextState) const;
+    // Whether the exported track's position moved in a way a client cannot
+    // tell from the metadata; see the definition.
+    bool positionJumped(const PublishedPlayerState &nextState) const;
 
     BridgeClient *m_bridge{nullptr};
     bool m_enabled{true};
@@ -122,6 +133,8 @@ private:
     // Rebuilt only when the track, its metadata, or its length changes, not
     // on every playback heartbeat.
     QVariantMap m_metadata;
+    // The track m_metadata describes, and its ID.
+    QString m_exportedTrackPath;
     QString m_trackIdPath;
     qlonglong m_metadataLengthUs{0};
     CoverRevisionLinks m_artLinks;

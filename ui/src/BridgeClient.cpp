@@ -5836,7 +5836,13 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
     }
-    m_currentTrackTextPath = nextTrackTextPath;
+    // The text describing another track is a change of the text, also when
+    // the two tracks' text reads the same.
+    if (m_currentTrackTextPath != nextTrackTextPath) {
+        m_currentTrackTextPath = nextTrackTextPath;
+        changed = true;
+        trackMetadataSignalChanged = true;
+    }
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;
