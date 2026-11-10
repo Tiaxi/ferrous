@@ -9,16 +9,21 @@ import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
 // The top of the sidebar: the playing track, on the view colour with no
-// card.
+// card, and a seam at its foot, where the library starts.
 //
 // - Wide: the cover edge to edge, then the title, "Artist — Album" and
-//   "Year · Genre · Track n" under it, inset 12 px.
+//   "Year · Genre · Track n" under it, inset 12 px, then regionGap before
+//   the seam.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
-//   lines beside it, then 12 px before the library.
+//   lines beside it, or under it when there is no room beside it, then
+//   12 px before the seam.
 // - Nothing loaded: one row with the album glyph and "Nothing playing".
 // - A track without a cover or without tags keeps the layout: the tile
 //   on the view colour with a small mark, and a line of space for each
 //   line it has no text for.
+//
+// The title is a step over the rest: DemiBold, larger; the artist and the
+// album are in the text colour, and the details in the tertiary one.
 //
 // Lines that do not fit are elided, with the whole text in a tooltip.
 Item {
@@ -640,15 +645,40 @@ Item {
     onCoverPathChanged: root.followTrack()
     Component.onCompleted: root.followTrack()
 
-    // 15, 14 and 12 px with the default 13 px font.
-    readonly property real titlePointSize: root.uiPalette.basePointSize * 15 / 13
-    readonly property real narrowTitlePointSize: root.uiPalette.basePointSize * 14 / 13
+    // The title, a step over the text under it: 12 pt with the default
+    // 10 pt font, as a level 2 Kirigami.Heading is. It follows the font.
+    readonly property real titlePointSize: root.uiPalette.basePointSize * 1.2
 
-    implicitHeight: root.layoutMode === "empty"
+    // The space under the wide text block before the seam into the library,
+    // which sets the two apart as regions of one sheet.
+    readonly property int regionGap: 28
+    // The 1 px seam at the panel's foot, where the library starts.
+    readonly property int seamHeight: 1
+    // The top of the lines beside the narrow cover.
+    readonly property int narrowTextTop: 10
+    // The least width of the lines beside the narrow cover: about 12
+    // characters of the font. Under it, as with a large font in a narrow
+    // window, they go under the cover, on the whole width.
+    readonly property real narrowLineMinimum: 12 * baseMetrics.averageCharacterWidth
+    readonly property bool narrowStacked: root.layoutMode === "narrow"
+        && root.width - root.narrowCoverSize - 2 * root.textInset < root.narrowLineMinimum
+
+    FontMetrics {
+        id: baseMetrics
+        font: root.uiPalette.baseFont
+    }
+
+    // The block follows its text: in narrow, at least the cover's height,
+    // and more when the lines need it.
+    implicitHeight: (root.layoutMode === "empty"
         ? emptyRow.height + 2 * Kirigami.Units.smallSpacing + root.textInset
         : (root.layoutMode === "narrow"
-            ? root.narrowCoverSize + root.textInset
-            : root.width + liveText.wideHeight + root.textInset + 14)
+            ? (root.narrowStacked
+                ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
+                : Math.max(root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
+                + root.textInset
+            : root.width + root.textInset + liveText.wideHeight + root.regionGap))
+        + root.seamHeight
 
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Now playing")
@@ -674,8 +704,6 @@ Item {
         font.weight: owner.weight
         font.features: owner.features
         color: owner.color
-        lineHeightMode: owner.fixedLineHeight > 0 ? Text.FixedHeight : Text.ProportionalHeight
-        lineHeight: owner.fixedLineHeight > 0 ? owner.fixedLineHeight : 1
     }
 
     // A line of the playing track, with its text as the accessible name.
@@ -704,9 +732,7 @@ Item {
         // Tabular figures where `_stillRuns` counts on them.
         readonly property var features: root.tabularLines[line.lineKey] === true
             ? root.uiPalette.tabularFigures : ({})
-        property color color: root.uiPalette.textSecondary
-        // A line height in pixels, or 0 for the font's.
-        property real fixedLineHeight: 0
+        property color color: root.uiPalette.text
         readonly property bool truncated: stillText.truncated
 
         readonly property var before: root.outgoing !== null
@@ -1008,6 +1034,7 @@ Item {
         id: liveText
 
         readonly property real wideHeight: wideColumn.implicitHeight
+        readonly property real narrowHeight: narrowColumn.implicitHeight
         readonly property bool truncated: root.layoutMode === "wide"
             ? (wideTitle.truncated || wideArtistAlbum.truncated || wideDetails.truncated)
             : (root.layoutMode === "narrow"
@@ -1044,8 +1071,6 @@ Item {
                 text: root.trackLines.title
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
-                color: root.uiPalette.text
-                fixedLineHeight: Math.round(root.uiPalette.rowHeight * 20 / 26)
             }
             FadingLine {
                 id: wideArtistAlbum
@@ -1063,13 +1088,14 @@ Item {
             }
         }
 
-        // Narrow: four short lines beside the cover.
+        // Narrow: four short lines beside the cover, or under it when the
+        // room beside it is too small for them.
         ColumnLayout {
             id: narrowColumn
             objectName: "nowPlayingNarrowText"
             visible: root.layoutMode === "narrow"
-            x: root.narrowCoverSize + root.textInset
-            y: 10
+            x: root.narrowStacked ? root.textInset : root.narrowCoverSize + root.textInset
+            y: root.narrowStacked ? root.narrowCoverSize + root.textInset : root.narrowTextTop
             width: Math.max(0, root.width - x - root.textInset)
             spacing: 0
 
@@ -1082,9 +1108,8 @@ Item {
                 lineKey: "title"
                 name: "NarrowTitle"
                 text: root.trackLines.title
-                pointSize: root.narrowTitlePointSize
+                pointSize: root.titlePointSize
                 weight: Font.DemiBold
-                color: root.uiPalette.text
             }
             FadingLine {
                 id: narrowArtist
@@ -1100,7 +1125,6 @@ Item {
                 name: "NarrowAlbum"
                 text: root.trackLines.narrowAlbum
                 pointSize: root.uiPalette.smallPointSize
-                color: root.uiPalette.textTertiary
             }
             FadingLine {
                 id: narrowDetails
@@ -1111,6 +1135,15 @@ Item {
                 color: root.uiPalette.textTertiary
             }
         }
+    }
+
+    Rectangle {
+        objectName: "nowPlayingSeam"
+        x: 0
+        y: root.height - root.seamHeight
+        width: root.width
+        height: root.seamHeight
+        color: root.uiPalette.seam
     }
 
     // The whole text of the lines, when one of them is cut off.

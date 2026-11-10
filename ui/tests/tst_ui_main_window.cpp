@@ -10,6 +10,7 @@
 #include <QColor>
 #include <QFile>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QImage>
 #include <QJSValue>
 #include <QMutex>
@@ -27,6 +28,7 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <initializer_list>
@@ -289,6 +291,10 @@ private slots:
     void contentIsOneSheetWithFourSeams();
     void sidebarIs360PxWideAnd260PxInANarrowWindow();
     void nowPlayingHasItsWideNarrowAndEmptyLayouts();
+    void nowPlayingTitleIsAStepOverItsLines();
+    void nowPlayingTitleIsAStepOverItsLines_data();
+    void nowPlayingNarrowShowsEveryLineAtAnyFontSize();
+    void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
     void nowPlayingWithoutCoverOrTagsKeepsItsLayout();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
@@ -425,6 +431,13 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(emptyLabel->property("text").toString(), QStringLiteral("Nothing playing"));
     QCOMPARE(colorOf(emptyLabel), tokenHex(window, "textSecondary"));
     QCOMPARE(sceneRect(header).top(), sceneRect(panel).bottom());
+    // A seam where the library starts.
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QVERIFY(shown(seam));
+    QCOMPARE(seam->height(), 1.0);
+    QCOMPARE(seam->width(), panel->width());
+    QCOMPARE(colorOf(seam), tokenHex(window, "seam"));
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 
     // Playing, wide: the cover edge to edge and square, then the text 12 px
     // in and 12 px under it, with no card around it.
@@ -447,16 +460,21 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QTRY_COMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2"));
     bridge->setProperty("currentTrackTotal", 8);
     QTRY_COMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2 of 8"));
+    // The title a step over the lines, 12 pt DemiBold with a 10 pt font;
+    // the artist and the album in the text colour, the details secondary.
     const QFont titleFont = title->property("font").value<QFont>();
     QCOMPARE(titleFont.weight(), QFont::DemiBold);
-    QCOMPARE(titleFont.pointSizeF(), palette->property("basePointSize").toReal() * 15 / 13);
+    QCOMPARE(titleFont.pointSizeF(), palette->property("basePointSize").toReal() * 1.2);
     QCOMPARE(colorOf(title), tokenHex(window, "text"));
-    QCOMPARE(colorOf(artistAlbum), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(artistAlbum), tokenHex(window, "text"));
     QCOMPARE(colorOf(details), tokenHex(window, "textTertiary"));
     QCOMPARE(details->property("font").value<QFont>().pointSizeF(),
              palette->property("smallPointSize").toReal());
     QVERIFY(!emptyRow->isVisible());
-    QTRY_VERIFY(sceneRect(header).top() >= sceneRect(details).bottom());
+    // Then 28 px, and the seam into the library: two regions of one sheet.
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(panel).bottom());
 
     // Missing values are left out, not shown as dashes.
     bridge->setProperty("currentTrackGenre", QString());
@@ -471,18 +489,23 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QVERIFY(panel->property("textTruncated").toBool());
     QCOMPARE(title->property("x").toReal(), 0.0);
 
-    // Narrow: a 96 px cover with the lines beside it, then 12 px before the
-    // library.
+    // Narrow: a 96 px cover with the lines beside it, then 12 px and the
+    // seam before the library.
     window->resize(1000, 720);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QTRY_COMPARE(cover->width(), 96.0);
     QCOMPARE(cover->height(), 96.0);
+    QVERIFY(!panel->property("narrowStacked").toBool());
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
     QVERIFY(shown(narrowTitle));
     QCOMPARE(sceneRect(narrowTitle).left() - sceneRect(cover).right(), 12.0);
     QCOMPARE(narrowTitle->property("font").value<QFont>().pointSizeF(),
-             palette->property("basePointSize").toReal() * 14 / 13);
-    QTRY_COMPARE(sceneRect(header).top() - sceneRect(cover).bottom(), 12.0);
+             palette->property("basePointSize").toReal() * 1.2);
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowArtist")), tokenHex(window, "text"));
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowAlbum")), tokenHex(window, "text"));
+    QCOMPARE(colorOf(named(window, "nowPlayingNarrowDetails")), tokenHex(window, "textTertiary"));
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(cover).bottom(), 12.0);
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 
     // The narrow lines have the year with the album and the total with the
     // number, or the number alone without a total.
@@ -496,6 +519,130 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // Nor is a total below the number shown.
     bridge->setProperty("currentTrackTotal", 1);
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
+}
+
+void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The title is a clear step over the lines under it at any font size
+// (#373 H2): 1.2 times the font, DemiBold, as a level 2 Kirigami.Heading
+// is; "Artist — Album" in the text colour at the font's size; the details
+// smaller, in the tertiary colour. The block then has its 28 px and the
+// seam before the library.
+void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
+    QFETCH(qreal, pointSize);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QFont font = window->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(window->setProperty("font", font));
+    QObject *palette = paletteOf(window);
+    QTRY_COMPARE(palette->property("basePointSize").toReal(), pointSize);
+    playTrack(bridgeOf(window));
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QQuickItem *title = named(window, "nowPlayingTitle");
+    QQuickItem *artistAlbum = named(window, "nowPlayingArtistAlbum");
+    QQuickItem *details = named(window, "nowPlayingDetails");
+    QVERIFY(title && artistAlbum && details);
+
+    const QFont titleFont = title->property("font").value<QFont>();
+    const QFont lineFont = artistAlbum->property("font").value<QFont>();
+    QCOMPARE(titleFont.pointSizeF(), pointSize * 1.2);
+    QCOMPARE(titleFont.weight(), QFont::DemiBold);
+    QCOMPARE(lineFont.pointSizeF(), pointSize);
+    QCOMPARE(lineFont.weight(), QFont::Normal);
+    QCOMPARE(details->property("font").value<QFont>().pointSizeF(), pointSize * 0.9);
+    QCOMPARE(colorOf(artistAlbum), tokenHex(window, "text"));
+    QCOMPARE(colorOf(details), tokenHex(window, "textTertiary"));
+    // The step shows: its capitals are a fifth taller, at least.
+    QVERIFY(QFontMetricsF(titleFont).capHeight() >= 1.15 * QFontMetricsF(lineFont).capHeight());
+    // Each line takes the height of its font: none overlaps the next.
+    QTRY_VERIFY(title->height() >= QFontMetricsF(titleFont).height() - 1);
+    QTRY_VERIFY(sceneRect(artistAlbum).top() >= sceneRect(title).bottom());
+    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(artistAlbum).bottom());
+
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 28.0);
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
+}
+
+void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("stacked");
+    QTest::newRow("10 pt") << 10.0 << false;
+    QTest::newRow("14 pt") << 14.0 << false;
+    QTest::newRow("24 pt") << 24.0 << true;
+}
+
+// In a narrow window, at any font size, the now-playing lines all show,
+// each with at least 8 characters of its text (#373 H2, 24 pt in 1000 by
+// 720): beside the 96 px cover, the block as tall as the cover or as its
+// lines, whichever is taller; under the cover, on the whole width, once the
+// room beside it is under about 12 characters. Then 12 px and the seam
+// before the library.
+void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, stacked);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QFont font = window->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(window->setProperty("font", font));
+    QObject *palette = paletteOf(window);
+    QTRY_COMPARE(palette->property("basePointSize").toReal(), pointSize);
+    window->resize(1000, 720);
+    QTRY_COMPARE(window->width(), 1000);
+    QObject *bridge = bridgeOf(window);
+    playTrack(bridge);
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal"));
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QCOMPARE(panel->property("narrowStacked").toBool(), stacked);
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    QTRY_COMPARE(cover->width(), 96.0);
+    const QRectF tile = sceneRect(cover);
+    const QRectF block = sceneRect(panel);
+
+    qreal bottom = tile.bottom();
+    for (const char *name : {"nowPlayingNarrowTitle", "nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
+                             "nowPlayingNarrowDetails"}) {
+        QQuickItem *line = named(window, name);
+        QVERIFY2(shown(line), name);
+        const QRectF rect = sceneRect(line);
+        const QString text = line->property("text").toString();
+        QVERIFY2(!text.isEmpty(), name);
+        // In the panel, clear of the cover, with its font's height.
+        QVERIFY2(rect.left() >= block.left() + 12 && rect.right() <= block.right() - 12, name);
+        QVERIFY2(!rect.intersects(tile), name);
+        QVERIFY2(rect.height() >= QFontMetricsF(line->property("font").value<QFont>()).height() - 1, name);
+        if (stacked) {
+            QVERIFY2(rect.top() >= tile.bottom() + 12, name);
+            QCOMPARE(rect.left(), block.left() + 12);
+        } else {
+            QCOMPARE(rect.left(), tile.right() + 12);
+        }
+        // Whole, or at least 8 characters of it and the ellipsis.
+        const QFontMetricsF metrics(line->property("font").value<QFont>());
+        QVERIFY2(metrics.horizontalAdvance(text) <= rect.width()
+                     || metrics.horizontalAdvance(text.left(8) + QStringLiteral("…")) <= rect.width(),
+                 qPrintable(QStringLiteral("%1: %2 in %3 px").arg(QString::fromLatin1(name), text).arg(rect.width())));
+        bottom = std::max(bottom, rect.bottom());
+    }
+    // The block follows its lines: the seam 12 px under the lowest of them
+    // or the cover, whichever is lower.
+    QTRY_COMPARE(sceneRect(seam).top() - bottom, 12.0);
+    QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 }
 
 // A track without a cover, or without tags, keeps the layout of one with
