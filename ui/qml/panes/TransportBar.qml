@@ -250,7 +250,10 @@ ToolBar {
             }
 
             // One button that shows the state: Pause while playing,
-            // otherwise Play. Its glyphs cross-fade.
+            // otherwise Play. Its glyph swaps without ever drawing both:
+            // the one shown fades out over the first half of shortDuration,
+            // then the other fades in over the second. A change back while
+            // the glyph fades out brings it back from where it is.
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
@@ -258,8 +261,63 @@ ToolBar {
                 action: root.playing ? root.pauseAction : root.playAction
 
                 contentItem: Item {
+                    id: playPauseGlyphs
                     implicitWidth: playPauseButton.glyphSize
                     implicitHeight: playPauseButton.glyphSize
+
+                    // The glyph drawn, Pause or Play, and its opacity: set
+                    // from the state as it is first, then by follow().
+                    property bool showsPause: false
+                    property real glyphOpacity: 1
+                    readonly property int halfDuration: Math.round(Kirigami.Units.shortDuration / 2)
+                    readonly property SequentialAnimation swap: SequentialAnimation {
+                        objectName: "transportPlayPauseSwap"
+                        NumberAnimation {
+                            target: playPauseGlyphs
+                            property: "glyphOpacity"
+                            to: 0
+                            duration: playPauseGlyphs.halfDuration
+                            easing.type: Easing.OutCubic
+                        }
+                        ScriptAction {
+                            script: playPauseGlyphs.showsPause = root.playing
+                        }
+                        NumberAnimation {
+                            target: playPauseGlyphs
+                            property: "glyphOpacity"
+                            to: 1
+                            duration: playPauseGlyphs.halfDuration
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+                    readonly property NumberAnimation comeBack: NumberAnimation {
+                        target: playPauseGlyphs
+                        property: "glyphOpacity"
+                        to: 1
+                        duration: playPauseGlyphs.halfDuration
+                        easing.type: Easing.OutCubic
+                    }
+
+                    function follow() {
+                        playPauseGlyphs.swap.stop()
+                        playPauseGlyphs.comeBack.stop()
+                        // Kirigami's durations are 0 with animations off.
+                        if (playPauseGlyphs.halfDuration <= 0) {
+                            playPauseGlyphs.showsPause = root.playing
+                            playPauseGlyphs.glyphOpacity = 1
+                        } else if (playPauseGlyphs.showsPause === root.playing) {
+                            playPauseGlyphs.comeBack.start()
+                        } else {
+                            playPauseGlyphs.swap.start()
+                        }
+                    }
+
+                    Component.onCompleted: playPauseGlyphs.showsPause = root.playing
+
+                    Connections {
+                        target: root
+                        function onPlayingChanged() { playPauseGlyphs.follow() }
+                    }
 
                     Kirigami.Icon {
                         objectName: "transportPlayPauseGlyph_play"
@@ -269,16 +327,8 @@ ToolBar {
                         source: root.playAction ? root.playAction.icon.name : ""
                         color: playPauseButton.glyphColor
                         isMask: true
-                        opacity: root.playing ? 0 : 1
+                        opacity: playPauseGlyphs.showsPause ? 0 : playPauseGlyphs.glyphOpacity
                         visible: opacity > 0
-
-                        Behavior on opacity {
-                            enabled: Kirigami.Units.shortDuration > 0
-                            NumberAnimation {
-                                duration: Kirigami.Units.shortDuration
-                                easing.type: Easing.OutCubic
-                            }
-                        }
                     }
 
                     Kirigami.Icon {
@@ -289,16 +339,8 @@ ToolBar {
                         source: root.pauseAction ? root.pauseAction.icon.name : ""
                         color: playPauseButton.glyphColor
                         isMask: true
-                        opacity: root.playing ? 1 : 0
+                        opacity: playPauseGlyphs.showsPause ? playPauseGlyphs.glyphOpacity : 0
                         visible: opacity > 0
-
-                        Behavior on opacity {
-                            enabled: Kirigami.Units.shortDuration > 0
-                            NumberAnimation {
-                                duration: Kirigami.Units.shortDuration
-                                easing.type: Easing.OutCubic
-                            }
-                        }
                     }
                 }
             }

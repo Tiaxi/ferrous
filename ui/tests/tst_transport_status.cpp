@@ -413,6 +413,7 @@ private slots:
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void narrowTransportShortensTheVolume();
     void playPauseIsOneButtonThatShowsTheState();
+    void playPauseGlyphsNeverDrawTogether();
     void transportToolTipsNameTheShortcut();
     void seekWaveformMeetsItsContrastAsDrawn_data();
     void seekWaveformMeetsItsContrastAsDrawn();
@@ -562,6 +563,73 @@ void TransportStatusTest::playPauseIsOneButtonThatShowsTheState() {
     QSignalSpy paused(pauseAction, SIGNAL(triggered(QObject*)));
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(button));
     QTRY_COMPARE(paused.count(), 1);
+}
+
+// The Play/Pause glyph swaps without a frame of both shapes at once: the
+// glyph shown fades out over the first half of shortDuration, then the other
+// fades in over the second (#373 H1: a mashed glyph for a frame or two). A
+// change back while the glyph fades out brings it back; with animations off
+// the swap is instant.
+void TransportStatusTest::playPauseGlyphsNeverDrawTogether() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *play = harness.item(QStringLiteral("transportPlayPauseGlyph_play"));
+    QQuickItem *pause = harness.item(QStringLiteral("transportPlayPauseGlyph_pause"));
+    QVERIFY(play && pause);
+    auto *swap = play->parentItem()->property("swap").value<QObject *>();
+    auto *units = unitsOf(play);
+    QVERIFY(swap != nullptr && units != nullptr);
+    QCOMPARE(swap->objectName(), QStringLiteral("transportPlayPauseSwap"));
+    // Long enough for frames in each half.
+    units->setShortDuration(600);
+    QTRY_VERIFY(pause->opacity() == 1.0 && !play->isVisible());
+
+    const auto drawn = [](QQuickItem *glyph) { return glyph->isVisible() && glyph->opacity() > 0.0; };
+    QString failure;
+    int frames = 0;
+    const QMetaObject::Connection connection =
+        QObject::connect(harness.window, &QQuickWindow::frameSwapped, harness.window, [&]() {
+            ++frames;
+            if (failure.isEmpty() && drawn(play) && drawn(pause)) {
+                failure = QStringLiteral("both glyphs at frame %1: play %2, pause %3")
+                              .arg(frames).arg(play->opacity()).arg(pause->opacity());
+            }
+        });
+    const auto check = [&](const char *where) {
+        QVERIFY2(!(drawn(play) && drawn(pause)), where);
+    };
+
+    // Playing to paused: Pause goes out, then Play comes in.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(swap->property("running").toBool());
+    check("at the start");
+    QVERIFY(drawn(pause));
+    QTRY_VERIFY(!drawn(pause));
+    check("half-way");
+    QTRY_VERIFY(!swap->property("running").toBool());
+    QCOMPARE(play->opacity(), 1.0);
+    QVERIFY(!pause->isVisible());
+
+    // Playing again, and back to paused while Play fades out: Play comes
+    // back, and Pause never shows.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(play->opacity() < 1.0);
+    QVERIFY(drawn(play));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QVERIFY(!swap->property("running").toBool());
+    QTRY_COMPARE(play->opacity(), 1.0);
+    QVERIFY(!pause->isVisible());
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY(frames > 0);
+
+    // Animations off: at once.
+    units->setShortDuration(0);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QVERIFY(!swap->property("running").toBool());
+    QCOMPARE(pause->opacity(), 1.0);
+    QVERIFY(!play->isVisible());
 }
 
 void TransportStatusTest::transportToolTipsNameTheShortcut() {
