@@ -322,6 +322,7 @@ private slots:
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
+    void libraryTreeChevronsGrowWithALargeFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
@@ -740,6 +741,44 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
     QVERIFY(album != nullptr);
     QCOMPARE(itemNamed(album, QStringLiteral("libraryRowChevron"))->property("source").toString(),
              QStringLiteral("arrow-right"));
+}
+
+// At 24 pt the tree's chevrons and state glyphs grow with the font, 2.4
+// times their 16 and 12 px, and the indent step with the chevrons, so that
+// each level's chevron is where its parent's ends.
+void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr
+                && (track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    playTrack(bridgeOf(window));
+    QQuickItem *artistChevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
+    QQuickItem *albumChevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QQuickItem *state = itemNamed(track, QStringLiteral("libraryRowState"));
+    QVERIFY(artistChevron && albumChevron && state);
+    QCOMPARE(artistChevron->size(), QSizeF(38, 38));
+    QCOMPARE(albumChevron->x() - artistChevron->x(), 38.0);
+    QTRY_VERIFY(state->isVisible());
+    QCOMPARE(state->size(), QSizeF(29, 29));
+    // Each inside its row.
+    for (QQuickItem *item : {artistChevron, albumChevron, state}) {
+        QQuickItem *row = item->parentItem();
+        QVERIFY(item->y() >= 0 && item->y() + item->height() <= row->height());
+    }
+    // The title after the chevron and its gap, clear of it.
+    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x() >= artistChevron->x() + 38 + 6);
 }
 
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {

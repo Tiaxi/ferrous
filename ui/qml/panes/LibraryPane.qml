@@ -37,14 +37,15 @@ Rectangle {
     readonly property bool keyboardInUse: InputModality.keyboard
 
     // The tree's geometry: the inset of the first chevron, the indent step,
-    // and the chevron, thumbnail and gaps after it.
+    // and the chevron, thumbnail and gaps after it. The chevrons and the
+    // state glyphs, and so the indent step, grow with a larger font.
     readonly property int rowInset: 12
-    readonly property int indentStep: 16
-    readonly property int chevronSize: 16
+    readonly property int indentStep: root.chevronSize
+    readonly property int chevronSize: root.uiPalette.scaledSize(16)
     readonly property int chevronGap: 6
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
-    readonly property int stateGlyphSize: 12
+    readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
     // The mark of a collapsed row that holds the playing track: an amber
     // tick at the row's left edge, apart from the chevrons, as tall as the
     // state glyphs.

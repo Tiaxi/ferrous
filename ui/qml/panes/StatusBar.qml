@@ -161,11 +161,12 @@ ToolBar {
         elide: Text.ElideRight
     }
 
-    // A glyph of the status bar: a theme icon drawn in `color`.
+    // A glyph of the status bar: a theme icon drawn in `color`, `size` at
+    // the default font and larger with a larger one.
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
-        implicitWidth: size
-        implicitHeight: size
+        implicitWidth: root.uiPalette.scaledSize(size)
+        implicitHeight: root.uiPalette.scaledSize(size)
         color: root.uiPalette.textSecondary
         isMask: true
     }

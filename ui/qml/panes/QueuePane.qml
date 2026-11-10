@@ -824,8 +824,8 @@ Rectangle {
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
                             anchors.centerIn: parent
-                            width: 12
-                            height: 12
+                            width: root.uiPalette.scaledSize(12)
+                            height: root.uiPalette.scaledSize(12)
                             source: glyph
                             isMask: true
                             color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
@@ -848,8 +848,8 @@ Rectangle {
                             objectName: "queueRowFadingState"
                             visible: playlistRow.amberLeft > 0
                             anchors.centerIn: parent
-                            width: 12
-                            height: 12
+                            width: root.uiPalette.scaledSize(12)
+                            height: root.uiPalette.scaledSize(12)
                             source: visible ? queueNowFade.target.glyph : ""
                             isMask: true
                             color: root.uiPalette.now

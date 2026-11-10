@@ -38,7 +38,7 @@ Item {
     readonly property bool issuesShown: root.unseenIssueCount > 0
 
     implicitWidth: closeButton.x + closeButton.width + root.spacing
-    implicitHeight: 24 + 2 * root.spacing
+    implicitHeight: root.uiPalette.toolButtonSize + 2 * root.spacing
     // As the title strip of the viewer over the whole screen: shown at once,
     // so the key that brings the controls back can move focus to them; it
     // fades out on the strip's curve, and hidden it takes no pointer.
@@ -81,7 +81,7 @@ Item {
         x: root.spacing
         y: root.spacing
         visible: root.readoutShown
-        height: 24
+        height: root.uiPalette.toolButtonSize
         leftPadding: 4
         rightPadding: 2
         verticalAlignment: Text.AlignVCenter

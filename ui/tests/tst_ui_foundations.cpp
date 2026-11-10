@@ -266,6 +266,8 @@ private slots:
     void regionHeaderGivesUpTheTotalsBeforeTheName_data();
     void regionHeaderGivesUpTheTotalsBeforeTheName();
     void plotPlateLabelHasAnEdgeOutside();
+    void smallControlsScaleWithALargeFont_data();
+    void smallControlsScaleWithALargeFont();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
@@ -979,6 +981,79 @@ void UiFoundationsTest::plotPlateLabelHasAnEdgeOutside() {
     QVERIFY2(sameColor(colorOf(fill, "color"), colorOf(waveform, "plotPlate")), qPrintable(colorOf(fill, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotPlate").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(edgeBorder, "color"), colorOf(waveform, "plotPlateEdge")), qPrintable(colorOf(edgeBorder, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotPlateEdge").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(text, "color"), colorOf(waveform, "plotText")), qPrintable(colorOf(text, "color").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(waveform, "plotText").name(QColor::HexArgb)));
+}
+
+void UiFoundationsTest::smallControlsScaleWithALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("iconSize");
+    QTest::addColumn<int>("buttonSize");
+    QTest::newRow("10 pt") << 10.0 << 16 << 24;
+    // 2.4 times the default: 16 px is 38 px, and the button 4 px more
+    // around it.
+    QTest::newRow("24 pt") << 24.0 << 38 << 46;
+}
+
+// The plot's and the viewers' small tool buttons and their glyphs are 24
+// and 16 px at the default 10 pt font, and grow with a larger one as the
+// transport's do; a lane label's plate holds its text's line, 20 px tall
+// at the default font, with 6 px either side of the text.
+void UiFoundationsTest::smallControlsScaleWithALargeFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, iconSize);
+    QFETCH(int, buttonSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root = createWindow(engine, themedWindowQml(kBreezeDark, kPlotItems + QStringLiteral(R"QML(
+        Components.ViewerToolButton {
+            objectName: "viewerButton"
+            x: 16
+            y: 160
+            uiPalette: tokens
+            text: "Close"
+            icon.name: "ferrous-fixture-square"
+        }
+)QML")),
+                                                       &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *plotButton = itemNamed(root.get(), QStringLiteral("firstButton"));
+    QQuickItem *letterButton = itemNamed(root.get(), QStringLiteral("secondButton"));
+    QQuickItem *viewerButton = itemNamed(root.get(), QStringLiteral("viewerButton"));
+    QQuickItem *label = itemNamed(root.get(), QStringLiteral("lanePlate"));
+    QVERIFY(plotButton && letterButton && viewerButton && label);
+    QQuickItem *plotIcon = childNamed(plotButton, QStringLiteral("plotToolButtonIcon"));
+    QQuickItem *viewerIcon = childNamed(viewerButton, QStringLiteral("viewerToolButtonIcon"));
+    QQuickItem *text = childNamed(label, QStringLiteral("plotPlateLabel"));
+    QVERIFY(plotIcon && viewerIcon && text);
+
+    for (QQuickItem *button : {plotButton, letterButton, viewerButton}) {
+        QCOMPARE(button->size(), QSizeF(buttonSize, buttonSize));
+    }
+    for (QQuickItem *icon : {plotIcon, viewerIcon}) {
+        QCOMPARE(icon->size(), QSizeF(iconSize, iconSize));
+    }
+    // The M of Mute stays inside its button.
+    QQuickItem *letter = childNamed(letterButton, QStringLiteral("plotToolButtonGlyph"));
+    QVERIFY(letter != nullptr);
+    QVERIFY(letter->implicitHeight() <= buttonSize);
+
+    // The lane label's plate: its text whole inside it, 6 px either side.
+    QCOMPARE(label->width(), std::max(20.0, text->width() + 12.0));
+    QVERIFY2(text->implicitHeight() <= label->height(),
+             qPrintable(QStringLiteral("%1 > %2").arg(text->implicitHeight()).arg(label->height())));
+    if (pointSize == 10.0) {
+        QCOMPARE(label->height(), 20.0);
+    } else {
+        QVERIFY2(label->height() >= text->implicitHeight() + 6,
+                 qPrintable(QStringLiteral("%1 for %2").arg(label->height()).arg(text->implicitHeight())));
+    }
 }
 
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {

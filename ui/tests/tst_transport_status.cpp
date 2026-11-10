@@ -1903,6 +1903,10 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(within(rect, bar), qPrintable(name + QLatin1Char(' ') + describeRect(rect)));
         QVERIFY2(std::abs(rect.center().y() - bar.center().y()) <= 1.0, qPrintable(name + QLatin1Char(' ') + describeRect(rect) + QLatin1Char(' ') + describeRect(bar)));
     }
+    // The glyphs grow with the font as the transport's do: the state's
+    // 11 px and the issues' 14 px, 2.4 times.
+    QCOMPARE(harness.item(QStringLiteral("statusBarPlaybackGlyph"))->size(), QSizeF(26, 26));
+    QCOMPARE(harness.item(QStringLiteral("statusBarErrorsGlyph"))->size(), QSizeF(34, 34));
     // The format group's words, each whole and within the bar.
     QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
     QVERIFY(format != nullptr);
