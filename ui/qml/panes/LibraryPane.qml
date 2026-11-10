@@ -47,10 +47,11 @@ Rectangle {
     readonly property int thumbnailGap: 8
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
     // The mark of a collapsed row that holds the playing track: the queue's
-    // amber state glyph, smaller and quieter, at the row's right end, far
-    // from the chevrons, so it never reads as a second one. Rows that can
-    // hold the track keep its place, so their years stay in one column
-    // and nothing moves as playback starts or stops.
+    // amber state glyph, smaller and quieter, just after the row's name,
+    // so it reads as the name's and never as a second chevron. Rows that
+    // can hold the track keep its place after the name's room, so a long
+    // name elides the same whether it shows or not, and nothing moves as
+    // playback starts or stops.
     readonly property int nowMarkSize: root.uiPalette.scaledSize(10)
     readonly property int nowMarkGap: root.chevronGap
 
@@ -372,14 +373,12 @@ Rectangle {
                     // level above: where a track's album has its chevron,
                     // and left of a collapsed album's or artist's own.
                     readonly property real stateX: Math.max(0, chevronX - root.indentStep)
-                    // The right end of the row's text: the scrollbar lane
-                    // and the inset, and on a row that can hold the playing
-                    // track, its mark's place.
-                    readonly property real markX: width - Kirigami.Units.largeSpacing
-                        - root.rowInset - root.nowMarkSize
-                    readonly property real textEnd: hasChildren
-                        ? markX - root.nowMarkGap
-                        : width - Kirigami.Units.largeSpacing - root.rowInset
+                    // The right end of the row's text: clear of the
+                    // scrollbar lane, and the inset.
+                    readonly property real textEnd: width - Kirigami.Units.largeSpacing - root.rowInset
+                    // The room a row that can hold the playing track keeps
+                    // after its name for the mark.
+                    readonly property real markRoom: hasChildren ? root.nowMarkGap + root.nowMarkSize : 0
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
@@ -498,15 +497,17 @@ Rectangle {
                     }
 
                     // A collapsed row that holds the playing track, playing
-                    // or paused: the state glyph at the row's right end,
-                    // vertically centred. It fades out with the amber after
-                    // a track change.
+                    // or paused: the state glyph just after the name's
+                    // visible text, its elided text when it is long,
+                    // vertically centred, in the room the name keeps for
+                    // it. It fades out with the amber after a track change.
                     Kirigami.Icon {
                         objectName: "libraryRowNowMark"
                         readonly property real level: libraryRow.holdsNow
                             ? 1 : (libraryRow.isTrackRow ? 0 : libraryRow.amberLeft)
                         visible: level > 0
-                        x: libraryRow.markX
+                        x: Math.round(rowTitleText.x + Math.min(rowTitleText.contentWidth, rowTitleText.width)
+                            + root.nowMarkGap)
                         y: Math.round((libraryRow.height - height) / 2)
                         width: root.nowMarkSize
                         height: root.nowMarkSize
@@ -555,9 +556,13 @@ Rectangle {
                     }
 
                     Text {
+                        id: rowTitleText
                         objectName: "libraryRowTitle"
                         x: libraryRow.titleX
-                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0))
+                        // Up to the year, or the text's end, less the
+                        // mark's room on a row that can hold it.
+                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0)
+                            - libraryRow.markRoom)
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight

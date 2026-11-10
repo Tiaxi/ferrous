@@ -227,7 +227,8 @@ const QString kAlbumKey = QStringLiteral("album|Artist A|Album A");
 // An artist with an album from 2005 of one track, number 2, in the bridge's
 // tree format. The artist row's path is that of the folder of whichever of
 // its tracks the backend met first.
-QByteArray artistAlbumTrackTree(const QString &artistPath = QStringLiteral("/music/Artist A")) {
+QByteArray artistAlbumTrackTree(const QString &artistPath = QStringLiteral("/music/Artist A"),
+                                const QString &albumTitle = QStringLiteral("Album A")) {
     struct Row {
         quint8 rowType;
         quint16 depth;
@@ -241,7 +242,7 @@ QByteArray artistAlbumTrackTree(const QString &artistPath = QStringLiteral("/mus
     };
     const QList<Row> rows{
         {1, 0, 0, 1, 0, QStringLiteral("Artist A (1)"), kArtistKey, artistPath, {}},
-        {2, 1, 0, 1, 2005, QStringLiteral("Album A"), kAlbumKey,
+        {2, 1, 0, 1, 2005, albumTitle, kAlbumKey,
          QStringLiteral("/music/Artist A/Album A"), {}},
         {4, 2, 2, 0, 0, QStringLiteral("Second"), QStringLiteral("track|") + kTrackPath, kTrackPath,
          kTrackPath},
@@ -271,12 +272,55 @@ QByteArray artistAlbumTrackTree(const QString &artistPath = QStringLiteral("/mus
 }
 
 void showTree(LibraryTreeModel &model, const QStringList &expanded,
-              const QString &artistPath = QStringLiteral("/music/Artist A")) {
+              const QString &artistPath = QStringLiteral("/music/Artist A"),
+              const QString &albumTitle = QStringLiteral("Album A")) {
     model.setExpandedKeys(expanded);
-    model.setLibraryTreeFromBinary(artistAlbumTrackTree(artistPath));
+    model.setLibraryTreeFromBinary(artistAlbumTrackTree(artistPath, albumTitle));
 }
 
 const QStringList kAllExpanded{kArtistKey, kAlbumKey};
+
+// Where a collapsed row's now mark is (#373 H4): 6 px after its name's
+// visible text, the elided text when the name is long, vertically centred,
+// inside the row and before its year, and well clear of its chevron, so it
+// never reads as a second one. Empty when it is so, else what is wrong.
+QString markFollowsTheName(QQuickItem *row) {
+    QQuickItem *mark = itemNamed(row, QStringLiteral("libraryRowNowMark"));
+    QQuickItem *title = itemNamed(row, QStringLiteral("libraryRowTitle"));
+    QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
+    if (!shown(mark) || title == nullptr || !shown(chevron)) {
+        return QStringLiteral("no mark, title or chevron");
+    }
+    const QRectF markRect = mark->mapRectToItem(row, QRectF(0, 0, mark->width(), mark->height()));
+    const QRectF chevronRect = chevron->mapRectToItem(row, QRectF(0, 0, chevron->width(), chevron->height()));
+    const qreal textWidth = title->property("contentWidth").toReal();
+    const qreal textEnd = title->x() + textWidth;
+    const QString where = QStringLiteral("mark %1..%2, text %3..%4 (box to %5), chevron to %6, row %7")
+                              .arg(markRect.left()).arg(markRect.right()).arg(title->x()).arg(textEnd)
+                              .arg(title->x() + title->width()).arg(chevronRect.right()).arg(row->width());
+    if (textWidth <= 0 || textWidth > title->width() + 0.5) {
+        return QStringLiteral("the text's width is not the drawn one: ") + where;
+    }
+    if (std::abs(markRect.left() - textEnd - 6.0) > 1.0) {
+        return QStringLiteral("not 6 px after the text: ") + where;
+    }
+    if (std::abs(markRect.center().y() - row->height() / 2) > 0.5) {
+        return QStringLiteral("not vertically centred: ") + where;
+    }
+    // Inside the row, clear of the scrollbar lane and the inset.
+    if (markRect.left() < 0 || markRect.right() > row->width() - 8.0 - 12.0) {
+        return QStringLiteral("outside the row: ") + where;
+    }
+    // Never beside the chevron: the name's start, and its gap, between.
+    if (markRect.left() < title->x() || markRect.left() - chevronRect.right() < 6.0 + 6.0) {
+        return QStringLiteral("beside the chevron: ") + where;
+    }
+    QQuickItem *year = itemNamed(row, QStringLiteral("libraryRowYear"));
+    if (shown(year) && markRect.right() + 6.0 > year->x()) {
+        return QStringLiteral("not before the year: ") + where;
+    }
+    return {};
+}
 
 QVariantList sampleQueueRows(int count) {
     QVariantList rows;
@@ -336,6 +380,7 @@ private slots:
     void libraryTreeHasOneIndentStep();
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
+    void collapsedRowMarkFollowsAnElidedName();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void listsRingARowAsTheKeyboardComesIn();
@@ -1122,8 +1167,8 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
              QStringLiteral("arrow-down"));
     // Album: one step in, then the 20 px thumbnail, then the name at 78;
     // the year at the right end, tertiary, clear of the scrollbar lane and
-    // of the 10 px place, 6 px before the inset, of the mark a collapsed
-    // row that holds the playing track has, whether it shows or not.
+    // the inset: the mark a collapsed row that holds the playing track has
+    // follows the name, not the year (#373 H4).
     QCOMPARE(xOf(album, "libraryRowChevron"), 28.0);
     QCOMPARE(xOf(album, "libraryRowThumbnail"), 50.0);
     QCOMPARE(itemNamed(album, QStringLiteral("libraryRowThumbnail"))->width(), 20.0);
@@ -1133,7 +1178,7 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
     QQuickItem *year = itemNamed(album, QStringLiteral("libraryRowYear"));
     QVERIFY(shown(year));
     QCOMPARE(year->property("text").toString(), QStringLiteral("2005"));
-    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12 - 10 - 6);
+    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12);
     QCOMPARE(colorOf(year), tokenHex(window, "textTertiary"));
     // Track: its number under the thumbnail, right-aligned, and its title
     // where the album's name starts; no number in the title.
@@ -1194,6 +1239,13 @@ void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
     }
     // The title after the chevron and its gap, clear of it.
     QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x() >= artistChevron->x() + 38 + 6);
+    // A collapsed album's now mark, grown with the font, still follows its
+    // name.
+    libraryModel.toggleKey(kAlbumKey);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
+    QTRY_VERIFY(shown(itemNamed(libraryRow(window, QStringLiteral("album")), QStringLiteral("libraryRowNowMark"))));
+    const QString misplaced = markFollowsTheName(libraryRow(window, QStringLiteral("album")));
+    QVERIFY2(misplaced.isEmpty(), qPrintable(misplaced));
 }
 
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {
@@ -1243,10 +1295,9 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
 
     // A collapsed album that holds the playing track: no glyph in its
     // chevron column, but the queue's amber state glyph, 10 px and quieter,
-    // at the row's right end: right-aligned with the rows' text, clear of
-    // the 8 px scrollbar lane and the 12 px inset, vertically centred, and
-    // far from the chevron, so it never reads as a second one. Its title
-    // stays un-amber, and its year ends before it.
+    // 6 px after its name's text, vertically centred, where it reads as the
+    // name's and never as a second chevron (#373 H4). Its title stays
+    // un-amber, and its year follows it.
     const auto tick = [](QQuickItem *row) { return itemNamed(row, QStringLiteral("libraryRowNowMark")); };
     const qreal markOpacity = paletteOf(window)->property("nowMarkOpacity").toReal();
     QVERIFY(markOpacity >= 0.6 && markOpacity < 1.0);
@@ -1258,27 +1309,8 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
         QCOMPARE(mark->opacity(), markOpacity);
         QCOMPARE(mark->width(), 10.0);
         QCOMPARE(mark->height(), 10.0);
-        const QRectF markRect = mark->mapRectToItem(row, QRectF(0, 0, mark->width(), mark->height()));
-        QCOMPARE(markRect.right(), row->width() - 8.0 - 12.0);
-        QVERIFY(std::abs(markRect.center().y() - row->height() / 2) <= 0.5);
-        QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
-        QVERIFY(shown(chevron));
-        const QRectF chevronRect =
-            chevron->mapRectToItem(row, QRectF(0, 0, chevron->width(), chevron->height()));
-        // Never beside the chevron: past the title's start, in the right
-        // half of the row.
-        QQuickItem *rowTitle = title(row);
-        QVERIFY(markRect.left() > rowTitle->x());
-        QVERIFY2(markRect.left() > row->width() / 2 && markRect.left() - chevronRect.right() > 100.0,
-                 qPrintable(QStringLiteral("mark starts at %1, chevron ends at %2")
-                                .arg(markRect.left())
-                                .arg(chevronRect.right())));
-        // The title and the year end before it.
-        QVERIFY(rowTitle->x() + rowTitle->width() <= markRect.left());
-        QQuickItem *year = itemNamed(row, QStringLiteral("libraryRowYear"));
-        if (shown(year)) {
-            QVERIFY(year->x() + year->width() <= markRect.left() - 6.0);
-        }
+        const QString misplaced = markFollowsTheName(row);
+        QVERIFY2(misplaced.isEmpty(), qPrintable(misplaced));
     };
     libraryModel.toggleKey(QStringLiteral("album|Artist A|Album A"));
     QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
@@ -1323,6 +1355,42 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist B/Album/01.flac"));
     bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("artist|Artist B")});
     QTRY_VERIFY(!shown(tick(artist)));
+}
+
+// A name too long for its row elides before the year, keeping the mark's
+// room, and the mark follows the elided text inside the row (#373 H4). The
+// name elides the same whether the mark shows or not.
+void UiMainWindowTest::collapsedRowMarkFollowsAnElidedName() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    const QString longName = QStringLiteral("An Album Whose Name Runs On ") + QStringLiteral("And On ").repeated(30);
+    showTree(libraryModel, {kArtistKey}, QStringLiteral("/music/Artist A"), longName);
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    QQuickItem *title = itemNamed(album, QStringLiteral("libraryRowTitle"));
+    QQuickItem *year = itemNamed(album, QStringLiteral("libraryRowYear"));
+    QVERIFY(title != nullptr && shown(year));
+    // Elided: its drawn text narrower than the whole name.
+    QVERIFY(title->property("implicitWidth").toReal() > title->width());
+    const qreal stoppedTextWidth = title->property("contentWidth").toReal();
+    const qreal stoppedWidth = title->width();
+    // The year at the right end, the name's box ending the mark's room
+    // and a gap before it.
+    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12);
+    QCOMPARE(title->x() + title->width(), year->x() - 8 - 6 - 10);
+
+    playTrack(bridge);
+    QQuickItem *mark = itemNamed(album, QStringLiteral("libraryRowNowMark"));
+    QTRY_VERIFY(shown(mark));
+    const QString misplaced = markFollowsTheName(album);
+    QVERIFY2(misplaced.isEmpty(), qPrintable(misplaced));
+    // Nothing moved: the name elides as it did.
+    QCOMPARE(title->width(), stoppedWidth);
+    QCOMPARE(title->property("contentWidth").toReal(), stoppedTextWidth);
 }
 
 void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath() {
