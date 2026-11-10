@@ -324,8 +324,10 @@ Rectangle {
     readonly property bool firstRun: root.uiBridge.queueLength === 0
         && root.uiBridge.libraryRootCount === 0
 
-    // A track change: the row that becomes now is amber at once, from its
-    // own state; the row that was now fades its amber out (#373 Motion).
+    // A track change: the row that was now fades its amber out as the row
+    // that becomes now fades it in, over the same time on the same curve,
+    // so no two rows are ever both fully amber (#373 Motion). With nothing
+    // fading out, as at the first track, the new row is amber at once.
     // `nowRow` is the row that is amber, as last seen; the playing row's
     // index, path and state change together, and are read together here.
     // A row is matched by its index and its path, so an edit that moves
@@ -336,6 +338,7 @@ Rectangle {
 
     Components.NowFadeOut {
         id: queueNowFade
+        fadesIn: true
     }
 
     function followNowRow() {
@@ -719,6 +722,10 @@ Rectangle {
                             && pathValue === fading.path
                             ? queueNowFade.level : 0
                     }
+                    // The share of its amber the row that is now has: less
+                    // than 1 only while it takes it over from the row that
+                    // was now.
+                    readonly property real amberIn: isNow ? queueNowFade.levelIn : 0
                     readonly property string unreadableReason: root.errorController
                         && pathValue.length > 0
                         ? (root.errorController.unreadablePaths[pathValue] || "")
@@ -800,6 +807,9 @@ Rectangle {
                             source: glyph
                             isMask: true
                             color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
+                            // The amber glyph fades in as the old row's
+                            // fades out.
+                            opacity: playlistRow.isNow ? playlistRow.amberIn : 1
 
                             ToolTip.visible: stateHover.hovered && playlistRow.unreadable
                             ToolTip.delay: Kirigami.Units.toolTipDelay
@@ -854,7 +864,9 @@ Rectangle {
                         readonly property color plainColor: playlistRow.unreadable
                             ? root.uiPalette.textSecondary : root.uiPalette.text
                         color: playlistRow.isNow
-                            ? root.uiPalette.now
+                            ? (playlistRow.amberIn < 1
+                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberIn)
+                                : root.uiPalette.now)
                             : (playlistRow.amberLeft > 0
                                 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberLeft)
                                 : plainColor)

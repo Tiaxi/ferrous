@@ -978,8 +978,10 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver_data() {
     QTest::newRow("gapless") << true;
 }
 
-// The new playing row is amber at once; only the old row's amber glyph and
-// title fade out, over shortDuration with OutCubic.
+// The old row's amber glyph and title fade out as the new row's fade in,
+// over the same shortDuration on the same OutCubic curve: the two rows'
+// amber never adds up to more than one row's, so no frame shows two fully
+// amber rows.
 void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QFETCH(bool, gapless);
     LibraryTreeModel libraryModel;
@@ -1014,28 +1016,67 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
         playQueueRow(bridge, 2);
     }
 
-    // At once, before a frame: the new row is amber, the old one fades.
-    QCOMPARE(colorOf(newRow.title), nowHex(window));
-    QCOMPARE(newRow.title->property("font").value<QFont>().weight(), QFont::DemiBold);
-    QVERIFY(newRow.glyph->isVisible());
-    QCOMPARE(colorOf(newRow.glyph), nowHex(window));
-    QVERIFY(!newRow.fadingGlyph->isVisible());
+    // At once, before a frame: the old row is amber, the new one not yet.
     QVERIFY(animationOf(fade)->property("running").toBool());
     QVERIFY(oldRow.fadingGlyph->isVisible());
     QCOMPARE(oldRow.fadingGlyph->property("source").toString(), QStringLiteral("media-playback-start"));
     QCOMPARE(colorOf(oldRow.fadingGlyph), nowHex(window));
     QCOMPARE(oldRow.fadingGlyph->opacity(), 1.0);
     QCOMPARE(colorOf(oldRow.title), nowHex(window));
-    // Its weight goes with the state, at once.
+    QVERIFY(colorOf(newRow.title) != nowHex(window));
+    QCOMPARE(colorOf(newRow.glyph), nowHex(window));
+    QCOMPARE(newRow.glyph->opacity(), 0.0);
+    QVERIFY(!newRow.fadingGlyph->isVisible());
+    // The weights go with the state, at once.
+    QCOMPARE(newRow.title->property("font").value<QFont>().weight(), QFont::DemiBold);
     QCOMPARE(oldRow.title->property("font").value<QFont>().weight(), QFont::Normal);
     QVERIFY(!oldRow.glyph->isVisible());
 
-    // Then it is plain, and nothing runs.
-    QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
+    // Every frame of the hand-over: the glyphs' opacities add up to one,
+    // and so do the titles' shares of the amber, so never are two rows
+    // fully amber.
+    const QColor now(nowHex(window));
+    const QColor plain = qvariant_cast<QObject *>(window->property("uiPalette"))
+        ->property("text").value<QColor>();
+    // How far a title is from the text colour towards the amber, 0 to 1,
+    // along the channel where the two differ most.
+    const auto amberShare = [&](QQuickItem *title) {
+        const QColor color = title->property("color").value<QColor>();
+        const qreal channels[3][3] = {{plain.redF(), now.redF(), color.redF()},
+                                      {plain.greenF(), now.greenF(), color.greenF()},
+                                      {plain.blueF(), now.blueF(), color.blueF()}};
+        int widest = 0;
+        for (int channel = 1; channel < 3; ++channel) {
+            if (std::abs(channels[channel][1] - channels[channel][0])
+                > std::abs(channels[widest][1] - channels[widest][0])) {
+                widest = channel;
+            }
+        }
+        return (channels[widest][2] - channels[widest][0]) / (channels[widest][1] - channels[widest][0]);
+    };
+    int frames = 0;
+    qreal worstGlyphs = 0;
+    qreal worstTitles = 0;
+    QVERIFY(QTest::qWaitFor([&]() {
+        if (!animationOf(fade)->property("running").toBool()) {
+            return true;
+        }
+        ++frames;
+        worstGlyphs = std::max(worstGlyphs,
+                               std::abs(oldRow.fadingGlyph->opacity() + newRow.glyph->opacity() - 1.0));
+        worstTitles = std::max(worstTitles, amberShare(oldRow.title) + amberShare(newRow.title) - 1.0);
+        return false;
+    }, 2000));
+    QVERIFY(frames > 0);
+    QVERIFY2(worstGlyphs < 0.02, qPrintable(QString::number(worstGlyphs)));
+    QVERIFY2(worstTitles < 0.03, qPrintable(QString::number(worstTitles)));
+
+    // Then the old row is plain, the new one wholly amber, and nothing runs.
     QVERIFY(!oldRow.fadingGlyph->isVisible());
     QVERIFY(colorOf(oldRow.title) != nowHex(window));
     QVERIFY(fade->property("target").isNull() || !fade->property("target").value<QJSValue>().isObject());
     QCOMPARE(colorOf(newRow.title), nowHex(window));
+    QCOMPARE(newRow.glyph->opacity(), 1.0);
 }
 
 // Repeat-One plays the same row again: it stays amber, nothing fades.
