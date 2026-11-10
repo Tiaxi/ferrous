@@ -129,6 +129,8 @@ class BridgeClient : public QObject {
     Q_PROPERTY(bool lastFmBuildConfigured READ lastFmBuildConfigured NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmUsername READ lastFmUsername NOTIFY snapshotChanged)
     Q_PROPERTY(int lastFmAuthState READ lastFmAuthState NOTIFY snapshotChanged)
+    // The scrobbles that wait to be sent; see
+    // BinaryBridgeCodec::DecodedLastFm::pendingScrobbleCount.
     Q_PROPERTY(int lastFmPendingScrobbleCount READ lastFmPendingScrobbleCount NOTIFY snapshotChanged)
     Q_PROPERTY(QString lastFmStatusText READ lastFmStatusText NOTIFY snapshotChanged)
     // Whether the status bar shows the scrobble progress indicator.
