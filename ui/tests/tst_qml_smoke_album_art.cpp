@@ -2,6 +2,11 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QFontMetricsF>
+#include <QQmlContext>
+#include <QQmlExpression>
+#include <cmath>
+
 // The album art viewer: its zoom and details, and the iTunes artwork
 // preview.
 class AlbumArtSmokeTest : public QmlSmokeTest {
@@ -1348,6 +1353,29 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QCOMPARE(rectOf(back).top(), rectOf(apply).top());
     QVERIFY2(rectOf(back).right() <= rectOf(apply).left(), at.constData());
     QVERIFY2(columnRect.right() - rectOf(apply).right() <= 24.0, at.constData());
+    // About 40 characters wide, 280 px with its seam at the default font,
+    // up to half the view, or wider for the buttons; its contents 16 px in
+    // from both edges.
+    const QFont font = label->property("font").value<QFont>();
+    const qreal fortyCharacters = std::ceil(QFontMetricsF(font).averageCharWidth() * 40) - 1;
+    const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
+    QVERIFY2(column->width() >= qMax(279.0, qMin(halfTheView, fortyCharacters)) - 0.5,
+             qPrintable(QStringLiteral("%1: %2 px").arg(QString::fromUtf8(at)).arg(column->width())));
+    QCOMPARE(rectOf(label).left() - columnRect.left(), 16.0);
+    QCOMPARE(columnRect.right() - rectOf(apply).right(), 16.0);
+    // The file's name a step larger than the details: 12 pt to their 10.
+    QQuickItem *value = visibleItemsNamed(column, QStringLiteral("albumArtInfoValue")).value(0);
+    QVERIFY2(value != nullptr, at.constData());
+    QCOMPARE(title->property("font").value<QFont>().pointSizeF(),
+             value->property("font").value<QFont>().pointSizeF() * 1.2);
+    // Apply is the default button, which Breeze tints; Back to Results is
+    // a plain one.
+    const auto isDefault = [](QQuickItem *button) {
+        return QQmlExpression(qmlContext(button), button, QStringLiteral("Accessible.defaultButton"))
+            .evaluate().toBool();
+    };
+    QVERIFY2(isDefault(apply), at.constData());
+    QVERIFY2(!isDefault(back), at.constData());
     // The art fits the space left of the seam, 24 px clear of it, centred
     // there.
     QQuickItem *image = visibleItemNamed(host, QStringLiteral("albumArtImage"));
@@ -1680,6 +1708,15 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(currentRow->height(), 80.0);
     // The dialog's first line, with no space above it.
     QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());
+    // What the search found: between the current art and the results'
+    // frame, 8 px clear of each, its text on the thumbnails' inset.
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkResultsHeading"));
+    QVERIFY(heading != nullptr && heading->isVisible());
+    QCOMPARE(heading->property("text").toString(), QStringLiteral("Found 3 suggestions."));
+    QCOMPARE(sceneRectOf(heading).top() - sceneRectOf(currentRow).bottom(), 8.0);
+    QCOMPARE(sceneRectOf(frame).top() - sceneRectOf(heading).bottom(), 8.0);
+    QCOMPARE(sceneRectOf(heading).left(), sceneRectOf(firstThumbnail).left());
+    QCOMPARE(sceneRectOf(heading).left() - sceneRectOf(frame).left(), 17.0);
     // Nothing to search for or wait on.
     QVERIFY(visibleItemsNamed(content, QStringLiteral("itunesArtworkPlaceholder")).isEmpty());
 }
@@ -2159,10 +2196,10 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
 void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
     // Back to Results and Apply stay whole inside the details column at
     // larger fonts, in the main window's viewer and over the whole screen.
-    // With the usual font they share a row at its end; with one too large
-    // for that, they stack. The app's style's buttons no longer fit side by
-    // side at 14 pt. At 24 pt, Back to Results is wider than the usual
-    // column: the column widens for it, so it is not cut short (#535).
+    // The column is about 40 characters wide, so with a larger font it
+    // widens with them; where half the view leaves no room for that, they
+    // stack. At 24 pt, Back to Results is wider than the usual column: the
+    // column widens for it, so it is not cut short (#535).
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QTemporaryDir dir;
@@ -2232,9 +2269,14 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
                      qPrintable(QStringLiteral("%1: back %2 of %3, apply %4 of %5")
                                     .arg(QString::fromLatin1(at)).arg(back->width()).arg(back->implicitWidth())
                                     .arg(apply->width()).arg(apply->implicitWidth())));
-            if (pointSize >= 24.0) {
-                QVERIFY2(columnRect.width() > 279.0, at.constData());
-            } else {
+            // About 40 characters wide, 279 px and its seam with the usual
+            // font, or wider for the widest button, up to half the view.
+            const qreal fortyCharacters = std::ceil(
+                QFontMetricsF(qvariant_cast<QFont>(back->property("font"))).averageCharWidth() * 40) - 1;
+            const qreal widestButton = std::ceil(qMax(back->implicitWidth(), apply->implicitWidth())) + 32;
+            const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
+            QCOMPARE(columnRect.width(), qMax(279.0, qMin(halfTheView, qMax(fortyCharacters, widestButton))));
+            if (pointSize == 0) {
                 QCOMPARE(columnRect.width(), 279.0);
             }
             // The footer's buttons, under the details, inside the column.
@@ -2262,8 +2304,14 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
                 QCOMPARE(sceneRectOf(back).width(), sceneRectOf(apply).width());
                 QCOMPARE(sceneRectOf(back).width(), columnRect.width() - 32);
             }
-            if (pointSize >= 14.0) {
-                QVERIFY2(!fitsInARow, "14 pt does not fit them in a row");
+            // Stacked only where the column has no more room: at half the
+            // view, in a screen-filling viewer of the 800 px test screen at
+            // 24 pt.
+            if (!fitsInARow) {
+                QCOMPARE(columnRect.width(), halfTheView);
+            }
+            if (pointSize >= 24.0 && fullscreenMode == 1) {
+                QVERIFY2(!fitsInARow, "24 pt in an 800 px view does not fit them in a row");
             }
             QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
             QTRY_VERIFY(dialog->property("opened").toBool());
@@ -2282,8 +2330,8 @@ void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
     // a preview shows them, before any frame, so that nothing can find
     // Apply elsewhere: a candidate's preview after one of the current art,
     // which had Back to Results alone, as when it was laid out last. With
-    // the usual font they share a row; at 24 pt they stack, as in
-    // itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide.
+    // the usual font they share a row; at 24 pt in a narrow view they
+    // stack, as in itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide.
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QTemporaryDir dir;
@@ -2311,19 +2359,25 @@ void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
         QVERIFY(fake != nullptr);
         setPlayingTrack(bridge);
         bridge->setProperty("currentTrackCoverPath", coverUrl);
-        bridge->setProperty("viewerFullscreenMode", 0);
+        // At 24 pt, over the whole 800 px test screen: too narrow a view for
+        // the buttons side by side.
+        bridge->setProperty("viewerFullscreenMode", stacked ? 1 : 0);
+        const auto host = [&]() {
+            return stacked ? viewerWindowNamed(engine, QStringLiteral("albumArtFullscreenWindow")) : window;
+        };
         QVERIFY(openItunesArtworkDialog(window, dialog, fake, fixture, QVariantMap{
             {QStringLiteral("trackPath"), QStringLiteral("/music/Morning Tide Field.flac")},
             {QStringLiteral("album"), QStringLiteral("Small Hours")},
             {QStringLiteral("coverPath"), coverUrl},
         }));
         const auto backToTheResults = [&]() {
-            QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewBackButton")));
+            QVERIFY(clickPreviewButton(host(), QStringLiteral("albumArtPreviewBackButton")));
             QTRY_VERIFY(dialog->property("opened").toBool());
             QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
         };
         // Where the preview's buttons are now, without letting the events run.
-        const auto checkButtonsInPlace = [window, stacked](const QByteArray &at) {
+        const auto checkButtonsInPlace = [&host, stacked](const QByteArray &at) {
+            QQuickWindow *window = host();
             QQuickItem *column = visibleItemNamed(window, QStringLiteral("albumArtInfoColumn"));
             QQuickItem *back = visibleItemNamed(window, QStringLiteral("albumArtPreviewBackButton"));
             QQuickItem *apply = visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton"));
@@ -2362,7 +2416,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsAreInTheDetailsAsSoonAsTheyShow() {
             // The current art: Back to Results alone.
             QVERIFY(QMetaObject::invokeMethod(dialog, "showPreview", Q_ARG(QVariant, -1)));
             QTRY_VERIFY2(viewer->property("albumArtPreviewActive").toBool(), at.constData());
-            QVERIFY2(visibleItemNamed(window, QStringLiteral("albumArtPreviewApplyButton")) == nullptr,
+            QVERIFY2(visibleItemNamed(host(), QStringLiteral("albumArtPreviewApplyButton")) == nullptr,
                      at.constData());
             backToTheResults();
 

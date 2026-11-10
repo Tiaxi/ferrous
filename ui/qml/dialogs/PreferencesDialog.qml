@@ -10,16 +10,15 @@ import "../components" as Components
 import "../preferences" as Preferences
 import "../logic/KeyUtils.js" as KeyUtils
 
-// Configure Ferrous: a KDE page list beside the pages. The settings change
-// on OK or Apply, Cancel drops what was changed since, and Defaults sets
-// every page back to the defaults, to be applied in turn. The library
-// folders and the Last.fm account are not settings: they change at once.
-Dialog {
+// Configure Ferrous: a KDE page list beside the pages, in a window of its
+// own, as KConfigDialog. The settings change on OK or Apply, Cancel drops
+// what was changed since, and Defaults sets every page back to the
+// defaults, to be applied in turn. The library folders and the Last.fm
+// account are not settings: they change at once.
+Components.DialogWindow {
     id: root
 
     required property var uiBridge
-    required property var uiPalette
-    required property var windowRoot
     required property var spectrogramFftChoices
     required property var promptAddLibraryRoot
     required property var openLibraryRootNameDialog
@@ -155,12 +154,8 @@ Dialog {
         }
     }
 
-    modal: true
-    // Keyboard users start in the dialog, on the page list.
-    focus: true
     // KConfigDialog's caption: "Configure", with the application's name.
     title: I18n.i18nc("@title:window %1 is the application name", "Configure — %1", "Ferrous")
-    parent: Overlay.overlay
     // The page list's rows: the icon and the title, with its insets.
     readonly property real pageRowLeftPadding: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     readonly property real pageRowSpacing: Kirigami.Units.largeSpacing + 2
@@ -178,37 +173,35 @@ Dialog {
         font: root.uiPalette.baseFont
     }
 
-    // The pages' sizes are for the default 10 pt font; a larger font
-    // widens them, and a smaller one keeps them.
-    readonly property real fontScale: Math.max(1, root.uiPalette.basePointSize / 10)
-    // 49 grid units, or the page list and 39 of them for the pages when the
-    // list is wider or the font larger. As tall as the tallest page, so
-    // that none scrolls when the window has the room.
-    width: Math.min(Math.max(Kirigami.Units.gridUnit * 49,
-            root.pageListWidth + 1 + Kirigami.Units.gridUnit * 39 * root.fontScale),
-        root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    height: Math.min(Math.ceil(root.implicitHeight), root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
-    x: Math.round(((parent ? parent.width : root.windowRoot.width) - width) / 2)
-    y: Math.round(((parent ? parent.height : root.windowRoot.height) - height) / 2)
-    padding: 0
-    closePolicy: Popup.CloseOnEscape
+    // 49 by 32 grid units, or the page list and 39 of them for the pages
+    // when the list is wider, or wider for every page's wide layout; and
+    // the tallest page whole at the default font, or taller for the page
+    // it opens on. A larger font makes the window larger, within the
+    // screen; it lays its pages out for the room it has, and the user may
+    // make it larger.
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 49, root.pageListWidth + 1
+        + Math.max(Kirigami.Units.gridUnit * 39, pagesLoader.item ? pagesLoader.item.wideWidth : 0))
+    defaultHeight: Math.max(Kirigami.Units.gridUnit * 32,
+        preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
+    // The page list, and a page with room for its widest control.
+    minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,
+        pagesLoader.item ? pagesLoader.item.minimumWidth : 0))
+    minimumHeight: Math.ceil(Math.min(root.defaultHeight, Kirigami.Units.gridUnit * 18))
 
     onAboutToShow: {
         settingsState.discard()
         pagesLoader.active = true
+        // Keyboard users start on the page list.
+        pageList.forceActiveFocus(Qt.PopupFocusReason)
     }
-    onOpened: pageList.forceActiveFocus(Qt.PopupFocusReason)
     // Cancel, Escape and the close button drop what was not applied.
     onRejected: settingsState.discard()
     onAccepted: settingsState.apply()
 
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
     // Defaults on the left; OK, Apply and Cancel in KDE's order on the
     // right. A seam between the pages and the buttons.
     footer: Control {
+        id: preferencesFooter
         objectName: "preferencesButtons"
         padding: 0
         background: Item {
@@ -277,11 +270,14 @@ Dialog {
         }
     }
 
-    contentItem: RowLayout {
+    RowLayout {
+        id: preferencesContent
+        anchors.fill: parent
+
         // Enter presses the default button, as in KDE's dialogs. The pages'
         // combo boxes pass it on from here too.
         function handleDialogEnter(event, focusItem) {
-            return dialogButtons.handleEnter(event, focusItem, KeyUtils.popupTakesKeys(root))
+            return dialogButtons.handleEnter(event, focusItem, root.visible)
         }
         Keys.onPressed: function(event) { handleDialogEnter(event, Window.activeFocusItem) }
 
@@ -289,13 +285,13 @@ Dialog {
 
         Shortcut {
             sequences: ["Ctrl+Tab", "Ctrl+PgDown"]
-            enabled: root.opened
+            enabled: root.visible
             onActivated: root.stepPage(1)
         }
 
         Shortcut {
             sequences: [StandardKey.PreviousChild, "Ctrl+PgUp"]
-            enabled: root.opened
+            enabled: root.visible
             onActivated: root.stepPage(-1)
         }
 
@@ -392,7 +388,20 @@ Dialog {
             active: false
             sourceComponent: Component {
                 StackLayout {
+                    id: pagesStack
                     objectName: "preferencesPages"
+                    // The width that fits every page, and the width for
+                    // every page's wide layout.
+                    readonly property real minimumWidth: pagesStack.widest("minimumWidth")
+                    readonly property real wideWidth: pagesStack.widest("wideWidth")
+
+                    function widest(property) {
+                        let widest = 0
+                        for (let i = 0; i < pagesStack.children.length; ++i) {
+                            widest = Math.max(widest, pagesStack.children[i][property] || 0)
+                        }
+                        return widest
+                    }
                     currentIndex: root.pageIndex
 
                     Preferences.LibraryPage {
@@ -400,7 +409,7 @@ Dialog {
                         uiBridge: root.uiBridge
                         uiPalette: root.uiPalette
                         settings: settingsState
-                        windowRoot: root.windowRoot
+                        windowRoot: root
                         promptAddLibraryRoot: root.promptAddLibraryRoot
                         openLibraryRootNameDialog: root.openLibraryRootNameDialog
                     }

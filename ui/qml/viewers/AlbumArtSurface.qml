@@ -369,20 +369,27 @@ Item {
     // middle, with Copy Path. The rows' labels share a column as wide as the
     // widest of them, up to two fifths of the row, so every value starts at
     // the same x and keeps the rest; a label wider than that wraps.
-    // During a preview, the column widens for a larger font, so neither of
-    // its buttons is cut short, up to half the view.
+    // During a preview, the column is about 40 characters wide, 280 px with
+    // the default font, or wider for its buttons, up to half the view: in
+    // a narrower view, the buttons stack, so neither is cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
+        readonly property real previewWidth: Math.max(279, Math.ceil(infoFontMetrics.averageCharacterWidth * 40) - 1)
         visible: root.infoVisible
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: root.previewActive
-            ? Math.max(279, Math.min(Math.floor(root.width / 2),
+            ? Math.max(279, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.previewWidth,
                 Math.ceil(Math.max(previewBackButton.implicitWidth,
-                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 32))
+                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 32)))
             : 279
+
+        FontMetrics {
+            id: infoFontMetrics
+            font: root.uiPalette.baseFont
+        }
 
         // Opaque, so the details read the same over any art.
         Rectangle {
@@ -429,6 +436,8 @@ Item {
             readonly property real labelColumnWidth: Math.min(Math.ceil(infoRows.widestLabel),
                                                               Math.floor(infoLayout.width * 0.4))
 
+            // During a preview, a step larger than the details: 12 pt with
+            // the default 10 pt font.
             Label {
                 objectName: "albumArtInfoTitle"
                 Layout.fillWidth: true
@@ -437,6 +446,9 @@ Item {
                     ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
                     : ((root.fileInfo && root.fileInfo.fileName)
                         || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
+                font.pointSize: root.previewActive
+                    ? root.uiPalette.basePointSize * 1.2
+                    : root.uiPalette.basePointSize
                 font.weight: Font.DemiBold
                 color: root.uiPalette.text
                 elide: Text.ElideMiddle
@@ -568,7 +580,8 @@ Item {
         }
 
         // The preview's buttons, as a dialog's, 12 px under the details: at
-        // the end of a row, the default one, Apply, last. When they do not
+        // the end of a row, the default one, Apply, last, tinted as the
+        // default button. When they do not
         // fit side by side, with a larger font or a longer translation, they
         // stack, each the column's width, Back to Results first.
         // Anchors and bindings place them, so they are in place the moment
@@ -629,6 +642,8 @@ Item {
                     width: previewButtons.oneRow ? implicitWidth : previewButtons.width
                     visible: root.previewHasCandidate
                     enabled: root.previewCanApply
+                    // Breeze tints the default button.
+                    Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"
                     text: I18n.i18nc("@action:button", "Apply")
                     toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")

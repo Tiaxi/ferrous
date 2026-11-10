@@ -7,15 +7,12 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
 // About Ferrous, laid out as KDE's About dialog: the icon, name and
-// version, then the About, Components, Authors and License tabs.
-Dialog {
+// version, then the About, Components, Authors and License tabs, in a window
+// of its own, as KAboutApplicationDialog.
+Components.DialogWindow {
     id: root
-
-    required property var uiPalette
-    required property var windowRoot
 
     readonly property string version: typeof appVersion !== "undefined" ? String(appVersion) : ""
     // The libraries Ferrous runs on, as main.cpp gives them: each a name and
@@ -44,15 +41,14 @@ Dialog {
     }
 
     objectName: "aboutDialog"
-    parent: Overlay.overlay
-    modal: true
-    focus: true
     title: I18n.i18nc("@title:window", "About Ferrous")
-    // 29 grid units, or wider when a large font makes the tabs or the
-    // buttons need more; the texts wrap within it.
-    readonly property real minimumWidth: Math.ceil(Math.max(
-        aboutTabs.implicitWidth + root.leftPadding + root.rightPadding,
-        root.componentsWidth + 2 * Kirigami.Units.largeSpacing + root.leftPadding + root.rightPadding,
+    // The content's inset from the window's edges.
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    // As wide as the tabs and the Components page need, and the buttons;
+    // the texts wrap within it.
+    readonly property real contentMinimumWidth: Math.ceil(Math.max(
+        aboutTabs.implicitWidth + 2 * root.contentPadding,
+        root.componentsWidth + 2 * Kirigami.Units.largeSpacing + 2 * root.contentPadding,
         aboutFooter.implicitWidth))
     // The Components page: the names' column, 9 grid units or as wide as
     // the longest name, and the versions after it.
@@ -74,12 +70,18 @@ Dialog {
         id: componentMetrics
         font: root.uiPalette.baseFont
     }
-    width: Math.min(Math.max(Kirigami.Units.gridUnit * 29, root.minimumWidth),
-        root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    closePolicy: Popup.CloseOnEscape
+    minimumWidth: root.contentMinimumWidth
+    minimumHeight: Math.ceil(aboutHeading.implicitHeight + aboutTabs.implicitHeight + aboutFooter.implicitHeight
+        + 2 * root.contentPadding + 3 * Kirigami.Units.gridUnit)
+    // 29 grid units, or wider when a large font makes the tabs or the
+    // buttons need more; as tall as the tallest tab.
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 29, root.contentMinimumWidth)
+    defaultHeight: aboutContent.implicitHeight + 2 * root.contentPadding + aboutFooter.implicitHeight
 
-    onAboutToShow: root.tabIndex = 0
-    onOpened: aboutTabs.currentItem.forceActiveFocus(Qt.PopupFocusReason)
+    onAboutToShow: {
+        root.tabIndex = 0
+        aboutTabs.currentItem.forceActiveFocus(Qt.PopupFocusReason)
+    }
 
     // The arrow keys move between the tabs, as in KDE's About dialog.
     function stepTab(step) {
@@ -91,10 +93,6 @@ Dialog {
         width: implicitWidth
         Keys.onLeftPressed: root.stepTab(-1)
         Keys.onRightPressed: root.stepTab(1)
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
     }
 
     // A text field that only the clipboard sees.
@@ -127,18 +125,23 @@ Dialog {
                 text: I18n.i18nc("@action:button", "Close")
                 icon.name: "window-close"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                onClicked: root.close()
+                onClicked: root.reject()
             }
         }
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        id: aboutContent
+        anchors.fill: parent
+        anchors.margins: root.contentPadding
+
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
 
         spacing: 0
 
         RowLayout {
+            id: aboutHeading
             Layout.leftMargin: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.gridUnit - 2
 
@@ -291,6 +294,11 @@ Dialog {
                     color: root.uiPalette.link
                 }
             }
+        }
+
+        // A taller window leaves the room below the tabs.
+        Item {
+            Layout.fillHeight: true
         }
     }
 }

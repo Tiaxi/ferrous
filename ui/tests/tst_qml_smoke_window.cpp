@@ -412,12 +412,12 @@ Item {
     Action { id: replaceFromItunesAction }
     Action { id: addLibraryFolderAction }
 
+    // A window of its own, for a window.
     Dialogs.PreferencesDialog {
         id: preferencesDialog
-        parent: harness
         uiBridge: bridge
         uiPalette: palette
-        windowRoot: harness
+        windowRoot: viewerWindowRoot
         spectrogramFftChoices: [512, 1024, 2048]
         promptAddLibraryRoot: function(context) {}
         openLibraryRootNameDialog: function(mode, path, name) {}

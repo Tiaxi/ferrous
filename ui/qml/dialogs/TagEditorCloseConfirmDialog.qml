@@ -60,8 +60,9 @@ Dialog {
     footer: Components.DialogFooter {
         id: dialogButtons
         enabled: !closingState.closing
-        // Save, or Discard and Reload when there is nothing else to do.
-        primary: root.forReload ? discardButton : saveButton
+        // Save; or, on the reload question, which has no Save, Cancel: the
+        // default button never drops the edits.
+        primary: root.forReload ? keepEditingButton : saveButton
         Button {
             id: saveButton
             objectName: "tagEditorCloseConfirmSaveButton"
@@ -89,6 +90,7 @@ Dialog {
             }
         }
         Button {
+            id: keepEditingButton
             objectName: "tagEditorCloseConfirmKeepEditingButton"
             text: root.forQuit || root.forReload
                 ? I18n.i18nc("@action:button", "Cancel")

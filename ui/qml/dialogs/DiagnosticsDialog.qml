@@ -213,6 +213,7 @@ Dialog {
         details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
             + "what it holds, for example for a bug report.")
         confirmText: I18n.i18nc("@action:button", "Delete Log")
+        destructive: true
         onConfirmed: {
             root.uiBridge.clearDiagnostics()
             root.syncDiagnosticsText()

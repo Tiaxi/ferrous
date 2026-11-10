@@ -22,6 +22,7 @@
 #include <QQuickWindow>
 #include <QScopeGuard>
 #include <QTemporaryDir>
+#include <QtMath>
 #include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
 #include <qqml.h>
@@ -251,16 +252,25 @@ bool tabTo(QQuickWindow *window, QQuickItem *target, int limit = 60,
     return target->hasActiveFocus();
 }
 
-// The preferences dialog, opened on `page`.
+// The window of a dialog that has one of its own.
+QQuickWindow *windowOf(QObject *dialog) {
+    return qobject_cast<QQuickWindow *>(dialog);
+}
+
+// Whether the dialog's window shows and has the keyboard.
+bool waitForDialogWindow(QObject *dialog) {
+    QQuickWindow *dialogWindow = windowOf(dialog);
+    return dialogWindow != nullptr && QTest::qWaitFor([&]() { return dialog->property("opened").toBool(); })
+        && QTest::qWaitForWindowExposed(dialogWindow) && QTest::qWaitForWindowActive(dialogWindow);
+}
+
+// The preferences dialog, opened on `page`, in its window.
 QObject *openPreferences(QQuickWindow *window, int page = 0) {
     QObject *dialog = object(window, QStringLiteral("preferencesDialog"));
     if (dialog == nullptr || !QMetaObject::invokeMethod(dialog, "openPage", Q_ARG(QVariant, page))) {
         return nullptr;
     }
-    if (!QTest::qWaitFor([&]() { return dialog->property("opened").toBool(); })) {
-        return nullptr;
-    }
-    return dialog;
+    return waitForDialogWindow(dialog) ? dialog : nullptr;
 }
 
 QObject *settingsOf(QObject *dialog) {
@@ -354,6 +364,10 @@ QStringList textsHolding(QObject *root, const QString &needle) {
     return found;
 }
 
+// Defined with the large-font checks below.
+void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size);
+QList<bool> formModes(QObject *preferences, QQuickItem *stack);
+
 } // namespace
 
 class UiDialogsTest : public QObject {
@@ -365,6 +379,7 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
+    void configureAndAboutAreWindowsOfTheirOwn();
     void configureIsAPageListWithKdesCaptionAndButtons();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
@@ -374,6 +389,7 @@ private slots:
     void everyConfigureSettingReachesTheBridge();
     void titleStripSettingIsOnlyForTheWholeScreen();
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
+    void configureFitsItsPagesAtAnyWidth();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
@@ -425,6 +441,114 @@ void UiDialogsTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
+// Configure Ferrous and About are windows of their own, as KConfigDialog
+// and KAboutApplicationDialog: KWin's title bar, no title or close button
+// of their own and no dimmed main window; above the main window, which they
+// block, resizable, and keeping the user's size. Escape and the title bar's
+// close button reject them, and the main window gets the keyboard back.
+void UiDialogsTest::configureAndAboutAreWindowsOfTheirOwn() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *overlay = qvariant_cast<QQuickItem *>(window->property("overlayHost"));
+    QVERIFY(overlay != nullptr);
+    QQuickItem *queue = visibleNamed(window, QStringLiteral("playlistView"));
+    QVERIFY(queue != nullptr);
+
+    struct Case { const char *name; QString title; };
+    for (const Case &test : {Case{"preferencesDialog", QStringLiteral("Configure \u2014 Ferrous")},
+                             Case{"aboutDialog", QStringLiteral("About Ferrous")}}) {
+        const QByteArray at(test.name);
+        queue->forceActiveFocus(Qt::OtherFocusReason);
+        QTRY_VERIFY2(queue->hasActiveFocus(), at.constData());
+        QObject *dialog = object(window, QString::fromLatin1(test.name));
+        QVERIFY2(dialog != nullptr, at.constData());
+        QQuickWindow *dialogWindow = windowOf(dialog);
+        QVERIFY2(dialogWindow != nullptr, at.constData());
+        QVERIFY2(!dialogWindow->isVisible(), at.constData());
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QVERIFY2(waitForDialogWindow(dialog), at.constData());
+
+        // A top-level dialog window over the main window, modal to the
+        // app, with the caption in KWin's title bar only.
+        QVERIFY2(dialogWindow->isTopLevel(), at.constData());
+        QCOMPARE(dialogWindow->transientParent(), window);
+        QCOMPARE(dialogWindow->modality(), Qt::ApplicationModal);
+        QCOMPARE(dialogWindow->flags() & Qt::WindowType_Mask, Qt::Dialog);
+        QCOMPARE(dialogWindow->title(), test.title);
+        QVERIFY2(textsHolding(dialogWindow->contentItem(), test.title).isEmpty(),
+                 qPrintable(textsHolding(dialogWindow->contentItem(), test.title).join(QLatin1Char('\n'))));
+        for (const QString &name : {QStringLiteral("dialogHeaderTitle"), QStringLiteral("dialogHeaderCloseButton")}) {
+            QVERIFY2(itemsNamed(dialogWindow->contentItem(), name).isEmpty(), qPrintable(name));
+        }
+        // Nothing over the main window, which is not dimmed: only the
+        // empty popup that blocks its shortcuts.
+        for (QQuickItem *item : overlay->childItems()) {
+            QVERIFY2(!item->isVisible() || item->width() * item->height() == 0,
+                     qPrintable(QStringLiteral("%1: %2").arg(QString::fromLatin1(at), describe(item))));
+        }
+        // Resizable, from a minimum that holds its content, and shown at
+        // the size its content asks for.
+        QVERIFY2(dialogWindow->minimumWidth() > 0 && dialogWindow->minimumHeight() > 0, at.constData());
+        QVERIFY2(dialogWindow->maximumWidth() > dialogWindow->minimumWidth()
+                     && dialogWindow->maximumHeight() > dialogWindow->minimumHeight(), at.constData());
+        QCOMPARE(dialogWindow->width(),
+                 qMax(dialogWindow->minimumWidth(), qCeil(dialog->property("defaultWidth").toReal())));
+        QCOMPARE(dialogWindow->height(),
+                 qMax(dialogWindow->minimumHeight(), qCeil(dialog->property("defaultHeight").toReal())));
+        QVERIFY2(dialogWindow->width() >= dialogWindow->minimumWidth()
+                     && dialogWindow->height() >= dialogWindow->minimumHeight(), at.constData());
+
+        // Escape rejects it, and the main window has the keyboard again,
+        // where it was.
+        QSignalSpy rejected(dialog, SIGNAL(rejected()));
+        QTest::keyClick(dialogWindow, Qt::Key_Escape);
+        QTRY_VERIFY2(!dialogWindow->isVisible(), at.constData());
+        QCOMPARE(rejected.count(), 1);
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTRY_VERIFY2(queue->hasActiveFocus(), at.constData());
+
+        // The size the user gives it stays when it opens again.
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QVERIFY2(waitForDialogWindow(dialog), at.constData());
+        const QSize resized(dialogWindow->width() + 120, dialogWindow->height() + 40);
+        dialogWindow->resize(resized);
+        QTRY_COMPARE(dialogWindow->size(), resized);
+        // The title bar's close button: a Cancel, which hides the window.
+        dialogWindow->close();
+        QTRY_VERIFY2(!dialogWindow->isVisible(), at.constData());
+        QCOMPARE(rejected.count(), 2);
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        QVERIFY2(waitForDialogWindow(dialog), at.constData());
+        QCOMPARE(dialogWindow->size(), resized);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+        QTRY_VERIFY2(!dialogWindow->isVisible(), at.constData());
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+
+    // Closed by its title bar's button, Configure drops what was not
+    // applied.
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("libraryWatchEnabled", true));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *watch = nullptr;
+    QTRY_VERIFY((watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
+    click(prefs, watch);
+    QTRY_VERIFY(dialog->property("modified").toBool());
+    prefs->close();
+    QTRY_VERIFY(!prefs->isVisible());
+    QVERIFY(bridge->property("libraryWatchEnabled").toBool());
+    QVERIFY(openPreferences(window, 0) != nullptr);
+    QVERIFY(!dialog->property("modified").toBool());
+    QTRY_VERIFY(watch->property("checked").toBool());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
 void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -432,25 +556,27 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *dialog = openPreferences(window);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     // KConfigDialog's caption.
     QCOMPARE(dialog->property("title").toString(), QStringLiteral("Configure \u2014 Ferrous"));
 
     // A 176 px list of the five pages on the view colour, the selected one
     // a full-row tint.
-    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(list != nullptr);
     QCOMPARE(list->width(), 176.0);
     QCOMPARE(hex(list->parentItem()->property("color").value<QColor>()), hex(tokenOf(window, "view")));
     const QStringList pages{QStringLiteral("Library"), QStringLiteral("Spectrogram"), QStringLiteral("Appearance"),
                             QStringLiteral("Last.fm"), QStringLiteral("Media Controls")};
     QQuickItem *stack = nullptr;
-    QTRY_VERIFY((stack = visibleNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     for (int i = 0; i < pages.size(); ++i) {
-        QQuickItem *row = visibleNamed(window, QStringLiteral("preferencesPage_%1").arg(i));
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(i));
         QVERIFY(row != nullptr);
         QCOMPARE(row->property("text").toString(), pages[i]);
         QCOMPARE(row->width(), 176.0);
-        click(window, row);
+        click(prefs, row);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), i);
         // The page's title, 15 px semibold, on the content edge.
         QQuickItem *page = stack->childItems().at(i);
@@ -473,10 +599,10 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     }
 
     // Defaults on the left; OK, Apply and Cancel on the right, in that order.
-    QQuickItem *defaults = visibleNamed(window, QStringLiteral("preferencesDefaultsButton"));
-    QQuickItem *ok = visibleNamed(window, QStringLiteral("preferencesOkButton"));
-    QQuickItem *apply = visibleNamed(window, QStringLiteral("preferencesApplyButton"));
-    QQuickItem *cancel = visibleNamed(window, QStringLiteral("preferencesCancelButton"));
+    QQuickItem *defaults = visibleNamed(prefs, QStringLiteral("preferencesDefaultsButton"));
+    QQuickItem *ok = visibleNamed(prefs, QStringLiteral("preferencesOkButton"));
+    QQuickItem *apply = visibleNamed(prefs, QStringLiteral("preferencesApplyButton"));
+    QQuickItem *cancel = visibleNamed(prefs, QStringLiteral("preferencesCancelButton"));
     QVERIFY(defaults != nullptr && ok != nullptr && apply != nullptr && cancel != nullptr);
     QVERIFY(sceneRect(defaults).right() < sceneRect(ok).left());
     QVERIFY(sceneRect(ok).right() < sceneRect(apply).left());
@@ -487,7 +613,7 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     // OK is the default button.
     QVERIFY(evaluate(ok, QStringLiteral("Accessible.defaultButton")).toBool());
     QVERIFY(!apply->property("enabled").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
@@ -498,25 +624,27 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *dialog = openPreferences(window);
     QVERIFY(dialog != nullptr);
-    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(list != nullptr);
     // Keyboard users start on the page list.
     QTRY_VERIFY(list->hasActiveFocus());
     QQuickItem *stack = nullptr;
-    QTRY_VERIFY((stack = visibleNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
-    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 1);
-    QTest::keyClick(window, Qt::Key_Down);
+    QTest::keyClick(prefs, Qt::Key_Down);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 2);
-    QTest::keyClick(window, Qt::Key_Up);
+    QTest::keyClick(prefs, Qt::Key_Up);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 1);
     // Ctrl+Tab and Ctrl+Page Up and Down move between the pages too, and
     // wrap around.
-    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_Tab, Qt::ControlModifier);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 2);
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTRY_COMPARE(stack->property("currentIndex").toInt(), 4);
 
     // From the list, Tab reaches each page's controls, then the buttons, and
@@ -533,23 +661,23 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     for (const auto &[page, name] : controls) {
         QVERIFY(dialog->setProperty("pageIndex", page));
         list->forceActiveFocus(Qt::TabFocusReason);
-        QQuickItem *control = visibleNamed(window, name);
+        QQuickItem *control = visibleNamed(prefs, name);
         QVERIFY2(control != nullptr, qPrintable(name));
-        QVERIFY2(tabTo(window, control), qPrintable(QStringLiteral("Tab did not reach %1").arg(name)));
+        QVERIFY2(tabTo(prefs, control), qPrintable(QStringLiteral("Tab did not reach %1").arg(name)));
     }
-    QQuickItem *box = visibleNamed(window, QStringLiteral("systemMediaControlsCheckBox"));
+    QQuickItem *box = visibleNamed(prefs, QStringLiteral("systemMediaControlsCheckBox"));
     const bool before = box->property("checked").toBool();
-    QTest::keyClick(window, Qt::Key_Space);
+    QTest::keyClick(prefs, Qt::Key_Space);
     QTRY_COMPARE(box->property("checked").toBool(), !before);
     for (const char *button : {"preferencesDefaultsButton", "preferencesOkButton", "preferencesApplyButton",
                                "preferencesCancelButton"}) {
-        QQuickItem *item = visibleNamed(window, QString::fromLatin1(button));
+        QQuickItem *item = visibleNamed(prefs, QString::fromLatin1(button));
         QVERIFY(item != nullptr);
-        QVERIFY2(tabTo(window, item), button);
+        QVERIFY2(tabTo(prefs, item), button);
     }
     // Back with Shift+Tab to the list.
-    QVERIFY(tabTo(window, list, 60, Qt::ShiftModifier));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QVERIFY(tabTo(prefs, list, 60, Qt::ShiftModifier));
+    QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     // Escape is Cancel: the change was not applied.
     QCOMPARE(bridgeOf(window)->property("systemMediaControlsEnabled").toBool(), before);
@@ -564,34 +692,36 @@ void UiDialogsTest::configureAppliesOnOkOrApplyAndCancelDropsTheChanges() {
     QVERIFY(bridge->setProperty("libraryWatchEnabled", true));
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *watch = nullptr;
-    QTRY_VERIFY((watch = visibleNamed(window, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
-    QQuickItem *apply = visibleNamed(window, QStringLiteral("preferencesApplyButton"));
+    QTRY_VERIFY((watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
+    QQuickItem *apply = visibleNamed(prefs, QStringLiteral("preferencesApplyButton"));
     QVERIFY(watch->property("checked").toBool());
 
     // A change waits for Apply.
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(!watch->property("checked").toBool());
     QVERIFY(bridge->property("libraryWatchEnabled").toBool());
     QVERIFY(dialog->property("modified").toBool());
     QVERIFY(apply->property("enabled").toBool());
     // Changed back, there is nothing to apply.
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(watch->property("checked").toBool());
     QVERIFY(!dialog->property("modified").toBool());
     QVERIFY(!apply->property("enabled").toBool());
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(!watch->property("checked").toBool());
-    click(window, apply);
+    click(prefs, apply);
     QTRY_VERIFY(!bridge->property("libraryWatchEnabled").toBool());
     QVERIFY(dialog->property("opened").toBool());
     QVERIFY(!watch->property("checked").toBool());
     QVERIFY(!apply->property("enabled").toBool());
 
     // Cancel drops what was changed since.
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(watch->property("checked").toBool());
-    click(window, visibleNamed(window, QStringLiteral("preferencesCancelButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesCancelButton")));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(!bridge->property("libraryWatchEnabled").toBool());
     // Opened again, it shows the setting as it is.
@@ -602,11 +732,11 @@ void UiDialogsTest::configureAppliesOnOkOrApplyAndCancelDropsTheChanges() {
     // OK applies and closes. A setting changed outside the dialog shows in
     // it while it has no change of its own.
     QVERIFY(bridge->setProperty("librarySortMode", 1));
-    QQuickItem *sort = visibleNamed(window, QStringLiteral("librarySortComboBox"));
+    QQuickItem *sort = visibleNamed(prefs, QStringLiteral("librarySortComboBox"));
     QTRY_COMPARE(sort->property("currentIndex").toInt(), 1);
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(watch->property("checked").toBool());
-    click(window, visibleNamed(window, QStringLiteral("preferencesOkButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(bridge->property("libraryWatchEnabled").toBool());
     QCOMPARE(bridge->property("librarySortMode").toInt(), 1);
@@ -630,9 +760,11 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     }
     QObject *dialog = openPreferences(window, 1);
     QVERIFY(dialog != nullptr);
-    QQuickItem *defaultsButton = visibleNamed(window, QStringLiteral("preferencesDefaultsButton"));
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *defaultsButton = visibleNamed(prefs, QStringLiteral("preferencesDefaultsButton"));
     QTRY_VERIFY(!defaultsButton->property("enabled").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
 
     // Away from them, Defaults sets every page back, on every page, to be
@@ -644,12 +776,12 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     QVERIFY(bridge->setProperty("stretchShortTracks", false));
     QVERIFY(openPreferences(window, 1) != nullptr);
     QTRY_VERIFY(defaultsButton->property("enabled").toBool());
-    QQuickItem *logScale = visibleNamed(window, QStringLiteral("spectrogramLogScaleCheckBox"));
-    QQuickItem *slider = visibleNamed(window, QStringLiteral("dbRangeSlider"));
+    QQuickItem *logScale = visibleNamed(prefs, QStringLiteral("spectrogramLogScaleCheckBox"));
+    QQuickItem *slider = visibleNamed(prefs, QStringLiteral("dbRangeSlider"));
     QVERIFY(logScale != nullptr && slider != nullptr);
     QVERIFY(logScale->property("checked").toBool());
     QCOMPARE(slider->property("value").toDouble(), 90.0);
-    click(window, defaultsButton);
+    click(prefs, defaultsButton);
     QTRY_VERIFY(!logScale->property("checked").toBool());
     QCOMPARE(slider->property("value").toDouble(), 132.0);
     QCOMPARE(pendingValue(dialog, QStringLiteral("libraryWatchEnabled")).toBool(), true);
@@ -657,7 +789,7 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     // Nothing is applied yet.
     QVERIFY(bridge->property("logScale").toBool());
     QCOMPARE(bridge->property("dbRange").toDouble(), 90.0);
-    click(window, visibleNamed(window, QStringLiteral("preferencesOkButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(!bridge->property("logScale").toBool());
     QCOMPARE(bridge->property("dbRange").toDouble(), 132.0);
@@ -678,24 +810,26 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
     // From the page list: OK applies and closes.
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
-    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QTRY_VERIFY(list->hasActiveFocus());
     QQuickItem *watch = nullptr;
-    QTRY_VERIFY((watch = visibleNamed(window, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
-    click(window, watch);
+    QTRY_VERIFY((watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))) != nullptr);
+    click(prefs, watch);
     QTRY_VERIFY(!watch->property("checked").toBool());
     list->forceActiveFocus(Qt::TabFocusReason);
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(prefs, Qt::Key_Return);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(!bridge->property("libraryWatchEnabled").toBool());
 
     // From a check box, with the keypad's Enter.
     QVERIFY(openPreferences(window, 0) != nullptr);
     QTRY_VERIFY(watch->isVisible());
-    QVERIFY(tabTo(window, watch));
-    QTest::keyClick(window, Qt::Key_Space);
+    QVERIFY(tabTo(prefs, watch));
+    QTest::keyClick(prefs, Qt::Key_Space);
     QTRY_VERIFY(watch->property("checked").toBool());
-    QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+    QTest::keyClick(prefs, Qt::Key_Enter, Qt::KeypadModifier);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(bridge->property("libraryWatchEnabled").toBool());
 
@@ -703,16 +837,16 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
     // leaves Configure open, and Escape closes only the list.
     QVERIFY(openPreferences(window, 0) != nullptr);
     QQuickItem *sort = nullptr;
-    QTRY_VERIFY((sort = visibleNamed(window, QStringLiteral("librarySortComboBox"))) != nullptr);
-    QVERIFY(tabTo(window, sort));
-    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY((sort = visibleNamed(prefs, QStringLiteral("librarySortComboBox"))) != nullptr);
+    QVERIFY(tabTo(prefs, sort));
+    QTest::keyClick(prefs, Qt::Key_Space);
     QObject *sortPopup = qvariant_cast<QObject *>(sort->property("popup"));
     QTRY_VERIFY(sortPopup->property("opened").toBool());
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(prefs, Qt::Key_Return);
     QCoreApplication::processEvents();
     QVERIFY(dialog->property("visible").toBool());
     if (sortPopup->property("visible").toBool()) {
-        QTest::keyClick(window, Qt::Key_Escape);
+        QTest::keyClick(prefs, Qt::Key_Escape);
         QTRY_VERIFY(!sortPopup->property("visible").toBool());
     }
     QVERIFY(dialog->property("visible").toBool());
@@ -723,7 +857,7 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
     QTRY_VERIFY(sort->hasActiveFocus());
     QVERIFY(!sortPopup->property("visible").toBool());
     QCOMPARE(bridge->property("librarySortMode").toInt(), 0);
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(prefs, Qt::Key_Return);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QCOMPARE(bridge->property("librarySortMode").toInt(), 1);
     // So does every combo box of the pages.
@@ -733,20 +867,20 @@ void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
              {2, QStringLiteral("viewerFullscreenComboBox")}}) {
         QVERIFY(openPreferences(window, page) != nullptr);
         QQuickItem *combo = nullptr;
-        QTRY_VERIFY2((combo = visibleNamed(window, name)) != nullptr, qPrintable(name));
+        QTRY_VERIFY2((combo = visibleNamed(prefs, name)) != nullptr, qPrintable(name));
         combo->forceActiveFocus(Qt::TabFocusReason);
-        QTest::keyClick(window, Qt::Key_Enter, Qt::KeypadModifier);
+        QTest::keyClick(prefs, Qt::Key_Enter, Qt::KeypadModifier);
         QTRY_VERIFY2(!dialog->property("visible").toBool(), qPrintable(name));
     }
 
     // On Cancel, Enter presses Cancel.
     QVERIFY(openPreferences(window, 0) != nullptr);
     QTRY_VERIFY(watch->isVisible());
-    click(window, watch);
+    click(prefs, watch);
     QTRY_VERIFY(!watch->property("checked").toBool());
-    QQuickItem *cancel = visibleNamed(window, QStringLiteral("preferencesCancelButton"));
-    QVERIFY(tabTo(window, cancel));
-    QTest::keyClick(window, Qt::Key_Return);
+    QQuickItem *cancel = visibleNamed(prefs, QStringLiteral("preferencesCancelButton"));
+    QVERIFY(tabTo(prefs, cancel));
+    QTest::keyClick(prefs, Qt::Key_Return);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(bridge->property("libraryWatchEnabled").toBool());
 }
@@ -823,7 +957,9 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     QVERIFY(bridge->setProperty("viewerFullscreenMode", 1));
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
-    QTRY_VERIFY(visibleNamed(window, QStringLiteral("preferencesPages")) != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
+    QTRY_VERIFY(visibleNamed(prefs, QStringLiteral("preferencesPages")) != nullptr);
 
     struct Check { int page; const char *control; const char *property; };
     const QList<Check> checks{
@@ -846,11 +982,11 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     for (const Check &check : checks) {
         QVERIFY(dialog->setProperty("pageIndex", check.page));
         QQuickItem *box = nullptr;
-        QTRY_VERIFY2((box = visibleNamed(window, QString::fromLatin1(check.control))) != nullptr, check.control);
+        QTRY_VERIFY2((box = visibleNamed(prefs, QString::fromLatin1(check.control))) != nullptr, check.control);
         const bool before = bridge->property(check.property).toBool();
         // By the keyboard: a long page may have the box scrolled out of view.
         box->forceActiveFocus(Qt::TabFocusReason);
-        QTest::keyClick(window, Qt::Key_Space);
+        QTest::keyClick(prefs, Qt::Key_Space);
         QTRY_VERIFY2(box->property("checked").toBool() == !before,
                      qPrintable(QStringLiteral("%1 at %2,%3").arg(QString::fromLatin1(check.control))
                                     .arg(sceneRect(box).x()).arg(sceneRect(box).y())));
@@ -870,19 +1006,19 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
     for (const Choice &choice : choices) {
         QVERIFY(dialog->setProperty("pageIndex", choice.page));
         QQuickItem *combo = nullptr;
-        QTRY_VERIFY2((combo = visibleNamed(window, QString::fromLatin1(choice.control))) != nullptr, choice.control);
+        QTRY_VERIFY2((combo = visibleNamed(prefs, QString::fromLatin1(choice.control))) != nullptr, choice.control);
         QVERIFY(combo->setProperty("currentIndex", choice.index));
         QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, choice.index)));
         QVERIFY(bridge->property(choice.property) != choice.value);
     }
     QVERIFY(dialog->setProperty("pageIndex", 1));
-    QQuickItem *slider = visibleNamed(window, QStringLiteral("dbRangeSlider"));
+    QQuickItem *slider = visibleNamed(prefs, QStringLiteral("dbRangeSlider"));
     QVERIFY(slider->setProperty("value", 145.0));
     QVERIFY(QMetaObject::invokeMethod(slider, "moved"));
-    QCOMPARE(visibleNamed(window, QStringLiteral("dbRangeValueLabel"))->property("text").toString(),
+    QCOMPARE(visibleNamed(prefs, QStringLiteral("dbRangeValueLabel"))->property("text").toString(),
              QStringLiteral("145 dB"));
 
-    click(window, visibleNamed(window, QStringLiteral("preferencesOkButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     for (auto it = expected.cbegin(); it != expected.cend(); ++it) {
         QVERIFY2(bridge->property(qPrintable(it.key())).toBool() == it.value(), qPrintable(it.key()));
@@ -903,20 +1039,22 @@ void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
     QVERIFY(bridge->property("showFullscreenTitleStrip").toBool());
     QObject *dialog = openPreferences(window, 2);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *box = nullptr;
-    QTRY_VERIFY((box = visibleNamed(window, QStringLiteral("showFullscreenTitleStripCheckBox"))) != nullptr);
+    QTRY_VERIFY((box = visibleNamed(prefs, QStringLiteral("showFullscreenTitleStripCheckBox"))) != nullptr);
     QCOMPARE(box->property("text").toString(), QStringLiteral("Show the title strip when the pointer moves"));
     QVERIFY(box->property("checked").toBool());
     // Fill the window: viewers in the window have corner buttons, no strip.
     QVERIFY(!box->isEnabled());
 
     // Fill the screen, chosen and not yet applied, enables it.
-    QQuickItem *combo = visibleNamed(window, QStringLiteral("viewerFullscreenComboBox"));
+    QQuickItem *combo = visibleNamed(prefs, QStringLiteral("viewerFullscreenComboBox"));
     QVERIFY(combo != nullptr);
     QVERIFY(combo->setProperty("currentIndex", 1));
     QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 1)));
     QTRY_VERIFY(box->isEnabled());
-    click(window, box);
+    click(prefs, box);
     QTRY_VERIFY(!box->property("checked").toBool());
     QVERIFY(bridge->property("showFullscreenTitleStrip").toBool());
 
@@ -928,7 +1066,7 @@ void UiDialogsTest::titleStripSettingIsOnlyForTheWholeScreen() {
     QVERIFY(QMetaObject::invokeMethod(combo, "activated", Q_ARG(int, 1)));
     QTRY_VERIFY(box->isEnabled());
 
-    click(window, visibleNamed(window, QStringLiteral("preferencesOkButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("preferencesOkButton")));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QVERIFY(!bridge->property("showFullscreenTitleStrip").toBool());
     QCOMPARE(bridge->property("viewerFullscreenMode").toInt(), 1);
@@ -941,14 +1079,16 @@ void UiDialogsTest::configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange(
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *help = nullptr;
-    QTRY_VERIFY((help = visibleNamed(window, QStringLiteral("libraryWatchHelp"))) != nullptr);
+    QTRY_VERIFY((help = visibleNamed(prefs, QStringLiteral("libraryWatchHelp"))) != nullptr);
     // The secondary colour, not the disabled one, in the base font.
     QCOMPARE(hex(help->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
     QCOMPARE(help->property("font").value<QFont>().pointSizeF(),
              paletteOf(window)->property("basePointSize").toReal());
     // Under the check box's text, not its indicator.
-    QQuickItem *watch = visibleNamed(window, QStringLiteral("libraryWatchCheckBox"));
+    QQuickItem *watch = visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"));
     QQuickItem *helpLabel = itemsNamed(help, QStringLiteral("formHelpTextLabel")).value(0);
     QVERIFY(helpLabel != nullptr);
     QCOMPARE(sceneRect(helpLabel).left(),
@@ -957,10 +1097,37 @@ void UiDialogsTest::configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange(
     QCOMPARE(helpLabel->property("wrapMode").toInt(), 4);
     QQuickItem *slider = nullptr;
     QVERIFY(dialog->setProperty("pageIndex", 1));
-    QTRY_VERIFY((slider = visibleNamed(window, QStringLiteral("dbRangeSlider"))) != nullptr);
+    QTRY_VERIFY((slider = visibleNamed(prefs, QStringLiteral("dbRangeSlider"))) != nullptr);
     // The backend keeps 50 to 150 dB; the slider offers the same.
     QCOMPARE(slider->property("from").toDouble(), 50.0);
     QCOMPARE(slider->property("to").toDouble(), 150.0);
+}
+
+// Configure Ferrous lays its pages out for the room its window has: the
+// labels beside the fields at its default size, above them in a page too
+// narrow for both, and nothing runs past a page's edge either way. Its
+// window is never narrower than its widest field needs.
+void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
+    checkPreferencesPages(dialog, prefs, stack, QStringLiteral("default size"));
+    QVERIFY(!QTest::currentTestFailed());
+
+    prefs->resize(prefs->minimumWidth(), prefs->height());
+    QTRY_COMPARE(prefs->width(), prefs->minimumWidth());
+    QTRY_VERIFY(formModes(dialog, stack).contains(false));
+    checkPreferencesPages(dialog, prefs, stack, QStringLiteral("narrowest"));
+    QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
 }
 
 void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
@@ -979,24 +1146,26 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     }));
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *list = nullptr;
-    QTRY_VERIFY((list = visibleNamed(window, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
     QTRY_COMPARE(itemsNamed(list, QStringLiteral("libraryRootRow")).size(), 2);
     QQuickItem *second = itemsNamed(list, QStringLiteral("libraryRootRow")).at(1);
     QVERIFY(itemsNamed(second, QStringLiteral("libraryRootUnwatchedLabel")).at(0)->isVisible());
     QVERIFY(!itemsNamed(itemsNamed(list, QStringLiteral("libraryRootRow")).at(0),
                         QStringLiteral("libraryRootUnwatchedLabel")).at(0)->isVisible());
     // The folders change at once, and the buttons act on the selected one.
-    click(window, second);
+    click(prefs, second);
     QTRY_COMPARE(list->property("currentIndex").toInt(), 1);
     QTRY_VERIFY(list->hasActiveFocus());
-    click(window, visibleNamed(window, QStringLiteral("libraryRootRemoveButton")));
+    click(prefs, visibleNamed(prefs, QStringLiteral("libraryRootRemoveButton")));
     QObject *confirm = object(window, QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
     QTRY_VERIFY(confirm->property("opened").toBool());
     QVERIFY(confirm->property("message").toString().contains(QStringLiteral("/mnt/archive/flac")));
     QVERIFY(confirm->property("details").toString().contains(QStringLiteral("38 tracks")));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(dialog->property("opened").toBool());
     // Nothing waits for Apply.
@@ -1012,11 +1181,13 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QObject *dialog = openPreferences(window, 3);
     QVERIFY(dialog != nullptr);
+    // Configure Ferrous has a window of its own.
+    QQuickWindow *prefs = windowOf(dialog);
     const auto shownButtons = [&]() {
         QStringList shown;
         for (const char *name : {"lastFmConnectButton", "lastFmCompleteButton", "lastFmReconnectButton",
                                  "lastFmDisconnectButton"}) {
-            QQuickItem *button = named(window, QString::fromLatin1(name));
+            QQuickItem *button = named(prefs, QString::fromLatin1(name));
             if (button != nullptr && button->isVisible()) {
                 shown.push_back(QString::fromLatin1(name));
             }
@@ -1024,7 +1195,7 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
         return shown;
     };
     QTRY_COMPARE(shownButtons(), QStringList{QStringLiteral("lastFmConnectButton")});
-    QVERIFY(!visibleNamed(window, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
+    QVERIFY(!visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
     QVERIFY(bridge->setProperty("lastFmAuthState", 1));
     QTRY_COMPARE(shownButtons(), (QStringList{QStringLiteral("lastFmCompleteButton"),
                                               QStringLiteral("lastFmDisconnectButton")}));
@@ -1032,8 +1203,8 @@ void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
     QTRY_COMPARE(shownButtons(), (QStringList{QStringLiteral("lastFmReconnectButton"),
                                               QStringLiteral("lastFmDisconnectButton")}));
-    QVERIFY(visibleNamed(window, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
-    QCOMPARE(visibleNamed(window, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
+    QVERIFY(visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox")));
+    QCOMPARE(visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))->property("text").toString(),
              QStringLiteral("Connected as listener"));
 }
 
@@ -1045,35 +1216,37 @@ void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
     QObject *dialog = object(window, QStringLiteral("aboutDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
-    QTRY_VERIFY(dialog->property("opened").toBool());
-    QQuickItem *icon = visibleNamed(window, QStringLiteral("aboutIcon"));
+    QVERIFY(waitForDialogWindow(dialog));
+    // About has a window of its own.
+    QQuickWindow *about = windowOf(dialog);
+    QQuickItem *icon = visibleNamed(about, QStringLiteral("aboutIcon"));
     QVERIFY(icon != nullptr);
     QCOMPARE(icon->property("source").toString(), QStringLiteral("qrc:/icons/hicolor/48x48/apps/ferrous.svg"));
     QTRY_VERIFY(icon->property("valid").toBool());
     QCOMPARE(icon->width(), 48.0);
-    QCOMPARE(visibleNamed(window, QStringLiteral("aboutName"))->property("text").toString(), QStringLiteral("Ferrous"));
-    QCOMPARE(visibleNamed(window, QStringLiteral("aboutVersion"))->property("text").toString(),
+    QCOMPARE(visibleNamed(about, QStringLiteral("aboutName"))->property("text").toString(), QStringLiteral("Ferrous"));
+    QCOMPARE(visibleNamed(about, QStringLiteral("aboutVersion"))->property("text").toString(),
              QStringLiteral("Version 0.3.0"));
-    QVERIFY(visibleNamed(window, QStringLiteral("aboutHomepageLink")) != nullptr);
-    QVERIFY(visibleNamed(window, QStringLiteral("aboutBugReportLink")) != nullptr);
-    QQuickItem *tabs = visibleNamed(window, QStringLiteral("aboutTabs"));
+    QVERIFY(visibleNamed(about, QStringLiteral("aboutHomepageLink")) != nullptr);
+    QVERIFY(visibleNamed(about, QStringLiteral("aboutBugReportLink")) != nullptr);
+    QQuickItem *tabs = visibleNamed(about, QStringLiteral("aboutTabs"));
     QVERIFY(tabs != nullptr);
     QCOMPARE(tabs->property("count").toInt(), 4);
     QTRY_VERIFY(qvariant_cast<QQuickItem *>(tabs->property("currentItem"))->hasActiveFocus());
-    QQuickItem *pages = visibleNamed(window, QStringLiteral("aboutPages"));
-    QTest::keyClick(window, Qt::Key_Right);
+    QQuickItem *pages = visibleNamed(about, QStringLiteral("aboutPages"));
+    QTest::keyClick(about, Qt::Key_Right);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 1);
 
     // Copy and Close: on the left and the right of the button row.
-    QQuickItem *copy = visibleNamed(window, QStringLiteral("aboutCopyVersionButton"));
-    QQuickItem *close = visibleNamed(window, QStringLiteral("aboutCloseButton"));
+    QQuickItem *copy = visibleNamed(about, QStringLiteral("aboutCopyVersionButton"));
+    QQuickItem *close = visibleNamed(about, QStringLiteral("aboutCloseButton"));
     QVERIFY(copy != nullptr && close != nullptr);
     QVERIFY(sceneRect(copy).right() < sceneRect(close).left());
     QGuiApplication::clipboard()->clear();
-    click(window, copy);
+    click(about, copy);
     QTRY_VERIFY(QGuiApplication::clipboard()->text().startsWith(QStringLiteral("Ferrous 0.3.0\n")));
     QVERIFY(QGuiApplication::clipboard()->text().contains(QStringLiteral("Qt ")));
-    click(window, close);
+    click(about, close);
     QTRY_VERIFY(!dialog->property("visible").toBool());
 }
 
@@ -1788,7 +1961,7 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
         QVERIFY2(dialog != nullptr, name);
         if (QString::fromLatin1(name) == QStringLiteral("preferencesDialog")) {
             QVERIFY(openPreferences(window) != nullptr);
-            QTRY_VERIFY(visibleNamed(window, QStringLiteral("preferencesPages")) != nullptr);
+            QTRY_VERIFY(visibleNamed(windowOf(dialog), QStringLiteral("preferencesPages")) != nullptr);
         }
         const QStringList dots = textsHolding(dialog, QStringLiteral("..."));
         QVERIFY2(dots.isEmpty(), qPrintable(dots.join(QLatin1Char('\n'))));
@@ -1816,16 +1989,20 @@ QString describeItem(QQuickItem *item) {
         .arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
 }
 
-// The visible items of the popup whose frame is `frame` that lie outside
-// it, or are text cut short; the frame's own drawing aside.
-QStringList itemsCrossing(QQuickItem *popupItem, QQuickItem *frame) {
-    const QRectF bounds = sceneRect(frame);
+// The visible items of `window` that lie outside it, across or also down,
+// or are text cut short.
+QStringList itemsCrossingWindow(QQuickWindow *window, bool acrossOnly) {
+    const QRectF bounds(0, 0, window->width(), window->height());
     QStringList crossing;
     const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
-        if (item == frame || !item->isVisible() || item->opacity() <= 0) {
+        if (!item->isVisible() || item->opacity() <= 0) {
             return;
         }
-        if (item->width() > 0 && item->height() > 0 && !within(sceneRect(item), bounds)) {
+        const QRectF rect = sceneRect(item);
+        const bool outside = acrossOnly
+            ? rect.left() < bounds.left() - 0.5 || rect.right() > bounds.right() + 0.5
+            : !within(rect, bounds);
+        if (item->width() > 0 && item->height() > 0 && outside) {
             crossing << describeItem(item);
         }
         if (item->property("truncated").toBool()) {
@@ -1835,16 +2012,93 @@ QStringList itemsCrossing(QQuickItem *popupItem, QQuickItem *frame) {
             visit(child);
         }
     };
-    visit(popupItem);
+    for (QQuickItem *child : window->contentItem()->childItems()) {
+        visit(child);
+    }
     return crossing;
+}
+
+// Every page of Configure Ferrous, `preferences` in `prefs`, holds its
+// contents across: nothing runs past the page's visible width, in the
+// form's wide layout or its narrow one; help texts wrap to the fields'
+// column, the dynamic range keeps its value in view, and the page scrolls
+// only down. The page list's titles and the pages' titles are whole.
+void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size) {
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
+    QVERIFY(list != nullptr);
+    for (int page = 0; page < 5; ++page) {
+        const QString at = QStringLiteral("%1, page %2").arg(size).arg(page);
+        preferences->setProperty("pageIndex", page);
+        QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
+        QQuickItem *pageItem = stack->childItems().at(page);
+        // Laid out for the window's width.
+        QTRY_VERIFY2(!layoutPending(pageItem), qPrintable(at));
+        QTest::qWait(50);
+        for (QQuickItem *row : itemsNamed(list, QStringLiteral("preferencesPage_%1").arg(page))) {
+            for (QQuickItem *label : itemsNamed(row, QString())) {
+                QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
+            }
+        }
+        QQuickItem *title = itemsNamed(pageItem, QStringLiteral("preferencesPageTitle")).value(0);
+        QVERIFY(title != nullptr);
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(describeItem(title)));
+        const qreal pageRight = sceneRect(pageItem).left() + pageItem->property("leftPadding").toReal()
+            + pageItem->property("availableWidth").toReal();
+        const std::function<void(QQuickItem *)> checkWidth = [&](QQuickItem *item) {
+            if (!item->isVisible() || item->opacity() <= 0) {
+                return;
+            }
+            if (item->width() > 0) {
+                QVERIFY2(sceneRect(item).right() <= pageRight + 0.5,
+                         qPrintable(QStringLiteral("%1 ends at %2: ").arg(at).arg(pageRight)
+                                    + describeItem(item)));
+            }
+            if (item->objectName().endsWith(QStringLiteral("ComboBox"))) {
+                QVERIFY2(item->width() >= item->implicitWidth() - 0.5, qPrintable(describeItem(item)));
+            }
+            if (item->objectName() == QStringLiteral("formHelpTextLabel")) {
+                // Wrapped, not cut short: Text.Wrap.
+                QCOMPARE(item->property("wrapMode").toInt(), 4);
+                QVERIFY2(!item->property("truncated").toBool(), qPrintable(describeItem(item)));
+            }
+            for (QQuickItem *child : item->childItems()) {
+                checkWidth(child);
+            }
+        };
+        for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
+            checkWidth(form);
+        }
+        if (page == 1) {
+            QQuickItem *value = visibleNamed(prefs, QStringLiteral("dbRangeValueLabel"));
+            QQuickItem *slider = visibleNamed(prefs, QStringLiteral("dbRangeSlider"));
+            QVERIFY2(value != nullptr && slider != nullptr, qPrintable(at));
+            QVERIFY2(value->width() >= value->implicitWidth() - 0.5, qPrintable(describeItem(value)));
+            QVERIFY2(sceneRect(slider).right() <= sceneRect(value).left(), qPrintable(at));
+            QVERIFY2(sceneRect(value).right() <= pageRight + 0.5, qPrintable(describeItem(value)));
+        }
+    }
+}
+
+// Whether each page of Configure Ferrous has its labels beside its fields.
+QList<bool> formModes(QObject *preferences, QQuickItem *stack) {
+    QList<bool> modes;
+    for (int page = 0; page < 5; ++page) {
+        preferences->setProperty("pageIndex", page);
+        QQuickItem *pageItem = stack->childItems().at(page);
+        for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
+            modes.push_back(form->property("wideMode").toBool());
+        }
+    }
+    return modes;
 }
 
 } // namespace
 
 // At 24 pt, About, Configure and Edit Tags hold their contents: no tab,
 // text or button crosses a dialog's edge or is cut short, Configure's page
-// list and combo boxes fit their words, and Edit Tags' fields show about 16
-// characters, with the table taking the rest.
+// list and combo boxes fit their words, its pages fit across at any width
+// of its window, and Edit Tags' fields show about 16 characters, with the
+// table taking the rest.
 void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -1861,19 +2115,18 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 24.0);
 
-    // About, on each of its tabs.
+    // About, on each of its tabs: nothing crosses its window's edges.
     QObject *about = object(window, QStringLiteral("aboutDialog"));
     QVERIFY(about != nullptr);
     QVERIFY(QMetaObject::invokeMethod(about, "open"));
-    QTRY_VERIFY(about->property("opened").toBool());
-    auto *aboutFrame = qvariant_cast<QQuickItem *>(about->property("background"));
-    QVERIFY(aboutFrame != nullptr);
-    QQuickItem *aboutTabs = visibleNamed(window, QStringLiteral("aboutTabs"));
+    QVERIFY(waitForDialogWindow(about));
+    QQuickWindow *aboutWindow = windowOf(about);
+    QQuickItem *aboutTabs = visibleNamed(aboutWindow, QStringLiteral("aboutTabs"));
     QVERIFY(aboutTabs != nullptr);
     for (int tab = 0; tab < 4; ++tab) {
         about->setProperty("tabIndex", tab);
         QTest::qWait(50);
-        const QStringList crossing = itemsCrossing(aboutFrame->parentItem(), aboutFrame);
+        const QStringList crossing = itemsCrossingWindow(aboutWindow, false);
         QVERIFY2(crossing.isEmpty(), qPrintable(QStringLiteral("tab %1:\n").arg(tab) + crossing.join(QLatin1Char('\n'))));
     }
     // Every tab whole, side by side.
@@ -1883,7 +2136,8 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QVERIFY(tab != nullptr);
         QVERIFY2(within(sceneRect(tab), sceneRect(aboutTabs)), qPrintable(describeItem(tab)));
     }
-    QVERIFY(within(sceneRect(visibleNamed(window, QStringLiteral("aboutCloseButton"))), sceneRect(aboutFrame)));
+    QVERIFY(within(sceneRect(visibleNamed(aboutWindow, QStringLiteral("aboutCloseButton"))),
+                   QRectF(0, 0, aboutWindow->width(), aboutWindow->height())));
     QMetaObject::invokeMethod(about, "close");
     QTRY_VERIFY(!about->property("visible").toBool());
 
@@ -1891,62 +2145,24 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     // longest title, and every combo box as wide as its longest option.
     QObject *preferences = openPreferences(window);
     QVERIFY(preferences != nullptr);
-    auto *preferencesFrame = qvariant_cast<QQuickItem *>(preferences->property("background"));
-    QQuickItem *list = visibleNamed(window, QStringLiteral("preferencesPageList"));
-    QVERIFY(preferencesFrame != nullptr && list != nullptr);
+    QQuickWindow *prefs = windowOf(preferences);
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
+    QVERIFY(list != nullptr);
     QVERIFY(list->width() > 176.0);
     QQuickItem *stack = nullptr;
-    QTRY_VERIFY((stack = visibleNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
-    for (int page = 0; page < 5; ++page) {
-        preferences->setProperty("pageIndex", page);
-        QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
-        QTest::qWait(50);
-        QQuickItem *pageItem = stack->childItems().at(page);
-        for (QQuickItem *row : itemsNamed(list, QStringLiteral("preferencesPage_%1").arg(page))) {
-            for (QQuickItem *label : itemsNamed(row, QString())) {
-                QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
-            }
-        }
-        const std::function<void(QQuickItem *)> checkCombos = [&](QQuickItem *item) {
-            if (item->isVisible() && item->objectName().endsWith(QStringLiteral("ComboBox"))) {
-                QVERIFY2(item->width() >= item->implicitWidth() - 0.5, qPrintable(describeItem(item)));
-                // A page taller than the window scrolls; across, nothing
-                // may cross the dialog's edge.
-                QVERIFY2(sceneRect(item).right() <= sceneRect(preferencesFrame).right() + 0.5,
-                         qPrintable(describeItem(item)));
-            }
-            for (QQuickItem *child : item->childItems()) {
-                checkCombos(child);
-            }
-        };
-        checkCombos(pageItem);
-        QQuickItem *title = itemsNamed(pageItem, QStringLiteral("preferencesPageTitle")).value(0);
-        QVERIFY(title != nullptr);
-        QVERIFY2(!title->property("truncated").toBool(), qPrintable(describeItem(title)));
-        // Nothing in a form in its wide layout runs past the page's visible
-        // width. (Kirigami's narrow layout caps its column at 32 grid
-        // units, which don't follow the application's font here.)
-        const qreal pageRight = sceneRect(pageItem).left() + pageItem->property("leftPadding").toReal()
-            + pageItem->property("availableWidth").toReal();
-        const std::function<void(QQuickItem *)> checkWidth = [&](QQuickItem *item) {
-            if (!item->isVisible()) {
-                return;
-            }
-            if (item->width() > 0) {
-                QVERIFY2(sceneRect(item).right() <= pageRight + 0.5,
-                         qPrintable(QStringLiteral("page %1 ends at %2: ").arg(page).arg(pageRight)
-                                    + describeItem(item)));
-            }
-            for (QQuickItem *child : item->childItems()) {
-                checkWidth(child);
-            }
-        };
-        for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
-            if (form->property("wideMode").toBool()) {
-                checkWidth(form);
-            }
-        }
-    }
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    // It opens wide enough for every page's labels beside its fields.
+    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
+    checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, default size"));
+    QVERIFY(!QTest::currentTestFailed());
+    // In a larger window too. (Narrower, Kirigami's narrow layout caps its
+    // column at 32 grid units, which in a test do not follow the font as
+    // they do on the desktop; configureFitsItsPagesAtAnyWidth checks it.)
+    prefs->resize(2200, prefs->height());
+    QTRY_COMPARE(prefs->width(), 2200);
+    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
+    checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, wide"));
+    QVERIFY(!QTest::currentTestFailed());
     QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
     QTRY_VERIFY(!preferences->property("visible").toBool());
 
@@ -1993,6 +2209,19 @@ int main(int argc, char **argv) {
     qputenv("XDG_CONFIG_DIRS", QFile::encodeName(fixtures.filePath(QStringLiteral("config-dirs"))));
     qputenv("XDG_DATA_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("data"))));
     qputenv("XDG_CACHE_HOME", QFile::encodeName(fixtures.filePath(QStringLiteral("cache"))));
+    // A desktop's screen, rather than the offscreen platform's 800 × 600:
+    // the dialogs in windows of their own size themselves within it.
+    if (qgetenv("QT_QPA_PLATFORM") == QByteArrayLiteral("offscreen")) {
+        const QString screens = fixtures.filePath(QStringLiteral("offscreen-screens.json"));
+        QFile file(screens);
+        if (!file.open(QIODevice::WriteOnly)
+            || file.write(R"({"screens": [{"name": "Desktop", "x": 0, "y": 0, "width": 2560, "height": 1600,
+                "logicalDpi": 96, "logicalBaseDpi": 96, "dpr": 1}]})") < 0) {
+            return 1;
+        }
+        file.close();
+        qputenv("QT_QPA_PLATFORM", QFile::encodeName(QStringLiteral("offscreen:configfile=") + screens));
+    }
     QApplication app(argc, argv);
     UiDialogsTest test;
     return QTest::qExec(&test, argc, argv);
