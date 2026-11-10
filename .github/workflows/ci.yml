@@ -267,8 +267,10 @@ jobs:
             echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg/cache"
           } >> "$GITHUB_ENV"
 
+      # Two at a time, half the runner's CPUs, as scripts/run-tests.sh
+      # chooses; each test program has directories of its own.
       - name: Run UI smoke tests
-        run: ctest --test-dir ui/build --output-on-failure -V
+        run: ctest --test-dir ui/build --output-on-failure --parallel 2
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |

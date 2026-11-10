@@ -318,6 +318,17 @@ install(FILES io.github.tiaxi.ferrous.metainfo.xml DESTINATION share/metainfo CO
 
 if(BUILD_TESTING)
     find_package(Qt6 6.6 REQUIRED COMPONENTS Test QuickTest)
+    find_program(FERROUS_BASH bash REQUIRED)
+
+    # Each test program runs with a temporary directory and XDG config, data
+    # and cache directories of its own, so that tests can run in parallel
+    # (ctest -j); tests/own_directories.sh. CMake puts the launcher before the
+    # command of every test that runs a program built here; older CMake
+    # ignores CMAKE_TEST_LAUNCHER, and the tests would share directories.
+    if(CMAKE_VERSION VERSION_LESS 3.29)
+        message(FATAL_ERROR "The tests need CMake 3.29 or newer; configure with -DBUILD_TESTING=OFF to build without them.")
+    endif()
+    set(CMAKE_TEST_LAUNCHER "${FERROUS_BASH};${CMAKE_CURRENT_SOURCE_DIR}/tests/own_directories.sh")
 
     # The line a Qt test prints for a skipped test function, for any test
     # class name.
@@ -365,38 +376,43 @@ if(BUILD_TESTING)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_metainfo_release.cmake"
     )
     # The release workflow runs this check on the pushed tag.
-    find_program(FERROUS_BASH bash)
-    if(FERROUS_BASH)
-        add_test(NAME ferrous_release_version_check
-            COMMAND "${CMAKE_COMMAND}"
-                -DBASH=${FERROUS_BASH}
-                -DCHECK_SCRIPT=${FERROUS_ROOT_DIR}/scripts/check-release-version.sh
-                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-version-check
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_release_version.cmake"
+    add_test(NAME ferrous_release_version_check
+        COMMAND "${CMAKE_COMMAND}"
+            -DBASH=${FERROUS_BASH}
+            -DCHECK_SCRIPT=${FERROUS_ROOT_DIR}/scripts/check-release-version.sh
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/release-version-check
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_release_version.cmake"
+    )
+    add_test(NAME ferrous_release_version_consistent
+        COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/check-release-version.sh"
+            "v${FERROUS_APP_VERSION}"
+    )
+    # Configuring and the scripts read the same [package] version.
+    add_test(NAME ferrous_cargo_package_version
+        COMMAND "${CMAKE_COMMAND}"
+            -DBASH=${FERROUS_BASH}
+            -DSCRIPT=${FERROUS_ROOT_DIR}/scripts/cargo-package-version.sh
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-package-version
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cargo_package_version.cmake"
+    )
+    # The other repository scripts, run on scratch copies and stand-in
+    # commands.
+    foreach(_script_test IN ITEMS
+            bump-version collect-release-assets extract-messages install-rpm
+            run-ui-cleanup stress-tests)
+        add_test(NAME ferrous_script_${_script_test}
+            COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
+                "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
         )
-        add_test(NAME ferrous_release_version_consistent
-            COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/check-release-version.sh"
-                "v${FERROUS_APP_VERSION}"
-        )
-        # Configuring and the scripts read the same [package] version.
-        add_test(NAME ferrous_cargo_package_version
-            COMMAND "${CMAKE_COMMAND}"
-                -DBASH=${FERROUS_BASH}
-                -DSCRIPT=${FERROUS_ROOT_DIR}/scripts/cargo-package-version.sh
-                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-package-version
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_cargo_package_version.cmake"
-        )
-        # The other repository scripts, run on scratch copies and stand-in
-        # commands.
-        foreach(_script_test IN ITEMS
-                bump-version collect-release-assets extract-messages install-rpm
-                run-ui-cleanup stress-tests)
-            add_test(NAME ferrous_script_${_script_test}
-                COMMAND "${FERROUS_BASH}" "${FERROUS_ROOT_DIR}/scripts/tests/${_script_test}-test.sh"
-                    "${CMAKE_CURRENT_BINARY_DIR}/script-tests/${_script_test}"
-            )
-        endforeach()
-    endif()
+    endforeach()
+    add_test(NAME ferrous_test_launcher_own_directories
+        COMMAND "${FERROUS_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/own_directories-test.sh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/own_directories.sh"
+            "${CMAKE_CURRENT_BINARY_DIR}/script-tests/own-directories"
+            "${CMAKE_CURRENT_BINARY_DIR}"
+            "${CMAKE_CTEST_COMMAND}"
+    )
+    set_tests_properties(ferrous_test_launcher_own_directories PROPERTIES TIMEOUT 60)
     find_program(FERROUS_APPSTREAMCLI appstreamcli)
     if(FERROUS_APPSTREAMCLI)
         add_test(NAME ferrous_metainfo_validate
@@ -1445,4 +1461,27 @@ if(BUILD_TESTING)
         PASS_REGULAR_EXPRESSION "could[ \t\r\n]+not[ \t\r\n]+read"
         TIMEOUT 60
     )
+
+    # ctest -j starts the tests of most COST first, so that a run does not
+    # end waiting on a long test that started last. CTest takes the times of
+    # the build directory's last run instead where it has them; these, about
+    # each test's seconds when run alone, are for a first run, as in CI.
+    foreach(test_and_cost IN ITEMS
+            ferrous_qml_smoke_transport_input:80
+            ferrous_ui_motion_tests:60
+            ferrous_qml_smoke_tag_editor:50
+            ferrous_ui_dialogs_tests:40
+            ferrous_qml_smoke_waveform:32
+            ferrous_qml_smoke_errors:32
+            ferrous_qml_smoke_spectrogram:32
+            ferrous_accessibility_tests:20
+            ferrous_bridge_client_tests:14
+            ferrous_ui_menus_tests:13
+            ferrous_qml_smoke_library_queue:13
+            ferrous_qml_smoke_window:11)
+        string(REPLACE ":" ";" test_and_cost "${test_and_cost}")
+        list(GET test_and_cost 0 test)
+        list(GET test_and_cost 1 cost)
+        set_tests_properties(${test} PROPERTIES COST ${cost})
+    endforeach()
 endif()
