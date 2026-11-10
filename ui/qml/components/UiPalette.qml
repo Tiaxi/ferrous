@@ -63,8 +63,12 @@ QtObject {
     readonly property color focusRing: root.themeIsDark
         ? root._withHslLightness(root.accent, 1.03, 0.686)
         : root._withHslLightness(root.accent, 0.89, 0.38)
-    // #3daee9 / #1a74a8: the accent, darkened on light to read as text.
-    readonly property color link: root.themeIsDark ? root.accent : root.focusRing
+    // #3daee9 / #1b73a1: the accent, darkened on light to read as text, and
+    // at least 4.5:1 on both the window colour (dialogs, Recent Issues) and
+    // the view: a theme whose accent falls short on either has the link's
+    // lightness moved away from them until it reaches that.
+    readonly property color link: root.readableOn(root.themeIsDark ? root.accent : root.focusRing,
+                                                  [root.chrome, root.view], 4.5)
     // #ed5a6a / #c4293b: the theme's negative text, lightened on dark and
     // darkened on light for text contrast.
     readonly property color negative: root.themeIsDark
@@ -78,6 +82,40 @@ QtObject {
     readonly property color now: root.themeIsDark ? "#f2b035" : "#955500"
     // The scrim behind the search palette.
     readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.5 : 0.25)
+
+    // The link on `background`, such as a hover tint drawn over the window
+    // colour: the link, darker or lighter where it falls short of 4.5:1 on it.
+    function linkOn(background) {
+        return root.readableOn(root.link, [background], 4.5)
+    }
+
+    // `color`, or, where it is under `ratio` on any of the opaque
+    // `backgrounds`, the nearest HSL lightness of it that reaches it on all
+    // of them: darker on light backgrounds, lighter on dark ones.
+    function readableOn(color, backgrounds, ratio) {
+        const worst = function(candidate) {
+            let lowest = Infinity
+            for (let i = 0; i < backgrounds.length; ++i) {
+                lowest = Math.min(lowest, ColorUtils.contrastRatio(candidate, backgrounds[i]))
+            }
+            return lowest
+        }
+        if (worst(color) >= ratio) {
+            return color
+        }
+        const darker = ColorUtils.relativeLuminance(backgrounds[0]) > 0.18
+        for (let step = 1; step <= 100; ++step) {
+            const lightness = color.hslLightness + (darker ? -step : step) / 100
+            if (lightness < 0 || lightness > 1) {
+                break
+            }
+            const candidate = root._withHslLightness(color, 1, lightness)
+            if (worst(candidate) >= ratio) {
+                return candidate
+            }
+        }
+        return darker ? Qt.rgba(0, 0, 0, 1) : Qt.rgba(1, 1, 1, 1)
+    }
 
     // Tertiary text steps up to secondary on a selected row.
     function textTertiaryOn(selected) {

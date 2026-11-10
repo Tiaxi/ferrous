@@ -326,7 +326,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
         {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#d4edfa")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
-        {"link", QStringLiteral("#3daee9"), QStringLiteral("#1a74a8")},
+        {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
         {"now", QStringLiteral("#f2b035"), QStringLiteral("#955500")},
@@ -398,6 +398,13 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
     const QColor hovered = drawnOver(colorOf(tokens, "hover"), view);
     const QColor secondary = colorOf(tokens, "textSecondary");
     const QColor tertiary = colorOf(tokens, "textTertiary");
+    const auto linkOn = [tokens](const QColor &background) {
+        QVariant link;
+        QMetaObject::invokeMethod(tokens, "linkOn", Q_RETURN_ARG(QVariant, link), Q_ARG(QVariant, background));
+        return link.value<QColor>();
+    };
+    // Where the link already reads, it stays the link.
+    QVERIFY(sameColor(linkOn(view), colorOf(tokens, "link")));
 
     // The ratios the design lists.
     const QColor secondaryBackground = secondaryOnChrome ? chrome : view;
@@ -429,6 +436,10 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("playing title on the selection"), colorOf(tokens, "now"), selection, 4.5},
         {QStringLiteral("playing title on the inactive selection"), colorOf(tokens, "now"), selectionInactive, 4.5},
         {QStringLiteral("link on view"), colorOf(tokens, "link"), view, 4.5},
+        // The dialogs' links: About, About KDE and Recent Issues.
+        {QStringLiteral("link on chrome"), colorOf(tokens, "link"), chrome, 4.5},
+        {QStringLiteral("link on a hovered button on chrome"), linkOn(drawnOver(colorOf(tokens, "hover"), chrome)),
+         drawnOver(colorOf(tokens, "hover"), chrome), 4.5},
         {QStringLiteral("negative on view"), colorOf(tokens, "negative"), view, 4.5},
         {QStringLiteral("negative on chrome"), colorOf(tokens, "negative"), chrome, 4.5},
         {QStringLiteral("focus ring on the selection"), colorOf(tokens, "focusRing"), selection, 3.0},

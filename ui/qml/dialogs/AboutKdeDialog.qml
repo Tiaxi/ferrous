@@ -26,11 +26,14 @@ Dialog {
     width: Math.min(Kirigami.Units.gridUnit * 26,
                     (parent ? parent.width : Kirigami.Units.gridUnit * 28) - 2 * Kirigami.Units.gridUnit)
 
-    // A link as Kirigami draws one, announced as a link, with the focus
-    // ring of the window's other controls while the keyboard is on it.
+    // A link as Kirigami draws one, in the window's link colour (the
+    // About window's, which reads on the dialog), announced as a link, with
+    // the focus ring of the window's other controls while the keyboard is
+    // on it.
     component DialogLink: Kirigami.UrlButton {
         id: link
 
+        color: root.uiPalette ? root.uiPalette.link : Kirigami.Theme.linkColor
         Accessible.role: Accessible.Link
 
         Rectangle {

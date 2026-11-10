@@ -1213,10 +1213,16 @@ void UiMenusTest::aboutKdeLinksTakeTheKeyboard() {
                            QStringLiteral("https://community.kde.org/Get_Involved"),
                            QStringLiteral("https://kde.org/donate/"), QStringLiteral("https://kde.org/")};
     QList<QQuickItem *> links;
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
     for (int i = 0; i < 4; ++i) {
         auto *link = dialog->findChild<QQuickItem *>(QStringLiteral("aboutKdeLink%1").arg(i));
         QVERIFY(link != nullptr);
         QCOMPARE(link->property("url").toString(), urls.at(i));
+        // The window's link colour, which reads on the dialog (the theme's
+        // own link was 4.3:1 on Breeze Light's view).
+        QCOMPARE(link->property("color").value<QColor>().name(QColor::HexArgb),
+                 palette->property("link").value<QColor>().name(QColor::HexArgb));
         // A link to assistive technology, named as it reads.
         QAccessibleInterface *iface = QAccessible::queryAccessibleInterface(link);
         QVERIFY(iface != nullptr);
