@@ -102,6 +102,8 @@ private slots:
     void spectrogramStaleZoomDataDoesNotDrawIntoTheFrozenPreview();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives_data();
     void spectrogramZoomShowsOlderDataUntilTheNewArrives();
+    void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data();
+    void spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore();
 };
 
 namespace {
@@ -5040,54 +5042,69 @@ void SpectrogramCanvasSmokeTest::spectrogramDevicePixelCanvasAdvancesAsItsRaster
 
 namespace {
 
-// Which of the item's `width` logical pixel columns show data, as `node`
-// draws them: the canvas where its pixel is not transparent, and else the
-// backdrop or the reserve under it. Sampled along the middle row.
-QVector<bool> plotColumnsShown(const SpectrogramItem &item, QSGNode *node, int width) {
+// What each of the item's `width` logical pixel columns shows along its
+// middle row, as `node` draws it: the canvas where its pixel is not
+// transparent, and else the backdrop or the reserve under it; 0 where none
+// has data.
+QVector<QRgb> plotColumnColors(const SpectrogramItem &item, QSGNode *node, int width) {
     QHash<QSGTexture *, int> bandX;
     for (const auto &[x, texture] : SpectrogramItem::canvasTextures(node)) {
         bandX.insert(texture, x);
     }
-    // Whether `span` draws an opaque pixel of `image`, its source `offset`
-    // pixels into it, at x.
-    const auto opaque = [](const QSGSimpleTextureNode *span, double x, const QImage &image,
-                            int offset) {
+    // What `span` draws of `image`, its source `offset` pixels into it, at
+    // x: 0 if nothing.
+    const auto sample = [](const QSGSimpleTextureNode *span, double x, const QImage &image,
+                            int offset) -> QRgb {
         const QRectF rect = span->rect();
         if (rect.isEmpty() || image.isNull() || x < rect.left() || x >= rect.right()) {
-            return false;
+            return 0;
         }
         const QRectF source = span->sourceRect();
         const int sx = offset + static_cast<int>(std::floor(
             source.left() + (x - rect.left()) * source.width() / rect.width()));
-        return sx >= 0 && sx < image.width() && qAlpha(image.pixel(sx, image.height() / 2)) > 0;
+        if (sx < 0 || sx >= image.width()) {
+            return 0;
+        }
+        const QRgb pixel = image.pixel(sx, image.height() / 2);
+        return qAlpha(pixel) > 0 ? pixel : 0;
     };
     QSGNode *floor = node->childAtIndex(0);
     QSGNode *tiles = node->childAtIndex(1);
-    QVector<bool> shown(width, false);
+    QVector<QRgb> colors(width, 0);
     for (int x = 0; x < width; ++x) {
         const double at = x + 0.5;
-        bool data = false;
+        QRgb color = 0;
         const auto canvasSpan = [&](QSGNode *child) {
             const auto *span = static_cast<const QSGSimpleTextureNode *>(child);
-            if (bandX.contains(span->texture())
-                && opaque(span, at, item.m_canvas, bandX.value(span->texture()))) {
-                data = true;
+            if (color == 0 && bandX.contains(span->texture())) {
+                color = sample(span, at, item.m_canvas, bandX.value(span->texture()));
             }
         };
         for (int i = 0; i < tiles->childCount(); ++i) {
             canvasSpan(tiles->childAtIndex(i));
         }
         canvasSpan(node->childAtIndex(2));
-        // Under the floor's children: the reserve, then the backdrop's spans.
-        data = data
-            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(0)), at,
-                item.m_reserve.image, 0)
-            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(1)), at,
-                item.m_backdrop.image, 0)
-            || opaque(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(2)), at,
-                item.m_backdrop.image, 0);
-        shown[x] = data;
+        // Under the floor's children: the backdrop's spans over the reserve.
+        for (const int child : {2, 1}) {
+            if (color == 0) {
+                color = sample(static_cast<const QSGSimpleTextureNode *>(
+                    floor->childAtIndex(child)), at, item.m_backdrop.image, 0);
+            }
+        }
+        if (color == 0) {
+            color = sample(static_cast<const QSGSimpleTextureNode *>(floor->childAtIndex(0)), at,
+                item.m_reserve.image, 0);
+        }
+        colors[x] = color;
     }
+    return colors;
+}
+
+// Which of the item's `width` logical pixel columns show data.
+QVector<bool> plotColumnsShown(const SpectrogramItem &item, QSGNode *node, int width) {
+    const QVector<QRgb> colors = plotColumnColors(item, node, width);
+    QVector<bool> shown(width);
+    std::transform(colors.begin(), colors.end(), shown.begin(), [](QRgb color) { return color != 0; });
     return shown;
 }
 
@@ -5220,6 +5237,96 @@ void SpectrogramCanvasSmokeTest::spectrogramZoomShowsOlderDataUntilTheNewArrives
     QVERIFY(feedZoom("data for the reset"));
     // Seen over the view.
     QVERIFY(std::count(shown.begin(), shown.end(), true) > width / 2);
+
+    delete node;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore_data() {
+    QTest::addColumn<bool>("clockFirst");
+    // The clock reports the next track before its data arrives, and after.
+    QTest::newRow("clock first") << true;
+    QTest::newRow("data first") << false;
+}
+
+void SpectrogramCanvasSmokeTest::spectrogramTrackChangeDuringAZoomShowsNothingOfTheTrackBefore() {
+    // Issue 542's review: a rolling view zoomed, and before the zoom's data
+    // arrives, the next track starts. Its session's reset is not the zoom's
+    // restart: nothing of the track before, its canvas, the ring's columns
+    // kept for the reserve or a reserve being drawn, shows under the next
+    // track's columns, though their times overlap, as when skipping soon
+    // after playback starts.
+    QFETCH(bool, clockFirst);
+    QQuickWindow window;
+    window.resize(240, 160);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window, 5000));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    constexpr int width = 200;
+    item.setWidth(width);
+    item.setHeight(100);
+    item.setDisplayMode(0);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    constexpr quint64 before = 1;
+    constexpr quint64 next = 2;
+    // Five seconds of the first track, of one colour.
+    const int playedColumns = static_cast<int>(5.0 * 48'000 / 1024);
+    item.feedPrecomputedChunk(QByteArray(bins * playedColumns, '\x30'), bins, 0, playedColumns,
+        0, 6000, 48'000, 1024, false, true, before, true, 1);
+    setTestPosition(item, 5.0, before);
+    QSGNode *node = nullptr;
+    const auto settle = [&]() {
+        for (int round = 0; round < 8; ++round) {
+            node = item.updatePaintNode(node, nullptr);
+            if (!QTest::qWaitFor([&item]() {
+                    return !spectrogramRasterPending(item) && !spectrogramReservePending(item);
+                }, 5000)) {
+                return false;
+            }
+        }
+        node = item.updatePaintNode(node, nullptr);
+        return true;
+    };
+    QVERIFY(settle());
+    const QRgb beforeColor = plotColumnColors(item, node, width).at(width / 2);
+    QVERIFY(beforeColor != 0);
+
+    // Zoomed out, and the zoom sent; its data does not come.
+    item.setZoomLevel(0.8);
+    node = item.updatePaintNode(node, nullptr);
+    QVERIFY(sendPendingBackendZoom(item));
+    QVERIFY(settle());
+    // The next track, from 4 s, in another colour: its session's reset,
+    // then its first columns.
+    const int hop = item.columnHopForZoomLocked(item.backendZoomForRequestLocked());
+    const int start = static_cast<int>(4.0 * 48'000 / hop);
+    const auto feedNext = [&]() {
+        item.feedPrecomputedChunk(QByteArray(), bins, 0, 0, start, 6000 * 1024 / hop,
+            48'000, hop, false, true, next, true, 2);
+        item.feedPrecomputedChunk(QByteArray(bins * 16, '\x70'), bins, 0, 16, start,
+            6000 * 1024 / hop, 48'000, hop, false, false, next, true, 2);
+    };
+    if (clockFirst) {
+        setTestPosition(item, 4.0, next);
+        feedNext();
+    } else {
+        feedNext();
+        node = item.updatePaintNode(node, nullptr);
+        setTestPosition(item, 4.0, next);
+    }
+    QVERIFY(settle());
+    for (int frame = 0; frame < 4; ++frame) {
+        const QVector<QRgb> colors = plotColumnColors(item, node, width);
+        for (int x = 0; x < width; ++x) {
+            QVERIFY2(colors[x] != beforeColor,
+                qPrintable(QStringLiteral("frame %1: x %2 shows the track before").arg(frame).arg(x)));
+        }
+        QVERIFY(QTest::qWaitFor([&item]() { return !spectrogramReservePending(item); }, 5000));
+        node = item.updatePaintNode(node, nullptr);
+    }
+    // The next track's columns show.
+    const QVector<QRgb> colors = plotColumnColors(item, node, width);
+    QVERIFY(std::any_of(colors.begin(), colors.end(), [](QRgb color) { return color != 0; }));
 
     delete node;
 }

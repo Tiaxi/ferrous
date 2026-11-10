@@ -160,8 +160,11 @@ struct SpectrogramBackdrop {
     double leftSeconds{0.0};
     double pixelsPerSecond{0.0};
     bool rolling{false};
-    // A centered canvas's track, which another track's view has nothing of.
+    // The track of its columns, which another track's view has nothing of,
+    // rolling too: a track change that is not gapless clears the history.
     quint64 trackToken{0};
+    // The validity it was made with (m_backdropValidity).
+    quint64 validity{0};
     // What its rows and colours are of: another projection's are not this
     // view's.
     std::shared_ptr<const SpectrogramProjection> projection;
@@ -528,7 +531,16 @@ private:
         int bins,
         quint64 trackToken,
         quint64 generation,
-        bool clearHistoryOnReset);
+        bool clearHistoryOnReset,
+        int hopSize,
+        int sampleRate);
+    // Whether a session reset starting at column startIndex, hopSize frames
+    // a column, is the backend's restart for the zoom asked for: of the
+    // same track, with no seek or track change since the zoom was asked
+    // for, and rolling, from the playhead. Only then is what the view
+    // showed before it of the times the reset's columns are.
+    bool resetRestartsForZoomLocked(
+        int startIndex, quint64 trackToken, int hopSize, int sampleRate) const;
     qint64 currentRollingDisplayRightLocked(std::chrono::steady_clock::time_point now) const;
     void truncateRollingTailLocked(qint64 newWriteSeq);
     double currentRenderPositionSecondsLocked(std::chrono::steady_clock::time_point now) const;
@@ -885,6 +897,10 @@ private:
     double m_reserveRequestedLeft{0.0};
     double m_reserveRequestedRight{-1.0};
     quint64 m_backdropValidity{0};
+    // Changes with each seek or track change the clock reports, and its
+    // value when the zoom being waited for was asked for.
+    quint64 m_timelineSerial{0};
+    quint64 m_zoomTimelineSerial{0};
     // Changes whenever the ring's columns are cleared or renumbered, which
     // makes a rasterization of them obsolete.
     quint64 m_ringGeneration{0};

@@ -3311,10 +3311,16 @@ void WaveformEditorItem::drawDetailSlice(
         ? std::max(kSampleCurveBoundaryMarginPixels,
             static_cast<int>(std::ceil(sampleSpacing * kSampleCurveContextSamples + 3.0)))
         : 1;
+    // A point of an envelope stands for its frames: a point that ends in
+    // the slice is in it however far before it its middle is.
+    const double pointSeconds = detail.sampleRateHz > 0
+        ? static_cast<double>(detail.framesPerPoint) / static_cast<double>(detail.sampleRateHz)
+        : 0.0;
+    const double pointMargin = sampleCurve ? 0.0 : pointSeconds;
     const double sliceStart = visibleStart
-        + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel;
+        + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel - pointMargin;
     const double sliceEnd = visibleStart
-        + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel;
+        + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel + pointMargin;
     auto [firstPoint, lastPoint] = detailPointRange(detail,
         sliceStart, sliceEnd);
     // The owned samples' points, and as their polyline's indices.
@@ -3354,9 +3360,34 @@ void WaveformEditorItem::drawDetailSlice(
         }
         for (int point = firstPoint; point < lastPoint; ++point) {
             const double time = detailPointTime(detail, point);
-            if (!sampleCurve
-                && (time < visibleStart || time >= visibleEnd)) {
-                continue;
+            // An envelope's point is of the pixels whose middles are in its
+            // frames, and a point narrower than a pixel of the pixel its
+            // frames are in the middle of: points further apart than a
+            // pixel, as when a zoom shows the detail of a wider view until
+            // its own arrives, cover the pixels of their frames.
+            int firstPixel = 0;
+            int endPixel = 0;
+            if (!sampleCurve) {
+                const double pointStart = detail.startSeconds
+                    + static_cast<double>(point) * pointSeconds;
+                const double startPosition = (pointStart - visibleStart) / secondsPerPixel;
+                const double endPosition =
+                    (pointStart + pointSeconds - visibleStart) / secondsPerPixel;
+                firstPixel = static_cast<int>(std::ceil(startPosition - 0.5 - kGridAlignmentEpsilon));
+                endPixel = static_cast<int>(std::ceil(endPosition - 0.5 - kGridAlignmentEpsilon));
+                if (endPixel <= firstPixel) {
+                    if (time < visibleStart || time >= visibleEnd) {
+                        continue;
+                    }
+                    firstPixel = static_cast<int>(std::floor(
+                        (time - visibleStart) / secondsPerPixel + kGridAlignmentEpsilon));
+                    endPixel = firstPixel + 1;
+                }
+                firstPixel = std::max(firstPixel, firstX);
+                endPixel = std::min(endPixel, lastX);
+                if (endPixel <= firstPixel) {
+                    continue;
+                }
             }
             // From the slice's start: the same for a view and for a chunk
             // that starts whole device pixels from it, but for the
@@ -3367,16 +3398,10 @@ void WaveformEditorItem::drawDetailSlice(
                     * kSampleCurveSubpixelScale)
                     / kSampleCurveSubpixelScale
                 : (time - visibleStart) / secondsPerPixel;
-            const int x = std::clamp(
-                static_cast<int>(std::floor(
-                    pixelPosition + kGridAlignmentEpsilon)),
-                0, width - 1);
-            if (sampleCurve) {
-                if (!ownership && (pixelPosition < firstX - boundaryMargin
+            if (sampleCurve
+                && !ownership
+                && (pixelPosition < firstX - boundaryMargin
                     || pixelPosition >= lastX + boundaryMargin)) {
-                    continue;
-                }
-            } else if (x < firstX || x >= lastX) {
                 continue;
             }
             float minimum = 1.0F;
@@ -3398,30 +3423,18 @@ void WaveformEditorItem::drawDetailSlice(
                     pixelPosition,
                     center - static_cast<double>(minimum) * half));
             } else {
-                const auto pixel = static_cast<std::size_t>(x - firstX);
-                pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
-                pixelMaxima[pixel] = std::max(pixelMaxima[pixel], maximum);
-                pixelSeen[pixel] = true;
+                for (int x = firstPixel; x < endPixel; ++x) {
+                    const auto pixel = static_cast<std::size_t>(x - firstX);
+                    pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
+                    pixelMaxima[pixel] = std::max(pixelMaxima[pixel], maximum);
+                    pixelSeen[pixel] = true;
+                }
             }
         }
         if (!sampleCurve) {
-            // Points further apart than a pixel, as a zoom shows the detail
-            // of a wider view until its own arrives, hold until the next:
-            // the pixels between them are of the earlier one's frames.
-            const auto lastSeen = std::find(pixelSeen.rbegin(), pixelSeen.rend(), true);
-            const int lastSeenX = lastSeen == pixelSeen.rend()
-                ? firstX - 1
-                : firstX + static_cast<int>(pixelSeen.rend() - lastSeen) - 1;
-            std::size_t held = pixelSeen.size();
             for (int x = firstX; x < lastX; ++x) {
-                auto pixel = static_cast<std::size_t>(x - firstX);
-                if (pixelSeen[pixel]) {
-                    held = pixel;
-                } else if (held < pixelSeen.size() && x < lastSeenX) {
-                    pixel = held;
-                } else {
-                    continue;
-                }
+                const auto pixel = static_cast<std::size_t>(x - firstX);
+                if (!pixelSeen[pixel]) continue;
                 painter.drawLine(
                     x,
                     static_cast<int>(std::round(

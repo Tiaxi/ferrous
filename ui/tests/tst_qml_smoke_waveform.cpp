@@ -50,6 +50,7 @@ private slots:
     void waveformEditorZoomInRetainsCoveredCacheWhileRefining();
     void waveformEditorSparseZoomDetailFallsBackUntilReady();
     void waveformEditorPerChannelZoomShowsOlderDetailUntilTheNewArrives();
+    void waveformEditorSparseDetailCoversEachPointsFrames();
     void waveformEditorSeparatesChannelPanes();
     void waveformEditorRestrictsDetailWorkToVisiblePoints();
     void waveformEditorDetailPointsUseAbsoluteSampleTimes();
@@ -1891,6 +1892,54 @@ void WaveformSmokeTest::waveformEditorPerChannelZoomShowsOlderDetailUntilTheNewA
     item.setZoomLevel(8.0);
     QVERIFY(frameShowsTheDetail("in past the points"));
     item.m_requestTimer.stop();
+}
+
+void WaveformSmokeTest::waveformEditorSparseDetailCoversEachPointsFrames() {
+    // Detail of points further apart than a pixel, as a zoom shows until
+    // its own detail arrives, draws each point over the pixels of its
+    // frames: not from its middle to the next point's, half a point late,
+    // and to the ends of the first and the last point, but no further than
+    // the detail. Here 21 points of 100 ms, loud and silent in turn, from
+    // 0 to 2.1 s, in a view of 200 pixels a second from -0.1 s to 2.2 s.
+    WaveformEditorItem::DetailWindow detail;
+    detail.sampleRateHz = 1'000;
+    detail.channelCount = 1;
+    detail.startSeconds = 0.0;
+    detail.endSeconds = 2.1;
+    detail.framesPerPoint = 100;
+    detail.pointCount = 21;
+    detail.extrema.resize(42);
+    for (int point = 0; point < 21; ++point) {
+        const float amplitude = point % 2 == 0 ? 0.8F : 0.0F;
+        detail.extrema[point * 2] = -amplitude;
+        detail.extrema[point * 2 + 1] = amplitude;
+    }
+    const WaveformEditorItem::LaneStyle style;
+    constexpr int width = 460;
+    constexpr int height = 100;
+    constexpr double visibleStart = -0.1;
+    constexpr double visibleEnd = 2.2;
+    // Drawn whole, and in slices that start and end within points.
+    const QList<QList<int>> slicings{{0, width}, {0, 7, 33, 251, 415, width}};
+    for (const QList<int> &edges : slicings) {
+        QImage canvas(width, height, QImage::Format_RGB32);
+        canvas.fill(style.background);
+        QPainter painter(&canvas);
+        for (int i = 0; i + 1 < edges.size(); ++i) {
+            WaveformEditorItem::drawDetailSlice(painter, detail, style, width, height,
+                visibleStart, visibleEnd, 1, edges[i], edges[i + 1], 1.0);
+        }
+        painter.end();
+        for (int x = 0; x < width; ++x) {
+            const double seconds = visibleStart + (x + 0.5) / 200.0;
+            const int point = static_cast<int>(std::floor(seconds / 0.1 + 1e-9));
+            const bool loud = seconds >= 0.0 && seconds < 2.1 && point % 2 == 0;
+            // A loud point reaches well above the lane's middle.
+            const bool drawn = canvas.pixelColor(x, height / 4) != QColor(style.background);
+            QVERIFY2(drawn == loud, qPrintable(QStringLiteral("slices %1: x %2 (%3 s) is %4")
+                .arg(edges.size() - 1).arg(x).arg(seconds).arg(drawn ? "drawn" : "empty")));
+        }
+    }
 }
 
 void WaveformSmokeTest::waveformEditorSparseZoomDetailFallsBackUntilReady() {
