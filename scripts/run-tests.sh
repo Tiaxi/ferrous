@@ -20,6 +20,7 @@ DO_BUILD=1
 RUN_CLIPPY="${FERROUS_RUN_CLIPPY:-1}"
 RUN_AUDIT="${FERROUS_RUN_AUDIT:-1}"
 RUN_COVERAGE="${FERROUS_RUN_COVERAGE:-0}"
+CTEST_VERBOSE=0
 COVERAGE_MIN="${FERROUS_COVERAGE_MIN:-35}"
 RUST_FEATURES="${FERROUS_TEST_FEATURES:-gst}"
 # Cargo's default features include gst, so the checks build without them,
@@ -56,6 +57,7 @@ Options:
   --no-coverage     Skip coverage gate (cargo llvm-cov)
   --no-configure    Skip CMake configure step for UI tests
   --no-build        Skip CMake build step for UI tests
+  --verbose         Show every UI test's output, not only a failed one's
   -h, --help        Show this help
 
 Environment:
@@ -67,6 +69,8 @@ Environment:
   FERROUS_COVERAGE_MIN    Minimum line coverage percent for gate (default: 35)
   FERROUS_UI_BUILD_DIR
                           UI build dir (default: ui/build)
+  CTEST_PARALLEL_LEVEL    UI tests run at once (default: half the CPUs,
+                          at most 8)
   CMAKE_GENERATOR         CMake generator (default: Ninja)
 USAGE
 }
@@ -99,6 +103,9 @@ while [[ $# -gt 0 ]]; do
         --no-build)
             DO_BUILD=0
             ;;
+        --verbose)
+            CTEST_VERBOSE=1
+            ;;
         -h|--help)
             usage
             exit 0
@@ -111,6 +118,19 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# The UI tests wait on animations and timers more than they compute, so
+# CTest runs them in parallel, each test program with directories of its own
+# (ui/tests/own_directories.sh). Half the CPUs leaves room for other work,
+# which would make the tests' timing less reliable.
+CTEST_JOBS="${CTEST_PARALLEL_LEVEL:-}"
+if [[ -z "${CTEST_JOBS}" ]]; then
+    CTEST_JOBS=$(($(nproc) / 2))
+    CTEST_JOBS=$((CTEST_JOBS < 1 ? 1 : CTEST_JOBS > 8 ? 8 : CTEST_JOBS))
+elif ! [[ "${CTEST_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CTEST_PARALLEL_LEVEL must be a positive whole number (got '${CTEST_JOBS}')." >&2
+    exit 1
+fi
 
 if ! command -v cargo >/dev/null 2>&1; then
     if [[ -f "$HOME/.cargo/env" ]]; then
@@ -175,5 +195,10 @@ if [[ ${RUN_UI} -eq 1 ]]; then
     if [[ ${DO_BUILD} -eq 1 ]]; then
         cmake --build "${BUILD_DIR}"
     fi
-    with_test_user_dirs ctest --test-dir "${BUILD_DIR}" --output-on-failure -V
+    ctest_args=(--test-dir "${BUILD_DIR}" --output-on-failure --parallel "${CTEST_JOBS}")
+    # Output of tests that run at once is interleaved line by line.
+    if [[ ${CTEST_VERBOSE} -eq 1 ]]; then
+        ctest_args+=(-V)
+    fi
+    with_test_user_dirs ctest "${ctest_args[@]}"
 fi
