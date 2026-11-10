@@ -564,16 +564,19 @@ Rectangle {
                         text: libraryRow.rowTitle
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
-                        font.weight: libraryRow.isNow ? Font.DemiBold : Font.Normal
                         readonly property color plainColor: libraryRow.unreadableReason.length > 0
                             ? root.uiPalette.textSecondary
                             : root.uiPalette.text
-                        // A collapsed row's title is never amber.
-                        color: libraryRow.isNow
+                        // The title's share of amber, which sets its weight
+                        // and its colour together, so the two change in the
+                        // same frame: semibold while it is mostly amber. A
+                        // collapsed row's title is never amber.
+                        readonly property real amber: libraryRow.isNow
+                            ? 1 : (libraryRow.isTrackRow ? libraryRow.amberLeft : 0)
+                        font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
+                        color: amber >= 1
                             ? root.uiPalette.now
-                            : (libraryRow.isTrackRow && libraryRow.amberLeft > 0
-                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, libraryRow.amberLeft)
-                                : plainColor)
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
                     }
 
                     Text {

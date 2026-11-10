@@ -879,19 +879,23 @@ Rectangle {
                         width: titleHeader.width
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.basePointSize
-                        font.weight: playlistRow.isNow ? Font.DemiBold : Font.Normal
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignLeft
                         text: playlistRow.titleValue
                         readonly property color plainColor: playlistRow.unreadable
                             ? root.uiPalette.textSecondary : root.uiPalette.text
-                        color: playlistRow.isNow
-                            ? (playlistRow.amberIn < 1
-                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberIn)
-                                : root.uiPalette.now)
-                            : (playlistRow.amberLeft > 0
-                                ? ColorUtils.mixColor(plainColor, root.uiPalette.now, playlistRow.amberLeft)
-                                : plainColor)
+                        // The title's share of amber, taken in by the row
+                        // that becomes now as the row that was now gives it
+                        // up. It sets the weight and the colour together, so
+                        // the two change in the same frame: semibold while
+                        // the title is mostly amber, which the two rows swap
+                        // at the fade's midpoint.
+                        readonly property real amber: playlistRow.isNow
+                            ? playlistRow.amberIn : playlistRow.amberLeft
+                        font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
+                        color: amber >= 1
+                            ? root.uiPalette.now
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
                     }
 
                     Text {
