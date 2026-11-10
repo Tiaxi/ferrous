@@ -1769,6 +1769,9 @@ ApplicationWindow {
             markerX: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.markerX : waveformSurface.markerX
             openIssues: function() { errorController.historyRequested() }
+            zoomLevel: visualizationSurface.zoomLevel
+            resetZoom: visualizationSurface.resetZoom
+            zoomReadoutAvailable: !viewerController.spectrogramViewerOpen
         }
     }
 

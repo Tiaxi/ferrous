@@ -44,19 +44,15 @@ Item {
     implicitHeight: root.uiPalette.toolButtonSize
 
     // Quiet: only while the view is zoomed.
-    Label {
+    Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
         x: 0
         visible: root.readoutShown
-        height: root.uiPalette.toolButtonSize
+        uiPalette: root.uiPalette
+        plotColors: root.plotColors
+        zoomLevel: root.zoomLevel
         rightPadding: 4
-        verticalAlignment: Text.AlignVCenter
-        text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
-            Math.round(root.zoomLevel * 100))
-        font.pointSize: root.uiPalette.smallPointSize
-        font.features: root.uiPalette.tabularFigures
-        color: root.plotColors ? root.plotColors.plotTextSecondary : root.uiPalette.textSecondary
     }
 
     Components.ViewerToolButton {

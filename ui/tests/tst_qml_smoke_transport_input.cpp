@@ -33,6 +33,7 @@ private slots:
     void fullscreenVisualizationKeepsItsControlsBelowTheStrip();
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
+    void mainPaneZoomShowsAReadoutBesideTheModeSwitch();
     void resetZoomResetsOnlyTheShownPlotsZoom();
     void resetZoomIsOffAtAShortTracksStretchedDefault();
     void viewerControlsComeBackForTheKeyboard();
@@ -1857,6 +1858,102 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
+}
+
+// The main pane shows its zoom while it is zoomed (#373 H4: nothing did,
+// with the scale off): the viewers' readout and Reset, on a plate 8 px left
+// of the mode switch, there also while the switch hides. The plot keeps its
+// place and size; its overlays keep clear of the plate. A viewer shows the
+// zoom in its own controls instead.
+void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+    QVERIFY(bridge && viewer && spectrogramSurface && waveformSurface && layer && surface);
+    auto *waveform = qobject_cast<WaveformEditorItem *>(
+        waveformSurface->property("waveformItem").value<QObject *>());
+    QVERIFY(waveform != nullptr);
+    setPlayingTrack(bridge);
+    QQuickItem *plate = itemNamed(layer, QStringLiteral("plotZoomPlate"));
+    QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
+    QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(plate && readout && reset && modeSwitch);
+    // The mode switch hidden, as with the pointer away from the pane; the
+    // pointer comes back below.
+    modeSwitch->setProperty("revealed", false);
+    QTRY_COMPARE(modeSwitch->opacity(), 0.0);
+
+    // Nothing at the default zoom.
+    QVERIFY(!plate->isVisible());
+    const QRectF plotBefore = sceneRectOf(spectrogramSurface);
+    const QSizeF cornerBefore = surface->property("reservedCorner").toSizeF();
+
+    for (const int mode : {0, 1}) {
+        viewer->setProperty("visualizationMode", mode);
+        QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+        QVERIFY(!plate->isVisible());
+        if (mode == 0) {
+            spectrogramSurface->setProperty("_widgetZoomLevel", 2.44);
+        } else {
+            waveform->setZoomLevel(4.0);
+        }
+        // At once, with the viewers' wording, in the plot's colours.
+        QVERIFY(plate->isVisible());
+        QCOMPARE(plate->opacity(), 1.0);
+        QVERIFY(readout->isVisible() && reset->isVisible());
+        QCOMPARE(readout->property("text").toString(),
+                 mode == 0 ? QStringLiteral("Zoom 244%") : QStringLiteral("Zoom 400%"));
+        QCOMPARE(reset->property("text").toString(), QStringLiteral("Reset Zoom"));
+        QCOMPARE(plate->property("plotColors").value<QObject *>(),
+                 layer->property("plotColors").value<QObject *>());
+        // 8 px left of the switch, on its top, also while the switch hides
+        // (the click on Reset below puts the pointer on the pane, which
+        // reveals it).
+        if (mode == 0) {
+            QCOMPARE(modeSwitch->opacity(), 0.0);
+        }
+        QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
+        QCOMPARE(sceneRectOf(plate).top(), sceneRectOf(modeSwitch).top());
+        QCOMPARE(sceneRectOf(plate).height(), sceneRectOf(modeSwitch).height());
+        QVERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left());
+        // The plot stays where it is; its overlays keep clear of the plate.
+        QCOMPARE(sceneRectOf(spectrogramSurface), plotBefore);
+        const QSizeF corner = surface->property("reservedCorner").toSizeF();
+        QCOMPARE(corner.width(), cornerBefore.width() + 8 + plate->width());
+        QCOMPARE(corner.height(), cornerBefore.height());
+
+        // Reset: the default zoom, and the plate goes.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          reset->mapToScene(QPointF(reset->width() / 2, reset->height() / 2)).toPoint());
+        if (mode == 0) {
+            QTRY_COMPARE(spectrogramSurface->property("zoomLevel").toDouble(), 1.0);
+        } else {
+            QTRY_COMPARE(waveform->zoomLevel(), 1.0);
+        }
+        QTRY_VERIFY(!plate->isVisible());
+        QCOMPARE(surface->property("reservedCorner").toSizeF(), cornerBefore);
+    }
+
+    // In a viewer, the zoom shows in the viewer's controls instead.
+    viewer->setProperty("visualizationMode", 0);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
+    QQuickItem *controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
+    QVERIFY(controls != nullptr);
+    QTRY_VERIFY(itemNamed(controls, QStringLiteral("viewerZoomReadout"))->isVisible());
+    QVERIFY(!plate->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
 void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {

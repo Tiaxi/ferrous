@@ -192,6 +192,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
+        qml/components/PlotZoomPlate.qml
         qml/components/PopupClosing.qml
         qml/components/PopupInitialFocus.qml
         qml/components/RegionHeader.qml
@@ -202,6 +203,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/ViewerCornerControls.qml
         qml/components/ViewerStrip.qml
         qml/components/ViewerToolButton.qml
+        qml/components/ZoomReadout.qml
         qml/controllers/ErrorController.qml
         qml/controllers/GlobalSearchController.qml
         qml/controllers/LibraryController.qml
