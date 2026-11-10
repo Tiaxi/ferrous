@@ -1269,10 +1269,14 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     QCOMPARE(box->size(), QSizeF(20, 20));
-    QCOMPARE(glyph->width(), 12.0);
+    // A 14 px glyph with a heavier stroke in a 1.5 px ring, which reads at
+    // the slot's size.
+    QCOMPARE(glyph->width(), 14.0);
+    QCOMPARE(slot->property("ringStroke").toReal(), 1.5);
     QVERIFY(ring->isVisible());
     QVERIFY(std::abs(progress() - 77.0 / 115.0) < 0.02);
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-ring.svg")));
+    QVERIFY(!slot->property("ringFilled").toBool());
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 0:38 to scrobble"));
@@ -1318,9 +1322,25 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("link")));
         QVERIFY(!label->isVisible());
     }
+    // Scrobbled has a second cue besides the colour: the ring fills, with
+    // the glyph cut out of it in the chrome colour.
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbled"));
+    QVERIFY(slot->property("ringFilled").toBool());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("chrome")));
+    QVERIFY2(contrastRatio(harness.token("chrome"), harness.token("link")) >= 3.0,
+             qPrintable(describe(QStringLiteral("glyph cut out of the scrobbled ring"), harness.token("chrome"),
+                                 harness.token("link"))));
+    // Inside the ring, left of the glyph: the fill, drawn. The slot has
+    // just come back, so the point is found once it is laid out again.
+    const auto insideRing = [box]() { return box->mapToScene(QPointF(2.5, box->height() / 2)); };
+    qreal scale = 1;
+    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("link")));
+    // While it is sent, the ring is closed but not filled.
     bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
+    QVERIFY(!slot->property("ringFilled").toBool());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("chrome")));
     QVERIFY2(contrastRatio(harness.token("link"), harness.token("chrome")) >= 3.0,
              qPrintable(describe(QStringLiteral("scrobbled ring"), harness.token("link"), harness.token("chrome"))));
 
@@ -1410,7 +1430,12 @@ void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {
     QCOMPARE(textChanged.count(), 0);
     bridge->setProperty("lastFmScrobbleListenedMs", 31000);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:24 to scrobble"));
-    QCOMPARE(progressMoved.count(), 1);
+    // The ring moves by whole device pixels of its arc: with the second,
+    // if it crosses one.
+    const double arcPixels = std::round(2 * M_PI * slot->property("ringRadius").toDouble()
+                                        * std::max(1.0, harness.window->devicePixelRatio()));
+    const bool crossesAPixel = std::floor(31.0 / 115.0 * arcPixels) != std::floor(30.0 / 115.0 * arcPixels);
+    QCOMPARE(progressMoved.count(), crossesAPixel ? 1 : 0);
     QCOMPARE(textChanged.count(), 1);
 
     // A new play (a new track, a replay, Repeat One) counts from zero.
