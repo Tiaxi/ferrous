@@ -58,6 +58,13 @@ private slots:
     void spectrogramFreshInstanceResyncsBackendZoomOnTrackChange();
     void spectrogramFreshInstanceSeekRestartDoesNotResetZoom();
     void spectrogramTrackChangeCancelsPendingZoomDebounce();
+    void spectrogramShortTrackDefaultZoomFillsTheView_data();
+    void spectrogramShortTrackDefaultZoomFillsTheView();
+    void spectrogramShortTracksLengthArrivingLaterMovesTheDefault();
+    void spectrogramGaplessLongToShortTrackStretchesTheView_data();
+    void spectrogramGaplessLongToShortTrackStretchesTheView();
+    void spectrogramRepeatOneOfAStretchedTrackKeepsItsZoom();
+    void spectrogramStretchSettingMovesTheDefaultWhilePlaying();
     void spectrogramRenderLoopStopsWhenNotPlaying();
     void spectrogramStillFramesLeaveTextureNodesAlone();
     void spectrogramIdleCenteredViewWaitsForThePlayheadsNextPixel_data();
@@ -2452,6 +2459,300 @@ void SpectrogramPlaybackSmokeTest::spectrogramCenteredGaplessFollowsTheClock() {
     setTestPosition(item, 0.08, newToken);
     QVERIFY(!item.m_positionJumpHoldActive);
     QVERIFY(item.m_positionSeconds < 1.0);
+}
+
+namespace {
+
+// A file at 48 kHz with 8192-sample windows, as the backend's sessions
+// decode it: 1 s is a short track, a minute a long one.
+constexpr int kStretchRate = 48'000;
+constexpr int kStretchFft = 8'192;
+constexpr int kStretchBins = 4;
+constexpr quint64 kShortFrames = 48'000;
+constexpr quint64 kLongFrames = 60 * 48'000;
+
+// The column after the last that a session at `zoom` decodes of the file.
+int stretchEndColumn(quint64 frames, double zoom) {
+    return static_cast<int>(ferrous_ffi_spectrogram_decoded_end_column(
+        frames, kStretchFft, static_cast<float>(zoom), kStretchRate));
+}
+
+int stretchHop(double zoom) {
+    return static_cast<int>(ferrous_ffi_spectrogram_column_hop(
+        kStretchRate, static_cast<float>(zoom)));
+}
+
+// A session's start of the track `token` at `zoom`: its reset, then
+// `columns` columns of it (all of them if negative). `frames` is what the
+// session tells of the file: 0 for a length it does not know.
+void feedStretchSession(
+    SpectrogramItem &item, quint64 token, double zoom, quint64 frames,
+    quint64 trackFrames, int columns = -1) {
+    const int hop = stretchHop(zoom);
+    const int end = stretchEndColumn(frames, zoom);
+    const int count = columns < 0 ? end : std::min(columns, end);
+    const int knownEnd = trackFrames > 0 ? end : 0;
+    item.feedPrecomputedChunk(
+        QByteArray(), kStretchBins, 0, 0, 0, end, kStretchRate, hop, false, true, token, true,
+        0, 0, kStretchFft, trackFrames, knownEnd);
+    item.feedPrecomputedChunk(
+        QByteArray(count * kStretchBins, '\x40'), kStretchBins, 0, count, 0, end, kStretchRate,
+        hop, count == end, false, token, false, 0, 0, kStretchFft, trackFrames, knownEnd);
+}
+
+// Pixels the track's columns take at the zoom the view draws them at.
+double trackPixels(SpectrogramItem &item, quint64 frames) {
+    QMutexLocker lock(&item.m_stateMutex);
+    return stretchEndColumn(frames, item.m_zoomLevel) * item.effectiveZoomLocked();
+}
+
+} // namespace
+
+void SpectrogramPlaybackSmokeTest::spectrogramShortTrackDefaultZoomFillsTheView_data() {
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<bool>("stretch");
+    QTest::addColumn<bool>("shortTrack");
+    for (const int mode : {0, 1}) {
+        for (const bool stretch : {true, false}) {
+            for (const bool shortTrack : {true, false}) {
+                QTest::addRow("%s, %s, %s", mode == 0 ? "rolling" : "centered",
+                              stretch ? "stretched" : "not stretched",
+                              shortTrack ? "1 s" : "a minute")
+                    << mode << stretch << shortTrack;
+            }
+        }
+    }
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramShortTrackDefaultZoomFillsTheView() {
+    QFETCH(int, displayMode);
+    QFETCH(bool, stretch);
+    QFETCH(bool, shortTrack);
+    SpectrogramItem item;
+    item.setWidth(1000);
+    item.setHeight(200);
+    item.setDisplayMode(displayMode);
+    item.setStretchShortTracks(stretch);
+    QSignalSpy backendZoom(&item, &SpectrogramItem::backendZoomRequested);
+    QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+    const quint64 frames = shortTrack ? kShortFrames : kLongFrames;
+
+    // The backend starts the track at zoom 1.
+    feedStretchSession(item, 5, 1.0, frames, frames, 32);
+
+    if (!stretch || !shortTrack) {
+        // Today's scale: zoom 1, a column a pixel at the reference hop.
+        QCOMPARE(item.defaultZoomLevel(), 1.0);
+        QCOMPARE(item.zoomLevel(), 1.0);
+        QCOMPARE(item.maximumZoomLevel(), 16.0);
+        QCOMPARE(backendZoom.count(), 0);
+        QCOMPARE(zoomReset.count(), 0);
+        if (shortTrack) {
+            // A sliver of the view: 43 columns of 1000 pixels.
+            QCOMPARE(trackPixels(item, frames), 43.0);
+        } else {
+            QVERIFY(trackPixels(item, frames) > 1000.0);
+        }
+        return;
+    }
+
+    // The default zoom is the one at which the second fills the view, and
+    // the view goes there at once, asking the backend for it.
+    const double fit = ferrous_ffi_spectrogram_fit_zoom(kShortFrames, kStretchFft, kStretchRate, 1000);
+    QCOMPARE(stretchHop(fit), 44);
+    QCOMPARE(item.defaultZoomLevel(), fit);
+    QCOMPARE(item.zoomLevel(), fit);
+    QCOMPARE(zoomReset.count(), 1);
+    QCOMPARE(backendZoom.count(), 1);
+    QCOMPARE(backendZoom.at(0).at(0).toFloat(), static_cast<float>(fit));
+    // The wheel zooms in no further than the default.
+    QCOMPARE(item.maximumZoomLevel(), fit);
+
+    // The backend's session at the default zoom: the track's 998 columns,
+    // a pixel each, fill the 1000-pixel view.
+    feedStretchSession(item, 5, fit, frames, frames);
+    QCOMPARE(backendZoom.count(), 1);
+    QCOMPARE(zoomReset.count(), 1);
+    QCOMPARE(item.zoomLevel(), fit);
+    const double pixels = trackPixels(item, frames);
+    QVERIFY2(pixels >= 995.0 && pixels <= 1000.0, qPrintable(QString::number(pixels)));
+    if (displayMode == 1) {
+        // The whole track is in view wherever the playhead is.
+        QMutexLocker lock(&item.m_stateMutex);
+        for (const double position : {0.0, 0.5, 0.9}) {
+            const auto view = item.centeredViewLocked(
+                position, item.canvasWidthLocked(), item.canvasHeightLocked(),
+                item.canvasZoomLocked(), static_cast<double>(kStretchRate) / 44.0);
+            QCOMPARE(view.left, qint64(0));
+            QVERIFY2(view.right >= qint64(997), qPrintable(QString::number(view.right)));
+        }
+    }
+
+    // A track that fills the view gets zoom 1 again.
+    backendZoom.clear();
+    feedStretchSession(item, 6, fit, kLongFrames, kLongFrames, 32);
+    QCOMPARE(item.defaultZoomLevel(), 1.0);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(backendZoom.count(), 1);
+    QCOMPARE(backendZoom.at(0).at(0).toFloat(), 1.0f);
+    QCOMPARE(item.maximumZoomLevel(), 16.0);
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramShortTracksLengthArrivingLaterMovesTheDefault() {
+    // A session that does not know the file's length yet: the default
+    // stays 1 until it does, then moves to the stretched zoom, as a zoom
+    // of the wheel does, with the data on screen kept until the zoom's
+    // arrives.
+    for (const int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(1000);
+        item.setHeight(200);
+        item.setDisplayMode(mode);
+        QSignalSpy defaultChanged(&item, &SpectrogramItem::defaultZoomLevelChanged);
+        QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+        feedStretchSession(item, 5, 1.0, kShortFrames, 0, 16);
+        QCOMPARE(item.defaultZoomLevel(), 1.0);
+        QCOMPARE(item.zoomLevel(), 1.0);
+        QCOMPARE(defaultChanged.count(), 0);
+        const bool ready = item.m_precomputedReady;
+
+        // The length arrives with the next columns.
+        const int end = stretchEndColumn(kShortFrames, 1.0);
+        item.feedPrecomputedChunk(
+            QByteArray(16 * kStretchBins, '\x40'), kStretchBins, 0, 16, 16, end, kStretchRate,
+            1024, false, false, 5, false, 0, 0, kStretchFft, kShortFrames, end);
+        const double fit = ferrous_ffi_spectrogram_fit_zoom(kShortFrames, kStretchFft, kStretchRate, 1000);
+        QCOMPARE(defaultChanged.count(), 1);
+        QCOMPARE(item.defaultZoomLevel(), fit);
+        // Nothing resets: the view's owner follows the default.
+        QCOMPARE(zoomReset.count(), 0);
+        QCOMPARE(item.zoomLevel(), 1.0);
+        QCOMPARE(item.m_precomputedReady, ready);
+        item.setZoomLevel(item.defaultZoomLevel());
+        QCOMPARE(item.zoomLevel(), fit);
+        QVERIFY(item.m_awaitingZoomData);
+        QCOMPARE(item.m_precomputedReady, ready);
+        QCOMPARE(zoomReset.count(), 0);
+    }
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramGaplessLongToShortTrackStretchesTheView_data() {
+    QTest::addColumn<int>("displayMode");
+    QTest::newRow("rolling") << 0;
+    QTest::newRow("centered") << 1;
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramGaplessLongToShortTrackStretchesTheView() {
+    QFETCH(int, displayMode);
+    SpectrogramItem item;
+    item.setWidth(1000);
+    item.setHeight(200);
+    item.setDisplayMode(displayMode);
+    item.setPlaying(true);
+    constexpr quint64 longToken = 5;
+    constexpr quint64 shortToken = 6;
+    setTestPosition(item, 59.0, longToken);
+    feedStretchSession(item, longToken, 1.0, kLongFrames, kLongFrames, 64);
+    QCOMPARE(item.defaultZoomLevel(), 1.0);
+    QSignalSpy backendZoom(&item, &SpectrogramItem::backendZoomRequested);
+    QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+    QSignalSpy defaultChanged(&item, &SpectrogramItem::defaultZoomLevelChanged);
+    const double fit = ferrous_ffi_spectrogram_fit_zoom(kShortFrames, kStretchFft, kStretchRate, 1000);
+
+    if (displayMode == 1) {
+        // Centered: the short track's session tells its length, and the
+        // view resets to its default.
+        const int end = stretchEndColumn(kShortFrames, 1.0);
+        item.feedPrecomputedChunk(
+            QByteArray(16 * kStretchBins, '\x40'), kStretchBins, 0, 16, 0, end, kStretchRate,
+            1024, false, false, shortToken, false, 0, 0, kStretchFft, kShortFrames, end);
+        QCOMPARE(item.defaultZoomLevel(), fit);
+        QCOMPARE(item.zoomLevel(), fit);
+        QCOMPARE(zoomReset.count(), 1);
+        QCOMPARE(backendZoom.count(), 1);
+        QCOMPARE(backendZoom.at(0).at(0).toFloat(), static_cast<float>(fit));
+        return;
+    }
+
+    // Rolling: the session goes on into the short track without telling its
+    // length, and the view goes on at its zoom.
+    item.feedPrecomputedChunk(
+        QByteArray(16 * kStretchBins, '\x40'), kStretchBins, 0, 16, 64, 2853, kStretchRate,
+        1024, false, false, shortToken, false, 0, 0, kStretchFft, 0, 0);
+    QCOMPARE(item.defaultZoomLevel(), 1.0);
+    QCOMPARE(item.zoomLevel(), 1.0);
+    QCOMPARE(zoomReset.count(), 0);
+    QCOMPARE(backendZoom.count(), 0);
+    // The clock's length of the short track tells the default, which the
+    // view's owner then follows.
+    PlaybackClock &clock = testClock(item);
+    PlaybackSample sample;
+    sample.positionSeconds = 0.0;
+    sample.sampledAtNs = clock.nowNs();
+    sample.advancing = true;
+    sample.durationSeconds = 1.0;
+    sample.trackToken = shortToken;
+    clock.applySample(sample, false);
+    QCOMPARE(defaultChanged.count(), 1);
+    QCOMPARE(item.defaultZoomLevel(), fit);
+    QCOMPARE(zoomReset.count(), 0);
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramRepeatOneOfAStretchedTrackKeepsItsZoom() {
+    // Repeat-One plays the track again gaplessly as a new token: the view
+    // at the stretched default stays there, without a restart.
+    for (const int mode : {0, 1}) {
+        SpectrogramItem item;
+        item.setWidth(1000);
+        item.setHeight(200);
+        item.setDisplayMode(mode);
+        feedStretchSession(item, 5, 1.0, kShortFrames, kShortFrames, 16);
+        const double fit = item.defaultZoomLevel();
+        QVERIFY(fit > 16.0);
+        feedStretchSession(item, 5, fit, kShortFrames, kShortFrames);
+        QCOMPARE(item.zoomLevel(), fit);
+        QSignalSpy backendZoom(&item, &SpectrogramItem::backendZoomRequested);
+        QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+        QSignalSpy defaultChanged(&item, &SpectrogramItem::defaultZoomLevelChanged);
+        const int hop = stretchHop(fit);
+        const int end = stretchEndColumn(kShortFrames, fit);
+        item.feedPrecomputedChunk(
+            QByteArray(16 * kStretchBins, '\x40'), kStretchBins, 0, 16, mode == 0 ? end : 0,
+            mode == 0 ? 2 * end : end, kStretchRate, hop, false, false, 6, false, 0, 0,
+            kStretchFft, mode == 0 ? 0 : kShortFrames, mode == 0 ? 0 : end);
+        QCOMPARE(item.zoomLevel(), fit);
+        QCOMPARE(item.defaultZoomLevel(), fit);
+        QCOMPARE(backendZoom.count(), 0);
+        QCOMPARE(zoomReset.count(), 0);
+        QCOMPARE(defaultChanged.count(), 0);
+    }
+}
+
+void SpectrogramPlaybackSmokeTest::spectrogramStretchSettingMovesTheDefaultWhilePlaying() {
+    SpectrogramItem item;
+    item.setWidth(1000);
+    item.setHeight(200);
+    item.setDisplayMode(1);
+    feedStretchSession(item, 5, 1.0, kShortFrames, kShortFrames, 16);
+    const double fit = item.defaultZoomLevel();
+    QVERIFY(fit > 1.0);
+    QSignalSpy defaultChanged(&item, &SpectrogramItem::defaultZoomLevelChanged);
+    QSignalSpy zoomReset(&item, &SpectrogramItem::zoomResetRequested);
+    item.setStretchShortTracks(false);
+    QCOMPARE(defaultChanged.count(), 1);
+    QCOMPARE(item.defaultZoomLevel(), 1.0);
+    QCOMPARE(item.maximumZoomLevel(), 16.0);
+    item.setStretchShortTracks(true);
+    QCOMPARE(defaultChanged.count(), 2);
+    QCOMPARE(item.defaultZoomLevel(), fit);
+    // A wider view fills at a deeper zoom; a narrower one at a shallower.
+    item.setWidth(1500);
+    QCOMPARE(defaultChanged.count(), 3);
+    QVERIFY(item.defaultZoomLevel() > fit);
+    item.setWidth(1000);
+    QCOMPARE(item.defaultZoomLevel(), fit);
+    // The item leaves its zoom to its owner.
+    QCOMPARE(zoomReset.count(), 0);
 }
 
 void SpectrogramPlaybackSmokeTest::spectrogramRenderLoopStopsWhenNotPlaying() {

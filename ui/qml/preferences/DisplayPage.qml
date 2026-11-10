@@ -8,7 +8,7 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
-// The Appearance page: the viewers and the level meter.
+// The Appearance page: the viewers, the level meter and the default zoom.
 Preferences.PreferencesPage {
     id: root
 
@@ -49,5 +49,13 @@ Preferences.PreferencesPage {
         text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
         checked: root.settings.value("showLevelMeter")
         onToggled: root.settings.setValue("showLevelMeter", checked)
+    }
+
+    CheckBox {
+        objectName: "stretchShortTracksCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
+        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
+        checked: root.settings.value("stretchShortTracks")
+        onToggled: root.settings.setValue("stretchShortTracks", checked)
     }
 }

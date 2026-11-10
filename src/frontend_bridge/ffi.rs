@@ -1293,6 +1293,32 @@ pub extern "C" fn ferrous_ffi_spectrogram_reference_hop(sample_rate: u32) -> u32
     )
 }
 
+/// The zoom at which the columns a spectrogram session decodes of a file of
+/// `frames` frames at `sample_rate`, with `fft_size`-sample windows, fill a
+/// view `width` logical pixels wide; 1 when they fill it at zoom 1 or the
+/// length is unknown (0). The default zoom of a track shorter than the view
+/// when the user has such tracks stretched.
+#[no_mangle]
+pub extern "C" fn ferrous_ffi_spectrogram_fit_zoom(
+    frames: u64,
+    fft_size: u32,
+    sample_rate: u32,
+    width: u32,
+) -> f32 {
+    ffi_call(
+        "ferrous_ffi_spectrogram_fit_zoom",
+        |_| 1.0,
+        || {
+            crate::analysis::spectrogram_fit_zoom(
+                frames,
+                usize::try_from(fft_size).unwrap_or(usize::MAX),
+                sample_rate,
+                width,
+            )
+        },
+    )
+}
+
 /// The zoom the spectrogram moves to when `requested` is asked of it at
 /// `current`; `current` if it keeps its zoom.
 #[no_mangle]
@@ -2493,6 +2519,7 @@ fn parse_settings_command(
         74 => BridgeSettingsCommand::SetLastFmScrobblingPaused(reader.read_u8()? != 0),
         75 => BridgeSettingsCommand::SetLastFmShowScrobbleProgress(reader.read_u8()? != 0),
         76 => BridgeSettingsCommand::SetShowFullscreenTitleStrip(reader.read_u8()? != 0),
+        77 => BridgeSettingsCommand::SetStretchShortTracks(reader.read_u8()? != 0),
         _ => return Ok(None),
     };
     reader.expect_done()?;
@@ -3183,6 +3210,10 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.show_fullscreen_title_strip),
     );
+    push_u8(
+        &mut out,
+        u8::from(snapshot.settings.display.stretch_short_tracks),
+    );
     out
 }
 
@@ -3764,6 +3795,7 @@ mod tests {
                     channel_buttons_visibility: 1,
                     spectrogram_zoom_enabled: true,
                     spectrogram_frequency_cap: false,
+                    stretch_short_tracks: true,
                 },
                 library_sort_mode: LibrarySortMode::Year,
                 library_watch_enabled: true,
@@ -5538,9 +5570,10 @@ mod tests {
 
     /// The bytes that end the settings section: the queue's column widths
     /// and their generation, then the spectrogram's frequency cap, whether
-    /// the scrobble progress indicator is shown, and whether a viewer over
-    /// the whole screen shows its title strip.
-    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 3;
+    /// the scrobble progress indicator is shown, whether a viewer over the
+    /// whole screen shows its title strip, and whether short tracks are
+    /// stretched to the spectrogram's width.
+    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 4;
 
     #[test]
     fn frequency_cap_setting_command_and_snapshot_share_protocol() {
@@ -5554,9 +5587,9 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.spectrogram_frequency_cap = enabled;
             let settings = encode_settings_section(&snapshot);
-            // Followed by the scrobble progress indicator's setting and the
-            // title strip's.
-            assert_eq!(settings[settings.len() - 3], u8::from(enabled));
+            // Followed by the scrobble progress indicator's setting, the
+            // title strip's and the stretch's.
+            assert_eq!(settings[settings.len() - 4], u8::from(enabled));
         }
         assert!(parse_binary_command(&encode_command(73, &[])).is_err());
         assert!(parse_binary_command(&encode_command(73, &[1, 0])).is_err());
@@ -5574,8 +5607,8 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.integrations.lastfm_show_scrobble_progress = show;
             let settings = encode_settings_section(&snapshot);
-            // Followed by the title strip's setting.
-            assert_eq!(settings[settings.len() - 2], u8::from(show));
+            // Followed by the title strip's setting and the stretch's.
+            assert_eq!(settings[settings.len() - 3], u8::from(show));
         }
         assert!(parse_binary_command(&encode_command(75, &[])).is_err());
         assert!(parse_binary_command(&encode_command(75, &[1, 0])).is_err());
@@ -5593,11 +5626,30 @@ mod tests {
             let mut snapshot = sample_snapshot();
             snapshot.settings.display.show_fullscreen_title_strip = show;
             let settings = encode_settings_section(&snapshot);
-            // The last byte of the section.
-            assert_eq!(settings[settings.len() - 1], u8::from(show));
+            // Followed by the stretch's setting.
+            assert_eq!(settings[settings.len() - 2], u8::from(show));
         }
         assert!(parse_binary_command(&encode_command(76, &[])).is_err());
         assert!(parse_binary_command(&encode_command(76, &[1, 0])).is_err());
+    }
+
+    #[test]
+    fn stretch_short_tracks_setting_command_and_snapshot_share_protocol() {
+        for stretch in [false, true] {
+            let cmd = parse_binary_command(&encode_command(77, &[u8::from(stretch)]))
+                .expect("parse stretch setting")
+                .expect("stretch setting command");
+            assert!(matches!(cmd,
+                BridgeCommand::Settings(BridgeSettingsCommand::SetStretchShortTracks(value))
+                if value == stretch));
+            let mut snapshot = sample_snapshot();
+            snapshot.settings.display.stretch_short_tracks = stretch;
+            let settings = encode_settings_section(&snapshot);
+            // The last byte of the section.
+            assert_eq!(settings[settings.len() - 1], u8::from(stretch));
+        }
+        assert!(parse_binary_command(&encode_command(77, &[])).is_err());
+        assert!(parse_binary_command(&encode_command(77, &[1, 0])).is_err());
     }
 
     #[test]
@@ -5671,7 +5723,7 @@ mod tests {
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 3];
+        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 4];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);

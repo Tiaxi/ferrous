@@ -289,6 +289,7 @@ ApplicationWindow {
         property int viewerFullscreenMode: 0
         property bool preventDisplaySleepInFullscreen: true
         property bool showFullscreenTitleStrip: true
+        property bool stretchShortTracks: true
         property bool logScale: false
         property bool spectrogramFrequencyCap: false
         property int repeatMode: 0
@@ -398,6 +399,7 @@ ApplicationWindow {
         function setViewerFullscreenMode(value) { viewerFullscreenMode = value }
         function setPreventDisplaySleepInFullscreen(value) { preventDisplaySleepInFullscreen = value }
         function setShowFullscreenTitleStrip(value) { showFullscreenTitleStrip = value }
+        function setStretchShortTracks(value) { stretchShortTracks = value }
         function setDbRange(value) { dbRange = Math.max(50, Math.min(150, value)) }
         function setLogScale(value) { logScale = value }
         function setSpectrogramFrequencyCap(value) { spectrogramFrequencyCap = value }
@@ -412,7 +414,7 @@ ApplicationWindow {
                 viewerFullscreenMode: 0, dbRange: 132, logScale: false, showFps: false,
                 showLevelMeter: false, librarySortMode: 0, systemMediaControlsEnabled: true,
                 preventDisplaySleepInFullscreen: true, showFullscreenTitleStrip: true,
-                showSpectrogramCrosshair: false,
+                stretchShortTracks: true, showSpectrogramCrosshair: false,
                 showSpectrogramScale: false, channelButtonsVisibility: 1,
                 spectrogramZoomEnabled: true, libraryWatchEnabled: true,
                 spectrogramFrequencyCap: false, lastFmShowScrobbleProgress: true,
@@ -1562,9 +1564,10 @@ ApplicationWindow {
                      viewerController.spectrogramViewerOpen
                          ? spectrogramViewerShell.reservedCorner.height : 0))
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
-        // The shown plot's zoom, 1 at the default.
+        // The shown plot's zoom, 1 at the default: the spectrogram's
+        // relative to its own, which stretches a short track.
         readonly property real zoomLevel: visualizationSurface.spectrogramShown
-            ? spectrogramSurface.zoomLevel
+            ? spectrogramSurface.zoomLevel / spectrogramSurface.defaultZoomLevel
             : waveformSurface.waveformItem.zoomLevel
 
         readonly property bool zoomed: Math.abs(visualizationSurface.zoomLevel - 1.0) > 0.001

@@ -11,7 +11,10 @@
 //! arithmetic, make the decoder and the view decide alike where a track
 //! ends and when a window covers it.
 
-use super::column_hop::{column_hop, column_hops, effective_zoom, pixels_per_column, render_zoom};
+use super::column_hop::{
+    column_hop, column_hops, effective_zoom, pixels_per_column, reference_hop, render_zoom,
+    MAX_ZOOM,
+};
 use super::usize_to_u64;
 
 /// The view shows the whole track once its window covers this share of
@@ -56,6 +59,54 @@ pub fn decoded_end_column(frames: u64, fft_size: usize, zoom: f32, sample_rate: 
     };
     let rows = beyond / stft_hop + 1;
     (rows * stft_hop).div_ceil(usize_to_u64(hops.effective_hop.max(1)))
+}
+
+/// The zoom whose columns of a track of `frames` frames, with
+/// `fft_size`-sample windows, of audio at `sample_rate`, fill a view `width`
+/// pixels wide: the deepest zoom, up to [`MAX_ZOOM`], at which all the
+/// columns a session decodes of the track ([`decoded_end_column`]) fit in
+/// the view. It is the spectrogram's default zoom for a track shorter than
+/// the view when the user has it stretch such tracks.
+///
+/// 1 when the track's columns at zoom 1 fill the view already, when it has
+/// no columns at all, and when its length, the rate or the width is unknown
+/// (0). Deeper zooms draw a column a pixel ([`pixels_per_column`]), and
+/// hops are whole samples, so the columns fill the view to within the
+/// columns one more sample a hop takes off; a track too short to fill it at
+/// [`MAX_ZOOM`] gets that zoom.
+#[must_use]
+pub fn fit_zoom(frames: u64, fft_size: usize, sample_rate: u32, width: u32) -> f32 {
+    if frames == 0 || fft_size == 0 || sample_rate == 0 || width == 0 {
+        return 1.0;
+    }
+    let width = u64::from(width);
+    let at_default = decoded_end_column(frames, fft_size, 1.0, sample_rate);
+    if at_default == 0 || at_default >= width {
+        return 1.0;
+    }
+    let reference = reference_hop(sample_rate);
+    let deepest = column_hop(sample_rate, MAX_ZOOM);
+    // Hops are at most a few thousand samples, and zooms between 1 and
+    // MAX_ZOOM, which f32 holds as the backend does.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let zoom_of = |hop: usize| (reference as f64 / hop as f64) as f32;
+    let fits =
+        |hop: usize| decoded_end_column(frames, fft_size, zoom_of(hop), sample_rate) <= width;
+    // The columns are about the frames past the first half window over the
+    // hop: start there, and step to the shortest hop whose columns fit.
+    let beyond = frames.saturating_sub(usize_to_u64(fft_size / 2));
+    let estimate = usize::try_from(beyond / width).unwrap_or(usize::MAX);
+    let mut hop = estimate.clamp(deepest, reference);
+    while hop < reference && !fits(hop) {
+        hop += 1;
+    }
+    while hop > deepest && fits(hop - 1) {
+        hop -= 1;
+    }
+    if hop >= reference {
+        return 1.0;
+    }
+    zoom_of(hop).min(MAX_ZOOM)
 }
 
 /// A centered view of a session's columns, as the Qt view reckons it.
@@ -160,7 +211,83 @@ impl CenteredView {
 
 #[cfg(test)]
 mod tests {
-    use super::{column_hop, decoded_end_column, window_seconds, CenteredView};
+    use super::{column_hop, decoded_end_column, fit_zoom, window_seconds, CenteredView};
+    use crate::analysis::column_hop::{reference_hop, MAX_ZOOM};
+
+    /// The columns a session at `zoom` decodes of a track.
+    fn columns_at(frames: u64, fft_size: usize, zoom: f32, rate: u32) -> u64 {
+        decoded_end_column(frames, fft_size, zoom, rate)
+    }
+
+    #[test]
+    fn a_short_track_fills_the_view_at_its_fit_zoom() {
+        for (rate, fft_size, width) in [
+            (48_000, 8192, 1_000),
+            (44_100, 8192, 1_000),
+            (48_000, 2048, 1_337),
+            (96_000, 8192, 1_920),
+            (44_100, 512, 640),
+        ] {
+            let frames = u64::from(rate); // one second
+            let zoom = fit_zoom(frames, fft_size, rate, width);
+            assert!(zoom > 1.0, "{rate} Hz, {width} px: {zoom}");
+            let columns = columns_at(frames, fft_size, zoom, rate);
+            assert!(
+                columns <= u64::from(width),
+                "{rate} Hz: {columns} > {width}"
+            );
+            // A column a sample longer would leave more of the view empty:
+            // the hop is the shortest whose columns fit.
+            let hop = column_hop(rate, zoom);
+            assert!(hop < reference_hop(rate));
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let finer = (reference_hop(rate) as f64 / (hop - 1) as f64) as f32;
+            assert!(
+                zoom >= MAX_ZOOM || columns_at(frames, fft_size, finer, rate) > u64::from(width),
+                "{rate} Hz: a hop of {} samples fits too",
+                hop - 1
+            );
+        }
+        // 1 s at 48 kHz in 1000 px: 44 samples a column, 998 columns.
+        let zoom = fit_zoom(48_000, 8192, 48_000, 1_000);
+        assert_eq!(column_hop(48_000, zoom), 44);
+        assert_eq!(columns_at(48_000, 8192, zoom, 48_000), 998);
+    }
+
+    #[test]
+    fn a_track_that_fills_the_view_or_has_no_known_length_keeps_zoom_1() {
+        // 30 s at zoom 1 is 1406 columns, wider than 1000 px.
+        assert!((fit_zoom(30 * 48_000, 8192, 48_000, 1_000) - 1.0).abs() < f32::EPSILON);
+        // Exactly as wide as the view.
+        let frames = 1_000 * 1_024 + 4_096;
+        assert!(columns_at(frames, 8192, 1.0, 48_000) >= 1_000);
+        assert!((fit_zoom(frames, 8192, 48_000, 1_000) - 1.0).abs() < f32::EPSILON);
+        for (frames, fft_size, rate, width) in [
+            (0, 8192, 48_000, 1_000),
+            (48_000, 0, 48_000, 1_000),
+            (48_000, 8192, 0, 1_000),
+            (48_000, 8192, 48_000, 0),
+            // Shorter than half a window: no columns.
+            (4_000, 8192, 48_000, 1_000),
+        ] {
+            assert!(
+                (fit_zoom(frames, fft_size, rate, width) - 1.0).abs() < f32::EPSILON,
+                "{frames} frames"
+            );
+        }
+    }
+
+    #[test]
+    fn a_track_too_short_to_fill_the_view_gets_the_deepest_zoom() {
+        // A fifth of a second at 48 kHz is under 600 columns a 16 samples.
+        let zoom = fit_zoom(9_600, 2048, 48_000, 3_840);
+        assert!((zoom - MAX_ZOOM).abs() < f32::EPSILON);
+        assert_eq!(column_hop(48_000, zoom), 16);
+        // 8 kHz cannot go below its floor of 16 samples a column.
+        let zoom = fit_zoom(8_000, 512, 8_000, 3_840);
+        assert_eq!(column_hop(8_000, zoom), 16);
+        assert!(zoom < MAX_ZOOM);
+    }
 
     /// A view of `window` seconds at 100 columns a second, of a track
     /// `duration` seconds long (0 if unknown).

@@ -104,6 +104,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(int viewerFullscreenMode READ viewerFullscreenMode NOTIFY snapshotChanged)
     Q_PROPERTY(bool preventDisplaySleepInFullscreen READ preventDisplaySleepInFullscreen NOTIFY snapshotChanged)
     Q_PROPERTY(bool showFullscreenTitleStrip READ showFullscreenTitleStrip NOTIFY snapshotChanged)
+    // Whether the spectrogram's default zoom stretches a track shorter than
+    // the view to its width.
+    Q_PROPERTY(bool stretchShortTracks READ stretchShortTracks NOTIFY snapshotChanged)
     Q_PROPERTY(double dbRange READ dbRange NOTIFY snapshotChanged)
     Q_PROPERTY(bool logScale READ logScale NOTIFY snapshotChanged)
     Q_PROPERTY(int repeatMode READ repeatMode NOTIFY snapshotChanged)
@@ -285,6 +288,7 @@ public:
     int viewerFullscreenMode() const;
     bool preventDisplaySleepInFullscreen() const;
     bool showFullscreenTitleStrip() const;
+    bool stretchShortTracks() const;
     double dbRange() const;
     bool logScale() const;
     int repeatMode() const;
@@ -375,6 +379,7 @@ public:
     Q_INVOKABLE void setViewerFullscreenMode(int value);
     Q_INVOKABLE void setPreventDisplaySleepInFullscreen(bool value);
     Q_INVOKABLE void setShowFullscreenTitleStrip(bool value);
+    Q_INVOKABLE void setStretchShortTracks(bool value);
     Q_INVOKABLE void setDbRange(double value);
     // The settings of a new install, by the name of their properties: what
     // the backend starts with when it has no settings file.
@@ -914,6 +919,7 @@ private:
     int m_viewerFullscreenMode{0};
     bool m_preventDisplaySleepInFullscreen{true};
     bool m_showFullscreenTitleStrip{true};
+    bool m_stretchShortTracks{true};
     double m_dbRange{132.0};
     bool m_logScale{false};
     int m_repeatMode{0};

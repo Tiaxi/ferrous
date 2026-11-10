@@ -517,6 +517,7 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
         {1, QStringLiteral("spectrogramFftComboBox")}, {1, QStringLiteral("dbRangeSlider")},
         {1, QStringLiteral("channelButtonsComboBox")},
         {2, QStringLiteral("viewerFullscreenComboBox")}, {2, QStringLiteral("showLevelMeterCheckBox")},
+        {2, QStringLiteral("stretchShortTracksCheckBox")},
         {3, QStringLiteral("lastFmScrobblingCheckBox")},
         {4, QStringLiteral("systemMediaControlsCheckBox")},
     };
@@ -631,6 +632,7 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     QVERIFY(bridge->setProperty("dbRange", 90.0));
     QVERIFY(bridge->setProperty("libraryWatchEnabled", false));
     QVERIFY(bridge->setProperty("showLevelMeter", true));
+    QVERIFY(bridge->setProperty("stretchShortTracks", false));
     QVERIFY(openPreferences(window, 1) != nullptr);
     QTRY_VERIFY(defaultsButton->property("enabled").toBool());
     QQuickItem *logScale = visibleNamed(window, QStringLiteral("spectrogramLogScaleCheckBox"));
@@ -652,6 +654,8 @@ void UiDialogsTest::configureDefaultsSetsThePagesBackToBeApplied() {
     QCOMPARE(bridge->property("dbRange").toDouble(), 132.0);
     QVERIFY(bridge->property("libraryWatchEnabled").toBool());
     QVERIFY(!bridge->property("showLevelMeter").toBool());
+    // On for a new install.
+    QVERIFY(bridge->property("stretchShortTracks").toBool());
 }
 
 void UiDialogsTest::enterPressesConfiguresOkButtonUnlessAControlTakesIt() {
@@ -824,6 +828,7 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         {2, "showFullscreenTitleStripCheckBox", "showFullscreenTitleStrip"},
         {2, "preventDisplaySleepInFullscreenCheckBox", "preventDisplaySleepInFullscreen"},
         {2, "showLevelMeterCheckBox", "showLevelMeter"},
+        {2, "stretchShortTracksCheckBox", "stretchShortTracks"},
         {3, "lastFmScrobblingCheckBox", "lastFmScrobblingEnabled"},
         {3, "lastFmShowScrobbleProgressCheckBox", "lastFmShowScrobbleProgress"},
         {4, "systemMediaControlsCheckBox", "systemMediaControlsEnabled"},

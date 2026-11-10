@@ -164,6 +164,9 @@ enum CommandId : quint16 {
     // Whether a viewer over the whole screen shows its title strip when the
     // pointer moves (u8).
     CmdSetShowFullscreenTitleStrip = 76,
+    // Whether the spectrogram's default zoom stretches a track shorter than
+    // the view to its width (u8).
+    CmdSetStretchShortTracks = 77,
 };
 
 // The narrowest and widest queue column the backend keeps, in logical
@@ -407,6 +410,7 @@ struct DecodedSettings {
     bool spectrogramFrequencyCap{false};
     bool lastFmShowScrobbleProgress{true};
     bool showFullscreenTitleStrip{true};
+    bool stretchShortTracks{true};
     // Whether the section ended with the queue's column widths, which
     // older backends do not send, and the generation of the latest widths
     // the UI sent that the backend had taken.

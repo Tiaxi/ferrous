@@ -1859,6 +1859,7 @@ Window {
         property bool showSpectrogramCrosshair: false
         property bool showSpectrogramScale: false
         property bool spectrogramZoomEnabled: true
+        property bool stretchShortTracks: true
         property int channelButtonsVisibility: 0
         property var soloedChannels: []
         signal precomputedSpectrogramChannelsReady(int channelCount, bool bufferReset)

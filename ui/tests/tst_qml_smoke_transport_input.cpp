@@ -28,6 +28,7 @@ private slots:
     void viewersInTheMainWindowAreNamedInItsTitle();
     void viewerZoomShowsAReadoutAndAResetButton();
     void resetZoomResetsOnlyTheShownPlotsZoom();
+    void resetZoomIsOffAtAShortTracksStretchedDefault();
     void viewerControlsComeBackForTheKeyboard();
     void viewerKeysWorkFromEveryControl();
     void viewerControlsStayWhileOneHasFocus();
@@ -1663,6 +1664,54 @@ void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
     QCOMPARE(spectrogramSurface->property("laneCount").toInt(), 2);
     QTest::keyClick(fullscreen, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void TransportInputSmokeTest::resetZoomIsOffAtAShortTracksStretchedDefault() {
+    // A short track stretched to the plot's width is at its default zoom:
+    // Reset Zoom is off, and the zoom is reckoned from it.
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *resetAction = window->findChild<QObject *>(QStringLiteral("resetZoomAction"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && resetAction != nullptr
+            && spectrogramSurface != nullptr);
+    setPlayingTrack(bridge);
+    viewer->setProperty("visualizationMode", 0);
+    QVERIFY(bridge->property("stretchShortTracks").toBool());
+    SpectrogramItem *item = nullptr;
+    QTRY_VERIFY((item = qobject_cast<SpectrogramItem *>(findQuickItemByObjectName(
+                     spectrogramSurface, QStringLiteral("spectrogramPaneItem")))) != nullptr);
+    QTRY_VERIFY(item->width() > 100.0);
+    const auto width = static_cast<std::uint32_t>(std::floor(item->width()));
+
+    // A second at 48 kHz.
+    constexpr int bins = 4;
+    constexpr quint64 frames = 48'000;
+    const int end = static_cast<int>(ferrous_ffi_spectrogram_decoded_end_column(frames, 8192, 1.0f, 48'000));
+    item->feedPrecomputedChunk(QByteArray(), bins, 0, 0, 0, end, 48'000, 1024, false, true, 5, true,
+                               0, 0, 8192, frames, end);
+    item->feedPrecomputedChunk(QByteArray(16 * bins, '\x40'), bins, 0, 16, 0, end, 48'000, 1024,
+                               false, false, 5, false, 0, 0, 8192, frames, end);
+    const double fit = ferrous_ffi_spectrogram_fit_zoom(frames, 8192, 48'000, width);
+    QVERIFY(fit > 1.0);
+    QTRY_COMPARE(spectrogramSurface->property("zoomLevel").toDouble(), fit);
+    QObject *visualization = window->findChild<QObject *>(QStringLiteral("visualizationSurface"));
+    QVERIFY(visualization != nullptr);
+    QCOMPARE(visualization->property("zoomLevel").toDouble(), 1.0);
+    QVERIFY(!resetAction->property("enabled").toBool());
+
+    // Zoomed out from it to today's scale, and back.
+    QVERIFY(spectrogramSurface->setProperty("_widgetZoomLevel", 1.0));
+    QVERIFY(resetAction->property("enabled").toBool());
+    QVERIFY(qAbs(visualization->property("zoomLevel").toDouble() - 1.0 / fit) < 1e-9);
+    QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
+    QTRY_COMPARE(spectrogramSurface->property("zoomLevel").toDouble(), fit);
+    QCOMPARE(item->zoomLevel(), fit);
+    QVERIFY(!resetAction->property("enabled").toBool());
 }
 
 void TransportInputSmokeTest::viewerControlsComeBackForTheKeyboard() {
