@@ -3,6 +3,7 @@
 #include <QSignalSpy>
 #include <QtTest/QtTest>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -89,6 +90,8 @@ private slots:
     void shortTrackTicksNoFasterThanTheScreen();
     void unknownDurationTicksOnlyAtSeconds();
     void frameRateFollowsTheScreen();
+    void samplesKeepAShortTracksPlayheadToItsFrames();
+    void sparseStepsAfterASeekComeAtTheirBoundaries();
 };
 
 void PlaybackClockTest::monotonicClockIsTheSteadyClock() {
@@ -669,43 +672,46 @@ void PlaybackClockTest::shortTrackTicksNoFasterThanTheScreen() {
     qint64 textChangedAt = 0;
     connect(&clock, &PlaybackClock::positionTextChanged, &clock,
             [&]() { textChangedAt = m_now; });
-    // Playback starts at 0, where the position already was.
-    std::optional<qint64> movedAt;
-    connect(&clock, &PlaybackClock::positionChanged, &clock, [&]() { movedAt = m_now; });
+    QSignalSpy moves(&clock, &PlaybackClock::positionChanged);
 
     int ticks = 0;
     qint64 playedNs = 0;
     // Plays until `until`, as the event loop fires the clock's timer.
     const auto playUntil = [&](qint64 until) {
         const qint64 from = m_now;
+        // Each part starts after an exact change, which starts the steps
+        // over.
+        std::optional<qint64> steppedAt;
         while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= until) {
-            const std::optional<qint64> movedBefore = movedAt;
+            const qsizetype movesBefore = moves.count();
             const qsizetype textsBefore = text.count();
             tick(clock);
             ++ticks;
-            // The playhead moves a frame or more after it last moved,
-            // however many steps it moves by; only the text's change, once
-            // a second, comes when it is due.
-            if (text.count() == textsBefore) {
-                QCOMPARE(movedAt, std::optional<qint64>(m_now));
-                if (movedBefore.has_value()) {
-                    QVERIFY2(m_now - *movedBefore >= kFrameNs,
-                             qPrintable(QStringLiteral("%1 ns apart").arg(m_now - *movedBefore)));
-                }
-            }
-            // Each tick shows where the position is, to its step, and the
-            // text of it.
             const double position = clock.positionAt(m_now);
-            QVERIFY(std::abs(clock.positionSeconds() - position) <= kStep);
             QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(position));
+            if (moves.count() == movesBefore) {
+                // Only the text's change, once a second, comes between the
+                // frames; the playhead follows at its frame.
+                QCOMPARE(text.count(), textsBefore + 1);
+                QVERIFY(std::abs(clock.positionSeconds() - position) <= seconds(kFrameNs));
+                continue;
+            }
+            // The playhead moves a frame or more after it last moved,
+            // however many steps it moves by, to where the position is.
+            if (steppedAt.has_value()) {
+                QVERIFY2(m_now - *steppedAt >= kFrameNs,
+                         qPrintable(QStringLiteral("%1 ns apart").arg(m_now - *steppedAt)));
+            }
+            steppedAt = m_now;
+            QVERIFY(std::abs(clock.positionSeconds() - position) <= kStep);
         }
         m_now = until;
         playedNs += until - from;
     };
-    // At most one tick a frame, and the playhead still moves every frame or
-    // so: 600 ms is 36 frames.
+    // At most one move a frame, and the playhead still moves every frame or
+    // so: 600 ms is 36 frames, and the text took a tick of its own.
     playUntil(kStart + 600 * kMs);
-    QVERIFY2(ticks <= 36 && ticks >= 30, qPrintable(QString::number(ticks)));
+    QVERIFY2(ticks <= 36 + text.count() && ticks >= 30, qPrintable(QString::number(ticks)));
     // The text turned to 00:01 when the position reached 0.5 s.
     QCOMPARE(text.count(), 1);
     QCOMPARE(clock.positionText(), QStringLiteral("00:01"));
@@ -798,6 +804,100 @@ void PlaybackClockTest::unknownDurationTicksOnlyAtSeconds() {
     clock.setDurationSeconds(200.0);
     QVERIFY(clock.nextTickNs().has_value());
     QVERIFY(*clock.nextTickNs() - m_now <= clock.frameIntervalNs());
+}
+
+void PlaybackClockTest::samplesKeepAShortTracksPlayheadToItsFrames() {
+    // The 1 s clip again, with the engine's samples every 20 to 50 ms, each
+    // a little off, as a sink quantizes them: each corrects the position,
+    // and may cross pixels between the clock's ticks.
+    constexpr double kDuration = 1.0;
+    constexpr double kStep = kDuration / 1598.0;
+    constexpr qint64 kFrameNs = 16'666'667;
+    constexpr std::array<int, 7> kSampleGapsMs{20, 33, 47, 25, 41, 50, 28};
+    constexpr std::array<double, 4> kSampleOffsets{0.0, -0.003, 0.002, -0.001};
+    PlaybackClock clock;
+    attach(clock);
+    clock.setFrameRate(60.0);
+    clock.setPositionStepSeconds(kStep);
+    clock.applySample(sample(0.0, kStart, true, 1, kDuration), true);
+    QList<qint64> movedAt;
+    connect(&clock, &PlaybackClock::positionChanged, &clock, [&]() { movedAt.push_back(m_now); });
+    QSignalSpy text(&clock, &PlaybackClock::positionTextChanged);
+    QSignalSpy jumped(&clock, &PlaybackClock::positionJumped);
+
+    int ticks = 0;
+    int samples = 0;
+    const qint64 end = kStart + 900 * kMs;
+    qint64 nextSampleAt = kStart + kSampleGapsMs[0] * kMs;
+    while (m_now < end) {
+        if (nextSampleAt <= end && nextSampleAt <= tickDueAt(clock)) {
+            m_now = nextSampleAt;
+            const qint64 sampledAt = nextSampleAt - 2 * kMs;
+            clock.applySample(
+                sample(seconds(sampledAt - kStart) + kSampleOffsets[samples % kSampleOffsets.size()],
+                       sampledAt, true, 1, kDuration),
+                false);
+            ++samples;
+            nextSampleAt += kSampleGapsMs[samples % kSampleGapsMs.size()] * kMs;
+        } else if (tickDueAt(clock) <= end) {
+            tick(clock);
+            ++ticks;
+        } else {
+            m_now = end;
+        }
+        // The playhead is at most a frame behind the position.
+        QVERIFY(std::abs(clock.positionSeconds() - clock.positionAt(m_now)) <= 0.02);
+    }
+    QVERIFY(samples >= 20);
+    // No sample started over.
+    QCOMPARE(jumped.count(), 0);
+
+    // Each move of the playhead, by a tick or by a sample, a frame or more
+    // after the last; it still moved about every frame.
+    for (qsizetype i = 1; i < movedAt.size(); ++i) {
+        QVERIFY2(movedAt[i] - movedAt[i - 1] >= kFrameNs,
+                 qPrintable(QStringLiteral("moves %1 ns apart at %2 ms")
+                                .arg(movedAt[i] - movedAt[i - 1])
+                                .arg((movedAt[i] - kStart) / kMs)));
+    }
+    QVERIFY2(movedAt.size() <= 54 && movedAt.size() >= 45, qPrintable(QString::number(movedAt.size())));
+    QVERIFY2(ticks <= 54 + text.count(), qPrintable(QString::number(ticks)));
+    QCOMPARE(text.count(), 1);
+    QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(clock.positionAt(m_now)));
+}
+
+void PlaybackClockTest::sparseStepsAfterASeekComeAtTheirBoundaries() {
+    // A step of 100 ms, longer than a frame.
+    PlaybackClock clock;
+    attach(clock);
+    clock.setFrameRate(60.0);
+    clock.setPositionStepSeconds(0.1);
+    clock.applySample(sample(10.0, kStart, true), true);
+    QVERIFY(dueIn(clock, 50));
+    tick(clock);
+    QVERIFY(clock.positionSeconds() >= 10.05 && clock.positionSeconds() <= 10.051);
+    // A seek 5 ms after that step, to 1 ms before a boundary: the playhead
+    // takes the boundary when it comes, though it moved less than a frame
+    // ago.
+    m_now += 5 * kMs;
+    clock.holdAt(10.149);
+    QCOMPARE(clock.positionSeconds(), 10.149);
+    clock.applySample(sample(10.149, m_now, true), true);
+    QVERIFY(dueIn(clock, 1));
+    tick(clock);
+    QVERIFY(clock.positionSeconds() >= 10.15 && clock.positionSeconds() <= 10.151);
+    // And the boundaries after it, each at most a millisecond late; the
+    // text's tick at 10.5 s comes between them.
+    for (int i = 0; i < 5; ++i) {
+        const double boundary = 10.25 + 0.1 * i;
+        tick(clock);
+        if (clock.positionSeconds() < boundary - 0.05) {
+            QCOMPARE(clock.positionText(), QStringLiteral("00:11"));
+            tick(clock);
+        }
+        QVERIFY2(clock.positionSeconds() >= boundary && clock.positionSeconds() <= boundary + 0.0011,
+                 qPrintable(QString::number(clock.positionSeconds(), 'f', 6)));
+    }
 }
 
 void PlaybackClockTest::frameRateFollowsTheScreen() {

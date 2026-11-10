@@ -169,10 +169,13 @@ private:
 
     void setState(const PlaybackClockState &state);
     // Updates the properties to `now`: positionSeconds to the exact
-    // position, or only when it has moved by a step.
+    // position, or only when it has moved by a step and has not moved by
+    // one for a frame.
     void update(bool exact);
     // Whether positionSeconds shows `position` somewhere other than `shown`.
     bool showsMove(double shown, double position) const;
+    // Whether a frame has passed since positionSeconds last moved by a step.
+    bool frameSinceStep(qint64 now) const;
     // Wakes the clock when its properties would next change.
     void scheduleTick(qint64 now, double position);
 
@@ -183,9 +186,10 @@ private:
     int m_positionSecond{0};
     QTimer m_tickTimer;
     std::optional<qint64> m_nextTickNs;
-    // When positionSeconds last changed; it moves by its steps again a
-    // frame after that at the soonest.
-    std::optional<qint64> m_positionChangedNs;
+    // When positionSeconds last moved by its steps; it moves by them again
+    // a frame after that at the soonest. An exact change, such as a seek's,
+    // starts over.
+    std::optional<qint64> m_steppedAtNs;
     bool m_frameUpdatesEnabled{true};
     double m_positionStepSeconds{0.0};
     double m_frameRate{kDefaultFrameRate};

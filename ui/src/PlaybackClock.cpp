@@ -62,8 +62,8 @@ PlaybackClock::PlaybackClock(QObject *parent)
 
 void PlaybackClock::setTimeSource(TimeSource source) {
     m_timeSource = source ? std::move(source) : TimeSource(monotonicNowNs);
-    // The last change was on the other time source.
-    m_positionChangedNs.reset();
+    // The last step was on the other time source.
+    m_steppedAtNs.reset();
     refresh();
 }
 
@@ -204,12 +204,25 @@ bool PlaybackClock::showsMove(double shown, double position) const {
         != std::floor(shown / m_positionStepSeconds + 0.5);
 }
 
+bool PlaybackClock::frameSinceStep(qint64 now) const {
+    return !m_steppedAtNs.has_value() || now < *m_steppedAtNs
+        || now - *m_steppedAtNs >= frameIntervalNs();
+}
+
 void PlaybackClock::update(bool exact) {
     const qint64 now = nowNs();
     const double position = m_state.positionAt(now);
-    if (position != m_positionSeconds && (exact || showsMove(m_positionSeconds, position))) {
+    if (exact) {
+        m_steppedAtNs.reset();
+    }
+    // A step, from a tick or from a sample that corrects the position,
+    // waits for a frame after the last one; the tick then shows it.
+    if (position != m_positionSeconds
+        && (exact || (showsMove(m_positionSeconds, position) && frameSinceStep(now)))) {
         m_positionSeconds = position;
-        m_positionChangedNs = now;
+        if (!exact) {
+            m_steppedAtNs = now;
+        }
         emit positionChanged();
     }
     QString text = formatSeconds(position);
@@ -242,17 +255,23 @@ void PlaybackClock::scheduleTick(qint64 now, double position) {
     // Without a duration, no view has a place for the position, such as the
     // seek bar, whose playhead waits at the start; only the text changes.
     if (m_state.durationSeconds > 0.0) {
-        std::optional<qint64> step = now + frameNs;
-        if (m_positionStepSeconds > 0.0) {
+        std::optional<qint64> step;
+        if (showsMove(m_positionSeconds, position)) {
+            // A step that waits for its frame.
+            step = now;
+        } else if (m_positionStepSeconds > 0.0) {
             step = m_state.reachesAt(
                 (std::floor(position / m_positionStepSeconds + 0.5) + 0.5) * m_positionStepSeconds
                 + kPastBoundarySeconds);
+        } else {
+            step = now + frameNs;
         }
-        // No sooner than a frame after the position last changed: steps
-        // shorter than a frame, such as the pixels of a short track, move
-        // it by several at once, as the screen would show them anyway.
-        if (step.has_value() && m_positionChangedNs.has_value()) {
-            step = std::max(*step, std::min(*m_positionChangedNs, now) + frameNs);
+        // No sooner than a frame after the last step: steps shorter than a
+        // frame, such as the pixels of a short track, move the position by
+        // several at once, as the screen would show them anyway. Longer
+        // ones come at their boundaries.
+        if (step.has_value() && m_steppedAtNs.has_value()) {
+            step = std::max(*step, std::min(*m_steppedAtNs, now) + frameNs);
         }
         consider(step);
     }
