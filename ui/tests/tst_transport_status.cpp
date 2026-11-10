@@ -1055,12 +1055,20 @@ void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
     QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-start"));
     // Neutral: never amber or the accent.
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    const qreal labelLeft = sceneRect(label).left();
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Paused"));
     QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-pause"));
+    QCOMPARE(sceneRect(label).left(), labelLeft);
+    // Stopped has its glyph too, so the word starts at the same place in
+    // every state.
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Stopped"));
-    QVERIFY(!glyph->isVisible());
+    QVERIFY(glyph->isVisible());
+    QCOMPARE(glyph->width(), 11.0);
+    QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-stop"));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_COMPARE(sceneRect(label).left(), labelLeft);
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
 }
 

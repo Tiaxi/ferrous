@@ -291,11 +291,11 @@ void TranslationTest::channelLayoutIconFollowsTheLayoutNotItsText() {
     isolateBridgeClient(client);
 
     client.m_currentTrackChannels = 2;
-    QCOMPARE(client.currentTrackChannelLayoutText(), pseudo(QStringLiteral("stereo")));
+    QCOMPARE(client.currentTrackChannelLayoutText(), pseudo(QStringLiteral("Stereo")));
     QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("stereo"));
 
     client.m_currentTrackChannels = 1;
-    QCOMPARE(client.currentTrackChannelLayoutText(), pseudo(QStringLiteral("mono")));
+    QCOMPARE(client.currentTrackChannelLayoutText(), pseudo(QStringLiteral("Mono")));
     QCOMPARE(client.currentTrackChannelLayoutIconKey(), QStringLiteral("mono"));
 
     client.m_currentTrackChannels = 6;

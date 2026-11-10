@@ -176,7 +176,8 @@ ToolBar {
             color: root.uiPalette.text
         }
 
-        // The neutral playback state: the play or pause glyph and the word.
+        // The neutral playback state: the play, pause or stop glyph and the
+        // word, which starts at the same place in every state.
         Row {
             objectName: "statusBarPlaybackState"
             visible: root.showTrackSections
@@ -187,8 +188,8 @@ ToolBar {
                 objectName: "statusBarPlaybackGlyph"
                 anchors.verticalCenter: parent.verticalCenter
                 size: 11
-                visible: root.playbackState !== "Stopped"
-                source: root.playbackState === "Playing" ? "media-playback-start" : "media-playback-pause"
+                source: root.playbackState === "Playing" ? "media-playback-start"
+                    : (root.playbackState === "Paused" ? "media-playback-pause" : "media-playback-stop")
             }
 
             StatusLabel {
