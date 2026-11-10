@@ -420,6 +420,8 @@ private slots:
     void seekHoverDrawsALineAndANativeToolTip();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
+    void transportButtonsDrawTheAppsFocusRing_data();
+    void transportButtonsDrawTheAppsFocusRing();
     void seekWithoutATrackIsALineAndNoTime();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
@@ -836,6 +838,70 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     const QVariantList seeks = harness.root->property("seeks").value<QJSValue>().toVariant().toList();
     QCOMPARE(seeks.size(), 1);
     QCOMPARE(seeks.first().toDouble(), 82.0);
+}
+
+void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The transport's buttons draw their own background: the hover tint, and
+// for keyboard focus the seek bar's and the volume's 2 px ring, 3 px out,
+// which meets 3:1 on the chrome in both themes. The style's frame, 2.18:1
+// on the light chrome, is not drawn: the background is the app's.
+void TransportStatusTest::transportButtonsDrawTheAppsFocusRing() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    const QColor chrome = harness.token("chrome");
+    for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
+                                QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next"),
+                                QStringLiteral("muteButton")}) {
+        QQuickItem *button = harness.item(name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        auto *background = button->property("background").value<QQuickItem *>();
+        QVERIFY2(background != nullptr, qPrintable(name));
+        const QList<QQuickItem *> rings = background->findChildren<QQuickItem *>(
+            QStringLiteral("transportButtonFocusRing"));
+        const QList<QQuickItem *> hovers = background->findChildren<QQuickItem *>(
+            QStringLiteral("transportButtonHover"));
+        // The app's background, with nothing else in it: no style frame.
+        QCOMPARE(rings.size(), 1);
+        QCOMPARE(hovers.size(), 1);
+        QCOMPARE(background->childItems().size(), 2);
+        QQuickItem *ring = rings.first();
+        QQuickItem *hover = hovers.first();
+        QVERIFY2(!ring->isVisible(), qPrintable(name));
+
+        // Hover: the tint, and no ring. The buttons follow the platform's
+        // hover effects, which the offscreen platform turns off.
+        button->setProperty("hoverEnabled", true);
+        QTest::mouseMove(harness.window, sceneCentre(button));
+        QTRY_VERIFY2(hover->isVisible() && hover->opacity() == 1.0, qPrintable(name));
+        QVERIFY(sameColor(hover->property("color").value<QColor>(), harness.token("hover")));
+        QVERIFY(!ring->isVisible());
+        QTest::mouseMove(harness.window, QPoint(10, harness.window->height() - 10));
+        QTRY_VERIFY2(!hover->isVisible(), qPrintable(name));
+
+        // Keyboard focus: one 2 px ring, 3 px out from the button.
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(ring->isVisible(), qPrintable(name));
+        QCOMPARE(evaluateOn(ring, QStringLiteral("border.width")).toInt(), 2);
+        QCOMPARE(sceneRect(ring), sceneRect(button).adjusted(-3, -3, 3, 3));
+        const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
+        QVERIFY(sameColor(ringColor, harness.token("focusRing")));
+        QVERIFY2(contrastRatio(ringColor, chrome) >= 3.0,
+                 qPrintable(describe(name, ringColor, chrome)));
+        harness.item(QStringLiteral("seekSlider"))->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY2(!ring->isVisible(), qPrintable(name));
+    }
+    // The mute glyph, which the style's background drew before, is drawn.
+    QQuickItem *muteGlyph = harness.item(QStringLiteral("muteButtonGlyph"));
+    QVERIFY(muteGlyph != nullptr && muteGlyph->isVisible());
+    QVERIFY(sameColor(muteGlyph->property("color").value<QColor>(), harness.token("text")));
+    QCOMPARE(muteGlyph->width(), 16.0);
 }
 
 void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
@@ -1914,6 +1980,10 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(within(rect, bar), qPrintable(name + QLatin1Char(' ') + describeRect(rect)));
         QVERIFY2(std::abs(rect.center().y() - bar.center().y()) <= 1.0, qPrintable(name + QLatin1Char(' ') + describeRect(rect) + QLatin1Char(' ') + describeRect(bar)));
     }
+    // The glyphs grow with the font as the transport's do: the state's
+    // 11 px and the issues' 14 px, 2.4 times.
+    QCOMPARE(harness.item(QStringLiteral("statusBarPlaybackGlyph"))->size(), QSizeF(26, 26));
+    QCOMPARE(harness.item(QStringLiteral("statusBarErrorsGlyph"))->size(), QSizeF(34, 34));
     // The format group's words, each whole and within the bar.
     QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
     QVERIFY(format != nullptr);

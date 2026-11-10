@@ -265,6 +265,18 @@ QtObject {
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 
+    // The design's glyphs and small buttons are sized for the default 10 pt
+    // font: a larger font scales them, as it does the transport's, and a
+    // smaller one keeps them.
+    readonly property real fontScale: Math.max(1, root.basePointSize / 10)
+    function scaledSize(size) {
+        return Math.max(size, Math.round(size * root.fontScale))
+    }
+    // The glyph of a small tool button, 16 px, and the button, 24 px, or
+    // the glyph and 4 px around it.
+    readonly property int toolIconSize: root.scaledSize(Kirigami.Units.iconSizes.small)
+    readonly property int toolButtonSize: Math.max(24, root.toolIconSize + 8)
+
     readonly property FontMetrics _baseFontMetrics: FontMetrics {
         font: root.baseFont
     }

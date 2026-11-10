@@ -41,7 +41,7 @@ Item {
     readonly property bool viewerControlsShown: viewerControlsRow.implicitWidth > 0
 
     implicitWidth: closeButton.x + closeButton.width
-    implicitHeight: 24
+    implicitHeight: root.uiPalette.toolButtonSize
 
     // Quiet: only while the view is zoomed.
     Label {
@@ -49,7 +49,7 @@ Item {
         objectName: "viewerZoomReadout"
         x: 0
         visible: root.readoutShown
-        height: 24
+        height: root.uiPalette.toolButtonSize
         rightPadding: 4
         verticalAlignment: Text.AlignVCenter
         text: I18n.i18nc("@info:status zoom of the view in percent", "Zoom %1%",
@@ -99,7 +99,7 @@ Item {
         id: viewerControlsRow
         x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
         implicitWidth: childrenRect.width
-        implicitHeight: 24
+        implicitHeight: root.uiPalette.toolButtonSize
         width: implicitWidth
         height: implicitHeight
     }

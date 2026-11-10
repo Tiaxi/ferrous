@@ -181,6 +181,49 @@ ToolBar {
         }
     }
 
+    // The background of the transport's tool buttons, in the window's
+    // tokens rather than the style's: the hover tint, which fades, and
+    // text 10% while pressed. Keyboard focus is one 2 px ring 3 px outside
+    // the button, in the focus colour of the seek bar's and the volume's
+    // rings, rather than the style's frame, which is 2.18:1 on the light
+    // chrome.
+    component ButtonBackground: Item {
+        id: buttonBackground
+
+        // The button it is the background of.
+        required property Item button
+
+        Rectangle {
+            objectName: "transportButtonHover"
+            anchors.fill: parent
+            radius: 3
+            color: buttonBackground.button.down
+                ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                : root.uiPalette.hover
+            opacity: buttonBackground.button.hovered || buttonBackground.button.down ? 1 : 0
+            visible: opacity > 0
+
+            Behavior on opacity {
+                enabled: Kirigami.Units.shortDuration > 0
+                NumberAnimation {
+                    duration: Kirigami.Units.shortDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+        }
+
+        Rectangle {
+            objectName: "transportButtonFocusRing"
+            visible: buttonBackground.button.visualFocus
+            anchors.fill: parent
+            anchors.margins: -3
+            radius: 6
+            color: "transparent"
+            border.width: 2
+            border.color: root.uiPalette.focusRing
+        }
+    }
+
     // A flat 32 px tool button of the transport with a theme icon. Its
     // tooltip names the action and its shortcut.
     component TransportButton: ToolButton {
@@ -219,6 +262,10 @@ ToolBar {
         // keys with modifiers stay the shortcuts'.
         Keys.onShortcutOverride: function(event) {
             event.accepted = KeyUtils.isPlainSpace(event)
+        }
+
+        background: ButtonBackground {
+            button: transportButton
         }
 
         contentItem: Item {
@@ -765,6 +812,7 @@ ToolBar {
         }
 
         ToolButton {
+            id: muteButton
             objectName: "muteButton"
             Layout.leftMargin: 16
             Layout.alignment: Qt.AlignVCenter
@@ -786,6 +834,25 @@ ToolBar {
             focusPolicy: Qt.TabFocus
             Keys.onShortcutOverride: function(event) {
                 event.accepted = KeyUtils.isPlainSpace(event)
+            }
+            // The style drew the glyph with its frame; this background
+            // draws neither.
+            contentItem: Item {
+                implicitWidth: muteButton.icon.width
+                implicitHeight: muteButton.icon.height
+
+                Kirigami.Icon {
+                    objectName: "muteButtonGlyph"
+                    anchors.centerIn: parent
+                    width: muteButton.icon.width
+                    height: muteButton.icon.height
+                    source: muteButton.icon.name
+                    color: muteButton.icon.color
+                    isMask: true
+                }
+            }
+            background: ButtonBackground {
+                button: muteButton
             }
             onClicked: root.toggleMutedVolume()
         }

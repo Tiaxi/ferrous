@@ -36,6 +36,7 @@
 #include "../src/BridgeClient.h"
 // The plot layer's tests give the meter levels to draw.
 #define private public
+#include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #undef private
 #include "../src/LibraryTreeModel.h"
@@ -368,6 +369,7 @@ void AccessibilityTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
 }
 
 void AccessibilityTest::init() {

@@ -5,6 +5,7 @@
 #include <QString>
 #include <qqml.h>
 
+#include "InputModality.h"
 #include "LevelMeterItem.h"
 #include "Localization.h"
 #include "PlaybackClock.h"
@@ -20,6 +21,7 @@ void registerFerrousQmlTypes() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
     qmlRegisterUncreatableType<PlaybackClock>(
         "FerrousUi", 1, 0, "PlaybackClock", QStringLiteral("The bridge owns the playback clock"));
 }

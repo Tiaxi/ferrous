@@ -6,10 +6,11 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// A flat 24 px tool button on the window's chrome or view colour, such as
-// the viewers' info and close buttons: a theme icon (`icon.name`), or its
-// text with `display: AbstractButton.TextOnly`. Its `text` is the tooltip
-// and the accessible name; `toolTipText` replaces the tooltip. Checked is
+// A flat 24 px tool button, larger with a larger font, on the window's
+// chrome or view colour, such as the viewers' info and close buttons: a
+// theme icon (`icon.name`), or its text with `display:
+// AbstractButton.TextOnly`. Its `text` is the tooltip and the accessible
+// name; `toolTipText` replaces the tooltip. Checked is
 // the selection tint alone; the 2 px ring is for keyboard focus only.
 // With `plotColors` (UiPalette's PlotColors), it takes its colours from the
 // plot it sits on rather than the window, as on a viewer's title strip
@@ -35,15 +36,15 @@ ToolButton {
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
 
     implicitWidth: root.display === AbstractButton.TextOnly
-        ? Math.max(24, label.implicitWidth + 2 * 6)
-        : 24
-    implicitHeight: 24
+        ? Math.max(root.uiPalette.toolButtonSize, label.implicitWidth + 2 * 6)
+        : root.uiPalette.toolButtonSize
+    implicitHeight: root.uiPalette.toolButtonSize
     padding: 0
     flat: true
     hoverEnabled: true
     display: AbstractButton.IconOnly
-    icon.width: Kirigami.Units.iconSizes.small
-    icon.height: Kirigami.Units.iconSizes.small
+    icon.width: root.uiPalette.toolIconSize
+    icon.height: root.uiPalette.toolIconSize
     focusPolicy: Qt.TabFocus
 
     Accessible.name: root.text

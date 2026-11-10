@@ -88,7 +88,9 @@ Item {
             font.pointSize: root.uiPalette.smallPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
-            height: 20
+            // 20 px: its line and 1 or 2 px above and below it, more with
+            // a larger font.
+            height: Math.max(20, Math.ceil(implicitHeight) + Math.round(3 * root.uiPalette.fontScale))
             verticalAlignment: Text.AlignVCenter
             Accessible.ignored: true
         }

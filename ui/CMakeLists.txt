@@ -120,6 +120,7 @@ qt_add_executable(ferrous
     src/PlaybackClock.cpp
     src/PlaybackFrameScheduler.cpp
     src/WindowPresence.cpp
+    src/InputModality.cpp
     src/WaveformReaderLease.cpp
     src/TagEditorController.cpp
     src/TagEditorTableModel.cpp
@@ -611,6 +612,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -719,6 +721,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -791,6 +794,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -863,6 +867,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -936,6 +941,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -1009,6 +1015,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp
@@ -1178,6 +1185,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/QmlTypes.cpp
         src/SpectrogramItem.cpp
@@ -1297,6 +1305,7 @@ if(BUILD_TESTING)
         src/PlaybackClock.cpp
         src/PlaybackFrameScheduler.cpp
         src/WindowPresence.cpp
+        src/InputModality.cpp
         src/WaveformReaderLease.cpp
         src/TagEditorController.cpp
         src/TagEditorTableModel.cpp

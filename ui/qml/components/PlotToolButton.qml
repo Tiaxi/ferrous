@@ -5,8 +5,8 @@ import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import "../logic/KeyUtils.js" as KeyUtils
 
-// A 24 px tool button on a PlotPlate: a theme icon (`icon.name`), or short
-// text such as the M and S of a lane. Its `text` is the tooltip and the
+// A 24 px tool button on a PlotPlate, larger with a larger font: a theme
+// icon (`icon.name`), or short text such as the M and S of a lane. Its `text` is the tooltip and the
 // accessible name. Checked is a solid fill with the glyph in the plot's
 // checked glyph colour. Keyboard focus is a separate 2 px ring 1 px
 // outside the button, with a 1 px gap in the plate's colour, so it reads
@@ -22,15 +22,15 @@ ToolButton {
         ? root.plotColors.checkedGlyph
         : root.plotColors.plotText
 
-    implicitWidth: 24
-    implicitHeight: 24
+    implicitWidth: root.uiPalette.toolButtonSize
+    implicitHeight: root.uiPalette.toolButtonSize
     padding: 0
     flat: true
     // The hover tint, whatever the platform's hover effects.
     hoverEnabled: true
     display: AbstractButton.IconOnly
-    icon.width: Kirigami.Units.iconSizes.small
-    icon.height: Kirigami.Units.iconSizes.small
+    icon.width: root.uiPalette.toolIconSize
+    icon.height: root.uiPalette.toolIconSize
     icon.color: root.glyphColor
     focusPolicy: Qt.TabFocus
     // The focus ring reaches over the plate's 2 px gap to the next button.

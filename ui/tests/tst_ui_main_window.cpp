@@ -22,6 +22,7 @@
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtEndian>
@@ -33,6 +34,7 @@
 #include <functional>
 #include <initializer_list>
 
+#include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
@@ -178,6 +180,33 @@ QQuickItem *libraryRow(QQuickWindow *window, const QString &rowType) {
     return nullptr;
 }
 
+// Row `index` of a list view, if it has one in place.
+QQuickItem *viewRowAt(QQuickItem *view, int index) {
+    QQuickItem *row = nullptr;
+    QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+    return row;
+}
+
+// The rows of a list view that show the current-row ring.
+QList<int> ringedRowsOf(QQuickItem *view) {
+    QList<int> rows;
+    for (int index = 0; index < view->property("count").toInt(); ++index) {
+        QQuickItem *row = viewRowAt(view, index);
+        QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+        if (shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() > 0) {
+            rows.push_back(index);
+        }
+    }
+    return rows;
+}
+
+// Whether row `index` of a list view shows the selection tint.
+bool rowTinted(QQuickItem *view, int index) {
+    QQuickItem *row = viewRowAt(view, index);
+    QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+    return shown(tint) && tint->property("color").value<QColor>().alpha() > 0;
+}
+
 template <typename T>
 void appendLe(QByteArray &out, T value) {
     const T little = qToLittleEndian(value);
@@ -299,13 +328,16 @@ private slots:
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
+    void libraryTreeChevronsGrowWithALargeFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void listsRingARowAsTheKeyboardComesIn();
+    void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
+    void narrowWindowAtALargeFontFitsTheQueue();
     void firstRunShowsOneMessage();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
@@ -319,6 +351,7 @@ void UiMainWindowTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
 }
 
 void UiMainWindowTest::init() {
@@ -859,6 +892,44 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
              QStringLiteral("arrow-right"));
 }
 
+// At 24 pt the tree's chevrons and state glyphs grow with the font, 2.4
+// times their 16 and 12 px, and the indent step with the chevrons, so that
+// each level's chevron is where its parent's ends.
+void UiMainWindowTest::libraryTreeChevronsGrowWithALargeFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(libraryModel, kAllExpanded);
+    QQuickItem *artist = nullptr;
+    QQuickItem *album = nullptr;
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr
+                && (album = libraryRow(window, QStringLiteral("album"))) != nullptr
+                && (track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    playTrack(bridgeOf(window));
+    QQuickItem *artistChevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
+    QQuickItem *albumChevron = itemNamed(album, QStringLiteral("libraryRowChevron"));
+    QQuickItem *state = itemNamed(track, QStringLiteral("libraryRowState"));
+    QVERIFY(artistChevron && albumChevron && state);
+    QCOMPARE(artistChevron->size(), QSizeF(38, 38));
+    QCOMPARE(albumChevron->x() - artistChevron->x(), 38.0);
+    QTRY_VERIFY(state->isVisible());
+    QCOMPARE(state->size(), QSizeF(29, 29));
+    // Each inside its row.
+    for (QQuickItem *item : {artistChevron, albumChevron, state}) {
+        QQuickItem *row = item->parentItem();
+        QVERIFY(item->y() >= 0 && item->y() + item->height() <= row->height());
+    }
+    // The title after the chevron and its gap, clear of it.
+    QVERIFY(itemNamed(artist, QStringLiteral("libraryRowTitle"))->x() >= artistChevron->x() + 38 + 6);
+}
+
 void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1053,9 +1124,9 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QCOMPARE(colorOf(tint), tokenHex(window, "selectionInactive"));
     QCOMPARE(QQmlProperty(tint, QStringLiteral("border.width")).read().toReal(), 0.0);
     QCOMPARE(colorOf(year), tokenHex(window, "textSecondary"));
-    // With focus: the tint, and the ring on the current row as one
-    // rectangle.
-    view->forceActiveFocus();
+    // With focus from the keyboard: the tint, and the ring on the current
+    // row as one rectangle.
+    view->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(view->hasActiveFocus());
     QTRY_COMPARE(colorOf(tint), tokenHex(window, "selection"));
     QCOMPARE(QQmlProperty(tint, QStringLiteral("border.width")).read().toReal(), 1.0);
@@ -1192,6 +1263,69 @@ void UiMainWindowTest::listsRingARowAsTheKeyboardComesIn() {
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{11});
     QTRY_COMPARE(ringedRows(queueView), QList<int>{11});
+}
+
+// The current-row ring shows where the keyboard is, so it shows only
+// while the keyboard is in use: not at launch, where the library has the
+// focus, and not after a click, which selects with the tint alone. Tab or a
+// key press brings it back.
+void UiMainWindowTest::listsRingTheCurrentRowOnlyForTheKeyboard() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, kAllExpanded);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) != nullptr);
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QQuickItem *libraryView = named(window, "libraryView");
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(libraryView && queueView);
+    QTRY_COMPARE(queueView->property("count").toInt(), 5);
+    const auto clickRow = [window](QQuickItem *view, int index, const char *cell) {
+        QQuickItem *row = viewRowAt(view, index);
+        QVERIFY(row != nullptr);
+        QQuickItem *target = itemNamed(row, QString::fromLatin1(cell));
+        QVERIFY(target != nullptr);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(target).center().toPoint());
+    };
+
+    // At launch: the library has the focus and a current row, but no ring.
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    QCOMPARE(ringedRowsOf(queueView), QList<int>{});
+
+    // A click selects with the tint alone.
+    clickRow(libraryView, 1, "libraryRowTitle");
+    QTRY_VERIFY(rowTinted(libraryView, 1));
+    QVERIFY(libraryView->hasActiveFocus());
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    // A key in the list rings the row it moves to.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{2});
+    // A modifier alone, as for a Ctrl+click, is not the keyboard taking over.
+    clickRow(libraryView, 1, "libraryRowTitle");
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{});
+    QTest::keyClick(window, Qt::Key_Control);
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+
+    // Tab into the queue: its current row is ringed, and the library's
+    // ring is gone with the focus.
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{0});
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    // A click on a queue row selects it with the tint alone.
+    clickRow(queueView, 3, "queueCell_title");
+    QTRY_VERIFY(rowTinted(queueView, 3));
+    QCOMPARE(ringedRowsOf(queueView), QList<int>{});
+    // Backtab to the library: its selected row is ringed again.
+    libraryView->forceActiveFocus(Qt::BacktabFocusReason);
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{1});
+    QVERIFY(rowTinted(libraryView, 1));
 }
 
 void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
@@ -1335,6 +1469,84 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
     window->resize(1600, 1000);
     QTRY_VERIFY(album->isVisible());
     QVERIFY(albumHandle->isVisible());
+}
+
+// A narrow window at a large font, 1000 x 720 at 24 pt: the window's
+// minimum stays within it, and the queue's columns fit the queue. Length
+// keeps its measured width, the title its minimum, Album drops first, and
+// nothing runs past the queue's right end. An empty queue's hint wraps
+// within the queue, 24 px clear of its sides.
+void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1000, 720);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY2(window->minimumWidth() <= 1000, qPrintable(QString::number(window->minimumWidth())));
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QVERIFY(queue != nullptr);
+    QTRY_VERIFY(sceneRect(queue).right() <= window->width() + 0.5);
+
+    // The empty queue's hint.
+    bridge->setProperty("libraryRootCount", 1);
+    QQuickItem *hint = named(window, "queueEmptyMessage");
+    QQuickItem *explanation = named(window, "queueEmptyExplanation");
+    QVERIFY(hint && explanation);
+    QTRY_VERIFY(shown(hint));
+    const QRectF pane = sceneRect(queue);
+    for (QQuickItem *item : {hint, named(window, "queueEmptyLabel"), explanation}) {
+        const QRectF rect = sceneRect(item);
+        QVERIFY2(rect.left() >= pane.left() + 24 - 0.5 && rect.right() <= pane.right() - 24 + 0.5,
+                 qPrintable(QStringLiteral("%1: %2..%3 in %4..%5")
+                                .arg(item->objectName())
+                                .arg(rect.left()).arg(rect.right()).arg(pane.left()).arg(pane.right())));
+    }
+    QVERIFY2(explanation->property("lineCount").toInt() > 1,
+             qPrintable(QString::number(explanation->property("lineCount").toInt())));
+
+    // Fifty tracks: Length, Title and Artist fit; Album drops.
+    bridge->setProperty("queueRows", sampleQueueRows(50));
+    bridge->setProperty("queueLength", 50);
+    QQuickItem *view = named(window, "playlistView");
+    QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
+    QTRY_VERIFY(!shown(named(window, "queueHeader_album")));
+    QQuickItem *title = named(window, "queueHeader_title");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QQuickItem *length = named(window, "queueHeader_length");
+    QVERIFY(title && artist && length);
+    QVERIFY(shown(length) && shown(artist));
+    QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(title->width())));
+    QVERIFY(length->width() >= queue->property("minimumLengthColumnWidth").toReal() - 0.5);
+    QVERIFY(sceneRect(artist).left() >= sceneRect(title).right());
+    QVERIFY(sceneRect(length).left() >= sceneRect(artist).right());
+    QVERIFY2(sceneRect(length).right() <= pane.right() - 8 + 0.5,
+             qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(pane.right() - 8)));
+    // The row's cells are where the header's columns are.
+    QQuickItem *row = viewRowAt(view, 0);
+    for (const char *cell : {"queueCell_title", "queueCell_artist", "queueCell_length"}) {
+        QQuickItem *item = itemNamed(row, QString::fromLatin1(cell));
+        QVERIFY2(shown(item) && sceneRect(item).right() <= pane.right() - 8 + 0.5, cell);
+    }
+    QVERIFY(!shown(itemNamed(row, QStringLiteral("queueCell_album"))));
+
+    // Narrower still, at the queue's minimum: Artist drops too, and Length
+    // still fits.
+    window->resize(window->minimumWidth(), 720);
+    QTRY_COMPARE(window->width(), window->minimumWidth());
+    QTRY_VERIFY(queue->width() <= queue->property("minimumContentWidth").toReal() + 0.5);
+    const QRectF narrowPane = sceneRect(queue);
+    QVERIFY(narrowPane.right() <= window->width() + 0.5);
+    QVERIFY(shown(length));
+    QVERIFY2(sceneRect(length).right() <= narrowPane.right() - 8 + 0.5,
+             qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(narrowPane.right() - 8)));
+    QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(title->width())));
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {

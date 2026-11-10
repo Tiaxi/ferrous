@@ -10,7 +10,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // - hovered: the hover tint, which fades in and out;
 // - selected: the selection tint, or the inactive one while the list has
 //   no keyboard focus;
-// - focused (the current row of a list with keyboard focus): a 1 px ring;
+// - focused (the current row of a list with keyboard focus, while the
+//   keyboard is in use): a 1 px ring;
 //   on a selected row, the tint and the ring are one rectangle; on an
 //   unselected row, the ring alone, as in Breeze.
 // Selection and focus change at once.
