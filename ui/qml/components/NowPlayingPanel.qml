@@ -21,8 +21,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   12 px before the seam.
 // - Nothing loaded: one row with the album glyph and "Nothing playing".
 // - A track without a cover or without tags keeps the layout: the tile
-//   on the view colour with a small mark, and a line of space for each
-//   line it has no text for.
+//   on the view colour with Breeze's album cover mark, and a line of space
+//   for each line it has no text for.
 //
 // The title is a step over the rest: DemiBold, larger; the artist and the
 // album are in the text colour, and the details in the tertiary one.
@@ -683,6 +683,14 @@ Item {
         && artistAlbumMetrics.advanceWidth(root.artistAlbumText) > wideColumn.width
     readonly property int wideArtistAlbumGap: 4
 
+    // The mark of a track without a cover, from the font: 48 px with the
+    // default font in the wide tile and 32 px in the narrow one, larger with
+    // a larger font, and never over a third of the tile. Even, so that it
+    // sits on whole pixels at the centre of the tile.
+    readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
+        root.uiPalette.scaledSize(root.layoutMode === "narrow"
+            ? Kirigami.Units.iconSizes.medium : Kirigami.Units.iconSizes.large)) / 2)
+
     // The block follows its text: in narrow, at least the cover's height,
     // and more when the lines need it.
     implicitHeight: (root.layoutMode === "empty"
@@ -1037,6 +1045,7 @@ Item {
         // in the tertiary text colour.
         placeholderColor: root.uiPalette.view
         placeholderGlyphColor: root.uiPalette.textTertiary
+        placeholderGlyphSize: root.coverMarkSize
         // The sidebar's, which shows around the cover.
         backdropColor: root.uiPalette.view
         replaceFromItunesAction: root.replaceFromItunesAction

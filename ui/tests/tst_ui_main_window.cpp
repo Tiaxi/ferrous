@@ -750,9 +750,10 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
 
 // A track without a cover, or without tags, keeps the layout of one with
 // them (#373 H1): the tile keeps its size, on the sidebar's view colour with
-// no surface of its own, and shows a small tertiary mark at its centre, 48 px
-// wide and a third of the narrow 96 px tile; the text block keeps its three
-// lines, so the library under it does not move between tracks.
+// no surface of its own, and shows Breeze's album cover mark (#373 H3) in the
+// tertiary colour at its centre, 48 px wide and a third of the narrow 96 px
+// tile; the text block keeps its three lines, so the library under it does
+// not move between tracks.
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -785,7 +786,9 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
         QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), tile.center());
-        QVERIFY(mark->property("source").toUrl().toString().endsWith(QStringLiteral("cover-missing.svg")));
+        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-album-cover"));
+        QVERIFY(mark->property("valid").toBool());
+        QVERIFY(mark->property("isMask").toBool());
         QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
 
         // No tags: the file name for a title, the other lines empty; the
