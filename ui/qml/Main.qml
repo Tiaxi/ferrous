@@ -1539,6 +1539,7 @@ ApplicationWindow {
                     openViewer: viewerController.openSpectrogramViewer
                     uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
+                    awaitingFirstData: !visualizationSurface.sessionHasData
                 }
             }
         }
@@ -1633,7 +1634,10 @@ ApplicationWindow {
             }
         }
         onModeInputsChanged: visualizationSurface.followMode()
-        Component.onCompleted: visualizationSurface.settledMode = viewerController.visualizationMode
+        Component.onCompleted: {
+            visualizationSurface.settledMode = viewerController.visualizationMode
+            visualizationSurface.sessionHasData = visualizationSurface.plotHasData
+        }
         // Whether `mode`'s plot shows: settled, or chosen and coming in.
         function plotShown(mode) {
             return visualizationSurface.settledMode === mode || visualizationSurface.chosenMode === mode
@@ -1642,6 +1646,19 @@ ApplicationWindow {
         function plotOpacity(mode) {
             return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
                 ? 1 : visualizationSurface.modeFade
+        }
+
+        // Whether either plot has had a track's data this session. Until
+        // then the pane is bare, and in the light theme the view colour
+        // (PlotLayer); after it, its floor is the plot's, also once
+        // playback stops.
+        property bool sessionHasData: false
+        readonly property bool plotHasData: (root.uiBridge.currentTrackPath || "").length > 0
+            && (!spectrogramSurface.awaitingData || !waveformSurface.awaitingData)
+        onPlotHasDataChanged: {
+            if (visualizationSurface.plotHasData) {
+                visualizationSurface.sessionHasData = true
+            }
         }
         // The shown plot's zoom, 1 at the default: the spectrogram's
         // relative to its own, which stretches a short track.
@@ -1744,6 +1761,7 @@ ApplicationWindow {
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.markerX : waveformSurface.markerX
+            awaitingFirstData: !visualizationSurface.sessionHasData
             openIssues: function() { errorController.historyRequested() }
         }
     }
