@@ -26,6 +26,7 @@ private slots:
     void failedSaveBeforeQuitShowsTheErrorAndRetrySaves();
     void quitAnywayClosesAfterAFailedSave();
     void retryTakesNoSecondAnswerAsTheDialogFades();
+    void enterRetriesAsSoonAsTheSaveFailureShows();
     void aFailedSaveBeforeQuitIsNotHiddenByRecentErrors();
     void saveAnsweredAfterItsTimeoutStillClosesTheWindow();
     void answerToAnEarlierSaveAttemptDoesNotSettleARetry();
@@ -546,6 +547,46 @@ void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
     // The retry's answer still closes the window.
     QVERIFY(answerStateSave(bridge, retry, true));
     QTRY_VERIFY(!window->isVisible());
+}
+
+// Enter presses Retry as soon as the failure shows, before the keyboard has
+// moved into the dialog, and only once; Escape at once still keeps Ferrous
+// open (#562).
+void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowForQuit(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QVERIFY(bridge != nullptr);
+    QObject *dialog = window->findChild<QObject *>(QStringLiteral("quitSaveFailedDialog"));
+    QVERIFY(dialog != nullptr);
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    QVERIFY(bridge->setProperty("holdStateSaveAnswers", true));
+
+    window->close();
+    const int first = bridge->property("lastStateSaveRequestId").toInt();
+    QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QVERIFY(keyboardInPopupContent(dialog));
+    QTest::keyClick(window, Qt::Key_Return);
+    const int retry = bridge->property("lastStateSaveRequestId").toInt();
+    QCOMPARE(retry, first + 1);
+    // Enter again, as the dialog fades out, saves no second time.
+    QVERIFY(popupFadingOut(dialog));
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
+
+    // The retry fails too; Escape, at once, keeps Ferrous open.
+    QVERIFY(answerStateSave(bridge, retry, false, QStringLiteral("Settings could not be saved")));
+    QTRY_VERIFY(dialog->property("visible").toBool());
+    QVERIFY(keyboardInPopupContent(dialog));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!dialog->property("visible").toBool());
+    QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
+    QVERIFY(window->isVisible());
 }
 
 void ErrorsSmokeTest::saveAnsweredAfterItsTimeoutStillClosesTheWindow() {

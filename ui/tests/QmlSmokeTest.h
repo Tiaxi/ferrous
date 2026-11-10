@@ -483,6 +483,14 @@ bool popupFadingOut(QObject *popup);
 // quick second click. Whether both clicks were made, the second in the fade.
 bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *popup);
 
+// Whether the keyboard is in `popup`'s content itself, where a dialog's
+// Enter presses its default button, rather than in the popup or a control.
+bool keyboardInPopupContent(QObject *popup);
+
+// Tabs in `window` until the keyboard is on a button of `popup`'s footer;
+// whether it got there without leaving the popup.
+bool tabToPopupFooter(QQuickWindow *window, QObject *popup);
+
 // Whether no popup in any window is opening or closing. The app's style
 // fades popups in and out: in its enter or exit transition a popup is
 // visible but not opened, and a modal one that fades out still takes the

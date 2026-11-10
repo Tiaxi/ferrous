@@ -16,7 +16,49 @@ private slots:
     void diagnosticsLogUsesLowercaseAppDir();
     void replacingAlbumArtAsksFirstWhenTheTrackHasArt();
     void clearingDiagnosticsAsksFirst();
+    void enterConfirmsAsSoonAsTheConfirmationShows();
 };
+
+namespace {
+
+// The diagnostics dialog over a window of its own, with a bridge that counts
+// the clears in the window's `clears`.
+QObject *createDiagnosticsHarness(QQmlApplicationEngine &engine, QString *errorText) {
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    return createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import "components" as Components
+import "dialogs" as Dialogs
+ApplicationWindow {
+    id: window
+    width: 1100
+    height: 800
+    visible: true
+    property int clears: 0
+    property alias dialog: dialog
+    Components.UiPalette { id: palette; windowRoot: window }
+    QtObject {
+        id: bridge
+        property string diagnosticsText: "a line worth keeping"
+        property string diagnosticsLogPath: "/fixture/diagnostics.log"
+        signal diagnosticsChanged()
+        function reloadDiagnosticsFromDisk() {}
+        function clearDiagnostics() { window.clears++; diagnosticsText = "" }
+        function openContainingFolder(path) {}
+    }
+    Dialogs.DiagnosticsDialog {
+        id: dialog
+        uiBridge: bridge
+        uiPalette: palette
+        windowRoot: window
+    }
+}
+)QML"), baseUrl, errorText);
+}
+
+} // namespace
 
 void PreferencesSmokeTest::libraryPreferencesToggleWatchingAndShowUnwatchedRoots() {
     QQmlApplicationEngine engine;
@@ -418,39 +460,8 @@ ApplicationWindow {
 
 void PreferencesSmokeTest::clearingDiagnosticsAsksFirst() {
     QQmlApplicationEngine engine;
-    const QUrl baseUrl = QUrl::fromLocalFile(
-        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
     QString errorText;
-    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, QByteArrayLiteral(R"QML(
-import QtQuick 2.15
-import QtQuick.Controls 2.15
-import "components" as Components
-import "dialogs" as Dialogs
-ApplicationWindow {
-    id: window
-    width: 1100
-    height: 800
-    visible: true
-    property int clears: 0
-    property alias dialog: dialog
-    Components.UiPalette { id: palette; windowRoot: window }
-    QtObject {
-        id: bridge
-        property string diagnosticsText: "a line worth keeping"
-        property string diagnosticsLogPath: "/fixture/diagnostics.log"
-        signal diagnosticsChanged()
-        function reloadDiagnosticsFromDisk() {}
-        function clearDiagnostics() { window.clears++; diagnosticsText = "" }
-        function openContainingFolder(path) {}
-    }
-    Dialogs.DiagnosticsDialog {
-        id: dialog
-        uiBridge: bridge
-        uiPalette: palette
-        windowRoot: window
-    }
-}
-)QML"), baseUrl, &errorText));
+    QScopedPointer<QObject> root(createDiagnosticsHarness(engine, &errorText));
     QVERIFY2(root != nullptr, qPrintable(errorText));
     auto *window = qobject_cast<QQuickWindow *>(root.get());
     QVERIFY(window != nullptr);
@@ -475,6 +486,56 @@ ApplicationWindow {
     QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("confirmDialogConfirmButton"), confirm));
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(root->property("clears").toInt(), 1);
+    QCOMPARE(dialog->property("diagnosticsText").toString(), QString());
+}
+
+// Enter answers the shared confirmation as soon as it shows, before the
+// keyboard has moved into it, and only once; Escape and Tab still work
+// (#562).
+void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
+    QQmlApplicationEngine engine;
+    QString errorText;
+    QScopedPointer<QObject> root(createDiagnosticsHarness(engine, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
+    QObject *confirm = root->findChild<QObject *>(QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(dialog != nullptr && confirm != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QTRY_VERIFY(dialog->property("opened").toBool());
+
+    // Escape, at once, keeps the log.
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(confirm->property("visible").toBool());
+    QVERIFY(keyboardInPopupContent(confirm));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("clears").toInt(), 0);
+
+    // Tab goes on from the content through the dialog to its buttons.
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(tabToPopupFooter(window, confirm));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 0);
+
+    // Asked again, it has the keyboard in its content, not on the button
+    // Tab left it on, and Enter, as it fades in, clears the log once.
+    // Enter again, as it fades out, clears nothing more.
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(confirm->property("visible").toBool() && !confirm->property("opened").toBool());
+    QVERIFY(keyboardInPopupContent(confirm));
+    QTest::keyClick(window, Qt::Key_Return);
+    QCOMPARE(root->property("clears").toInt(), 1);
+    QVERIFY(popupFadingOut(confirm));
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 1);
+    QVERIFY(!confirm->property("visible").toBool());
     QCOMPARE(dialog->property("diagnosticsText").toString(), QString());
 }
 
