@@ -8178,6 +8178,12 @@ void BridgeClientTest::currentTrackChannelsExposesDecodedMetadata()
     QCOMPARE(client.currentTrackChannels(), 6);
     QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("6 ch"));
     QVERIFY(client.currentTrackChannelLayoutIconKey().isEmpty());
+
+    // The status bar's names start with a capital, as its other words do.
+    client.m_currentTrackChannels = 2;
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("Stereo"));
+    client.m_currentTrackChannels = 1;
+    QCOMPARE(client.currentTrackChannelLayoutText(), QStringLiteral("Mono"));
 }
 
 

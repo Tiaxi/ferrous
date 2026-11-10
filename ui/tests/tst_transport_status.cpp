@@ -20,6 +20,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
@@ -432,6 +433,7 @@ private slots:
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
     void statusBarHasNoDividers();
+    void transportAndStatusBarGrowWithALargeFont();
 };
 
 void TransportStatusTest::initTestCase() {
@@ -1055,12 +1057,20 @@ void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
     QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-start"));
     // Neutral: never amber or the accent.
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    const qreal labelLeft = sceneRect(label).left();
     harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Paused"));
     QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-pause"));
+    QCOMPARE(sceneRect(label).left(), labelLeft);
+    // Stopped has its glyph too, so the word starts at the same place in
+    // every state.
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
     QCOMPARE(label->property("text").toString(), QStringLiteral("Stopped"));
-    QVERIFY(!glyph->isVisible());
+    QVERIFY(glyph->isVisible());
+    QCOMPARE(glyph->width(), 11.0);
+    QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-stop"));
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_COMPARE(sceneRect(label).left(), labelLeft);
     QVERIFY(sameColor(label->property("color").value<QColor>(), harness.token("textSecondary")));
 }
 
@@ -1261,10 +1271,14 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     QCOMPARE(box->size(), QSizeF(20, 20));
-    QCOMPARE(glyph->width(), 12.0);
+    // A 14 px glyph with a heavier stroke in a 1.5 px ring, which reads at
+    // the slot's size.
+    QCOMPARE(glyph->width(), 14.0);
+    QCOMPARE(slot->property("ringStroke").toReal(), 1.5);
     QVERIFY(ring->isVisible());
     QVERIFY(std::abs(progress() - 77.0 / 115.0) < 0.02);
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-ring.svg")));
+    QVERIFY(!slot->property("ringFilled").toBool());
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 0:38 to scrobble"));
@@ -1310,9 +1324,25 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("link")));
         QVERIFY(!label->isVisible());
     }
+    // Scrobbled has a second cue besides the colour: the ring fills, with
+    // the glyph cut out of it in the chrome colour.
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbled"));
+    QVERIFY(slot->property("ringFilled").toBool());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("chrome")));
+    QVERIFY2(contrastRatio(harness.token("chrome"), harness.token("link")) >= 3.0,
+             qPrintable(describe(QStringLiteral("glyph cut out of the scrobbled ring"), harness.token("chrome"),
+                                 harness.token("link"))));
+    // Inside the ring, left of the glyph: the fill, drawn. The slot has
+    // just come back, so the point is found once it is laid out again.
+    const auto insideRing = [box]() { return box->mapToScene(QPointF(2.5, box->height() / 2)); };
+    qreal scale = 1;
+    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("link")));
+    // While it is sent, the ring is closed but not filled.
     bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
+    QVERIFY(!slot->property("ringFilled").toBool());
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("chrome")));
     QVERIFY2(contrastRatio(harness.token("link"), harness.token("chrome")) >= 3.0,
              qPrintable(describe(QStringLiteral("scrobbled ring"), harness.token("link"), harness.token("chrome"))));
 
@@ -1402,7 +1432,12 @@ void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {
     QCOMPARE(textChanged.count(), 0);
     bridge->setProperty("lastFmScrobbleListenedMs", 31000);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:24 to scrobble"));
-    QCOMPARE(progressMoved.count(), 1);
+    // The ring moves by whole device pixels of its arc: with the second,
+    // if it crosses one.
+    const double arcPixels = std::round(2 * M_PI * slot->property("ringRadius").toDouble()
+                                        * std::max(1.0, harness.window->devicePixelRatio()));
+    const bool crossesAPixel = std::floor(31.0 / 115.0 * arcPixels) != std::floor(30.0 / 115.0 * arcPixels);
+    QCOMPARE(progressMoved.count(), crossesAPixel ? 1 : 0);
     QCOMPARE(textChanged.count(), 1);
 
     // A new play (a new track, a replay, Repeat One) counts from zero.
@@ -1599,6 +1634,108 @@ void TransportStatusTest::statusBarHasNoDividers() {
             && (item->width() <= 1.0 || item->height() <= 1.0);
         QVERIFY2(!rule, qPrintable(item->objectName() + QStringLiteral(" %1×%2").arg(item->width()).arg(item->height())));
     }
+}
+
+namespace {
+
+// Whether `inner` lies within `outer`, give or take half a pixel.
+bool within(const QRectF &inner, const QRectF &outer) {
+    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
+        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
+}
+
+QString describeRect(const QRectF &rect) {
+    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
+} // namespace
+
+// At 24 pt, nothing in the transport or the status bar clips or overlaps:
+// the glyphs and buttons grow with the font, the band with them, and the
+// status bar is as tall as its text and 4 px above and below it.
+void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), 24.0);
+
+    // The transport: the glyphs 2.4 times the default font's, each inside
+    // its button, the buttons side by side inside the band.
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(transport != nullptr);
+    const QRectF band = sceneRect(transport);
+    const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
+                            QStringLiteral("next")};
+    const QList<int> glyphs{38, 48, 34, 38};
+    qreal previousRight = band.left();
+    qreal buttonSize = 0;
+    for (int i = 0; i < names.size(); ++i) {
+        QQuickItem *button = harness.item(QStringLiteral("transportButton_") + names[i]);
+        QVERIFY2(button != nullptr, qPrintable(names[i]));
+        QCOMPARE(button->property("glyphSize").toInt(), glyphs[i]);
+        const QRectF rect = sceneRect(button);
+        buttonSize = rect.height();
+        QVERIFY2(rect.width() >= glyphs[i] && rect.height() >= glyphs[i], qPrintable(names[i]));
+        QVERIFY2(within(rect, band), qPrintable(names[i] + QLatin1Char(' ') + describeRect(rect)));
+        QVERIFY2(rect.left() >= previousRight, qPrintable(names[i]));
+        previousRight = rect.right();
+    }
+    QCOMPARE(band.height(), std::max(48.0, buttonSize + 16.0));
+    for (const QString &name : {QStringLiteral("seekSlider"), QStringLiteral("transportTimePosition"),
+                                QStringLiteral("transportTimeLength"), QStringLiteral("muteButton"),
+                                QStringLiteral("volumeSlider")}) {
+        QQuickItem *item = harness.item(name);
+        QVERIFY2(item != nullptr, qPrintable(name));
+        QVERIFY2(within(sceneRect(item), band), qPrintable(name + QLatin1Char(' ') + describeRect(sceneRect(item))));
+    }
+    QVERIFY(sceneRect(harness.item(QStringLiteral("seekSlider"))).left() >= previousRight);
+    QVERIFY(sceneRect(harness.item(QStringLiteral("muteButton"))).left()
+            >= sceneRect(harness.item(QStringLiteral("transportTime"))).right());
+
+    // The status bar: its text and glyphs within the bar under the seam,
+    // and centred in it.
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
+    harness.bridge->setProperty("lastFmScrobbleState", 6);
+    harness.bridge->setProperty("lastFmScrobbleIneligibility", 3);
+    QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
+    takeWarnings(); // The controller logs each report as a warning.
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *issues = harness.item(QStringLiteral("statusBarErrorsButton"));
+    QVERIFY(status && label && slot && issues);
+    QTRY_VERIFY(slot->isVisible() && issues->isVisible());
+    // Once the bar has laid out the slot and the issues it shows again.
+    QTRY_VERIFY(std::abs(sceneRect(slot).center().y() - sceneRect(status).adjusted(0, 1, 0, 0).center().y()) <= 1.0
+                && sceneRect(slot).right() < sceneRect(issues).left());
+    const QRectF statusRect = sceneRect(status);
+    const QRectF bar = statusRect.adjusted(0, 1, 0, 0);
+    QVERIFY2(bar.height() >= label->height() + 7,
+             qPrintable(QStringLiteral("%1 for a %2 px line").arg(bar.height()).arg(label->height())));
+    for (const QString &name : {QStringLiteral("statusBarPlaybackGlyph"), QStringLiteral("statusBarPlaybackStateLabel"),
+                                QStringLiteral("scrobbleIndicator"), QStringLiteral("scrobbleIndicatorLabel"),
+                                QStringLiteral("scrobbleIndicatorBox"), QStringLiteral("statusBarErrorsButton"),
+                                QStringLiteral("statusBarErrorsLabel")}) {
+        QQuickItem *item = harness.item(name);
+        QVERIFY2(item != nullptr && item->isVisible(), qPrintable(name));
+        const QRectF rect = sceneRect(item);
+        QVERIFY2(within(rect, bar), qPrintable(name + QLatin1Char(' ') + describeRect(rect)));
+        QVERIFY2(std::abs(rect.center().y() - bar.center().y()) <= 1.0, qPrintable(name + QLatin1Char(' ') + describeRect(rect) + QLatin1Char(' ') + describeRect(bar)));
+    }
+    // The format group's words, each whole and within the bar.
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
+    QVERIFY(format != nullptr);
+    QCOMPARE(format->property("text").toString(), QStringLiteral("FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps"));
+    QVERIFY(within(sceneRect(format), bar));
+    // The Last.fm label's words inside the slot's background.
+    QVERIFY(within(sceneRect(harness.item(QStringLiteral("scrobbleIndicatorLabel"))), sceneRect(slot)));
+    QVERIFY(within(sceneRect(harness.item(QStringLiteral("statusBarErrorsLabel"))), sceneRect(issues)));
 }
 
 int main(int argc, char **argv) {

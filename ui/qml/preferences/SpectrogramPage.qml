@@ -13,7 +13,7 @@ Preferences.PreferencesPage {
 
     required property var spectrogramFftChoices
 
-    // A control's width in the form.
+    // A combo box's width in the form, or what its longest option needs.
     readonly property real comboWidth: Kirigami.Units.gridUnit * 9
 
     title: I18n.i18nc("@title preferences page", "Spectrogram")
@@ -21,7 +21,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "spectrogramViewComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Channels:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox spectrogram view", "Downmix"),
             I18n.i18nc("@item:inlistbox spectrogram view", "Per channel")
@@ -33,7 +33,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "spectrogramDisplayComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
             I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
@@ -45,7 +45,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "spectrogramFftComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "FFT window:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: root.spectrogramFftChoices
         currentIndex: {
             const index = root.spectrogramFftChoices.indexOf(root.settings.value("fftSize"))
@@ -160,7 +160,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "channelButtonsComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
-        Layout.preferredWidth: root.comboWidth
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox channel buttons", "Never"),
             I18n.i18nc("@item:inlistbox channel buttons", "On hover"),

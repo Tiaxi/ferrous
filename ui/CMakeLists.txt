@@ -244,6 +244,7 @@ qt_add_qml_module(ferrous_ui_qml
     RESOURCES
         qml/assets/lastfm.svg
         qml/assets/lastfm-paused.svg
+        qml/assets/lastfm-ring.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
         qml/logic/ChannelLabels.js

@@ -10,10 +10,11 @@ import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../components" as Components
 
-// The status bar (#373): 24 px of chrome with 12 px text. On the left the
-// playback state, repeat and shuffle, and the track's format; on the right
-// the library scan, the Last.fm slot and the issues. Groups are 16 px
-// apart, with middle dots only inside a group and no dividers.
+// The status bar (#373): 24 px of chrome with 12 px text, taller with a
+// larger font. On the left the playback state, repeat and shuffle, and the
+// track's format; on the right the library scan, the Last.fm slot and the
+// issues. Groups are 16 px apart, with middle dots only inside a group and
+// no dividers.
 ToolBar {
     id: root
 
@@ -33,7 +34,11 @@ ToolBar {
     // without its folder and bar.
     readonly property bool narrow: root.width < 1200
 
-    implicitHeight: 25
+    // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
+    // above and below it when that is more.
+    readonly property real barHeight: Math.max(24, Math.round(smallMetrics.height) + 8)
+
+    implicitHeight: root.topPadding + root.barHeight
     leftPadding: 12
     rightPadding: 6
     topPadding: 1
@@ -142,6 +147,12 @@ ToolBar {
         }
     }
 
+    FontMetrics {
+        id: smallMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+    }
+
     // A 12 px label of the status bar.
     component StatusLabel: Label {
         font.pointSize: root.uiPalette.smallPointSize
@@ -176,7 +187,8 @@ ToolBar {
             color: root.uiPalette.text
         }
 
-        // The neutral playback state: the play or pause glyph and the word.
+        // The neutral playback state: the play, pause or stop glyph and the
+        // word, which starts at the same place in every state.
         Row {
             objectName: "statusBarPlaybackState"
             visible: root.showTrackSections
@@ -187,8 +199,8 @@ ToolBar {
                 objectName: "statusBarPlaybackGlyph"
                 anchors.verticalCenter: parent.verticalCenter
                 size: 11
-                visible: root.playbackState !== "Stopped"
-                source: root.playbackState === "Playing" ? "media-playback-start" : "media-playback-pause"
+                source: root.playbackState === "Playing" ? "media-playback-start"
+                    : (root.playbackState === "Paused" ? "media-playback-pause" : "media-playback-stop")
             }
 
             StatusLabel {
@@ -413,7 +425,7 @@ ToolBar {
             visible: root.errorCount > 0
             Layout.alignment: Qt.AlignVCenter
             implicitWidth: leftPadding + issuesRow.implicitWidth + rightPadding
-            implicitHeight: 22
+            implicitHeight: root.barHeight - 2
             padding: 0
             leftPadding: 6
             rightPadding: 6

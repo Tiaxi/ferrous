@@ -574,13 +574,15 @@ QString channelLayoutCode(int channels, const QStringList &labels) {
     }
 }
 
+// The layout as the status bar names it: "Stereo", "Mono", or a surround
+// code such as "5.1".
 QString channelLayoutText(int channels, const QStringList &labels) {
     const QString code = channelLayoutCode(channels, labels);
     if (code == QStringLiteral("mono")) {
-        return i18nc("@info:status channel layout", "mono");
+        return i18nc("@info:status channel layout", "Mono");
     }
     if (code == QStringLiteral("stereo")) {
-        return i18nc("@info:status channel layout", "stereo");
+        return i18nc("@info:status channel layout", "Stereo");
     }
     if (!code.isEmpty()) {
         return code;

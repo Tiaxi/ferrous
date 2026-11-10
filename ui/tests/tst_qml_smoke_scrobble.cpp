@@ -40,6 +40,7 @@ ApplicationWindow {
     readonly property color secondaryColor: palette.textSecondary
     readonly property color tertiaryColor: palette.textTertiary
     readonly property color negativeColor: palette.negative
+    readonly property color chromeColor: palette.chrome
 
     QtObject {
         id: bridge
@@ -150,6 +151,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     const QColor secondary = root->property("secondaryColor").value<QColor>();
     const QColor tertiary = root->property("tertiaryColor").value<QColor>();
     const QColor negative = root->property("negativeColor").value<QColor>();
+    const QColor chrome = root->property("chromeColor").value<QColor>();
 
     // The slot shows the glyph in its ring while listening and once
     // scrobbled, words and a glyph when the user should know, and nothing
@@ -168,11 +170,12 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     };
     const QList<Case> cases{
         {"idle", 0, 0, false, 0, "empty", QString(), "", QColor(), QString()},
-        {"listening", 1, 0, false, 0, "listening", QString(), "/lastfm.svg", secondary,
+        {"listening", 1, 0, false, 0, "listening", QString(), "/lastfm-ring.svg", secondary,
          QStringLiteral("Last.fm: 2:00 to scrobble")},
-        {"sending", 2, 0, false, 0, "scrobbled", QString(), "/lastfm.svg", secondary,
+        {"sending", 2, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", secondary,
          QStringLiteral("Last.fm: sending the scrobble")},
-        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm.svg", secondary,
+        // Accepted: cut out of the filled ring.
+        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", chrome,
          QStringLiteral("Last.fm: scrobbled")},
         {"failed", 4, 0, false, 0, "failed", QStringLiteral("Scrobble failed"), "/lastfm.svg", negative,
          QStringLiteral("Last.fm didn't accept the scrobble: refused for testing")},
@@ -184,7 +187,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
          QStringLiteral("Last.fm can't be reached (refused for testing). 1 scrobble is waiting to be sent.")},
         {"too short", 6, 1, false, 0, "empty", QString(), "", QColor(), QString()},
         {"without tags", 6, 2, false, 0, "empty", QString(), "", QColor(), QString()},
-        {"ended early", 6, 3, false, 0, "notScrobbled", QStringLiteral("Not scrobbled"), "/lastfm.svg",
+        {"ended early", 6, 3, false, 0, "notScrobbled", QStringLiteral("Not scrobbled"), "/lastfm-ring.svg",
          tertiary,
          QStringLiteral("Last.fm: not scrobbled. The play ended after 0:00 of the 2:00 of listening it needed.")},
         {"skipped", 7, 0, false, 0, "empty", QString(), "", QColor(), QString()},

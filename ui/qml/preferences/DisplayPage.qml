@@ -17,7 +17,7 @@ Preferences.PreferencesPage {
     Components.DialogComboBox {
         objectName: "viewerFullscreenComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Fullscreen viewers:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 11
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 11, implicitWidth)
         model: [
             I18n.i18nc("@item:inlistbox viewer fullscreen", "Fill the window"),
             I18n.i18nc("@item:inlistbox viewer fullscreen", "Fill the screen")

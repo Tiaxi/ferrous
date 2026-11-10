@@ -21,9 +21,11 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   scrobbled", the empty ring and the glyph in the tertiary colour; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Scrobbled, or being sent: the ring closed, in the link colour, from
-//   the moment the play reaches its scrobble point; the send goes on in
-//   the background.
+// - Being sent: the ring closed, in the link colour, from the moment the
+//   play reaches its scrobble point; the send goes on in the background.
+// - Scrobbled: once Last.fm has accepted it, the closed ring fills too,
+//   with the glyph cut out of it, so it reads apart from a ring that is
+//   nearly full or closed without the colour.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
@@ -97,7 +99,7 @@ AbstractButton {
     // so a long scrobble point redraws it more rarely still.
     readonly property bool ringShown: root.look === "listening" || root.look === "notScrobbled"
         || root.look === "scrobbled"
-    readonly property real ringStroke: 2
+    readonly property real ringStroke: 1.5
     readonly property real ringRadius: (root.boxSize - root.ringStroke) / 2
     readonly property real ringProgress: {
         if (root.look === "scrobbled") {
@@ -113,6 +115,8 @@ AbstractButton {
         ? root.uiPalette.link
         : root.uiPalette.textSecondary
     readonly property color ringTrackColor: ColorUtils.withAlpha(root.uiPalette.textSecondary, 0.3)
+    // Last.fm accepted the scrobble: the closed ring is filled.
+    readonly property bool ringFilled: root.look === "scrobbled" && root.scrobbleState === 3
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -177,15 +181,21 @@ AbstractButton {
         case "paused":
             return Qt.resolvedUrl("../assets/lastfm-paused.svg")
         default:
-            return Qt.resolvedUrl("../assets/lastfm.svg")
+            return root.ringShown
+                ? Qt.resolvedUrl("../assets/lastfm-ring.svg")
+                : Qt.resolvedUrl("../assets/lastfm.svg")
         }
     }
-    // Inside the ring, the glyph is smaller; the offline glyph is a 14 px
-    // one.
-    readonly property int glyphSize: root.ringShown
-        ? Kirigami.Units.iconSizes.small - 4
-        : (root.look === "queued" ? Kirigami.Units.iconSizes.small - 2 : Kirigami.Units.iconSizes.small)
+    // Inside the ring, a 14 px glyph with a heavier stroke; the offline
+    // glyph is a 14 px one too.
+    readonly property int glyphSize: root.ringShown || root.look === "queued"
+        ? Kirigami.Units.iconSizes.small - 2
+        : Kirigami.Units.iconSizes.small
     readonly property color glyphColor: {
+        if (root.ringFilled) {
+            // Cut out of the filled ring.
+            return root.uiPalette.chrome
+        }
         switch (root.look) {
         case "failed":
             return root.uiPalette.negative
@@ -210,7 +220,8 @@ AbstractButton {
     // with no fade.
     visible: root.occupied
     implicitWidth: leftPadding + slotRow.implicitWidth + rightPadding
-    implicitHeight: 22
+    // 22 px, or a little more than its words at a larger font.
+    implicitHeight: Math.max(22, Math.round(slotLabel.implicitHeight) + 4)
     leftPadding: root.labelText.length > 0 ? 6 : 3
     rightPadding: 3
     topPadding: 0
@@ -295,6 +306,7 @@ AbstractButton {
             spacing: root.labelText.length > 0 ? Kirigami.Units.largeSpacing : 0
 
             Label {
+                id: slotLabel
                 objectName: "scrobbleIndicatorLabel"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
@@ -323,9 +335,10 @@ AbstractButton {
                     preferredRendererType: Shape.CurveRenderer
 
                     ShapePath {
+                        objectName: "scrobbleIndicatorRingTrack"
                         strokeColor: root.ringProgress < 1 ? root.ringTrackColor : "transparent"
                         strokeWidth: root.ringStroke
-                        fillColor: "transparent"
+                        fillColor: root.ringFilled ? root.ringColor : "transparent"
                         PathAngleArc {
                             centerX: root.boxSize / 2
                             centerY: root.boxSize / 2
