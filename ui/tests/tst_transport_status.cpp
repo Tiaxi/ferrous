@@ -439,6 +439,8 @@ private slots:
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotPausedLooksStruckThrough_data();
     void lastFmSlotPausedLooksStruckThrough();
+    void lastFmSlotRingTrackReadsAndScrobbledCloses_data();
+    void lastFmSlotRingTrackReadsAndScrobbledCloses();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
@@ -1387,7 +1389,6 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(ring->isVisible());
     QVERIFY(std::abs(progress() - 77.0 / 115.0) < 0.02);
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-ring.svg")));
-    QVERIFY(!slot->property("ringFilled").toBool());
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("textSecondary")));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 0:38 to scrobble"));
@@ -1424,36 +1425,28 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QTRY_VERIFY2(!slot->isVisible(), qPrintable(QString::number(state)));
     }
 
-    // Scrobbled, and while it is sent: the ring closed, in the link colour.
+    // Scrobbled, and while it is sent: the ring closed, with no fill and
+    // no colour (#373 H2): while it is sent in the arc's colour, once
+    // accepted with the glyph in the text colour.
+    const auto insideRing = [box]() { return box->mapToScene(QPointF(2.5, box->height() / 2)); };
+    qreal scale = 1;
     for (const int state : {2, 3}) {
         bridge->setProperty("lastFmScrobbleState", state);
         QTRY_VERIFY2(slot->isVisible(), qPrintable(QString::number(state)));
         QVERIFY(ring->isVisible());
         QCOMPARE(progress(), 1.0);
-        QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("link")));
+        const QColor wanted = harness.token(state == 3 ? "text" : "textSecondary");
+        QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), wanted));
+        QVERIFY(sameColor(glyph->property("color").value<QColor>(), wanted));
         QVERIFY(!label->isVisible());
+        // Inside the ring, left of the glyph: the status bar, unfilled.
+        QTRY_VERIFY2(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale),
+                               harness.token("chrome")),
+                     qPrintable(QString::number(state)));
     }
-    // Scrobbled has a second cue besides the colour: the ring fills, with
-    // the glyph cut out of it in the chrome colour.
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbled"));
-    QVERIFY(slot->property("ringFilled").toBool());
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("chrome")));
-    QVERIFY2(contrastRatio(harness.token("chrome"), harness.token("link")) >= 3.0,
-             qPrintable(describe(QStringLiteral("glyph cut out of the scrobbled ring"), harness.token("chrome"),
-                                 harness.token("link"))));
-    // Inside the ring, left of the glyph: the fill, drawn. The slot has
-    // just come back, so the point is found once it is laid out again.
-    const auto insideRing = [box]() { return box->mapToScene(QPointF(2.5, box->height() / 2)); };
-    qreal scale = 1;
-    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("link")));
-    // While it is sent, the ring is closed but not filled.
     bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: sending the scrobble"));
-    QVERIFY(!slot->property("ringFilled").toBool());
-    QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
-    QTRY_VERIFY(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale), harness.token("chrome")));
-    QVERIFY2(contrastRatio(harness.token("link"), harness.token("chrome")) >= 3.0,
-             qPrintable(describe(QStringLiteral("scrobbled ring"), harness.token("link"), harness.token("chrome"))));
 
     // Queued: the words and the offline glyph, without the ring.
     bridge->setProperty("lastFmScrobbleState", 5);
@@ -1468,15 +1461,18 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     bridge->setProperty("lastFmPendingScrobbleCount", 1);
     QCOMPARE(label->property("text").toString(), QStringLiteral("1 scrobble waiting"));
 
-    // Failed: the words and the glyph in the negative colour, at least
-    // 3:1 on the chrome.
+    // Failed: the words, and the closed ring and the glyph in the negative
+    // colour, the slot's only colour, at least 3:1 on the chrome.
     bridge->setProperty("lastFmPendingScrobbleCount", 0);
     bridge->setProperty("lastFmScrobbleState", 4);
     bridge->setProperty("lastFmScrobbleMessage", QStringLiteral("Invalid session key"));
     QTRY_COMPARE(label->property("text").toString(), QStringLiteral("Scrobble failed"));
-    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
-    QCOMPARE(glyph->width(), 16.0);
+    QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-ring.svg")));
+    QCOMPARE(glyph->width(), 14.0);
+    QVERIFY(ring->isVisible());
+    QCOMPARE(progress(), 1.0);
     const QColor negative = harness.token("negative");
+    QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), negative));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), negative));
     QVERIFY2(contrastRatio(negative, harness.token("chrome")) >= 3.0,
              qPrintable(describe(QStringLiteral("failed glyph"), negative, harness.token("chrome"))));
@@ -1613,6 +1609,87 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
     QVERIFY(paused[(side / 2) * side + side / 2]);
     QVERIFY(paused[5 * side + 5]);
     QVERIFY(paused[(side - 6) * side + side - 6]);
+}
+
+void TransportStatusTest::lastFmSlotRingTrackReadsAndScrobbledCloses_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The ring (#373 H2). Its track, the listening still to come, is opaque and
+// at least 3:1 on the status bar (it was 1.91:1 dark and 1.55:1 light),
+// and quieter than the arc of the listening done. Scrobbled is the ring
+// closed, with no fill: it differs from a ring nearly full by its shape,
+// a gap or none, which is drawn and measured where the gap is.
+void TransportStatusTest::lastFmSlotRingTrackReadsAndScrobbledCloses() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *box = harness.item(QStringLiteral("scrobbleIndicatorBox"));
+    QVERIFY(slot && box);
+    QObject *bridge = harness.bridge;
+    const QColor chrome = harness.token("chrome");
+
+    // At 0 %: the track alone, from the declared colours.
+    bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    bridge->setProperty("lastFmScrobbleListenedMs", 0);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible());
+    QCOMPARE(slot->property("ringProgress").toDouble(), 0.0);
+    const QColor track = slot->property("ringTrackColor").value<QColor>();
+    const QColor arc = slot->property("ringColor").value<QColor>();
+    QCOMPARE(track.alphaF(), 1.0f);
+    QVERIFY2(contrastRatio(track, chrome) >= 3.0, qPrintable(describe(QStringLiteral("ring track"), track, chrome)));
+    QVERIFY2(contrastRatio(arc, chrome) > contrastRatio(track, chrome) + 1.0,
+             qPrintable(describe(QStringLiteral("ring arc"), arc, chrome) + QStringLiteral(", ")
+                        + describe(QStringLiteral("ring track"), track, chrome)));
+
+    // Where a ring at 90 % has its gap: the arc runs clockwise from the top,
+    // so the gap is the last tenth before it, centred 18° left of the top.
+    const qreal radius = slot->property("ringRadius").toReal();
+    const double angle = (270.0 - 18.0) * M_PI / 180.0;
+    // Found again for each grab: the slot moves as its state changes.
+    qreal scale = 1;
+    const auto drawnInGap = [&]() {
+        const QImage image = grabbed(harness.window, &scale);
+        return pixelAt(image,
+                       box->mapToScene(QPointF(box->width() / 2 + radius * std::cos(angle),
+                                               box->height() / 2 + radius * std::sin(angle))),
+                       scale);
+    };
+    const auto drawnInside = [&]() {
+        const QImage image = grabbed(harness.window, &scale);
+        return pixelAt(image, box->mapToScene(QPointF(2.5, box->height() / 2)), scale);
+    };
+    // Whether the drawn pixel is nearer to `a` than to `b` and to `c`.
+    const auto nearest = [](const QColor &drawn, const QColor &a, const QColor &b, const QColor &c) {
+        return channelDistance(drawn, a) < channelDistance(drawn, b)
+            && channelDistance(drawn, a) < channelDistance(drawn, c);
+    };
+
+    // Nearly done: the gap shows the track.
+    bridge->setProperty("lastFmScrobbleListenedMs", 108000);
+    QTRY_VERIFY(std::abs(slot->property("ringProgress").toDouble() - 0.9) < 0.02);
+    QTRY_VERIFY2(nearest(drawnInGap(), track, arc, chrome), qPrintable(drawnInGap().name()));
+
+    // Scrobbled, sent and accepted: no gap, and nothing filled inside.
+    for (const int state : {2, 3}) {
+        bridge->setProperty("lastFmScrobbleState", state);
+        QTRY_COMPARE(slot->property("look").toString(), QStringLiteral("scrobbled"));
+        const QColor closed = slot->property("ringColor").value<QColor>();
+        QVERIFY2(contrastRatio(closed, chrome) >= 3.0,
+                 qPrintable(describe(QStringLiteral("closed ring"), closed, chrome)));
+        QTRY_VERIFY2(nearest(drawnInGap(), closed, track, chrome),
+                     qPrintable(QStringLiteral("state %1: %2 in the gap, the ring %3, the track %4")
+                                    .arg(state)
+                                    .arg(drawnInGap().name(), closed.name(), track.name())));
+        QVERIFY(sameColor(drawnInside(), chrome));
+    }
+    // No colour for a routine success: the accepted ring is the text's.
+    QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("text")));
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {

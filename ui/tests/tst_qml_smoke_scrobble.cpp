@@ -40,7 +40,7 @@ ApplicationWindow {
     readonly property color secondaryColor: palette.textSecondary
     readonly property color tertiaryColor: palette.textTertiary
     readonly property color negativeColor: palette.negative
-    readonly property color chromeColor: palette.chrome
+    readonly property color textColor: palette.text
 
     QtObject {
         id: bridge
@@ -151,7 +151,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     const QColor secondary = root->property("secondaryColor").value<QColor>();
     const QColor tertiary = root->property("tertiaryColor").value<QColor>();
     const QColor negative = root->property("negativeColor").value<QColor>();
-    const QColor chrome = root->property("chromeColor").value<QColor>();
+    const QColor text = root->property("textColor").value<QColor>();
 
     // The slot shows the glyph in its ring while listening and once
     // scrobbled, words and a glyph when the user should know, and nothing
@@ -174,10 +174,10 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
          QStringLiteral("Last.fm: 2:00 to scrobble")},
         {"sending", 2, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", secondary,
          QStringLiteral("Last.fm: sending the scrobble")},
-        // Accepted: cut out of the filled ring.
-        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", chrome,
+        // Accepted: in the closed ring, unfilled, in the text colour.
+        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", text,
          QStringLiteral("Last.fm: scrobbled")},
-        {"failed", 4, 0, false, 0, "failed", QStringLiteral("Scrobble failed"), "/lastfm.svg", negative,
+        {"failed", 4, 0, false, 0, "failed", QStringLiteral("Scrobble failed"), "/lastfm-ring.svg", negative,
          QStringLiteral("Last.fm didn't accept the scrobble: refused for testing")},
         {"waiting", 5, 0, false, 2, "queued", QStringLiteral("2 scrobbles waiting"), "status-offline.svg",
          secondary,
