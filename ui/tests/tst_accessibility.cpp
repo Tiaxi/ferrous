@@ -3695,22 +3695,30 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
         return QPair<QColor, QColor>(image.pixelColor(int(5 * scale), int(4.5 * scale)),
                                      image.pixelColor(int(5 * scale), int(6.5 * scale)));
     };
-    const QColor trough = layer->property("plotColors").value<QObject *>()
-        ->property("meterTrough").value<QColor>();
+    // The trough as drawn on the plot's floor: the waveform's set, which
+    // the bare light pane takes, has a translucent one.
+    QObject *meterColors = layer->property("plotColors").value<QObject *>();
+    const QColor trough = drawnOver(meterColors->property("meterTrough").value<QColor>(),
+                                    meterColors->property("plotBg").value<QColor>());
+    // Blending rounds each channel.
+    const auto near = [](const QColor &a, const QColor &b) {
+        return std::abs(a.red() - b.red()) <= 1 && std::abs(a.green() - b.green()) <= 1
+            && std::abs(a.blue() - b.blue()) <= 1;
+    };
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
     QTRY_VERIFY(!meter->active());
     QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
     QVERIFY(meter->isVisible());
     auto [lamp, gap] = lampRow();
-    QCOMPARE(lamp, trough);
-    QCOMPARE(gap, trough);
+    QVERIFY2(near(lamp, trough), qPrintable(lamp.name() + QStringLiteral(" vs ") + trough.name()));
+    QVERIFY2(near(gap, trough), qPrintable(gap.name() + QStringLiteral(" vs ") + trough.name()));
     QTRY_VERIFY(accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("\u2212\u221e dB")));
     QVERIFY(!accessibleText(lanes[1], QAccessible::Description).contains(QStringLiteral("clipping")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));
     QTRY_VERIFY(meter->active());
     std::tie(lamp, gap) = lampRow();
-    QVERIFY(lamp != trough);
-    QVERIFY(gap != trough);
+    QVERIFY(!near(lamp, trough));
+    QVERIFY(!near(gap, trough));
     // Off again: the plot takes the column back.
     QVERIFY(bridge->setProperty("showLevelMeter", false));
     QTRY_COMPARE(surface->property("plotWidth").toReal(), layer->width());
@@ -3810,13 +3818,15 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QQuickItem *analysing = layer->findChild<QQuickItem *>(QStringLiteral("plotAnalysingText"));
     QQuickItem *endsEarly = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarly"));
     QVERIFY(analysing != nullptr && endsEarly != nullptr);
-    // Before any audio: the plot's floor, no message; the switch shows.
+    // Before any audio: no message; the switch shows. The tests' theme is
+    // light, so the bare pane is the view colour until the first data.
     QVERIFY(!analysing->isVisible());
     QVERIFY(!endsEarly->isVisible());
     QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);
     QQuickItem *pane = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPane"));
     QVERIFY(pane != nullptr);
-    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#000000")));
+    const QColor view = qvariant_cast<QObject *>(window->property("uiPalette"))->property("view").value<QColor>();
+    QCOMPARE(pane->property("color").value<QColor>(), view);
     // A track without its analysis yet: Analysing…, after a moment.
     QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

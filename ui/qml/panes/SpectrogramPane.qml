@@ -12,8 +12,13 @@ Rectangle {
     required property var openViewer
     required property var uiPalette
     property int visualizationMode: 0
+    // Before the session's first audio data: the light theme's bare pane is
+    // the view colour, as PlotLayer draws it over the plot.
+    property bool awaitingFirstData: false
 
-    color: root.uiPalette.plotColors(root.visualizationMode).plotBg
+    color: root.awaitingFirstData && !root.uiPalette.themeIsDark
+        ? root.uiPalette.view
+        : root.uiPalette.plotColors(root.visualizationMode).plotBg
 
     MouseArea {
         anchors.fill: parent

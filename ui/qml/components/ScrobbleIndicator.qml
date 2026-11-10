@@ -21,15 +21,17 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   scrobbled", the empty ring and the glyph in the tertiary colour; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Being sent: the ring closed, in the link colour, from the moment the
-//   play reaches its scrobble point; the send goes on in the background.
-// - Scrobbled: once Last.fm has accepted it, the closed ring fills too,
-//   with the glyph cut out of it, so it reads apart from a ring that is
-//   nearly full or closed without the colour.
+// - Being sent: the ring closed, from the moment the play reaches its
+//   scrobble point; the send goes on in the background.
+// - Scrobbled: once Last.fm has accepted it, the closed ring and the glyph
+//   in the text colour. A ring with no gap is the end of the listening
+//   ring, apart from one nearly full by its shape; no fill, as a routine
+//   success is no louder than the rest of the status bar.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
-// - Failed: "Scrobble failed" and the glyph in the negative colour.
+// - Failed: "Scrobble failed", and the closed ring and the glyph in the
+//   negative colour: the slot's only colour.
 // - Paused by the user: the glyph struck through, in the tertiary colour,
 //   without the ring.
 // - Otherwise (not eligible, skipped, signed out): nothing.
@@ -98,11 +100,11 @@ AbstractButton {
     // is drawn, 0 to 1. The share moves by whole pixels of the arc too,
     // so a long scrobble point redraws it more rarely still.
     readonly property bool ringShown: root.look === "listening" || root.look === "notScrobbled"
-        || root.look === "scrobbled"
+        || root.look === "scrobbled" || root.look === "failed"
     readonly property real ringStroke: 1.5
     readonly property real ringRadius: (root.boxSize - root.ringStroke) / 2
     readonly property real ringProgress: {
-        if (root.look === "scrobbled") {
+        if (root.look === "scrobbled" || root.look === "failed") {
             return 1
         }
         if (root.look !== "listening" || root.thresholdSeconds <= 0) {
@@ -111,12 +113,20 @@ AbstractButton {
         const steps = Math.max(1, Math.round(2 * Math.PI * root.ringRadius * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    readonly property color ringColor: root.look === "scrobbled"
-        ? root.uiPalette.link
-        : root.uiPalette.textSecondary
-    readonly property color ringTrackColor: ColorUtils.withAlpha(root.uiPalette.textSecondary, 0.3)
-    // Last.fm accepted the scrobble: the closed ring is filled.
-    readonly property bool ringFilled: root.look === "scrobbled" && root.scrobbleState === 3
+    // Last.fm accepted the scrobble.
+    readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
+    readonly property color ringColor: {
+        if (root.look === "failed") {
+            return root.uiPalette.negative
+        }
+        return root.scrobbleAccepted ? root.uiPalette.text : root.uiPalette.textSecondary
+    }
+    // The ring's track, where the listening is still to come: opaque, the
+    // least of the arc's colour over the status bar that is 3:1 on it, so
+    // that the empty ring reads (WCAG 1.4.11) and stays quieter than the arc.
+    readonly property color ringTrackColor: ColorUtils.mixColor(root.uiPalette.chrome,
+        root.uiPalette.textSecondary,
+        ColorUtils.opacityForContrast(root.uiPalette.textSecondary, root.uiPalette.chrome, 0.3, 3.05))
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -192,9 +202,8 @@ AbstractButton {
         ? Kirigami.Units.iconSizes.small - 2
         : Kirigami.Units.iconSizes.small
     readonly property color glyphColor: {
-        if (root.ringFilled) {
-            // Cut out of the filled ring.
-            return root.uiPalette.chrome
+        if (root.scrobbleAccepted) {
+            return root.uiPalette.text
         }
         switch (root.look) {
         case "failed":
@@ -338,7 +347,7 @@ AbstractButton {
                         objectName: "scrobbleIndicatorRingTrack"
                         strokeColor: root.ringProgress < 1 ? root.ringTrackColor : "transparent"
                         strokeWidth: root.ringStroke
-                        fillColor: root.ringFilled ? root.ringColor : "transparent"
+                        fillColor: "transparent"
                         PathAngleArc {
                             centerX: root.boxSize / 2
                             centerY: root.boxSize / 2

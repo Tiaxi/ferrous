@@ -552,6 +552,19 @@ void WaveformEditorItem::setPlayheadColor(const QColor &value) { setColor(&Color
 QColor WaveformEditorItem::playheadCasingColor() const { QMutexLocker lock(&m_stateMutex); return m_colors.playheadCasing; }
 void WaveformEditorItem::setPlayheadCasingColor(const QColor &value) { setColor(&Colors::playheadCasing, value); }
 
+bool WaveformEditorItem::playheadVisible() const { QMutexLocker lock(&m_stateMutex); return m_playheadVisible; }
+
+void WaveformEditorItem::setPlayheadVisible(bool value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_playheadVisible == value) return;
+        // Drawn over the cached rasters, which keep.
+        m_playheadVisible = value;
+    }
+    emit playheadVisibleChanged();
+    update();
+}
+
 double WaveformEditorItem::markerSeconds() const { QMutexLocker lock(&m_stateMutex); return m_markerSeconds; }
 
 void WaveformEditorItem::setMarkerSeconds(double value) {
@@ -2199,6 +2212,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     double scale = 1.0;
     Colors colors;
     double markerSeconds = -1.0;
+    bool playheadVisible = true;
     const int canvasWidth = std::max(1, static_cast<int>(std::floor(width())));
     const int canvasHeight = std::max(1, static_cast<int>(std::floor(height())));
     // Replace body pixels rather than blending with the previous raster; the
@@ -2211,6 +2225,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         const qint64 frameNs = m_nowNs();
         colors = m_colors;
         markerSeconds = m_markerSeconds;
+        playheadVisible = m_playheadVisible;
         presentationCommitted = advanceStagedCacheLocked(frameNs);
         std::tie(visibleStart, visibleEnd) = visibleRangeLocked(frameNs);
         directDetail = renderDetailDirectlyLocked(visibleStart, visibleEnd);
@@ -2405,7 +2420,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     publishMarkerX(markerSeconds >= 0.0 && visibleEnd > visibleStart
         ? std::round((markerSeconds - visibleStart) / (visibleEnd - visibleStart) * canvasWidth)
         : std::numeric_limits<double>::quiet_NaN());
-    if (visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
+    if (playheadVisible && visibleEnd > visibleStart && position >= visibleStart && position <= visibleEnd) {
         const TimeAxis axis{visibleStart, visibleEnd, canvasWidth, scale};
         const double x = axis.x(axis.columnOf(position));
         // A device pixel's core cased in one on each side: the column's

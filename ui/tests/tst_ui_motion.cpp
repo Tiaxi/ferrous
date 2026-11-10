@@ -22,6 +22,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtEndian>
 #include <QtTest/QtTest>
@@ -948,6 +949,8 @@ private slots:
     void nowPlayingTextBlockIsNotEmptyForLong();
     void visualizationModeSwitchKeepsAPlotOnScreen();
     void visualizationModeSwitchKeepsAPlotOnScreen_data();
+    void visualizationPaneIsTheViewUntilTheFirstData();
+    void visualizationPaneIsTheViewUntilTheFirstData_data();
     void viewerControlsFadeWithTheStrip();
     void viewerControlsFadeWithTheStrip_data();
 };
@@ -3824,6 +3827,26 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     const auto whole = [](QQuickItem *plot) {
         return plot->isVisible() && plot->opacity() == 1.0 && !plot->property("awaitingData").toBool();
     };
+    // The playheads drawn (H2: two through the fade): those of the plots
+    // that show, at any opacity, and draw theirs. Every spectrogram lane
+    // draws the same one.
+    QQuickItem *waveformItem = itemNamed(waveform, QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveformItem != nullptr);
+    const auto playheads = [&]() {
+        int drawn = 0;
+        if (spectrogram->isVisible() && spectrogram->opacity() > 0.0) {
+            bool lanesDraw = false;
+            for (SpectrogramItem *pane : panes()) {
+                lanesDraw = lanesDraw || pane->playheadVisible();
+            }
+            drawn += lanesDraw ? 1 : 0;
+        }
+        if (waveform->isVisible() && waveform->opacity() > 0.0
+            && waveformItem->property("playheadVisible").toBool()) {
+            ++drawn;
+        }
+        return drawn;
+    };
     QString failure;
     int frames = 0;
     const QMetaObject::Connection connection =
@@ -3835,9 +3858,13 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
                               .arg(spectrogram->isVisible()).arg(spectrogram->opacity())
                               .arg(waveform->isVisible()).arg(waveform->opacity());
             }
+            if (failure.isEmpty() && playheads() != 1) {
+                failure = QStringLiteral("%1 playheads at frame %2").arg(playheads()).arg(frames);
+            }
         });
     const auto check = [&](const char *where) {
         QVERIFY2(whole(spectrogram) || whole(waveform), where);
+        QCOMPARE(playheads(), 1);
         QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(where) + QStringLiteral(": ") + failure));
     };
 
@@ -3854,6 +3881,12 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         surface->setProperty("modeFade", 0.5);
         QCOMPARE(waveform->opacity(), 0.5);
         QCOMPARE(spectrogram->opacity(), 1.0);
+        // One playhead: the incoming waveform's; the spectrogram's went as
+        // the fade started.
+        QVERIFY(waveformItem->property("playheadVisible").toBool());
+        for (SpectrogramItem *pane : panes()) {
+            QVERIFY(!pane->playheadVisible());
+        }
         // Its floor and its lanes as one picture.
         QObject *layer = waveform->property("layer").value<QObject *>();
         QVERIFY(layer != nullptr && layer->property("enabled").toBool());
@@ -3902,6 +3935,10 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         surface->setProperty("modeFade", 0.5);
         QCOMPARE(spectrogram->opacity(), 0.5);
         QVERIFY(whole(waveform));
+        QVERIFY(!waveformItem->property("playheadVisible").toBool());
+        for (SpectrogramItem *pane : panes()) {
+            QVERIFY(pane->playheadVisible());
+        }
         QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
         QTRY_VERIFY(!waveform->isVisible());
     } else {
@@ -3910,6 +3947,9 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     }
     QCOMPARE(spectrogram->opacity(), 1.0);
     check("on the spectrogram");
+    // Settled, the plot under it draws its playhead again, for the next
+    // switch.
+    QVERIFY(waveformItem->property("playheadVisible").toBool());
 
     // Back before the spectrogram can draw: the waveform, which never
     // left, stays, and the spectrogram goes.
@@ -3942,6 +3982,142 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     }
     QTRY_VERIFY(!waveform->isVisible());
     QCOMPARE(spectrogram->opacity(), 1.0);
+}
+
+void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<bool>("animated");
+    QTest::newRow("light") << false << true;
+    QTest::newRow("light, animations off") << false << false;
+    QTest::newRow("dark") << true << true;
+}
+
+// The empty pane (#373 H2, P1): in the light theme, before the session's
+// first audio data, the pane is the view colour, not a slab of the
+// spectrogram's black floor; what is drawn on it, the mode switch, takes
+// the colours of a plot on the view. The first data fades it out over
+// longDuration into the plot's floor and data, at once with animations
+// off, and the floor stays the plot's from then on, also once playback
+// stops. The dark theme's pane is its floor throughout.
+void UiMotionTest::visualizationPaneIsTheViewUntilTheFirstData() {
+    QFETCH(bool, dark);
+    QFETCH(bool, animated);
+    const QPalette before = QGuiApplication::palette();
+    if (dark) {
+        // Breeze Dark's window, view and text.
+        QPalette palette = before;
+        palette.setColor(QPalette::Window, QColor(QStringLiteral("#202326")));
+        palette.setColor(QPalette::Base, QColor(QStringLiteral("#141618")));
+        palette.setColor(QPalette::Text, QColor(QStringLiteral("#fcfcfc")));
+        palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#fcfcfc")));
+        QGuiApplication::setPalette(palette);
+    }
+    const auto restorePalette = qScopeGuard([&]() { QGuiApplication::setPalette(before); });
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    units->setShortDuration(animated ? 150 : 0);
+    units->setLongDuration(animated ? 400 : 1);
+    auto *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tokens != nullptr);
+    QCOMPARE(tokens->property("themeIsDark").toBool(), dark);
+    const QColor view = tokens->property("view").value<QColor>();
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *layer = named(window, "plotLayer");
+    QQuickItem *cover = named(window, "plotViewFloor");
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(pane && layer && cover && spectrogram);
+    auto *spectrogramSet = qvariant_cast<QObject *>(tokens->property("spectrogramPlot"));
+    auto *waveformSet = qvariant_cast<QObject *>(tokens->property("waveformPlot"));
+    const QColor black = spectrogramSet->property("plotBg").value<QColor>();
+    QCOMPARE(black, QColor(Qt::black));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(viewer != nullptr);
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 0);
+
+    // Clear of the mode switch in the top right corner.
+    const auto drawnInPane = [&]() {
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / static_cast<qreal>(window->width());
+        const QPointF at = pane->mapToScene(QPointF(pane->width() * 0.25, pane->height() * 0.6)) * scale;
+        return image.pixelColor(at.toPoint());
+    };
+
+    // Before any audio.
+    QTest::qWait(50);
+    if (dark) {
+        QVERIFY(!cover->isVisible());
+        QCOMPARE(pane->property("color").value<QColor>(), black);
+        QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
+        QCOMPARE(drawnInPane(), black);
+    } else {
+        QVERIFY(cover->isVisible());
+        QCOMPARE(cover->opacity(), 1.0);
+        QCOMPARE(cover->property("color").value<QColor>(), view);
+        QCOMPARE(pane->property("color").value<QColor>(), view);
+        QCOMPARE(layer->property("plotColors").value<QObject *>(), waveformSet);
+        QTRY_COMPARE(drawnInPane(), view);
+        // The mode switch shows on it.
+        QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+        QVERIFY(modeSwitch != nullptr);
+        QVERIFY(modeSwitch->isVisible());
+        QVERIFY(modeSwitch->z() > cover->z());
+    }
+
+    // A track, before its data: the pane stays as it is.
+    bridge->setProperty("durationSeconds", 60.0);
+    bridge->setProperty("currentTrackChannels", 2);
+    playQueueRow(bridge, 0);
+    QTest::qWait(50);
+    QCOMPARE(cover->isVisible(), !dark);
+
+    // The first data: the spectrogram's columns.
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QList<SpectrogramItem *> lanes;
+    QTRY_VERIFY([&]() {
+        lanes.clear();
+        for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+            lanes.push_back(qobject_cast<SpectrogramItem *>(item));
+        }
+        return lanes.size() == 2;
+    }());
+    constexpr int bins = 4'097;
+    constexpr int columns = 200;
+    for (qsizetype index = 0; index < lanes.size(); ++index) {
+        lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index),
+                                              columns, 0, 2'000, 48'000, 1'024, false, true, 1, false);
+    }
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+    // The floor is the plot's, and what is drawn on it in the plot's
+    // colours, at once.
+    QCOMPARE(pane->property("color").value<QColor>(), black);
+    QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
+    if (!dark && animated) {
+        // The view fades out over longDuration.
+        QVERIFY(cover->isVisible());
+        QTRY_VERIFY(cover->opacity() > 0.05 && cover->opacity() < 0.95);
+        QTRY_VERIFY_WITH_TIMEOUT(!cover->isVisible(), 2000);
+    } else {
+        QVERIFY(!cover->isVisible());
+    }
+    QCOMPARE(cover->opacity(), 0.0);
+    QVERIFY(drawnInPane() != view || dark);
+
+    // Stopped, with the track's data gone, the floor stays the plot's.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    bridge->setProperty("currentTrackPath", QString());
+    for (SpectrogramItem *lane : lanes) {
+        lane->releaseStorage();
+    }
+    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
+    QTest::qWait(50);
+    QVERIFY(!cover->isVisible());
+    QCOMPARE(pane->property("color").value<QColor>(), black);
 }
 
 void UiMotionTest::viewerControlsFadeWithTheStrip_data() {

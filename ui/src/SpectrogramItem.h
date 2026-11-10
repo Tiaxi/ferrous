@@ -303,6 +303,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
+    // Whether the playhead is drawn: the plot going out under another as
+    // the visualization mode switches draws none, so only one shows.
+    Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
     Q_PROPERTY(double zoomLevel READ zoomLevel WRITE setZoomLevel NOTIFY zoomLevelChanged)
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
     // Whether the default zoom stretches a track shorter than the view to
@@ -381,6 +384,8 @@ public:
 
     bool channelMuted() const;
     void setChannelMuted(bool muted);
+    bool playheadVisible() const;
+    void setPlayheadVisible(bool value);
 
     double zoomLevel() const;
     void setZoomLevel(double value);
@@ -465,6 +470,7 @@ signals:
     void crosshairSharedXChanged();
     void crosshairHoverChanged(double x);
     void channelMutedChanged();
+    void playheadVisibleChanged();
     void seekRequested(double seconds);
     void zoomLevelChanged();
     void zoomEnabledChanged();
@@ -880,6 +886,7 @@ private:
     std::array<QRgb, kGradientTableSize> m_palette32{};
     std::array<QRgb, kGradientTableSize> m_palette32Gray{};
     bool m_channelMuted{false};
+    bool m_playheadVisible{true};
     std::vector<int> m_iToBin;
     int m_mappingHeight{-1};
     int m_lowResEnd{0};

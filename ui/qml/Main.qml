@@ -1539,6 +1539,7 @@ ApplicationWindow {
                     openViewer: viewerController.openSpectrogramViewer
                     uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
+                    awaitingFirstData: !visualizationSurface.sessionHasData
                 }
             }
         }
@@ -1633,7 +1634,10 @@ ApplicationWindow {
             }
         }
         onModeInputsChanged: visualizationSurface.followMode()
-        Component.onCompleted: visualizationSurface.settledMode = viewerController.visualizationMode
+        Component.onCompleted: {
+            visualizationSurface.settledMode = viewerController.visualizationMode
+            visualizationSurface.sessionHasData = visualizationSurface.plotHasData
+        }
         // Whether `mode`'s plot shows: settled, or chosen and coming in.
         function plotShown(mode) {
             return visualizationSurface.settledMode === mode || visualizationSurface.chosenMode === mode
@@ -1642,6 +1646,26 @@ ApplicationWindow {
         function plotOpacity(mode) {
             return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
                 ? 1 : visualizationSurface.modeFade
+        }
+        // One playhead through the switch (H2: both showed): the settled
+        // plot's goes once the chosen one, with its own, has come in at all.
+        // Until then, the chosen plot is at 0, and the settled one keeps it.
+        function playheadShown(mode) {
+            return !(visualizationSurface.modeSwitching && visualizationSurface.modeFade > 0
+                && visualizationSurface.settledMode === mode)
+        }
+
+        // Whether either plot has had a track's data this session. Until
+        // then the pane is bare, and in the light theme the view colour
+        // (PlotLayer); after it, its floor is the plot's, also once
+        // playback stops.
+        property bool sessionHasData: false
+        readonly property bool plotHasData: (root.uiBridge.currentTrackPath || "").length > 0
+            && (!spectrogramSurface.awaitingData || !waveformSurface.awaitingData)
+        onPlotHasDataChanged: {
+            if (visualizationSurface.plotHasData) {
+                visualizationSurface.sessionHasData = true
+            }
         }
         // The shown plot's zoom, 1 at the default: the spectrogram's
         // relative to its own, which stretches a short track.
@@ -1681,6 +1705,7 @@ ApplicationWindow {
             // that its analysis runs.
             visible: visualizationSurface.plotShown(0)
             opacity: visualizationSurface.plotOpacity(0)
+            playheadVisible: visualizationSurface.playheadShown(0)
             z: visualizationSurface.settledMode === 0 ? 0 : 1
             // Its lanes, floors and seams fade in as one picture.
             layer.enabled: opacity > 0 && opacity < 1
@@ -1703,6 +1728,7 @@ ApplicationWindow {
             plotWidth: plotLayer.plotWidth
             visible: visualizationSurface.plotShown(1)
             opacity: visualizationSurface.plotOpacity(1)
+            playheadVisible: visualizationSurface.playheadShown(1)
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
@@ -1744,6 +1770,7 @@ ApplicationWindow {
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.markerX : waveformSurface.markerX
+            awaitingFirstData: !visualizationSurface.sessionHasData
             openIssues: function() { errorController.historyRequested() }
         }
     }
