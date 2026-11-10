@@ -150,6 +150,7 @@ ApplicationWindow {
         uiBridge: root.uiBridge
         visualFeedsEnabled: root.visualFeedsEnabled
         positionStepSeconds: transportBar.positionStepSeconds
+        frameRate: windowPresence.screenRefreshRate
     }
 
     Controllers.LibraryController {

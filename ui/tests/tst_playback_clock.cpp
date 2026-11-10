@@ -86,6 +86,9 @@ private slots:
     void jumpsPausesAndStepChangesShowTheExactPosition();
     void ticksWaitForAGaplessSuccessorsStart();
     void ticksStopAtTheEndOfTheTrack();
+    void shortTrackTicksNoFasterThanTheScreen();
+    void unknownDurationTicksOnlyAtSeconds();
+    void frameRateFollowsTheScreen();
 };
 
 void PlaybackClockTest::monotonicClockIsTheSteadyClock() {
@@ -612,7 +615,7 @@ void PlaybackClockTest::jumpsPausesAndStepChangesShowTheExactPosition() {
     QVERIFY(dueIn(clock, 25));
     // A step of 0 goes back to frames.
     clock.setPositionStepSeconds(0.0);
-    QCOMPARE(clock.m_tickTimer.interval(), PlaybackClock::kFrameIntervalMs);
+    QVERIFY(dueIn(clock, 16));
 }
 
 void PlaybackClockTest::ticksWaitForAGaplessSuccessorsStart() {
@@ -647,6 +650,182 @@ void PlaybackClockTest::ticksStopAtTheEndOfTheTrack() {
     QVERIFY(clock.positionSeconds() > 3.95);
     QVERIFY(clock.advancing());
     QVERIFY(!clock.m_tickTimer.isActive());
+}
+
+void PlaybackClockTest::shortTrackTicksNoFasterThanTheScreen() {
+    // A 1 s clip on a seek bar 1598 device pixels wide: a step of 0.63 ms,
+    // far shorter than a frame of a 60 Hz screen.
+    constexpr double kDuration = 1.0;
+    constexpr double kStep = kDuration / 1598.0;
+    constexpr qint64 kFrameNs = 16'666'667;
+    PlaybackClock clock;
+    attach(clock);
+    clock.setFrameRate(60.0);
+    QCOMPARE(clock.frameIntervalNs(), kFrameNs);
+    clock.setPositionStepSeconds(kStep);
+    clock.applySample(sample(0.0, kStart, true, 1, kDuration), true);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:00"));
+    QSignalSpy text(&clock, &PlaybackClock::positionTextChanged);
+    qint64 textChangedAt = 0;
+    connect(&clock, &PlaybackClock::positionTextChanged, &clock,
+            [&]() { textChangedAt = m_now; });
+    // Playback starts at 0, where the position already was.
+    std::optional<qint64> movedAt;
+    connect(&clock, &PlaybackClock::positionChanged, &clock, [&]() { movedAt = m_now; });
+
+    int ticks = 0;
+    qint64 playedNs = 0;
+    // Plays until `until`, as the event loop fires the clock's timer.
+    const auto playUntil = [&](qint64 until) {
+        const qint64 from = m_now;
+        while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= until) {
+            const std::optional<qint64> movedBefore = movedAt;
+            const qsizetype textsBefore = text.count();
+            tick(clock);
+            ++ticks;
+            // The playhead moves a frame or more after it last moved,
+            // however many steps it moves by; only the text's change, once
+            // a second, comes when it is due.
+            if (text.count() == textsBefore) {
+                QCOMPARE(movedAt, std::optional<qint64>(m_now));
+                if (movedBefore.has_value()) {
+                    QVERIFY2(m_now - *movedBefore >= kFrameNs,
+                             qPrintable(QStringLiteral("%1 ns apart").arg(m_now - *movedBefore)));
+                }
+            }
+            // Each tick shows where the position is, to its step, and the
+            // text of it.
+            const double position = clock.positionAt(m_now);
+            QVERIFY(std::abs(clock.positionSeconds() - position) <= kStep);
+            QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(position));
+        }
+        m_now = until;
+        playedNs += until - from;
+    };
+    // At most one tick a frame, and the playhead still moves every frame or
+    // so: 600 ms is 36 frames.
+    playUntil(kStart + 600 * kMs);
+    QVERIFY2(ticks <= 36 && ticks >= 30, qPrintable(QString::number(ticks)));
+    // The text turned to 00:01 when the position reached 0.5 s.
+    QCOMPARE(text.count(), 1);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:01"));
+    QVERIFY(textChangedAt >= kStart + 500 * kMs);
+    QVERIFY(textChangedAt <= kStart + 501 * kMs);
+
+    // Paused: the exact position, and no ticks.
+    clock.applySample(sample(0.6, m_now, false, 1, kDuration), false);
+    QCOMPARE(clock.positionSeconds(), 0.6);
+    QVERIFY(!clock.m_tickTimer.isActive());
+    m_now += 500 * kMs;
+    // Resumed: the position goes on from the pause, frame by frame.
+    clock.applySample(sample(0.6, m_now, true, 1, kDuration), false);
+    QCOMPARE(clock.positionSeconds(), 0.6);
+    QVERIFY(clock.nextTickNs().has_value());
+    QVERIFY(*clock.nextTickNs() - m_now <= kFrameNs);
+    const int ticksBeforeResume = ticks;
+    playUntil(m_now + 200 * kMs);
+    QVERIFY(ticks - ticksBeforeResume <= 12);
+    QVERIFY(std::abs(clock.positionSeconds() - 0.8) <= 0.02);
+
+    // A seek back to 0.1 s shows its target at once, then plays from it.
+    clock.holdAt(0.1);
+    QCOMPARE(clock.positionSeconds(), 0.1);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:00"));
+    QVERIFY(!clock.m_tickTimer.isActive());
+    m_now += 30 * kMs;
+    clock.applySample(sample(0.1, m_now, true, 1, kDuration), true);
+    QCOMPARE(clock.positionSeconds(), 0.1);
+    playUntil(m_now + 1'000 * kMs);
+
+    // Bounded by the screen's rate over all the playback, with the text's
+    // ticks, and stopped at the end of the clip, which the playhead reached.
+    const double playedSeconds = seconds(playedNs);
+    QCOMPARE(text.count(), 3);
+    QVERIFY2(ticks <= std::ceil(playedSeconds * 60.0) + text.count(),
+             qPrintable(QStringLiteral("%1 ticks in %2 s").arg(ticks).arg(playedSeconds)));
+    QVERIFY(!clock.m_tickTimer.isActive());
+    QVERIFY(std::abs(clock.positionSeconds() - kDuration) <= kStep);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:01"));
+    QCOMPARE(clock.currentPositionSeconds(), kDuration);
+}
+
+void PlaybackClockTest::unknownDurationTicksOnlyAtSeconds() {
+    // Before the duration is known, the seek bar's range is 1 s, so its
+    // step is as short as a 1 s clip's.
+    constexpr double kStep = 1.0 / 1598.0;
+    PlaybackClock clock;
+    attach(clock);
+    clock.setPositionStepSeconds(kStep);
+    clock.applySample(sample(0.2, kStart, true, 1, 0.0), true);
+    QSignalSpy text(&clock, &PlaybackClock::positionTextChanged);
+    // The first tick is when the text turns to 00:01.
+    QVERIFY(dueIn(clock, 300));
+
+    // Three seconds: a tick at 0.5, 1.5 and 2.5 s, each for the text.
+    QList<qint64> tickTimes;
+    while (clock.nextTickNs().has_value() && *clock.nextTickNs() <= kStart + 3000 * kMs) {
+        tick(clock);
+        tickTimes.push_back(m_now - kStart);
+        QCOMPARE(clock.positionText(), PlaybackClock::formatSeconds(clock.positionAt(m_now)));
+    }
+    QCOMPARE(tickTimes.size(), 3);
+    for (qsizetype i = 0; i < tickTimes.size(); ++i) {
+        const qint64 due = (300 + 1000 * i) * kMs;
+        QVERIFY(tickTimes[i] >= due && tickTimes[i] <= due + kMs);
+    }
+    QCOMPARE(text.count(), 3);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:03"));
+    m_now = kStart + 3000 * kMs;
+    QVERIFY(std::abs(clock.currentPositionSeconds() - 3.2) < 1e-9);
+
+    // A seek still shows its target at once, and the ticks wait for the
+    // next second of the text.
+    clock.holdAt(10.0);
+    QCOMPARE(clock.positionSeconds(), 10.0);
+    QCOMPARE(clock.positionText(), QStringLiteral("00:10"));
+    clock.applySample(sample(10.0, m_now, true, 1, 0.0), true);
+    QVERIFY(dueIn(clock, 500));
+    // Paused and resumed, the same.
+    m_now += 100 * kMs;
+    clock.applySample(sample(10.1, m_now, false, 1, 0.0), false);
+    QVERIFY(!clock.m_tickTimer.isActive());
+    QCOMPARE(clock.positionSeconds(), 10.1);
+    m_now += 1000 * kMs;
+    clock.applySample(sample(10.1, m_now, true, 1, 0.0), false);
+    QVERIFY(dueIn(clock, 400));
+
+    // Once the duration is known, the playhead moves again, frame by frame.
+    clock.setDurationSeconds(200.0);
+    QVERIFY(clock.nextTickNs().has_value());
+    QVERIFY(*clock.nextTickNs() - m_now <= clock.frameIntervalNs());
+}
+
+void PlaybackClockTest::frameRateFollowsTheScreen() {
+    PlaybackClock clock;
+    attach(clock);
+    QSignalSpy changed(&clock, &PlaybackClock::frameRateChanged);
+    QCOMPARE(clock.frameRate(), PlaybackClock::kDefaultFrameRate);
+    // A screen that reports no rate keeps the default.
+    clock.setFrameRate(0.0);
+    clock.setFrameRate(std::numeric_limits<double>::quiet_NaN());
+    QCOMPARE(changed.count(), 0);
+    QCOMPARE(clock.frameRate(), PlaybackClock::kDefaultFrameRate);
+
+    // A 144 Hz screen: ticks 7 ms apart for a step of 1 ms.
+    clock.setPositionStepSeconds(0.001);
+    clock.applySample(sample(10.0, kStart, true), true);
+    clock.setFrameRate(144.0);
+    QCOMPARE(changed.count(), 1);
+    QCOMPARE(clock.frameIntervalNs(), qint64{6'944'445});
+    tick(clock);
+    QVERIFY(dueIn(clock, 7));
+    // Back to 60 Hz, the next tick waits for a frame of it.
+    clock.setFrameRate(60.0);
+    QCOMPARE(changed.count(), 2);
+    QVERIFY(dueIn(clock, 17));
+    clock.setFrameRate(-1.0);
+    QCOMPARE(clock.frameRate(), PlaybackClock::kDefaultFrameRate);
+    QCOMPARE(changed.count(), 2);
 }
 
 int main(int argc, char **argv) {

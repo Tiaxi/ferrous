@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QScreen>
 #include <QTimer>
 #include <QWindow>
 
@@ -25,6 +26,9 @@ class WindowPresence : public QObject {
     Q_OBJECT
     Q_PROPERTY(QWindow *window READ window WRITE setWindow NOTIFY windowChanged)
     Q_PROPERTY(bool shown READ shown NOTIFY shownChanged)
+    // The refresh rate of the window's screen, in hertz, for what moves with
+    // playback, which needs to change no more often; 0 without a screen.
+    Q_PROPERTY(double screenRefreshRate READ screenRefreshRate NOTIFY screenRefreshRateChanged)
 
 public:
     // How long an unexposed window still counts as shown.
@@ -40,10 +44,12 @@ public:
     QWindow *window() const { return m_window; }
     void setWindow(QWindow *window);
     bool shown() const { return m_shown; }
+    double screenRefreshRate() const { return m_screenRefreshRate; }
 
 signals:
     void windowChanged();
     void shownChanged();
+    void screenRefreshRateChanged();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -51,6 +57,9 @@ protected:
 private:
     void update();
     void unexposedGraceEnded();
+    // Follows the screen the window is on, and its refresh rate.
+    void followScreen();
+    void updateScreenRefreshRate();
 
     QPointer<QWindow> m_window;
     // Whether the window is visible and not minimized, and whether it is
@@ -60,7 +69,11 @@ private:
     QMetaObject::Connection m_visibleConnection;
     QMetaObject::Connection m_visibilityConnection;
     QMetaObject::Connection m_destroyedConnection;
+    QMetaObject::Connection m_screenConnection;
+    QMetaObject::Connection m_refreshRateConnection;
+    QPointer<QScreen> m_screen;
     // Runs while an unexposed window still counts as shown.
     QTimer m_unexposedGrace;
     bool m_shown{false};
+    double m_screenRefreshRate{0.0};
 };

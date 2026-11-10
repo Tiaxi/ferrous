@@ -59,7 +59,9 @@ struct PlaybackClockState {
 //
 // The properties change only when a view would show it: positionText when
 // its second does, and positionSeconds when the position moves by a step,
-// such as a device pixel of the seek bar. Code that needs the time itself,
+// such as a device pixel of the seek bar, but no more often than the screen
+// shows frames. Without a duration no view places the position, so only the
+// text changes then. Code that needs the time itself,
 // such as a seek relative to it, reads currentPositionSeconds(); render code
 // reads state().
 class PlaybackClock : public QObject {
@@ -80,6 +82,10 @@ class PlaybackClock : public QObject {
     // rounds to another multiple of it. 0 changes it every frame.
     Q_PROPERTY(double positionStepSeconds READ positionStepSeconds WRITE setPositionStepSeconds
                    NOTIFY positionStepSecondsChanged)
+    // The refresh rate of the screen that shows the position, in hertz: the
+    // properties change at most once a frame of it, however fast the
+    // position moves by its steps. 0 or less is kDefaultFrameRate.
+    Q_PROPERTY(double frameRate READ frameRate WRITE setFrameRate NOTIFY frameRateChanged)
 
 public:
     using TimeSource = std::function<qint64()>;
@@ -93,9 +99,8 @@ public:
     // A jump to a sample or seek target smaller than this is no
     // discontinuity, such as a seek that lands on its target.
     static constexpr double kJumpThresholdSeconds = 0.03;
-    // How often positionSeconds updates while playback advances, with frame
-    // updates enabled and no position step.
-    static constexpr int kFrameIntervalMs = 16;
+    // The frame rate of a screen that does not report its own.
+    static constexpr double kDefaultFrameRate = 60.0;
 
     explicit PlaybackClock(QObject *parent = nullptr);
 
@@ -137,6 +142,11 @@ public:
     double positionStepSeconds() const { return m_positionStepSeconds; }
     void setPositionStepSeconds(double stepSeconds);
 
+    double frameRate() const { return m_frameRate; }
+    void setFrameRate(double frameRate);
+    // One frame of frameRate, rounded up to whole nanoseconds.
+    qint64 frameIntervalNs() const;
+
     static QString formatSeconds(double seconds);
     // The whole second formatSeconds shows: rounded to the nearest.
     static int wholeSecond(double seconds);
@@ -152,6 +162,7 @@ signals:
     void positionTextChanged();
     void frameUpdatesEnabledChanged();
     void positionStepSecondsChanged();
+    void frameRateChanged();
 
 private:
     friend class PlaybackClockTest;
@@ -172,6 +183,10 @@ private:
     int m_positionSecond{0};
     QTimer m_tickTimer;
     std::optional<qint64> m_nextTickNs;
+    // When positionSeconds last changed; it moves by its steps again a
+    // frame after that at the soonest.
+    std::optional<qint64> m_positionChangedNs;
     bool m_frameUpdatesEnabled{true};
     double m_positionStepSeconds{0.0};
+    double m_frameRate{kDefaultFrameRate};
 };

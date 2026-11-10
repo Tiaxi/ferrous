@@ -12,6 +12,7 @@ public:
 private slots:
     void fullscreenVisualizationInhibitsDisplaySleepOnlyWhileActive();
     void playbackControllerReadsTheBridgeClock();
+    void windowPresenceFollowsTheScreensRefreshRate();
     void mainWindowStopsPositionFramesWhileHidden();
     void spaceTogglesPlaybackWhenTheLibraryHasFocus();
     void spaceTypesIntoTextFields();
@@ -201,6 +202,9 @@ Item {
     clock.setTimeSource([&now]() { return now; });
     controller->setProperty("positionStepSeconds", 0.5);
     QCOMPARE(clock.positionStepSeconds(), 0.5);
+    // The clock ticks no faster than the screen the view is on refreshes.
+    controller->setProperty("frameRate", 144.0);
+    QCOMPARE(clock.frameRate(), 144.0);
     clock.applySample(PlaybackSample{72.0, now, true, 180.0, 1}, true);
     now += 200'000'000LL;
     QCOMPARE(controller->property("positionSeconds").toDouble(), 72.0);
@@ -211,6 +215,27 @@ Item {
     const QVariantList seekCalls = bridge->property("seekCalls").toList();
     QCOMPARE(seekCalls.size(), 2);
     QVERIFY(std::abs(seekCalls.last().toDouble() - 82.2) < 1e-9);
+}
+
+void TransportInputSmokeTest::windowPresenceFollowsTheScreensRefreshRate() {
+    WindowPresence presence;
+    QSignalSpy changed(&presence, &WindowPresence::screenRefreshRateChanged);
+    QCOMPARE(presence.screenRefreshRate(), 0.0);
+    auto window = std::make_unique<QWindow>();
+    QVERIFY(window->screen() != nullptr);
+    const double refreshRate = window->screen()->refreshRate();
+    QVERIFY(refreshRate > 0.0);
+    presence.setWindow(window.get());
+    QCOMPARE(presence.screenRefreshRate(), refreshRate);
+    QCOMPARE(changed.count(), 1);
+    // No window, no screen.
+    presence.setWindow(nullptr);
+    QCOMPARE(presence.screenRefreshRate(), 0.0);
+    presence.setWindow(window.get());
+    QCOMPARE(presence.screenRefreshRate(), refreshRate);
+    window.reset();
+    QCOMPARE(presence.screenRefreshRate(), 0.0);
+    QCOMPARE(changed.count(), 4);
 }
 
 void TransportInputSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
@@ -250,6 +275,10 @@ void TransportInputSmokeTest::mainWindowStopsPositionFramesWhileHidden() {
     };
     QTRY_VERIFY(clock.frameUpdatesEnabled());
     QVERIFY(framesTick());
+    // Paced by the refresh rate of the window's screen.
+    QVERIFY(window->screen() != nullptr);
+    const double refreshRate = window->screen()->refreshRate();
+    QCOMPARE(clock.frameRate(), refreshRate > 0.0 ? refreshRate : PlaybackClock::kDefaultFrameRate);
 
     window->hide();
     QTRY_VERIFY(!clock.frameUpdatesEnabled());
