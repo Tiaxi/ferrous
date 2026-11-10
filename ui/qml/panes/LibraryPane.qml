@@ -46,10 +46,13 @@ Rectangle {
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
-    // The mark of a collapsed row that holds the playing track: an amber
-    // tick at the row's left edge, apart from the chevrons, as tall as the
-    // state glyphs.
-    readonly property int nowTickWidth: 2
+    // The mark of a collapsed row that holds the playing track: the queue's
+    // amber state glyph, smaller and quieter, at the row's right end, far
+    // from the chevrons, so it never reads as a second one. Rows that can
+    // hold the track keep its place, so their years stay in one column
+    // and nothing moves as playback starts or stops.
+    readonly property int nowMarkSize: root.uiPalette.scaledSize(10)
+    readonly property int nowMarkGap: root.chevronGap
 
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
@@ -369,6 +372,14 @@ Rectangle {
                     // level above: where a track's album has its chevron,
                     // and left of a collapsed album's or artist's own.
                     readonly property real stateX: Math.max(0, chevronX - root.indentStep)
+                    // The right end of the row's text: the scrollbar lane
+                    // and the inset, and on a row that can hold the playing
+                    // track, its mark's place.
+                    readonly property real markX: width - Kirigami.Units.largeSpacing
+                        - root.rowInset - root.nowMarkSize
+                    readonly property real textEnd: hasChildren
+                        ? markX - root.nowMarkGap
+                        : width - Kirigami.Units.largeSpacing - root.rowInset
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
@@ -487,20 +498,27 @@ Rectangle {
                     }
 
                     // A collapsed row that holds the playing track, playing
-                    // or paused: a tick at the row's left edge, away from
-                    // its chevron, so it never reads as a second one. It
-                    // fades out with the amber after a track change.
-                    Rectangle {
-                        objectName: "libraryRowNowTick"
+                    // or paused: the state glyph at the row's right end,
+                    // vertically centred. It fades out with the amber after
+                    // a track change.
+                    Kirigami.Icon {
+                        objectName: "libraryRowNowMark"
                         readonly property real level: libraryRow.holdsNow
                             ? 1 : (libraryRow.isTrackRow ? 0 : libraryRow.amberLeft)
                         visible: level > 0
-                        x: 0
+                        x: libraryRow.markX
                         y: Math.round((libraryRow.height - height) / 2)
-                        width: root.nowTickWidth
-                        height: root.stateGlyphSize
+                        width: root.nowMarkSize
+                        height: root.nowMarkSize
+                        source: !visible
+                            ? ""
+                            : (libraryRow.holdsNow
+                                ? (root.playbackState === "Paused"
+                                    ? "media-playback-pause" : "media-playback-start")
+                                : treeNowFade.target.glyph)
+                        isMask: true
                         color: root.uiPalette.now
-                        opacity: level
+                        opacity: root.uiPalette.nowMarkOpacity * level
                     }
 
                     Kirigami.ShadowedImage {
@@ -567,11 +585,11 @@ Rectangle {
                         // and the title reaches the right end.
                         readonly property bool shown: libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
                         visible: shown
-                        // The right end: the scrollbar lane and the inset.
-                        // The width is the implicit one: binding it again
-                        // relays out the text, whose implicit width the
-                        // binding reads (#474).
-                        x: libraryRow.width - Kirigami.Units.largeSpacing - root.rowInset - implicitWidth
+                        // At the text's right end. The width is the
+                        // implicit one: binding it again relays out the
+                        // text, whose implicit width the binding reads
+                        // (#474).
+                        x: libraryRow.textEnd - implicitWidth
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
                         text: shown ? String(libraryRow.yearResolved) : ""

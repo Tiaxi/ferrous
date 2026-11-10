@@ -90,6 +90,16 @@ QtObject {
         ? "#f2b035"
         : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection], 4.5)
     readonly property color _nowLight: "#955500"
+    // The opacity of a quiet amber mark, as of a collapsed tree row that
+    // holds the playing track: 60%, or more where that is under 3:1 on a
+    // row's background, plain, hovered or selected.
+    readonly property real nowMarkOpacity: {
+        const backgrounds = [root.view, root.hoveredRow, root.selection, root.selectionInactive]
+        let opacity = 0.6
+        for (let i = 0; i < backgrounds.length; ++i) {
+            opacity = Math.max(opacity, ColorUtils.opacityForContrast(root.now, backgrounds[i], 0.6, 3))
+        }
+        return opacity
     }
     // The scrim behind the search palette.
     readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.5 : 0.25)

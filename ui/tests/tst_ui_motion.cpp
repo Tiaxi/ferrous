@@ -1150,7 +1150,7 @@ void UiMotionTest::queueEditsMovingThePlayingRowFadeNothing() {
 
 // The tree hands the amber over as the queue does: the new track row at
 // once, the old one fading; a collapsed album that held the old track
-// fades its tick out.
+// fades its mark out.
 void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
@@ -1188,31 +1188,36 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QVERIFY(colorOf(first.title) != nowHex(window));
 
     // Album B is collapsed and holds the next track; then Album A plays
-    // again, and Album B's tick fades out. A collapsed row shows no glyph.
+    // again, and Album B's mark fades out. A collapsed row shows no glyph
+    // in its chevron column.
     QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
     QVERIFY(albumB != nullptr);
     playTreeTrack(bridge, kTrackB1, kAlbumBKey);
     const RowLook album = libraryRowLook(albumB);
-    QQuickItem *albumTick = itemNamed(albumB, QStringLiteral("libraryRowNowTick"));
-    QVERIFY(albumTick != nullptr);
-    QVERIFY(albumTick->isVisible());
-    QCOMPARE(albumTick->opacity(), 1.0);
+    QQuickItem *albumMark = itemNamed(albumB, QStringLiteral("libraryRowNowMark"));
+    QVERIFY(albumMark != nullptr);
+    QVERIFY(albumMark->isVisible());
+    // The mark is quieter than the amber text; it fades from there.
+    const qreal markOpacity =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("nowMarkOpacity").toReal();
+    QVERIFY(markOpacity >= 0.6 && markOpacity < 1.0);
+    QCOMPARE(albumMark->opacity(), markOpacity);
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
-    QVERIFY(albumTick->isVisible());
-    QCOMPARE(albumTick->opacity(), 1.0);
-    QCOMPARE(colorOf(albumTick), nowHex(window));
+    QVERIFY(albumMark->isVisible());
+    QCOMPARE(albumMark->opacity(), markOpacity);
+    QCOMPARE(colorOf(albumMark), nowHex(window));
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(!album.fadingGlyph->isVisible());
     // Its title is never amber.
     QVERIFY(colorOf(album.title) != nowHex(window));
     QCOMPARE(colorOf(libraryRowLook(libraryRowWithPath(window, kTrackA1)).title), nowHex(window));
     QVERIFY(QTest::qWaitFor([&]() {
-        return albumTick->opacity() < 1.0 || !albumTick->isVisible();
+        return albumMark->opacity() < markOpacity || !albumMark->isVisible();
     }));
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
-    QVERIFY(!albumTick->isVisible());
+    QVERIFY(!albumMark->isVisible());
 }
 
 // The tree reuses its rows: a row that comes back for another track never

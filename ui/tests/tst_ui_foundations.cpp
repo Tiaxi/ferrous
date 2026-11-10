@@ -483,6 +483,18 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
                  qPrintable(describe(pair.what, pair.foreground, pair.background)));
     }
 
+    // The quiet amber mark of a collapsed tree row is at least 60% and
+    // 3:1 on every background a row can have.
+    const double markOpacity = tokens->property("nowMarkOpacity").toDouble();
+    QVERIFY2(markOpacity >= 0.6 && markOpacity <= 1.0, qPrintable(QString::number(markOpacity)));
+    for (const QColor &background : {view, hovered, selection, selectionInactive}) {
+        QColor mark = colorOf(tokens, "now");
+        mark.setAlphaF(static_cast<float>(markOpacity));
+        const QColor drawn = drawnOver(mark, background);
+        QVERIFY2(contrastRatio(drawn, background) >= 3.0,
+                 qPrintable(describe(QStringLiteral("the tree's amber mark"), drawn, background)));
+    }
+
     // A hovered row stands out from the view at 1.3:1, yet is nearer to it
     // than a selected row is, in lightness and hue together.
     QVERIFY2(contrastRatio(hovered, view) >= 1.3, qPrintable(describe(QStringLiteral("hover tint"), hovered, view)));
