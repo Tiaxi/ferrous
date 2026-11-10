@@ -383,7 +383,9 @@ private slots:
     void mprisMetadataIsRebuiltOnlyForTrackChanges();
     void mprisAlbumArtistComesFromAlbumArtistTag();
     void trackWithoutTitleOrArtistTagsShowsItsFileName();
+    void nextTrackHoldsTheTextBeforeUntilItsOwnIsKnown();
     void nextTrackWithoutTagsKeepsNoTextOfTheTrackBefore();
+    void stoppingEndsTheWaitForTheTracksText();
     void trackTextComesFromTheCurrentTracksQueueRowOnly();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
     void mprisPositionReadsThePlaybackClock();
@@ -5710,11 +5712,10 @@ void BridgeClientTest::gaplessHandoffSetsIdentityFlagBeforeMetadata() {
 
     QVERIFY(client.processBinarySnapshot(handoff));
     QVERIFY(client.m_pollTrackIdentityChanged);
-    // The old track's text does not stay for the new one: until its own
-    // metadata or queue row comes, the new track shows its file name (#560).
-    QVERIFY(client.m_pollTrackMetadataChanged);
-    QCOMPARE(client.currentTrackTitle(), QStringLiteral("new.flac"));
-    QVERIFY(client.currentTrackArtist().isEmpty());
+    QVERIFY(!client.m_pollTrackMetadataChanged);  // metadata unchanged
+    // Until the new track's own text is known, the old track's stays whole.
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("Old Title"));
+    QCOMPARE(client.currentTrackArtist(), QStringLiteral("Old Artist"));
 
     // Phase 2: Metadata worker delivers new metadata, same path/index.
     // sourcePath now matches currentPath, so metadata fields ARE applied.
@@ -6446,57 +6447,136 @@ void BridgeClientTest::trackWithoutTitleOrArtistTagsShowsItsFileName() {
     QCOMPARE(meta.value(QStringLiteral("xesam:album")).toString(), QStringLiteral("Fixture Album"));
 }
 
-// After a tagged track, the next one before its queue row comes, then with
-// its own metadata that lacks the title, artist and album: neither shows the
-// track before's text, here nor over MPRIS (#560).
-void BridgeClientTest::nextTrackWithoutTagsKeepsNoTextOfTheTrackBefore() {
-    BridgeClient client;
-    isolateBridgeClient(client);
-    const QString taggedPath = QStringLiteral("/fixture/tagged.flac");
-    const QString untaggedPath = QStringLiteral("/fixture/untitled take.flac");
+namespace {
+
+// The text a client shows for the playing track, as one set.
+QVariantList trackText(const BridgeClient &client) {
+    return {client.currentTrackTitle(), client.currentTrackArtist(), client.currentTrackAlbum(),
+            client.currentTrackGenre(), client.currentTrackYear(), client.currentTrackNumber(),
+            client.currentTrackTotal()};
+}
+
+BinaryBridgeCodec::DecodedSnapshot playingTaggedTrack(const QString &path, const QString &name, int year,
+                                                      int number) {
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.playback.present = true;
     snapshot.playback.state = 1;
-    snapshot.playback.currentPath = taggedPath;
+    snapshot.playback.currentPath = path;
     snapshot.metadata.present = true;
-    snapshot.metadata.sourcePath = taggedPath;
-    snapshot.metadata.title = QStringLiteral("Tagged Title");
-    snapshot.metadata.artist = QStringLiteral("Tagged Artist");
-    snapshot.metadata.album = QStringLiteral("Tagged Album");
-    snapshot.metadata.genre = QStringLiteral("Tagged Genre");
-    snapshot.metadata.year = 2001;
-    snapshot.metadata.trackNumber = 4;
+    snapshot.metadata.sourcePath = path;
+    snapshot.metadata.title = name + QStringLiteral(" Title");
+    snapshot.metadata.artist = name + QStringLiteral(" Artist");
+    snapshot.metadata.album = name + QStringLiteral(" Album");
+    snapshot.metadata.genre = name + QStringLiteral(" Genre");
+    snapshot.metadata.year = year;
+    snapshot.metadata.trackNumber = number;
+    snapshot.metadata.trackTotal = 8;
+    return snapshot;
+}
+
+} // namespace
+
+// The next tagged track's path comes before its queue row and metadata:
+// until its metadata comes, the track before's text stays whole, with no
+// file name or blanks in between, then the next track's shows in one step,
+// here and over MPRIS (#560).
+void BridgeClientTest::nextTrackHoldsTheTextBeforeUntilItsOwnIsKnown() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingTaggedTrack(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"), 2001, 3);
     QVERIFY(client.processBinarySnapshot(snapshot));
-    QCOMPARE(client.currentTrackTitle(), QStringLiteral("Tagged Title"));
-    QCOMPARE(client.currentTrackArtist(), QStringLiteral("Tagged Artist"));
+    const QVariantList textOfA{QStringLiteral("A Title"), QStringLiteral("A Artist"), QStringLiteral("A Album"),
+                               QStringLiteral("A Genre"), 2001, 3, 8};
+    QCOMPARE(trackText(client), textOfA);
     client.m_queueLength = 1;
     MprisController controller(&client);
 
-    const auto expectOnlyTheFileName = [&]() {
-        QCOMPARE(client.currentTrackTitle(), QStringLiteral("untitled take.flac"));
-        QVERIFY(client.currentTrackArtist().isEmpty());
-        QVERIFY(client.currentTrackAlbum().isEmpty());
-        QVERIFY(client.currentTrackGenre().isEmpty());
-        QVERIFY(!client.currentTrackYear().isValid());
-        QCOMPARE(client.currentTrackNumber(), 0);
-        emit client.trackMetadataChanged();
-        const QVariantMap meta = controller.metadata();
-        QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("untitled take.flac"));
-        QVERIFY(!meta.contains(QStringLiteral("xesam:artist")));
-        QVERIFY(!meta.contains(QStringLiteral("xesam:album")));
-    };
+    // B plays, with the metadata still A's, over two snapshots.
+    snapshot.playback.currentPath = QStringLiteral("/fixture/b.flac");
+    for (int pass = 0; pass < 2; ++pass) {
+        client.m_pollTrackMetadataChanged = false;
+        snapshot.playback.positionSeconds = pass;
+        QVERIFY(client.processBinarySnapshot(snapshot));
+        QVERIFY(!client.m_pollTrackMetadataChanged);
+        QCOMPARE(trackText(client), textOfA);
+    }
+    emit client.trackIdentityChanged();
+    QCOMPARE(controller.metadata().value(QStringLiteral("xesam:title")).toString(), QStringLiteral("A Title"));
+
+    client.m_pollTrackMetadataChanged = false;
+    QVERIFY(client.processBinarySnapshot(
+        playingTaggedTrack(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"), 2002, 5)));
+    QVERIFY(client.m_pollTrackMetadataChanged);
+    const QVariantList textOfB{QStringLiteral("B Title"), QStringLiteral("B Artist"), QStringLiteral("B Album"),
+                               QStringLiteral("B Genre"), 2002, 5, 8};
+    QCOMPARE(trackText(client), textOfB);
+    emit client.trackMetadataChanged();
+    const QVariantMap meta = controller.metadata();
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("B Title"));
+    QCOMPARE(meta.value(QStringLiteral("xesam:artist")).toStringList(), QStringList{QStringLiteral("B Artist")});
+
+    // Its own metadata that lacks a field leaves it empty, never A's or B's
+    // before.
+    BinaryBridgeCodec::DecodedSnapshot untitled =
+        playingTaggedTrack(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"), 2002, 5);
+    untitled.metadata.title.clear();
+    untitled.metadata.genre.clear();
+    QVERIFY(client.processBinarySnapshot(untitled));
+    QCOMPARE(trackText(client), (QVariantList{QStringLiteral("b.flac"), QStringLiteral("B Artist"),
+                                              QStringLiteral("B Album"), QString(), 2002, 5, 8}));
+}
+
+// After a tagged track, the next one whose tag lacks its title, artist and
+// album: the text before stays until its metadata comes, which then leaves
+// the file name and no artist or album, here and over MPRIS (#560).
+void BridgeClientTest::nextTrackWithoutTagsKeepsNoTextOfTheTrackBefore() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    const QString untaggedPath = QStringLiteral("/fixture/untitled take.flac");
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingTaggedTrack(QStringLiteral("/fixture/tagged.flac"), QStringLiteral("Tagged"), 2001, 4);
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    const QVariantList taggedText = trackText(client);
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("Tagged Title"));
+    client.m_queueLength = 1;
+    MprisController controller(&client);
 
     // The next track, with no queue row and the metadata still the track before's.
     snapshot.playback.currentPath = untaggedPath;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    expectOnlyTheFileName();
+    QCOMPARE(trackText(client), taggedText);
 
     // Its own metadata, which has none of them.
     snapshot.metadata = {};
     snapshot.metadata.present = true;
     snapshot.metadata.sourcePath = untaggedPath;
     QVERIFY(client.processBinarySnapshot(snapshot));
-    expectOnlyTheFileName();
+    QCOMPARE(trackText(client), (QVariantList{QStringLiteral("untitled take.flac"), QString(), QString(),
+                                              QString(), QVariant(), 0, 0}));
+    emit client.trackMetadataChanged();
+    const QVariantMap meta = controller.metadata();
+    QCOMPARE(meta.value(QStringLiteral("xesam:title")).toString(), QStringLiteral("untitled take.flac"));
+    QVERIFY(!meta.contains(QStringLiteral("xesam:artist")));
+    QVERIFY(!meta.contains(QStringLiteral("xesam:album")));
+}
+
+// A track whose text is not known yet when playback stops on it has no
+// text of the track before: it shows its file name (#560).
+void BridgeClientTest::stoppingEndsTheWaitForTheTracksText() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingTaggedTrack(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"), 2001, 3);
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    snapshot.playback.currentPath = QStringLiteral("/fixture/b.flac");
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("A Title"));
+
+    snapshot.playback.state = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(trackText(client), (QVariantList{QStringLiteral("b.flac"), QString(), QString(), QString(),
+                                              QVariant(), 0, 0}));
 }
 
 // The text falls back to the current track's queue row, never to the row at
@@ -7622,9 +7702,22 @@ void BridgeClientTest::currentTrackTotalBelongsToTheCurrentTracksNumber()
     snapshot.metadata.trackNumber = 2;
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(client.currentTrackTotal(), 8);
-    // Metadata still about the previous track gives the next no total.
+    // Metadata still about the previous track: its number and total stay
+    // together until the next track's own are known (#560).
     snapshot.playback.currentPath = QStringLiteral("/music/A/Album/03.flac");
     QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackNumber(), 2);
+    QCOMPARE(client.currentTrackTotal(), 8);
+    // The next track's queue row tells its number, and no total.
+    QueueRowData row;
+    row.title = QStringLiteral("03");
+    row.path = snapshot.playback.currentPath;
+    row.trackNumber = 3;
+    QVERIFY(client.m_queueRowsModel.setRows({row}));
+    client.m_queueLength = 1;
+    client.m_queuePathFirstIndexStale = true;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackNumber(), 3);
     QCOMPARE(client.currentTrackTotal(), 0);
     snapshot.metadata.sourcePath = snapshot.playback.currentPath;
     snapshot.metadata.trackNumber = 3;

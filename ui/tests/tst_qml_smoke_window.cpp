@@ -60,7 +60,7 @@ private slots:
     void aWindowOffScreenStopsTheClockAndTheFeeds();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
-    void nowPlayingShowsNoTextOfTheTrackBefore();
+    void nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown();
 };
 
 void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -1306,10 +1306,11 @@ std::unique_ptr<QmlSmokeTest> makeWindowSmokeTest(const QString &userDirectories
     return std::make_unique<WindowSmokeTest>(userDirectoriesParent);
 }
 
-// A track whose tag lacks its title, artist and album, after a tagged one
-// and before its queue row comes: the panel shows the new track's file name
-// and nothing of the track before, as BridgeClient tells it (#560).
-void WindowSmokeTest::nowPlayingShowsNoTextOfTheTrackBefore() {
+// Track changes whose path comes before the track's queue row and metadata,
+// as BridgeClient tells them: the panel keeps the track before's lines,
+// with no file name or blanks in between, until the next track's own come,
+// tagged or with a tag that lacks its title, artist and album (#560).
+void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
     BridgeClient bridge;
     // Only the snapshots below reach it, not the real bridge's.
     bridge.m_bridgePollTimer.stop();
@@ -1342,36 +1343,53 @@ void WindowSmokeTest::nowPlayingShowsNoTextOfTheTrackBefore() {
         return applied;
     };
 
-    const QString taggedPath = QStringLiteral("/fixture/tagged.flac");
     BinaryBridgeCodec::DecodedSnapshot snapshot;
     snapshot.playback.present = true;
     snapshot.playback.state = 1;
-    snapshot.playback.currentPath = taggedPath;
-    snapshot.metadata.present = true;
-    snapshot.metadata.sourcePath = taggedPath;
-    snapshot.metadata.title = QStringLiteral("Tagged Title");
-    snapshot.metadata.artist = QStringLiteral("Tagged Artist");
-    snapshot.metadata.album = QStringLiteral("Tagged Album");
-    QVERIFY(deliver(snapshot));
-    QTRY_COMPARE(title->property("text").toString(), QStringLiteral("Tagged Title"));
-    QTRY_COMPARE(artistAlbum->property("text").toString(),
-                 QStringLiteral("Tagged Artist — Tagged Album"));
+    const auto playTagged = [&snapshot](const QString &path, const QString &name) {
+        snapshot.playback.currentPath = path;
+        snapshot.metadata = {};
+        snapshot.metadata.present = true;
+        snapshot.metadata.sourcePath = path;
+        snapshot.metadata.title = name + QStringLiteral(" Title");
+        snapshot.metadata.artist = name + QStringLiteral(" Artist");
+        snapshot.metadata.album = name + QStringLiteral(" Album");
+    };
+    const auto expectLines = [&](const QString &titleText, const QString &artistAlbumText) {
+        QTRY_COMPARE(title->property("text").toString(), titleText);
+        QTRY_COMPARE(artistAlbum->property("text").toString(), artistAlbumText);
+        QCOMPARE(panel->property("titleText").toString(), titleText);
+        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+    };
+    // The lines stay as they were while the next track's are not known.
+    const auto expectLinesHeld = [&](const QString &titleText, const QString &artistAlbumText) {
+        QTest::qWait(50);
+        QCOMPARE(panel->property("titleText").toString(), titleText);
+        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+    };
 
-    // The next track, with the metadata still the track before's.
-    snapshot.playback.currentPath = QStringLiteral("/fixture/untitled take.flac");
+    playTagged(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"));
     QVERIFY(deliver(snapshot));
-    QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
-    QTRY_COMPARE(artistAlbum->property("text").toString(), QString());
+    expectLines(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
 
-    // Its own metadata, which has none of the three.
+    // B plays, with the metadata still A's; then B's own comes.
+    snapshot.playback.currentPath = QStringLiteral("/fixture/b.flac");
+    QVERIFY(deliver(snapshot));
+    expectLinesHeld(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
+    playTagged(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"));
+    QVERIFY(deliver(snapshot));
+    expectLines(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
+
+    // A track whose tag has none of the three; then its own metadata.
+    const QString untaggedPath = QStringLiteral("/fixture/untitled take.flac");
+    snapshot.playback.currentPath = untaggedPath;
+    QVERIFY(deliver(snapshot));
+    expectLinesHeld(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
     snapshot.metadata = {};
     snapshot.metadata.present = true;
-    snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+    snapshot.metadata.sourcePath = untaggedPath;
     QVERIFY(deliver(snapshot));
-    QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
-    QTRY_COMPARE(artistAlbum->property("text").toString(), QString());
-    QCOMPARE(panel->property("titleText").toString(), QStringLiteral("untitled take.flac"));
-    QCOMPARE(panel->property("artistAlbumText").toString(), QString());
+    expectLines(QStringLiteral("untitled take.flac"), QString());
     QCOMPARE(bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
     QVERIFY(bridge.currentTrackArtist().isEmpty());
     QVERIFY(bridge.currentTrackAlbum().isEmpty());

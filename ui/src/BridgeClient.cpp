@@ -5709,21 +5709,27 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     }
 #endif
 
-    // The track's text describes the current track alone: what its queue
-    // row and its metadata tell. Another track's never stays for it, so a
-    // new track starts with nothing until one of the two tells it.
-    const bool sameTrack = !currentPath.isEmpty() && !currentPathChanged;
-    QString nextTrackTitle = sameTrack ? m_currentTrackTitle : QString{};
-    QString nextTrackArtist = sameTrack ? m_currentTrackArtist : QString{};
-    QString nextTrackAlbum = sameTrack ? m_currentTrackAlbum : QString{};
+    // The track's text: its title, artist, album, genre, year and number,
+    // which change as one set. The set describes m_currentTrackTextPath:
+    // the current track once its queue row or its metadata tells it, and
+    // until then the track before, whose set stays whole rather than give
+    // way to a file name and blanks that the next moment replaces, as the
+    // cover waits too. A stop, or no track, ends the wait.
+    const bool textIsCurrentTracks = !currentPath.isEmpty() && m_currentTrackTextPath == currentPath;
+    QString nextTrackTextPath = currentPath.isEmpty() ? QString{} : m_currentTrackTextPath;
+    QString nextTrackTitle = currentPath.isEmpty() ? QString{} : m_currentTrackTitle;
+    QString nextTrackArtist = currentPath.isEmpty() ? QString{} : m_currentTrackArtist;
+    QString nextTrackAlbum = currentPath.isEmpty() ? QString{} : m_currentTrackAlbum;
     // Only the current track's file metadata carries the album artist.
-    QString nextTrackAlbumArtist = sameTrack ? m_currentTrackAlbumArtist : QString{};
-    QString nextTrackGenre = sameTrack ? m_currentTrackGenre : QString{};
-    QVariant nextTrackYear = sameTrack ? m_currentTrackYear : QVariant{};
-    int nextTrackNumber = sameTrack ? m_currentTrackNumber : 0;
+    QString nextTrackAlbumArtist = currentPath.isEmpty() || currentPathChanged
+        ? QString{} : m_currentTrackAlbumArtist;
+    QString nextTrackGenre = currentPath.isEmpty() ? QString{} : m_currentTrackGenre;
+    QVariant nextTrackYear = currentPath.isEmpty() ? QVariant{} : m_currentTrackYear;
+    int nextTrackNumber = currentPath.isEmpty() ? 0 : m_currentTrackNumber;
     // The backend counts the album for the number in the metadata, so the
-    // total belongs to the current track's metadata alone.
-    int nextTrackTotal = currentPath.isEmpty() || currentPathChanged ? 0 : m_currentTrackTotal;
+    // total belongs to the current track's metadata alone; it goes with the
+    // number it is shown with.
+    int nextTrackTotal = currentPath.isEmpty() ? 0 : m_currentTrackTotal;
     const bool metadataMatchesCurrentPath =
         !currentPath.isEmpty() && snapshot.metadata.present && metadataSourcePath == currentPath;
     QString nextTrackFormatLabel = currentPath.isEmpty()
@@ -5759,8 +5765,8 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         const int unknownYear = std::numeric_limits<int>::min();
 
         if (metadataMatchesCurrentPath) {
-            // The track's own metadata: a field it lacks is empty, or what
-            // the track's queue row has.
+            // The track's own metadata gives the whole set: a field it
+            // lacks is empty, or what the track's queue row has.
             const auto field = [](const QString &metadataValue, const QString &rowValue) {
                 return metadataValue.trimmed().isEmpty() ? rowValue : metadataValue;
             };
@@ -5771,7 +5777,10 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             const int year = metadataYear != unknownYear ? metadataYear : (row ? row->year : unknownYear);
             nextTrackYear = year != unknownYear ? QVariant(year) : QVariant{};
             nextTrackNumber = metadataTrackNumber > 0 ? metadataTrackNumber : (row ? row->trackNumber : 0);
-        } else if (row != nullptr) {
+            nextTrackTextPath = currentPath;
+        } else if (row != nullptr && textIsCurrentTracks) {
+            // The track's own set already: its row keeps the year and the
+            // number the metadata gave when it has none.
             nextTrackTitle = row->title;
             nextTrackArtist = row->artist;
             nextTrackAlbum = row->album;
@@ -5782,9 +5791,29 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
             if (row->trackNumber > 0) {
                 nextTrackNumber = row->trackNumber;
             }
+        } else if (row != nullptr) {
+            // The track's row replaces the set of the track before whole.
+            nextTrackTitle = row->title;
+            nextTrackArtist = row->artist;
+            nextTrackAlbum = row->album;
+            nextTrackGenre = row->genre;
+            nextTrackYear = row->year != unknownYear ? QVariant(row->year) : QVariant{};
+            nextTrackNumber = row->trackNumber;
+            nextTrackTotal = 0;
+            nextTrackTextPath = currentPath;
+        } else if (isStopped && !textIsCurrentTracks) {
+            // Stopped, nothing more will tell the track's set.
+            nextTrackTitle.clear();
+            nextTrackArtist.clear();
+            nextTrackAlbum.clear();
+            nextTrackGenre.clear();
+            nextTrackYear = QVariant{};
+            nextTrackNumber = 0;
+            nextTrackTotal = 0;
+            nextTrackTextPath = currentPath;
         }
 
-        if (nextTrackTitle.trimmed().isEmpty()) {
+        if (nextTrackTextPath == currentPath && nextTrackTitle.trimmed().isEmpty()) {
             const QFileInfo info(currentPath);
             const QString fallbackTitle = info.fileName();
             nextTrackTitle = fallbackTitle.isEmpty() ? currentPath : fallbackTitle;
@@ -5803,6 +5832,7 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         nextTrackBitDepth = metadataBitDepth;
         nextTrackCurrentBitrateKbps = metadataCurrentBitrateKbps;
     }
+    m_currentTrackTextPath = nextTrackTextPath;
     if (m_currentTrackTitle != nextTrackTitle) {
         m_currentTrackTitle = nextTrackTitle;
         changed = true;

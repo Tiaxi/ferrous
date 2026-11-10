@@ -841,6 +841,10 @@ private:
     // The bridge's play serial; see currentPlaySerial.
     quint64 m_currentPlaySerial{0};
     QString m_currentTrackCoverPath;
+    // The track the title, artist, album, genre, year and number describe:
+    // the current track's, or while its own are not known yet, the track
+    // before's (see processBinarySnapshot()).
+    QString m_currentTrackTextPath;
     QString m_currentTrackTitle;
     QString m_currentTrackArtist;
     QString m_currentTrackAlbum;
