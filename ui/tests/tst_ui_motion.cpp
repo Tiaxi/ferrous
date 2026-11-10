@@ -909,6 +909,8 @@ private slots:
     void animationsOffMakeEveryChangeInstant();
     void nothingAnimatesOnceTheMotionIsDone();
     void nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown();
+    void viewerControlsFadeWithTheStrip();
+    void viewerControlsFadeWithTheStrip_data();
 };
 
 void UiMotionTest::initTestCase() {
@@ -3296,6 +3298,114 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     UiMotionTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("whole screen") << true;
+    QTest::newRow("in the window") << false;
+}
+
+// The viewer's controls hide and show together (#373 H1: the strip faded,
+// the corner controls cut): the title strip over the whole screen, the
+// corner plate in the window, the mode switch and the lanes' Mute and Solo
+// all fade on one curve, at the same opacity in every frame, shown at once
+// for the key that wakes them and hidden only once faded out.
+void UiMotionTest::viewerControlsFadeWithTheStrip() {
+    QFETCH(bool, wholeScreen);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setShortDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(viewer && autoHide && spectrogram);
+    // Two named lanes, with Mute and Solo always shown.
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("channelButtonsVisibility", 2);
+    bridge->setProperty("currentTrackChannels", 2);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QQuickWindow *host = window;
+    if (wholeScreen) {
+        QTRY_VERIFY(spectrogram->window() != nullptr && spectrogram->window() != window);
+        host = spectrogram->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    } else {
+        QTRY_VERIFY(itemNamed(window->contentItem(), QStringLiteral("spectrogramPopupControls")) != nullptr);
+    }
+    // The controls that hide with the viewer's: the strip, or the corner
+    // plate, then the mode switch and the lanes' buttons.
+    QQuickItem *controls = itemNamed(host->contentItem(), wholeScreen ? QStringLiteral("spectrogramFullscreenStrip")
+                                                                       : QStringLiteral("spectrogramPopupControls"));
+    QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(controls && modeSwitch);
+    QList<QQuickItem *> followers{modeSwitch};
+    QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
+    followers.append(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")));
+    // The pointer resting on the view, which reveals the mode switch.
+    QTest::mouseMove(host, QPoint(host->width() / 2, host->height() / 2));
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QTRY_COMPARE(controls->opacity(), 1.0);
+    for (QQuickItem *follower : followers) {
+        QTRY_COMPARE(follower->opacity(), 1.0);
+        QVERIFY(follower->isVisible());
+    }
+
+    QString failure;
+    int frames = 0;
+    // Where a follower is not at the controls' opacity, or "".
+    const auto apart = [&]() -> QString {
+        for (QQuickItem *follower : followers) {
+            if (std::abs(follower->opacity() - controls->opacity()) > 1e-9
+                || follower->isVisible() != controls->isVisible()) {
+                return QStringLiteral("%1 at %2 (%3), the controls at %4 (%5)")
+                    .arg(follower->objectName()).arg(follower->opacity()).arg(follower->isVisible())
+                    .arg(controls->opacity()).arg(controls->isVisible());
+            }
+        }
+        return {};
+    };
+    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+        ++frames;
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+
+    // The pointer resting: they fade out together, and hide once out.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QVERIFY(controls->isVisible());
+    QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_VERIFY(!controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+
+    // A key wakes them: shown at once, fading in together.
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+    QVERIFY(controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_COMPARE(controls->opacity(), 1.0);
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY(frames > 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
 #include "tst_ui_motion.moc"

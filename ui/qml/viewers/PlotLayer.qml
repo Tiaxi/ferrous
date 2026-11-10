@@ -90,9 +90,12 @@ Item {
         anchors.right: parent.right
         anchors.topMargin: root.topInset + 4
         anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
-        visible: root.controlsVisible
-        revealed: root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
-            || modeSwitch.pointerHovered || modeSwitch.focusInside
+        // In a viewer, it hides and shows with the viewer's controls, on
+        // their curve; hidden, it takes no pointer.
+        visible: root.controlsVisible || opacity > 0
+        revealed: root.controlsVisible
+            && (root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
+                || modeSwitch.pointerHovered || modeSwitch.focusInside)
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode
@@ -131,7 +134,8 @@ Item {
             channelIndex: index
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
-            buttonsVisibility: root.controlsVisible ? root.uiBridge.channelButtonsVisibility : 0
+            buttonsVisibility: root.uiBridge.channelButtonsVisibility
+            controlsShown: root.controlsVisible
             laneHovered: root.hoveredLane === index
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }

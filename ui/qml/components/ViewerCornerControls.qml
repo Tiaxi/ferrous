@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
 
@@ -38,7 +39,21 @@ Item {
 
     implicitWidth: closeButton.x + closeButton.width + root.spacing
     implicitHeight: 24 + 2 * root.spacing
-    visible: root.controlsVisible
+    // As the title strip of the viewer over the whole screen: shown at once,
+    // so the key that brings the controls back can move focus to them; it
+    // fades out on the strip's curve, and hidden it takes no pointer.
+    opacity: root.controlsVisible ? 1 : 0
+    visible: root.controlsVisible || opacity > 0
+
+    // Kirigami's durations are 0 with animations turned off.
+    Behavior on opacity {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
+
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Viewer")
 
