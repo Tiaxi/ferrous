@@ -127,13 +127,20 @@ ToolBar {
     component GestureSlider: Slider {
         // The arrow keys held down.
         property var heldKeys: []
-        readonly property bool adjusting: pressed || heldKeys.length > 0
+        readonly property bool adjusting: gestureHeld()
         readonly property bool pointerHeld: pointerHold.active
 
         // The mouse's or a touch's hold. Its passive grab leaves the drag
         // to the slider.
         PointHandler {
             id: pointerHold
+        }
+
+        // Whether a drag or held keys move the slider, from their own state.
+        // A binding that also reads what `adjusting` decides can update
+        // between the two, and see `adjusting` still unchanged.
+        function gestureHeld() {
+            return pressed || heldKeys.length > 0
         }
 
         // The slider handles the keys after these, unless they accept them.
@@ -561,14 +568,30 @@ ToolBar {
             // The time under the hovering pointer, shown while no gesture
             // shows its own.
             readonly property bool hoverTimeShown: seekHover.hovered && !adjusting && seekAllowed
-            // Where the hovering pointer is, in the slider's coordinates;
-            // unchanging while hidden, so the hidden line and tooltip do not
-            // move. Qt sends no hover during a drag, and brings the point up
-            // to date at the frame after it, before that frame draws.
-            readonly property real hoverX: hoverTimeShown ? seekHover.point.position.x : 0
-            // The second a click at the pointer would seek to, as a drag
-            // there shows it.
-            readonly property int hoverSecond: hoverTimeShown ? Math.floor(secondsAtX(hoverX)) : 0
+            // Where the hovering pointer is, in the slider's coordinates, and
+            // the second a click there would seek to, as a drag there shows
+            // it. Hidden, they keep their last values, so the tooltip fades
+            // out where it was, with its time, and nothing hidden moves. Qt
+            // sends no hover during a drag, and brings the point up to date
+            // at the frame after it, before that frame draws.
+            property real hoverX: 0
+            property int hoverSecond: 0
+            Binding on hoverX {
+                when: seekSlider.hoverTimeShown
+                value: seekHover.point.position.x
+                restoreMode: Binding.RestoreNone
+            }
+            Binding on hoverSecond {
+                when: seekSlider.hoverTimeShown
+                // Without a length, whose stand-in range puts the start at
+                // every point, the last second stays. From the bridge, as
+                // `durationKnown` and `hoverTimeShown` can still hold the
+                // last length's values when this updates.
+                value: isFinite(root.uiBridge.durationSeconds) && root.uiBridge.durationSeconds > 0
+                    ? Math.floor(seekSlider.secondsAtX(seekHover.point.position.x))
+                    : seekSlider.hoverSecond
+                restoreMode: Binding.RestoreNone
+            }
 
             // The time in a native tooltip under the bar: at the playhead
             // while a gesture moves it, otherwise at the hovering pointer.
@@ -583,11 +606,19 @@ ToolBar {
                 visible: shown
                 delay: 0
                 timeout: -1
-                // The point the tooltip is centred on; unchanging while
-                // hidden, so playback moves no hidden tooltip.
-                property real anchorX: seekSlider.adjusting
-                    ? seekSlider.playheadX + seekSlider.playheadLineWidth / 2
-                    : seekSlider.hoverX
+                // The point the tooltip is centred on: the playhead's during
+                // a gesture, the pointer's while it hovers, and otherwise
+                // where it last was, so the tooltip fades out there and
+                // playback moves no hidden tooltip. From the gesture's and
+                // the hover's own state, as `shown` can still hold its last
+                // value when this updates.
+                property real anchorX: 0
+                Binding on anchorX {
+                    value: seekSlider.gestureHeld()
+                        ? seekSlider.playheadX + seekSlider.playheadLineWidth / 2
+                        : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
+                    restoreMode: Binding.RestoreNone
+                }
                 // On whole device pixels, so a pointer's move within one
                 // moves the tooltip by none and draws no frame.
                 readonly property real placedX: root.snapped(anchorX - width / 2)
@@ -596,10 +627,11 @@ ToolBar {
                 // The time while shown, and nothing while hidden, so that
                 // playback's seconds change no hidden text, which would draw
                 // frames. The text keeps the last time while it fades out.
+                // Its source is chosen as the anchor's is.
                 readonly property string shownText: !shown ? ""
-                    : FormatUtils.formatClockTime(seekSlider.adjusting
-                        ? seekSlider.valueSecond
-                        : seekSlider.hoverSecond)
+                    : seekSlider.gestureHeld() ? FormatUtils.formatClockTime(seekSlider.valueSecond)
+                    : seekHover.hovered ? FormatUtils.formatClockTime(seekSlider.hoverSecond)
+                    : ""
                 onShownTextChanged: {
                     if (shownText.length > 0) {
                         text = shownText
