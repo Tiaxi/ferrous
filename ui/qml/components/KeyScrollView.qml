@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 
 // A view that Tab reaches and the arrow, Page, Home and End keys scroll.
@@ -17,11 +18,18 @@ ScrollView {
     activeFocusOnTab: true
     focusPolicy: Qt.StrongFocus
 
+    // The frame shows while the view itself has the keyboard, which it
+    // keeps in its flickable. A control in it with the keyboard draws its
+    // own: the view is a focus scope, which has active focus then too.
+    readonly property bool framed: root.activeFocus
+        && (root.Window.activeFocusItem === root || root.Window.activeFocusItem === root.contentItem)
+
     background: Rectangle {
+        objectName: "keyScrollViewFrame"
         color: "transparent"
         radius: Kirigami.Units.cornerRadius
         border.width: 2
-        border.color: root.activeFocus ? Kirigami.Theme.focusColor : "transparent"
+        border.color: root.framed ? Kirigami.Theme.focusColor : "transparent"
     }
 
     function scrollBy(pixels) {
@@ -42,6 +50,12 @@ ScrollView {
     }
 
     Keys.onPressed: function(event) {
+        root.scrollForKey(event)
+    }
+
+    // Scrolls for an arrow, Page, Home or End key, and accepts it; leaves
+    // any other key. Also for the keys of controls outside the view.
+    function scrollForKey(event) {
         const page = Math.max(root.lineStep, root.height - root.lineStep)
         const all = root.contentItem.contentHeight
         switch (event.key) {

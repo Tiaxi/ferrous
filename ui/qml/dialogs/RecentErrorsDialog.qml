@@ -129,6 +129,20 @@ Popup {
         historyView.contentItem.contentY = 0
     }
 
+    // The control that has the keyboard as the popup opens: the newest
+    // entry's action, otherwise Open Diagnostics; not Clear All, which a
+    // stray Space would press. The list keeps no frame around it then,
+    // and its scroll keys still work from either (see the content's keys).
+    function initialFocusItem() {
+        for (let i = 0; i < historyList.count; ++i) {
+            const row = historyList.itemAt(i)
+            if (row && row.actionItem.visible) {
+                return row.actionItem
+            }
+        }
+        return diagnosticsButton
+    }
+
     parent: Overlay.overlay
     // Modal so that a press outside only closes it, also on the issues
     // button that opened it; with no dim, as a plain popup.
@@ -157,7 +171,7 @@ Popup {
     }
     onVisibleChanged: root.refreshQueuedSubjects()
     // Over a viewer the keyboard would otherwise stay with the viewer.
-    onOpened: historyView.forceActiveFocus(Qt.PopupFocusReason)
+    onOpened: root.initialFocusItem().forceActiveFocus(Qt.PopupFocusReason)
     // Issues that arrived while it was open have been seen too.
     onClosed: {
         root.errorController.markSeen()
@@ -219,6 +233,12 @@ Popup {
         // the main window's shortcuts stay active under a fullscreen viewer.
         Keys.onShortcutOverride: function(event) {
             event.accepted = KeyUtils.isPlainSpace(event)
+        }
+        // The arrow, Page, Home and End keys scroll the list from any
+        // control of the popup: a key from an entry's action reaches the
+        // list itself, and one from the header or the footer arrives here.
+        Keys.onPressed: function(event) {
+            historyView.scrollForKey(event)
         }
 
         RowLayout {
@@ -301,6 +321,7 @@ Popup {
                         // The file the entry is about, when its text does not name it.
                         readonly property bool showsSubject: historyRow.subject.length > 0
                             && historyRow.message.indexOf(historyRow.subject.split("/").pop()) < 0
+                        readonly property Item actionItem: actionButton
 
                         width: historyColumn.width
                         implicitHeight: rowLayout.implicitHeight + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
@@ -452,6 +473,7 @@ Popup {
         }
 
         ToolButton {
+            id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
             Layout.leftMargin: Kirigami.Units.smallSpacing + 2
             flat: true
