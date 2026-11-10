@@ -618,10 +618,14 @@ ToolBar {
                     }
                 }
 
-                // A 1 px line at the hovering pointer.
+                // A 1 px line at the hovering pointer, which comes and goes
+                // with the time box over it: at the box's opacity while the
+                // box shows, or fades out, the hover's time, where that last
+                // was. A gesture shows its time at the playhead with no line.
                 Rectangle {
                     objectName: "seekHoverLine"
-                    visible: seekSlider.hoverTimeShown
+                    opacity: seekTimeBox.showsHover && seekTimeBox.contentItem.visible ? seekTimeBox.opacity : 0
+                    visible: opacity > 0
                     antialiasing: false
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
@@ -704,6 +708,15 @@ ToolBar {
                 closePolicy: Popup.NoAutoClose
                 readonly property bool shown: (seekSlider.adjusting || seekSlider.hoverTimeShown)
                     && seekSlider.seekAllowed
+                // Whether the time it shows, or last showed, is the hover's
+                // rather than a gesture's: the hover line then shows, and
+                // fades out, with it.
+                property bool showsHover: false
+                Binding on showsHover {
+                    when: seekTimeBox.shown
+                    value: !seekSlider.gestureHeld()
+                    restoreMode: Binding.RestoreNone
+                }
                 visible: shown
                 delay: 0
                 timeout: -1
