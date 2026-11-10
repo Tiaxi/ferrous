@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, scalable. The 64-unit drawing, for sizes without a drawing of their own: a harmonic chirp on the spectrogram's floor. The fundamental and its 2nd and 3rd harmonics start at one time, at one, two and three times its height above the floor, and rise at one, two and three times its slope; each harmonic is thinner and lower on the colour map. -->
+<!-- Ferrous, scalable. The 64-unit drawing, for sizes without a drawing of their own: a harmonic chirp. The fundamental and its 2nd and 3rd harmonics start at one time, at one, two and three times its height above the zero of frequency, and rise at one, two and three times its slope, so they fan out; each harmonic is thinner and lower on the colour map. -->
 <svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
   <rect id="tile" fill="#3a1490" x="6" y="6" width="52" height="52" rx="5"/>
-  <rect id="floor" fill="#a6006e" x="12" y="45" width="40" height="7"/>
-  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.6" stroke-linecap="round" d="M15 31.5 L49 12"/>
-  <path id="h2" fill="none" stroke="#f0602a" stroke-width="2.1" stroke-linecap="round" d="M15 36 L49 23"/>
-  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="3.5" stroke-linecap="round" d="M15 40.5 L49 34"/>
+  <path id="h3" fill="none" stroke="#d20040" stroke-width="1.6" stroke-linecap="round" d="M15 36.5 L49 17"/>
+  <path id="h2" fill="none" stroke="#f0602a" stroke-width="2.1" stroke-linecap="round" d="M15 41 L49 28"/>
+  <path id="fundamental" fill="none" stroke="#ffb000" stroke-width="3.5" stroke-linecap="round" d="M15 45.5 L49 39"/>
 </svg>
