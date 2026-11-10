@@ -220,7 +220,8 @@ AbstractButton {
     // with no fade.
     visible: root.occupied
     implicitWidth: leftPadding + slotRow.implicitWidth + rightPadding
-    implicitHeight: 22
+    // 22 px, or a little more than its words at a larger font.
+    implicitHeight: Math.max(22, Math.round(slotLabel.implicitHeight) + 4)
     leftPadding: root.labelText.length > 0 ? 6 : 3
     rightPadding: 3
     topPadding: 0
@@ -305,6 +306,7 @@ AbstractButton {
             spacing: root.labelText.length > 0 ? Kirigami.Units.largeSpacing : 0
 
             Label {
+                id: slotLabel
                 objectName: "scrobbleIndicatorLabel"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0

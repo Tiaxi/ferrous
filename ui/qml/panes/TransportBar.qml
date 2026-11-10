@@ -12,6 +12,7 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // The transport (#373): Previous, Play/Pause, Stop and Next as flat 32 px
 // tool buttons, the seek waveform, the time and the volume, on the chrome.
+// The glyphs and buttons grow with a font larger than the default.
 ToolBar {
     id: root
 
@@ -104,6 +105,15 @@ ToolBar {
         return Math.round(value * root.windowDevicePixelRatio) / root.windowDevicePixelRatio
     }
 
+    // The design's glyph and button sizes are for the default 10 pt font; a
+    // larger font scales them, and a smaller one keeps them.
+    readonly property real fontScale: Math.max(1, root.uiPalette.basePointSize / 10)
+    function scaled(size) {
+        return Math.max(size, Math.round(size * root.fontScale))
+    }
+    // The tool buttons: 32 px, or the Play/Pause glyph and 6 px around it.
+    readonly property real buttonSize: Math.max(32, root.scaled(20) + 12)
+
     // A text of the transport's tooltips: the action and its shortcut.
     function actionToolTip(label, shortcutText) {
         return shortcutText.length > 0
@@ -112,7 +122,8 @@ ToolBar {
     }
 
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
-    implicitHeight: 48
+    // 48 px, or the buttons and 8 px above and below them.
+    implicitHeight: Math.max(48, root.buttonSize + 16)
     leftPadding: Kirigami.Units.smallSpacing
     rightPadding: 12
     topPadding: 0
@@ -176,8 +187,9 @@ ToolBar {
         id: transportButton
 
         required property string name
-        // The glyph's size: 16 px, 20 px for Play/Pause, 14 px for Stop.
-        property int glyphSize: Kirigami.Units.iconSizes.small
+        // The glyph's size: 16 px, 20 px for Play/Pause, 14 px for Stop,
+        // larger with a larger font.
+        property int glyphSize: root.scaled(Kirigami.Units.iconSizes.small)
         // The action's text without its mnemonic, and its shortcut.
         readonly property string label: FormatUtils.withoutMnemonic(
             transportButton.action ? transportButton.action.text || "" : "")
@@ -189,8 +201,8 @@ ToolBar {
             : Kirigami.Theme.disabledTextColor
 
         objectName: "transportButton_" + name
-        implicitWidth: 32
-        implicitHeight: 32
+        implicitWidth: root.buttonSize
+        implicitHeight: root.buttonSize
         padding: 0
         flat: true
         display: AbstractButton.IconOnly
@@ -242,7 +254,7 @@ ToolBar {
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
-                glyphSize: 20
+                glyphSize: root.scaled(20)
                 action: root.playing ? root.pauseAction : root.playAction
 
                 contentItem: Item {
@@ -293,7 +305,7 @@ ToolBar {
 
             TransportButton {
                 name: "stop"
-                glyphSize: 14
+                glyphSize: root.scaled(14)
                 action: root.stopAction
             }
 
@@ -714,8 +726,8 @@ ToolBar {
             objectName: "muteButton"
             Layout.leftMargin: 16
             Layout.alignment: Qt.AlignVCenter
-            implicitWidth: 32
-            implicitHeight: 32
+            implicitWidth: root.buttonSize
+            implicitHeight: root.buttonSize
             padding: 0
             display: AbstractButton.IconOnly
             flat: true
@@ -724,8 +736,8 @@ ToolBar {
                 : I18n.i18nc("@action:button", "Mute")
             icon.name: root.volumeSilent ? "audio-volume-muted" : "audio-volume-high"
             icon.color: root.uiPalette.text
-            icon.width: Kirigami.Units.iconSizes.small
-            icon.height: Kirigami.Units.iconSizes.small
+            icon.width: root.scaled(Kirigami.Units.iconSizes.small)
+            icon.height: root.scaled(Kirigami.Units.iconSizes.small)
             ToolTip.visible: hovered || visualFocus
             ToolTip.delay: Kirigami.Units.toolTipDelay
             ToolTip.text: text
