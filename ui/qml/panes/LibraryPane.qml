@@ -31,6 +31,10 @@ Rectangle {
     property var errorController: null
     // A narrow sidebar: the header shows only the track total.
     property bool narrow: false
+    // Whether the keyboard is in use, which the current row's ring shows
+    // only then. Read as the pane is made, so the app follows the input
+    // from the start, before the tree first has the focus.
+    readonly property bool keyboardInUse: InputModality.keyboard
 
     // The tree's geometry: the inset of the first chevron, the indent step,
     // and the chevron, thumbnail and gaps after it.
@@ -302,8 +306,11 @@ Rectangle {
                     // The model's role, so a row costs the same with any
                     // number of rows selected.
                     readonly property bool rowSelected: !!model.selected
-                    // The row the keyboard is on, in a list with focus.
+                    // The row the keyboard is on, in a list with focus,
+                    // while the keyboard is in use: a click selects with the
+                    // tint alone, and nothing is ringed at launch.
                     readonly property bool rowCurrent: libraryAlbumView.activeFocus
+                        && root.keyboardInUse
                         && selectionKeyResolved.length > 0
                         && selectionKeyResolved === root.controller.currentRowKey
                     readonly property string rowKindText: isTrackRow

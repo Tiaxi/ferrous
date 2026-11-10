@@ -31,6 +31,7 @@
 #include <functional>
 #include <initializer_list>
 
+#include "../src/InputModality.h"
 #include "../src/LevelMeterItem.h"
 #include "../src/LibraryTreeModel.h"
 #include "../src/Localization.h"
@@ -176,6 +177,33 @@ QQuickItem *libraryRow(QQuickWindow *window, const QString &rowType) {
     return nullptr;
 }
 
+// Row `index` of a list view, if it has one in place.
+QQuickItem *viewRowAt(QQuickItem *view, int index) {
+    QQuickItem *row = nullptr;
+    QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+    return row;
+}
+
+// The rows of a list view that show the current-row ring.
+QList<int> ringedRowsOf(QQuickItem *view) {
+    QList<int> rows;
+    for (int index = 0; index < view->property("count").toInt(); ++index) {
+        QQuickItem *row = viewRowAt(view, index);
+        QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+        if (shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() > 0) {
+            rows.push_back(index);
+        }
+    }
+    return rows;
+}
+
+// Whether row `index` of a list view shows the selection tint.
+bool rowTinted(QQuickItem *view, int index) {
+    QQuickItem *row = viewRowAt(view, index);
+    QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+    return shown(tint) && tint->property("color").value<QColor>().alpha() > 0;
+}
+
 template <typename T>
 void appendLe(QByteArray &out, T value) {
     const T little = qToLittleEndian(value);
@@ -297,6 +325,7 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void listsRingARowAsTheKeyboardComesIn();
+    void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
@@ -313,6 +342,7 @@ void UiMainWindowTest::initTestCase() {
     qmlRegisterType<WaveformEditorItem>("FerrousUi", 1, 0, "WaveformEditorItem");
     qmlRegisterType<LevelMeterItem>("FerrousUi", 1, 0, "LevelMeterItem");
     qmlRegisterType<WindowPresence>("FerrousUi", 1, 0, "WindowPresence");
+    InputModality::registerQmlType();
 }
 
 void UiMainWindowTest::init() {
@@ -904,9 +934,9 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QCOMPARE(colorOf(tint), tokenHex(window, "selectionInactive"));
     QCOMPARE(QQmlProperty(tint, QStringLiteral("border.width")).read().toReal(), 0.0);
     QCOMPARE(colorOf(year), tokenHex(window, "textSecondary"));
-    // With focus: the tint, and the ring on the current row as one
-    // rectangle.
-    view->forceActiveFocus();
+    // With focus from the keyboard: the tint, and the ring on the current
+    // row as one rectangle.
+    view->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(view->hasActiveFocus());
     QTRY_COMPARE(colorOf(tint), tokenHex(window, "selection"));
     QCOMPARE(QQmlProperty(tint, QStringLiteral("border.width")).read().toReal(), 1.0);
@@ -1043,6 +1073,69 @@ void UiMainWindowTest::listsRingARowAsTheKeyboardComesIn() {
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{11});
     QTRY_COMPARE(ringedRows(queueView), QList<int>{11});
+}
+
+// The current-row ring shows where the keyboard is, so it shows only
+// while the keyboard is in use: not at launch, where the library has the
+// focus, and not after a click, which selects with the tint alone. Tab or a
+// key press brings it back.
+void UiMainWindowTest::listsRingTheCurrentRowOnlyForTheKeyboard() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, kAllExpanded);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) != nullptr);
+    bridge->setProperty("queueRows", sampleQueueRows(5));
+    bridge->setProperty("queueLength", 5);
+    QQuickItem *libraryView = named(window, "libraryView");
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(libraryView && queueView);
+    QTRY_COMPARE(queueView->property("count").toInt(), 5);
+    const auto clickRow = [window](QQuickItem *view, int index, const char *cell) {
+        QQuickItem *row = viewRowAt(view, index);
+        QVERIFY(row != nullptr);
+        QQuickItem *target = itemNamed(row, QString::fromLatin1(cell));
+        QVERIFY(target != nullptr);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRect(target).center().toPoint());
+    };
+
+    // At launch: the library has the focus and a current row, but no ring.
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    QCOMPARE(ringedRowsOf(queueView), QList<int>{});
+
+    // A click selects with the tint alone.
+    clickRow(libraryView, 1, "libraryRowTitle");
+    QTRY_VERIFY(rowTinted(libraryView, 1));
+    QVERIFY(libraryView->hasActiveFocus());
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    // A key in the list rings the row it moves to.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{2});
+    // A modifier alone, as for a Ctrl+click, is not the keyboard taking over.
+    clickRow(libraryView, 1, "libraryRowTitle");
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{});
+    QTest::keyClick(window, Qt::Key_Control);
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+
+    // Tab into the queue: its current row is ringed, and the library's
+    // ring is gone with the focus.
+    queueView->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queueView->hasActiveFocus());
+    QTRY_COMPARE(ringedRowsOf(queueView), QList<int>{0});
+    QCOMPARE(ringedRowsOf(libraryView), QList<int>{});
+    // A click on a queue row selects it with the tint alone.
+    clickRow(queueView, 3, "queueCell_title");
+    QTRY_VERIFY(rowTinted(queueView, 3));
+    QCOMPARE(ringedRowsOf(queueView), QList<int>{});
+    // Backtab to the library: its selected row is ringed again.
+    libraryView->forceActiveFocus(Qt::BacktabFocusReason);
+    QTRY_VERIFY(libraryView->hasActiveFocus());
+    QTRY_COMPARE(ringedRowsOf(libraryView), QList<int>{1});
+    QVERIFY(rowTinted(libraryView, 1));
 }
 
 void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {

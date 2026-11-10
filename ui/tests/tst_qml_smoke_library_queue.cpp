@@ -3139,9 +3139,16 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
     QCOMPARE(color(cell(2, "title")), paletteColor("now"));
     QVERIFY(!ring(4));
-    // With focus: the active tint, and a ring on the current row only.
+    // With focus from the keyboard, in the active window: the active tint,
+    // and a ring on the current row only.
     bridge->setProperty("selectedQueueIndex", 4);
-    view->forceActiveFocus();
+    window->requestActivate();
+    QVERIFY(QTest::qWaitForWindowActive(window));
+    // The activation may hand the queue the focus, which is not the
+    // keyboard's: Tab brings it back.
+    view->setFocus(false);
+    QTRY_VERIFY(!view->hasActiveFocus());
+    view->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(view->hasActiveFocus());
     QTRY_COMPARE(tint(4), paletteColor("selection"));
     QCOMPARE(tint(2), paletteColor("selection"));

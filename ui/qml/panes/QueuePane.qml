@@ -32,6 +32,10 @@ Rectangle {
     property var errorController: null
     // What the first-run message's button does.
     property var addLibraryFolderAction: null
+    // Whether the keyboard is in use, which the current row's ring shows
+    // only then. Read as the pane is made, so the app follows the input
+    // from the start, before the queue first has the focus.
+    readonly property bool keyboardInUse: InputModality.keyboard
 
     // The columns, which the header and the rows share: the state glyph,
     // the number, then Title, Artist, Album and Length. Text that does not
@@ -723,8 +727,11 @@ Rectangle {
                     readonly property bool draggableQueueItem: true
                     readonly property int queueRowIndex: index
                     readonly property bool rowSelected: root.controller.isIndexSelected(index)
-                    // The row the keyboard is on, in a queue with focus.
+                    // The row the keyboard is on, in a queue with focus,
+                    // while the keyboard is in use: a click selects with the
+                    // tint alone.
                     readonly property bool rowCurrent: playlistView.activeFocus
+                        && root.keyboardInUse
                         && index === root.controller.currentRowIndex
                     readonly property string playbackStateText: !isCurrentQueueRow
                         ? ""
