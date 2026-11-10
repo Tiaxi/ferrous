@@ -124,8 +124,11 @@ ToolBar {
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     // 48 px, or the buttons and 8 px above and below them.
     implicitHeight: Math.max(48, root.buttonSize + 16)
-    leftPadding: Kirigami.Units.smallSpacing
-    rightPadding: 12
+    // The content's inset, on both sides: Previous starts where the
+    // library's rows and the status bar's text do.
+    readonly property int edgeInset: 12
+    leftPadding: root.edgeInset
+    rightPadding: root.edgeInset
     topPadding: 0
     bottomPadding: 0
     // Chrome. The seam under it is the main window's.

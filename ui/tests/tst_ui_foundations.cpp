@@ -22,6 +22,7 @@
 #include <QtTest/QtTest>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 
@@ -190,6 +191,28 @@ double contrastRatio(const QColor &a, const QColor &b) {
     return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
 }
 
+// The CIE76 distance of two opaque colours in CIELAB, under D65.
+double labDistance(const QColor &a, const QColor &b) {
+    const auto lab = [](const QColor &color) {
+        const auto linear = [](double channel) {
+            return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+        };
+        const double r = linear(color.redF());
+        const double g = linear(color.greenF());
+        const double b = linear(color.blueF());
+        const double x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+        const double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const double z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+        const auto f = [](double t) {
+            return t > 216.0 / 24389.0 ? std::cbrt(t) : (24389.0 / 27.0 * t + 16.0) / 116.0;
+        };
+        return std::array<double, 3>{116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))};
+    };
+    const std::array<double, 3> la = lab(a);
+    const std::array<double, 3> lb = lab(b);
+    return std::hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2]);
+}
+
 QString describe(const QString &what, const QColor &a, const QColor &b) {
     return QStringLiteral("%1: %2 on %3 is %4:1")
         .arg(what, a.name(QColor::HexArgb), b.name(QColor::HexArgb))
@@ -319,7 +342,8 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"view", QStringLiteral("#141618"), QStringLiteral("#ffffff")},
         {"text", QStringLiteral("#fcfcfc"), QStringLiteral("#232629")},
         {"textSecondary", QStringLiteral("#aeb7bd"), QStringLiteral("#4f5a63")},
-        {"textTertiary", QStringLiteral("#8f959a"), QStringLiteral("#646d77")},
+        // Light: darkened from the mix to be 4.5:1 on a hovered row.
+        {"textTertiary", QStringLiteral("#8f959a"), QStringLiteral("#5b6570")},
         {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#5a5c5e")},
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
@@ -329,7 +353,8 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
-        {"now", QStringLiteral("#f2b035"), QStringLiteral("#955500")},
+        // Light: darkened from #955500 to be 4.5:1 on a hovered row.
+        {"now", QStringLiteral("#f2b035"), QStringLiteral("#905200")},
     };
     for (const Expected &entry : expected) {
         const QColor actual = colorOf(tokens, entry.token);
@@ -346,7 +371,14 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     const QColor accent = fromHex(scheme.highlight);
     const QColor hover = colorOf(tokens, "hover");
     QCOMPARE(channelDistance(hover, text), 0);
-    QVERIFY(std::abs(hover.alphaF() - (dark ? 0.065 : 0.08)) < 0.002);
+    // The hover tint: the least of the text, in whole percent, that is
+    // 1.3:1 on the view.
+    QVERIFY2(std::abs(hover.alphaF() - (dark ? 0.10 : 0.14)) < 0.002, qPrintable(QString::number(hover.alphaF())));
+    QVERIFY(contrastRatio(drawnOver(hover, view), view) >= 1.3);
+    QColor lighterHover = hover;
+    lighterHover.setAlphaF(hover.alphaF() - 0.01f);
+    QVERIFY(contrastRatio(drawnOver(lighterHover, view), view) < 1.3);
+    QVERIFY(sameColor(colorOf(tokens, "hoveredRow"), drawnOver(hover, view)));
     QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.20 : 0.16)) <= 1);
     const QColor dim = colorOf(tokens, "dim");
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
@@ -374,7 +406,7 @@ void UiFoundationsTest::tokensMeetTheirContrast_data() {
     QTest::addColumn<double>("tertiaryRatio");
     // The ratios the design lists, on the backgrounds it measured them on.
     QTest::newRow("breeze dark") << true << 7.75 << true << 6.0;
-    QTest::newRow("breeze light") << false << 7.1 << false << 5.3;
+    QTest::newRow("breeze light") << false << 7.1 << false << 5.9;
 }
 
 // Text is at least 4.5:1 and graphics 3:1 wherever the design puts them.
@@ -433,6 +465,7 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("column text on the selection"), colorOf(tokens, "textColumn"), selection, 4.5},
         {QStringLiteral("text on the selection"), colorOf(tokens, "text"), selection, 4.5},
         {QStringLiteral("playing title on view"), colorOf(tokens, "now"), view, 4.5},
+        {QStringLiteral("playing title on a hovered row"), colorOf(tokens, "now"), hovered, 4.5},
         {QStringLiteral("playing title on the selection"), colorOf(tokens, "now"), selection, 4.5},
         {QStringLiteral("playing title on the inactive selection"), colorOf(tokens, "now"), selectionInactive, 4.5},
         {QStringLiteral("link on view"), colorOf(tokens, "link"), view, 4.5},
@@ -449,6 +482,28 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         QVERIFY2(contrastRatio(pair.foreground, pair.background) >= pair.minimum,
                  qPrintable(describe(pair.what, pair.foreground, pair.background)));
     }
+
+    // The quiet amber mark of a collapsed tree row is at least 60% and
+    // 3:1 on every background a row can have.
+    const double markOpacity = tokens->property("nowMarkOpacity").toDouble();
+    QVERIFY2(markOpacity >= 0.6 && markOpacity <= 1.0, qPrintable(QString::number(markOpacity)));
+    for (const QColor &background : {view, hovered, selection, selectionInactive}) {
+        QColor mark = colorOf(tokens, "now");
+        mark.setAlphaF(static_cast<float>(markOpacity));
+        const QColor drawn = drawnOver(mark, background);
+        QVERIFY2(contrastRatio(drawn, background) >= 3.0,
+                 qPrintable(describe(QStringLiteral("the tree's amber mark"), drawn, background)));
+    }
+
+    // A hovered row stands out from the view at 1.3:1, yet is nearer to it
+    // than a selected row is, in lightness and hue together.
+    QVERIFY2(contrastRatio(hovered, view) >= 1.3, qPrintable(describe(QStringLiteral("hover tint"), hovered, view)));
+    QVERIFY2(labDistance(hovered, view) < 0.9 * labDistance(selection, view),
+             qPrintable(QStringLiteral("hover %1 is %2 from the view, selection %3 is %4")
+                            .arg(hovered.name())
+                            .arg(labDistance(hovered, view))
+                            .arg(selection.name())
+                            .arg(labDistance(selection, view))));
 }
 
 void UiFoundationsTest::plotColorsFollowThePlot_data() {
@@ -1067,6 +1122,14 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QQuickItem *letter = childNamed(letterButton, QStringLiteral("plotToolButtonGlyph"));
     QVERIFY(letter != nullptr);
     QVERIFY(letter->implicitHeight() <= buttonSize);
+
+    // The plot's text, the lane label's and the M, at least 11 px at the
+    // default font and growing with a larger one, as the rest of the
+    // design's small text.
+    for (QQuickItem *item : {text, letter}) {
+        const int pixels = QFontInfo(item->property("font").value<QFont>()).pixelSize();
+        QVERIFY2(pixels >= std::max(11.0, 11.0 * pointSize / 10.0), qPrintable(QString::number(pixels)));
+    }
 
     // The lane label's plate: its text whole inside it, 6 px either side.
     QCOMPARE(label->width(), std::max(20.0, text->width() + 12.0));

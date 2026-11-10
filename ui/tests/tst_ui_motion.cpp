@@ -1043,9 +1043,13 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QCOMPARE(colorOf(newRow.glyph), nowHex(window));
     QCOMPARE(newRow.glyph->opacity(), 0.0);
     QVERIFY(!newRow.fadingGlyph->isVisible());
-    // The weights go with the state, at once.
-    QCOMPARE(newRow.title->property("font").value<QFont>().weight(), QFont::DemiBold);
-    QCOMPARE(oldRow.title->property("font").value<QFont>().weight(), QFont::Normal);
+    // The weights go with the amber, not the state: the new row is not
+    // semibold in the text colour, nor the old one regular in amber.
+    const auto weightOf = [](const RowLook &row) {
+        return row.title->property("font").value<QFont>().weight();
+    };
+    QCOMPARE(weightOf(newRow), QFont::Normal);
+    QCOMPARE(weightOf(oldRow), QFont::DemiBold);
     QVERIFY(!oldRow.glyph->isVisible());
 
     // Every frame of the hand-over: the glyphs' opacities add up to one,
@@ -1070,9 +1074,18 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
         }
         return (channels[widest][2] - channels[widest][0]) / (channels[widest][1] - channels[widest][0]);
     };
+    // Whether a title's weight agrees with its colour in this frame: it is
+    // semibold while it is mostly amber and regular while it is mostly the
+    // text colour, so the two change in the same frame.
+    const auto weightFollowsAmber = [&](const RowLook &row) {
+        const qreal share = amberShare(row.title);
+        return weightOf(row) == QFont::DemiBold ? share >= 0.48 : share <= 0.52;
+    };
+    QVERIFY(weightFollowsAmber(oldRow) && weightFollowsAmber(newRow));
     int frames = 0;
     qreal worstGlyphs = 0;
     qreal worstTitles = 0;
+    int weightMismatches = 0;
     QVERIFY(QTest::qWaitFor([&]() {
         if (!animationOf(fade)->property("running").toBool()) {
             return true;
@@ -1081,11 +1094,13 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
         worstGlyphs = std::max(worstGlyphs,
                                std::abs(oldRow.fadingGlyph->opacity() + newRow.glyph->opacity() - 1.0));
         worstTitles = std::max(worstTitles, amberShare(oldRow.title) + amberShare(newRow.title) - 1.0);
+        weightMismatches += (weightFollowsAmber(oldRow) ? 0 : 1) + (weightFollowsAmber(newRow) ? 0 : 1);
         return false;
     }, 2000));
     QVERIFY(frames > 0);
     QVERIFY2(worstGlyphs < 0.02, qPrintable(QString::number(worstGlyphs)));
     QVERIFY2(worstTitles < 0.03, qPrintable(QString::number(worstTitles)));
+    QCOMPARE(weightMismatches, 0);
 
     // Then the old row is plain, the new one wholly amber, and nothing runs.
     QVERIFY(!oldRow.fadingGlyph->isVisible());
@@ -1093,6 +1108,8 @@ void UiMotionTest::queueTrackChangeHandsTheAmberOver() {
     QVERIFY(fade->property("target").isNull() || !fade->property("target").value<QJSValue>().isObject());
     QCOMPARE(colorOf(newRow.title), nowHex(window));
     QCOMPARE(newRow.glyph->opacity(), 1.0);
+    QCOMPARE(weightOf(newRow), QFont::DemiBold);
+    QCOMPARE(weightOf(oldRow), QFont::Normal);
 }
 
 // Repeat-One plays the same row again: it stays amber, nothing fades.
@@ -1150,7 +1167,7 @@ void UiMotionTest::queueEditsMovingThePlayingRowFadeNothing() {
 
 // The tree hands the amber over as the queue does: the new track row at
 // once, the old one fading; a collapsed album that held the old track
-// fades its tick out.
+// fades its mark out.
 void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey, kAlbumAKey});
@@ -1182,37 +1199,61 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QVERIFY(first.fadingGlyph->isVisible());
     QCOMPARE(first.fadingGlyph->opacity(), 1.0);
     QCOMPARE(colorOf(first.title), nowHex(window));
+    // The weights go with the amber: the new row semibold at once, as it is
+    // amber at once, and the old one semibold while it is mostly amber.
+    const auto weightOf = [](const RowLook &row) {
+        return row.title->property("font").value<QFont>().weight();
+    };
+    QCOMPARE(weightOf(second), QFont::DemiBold);
+    QCOMPARE(weightOf(first), QFont::DemiBold);
+    QQuickItem *firstTitle = first.title;
+    int weightMismatches = 0;
     bridge->setProperty("currentTrackTreeKeys", QStringList{kArtistKey, kAlbumAKey});
-    QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
+    QVERIFY(QTest::qWaitFor([&]() {
+        if (!animationOf(fade)->property("running").toBool()) {
+            return true;
+        }
+        const qreal amber = firstTitle->property("amber").toReal();
+        const bool semibold = weightOf(first) == QFont::DemiBold;
+        weightMismatches += semibold == (amber >= 0.5) ? 0 : 1;
+        return false;
+    }));
+    QCOMPARE(weightMismatches, 0);
     QVERIFY(!first.fadingGlyph->isVisible());
     QVERIFY(colorOf(first.title) != nowHex(window));
+    QCOMPARE(weightOf(first), QFont::Normal);
 
     // Album B is collapsed and holds the next track; then Album A plays
-    // again, and Album B's tick fades out. A collapsed row shows no glyph.
+    // again, and Album B's mark fades out. A collapsed row shows no glyph
+    // in its chevron column.
     QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
     QVERIFY(albumB != nullptr);
     playTreeTrack(bridge, kTrackB1, kAlbumBKey);
     const RowLook album = libraryRowLook(albumB);
-    QQuickItem *albumTick = itemNamed(albumB, QStringLiteral("libraryRowNowTick"));
-    QVERIFY(albumTick != nullptr);
-    QVERIFY(albumTick->isVisible());
-    QCOMPARE(albumTick->opacity(), 1.0);
+    QQuickItem *albumMark = itemNamed(albumB, QStringLiteral("libraryRowNowMark"));
+    QVERIFY(albumMark != nullptr);
+    QVERIFY(albumMark->isVisible());
+    // The mark is quieter than the amber text; it fades from there.
+    const qreal markOpacity =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("nowMarkOpacity").toReal();
+    QVERIFY(markOpacity >= 0.6 && markOpacity < 1.0);
+    QCOMPARE(albumMark->opacity(), markOpacity);
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
-    QVERIFY(albumTick->isVisible());
-    QCOMPARE(albumTick->opacity(), 1.0);
-    QCOMPARE(colorOf(albumTick), nowHex(window));
+    QVERIFY(albumMark->isVisible());
+    QCOMPARE(albumMark->opacity(), markOpacity);
+    QCOMPARE(colorOf(albumMark), nowHex(window));
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(!album.fadingGlyph->isVisible());
     // Its title is never amber.
     QVERIFY(colorOf(album.title) != nowHex(window));
     QCOMPARE(colorOf(libraryRowLook(libraryRowWithPath(window, kTrackA1)).title), nowHex(window));
     QVERIFY(QTest::qWaitFor([&]() {
-        return albumTick->opacity() < 1.0 || !albumTick->isVisible();
+        return albumMark->opacity() < markOpacity || !albumMark->isVisible();
     }));
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
-    QVERIFY(!albumTick->isVisible());
+    QVERIFY(!albumMark->isVisible());
 }
 
 // The tree reuses its rows: a row that comes back for another track never

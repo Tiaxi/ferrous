@@ -14,6 +14,7 @@
 #include <QString>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 // A crosshair's readout on the axes of a plot, as the waveform and the
@@ -42,9 +43,15 @@ struct Colors {
     bool hasEdge() const { return edge.alpha() > 0; }
 };
 
+// The readout's text: the application's font at the small size of the
+// design (UiPalette.smallPointSize), as the plot's lane labels, so it grows
+// with a larger font: 12 px at the default 10 pt. It is sized in pixels, at
+// Qt's logical 96 dpi as QML's text is, so the plates it is measured for and
+// the images it is drawn in agree whatever the device pixel ratio.
 inline QFont font() {
     QFont font;
-    font.setPixelSize(10);
+    const double points = font.pointSizeF() > 0.0 ? font.pointSizeF() : font.pixelSize() * 0.75;
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(points * 0.9 * 96.0 / 72.0))));
     return font;
 }
 
