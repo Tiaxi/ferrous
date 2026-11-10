@@ -19,6 +19,7 @@
 #include <QPainter>
 #include <QQuickWindow>
 #include <QSGNode>
+#include <QSGOpacityNode>
 #include <QSGSimpleRectNode>
 #include <QSGSimpleTextureNode>
 #include <QSGRendererInterface>
@@ -300,13 +301,20 @@ struct SpectrogramOverlayFrame {
 // An overlay's nodes: rectangles for its lines, then its images above them.
 struct SpectrogramOverlayLayer {
     QSGNode *root{nullptr};
+    // The root of a layer that fades as a whole, or null.
+    QSGOpacityNode *opacity{nullptr};
     QSGNode *linesRoot{nullptr};
     QSGNode *imagesRoot{nullptr};
     QVector<QSGSimpleRectNode *> lines;
     QVector<QSGSimpleTextureNode *> images;
 
-    SpectrogramOverlayLayer() {
-        root = new QSGNode();
+    explicit SpectrogramOverlayLayer(bool fades = false) {
+        if (fades) {
+            opacity = new QSGOpacityNode();
+            root = opacity;
+        } else {
+            root = new QSGNode();
+        }
         linesRoot = new QSGNode();
         imagesRoot = new QSGNode();
         root->appendChildNode(linesRoot);
@@ -735,7 +743,8 @@ struct SpectrogramSceneNode final : public QSGNode {
     QSGSimpleRectNode *playhead{nullptr};
     SpectrogramOverlayLayer freqGridLayer;
     SpectrogramOverlayLayer timeGridLayer;
-    SpectrogramOverlayLayer crosshairLayer;
+    // The crosshair fades as a whole, its lines and plates alike.
+    SpectrogramOverlayLayer crosshairLayer{true};
     QSGSimpleTextureNode *overlay{nullptr};
     QVector<QSGSimpleTextureNode *> tileFragments;
     // How the canvas reaches the GPU: with the OpenGL renderer, in textures
@@ -2282,6 +2291,23 @@ void SpectrogramItem::publishMarkerX(double x) {
 
 bool SpectrogramItem::crosshairEnabled() const {
     return m_crosshairEnabled;
+}
+
+double SpectrogramItem::crosshairOpacity() const {
+    return m_crosshairOpacity;
+}
+
+void SpectrogramItem::setCrosshairOpacity(double value) {
+    value = std::clamp(value, 0.0, 1.0);
+    if (qFuzzyCompare(m_crosshairOpacity + 1.0, value + 1.0)) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_stateMutex);
+        m_crosshairOpacity = value;
+    }
+    emit crosshairOpacityChanged();
+    update();
 }
 
 void SpectrogramItem::setCrosshairEnabled(bool value) {
@@ -4474,6 +4500,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     // Where markerSeconds is drawn; NaN if it is not.
     double markerX = std::numeric_limits<double>::quiet_NaN();
     SpectrogramOverlayFrame crosshairFrame;
+    double crosshairOpacity = 1.0;
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     size_t profilePendingColumns = 0;
     size_t profileColumnCount = 0;
@@ -5196,6 +5223,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             m_crosshairDirty = true;
         }
 
+        crosshairOpacity = m_crosshairOpacity;
         showOverlay = m_showFpsOverlay && m_fpsValue > 0;
         reservedCorner = m_reservedCorner;
         if (showOverlay) {
@@ -5392,6 +5420,9 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     node->showOverlay(node->freqGridLayer, freqGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->timeGridLayer, timeGridFrame, kScaleTickColor, currentWindow);
     node->showOverlay(node->crosshairLayer, crosshairFrame, QColor(), currentWindow);
+    if (node->crosshairLayer.opacity->opacity() != crosshairOpacity) {
+        node->crosshairLayer.opacity->setOpacity(crosshairOpacity);
+    }
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
     publishMarkerX(markerX);
 

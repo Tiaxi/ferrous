@@ -2040,8 +2040,12 @@ struct SeekTimeFade {
 };
 
 // Hides the seek bar's time, shown in full, by `hide`, and follows its fade
-// out to its end: it fades where it was, with the time it showed.
-SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide) {
+// out to its end: it fades where it was, with the time it showed. The hover
+// line, when given, fades with it, at its opacity in every frame and where
+// it was, if `lineFades`; otherwise it shows in none (#373 H3: it went at
+// once while the time faded).
+SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, const std::function<void()> &hide,
+                                QQuickItem *hoverLine = nullptr, bool lineFades = false) {
     SeekTimeFade fade;
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
@@ -2055,9 +2059,25 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
     QSignalSpy moves(box.box, SIGNAL(xChanged()));
     QSignalSpy texts(box.box, SIGNAL(textChanged()));
     QStringList errors;
+    const qreal lineX = hoverLine != nullptr ? hoverLine->x() : 0.0;
+    if (hoverLine != nullptr && lineFades && !(hoverLine->isVisible() && hoverLine->opacity() >= 1.0)) {
+        errors.push_back(QStringLiteral("no hover line shown in full"));
+    }
+    const auto lineOpacity = [&]() {
+        return hoverLine->isVisible() ? hoverLine->opacity() : 0.0;
+    };
     const auto check = [&]() {
         if (!popup->isVisible()) {
             return;
+        }
+        if (hoverLine != nullptr) {
+            const qreal expected = lineFades ? popup->opacity() : 0.0;
+            if (std::abs(lineOpacity() - expected) > 1e-9 || (lineFades && hoverLine->x() != lineX)) {
+                errors.push_back(QStringLiteral("hover line at opacity %1 at %2, the time at %3")
+                                     .arg(lineOpacity())
+                                     .arg(hoverLine->x())
+                                     .arg(popup->opacity()));
+            }
         }
         if (popup->opacity() > 0.0 && popup->opacity() < 1.0) {
             ++fade.fadingFrames;
@@ -2077,6 +2097,9 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
     QObject::disconnect(frames);
     if (!ended) {
         errors.push_back(QStringLiteral("did not end"));
+    }
+    if (hoverLine != nullptr && hoverLine->isVisible()) {
+        errors.push_back(QStringLiteral("hover line still shown at %1").arg(hoverLine->opacity()));
     }
     if (!box.shown().isEmpty()) {
         errors.push_back(QStringLiteral("still shows %1").arg(box.shown()));
@@ -2106,9 +2129,12 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     const qreal dpr = window->effectiveDevicePixelRatio();
     QQuickItem *seek = visibleItemNamed(window, QStringLiteral("seekSlider"));
     QQuickItem *line = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
+    const QList<QQuickItem *> hoverLines = itemsNamed(window->contentItem(), QStringLiteral("seekHoverLine"));
+    QQuickItem *hoverLine = hoverLines.size() == 1 ? hoverLines.first() : nullptr;
     auto *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     SeekTimeBox timeBox;
-    QVERIFY(seek != nullptr && line != nullptr && bridge != nullptr && timeBox.find(window));
+    QVERIFY(seek != nullptr && line != nullptr && hoverLine != nullptr && bridge != nullptr
+            && timeBox.find(window));
     // The app's style fades a tooltip out.
     QVERIFY(timeBox.box->property("exit").value<QObject *>() != nullptr);
     const qreal y = seek->height() / 2;
@@ -2126,8 +2152,9 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
         }
         return timeBoxPlacementError(seek, timeBox, anchorX, dpr);
     };
-    const auto expectFade = [&](const std::function<void()> &hide) {
-        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide);
+    // The hover's time fades with its line; a gesture's has none.
+    const auto expectFade = [&](const std::function<void()> &hide, bool lineFades) {
+        const SeekTimeFade fade = followSeekTimeFade(window, timeBox, hide, hoverLine, lineFades);
         if (!fade.error.isEmpty()) {
             return fade.error;
         }
@@ -2140,7 +2167,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QTest::mouseMove(window, middle->scene);
     error = expectShown(middleTime, middleX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
-    error = expectFade([&]() { QTest::mouseMove(window, away); });
+    error = expectFade([&]() { QTest::mouseMove(window, away); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
 
     // A hover elsewhere shows its own time there, and so does a hover that
@@ -2177,13 +2204,14 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     const QPoint touched = seek->mapToScene(QPointF(seek->width() * 0.2, y)).toPoint();
     QTest::touchEvent(window, touchScreen).press(0, touched, window);
     QTest::touchEvent(window, touchScreen).move(0, touched + QPoint(20, 0), window);
-    error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); });
+    error = expectFade([&]() { QTest::touchEvent(window, touchScreen).release(0, touched + QPoint(20, 0), window); },
+                       false);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 2);
 
     // Stopping fades the time out where it was; playing again shows it.
     QTest::mouseMove(window, later->scene);
-    error = expectFade([&]() { bridge->setProperty("playbackState", QStringLiteral("Stopped")); });
+    error = expectFade([&]() { bridge->setProperty("playbackState", QStringLiteral("Stopped")); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     error = expectShown(laterTime, laterX);
@@ -2195,7 +2223,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     error = expectShown(minutesAndSeconds(secondsAtX(seek, laterX)), laterX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(minutesAndSeconds(secondsAtX(seek, laterX)) != laterTime);
-    error = expectFade([&]() { bridge->setProperty("durationSeconds", 0.0); });
+    error = expectFade([&]() { bridge->setProperty("durationSeconds", 0.0); }, true);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     bridge->setProperty("durationSeconds", 200.0);
     error = expectShown(laterTime, laterX);

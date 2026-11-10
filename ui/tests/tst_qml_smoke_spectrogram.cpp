@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QSGOpacityNode>
+
 // The spectrogram's controls and overlays, its crosshair and readout,
 // and click-to-seek.
 class SpectrogramSmokeTest : public QmlSmokeTest {
@@ -67,6 +69,7 @@ private slots:
     void spectrogramClickToSeekDisabledInRollingMode();
     void spectrogramClickToSeekMatchesCrosshairAtDevicePixels();
     void spectrogramOverlaysDrawNoPaneSizedImages();
+    void spectrogramCrosshairFadesAsAWhole();
 };
 
 void SpectrogramSmokeTest::spectrogramWholeScreenControlsIgnoreDuplicateHoverPoints() {
@@ -3165,6 +3168,54 @@ void SpectrogramSmokeTest::spectrogramOverlaysDrawNoPaneSizedImages() {
     item.setHeight(700);
     node = paintSettled(item, node);
     checkFrame("resize");
+    delete node;
+}
+
+// The crosshair, its lines and its readout's plates, fades as one, at the
+// opacity a viewer's controls give it as they fade (#373 H3: it went at
+// once while they faded); the scene keeps its layers where they were.
+void SpectrogramSmokeTest::spectrogramCrosshairFadesAsAWhole() {
+    QQuickWindow window;
+    if (!showOnScreen(window, 2.0)) {
+        QSKIP("Needs the offscreen platform's HiDPI test screens");
+    }
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    item.setWidth(400);
+    item.setHeight(200);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    item.setCrosshairEnabled(true);
+    constexpr int bins = 64;
+    constexpr int columns = 2'000;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x50'), bins, 0, columns,
+        0, columns, 48000, 1024, true, true, 1, false, 1);
+    setTestPosition(item, 10.0);
+    QHoverEvent hover(QEvent::HoverEnter, QPointF(200.0, 100.0), QPointF(200.0, 100.0), QPointF());
+    item.hoverEnterEvent(&hover);
+    QCOMPARE(item.crosshairOpacity(), 1.0);
+    QSGNode *node = paintSettled(item, nullptr);
+    // The crosshair's layer, child 7, under the scale's.
+    auto *layer = dynamic_cast<QSGOpacityNode *>(node->childAtIndex(7));
+    QVERIFY(layer != nullptr);
+    QCOMPARE(layer->opacity(), 1.0);
+    const OverlayOnScreen shown = overlayOnScreen(node, 7);
+    QVERIFY(!shown.images.isEmpty());
+
+    QSignalSpy changes(&item, &SpectrogramItem::crosshairOpacityChanged);
+    for (const double opacity : {0.5, 0.0, 1.0}) {
+        item.setCrosshairOpacity(opacity);
+        QCOMPARE(item.crosshairOpacity(), opacity);
+        node = item.updatePaintNode(node, nullptr);
+        QCOMPARE(node->childAtIndex(7), layer);
+        QCOMPARE(layer->opacity(), opacity);
+        // Its lines and plates stay laid out while it fades.
+        QCOMPARE(overlayOnScreen(node, 7).images.size(), shown.images.size());
+    }
+    QCOMPARE(changes.count(), 3);
+    // Out of range, it keeps to 0 to 1.
+    item.setCrosshairOpacity(2.0);
+    QCOMPARE(item.crosshairOpacity(), 1.0);
+    QCOMPARE(changes.count(), 3);
     delete node;
 }
 

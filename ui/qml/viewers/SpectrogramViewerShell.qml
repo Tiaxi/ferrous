@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import "../components" as Components
 
 Item {
@@ -65,6 +66,18 @@ Item {
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    // The controls as they fade, on the title strip's curve: 1 shown, 0
+    // hidden. What the visualization draws for the pointer, the crosshair
+    // and its readout, fades with them rather than going at once.
+    property real fullscreenControlsLevel: root.fullscreenControlsVisible ? 1 : 0
+    // Kirigami's durations are 0 with animations turned off.
+    Behavior on fullscreenControlsLevel {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
     readonly property bool fullscreenDisplayActive:
         root.viewerOpen
         && root.useWholeScreenViewerMode

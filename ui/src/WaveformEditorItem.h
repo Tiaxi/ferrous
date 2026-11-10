@@ -60,6 +60,9 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(bool zoomEnabled READ zoomEnabled WRITE setZoomEnabled NOTIFY zoomEnabledChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    // How much the crosshair, its lines and its readout, shows, from 0 to 1:
+    // a viewer's controls fade it out and in with them.
+    Q_PROPERTY(double crosshairOpacity READ crosshairOpacity WRITE setCrosshairOpacity NOTIFY crosshairOpacityChanged)
     Q_PROPERTY(bool showFpsOverlay READ showFpsOverlay WRITE setShowFpsOverlay NOTIFY showFpsOverlayChanged)
     // What the controls over the top right corner take of it; see ViewCorner.
     Q_PROPERTY(QSizeF reservedCorner READ reservedCorner WRITE setReservedCorner NOTIFY reservedCornerChanged)
@@ -121,6 +124,8 @@ public:
     void setGridEnabled(bool value);
     bool crosshairEnabled() const;
     void setCrosshairEnabled(bool value);
+    double crosshairOpacity() const;
+    void setCrosshairOpacity(double value);
     bool showFpsOverlay() const;
     void setShowFpsOverlay(bool value);
     QSizeF reservedCorner() const;
@@ -185,6 +190,7 @@ signals:
     void zoomEnabledChanged();
     void gridEnabledChanged();
     void crosshairEnabledChanged();
+    void crosshairOpacityChanged();
     void showFpsOverlayChanged();
     void reservedCornerChanged();
     void laneHeadBoundsChanged();
@@ -640,6 +646,7 @@ private:
     bool m_zoomEnabled{true};
     bool m_gridEnabled{false};
     bool m_crosshairEnabled{false};
+    double m_crosshairOpacity{1.0};
     bool m_showFpsOverlay{false};
     QSizeF m_reservedCorner;
     QRectF m_laneHeadBounds;

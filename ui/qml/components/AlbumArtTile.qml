@@ -8,8 +8,8 @@ import FerrousUi 1.0
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
 // track without a cover keeps the tile's place, on the colour around it,
-// with a small note mark at its centre: the cover is missing, and nothing
-// more is said about it (#373 H1).
+// with Breeze's album cover mark at its centre: the cover is missing, and
+// nothing more is said about it (#373 H1, H3).
 Rectangle {
     id: root
 
@@ -21,10 +21,11 @@ Rectangle {
     // panel passes the palette's.
     property color placeholderColor: "transparent"
     property color placeholderGlyphColor: Kirigami.Theme.textColor
-    // The mark's size: 48 px, and a third of a smaller tile.
-    readonly property real placeholderGlyphSize: Math.min(Kirigami.Units.iconSizes.large,
+    // The mark's size: 48 px, and a third of a smaller tile, unless the
+    // now-playing panel sizes it from the font.
+    property real placeholderGlyphSize: Math.min(Kirigami.Units.iconSizes.large,
         Math.round(Math.min(root.width, root.height) / 3))
-    readonly property url placeholderGlyphSource: Qt.resolvedUrl("../assets/cover-missing.svg")
+    readonly property string placeholderGlyphSource: "media-album-cover"
     // What shows around a cover that does not fill the tile, or through
     // one that is partly transparent: the colour behind the tile, which the
     // now-playing panel passes. Each cover draws on it, so a cover at full
@@ -70,6 +71,7 @@ Rectangle {
         width: root.placeholderGlyphSize
         height: width
         source: root.placeholderGlyphSource
+        roundToIconSize: false
         isMask: true
         color: root.placeholderGlyphColor
         visible: !root.hasCover
@@ -120,6 +122,7 @@ Rectangle {
                     width: root.placeholderGlyphSize
                     height: width
                     source: root.placeholderGlyphSource
+                    roundToIconSize: false
                     isMask: true
                     color: root.placeholderGlyphColor
                     visible: outgoing.coverPath.length === 0

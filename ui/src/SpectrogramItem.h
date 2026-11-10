@@ -280,6 +280,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(bool precomputedReady READ precomputedReady NOTIFY precomputedReadyChanged)
     Q_PROPERTY(int displayMode READ displayMode WRITE setDisplayMode NOTIFY displayModeChanged)
     Q_PROPERTY(bool crosshairEnabled READ crosshairEnabled WRITE setCrosshairEnabled NOTIFY crosshairEnabledChanged)
+    // How much the crosshair, its lines and its readout, shows, from 0 to 1:
+    // a viewer's controls fade it out and in with them.
+    Q_PROPERTY(double crosshairOpacity READ crosshairOpacity WRITE setCrosshairOpacity NOTIFY crosshairOpacityChanged)
     // What the crosshair's plates on this pane read, a line each: the
     // frequency and level at the pointer ("4.4 kHz, −62 dB") on the hovered
     // pane, then the time ("1:46.0") on the pane that shows it. Empty while
@@ -372,6 +375,8 @@ public:
     void setMarkerSeconds(double value);
     double markerX() const { return m_markerX; }
     void setCrosshairEnabled(bool value);
+    double crosshairOpacity() const;
+    void setCrosshairOpacity(double value);
 
     bool gridEnabled() const;
     void setGridEnabled(bool value);
@@ -459,6 +464,7 @@ signals:
     void precomputedReadyChanged();
     void displayModeChanged();
     void crosshairEnabledChanged();
+    void crosshairOpacityChanged();
     void crosshairReadoutChanged();
     void showCrosshairTimeChanged();
     void laneHeadBoundsChanged();
@@ -1160,6 +1166,7 @@ private:
 
     // Crosshair overlay state.
     bool m_crosshairEnabled{false};
+    double m_crosshairOpacity{1.0};
     bool m_hoverActive{false};
     QPointF m_hoverPosition;
     double m_crosshairSharedX{-1.0};
