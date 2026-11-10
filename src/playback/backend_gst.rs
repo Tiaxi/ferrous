@@ -2230,6 +2230,16 @@ impl GstPlaybackRuntime {
             self.applied_volume = self.target_volume;
             self.volume_ramp_tick_at = None;
             self.write_applied_volume();
+        } else if (self.target_volume - self.applied_volume).abs() <= f32::EPSILON
+            && !self.output_silenced()
+            && self.startup_ramp_hold_left.is_none()
+            && self.output_applies_volume() == Some(true)
+        {
+            // At the volume already, so no fade writes it. The stream can
+            // have been changed elsewhere since the engine last wrote it,
+            // by a change whose report the mark above set aside, and that
+            // need not be told again: the user's volume is the newer.
+            self.write_applied_volume();
         }
         self.emit_snapshot();
     }
@@ -12929,6 +12939,38 @@ mod engine_tests {
             .poll_volume_ramp(now + Duration::from_secs(1));
         let gain = f64::from(super::super::volume_level_to_gain(0.3));
         assert!((sink.property::<f64>("volume") - gain).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_same_volume_set_in_the_app_after_one_set_elsewhere_plays() {
+        // At 80 %, 66 % set in Plasma waits to be taken in as the user sets
+        // 80 % again, such as by releasing the slider where it was.
+        let fixtures = Fixtures::new("outside-volume-then-same");
+        let a = fixtures.wav("a.wav", 4_000);
+        let mut engine = DirectEngine::start_with_output(volume_applying_output);
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.play_until_opened(vec![a], RepeatMode::Off);
+        engine.finish_fade();
+        let sink = stream_sink(&engine.runtime.playbin);
+        change_stream_elsewhere(&sink, |sink| sink.set_property("volume", server_gain(0.66)));
+        engine
+            .runtime
+            .apply_command(PlaybackCommand::SetVolume(0.8));
+        engine.runtime.handle_stream_volume_reports();
+        let now = Instant::now();
+        engine.runtime.poll_volume_ramp(now);
+        engine
+            .runtime
+            .poll_volume_ramp(now + Duration::from_secs(1));
+        assert_eq!(engine.runtime.snapshot.volume, 0.8);
+        let gain = f64::from(super::super::volume_level_to_gain(0.8));
+        assert!(
+            (sink.property::<f64>("volume") - gain).abs() < 1e-6,
+            "the stream stayed at {}",
+            sink.property::<f64>("volume")
+        );
     }
 
     #[test]
