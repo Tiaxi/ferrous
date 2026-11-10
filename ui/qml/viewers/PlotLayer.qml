@@ -44,18 +44,11 @@ Item {
     property real markerX: NaN
     // Opens Recent Issues.
     property var openIssues: function() {}
-    // Whether no track has given the plots data yet this session.
-    property bool awaitingFirstData: false
 
-    // In the light theme, until the session's first audio data, the bare
-    // pane is the view colour rather than the spectrogram's black floor: a
-    // slab of black would be the strongest shape on the first screen. What
-    // is drawn on it then takes the colours of a plot on the view, the
-    // waveform's. The dark theme's floor is dark either way.
-    readonly property bool viewFloor: root.awaitingFirstData && !root.uiPalette.themeIsDark
-    readonly property var plotColors: root.viewFloor
-        ? root.uiPalette.waveformPlot
-        : root.uiPalette.plotColors(root.visualizationMode)
+    // The mode's plot colours, also while the plot is bare, before any
+    // audio and while it waits for its data: the floor is the mode's own
+    // then too (#373 H4 P5), so the first data never changes it.
+    readonly property var plotColors: root.uiPalette.plotColors(root.visualizationMode)
     readonly property bool meterShown: root.uiBridge.showLevelMeter
     // The meter takes 10 px of the plot's width while it is shown, also
     // when nothing plays: the plot narrows only when the option changes.
@@ -86,28 +79,6 @@ Item {
         return hours > 0
             ? hours + ":" + String(minutes).padStart(2, "0") + ":" + secs
             : minutes + ":" + secs
-    }
-
-    // The view colour over the plot and the meter's column while the floor
-    // is the view's, under everything else here. The first data fades it
-    // out over longDuration: the plot's floor and data come in as one.
-    // The seam above the pane is the split handle's.
-    Rectangle {
-        objectName: "plotViewFloor"
-        z: 1
-        anchors.fill: parent
-        color: root.uiPalette.view
-        opacity: root.viewFloor ? 1 : 0
-        visible: opacity > 0
-
-        // Animations off make the short duration 0; the long one stays 1 ms.
-        Behavior on opacity {
-            enabled: Kirigami.Units.shortDuration > 0
-            NumberAnimation {
-                duration: Kirigami.Units.longDuration
-                easing.type: Easing.InOutQuad
-            }
-        }
     }
 
     // The mode switch comes first in the Tab order, then each lane's Mute

@@ -395,12 +395,12 @@ void UiMainWindowTest::contentIsOneSheetWithFourSeams() {
     QQuickItem *statusSeam = named(window, "statusBarSeam");
     QVERIFY(transport && transportSeam && mainSplit && sidebar && rightSplit && queue && pane && statusSeam);
 
-    // Content on the view colour; the visualization too, in the light
-    // theme the tests run in, until the session's first audio data
-    // (tst_ui_motion's visualizationPaneIsTheViewUntilTheFirstData).
+    // Content on the view colour; the visualization on its mode's floor,
+    // the spectrogram's black also before any audio (tst_ui_motion's
+    // visualizationPaneFloorFollowsTheMode).
     QCOMPARE(colorOf(sidebar), tokenHex(window, "view"));
     QCOMPARE(colorOf(queue), tokenHex(window, "view"));
-    QCOMPARE(colorOf(pane), tokenHex(window, "view"));
+    QCOMPARE(colorOf(pane), QStringLiteral("#ff000000"));
 
     // Transport | content: a chrome line right under the transport, and
     // the content right under it.
@@ -1863,8 +1863,8 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QQuickItem *queue = named(window, "playlistView");
     QVERIFY(std::abs(sceneRect(message).center().x() - sceneRect(queue).center().x()) <= 1);
     // No other message: the library shows its header with nothing under it,
-    // and the queue no empty line; the pane, before any audio in the light
-    // theme, is the view colour, with no slab of the plot's black floor.
+    // and the queue no empty line; the pane, before any audio, is its
+    // mode's floor, the spectrogram's black.
     QVERIFY(!named(window, "libraryEmptyStateLabel")->isVisible());
     QVERIFY(!named(window, "queueEmptyLabel")->isVisible());
     QVERIFY(shown(named(window, "libraryHeader")));
@@ -1874,8 +1874,7 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QCOMPARE(itemNamed(named(window, "queueHeader"), QStringLiteral("regionHeaderTotals"))
                  ->property("text").toString(),
              QString());
-    QCOMPARE(colorOf(named(window, "spectrogramPane")), tokenHex(window, "view"));
-    QVERIFY(shown(named(window, "plotViewFloor")));
+    QCOMPARE(colorOf(named(window, "spectrogramPane")), QStringLiteral("#ff000000"));
     QVERIFY(!shown(named(window, "plotAnalysingText")));
     QVERIFY(shown(named(window, "nowPlayingEmptyRow")));
     // The empty queue's header shows only its name, and Tab skips its
