@@ -341,6 +341,7 @@ private slots:
     void narrowQueueDropsAlbumBeforeTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
     void firstRunShowsOneMessage();
+    void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
 
@@ -1723,6 +1724,46 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
     QTRY_VERIFY(!queueEmpty->isVisible());
     QCOMPARE(named(window, "queueHeader_artist")->opacity(), 1.0);
     QVERIFY(named(window, "queueColumnHandle_artist")->activeFocusOnTab());
+}
+
+// Tab goes from the library to the queue's rows: the column handles over
+// the queue's header come after them in the Tab chain, not before, and
+// still take the keyboard there.
+void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, kAllExpanded);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) != nullptr);
+    QQuickItem *library = named(window, "libraryView");
+    QQuickItem *queue = named(window, "playlistView");
+    QQuickItem *artistHandle = named(window, "queueColumnHandle_artist");
+    QVERIFY(library && queue && artistHandle);
+    QTRY_VERIFY(artistHandle->activeFocusOnTab());
+
+    library->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(library->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Tab);
+    QTRY_VERIFY2(queue->hasActiveFocus(),
+                 qPrintable(QStringLiteral("Tab went to %1")
+                                .arg(window->activeFocusItem() ? window->activeFocusItem()->objectName()
+                                                               : QStringLiteral("nothing"))));
+    // Then the handles, in the columns' order, which Left and Right still
+    // move.
+    for (const char *column : {"queueColumnHandle_artist", "queueColumnHandle_album", "queueColumnHandle_length"}) {
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY2(named(window, column)->hasActiveFocus(), column);
+    }
+    // And Shift+Tab goes back from the rows to the library.
+    queue->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(queue->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    QTRY_VERIFY(library->hasActiveFocus());
 }
 
 int main(int argc, char **argv) {

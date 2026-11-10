@@ -499,116 +499,6 @@ Rectangle {
                     color: root.uiPalette.textSecondary
                 }
             }
-
-            // A handle on the left of each resizable column, in the gap
-            // before it: the title fills the width the others leave, so
-            // dragging it left widens the column after it. Double-click,
-            // or Home, restores the column's default width; Left and Right
-            // move it from the keyboard. It shows only under the pointer
-            // and with keyboard focus.
-            Repeater {
-                model: [
-                    { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
-                    { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
-                    { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
-                ]
-
-                delegate: Item {
-                    id: resizeHandle
-                    objectName: "queueColumnHandle_" + modelData.column
-                    required property var modelData
-                    readonly property string column: modelData.column
-                    readonly property bool highlighted: resizeMouseArea.containsMouse
-                        || resizeMouseArea.pressed || resizeHandle.activeFocus
-                    // Where the pointer was when the drag started, in the
-                    // pane, which stays put as the columns move.
-                    property real pressX: 0
-
-                    visible: modelData.header.visible
-                    x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
-                    width: Kirigami.Units.largeSpacing
-                    height: parent.height
-                    // An empty queue's columns have no labels to resize.
-                    activeFocusOnTab: visible && root.uiBridge.queueLength > 0
-
-                    Accessible.role: Accessible.Separator
-                    Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
-                    Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
-                    Accessible.focusable: true
-
-                    Rectangle {
-                        objectName: "queueColumnHandleLine"
-                        anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.topMargin: Kirigami.Units.smallSpacing
-                        anchors.bottomMargin: Kirigami.Units.smallSpacing
-                        width: resizeHandle.activeFocus ? 2 : 1
-                        visible: resizeHandle.highlighted
-                        color: resizeHandle.activeFocus || resizeMouseArea.pressed
-                            ? root.uiPalette.focusRing
-                            : root.uiPalette.seam
-                    }
-
-                    MouseArea {
-                        id: resizeMouseArea
-                        anchors.fill: parent
-                        hoverEnabled: root.uiBridge.queueLength > 0
-                        preventStealing: true
-                        cursorShape: Qt.SplitHCursor
-
-                        onPressed: function(mouse) {
-                            resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
-                            root.beginColumnResize(resizeHandle.column)
-                        }
-                        onPositionChanged: function(mouse) {
-                            if (pressed && root.resizingColumn === resizeHandle.column) {
-                                const x = mapToItem(root, mouse.x, 0).x
-                                root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
-                            }
-                        }
-                        onReleased: root.finishColumnResize()
-                        onCanceled: root.cancelColumnResize()
-                        onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
-                    }
-
-                    function keyResizes(event) {
-                        return KeyUtils.isUnmodified(event)
-                            && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
-                                || event.key === Qt.Key_Home)
-                    }
-                    // The keys move the focused handle rather than seeking.
-                    Keys.onShortcutOverride: function(event) {
-                        event.accepted = resizeHandle.keyResizes(event)
-                    }
-                    Keys.onPressed: function(event) {
-                        if (!resizeHandle.keyResizes(event)) {
-                            return
-                        }
-                        event.accepted = true
-                        if (event.key === Qt.Key_Home) {
-                            root.restoreDefaultColumnWidth(resizeHandle.column)
-                            return
-                        }
-                        root.beginColumnResize(resizeHandle.column)
-                        root.resizeColumnBy(resizeHandle.column, root.resizeDelta
-                            + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
-                    }
-                    // A held key moves the handle until it is let go, when
-                    // the width is kept.
-                    Keys.onReleased: function(event) {
-                        if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
-                            event.accepted = true
-                            root.finishColumnResize()
-                        }
-                    }
-                    onActiveFocusChanged: {
-                        if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
-                            root.finishColumnResize()
-                        }
-                    }
-                }
-            }
         }
 
         Item {
@@ -1350,6 +1240,128 @@ Rectangle {
                 visible: playlistDropArea.containsDrag
                     && playlistDropArea.queueDropAccepted
                     && playlistDropArea.queueDropInsertIndex >= 0
+            }
+        }
+    }
+
+    // The resize handles over the header. They come after the list in the
+    // item tree, which orders the Tab chain, so Tab goes from the library
+    // to the queue's rows, and on to the handles only after them.
+    Item {
+        objectName: "queueColumnHandles"
+        // The header's place: the column layout fills the pane.
+        x: queueHeader.x
+        y: queueHeader.y
+        width: queueHeader.width
+        height: queueHeader.height
+
+        // A handle on the left of each resizable column, in the gap
+        // before it: the title fills the width the others leave, so
+        // dragging it left widens the column after it. Double-click,
+        // or Home, restores the column's default width; Left and Right
+        // move it from the keyboard. It shows only under the pointer
+        // and with keyboard focus.
+        Repeater {
+            model: [
+                { "column": "artist", "label": I18n.i18nc("@title:column", "Artist"), "header": artistHeader },
+                { "column": "album", "label": I18n.i18nc("@title:column", "Album"), "header": albumHeader },
+                { "column": "length", "label": I18n.i18nc("@title:column", "Length"), "header": lengthHeader }
+            ]
+
+            delegate: Item {
+                id: resizeHandle
+                objectName: "queueColumnHandle_" + modelData.column
+                required property var modelData
+                readonly property string column: modelData.column
+                readonly property bool highlighted: resizeMouseArea.containsMouse
+                    || resizeMouseArea.pressed || resizeHandle.activeFocus
+                // Where the pointer was when the drag started, in the
+                // pane, which stays put as the columns move.
+                property real pressX: 0
+
+                visible: modelData.header.visible
+                x: queueHeaderRow.x + modelData.header.x - root.columnGap / 2 - width / 2
+                width: Kirigami.Units.largeSpacing
+                height: parent.height
+                // An empty queue's columns have no labels to resize.
+                activeFocusOnTab: visible && root.uiBridge.queueLength > 0
+
+                Accessible.role: Accessible.Separator
+                Accessible.name: I18n.i18nc("@action %1 is a column title", "Resize the %1 column", modelData.label)
+                Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
+                Accessible.focusable: true
+
+                Rectangle {
+                    objectName: "queueColumnHandleLine"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.topMargin: Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: Kirigami.Units.smallSpacing
+                    width: resizeHandle.activeFocus ? 2 : 1
+                    visible: resizeHandle.highlighted
+                    color: resizeHandle.activeFocus || resizeMouseArea.pressed
+                        ? root.uiPalette.focusRing
+                        : root.uiPalette.seam
+                }
+
+                MouseArea {
+                    id: resizeMouseArea
+                    anchors.fill: parent
+                    hoverEnabled: root.uiBridge.queueLength > 0
+                    preventStealing: true
+                    cursorShape: Qt.SplitHCursor
+
+                    onPressed: function(mouse) {
+                        resizeHandle.pressX = mapToItem(root, mouse.x, 0).x
+                        root.beginColumnResize(resizeHandle.column)
+                    }
+                    onPositionChanged: function(mouse) {
+                        if (pressed && root.resizingColumn === resizeHandle.column) {
+                            const x = mapToItem(root, mouse.x, 0).x
+                            root.resizeColumnBy(resizeHandle.column, resizeHandle.pressX - x)
+                        }
+                    }
+                    onReleased: root.finishColumnResize()
+                    onCanceled: root.cancelColumnResize()
+                    onDoubleClicked: root.restoreDefaultColumnWidth(resizeHandle.column)
+                }
+
+                function keyResizes(event) {
+                    return KeyUtils.isUnmodified(event)
+                        && (event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                            || event.key === Qt.Key_Home)
+                }
+                // The keys move the focused handle rather than seeking.
+                Keys.onShortcutOverride: function(event) {
+                    event.accepted = resizeHandle.keyResizes(event)
+                }
+                Keys.onPressed: function(event) {
+                    if (!resizeHandle.keyResizes(event)) {
+                        return
+                    }
+                    event.accepted = true
+                    if (event.key === Qt.Key_Home) {
+                        root.restoreDefaultColumnWidth(resizeHandle.column)
+                        return
+                    }
+                    root.beginColumnResize(resizeHandle.column)
+                    root.resizeColumnBy(resizeHandle.column, root.resizeDelta
+                        + (event.key === Qt.Key_Left ? root.keyboardResizeStep : -root.keyboardResizeStep))
+                }
+                // A held key moves the handle until it is let go, when
+                // the width is kept.
+                Keys.onReleased: function(event) {
+                    if (!event.isAutoRepeat && resizeHandle.keyResizes(event)) {
+                        event.accepted = true
+                        root.finishColumnResize()
+                    }
+                }
+                onActiveFocusChanged: {
+                    if (!resizeHandle.activeFocus && !resizeMouseArea.pressed) {
+                        root.finishColumnResize()
+                    }
+                }
             }
         }
     }
