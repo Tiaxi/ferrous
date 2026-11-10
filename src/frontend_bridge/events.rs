@@ -2092,13 +2092,11 @@ mod tests {
     }
 
     #[test]
-    fn lastfm_scrobble_omits_unknown_album_placeholder() {
+    fn lastfm_scrobble_omits_a_missing_album() {
         let (lastfm_handle, commands) = lastfm::test_support::command_handle();
-        let track_path = p("/music/unknown-album-scrobble.flac");
+        let track_path = p("/music/album-less-scrobble.flac");
         let mut state = lastfm_playing_state(&track_path);
-        state.metadata.artist = "Boards of Canada".to_string();
-        state.metadata.title = "Web Loops".to_string();
-        state.metadata.album = "Unknown album".to_string();
+        state.metadata.album = "  ".to_string();
 
         let mut tracker = LastFmPlaybackTracker::default();
         let start = Instant::now();
@@ -2113,9 +2111,57 @@ mod tests {
 
         let queued = queued_scrobbles(&commands.try_iter().collect::<Vec<_>>());
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].artist, "Boards of Canada");
-        assert_eq!(queued[0].track, "Web Loops");
+        assert_eq!(queued[0].artist, "Artist");
+        assert_eq!(queued[0].track, "Track");
         assert!(queued[0].album.is_empty());
+    }
+
+    /// A file that has a tag but lacks its title or its artist is neither
+    /// announced nor scrobbled, and the indicator tells that its tags are
+    /// missing (#560).
+    #[test]
+    fn lastfm_sends_nothing_for_a_file_whose_tag_lacks_its_title_or_artist() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrous-lastfm-missing-tags-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        for (name, title, artist) in [
+            ("no-title.wav", None, Some("Fixture Artist")),
+            ("no-artist.wav", Some("Fixture Title"), None),
+        ] {
+            let track_path = dir.join(name);
+            crate::metadata::write_tagged_test_wave(&track_path, title, artist);
+            let (handle, commands) = lastfm::test_support::command_handle();
+            let mut state = lastfm_playing_state(&track_path);
+            state.metadata = crate::metadata::load_metadata_for_path(&track_path);
+
+            let mut tracker = LastFmPlaybackTracker::default();
+            let start = Instant::now();
+            tick_at(&state, &handle, &mut tracker, start, 0);
+            let shown = tick_at(&state, &handle, &mut tracker, start, 121);
+
+            let played = sent(&commands);
+            assert!(now_playing_tracks(&played).is_empty(), "{name}: {played:?}");
+            assert!(queued_scrobbles(&played).is_empty(), "{name}: {played:?}");
+            assert!(!tracker.scrobble_queued(), "{name}");
+            assert_eq!(shown.state, ScrobbleIndicatorState::Ineligible, "{name}");
+            assert_eq!(
+                shown.ineligibility,
+                ScrobbleIneligibility::MissingTags,
+                "{name}"
+            );
+
+            // Ending the play queues nothing either.
+            finalize_lastfm_track(
+                &state,
+                &handle,
+                &mut tracker,
+                start + Duration::from_secs(240),
+            );
+            assert!(queued_scrobbles(&sent(&commands)).is_empty(), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

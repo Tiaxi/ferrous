@@ -7813,8 +7813,10 @@ mod tests {
             .expect("spawn bridge");
         let first = p("/tmp/ferrous_metadata_case_a.flac");
         let second = p("/tmp/ferrous_metadata_case_b.flac");
-        let first_title = "ferrous_metadata_case_a";
-        let second_title = "ferrous_metadata_case_b";
+        // The metadata tells which track it is of by its source, since the
+        // tracks have no tags to read.
+        let first_source = first.to_string_lossy().into_owned();
+        let second_source = second.to_string_lossy().into_owned();
 
         bridge.command(BridgeCommand::Queue(BridgeQueueCommand::Replace {
             tracks: vec![first.clone(), second.clone()],
@@ -7824,7 +7826,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(8);
             let mut result = None;
             let fc = first.clone();
-            let ft = first_title.to_string();
+            let ft = first_source.clone();
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(60));
                 bridge.command(BridgeCommand::RequestSnapshot);
@@ -7832,7 +7834,7 @@ mod tests {
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(200), |s| {
                         s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&fc)
-                            && s.metadata.title == ft
+                            && s.metadata.source_path.as_ref() == Some(&ft)
                     })
                 {
                     result = Some(snap);
@@ -7841,7 +7843,10 @@ mod tests {
             }
             result.expect("first track + metadata loaded")
         };
-        assert_eq!(first_loaded.metadata.title, first_title);
+        assert_eq!(
+            first_loaded.metadata.source_path,
+            Some(first_source.clone())
+        );
 
         bridge.command(BridgeCommand::Playback(BridgePlaybackCommand::Seek(
             Duration::from_secs(180),
@@ -7849,7 +7854,7 @@ mod tests {
         // Wait for the handoff with repeated RequestSnapshot to ensure at
         // least one snapshot includes the queue.
         let second_for_handoff = second.clone();
-        let first_title_str = first_title.to_string();
+        let first_source_str = first_source.clone();
         let handoff_snapshot = {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut result = None;
@@ -7860,7 +7865,7 @@ mod tests {
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
                         s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&second_for_handoff)
-                            && s.metadata.title == first_title_str
+                            && s.metadata.source_path.as_ref() == Some(&first_source_str)
                     })
                 {
                     result = Some(snap);
@@ -7870,9 +7875,9 @@ mod tests {
             result.expect("handoff snapshot keeps old metadata before new metadata arrives")
         };
         assert_eq!(handoff_snapshot.playback.current.as_ref(), Some(&second));
-        assert_eq!(handoff_snapshot.metadata.title, first_title);
+        assert_eq!(handoff_snapshot.metadata.source_path, Some(first_source));
 
-        let second_title_str = second_title.to_string();
+        let second_source_str = second_source.clone();
         let second_for_meta = second.clone();
         let updated_metadata = {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -7884,7 +7889,7 @@ mod tests {
                     wait_for_snapshot_matching(&bridge, Duration::from_millis(100), |s| {
                         s.queue_len == 2
                             && s.playback.current.as_ref() == Some(&second_for_meta)
-                            && s.metadata.title == second_title_str
+                            && s.metadata.source_path.as_ref() == Some(&second_source_str)
                     })
                 {
                     result = Some(snap);
@@ -7893,7 +7898,7 @@ mod tests {
             }
             result.expect("metadata updated for handed-off track")
         };
-        assert_eq!(updated_metadata.metadata.title, second_title);
+        assert_eq!(updated_metadata.metadata.source_path, Some(second_source));
 
         bridge.command(BridgeCommand::Shutdown);
     }

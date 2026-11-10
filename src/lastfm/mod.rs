@@ -32,7 +32,6 @@ const MAX_REQUESTED_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// `ignoredMessage` code for a scrobble refused because the account reached
 /// its daily limit. Unlike the other ignore codes, it can succeed later.
 const LASTFM_IGNORED_DAILY_LIMIT: i64 = 5;
-const UNKNOWN_ALBUM_PLACEHOLDER: &str = "Unknown album";
 /// How many tracks a line of the diagnostics log names; the rest are
 /// counted.
 const LOGGED_TRACKS: usize = 3;
@@ -665,13 +664,11 @@ pub fn scrobble_threshold_seconds(duration_seconds: u32) -> Option<u32> {
     Some((duration_seconds / 2).min(240))
 }
 
+/// The album sent with a track: empty, and so left out of the request,
+/// when the track has none.
 #[must_use]
 pub(crate) fn normalize_album_for_submission(album: &str) -> String {
-    let trimmed = album.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case(UNKNOWN_ALBUM_PLACEHOLDER) {
-        return String::new();
-    }
-    trimmed.to_string()
+    album.trim().to_owned()
 }
 
 #[must_use]
@@ -2479,8 +2476,6 @@ mod tests {
     fn normalize_album_for_submission_omits_missing_album_values() {
         assert!(normalize_album_for_submission("").is_empty());
         assert!(normalize_album_for_submission("   ").is_empty());
-        assert!(normalize_album_for_submission("Unknown album").is_empty());
-        assert!(normalize_album_for_submission("unknown ALBUM").is_empty());
     }
 
     #[test]

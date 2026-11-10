@@ -39,7 +39,7 @@ use crate::raw_audio::{
 pub(crate) use cover_cache::tests::{encoded_picture, test_cache, write_wav_with_picture};
 pub(crate) use cover_cache::{CoverCacheBinding, EmbeddedCoverCache};
 #[cfg(test)]
-pub(crate) use tests::write_numbered_test_wave;
+pub(crate) use tests::{write_numbered_test_wave, write_tagged_test_wave};
 
 #[derive(Debug, Clone, Default)]
 pub struct TrackMetadata {
@@ -193,14 +193,12 @@ fn run_metadata_worker(
     }
 }
 
-fn load_metadata_for_path(path: &Path) -> TrackMetadata {
+/// The metadata of the file at `path`. A tag field the file lacks is left
+/// empty: what stands in for it is the UI's to choose, and Last.fm must not
+/// be sent a stand-in as the track's title or artist.
+pub(crate) fn load_metadata_for_path(path: &Path) -> TrackMetadata {
     let mut metadata = TrackMetadata {
         source_path: Some(path.to_string_lossy().to_string()),
-        title: path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_owned(),
         ..TrackMetadata::default()
     };
     metadata.file_fingerprint = crate::library::track_file_fingerprint(path);
@@ -244,14 +242,13 @@ fn apply_lofty_metadata(path: &Path, metadata: &mut TrackMetadata) {
     };
     metadata.title = tag
         .title()
-        .map_or_else(|| "Unknown title".to_string(), std::borrow::Cow::into_owned);
-    metadata.artist = tag.artist().map_or_else(
-        || "Unknown artist".to_string(),
-        std::borrow::Cow::into_owned,
-    );
+        .map_or_else(String::new, std::borrow::Cow::into_owned);
+    metadata.artist = tag
+        .artist()
+        .map_or_else(String::new, std::borrow::Cow::into_owned);
     metadata.album = tag
         .album()
-        .map_or_else(|| "Unknown album".to_string(), std::borrow::Cow::into_owned);
+        .map_or_else(String::new, std::borrow::Cow::into_owned);
     tag.get_string(ItemKey::AlbumArtist)
         .unwrap_or_default()
         .clone_into(&mut metadata.album_artist);
@@ -839,6 +836,63 @@ mod tests {
         let metadata = load_metadata_for_path(&path);
         assert_eq!(metadata.track_number, Some(2));
         assert_eq!(metadata.track_total, None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A short wave file with an ID3v2 tag that holds the given fields
+    /// and an album, and lacks the fields given as `None`.
+    pub(crate) fn write_tagged_test_wave(path: &Path, title: Option<&str>, artist: Option<&str>) {
+        use lofty::config::WriteOptions;
+        use lofty::prelude::Accessor;
+        use lofty::tag::{Tag, TagExt, TagType};
+
+        write_test_wave(path);
+        let mut tag = Tag::new(TagType::Id3v2);
+        if let Some(title) = title {
+            tag.set_title(title.to_owned());
+        }
+        if let Some(artist) = artist {
+            tag.set_artist(artist.to_owned());
+        }
+        tag.set_album("Fixture Album".to_owned());
+        tag.set_track(1);
+        tag.save_to_path(path, WriteOptions::new())
+            .expect("tag fixture");
+    }
+
+    #[test]
+    fn metadata_leaves_the_fields_a_tag_lacks_empty() {
+        let path = metadata_test_path("missing-fields", "wav");
+        write_tagged_test_wave(&path, None, None);
+
+        let metadata = load_metadata_for_path(&path);
+        assert!(metadata.title.is_empty(), "{:?}", metadata.title);
+        assert!(metadata.artist.is_empty(), "{:?}", metadata.artist);
+        assert_eq!(metadata.album, "Fixture Album");
+        assert_eq!(metadata.track_number, Some(1));
+
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        lofty::prelude::Accessor::set_genre(&mut tag, "Fixture Genre".to_owned());
+        lofty::tag::TagExt::save_to_path(&tag, &path, lofty::config::WriteOptions::new())
+            .expect("retag fixture");
+        let metadata = load_metadata_for_path(&path);
+        assert!(metadata.album.is_empty(), "{:?}", metadata.album);
+        assert_eq!(metadata.genre, "Fixture Genre");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_of_an_untagged_file_has_no_title() {
+        let path = metadata_test_path("untagged", "wav");
+        write_test_wave(&path);
+
+        let metadata = load_metadata_for_path(&path);
+        assert!(metadata.title.is_empty(), "{:?}", metadata.title);
+        assert!(metadata.artist.is_empty());
+        assert!(metadata.album.is_empty());
+        assert_eq!(metadata.format_label, "WAV");
 
         let _ = std::fs::remove_file(path);
     }

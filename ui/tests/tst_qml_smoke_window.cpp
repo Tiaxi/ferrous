@@ -1,5 +1,42 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// The now-playing test hands BridgeClient its snapshots, as BridgeClientTest
+// does, so BridgeClient alone is read with its private members open; what
+// it includes comes first, as it is.
+#include <QAbstractListModel>
+#include <QByteArray>
+#include <QElapsedTimer>
+#include <QHash>
+#include <QList>
+#include <QNetworkAccessManager>
+#include <QObject>
+#include <QPointer>
+#include <QRect>
+#include <QSet>
+#include <QSize>
+#include <QString>
+#include <QStringList>
+#include <QTimer>
+#include <QVariant>
+#include <QVariantList>
+#include <QVariantMap>
+#include <QVector>
+#include <condition_variable>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+
+#include "../src/BinaryBridgeCodec.h"
+#include "../src/GlobalSearchResultsModel.h"
+#include "../src/PlaybackClock.h"
+#include "../src/QueueRows.h"
+#define private public
+#include "../src/BridgeClient.h"
+#undef private
+
 #include "QmlSmokeTest.h"
 
 // The main window, its layout, and what survives a restart.
@@ -23,6 +60,7 @@ private slots:
     void aWindowOffScreenStopsTheClockAndTheFeeds();
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
+    void nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown();
 };
 
 void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -1266,6 +1304,95 @@ void WindowSmokeTest::drawingWritesNoShaderCache() {
 
 std::unique_ptr<QmlSmokeTest> makeWindowSmokeTest(const QString &userDirectoriesParent) {
     return std::make_unique<WindowSmokeTest>(userDirectoriesParent);
+}
+
+// Track changes whose path comes before the track's queue row and metadata,
+// as BridgeClient tells them: the panel keeps the track before's lines,
+// with no file name or blanks in between, until the next track's own come,
+// tagged or with a tag that lacks its title, artist and album (#560).
+void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
+    BridgeClient bridge;
+    // Only the snapshots below reach it, not the real bridge's.
+    bridge.m_bridgePollTimer.stop();
+    if (bridge.m_bridgeWakeNotifier != nullptr) {
+        bridge.m_bridgeWakeNotifier->setEnabled(false);
+        delete bridge.m_bridgeWakeNotifier;
+        bridge.m_bridgeWakeNotifier = nullptr;
+    }
+    bridge.m_bridgeWakeFd = -1;
+    bridge.shutdownBridgeGracefully();
+    if (bridge.m_ffiBridge != nullptr) {
+        ferrous_ffi_bridge_destroy(bridge.m_ffiBridge);
+        bridge.m_ffiBridge = nullptr;
+    }
+    bridge.m_connected = false;
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    auto *panel = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingPanel"));
+    auto *title = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingTitle"));
+    auto *artistAlbum = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingArtistAlbum"));
+    QVERIFY(panel != nullptr && title != nullptr && artistAlbum != nullptr);
+    const auto deliver = [&bridge](const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
+        bridge.resetPollChanges();
+        const bool applied = bridge.processBinarySnapshot(snapshot);
+        bridge.schedulePollChanges();
+        return applied;
+    };
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.playback.present = true;
+    snapshot.playback.state = 1;
+    const auto playTagged = [&snapshot](const QString &path, const QString &name) {
+        snapshot.playback.currentPath = path;
+        snapshot.metadata = {};
+        snapshot.metadata.present = true;
+        snapshot.metadata.sourcePath = path;
+        snapshot.metadata.title = name + QStringLiteral(" Title");
+        snapshot.metadata.artist = name + QStringLiteral(" Artist");
+        snapshot.metadata.album = name + QStringLiteral(" Album");
+    };
+    const auto expectLines = [&](const QString &titleText, const QString &artistAlbumText) {
+        QTRY_COMPARE(title->property("text").toString(), titleText);
+        QTRY_COMPARE(artistAlbum->property("text").toString(), artistAlbumText);
+        QCOMPARE(panel->property("titleText").toString(), titleText);
+        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+    };
+    // The lines stay as they were while the next track's are not known.
+    const auto expectLinesHeld = [&](const QString &titleText, const QString &artistAlbumText) {
+        QTest::qWait(50);
+        QCOMPARE(panel->property("titleText").toString(), titleText);
+        QCOMPARE(panel->property("artistAlbumText").toString(), artistAlbumText);
+    };
+
+    playTagged(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"));
+    QVERIFY(deliver(snapshot));
+    expectLines(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
+
+    // B plays, with the metadata still A's; then B's own comes.
+    snapshot.playback.currentPath = QStringLiteral("/fixture/b.flac");
+    QVERIFY(deliver(snapshot));
+    expectLinesHeld(QStringLiteral("A Title"), QStringLiteral("A Artist — A Album"));
+    playTagged(QStringLiteral("/fixture/b.flac"), QStringLiteral("B"));
+    QVERIFY(deliver(snapshot));
+    expectLines(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
+
+    // A track whose tag has none of the three; then its own metadata.
+    const QString untaggedPath = QStringLiteral("/fixture/untitled take.flac");
+    snapshot.playback.currentPath = untaggedPath;
+    QVERIFY(deliver(snapshot));
+    expectLinesHeld(QStringLiteral("B Title"), QStringLiteral("B Artist — B Album"));
+    snapshot.metadata = {};
+    snapshot.metadata.present = true;
+    snapshot.metadata.sourcePath = untaggedPath;
+    QVERIFY(deliver(snapshot));
+    expectLines(QStringLiteral("untitled take.flac"), QString());
+    QCOMPARE(bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
+    QVERIFY(bridge.currentTrackArtist().isEmpty());
+    QVERIFY(bridge.currentTrackAlbum().isEmpty());
 }
 
 #include "tst_qml_smoke_window.moc"

@@ -5114,6 +5114,29 @@ mod tests {
         assert_eq!(relay.rows()[1].length_seconds, None);
     }
 
+    /// A queued file whose tag lacks its title and artist shows its name
+    /// and no artist, never a stand-in in English (#560).
+    #[test]
+    fn queue_row_of_a_file_whose_tag_lacks_its_title_shows_its_name() {
+        let dir =
+            std::env::temp_dir().join(format!("ferrous-ffi-missing-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("untitled take.wav");
+        crate::metadata::write_tagged_test_wave(&path, None, None);
+        let mut snapshot = snapshot_with_update(QueueUpdate::Full(vec![path.clone()]), 1);
+        snapshot.library = Arc::new(LibrarySnapshot::default());
+        Arc::make_mut(&mut snapshot.queue_details)
+            .insert(path.clone(), crate::library::read_track_info(&path));
+
+        let mut relay = QueueRelay::default();
+        queue_sections(&mut relay, [&snapshot]).expect("a queue section");
+        let row = &relay.rows()[0];
+        assert_eq!(row.title, "untitled take");
+        assert!(row.artist.is_empty(), "{:?}", row.artist);
+        assert_eq!(row.album, "Fixture Album");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_refresh_sends_only_the_rows_whose_details_changed() {
         let queue = paths(&["/outside/song.flac", "/music/a.flac", "/outside/other.flac"]);

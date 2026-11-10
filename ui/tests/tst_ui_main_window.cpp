@@ -287,6 +287,7 @@ private slots:
     void contentIsOneSheetWithFourSeams();
     void sidebarIs360PxWideAnd260PxInANarrowWindow();
     void nowPlayingHasItsWideNarrowAndEmptyLayouts();
+    void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
@@ -491,6 +492,28 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // Nor is a total below the number shown.
     bridge->setProperty("currentTrackTotal", 1);
     QTRY_COMPARE(panel->property("narrowDetailsText").toString(), QStringLiteral("Classical · Track 2"));
+}
+
+// A track whose tag lacks its title and artist shows its file name as the
+// title and its album alone, with no stand-in for the artist (#560).
+void UiMainWindowTest::nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    playTrack(bridge);
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/untitled take.flac"));
+    bridge->setProperty("currentTrackTitle", QString());
+    bridge->setProperty("currentTrackArtist", QString());
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QVERIFY(panel != nullptr);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QQuickItem *title = named(window, "nowPlayingTitle");
+    QQuickItem *artistAlbum = named(window, "nowPlayingArtistAlbum");
+    QVERIFY(title && artistAlbum);
+    QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
+    QTRY_COMPARE(artistAlbum->property("text").toString(), QStringLiteral("Small Hours"));
 }
 
 void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
