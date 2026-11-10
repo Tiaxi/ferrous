@@ -65,9 +65,18 @@ Dialog {
     readonly property real sideInset: 16
     readonly property real leadSize: 24
     readonly property real titleX: root.sideInset + root.leadSize + 12
-    readonly property real titleWidth: 300
-    readonly property real contextX: root.titleX + root.titleWidth + 12
-    readonly property real lengthWidth: 44
+    // A track's length at the right: 44 px, or as wide as "00:00" in its
+    // font, and 12 px clear of the context. The title takes up to 300 px
+    // of what is left beside it, and the context the rest, so the three
+    // never meet, whatever the font and the width of the palette.
+    readonly property real lengthWidth: Math.max(44, Math.ceil(lengthMetrics.advanceWidth))
+    readonly property real columnGap: 12
+    readonly property real titleWidth: {
+        const lengthLeft = root.width - root.sideInset - Kirigami.Units.largeSpacing - root.lengthWidth - root.columnGap
+        const room = lengthLeft - root.columnGap - root.titleX
+        return Math.max(0, Math.min(300, Math.round(room * 0.6)))
+    }
+    readonly property real contextX: root.titleX + root.titleWidth + root.columnGap
     // Where the palette's top is: set when it opens, from where the
     // transport is then.
     property real paletteTop: 32
@@ -239,6 +248,13 @@ Dialog {
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
     FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
+    TextMetrics {
+        id: lengthMetrics
+        text: "00:00"
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.uiPalette.smallPointSize
+        font.features: root.uiPalette.tabularFigures
+    }
 
     // What the keys act on: the selected result's type, "more", "recent",
     // "suggestion", or "none".
@@ -718,7 +734,7 @@ Dialog {
                         objectName: "globalSearchResultContext"
                         visible: resultRow.isResult
                         x: root.contextX
-                        width: Math.max(0, (lengthText.visible ? lengthText.x - 12 : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
+                        width: Math.max(0, (lengthText.visible ? lengthText.x - root.columnGap : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         text: resultRow.context
@@ -733,7 +749,8 @@ Dialog {
                         objectName: "globalSearchResultLength"
                         visible: resultRow.isResult && resultRow.rowType === "track"
                         x: parent.width - root.sideInset - resultsView.scrollbarLane - width
-                        width: root.lengthWidth
+                        // Wider for a length of an hour or more.
+                        width: Math.max(root.lengthWidth, Math.ceil(implicitWidth))
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         horizontalAlignment: Text.AlignRight
