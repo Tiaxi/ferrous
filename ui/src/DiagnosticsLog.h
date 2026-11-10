@@ -16,6 +16,9 @@ namespace DiagnosticsLog {
 QString defaultLogPath();
 bool appendLine(const QString &logPath, const QString &line);
 bool appendLines(const QString &logPath, const QStringList &lines);
+// The last `maxLines` lines of the log at `logPath`; none if it cannot be
+// read. Reads from the disk: call it off the GUI thread.
+QStringList readLastLines(const QString &logPath, qsizetype maxLines);
 
 // `path` in double quotes, with its quotes and backslashes escaped, as log
 // lines quote a path, in C++ and in Rust (`quoted_path`), so that
@@ -39,6 +42,9 @@ public:
     void post(const QString &logPath, QStringList lines);
     // Queues deleting the log at `logPath`, after the lines posted before.
     void removeLog(const QString &logPath);
+    // Runs `task` on the writer's thread once everything posted before is
+    // written, as reading the log needs.
+    void then(std::function<void()> task);
     // Waits until everything posted before has been written.
     void waitUntilWritten();
 
@@ -47,6 +53,7 @@ private:
         QString logPath;
         QStringList lines;
         bool remove{false};
+        std::function<void()> task;
     };
 
     void run();

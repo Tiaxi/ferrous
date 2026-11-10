@@ -134,7 +134,12 @@ Dialog {
 
             TextArea {
                 id: diagnosticsTextArea
+                objectName: "diagnosticsTextArea"
                 text: root.diagnosticsText
+                // The bridge reads the log off the GUI thread.
+                placeholderText: (root.uiBridge.diagnosticsLoading || false)
+                    ? I18n.i18nc("@info:placeholder", "Loading the log\u2026")
+                    : ""
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.NoWrap

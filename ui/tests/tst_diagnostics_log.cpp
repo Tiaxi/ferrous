@@ -61,15 +61,17 @@ void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
         << QStringLiteral("[playback] info: Track started (user): \"<library 1>/….flac\".");
     QTest::newRow("escaped backslashes in a path")
         << QStringLiteral("[tags] info: Renamed \"/srv/fixture-music/AC\\\\DC\\\\\" to \"/srv/fixture-music/b.flac\".")
-        << QStringLiteral("[tags] info: Renamed \"<library 1>/…\" to \"<library 1>/….flac\".");
+        << QStringLiteral("[tags] info: Renamed \"<library 1>/…");
     QTest::newRow("a quoted root with an escaped quote")
         << QStringLiteral("Read \"/srv/fixture-music\\\"x/Private Song.flac\".")
         << QStringLiteral("Read \"<path>.flac\".");
     QTest::newRow("Rust's debug strings")
         << QStringLiteral("[ferrous] [system] debug: Command: Queue(Append([\"/srv/fixture-music/A \\\"B\\\"/1.flac\", "
                           "\"/media/stick/C\\\\D.mp3\"]))")
-        << QStringLiteral("[ferrous] [system] debug: Command: Queue(Append([\"<library 1>/….flac\", "
-                          "\"<path>.mp3\"]))");
+        << QStringLiteral("[ferrous] [system] debug: Command: Queue(Append([\"<library 1>/…");
+    QTest::newRow("a Rust debug string alone")
+        << QStringLiteral("[ferrous] [system] debug: Command: Library(AddTrack(\"/media/stick/C\\\\D \\\"E\\\".mp3\"))")
+        << QStringLiteral("[ferrous] [system] debug: Command: Library(AddTrack(\"<path>.mp3\"))");
     QTest::newRow("an older line with unescaped quotes")
         << QStringLiteral("[playback] info: Track started (user): "
                           "\"/srv/fixture-music/Album \"Deluxe\" Edition/01 Private Song.flac\".")
@@ -80,9 +82,18 @@ void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
     QTest::newRow("a quoted file name with escaped quotes")
         << QStringLiteral("[tags] warning: \"01 \\\"Private\\\" Song.flac\" is read-only")
         << QStringLiteral("[tags] warning: \"<file>.flac\" is read-only");
+    // A line with other quotes after a path's cannot tell an older path
+    // with quotes in it from two paths, so all of it after the path goes.
     QTest::newRow("two quoted paths")
         << QStringLiteral("[tags] info: Renamed \"/srv/fixture-music/A/1.flac\" to \"/srv/fixture-music/A/01 B.flac\".")
-        << QStringLiteral("[tags] info: Renamed \"<library 1>/….flac\" to \"<library 1>/….flac\".");
+        << QStringLiteral("[tags] info: Renamed \"<library 1>/…");
+    QTest::newRow("an older line with quotes, the first before a space")
+        << QStringLiteral("[playback] info: Track started (user): "
+                          "\"/srv/fixture-music/01 \" Private Album \" Song.flac\".")
+        << QStringLiteral("[playback] info: Track started (user): \"<library 1>/…");
+    QTest::newRow("a path outside the library, then quotes")
+        << QStringLiteral("Read \"/media/stick/01 \" Private Album \" Song.flac\".")
+        << QStringLiteral("Read \"<path>");
     QTest::newRow("brackets in a path")
         << QStringLiteral("[playback] warning: Could not play it. (/srv/fixture-music/Live (2001)/Track (Edit).mp3)")
         << QStringLiteral("[playback] warning: Could not play it. (<library 1>/….mp3)");

@@ -4223,6 +4223,9 @@ void BridgeClient::clearDiagnostics() {
     m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
     m_diagnosticsText.clear();
+    // A read asked for before is of the old log.
+    ++m_diagnosticsReadGeneration;
+    m_diagnosticsLoading = false;
     // After the lines already handed to the writer.
     m_diagnosticsWriter->removeLog(m_diagnosticsLogPath);
     emit diagnosticsChanged();
@@ -4231,26 +4234,43 @@ void BridgeClient::clearDiagnostics() {
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
     flushPendingDiagnosticDiskLines();
-    // Reading the log, which the user asked for, waits for the lines
-    // logged before it; logging itself never waits.
-    m_diagnosticsWriter->waitUntilWritten();
-    QStringList lines;
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        QFile file(m_diagnosticsLogPath);
-        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&file);
-            while (!in.atEnd()) {
-                const QString line = in.readLine();
-                if (!line.isNull()) {
-                    lines.push_back(line);
-                }
-            }
-        }
+    const quint64 generation = ++m_diagnosticsReadGeneration;
+    const quint64 loggedBefore = m_diagnosticsLinesLogged;
+    const QString logPath = m_diagnosticsLogPath;
+    if (!m_diagnosticsLoading) {
+        m_diagnosticsLoading = true;
+        emit diagnosticsChanged();
     }
+    // The writer reads after the lines it was given before, and the GUI
+    // thread never waits for the disk. The writer is this object's, and
+    // stops before it is gone, so `this` outlives the task; the result is
+    // posted to it, and dropped with it.
+    m_diagnosticsWriter->then([this, generation, loggedBefore, logPath]() {
+        QStringList lines = DiagnosticsLog::readLastLines(logPath, kMaxDiagnosticsLines);
+        QMetaObject::invokeMethod(
+            this,
+            [this, generation, loggedBefore, logPath, lines = std::move(lines)]() mutable {
+                applyDiagnosticsRead(generation, loggedBefore, logPath, std::move(lines));
+            },
+            Qt::QueuedConnection);
+    });
+}
+
+void BridgeClient::applyDiagnosticsRead(quint64 generation, quint64 loggedBefore,
+                                        const QString &logPath, QStringList lines) {
+    if (generation != m_diagnosticsReadGeneration || logPath != m_diagnosticsLogPath) {
+        return;
+    }
+    // The lines logged since the read was asked for came after it.
+    const auto since = static_cast<qsizetype>(
+        std::min<quint64>(m_diagnosticsLinesLogged - loggedBefore,
+                          static_cast<quint64>(m_diagnosticsLines.size())));
+    lines += m_diagnosticsLines.mid(m_diagnosticsLines.size() - since);
     if (lines.size() > kMaxDiagnosticsLines) {
         lines = lines.mid(lines.size() - kMaxDiagnosticsLines);
     }
     m_diagnosticsLines = std::move(lines);
+    m_diagnosticsLoading = false;
     rebuildDiagnosticsText();
     emit diagnosticsChanged();
 }
@@ -4334,6 +4354,7 @@ void BridgeClient::appendDiagnosticLine(const QString &line) {
         return;
     }
     m_diagnosticsLines.push_back(line);
+    ++m_diagnosticsLinesLogged;
     if (m_diagnosticsLines.size() > kMaxDiagnosticsLines) {
         const int removeCount = m_diagnosticsLines.size() - kMaxDiagnosticsLines;
         m_diagnosticsLines.erase(

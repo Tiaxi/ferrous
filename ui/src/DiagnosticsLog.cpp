@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QTextStream>
 
 namespace DiagnosticsLog {
 namespace {
@@ -166,14 +167,25 @@ qsizetype unescapedQuotes(QStringView line, qsizetype from) {
     return count;
 }
 
-// Whether the quote at `close` closes a quoted path for certain: it is
-// followed by the end of the line, a space or punctuation, and the quotes
-// after it pair up. A path an older build logged without escaping its
-// quotes fails this, and is then redacted to the end of the line.
-bool closesQuotedPath(QStringView line, qsizetype close) {
+// How surely the quote at `close` closes the quoted path before it.
+enum class Close {
+    // Followed by the end of the line, a space or punctuation, with no
+    // other quote on the line that a backslash does not escape.
+    Certain,
+    // Followed so, but other quotes come after it: the path may go on past
+    // it, as one an older build logged without escaping its quotes does.
+    Ambiguous,
+    // Followed by more text: the path goes on.
+    Not,
+};
+
+Close closeOf(QStringView line, qsizetype close) {
     const bool followedByBreak =
         close + 1 == line.size() || QStringView(u" .,:;)]}").contains(line.at(close + 1));
-    return followedByBreak && unescapedQuotes(line, close + 1) % 2 == 0;
+    if (!followedByBreak) {
+        return Close::Not;
+    }
+    return unescapedQuotes(line, close + 1) == 0 ? Close::Certain : Close::Ambiguous;
 }
 
 // `text` with its backslash escapes undone.
@@ -189,15 +201,32 @@ QString unescaped(QStringView text) {
     return out;
 }
 
-// Where the path that starts at `start` ends, and whether the quote or
-// bracket that opened before it says so.
-std::pair<qsizetype, bool> pathEnd(QStringView line, qsizetype start) {
+// Where the path that starts at `start` ends: the quote or bracket that
+// opened before it, or the end of the line.
+struct PathEnd {
+    qsizetype end;
+    // Whether a quote or bracket ends it.
+    bool delimited;
+    // A quote that may end it, when the line's quotes leave it open whether
+    // it does; `end` is then the end of the line.
+    qsizetype ambiguousClose{-1};
+};
+
+PathEnd pathEnd(QStringView line, qsizetype start) {
     const QChar opener = start > 0 ? line.at(start - 1) : QChar();
     qsizetype end = -1;
     if (opener == QLatin1Char('"')) {
         end = closingQuote(line, start);
-        if (end >= 0 && !closesQuotedPath(line, end)) {
-            end = -1;
+        if (end >= 0) {
+            switch (closeOf(line, end)) {
+            case Close::Certain:
+                break;
+            case Close::Ambiguous:
+                return {line.size(), false, end};
+            case Close::Not:
+                end = -1;
+                break;
+            }
         }
     } else {
         // A bracket or a single quote may also be in the path, so the last
@@ -301,7 +330,18 @@ private:
     }
 
     Classified classify(QStringView line, qsizetype start) const {
-        const auto [end, delimited] = pathEnd(line, start);
+        auto [end, delimited, ambiguousClose] = pathEnd(line, start);
+        if (ambiguousClose >= 0) {
+            // Where the path ends is not certain, so it is redacted to the
+            // end of the line, unless the path up to the quote is one of
+            // Ferrous's own folders or the system's, which name nothing of
+            // the user's: the backend's start line quotes several.
+            const QString beforeQuote = unescaped(line.mid(start, ambiguousClose - start));
+            if (kept(beforeQuote) || kept(QStringView(homeShortened(beforeQuote)))) {
+                end = ambiguousClose;
+                delimited = true;
+            }
+        }
         const QStringView path = line.mid(start, end - start);
         // A path in double quotes has its quotes and backslashes escaped.
         const bool escaped = start > 0 && line.at(start - 1) == QLatin1Char('"') && delimited;
@@ -423,6 +463,30 @@ QString withoutPaths(const QString &text, const PathRedaction &redaction) {
     return out;
 }
 
+QStringList readLastLines(const QString &logPath, qsizetype maxLines) {
+    QStringList lines;
+    if (logPath.isEmpty()) {
+        return lines;
+    }
+    // Not halfway through another thread's write.
+    const std::lock_guard<std::mutex> lock(logMutex());
+    QFile file(logPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return lines;
+    }
+    QTextStream in(&file);
+    while (!in.atEnd()) {
+        const QString line = in.readLine();
+        if (!line.isNull()) {
+            lines.push_back(line);
+        }
+    }
+    if (lines.size() > maxLines) {
+        lines = lines.mid(lines.size() - maxLines);
+    }
+    return lines;
+}
+
 QString quotedPath(const QString &path) {
     QString out;
     out.reserve(path.size() + 2);
@@ -456,7 +520,7 @@ void Writer::post(const QString &logPath, QStringList lines) {
     }
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
-        m_jobs.push_back(Job{logPath, std::move(lines), false});
+        m_jobs.push_back(Job{logPath, std::move(lines), false, {}});
         ++m_posted;
     }
     m_wake.notify_one();
@@ -468,7 +532,19 @@ void Writer::removeLog(const QString &logPath) {
     }
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
-        m_jobs.push_back(Job{logPath, {}, true});
+        m_jobs.push_back(Job{logPath, {}, true, {}});
+        ++m_posted;
+    }
+    m_wake.notify_one();
+}
+
+void Writer::then(std::function<void()> task) {
+    if (!task) {
+        return;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_jobs.push_back(Job{{}, {}, false, std::move(task)});
         ++m_posted;
     }
     m_wake.notify_one();
@@ -492,14 +568,16 @@ void Writer::run() {
         m_jobs.pop_front();
         quint64 jobs = 1;
         // Lines posted meanwhile go in the same write.
-        while (!job.remove && !m_jobs.empty() && !m_jobs.front().remove
-               && m_jobs.front().logPath == job.logPath) {
+        while (!job.remove && !job.task && !m_jobs.empty() && !m_jobs.front().remove
+               && !m_jobs.front().task && m_jobs.front().logPath == job.logPath) {
             job.lines += m_jobs.front().lines;
             m_jobs.pop_front();
             ++jobs;
         }
         lock.unlock();
-        if (job.remove) {
+        if (job.task) {
+            job.task();
+        } else if (job.remove) {
             QFile::remove(job.logPath);
         } else {
             (void)m_append(job.logPath, job.lines);

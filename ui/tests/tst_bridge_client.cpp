@@ -396,6 +396,7 @@ private slots:
     void mprisOpenUriOpensOnlyLocalFiles();
     void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
     void loggingDoesNotWaitForAStalledDisk();
+    void readingTheLogDoesNotWaitForAStalledDisk();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -4988,6 +4989,53 @@ void BridgeClientTest::loggingDoesNotWaitForAStalledDisk() {
     QVERIFY(lines[201].endsWith(QStringLiteral("[mpris] info: Next.")));
 }
 
+void BridgeClientTest::readingTheLogDoesNotWaitForAStalledDisk() {
+    // Outlive the client, whose writer waits on them.
+    QSemaphore writing;
+    QSemaphore diskAnswers;
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // The read the client starts with is done.
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_pendingDiagnosticsDiskLines.clear();
+    client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
+        [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
+            writing.release();
+            diskAnswers.acquire();
+            return DiagnosticsLog::appendLines(path, lines);
+        });
+    client.logInfo(QStringLiteral("app"), QStringLiteral("before the reload"));
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY(writing.tryAcquire(1, 5000));
+
+    // Opening Diagnostics, then Reload, while the disk does not answer.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    client.reloadDiagnosticsFromDisk();
+    client.reloadDiagnosticsFromDisk();
+    QVERIFY2(elapsed.elapsed() < 1000, qPrintable(QString::number(elapsed.elapsed())));
+    QVERIFY(client.diagnosticsLoading());
+    // The event loop goes on meanwhile.
+    bool ticked = false;
+    QTimer::singleShot(10, &client, [&ticked]() { ticked = true; });
+    QTRY_VERIFY(ticked);
+    QVERIFY(client.diagnosticsLoading());
+    client.logInfo(QStringLiteral("app"), QStringLiteral("during the reload"));
+
+    // Once the disk answers, the latest reload shows each line once.
+    diskAnswers.release(1000);
+    QTRY_VERIFY(!client.diagnosticsLoading());
+    const QString text = client.diagnosticsText();
+    QCOMPARE(text.count(QStringLiteral("[app] info: before the reload")), 1);
+    QCOMPARE(text.count(QStringLiteral("[app] info: during the reload")), 1);
+    QVERIFY(text.indexOf(QStringLiteral("before the reload")) < text.indexOf(QStringLiteral("during the reload")));
+}
+
 void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
     BridgeClient client;
     isolateBridgeClient(client);
@@ -6833,6 +6881,7 @@ void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
                        song, BinaryBridgeCodec::ErrorSeverityWarning);
     client.logDebug(QStringLiteral("app"), QStringLiteral("only with FERROUS_LOG=debug"));
     client.reloadDiagnosticsFromDisk();
+    QTRY_VERIFY(!client.diagnosticsLoading());
 
     const QStringList lines = client.diagnosticsText().split(QLatin1Char('\n'));
     const auto lineEnding = [&lines](const QString &tail) {

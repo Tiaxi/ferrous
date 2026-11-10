@@ -1071,8 +1071,9 @@ impl Service {
             }
             Err(err) => {
                 // The keyring's own error may name its entry, the account.
-                let message = request_error_message(&RequestError::Keyring(err))
-                    .replace(username.as_str(), "the saved account");
+                let message = request_error_message(&RequestError::Keyring(
+                    keyring_error_without_account(&err, &username),
+                ));
                 log_warning(
                     ErrorCategory::LastFm,
                     &format!("The saved account's session key could not be read: {message}"),
@@ -1620,6 +1621,27 @@ fn request_token(
         .ok_or_else(|| {
             RequestError::InvalidResponse("Last.fm token missing from response".to_string())
         })
+}
+
+/// The keyring's error `error` for the session key of `account`, for the
+/// user and the log, which never name the account: when the error names it,
+/// as a word of its own, a description that does not stands in for it. A
+/// word is a run of letters, digits, `_` and `-`, which a user name is made
+/// of, so the name inside a longer word, such as "in" in "keyring", is not
+/// the account.
+fn keyring_error_without_account(error: &str, account: &str) -> String {
+    let in_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let names_account = !account.is_empty()
+        && error.match_indices(account).any(|(at, _)| {
+            let before = error[..at].chars().next_back();
+            let after = error[at + account.len()..].chars().next();
+            !before.is_some_and(in_word) && !after.is_some_and(in_word)
+        });
+    if names_account {
+        "the keyring could not give the saved account's session key".to_string()
+    } else {
+        error.to_string()
+    }
 }
 
 fn request_session(
@@ -3877,17 +3899,49 @@ mod tests {
             "keyring locked for entry ferrous.lastfm/{USERNAME}"
         )));
         assert_eq!(failing.auth_state, AuthState::Error);
-        assert!(failing.status_text.contains("keyring locked"));
+        // The keyring's error named the account, so it is described.
+        assert!(failing.status_text.contains("the keyring could not give"));
 
         // The log tells both, without the account's name.
         let logged = test_log::lines_containing("[ferrous] [lastfm] warning: ");
         assert_eq!(logged.len(), 2, "{logged:?}");
         assert!(logged[0].contains("No session key was found"), "{logged:?}");
         assert!(logged[1].contains("could not be read: "), "{logged:?}");
-        assert!(logged[1].contains("keyring locked"), "{logged:?}");
+        assert!(
+            logged[1].contains("the keyring could not give"),
+            "{logged:?}"
+        );
         for line in test_log::all() {
             assert!(!line.contains(USERNAME), "{line}");
         }
+
+        // A short name is told from the words it is part of: the message
+        // is never changed inside a word.
+        let load_short = |keys| {
+            let mut service = Service::new(ServiceOptions::default(), backends(&transport, keys));
+            service.handle_command(Command::LoadStoredSession {
+                username: "in".to_string(),
+            });
+            service.state
+        };
+        let locked = load_short(MemorySessionKeys::failing("keyring locked"));
+        assert_eq!(locked.status_text, "Last.fm keyring error: keyring locked");
+        test_log::clear();
+        let named = load_short(MemorySessionKeys::failing(
+            "no entry ferrous.lastfm/in in the login keyring",
+        ));
+        assert_eq!(
+            named.status_text,
+            "Last.fm keyring error: the keyring could not give the saved account's session key"
+        );
+        assert_eq!(
+            test_log::lines_containing("could not be read: "),
+            [format!(
+                "[ferrous] [lastfm] warning: The saved account's session key could not be read: \
+                 {}",
+                named.status_text
+            )]
+        );
     }
 
     #[test]

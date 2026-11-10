@@ -356,6 +356,7 @@ ApplicationWindow {
         property string itunesArtworkStatusText: ""
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
+        property bool diagnosticsLoading: false
         property bool connected: false
         property string backendFailure: ""
         // What saveStateBeforeQuit fails with; empty for a save that succeeds.
