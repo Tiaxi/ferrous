@@ -329,6 +329,8 @@ private slots:
     void nowPlayingWithoutCoverOrTagsKeepsItsLayout();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
+    void nowPlayingMarksFollowTheFont();
+    void nowPlayingMarksFollowTheFont_data();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
@@ -935,6 +937,75 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     QTRY_VERIFY2(notWhole(combined, QStringLiteral("Ash — Dusk")).isEmpty(),
                  qPrintable(notWhole(combined, QStringLiteral("Ash — Dusk"))));
     QVERIFY(!artistLine->isVisible() && !albumLine->isVisible());
+}
+
+void UiMainWindowTest::nowPlayingMarksFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("14 pt") << 14.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The marks of the now-playing panel follow the font as the transport's
+// glyphs do (#373 H3): the glyph by "Nothing playing", 16 px with the
+// default font, the text after it; the album cover mark of a track without
+// a cover, 48 px in the wide tile and 32 px in the narrow one with the
+// default font, never over a third of the tile, which keeps its size, and
+// even, at the tile's centre on whole pixels.
+void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QFont font = window->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(window->setProperty("font", font));
+    QObject *palette = paletteOf(window);
+    QTRY_COMPARE(palette->property("basePointSize").toReal(), pointSize);
+    const qreal scale = std::max(1.0, pointSize / 10.0);
+    const auto scaled = [&](int size) { return std::max<qreal>(size, std::round(size * scale)); };
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QVERIFY(panel && cover);
+
+    // Nothing playing: the glyph, then largeSpacing and the text.
+    QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("empty"));
+    QQuickItem *glyph = named(window, "nowPlayingEmptyGlyph");
+    QQuickItem *label = named(window, "nowPlayingEmptyLabel");
+    QVERIFY(glyph && label);
+    QVERIFY(shown(glyph));
+    QCOMPARE(glyph->width(), scaled(16));
+    QCOMPARE(glyph->height(), glyph->width());
+    QCOMPARE(sceneRect(glyph).left() - sceneRect(panel).left(), 12.0);
+    QVERIFY(sceneRect(label).left() >= sceneRect(glyph).right() + 8);
+    if (pointSize == 24.0) {
+        QVERIFY(glyph->width() >= 36.0);
+    }
+
+    // A track without a cover: the mark at the tile's centre.
+    QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
+    QVERIFY(mark != nullptr);
+    for (const bool narrow : {false, true}) {
+        if (narrow) {
+            window->resize(1000, 720);
+            QTRY_COMPARE(window->width(), 1000);
+        }
+        playTrack(bridgeOf(window));
+        QTRY_COMPARE(panel->property("layoutMode").toString(),
+                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        QVERIFY(shown(mark));
+        // Even, so that it sits on whole pixels at the tile's centre.
+        const qreal expected = 2 * std::round(std::min(std::round(cover->width() / 3), scaled(narrow ? 32 : 48)) / 2);
+        QTRY_COMPARE(mark->width(), expected);
+        QCOMPARE(mark->height(), mark->width());
+        QCOMPARE(sceneRect(mark).center(), sceneRect(cover).center());
+        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-album-cover"));
+        QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
+        // The tile keeps the size a cover has.
+        QCOMPARE(cover->height(), cover->width());
+    }
 }
 
 // A track whose tag lacks its title and artist shows its file name as the

@@ -690,6 +690,9 @@ Item {
     readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
         root.uiPalette.scaledSize(root.layoutMode === "narrow"
             ? Kirigami.Units.iconSizes.medium : Kirigami.Units.iconSizes.large)) / 2)
+    // The glyph by "Nothing playing", 16 px with the default font, which
+    // grows with the font as the transport's glyphs do.
+    readonly property int emptyGlyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
 
     // The block follows its text: in narrow, at least the cover's height,
     // and more when the lines need it.
@@ -1010,9 +1013,10 @@ Item {
             : root.uiPalette.rowHeight
 
         Kirigami.Icon {
+            objectName: "nowPlayingEmptyGlyph"
             x: root.textInset
             y: emptyLabel.y + Math.round((Math.min(emptyLabel.implicitHeight, baseMetrics.height) - height) / 2)
-            width: Kirigami.Units.iconSizes.small
+            width: root.emptyGlyphSize
             height: width
             source: "media-album-track"
             isMask: true
@@ -1022,7 +1026,7 @@ Item {
         Text {
             id: emptyLabel
             objectName: "nowPlayingEmptyLabel"
-            x: root.textInset + Kirigami.Units.iconSizes.small + Kirigami.Units.largeSpacing
+            x: root.textInset + root.emptyGlyphSize + Kirigami.Units.largeSpacing
             width: Math.max(0, parent.width - x - root.textInset)
             anchors.verticalCenter: parent.verticalCenter
             text: I18n.i18nc("@info", "Nothing playing")
