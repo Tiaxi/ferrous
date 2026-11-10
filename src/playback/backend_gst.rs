@@ -1331,14 +1331,15 @@ impl GstPlaybackRuntime {
             return;
         }
         let applies_volume = self.output_applies_volume();
-        if !was_stopped && self.output_rise == OutputRise::Silenced && applies_volume.is_none() {
+        if !was_stopped && self.output_silenced() && applies_volume.is_none() {
             // A new run of a paused player, such as of a track picked while
             // paused, whose output picks its sink only as the run prerolls:
             // autoaudiosink picks it when playsink sets the output up. How
             // the output comes up is decided once the run has prerolled,
             // which it does before it can play anyway; see
-            // `handle_async_done`. A run that never prerolls is reported
-            // like one that never plays.
+            // `handle_async_done`. Play again meanwhile leaves that so. A
+            // run that never prerolls is reported like one that never
+            // plays.
             self.output_rise = OutputRise::SilencedUntilPreroll;
             self.playing_state_requested_at
                 .get_or_insert_with(Instant::now);
@@ -11893,6 +11894,13 @@ mod engine_tests {
                 engine.wait_until("Play was not taken", |engine| {
                     engine.snapshot.state == PlaybackState::Playing
                 });
+                // Play again, as a second request over MPRIS does, before
+                // the run has prerolled.
+                let snapshots = engine.snapshots.len();
+                engine.send(PlaybackCommand::Play);
+                engine.wait_until("the second Play was not taken", |engine| {
+                    engine.snapshots.len() > snapshots
+                });
                 hold.release();
             }
             engine.wait_until("the track did not play to 0.6 s", |engine| {
@@ -12541,6 +12549,9 @@ mod engine_tests {
             engine.runtime.apply_command(PlaybackCommand::Pause);
             assert_eq!(engine.runtime.output_rise, OutputRise::Silenced);
 
+            engine.runtime.apply_command(PlaybackCommand::Play);
+            assert_eq!(engine.runtime.output_rise, OutputRise::SilencedUntilPreroll);
+            // Play again, as a second request over MPRIS does, still waits.
             engine.runtime.apply_command(PlaybackCommand::Play);
             assert_eq!(engine.runtime.output_rise, OutputRise::SilencedUntilPreroll);
             // The run is not asked to play before it has prerolled.
