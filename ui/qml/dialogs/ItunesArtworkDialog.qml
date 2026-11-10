@@ -325,8 +325,131 @@ Dialog {
         }
     }
 
+    // The rows' grid, shared by the current art and the results: a 64 px
+    // thumbnail at the search palette's side inset, the text 12 px after
+    // it, and the actions at the end.
+    readonly property real sideInset: 16
+    readonly property real thumbnailSize: 64
+    readonly property real rowPadding: 8
+    readonly property real textX: root.sideInset + root.thumbnailSize + 12
+    // The rows' secondary line: the details of an image, in plain words,
+    // such as "1200 × 1200 · JPEG · 412 KiB".
+    function imageDetailsText(info) {
+        if (!info) {
+            return ""
+        }
+        const width = Number(info.width || 0)
+        const height = Number(info.height || 0)
+        return [
+            width > 0 && height > 0
+                ? I18n.i18nc("@info image size in pixels, width × height", "%1 × %2",
+                    String(width), String(height))
+                : "",
+            info.format || info.extension || "",
+            root.fileSizeText(info)
+        ].filter(Boolean).join(" · ")
+    }
+
+    // The file's size, such as "412 KiB", without the exact byte count
+    // that the details' fileSizeText adds.
+    function fileSizeText(info) {
+        const bytes = Number(info.fileSizeBytes)
+        if (!(info.fileSizeBytes !== undefined && bytes >= 0)) {
+            return info.fileSizeText || ""
+        }
+        const units = ["B", "KiB", "MiB", "GiB", "TiB"]
+        let scaled = bytes
+        let unit = 0
+        while (scaled >= 1024 && unit < units.length - 1) {
+            scaled /= 1024
+            ++unit
+        }
+        return I18n.i18nc("@info file size: size, unit such as MiB", "%1 %2",
+            scaled.toLocaleString(Qt.locale(), "f", unit === 0 || scaled >= 10 ? 0 : 1), units[unit])
+    }
+
+    // A row's thumbnail: the image fitted in a 64 px square, or a quiet
+    // placeholder without one.
+    component ArtworkThumbnail: Item {
+        property alias source: thumbnailImage.source
+
+        width: root.thumbnailSize
+        height: root.thumbnailSize
+
+        Image {
+            id: thumbnailImage
+            anchors.fill: parent
+            fillMode: Image.PreserveAspectFit
+            sourceSize.width: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
+            sourceSize.height: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
+            smooth: true
+            asynchronous: true
+            cache: true
+            visible: source.toString().length > 0
+        }
+
+        Kirigami.Icon {
+            anchors.centerIn: parent
+            width: Kirigami.Units.iconSizes.smallMedium
+            height: width
+            visible: !thumbnailImage.visible
+            source: "image-missing"
+            isMask: true
+            color: root.uiPalette.textTertiary
+        }
+    }
+
+    // A row's text: the title, then one secondary line, elided, with the
+    // whole of it in a tooltip when it does not fit.
+    component ArtworkText: Column {
+        property string title: ""
+        property string details: ""
+        property color detailsColor: root.uiPalette.textSecondary
+        property string titleObjectName: ""
+        property string detailsObjectName: ""
+
+        spacing: 2
+
+        Label {
+            objectName: parent.titleObjectName
+            width: parent.width
+            text: parent.title
+            color: root.uiPalette.text
+            elide: Text.ElideRight
+        }
+
+        Label {
+            id: detailsLabel
+            objectName: parent.detailsObjectName
+            width: parent.width
+            visible: text.length > 0
+            text: parent.details
+            color: parent.detailsColor
+            font.features: root.uiPalette.tabularFigures
+            elide: Text.ElideRight
+            ToolTip.text: text
+            ToolTip.visible: detailsHover.hovered && truncated
+            ToolTip.delay: Kirigami.Units.toolTipDelay
+
+            HoverHandler {
+                id: detailsHover
+            }
+        }
+    }
+
+    // Measures Apply, so the current art's Preview lines up with the
+    // results' Preview, which Apply follows.
+    ToolButton {
+        id: applyMetrics
+        visible: false
+        flat: true
+        display: AbstractButton.TextBesideIcon
+        icon.name: "dialog-ok-apply"
+        text: I18n.i18nc("@action:button", "Apply")
+    }
+
     contentItem: ColumnLayout {
-        spacing: 12
+        spacing: 0
 
         // Decodes the previewed candidate, small, on a worker thread: one
         // that does not decode cannot be applied.
@@ -341,280 +464,229 @@ Dialog {
             cache: false
         }
 
-        RowLayout {
+        // The current art, on the rows' grid above the results, with no
+        // frame of its own: the dialog's first line in every state.
+        Item {
+            id: currentArtworkRow
+            objectName: "itunesArtworkCurrentRow"
             Layout.fillWidth: true
-            spacing: 10
+            Layout.preferredHeight: Math.max(root.thumbnailSize,
+                currentArtworkText.implicitHeight, currentArtworkPreviewButton.implicitHeight)
+                + 2 * root.rowPadding
 
-            BusyIndicator {
-                running: root.uiBridge.itunesArtworkLoading
-                visible: running
+            ArtworkThumbnail {
+                id: currentArtworkThumbnail
+                objectName: "itunesArtworkCurrentThumbnail"
+                // The frame's 1 px edge, then the results' inset.
+                x: 1 + root.sideInset
+                y: Math.round((parent.height - height) / 2)
+                source: root.currentArtworkSource
             }
 
-            Text {
-                Layout.fillWidth: true
-                text: root.uiBridge.itunesArtworkStatusText || ""
-                color: root.uiPalette.text
-                wrapMode: Text.Wrap
+            ArtworkText {
+                id: currentArtworkText
+                x: 1 + root.textX
+                y: Math.round((parent.height - height) / 2)
+                width: Math.max(0, currentArtworkPreviewButton.x - 12 - x)
+                titleObjectName: "itunesArtworkCurrentTitle"
+                detailsObjectName: "itunesArtworkCurrentDetails"
+                title: I18n.i18nc("@label", "Current album art")
+                details: (root.currentArtworkSource || "").length === 0
+                    ? I18n.i18nc("@label", "No current album art is available for this track.")
+                    : (Object.keys(root.currentArtworkInfo || {}).length === 0
+                        ? I18n.i18nc("@label", "Current artwork metadata is not available.")
+                        : root.imageDetailsText(root.currentArtworkInfo))
+            }
+
+            // Where the results' Preview is: before Apply, clear of the
+            // scrollbar lane.
+            ToolButton {
+                id: currentArtworkPreviewButton
+                objectName: "itunesArtworkCurrentPreviewButton"
+                x: parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
+                    - applyMetrics.implicitWidth - Kirigami.Units.smallSpacing - width
+                y: Math.round((parent.height - height) / 2)
+                flat: true
+                display: AbstractButton.TextBesideIcon
+                icon.name: "view-preview"
+                text: I18n.i18nc("@action:button", "Preview")
+                enabled: (root.currentArtworkSource || "").length > 0 && !closingState.closing
+                onClicked: root.showPreview(-1)
             }
         }
 
+        // What the search found, under the results it is about.
+        Label {
+            objectName: "itunesArtworkResultsHeading"
+            Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            Layout.bottomMargin: Kirigami.Units.smallSpacing
+            visible: itunesArtworkResultsView.count > 0 && text.length > 0
+            text: root.uiBridge.itunesArtworkStatusText || ""
+            color: root.uiPalette.textSecondary
+            wrapMode: Text.Wrap
+        }
+
+        // The results: a flat list on the view colour, in the view's frame,
+        // with a hairline between rows. Searching, or with nothing found,
+        // the frame holds a placeholder message instead.
         Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: implicitHeight
-            implicitHeight: currentArtworkSummaryRow.implicitHeight + 20
-            radius: Kirigami.Units.cornerRadius
-            color: root.uiPalette.view
-            border.color: root.uiPalette.seam
-            clip: true
-
-            RowLayout {
-                id: currentArtworkSummaryRow
-                anchors.fill: parent
-                anchors.margins: 10
-                spacing: 12
-
-                Item {
-                    Layout.preferredWidth: 92
-                    Layout.preferredHeight: 92
-                    clip: true
-
-                    Image {
-                        id: currentArtworkImage
-                        anchors.fill: parent
-                        fillMode: Image.PreserveAspectFit
-                        sourceSize.width: Math.ceil(width * Screen.devicePixelRatio)
-                        sourceSize.height: Math.ceil(height * Screen.devicePixelRatio)
-                        source: root.currentArtworkSource
-                        smooth: true
-                        asynchronous: true
-                        cache: true
-                        visible: (root.currentArtworkSource || "").length > 0
-                    }
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 2
-                        color: root.uiPalette.hover
-                        border.color: root.uiPalette.seam
-                        visible: !currentArtworkImage.visible
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: I18n.i18nc("@label", "No art")
-                            color: root.uiPalette.textSecondary
-                        }
-                    }
-                }
-
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: I18n.i18nc("@label", "Current album art")
-                        color: root.uiPalette.text
-                        font.pointSize: root.uiPalette.basePointSize * 1.125
-                        font.weight: Font.DemiBold
-                        elide: Text.ElideRight
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: [
-                            (root.currentArtworkInfo.resolutionText || ""),
-                            (root.currentArtworkInfo.fileType || ""),
-                            (root.currentArtworkInfo.fileSizeText || "")
-                        ].filter(Boolean).join(" \u00b7 ")
-                        color: root.uiPalette.textSecondary
-                        wrapMode: Text.Wrap
-                        visible: text.length > 0
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        visible: (root.currentArtworkInfo.mimeType || "").length > 0
-                        text: I18n.i18nc("@info", "MIME: %1", root.currentArtworkInfo.mimeType || "")
-                        color: root.uiPalette.textSecondary
-                        elide: Text.ElideRight
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        visible: (root.currentArtworkSource || "").length === 0
-                        text: I18n.i18nc("@label", "No current album art is available for this track.")
-                        color: root.uiPalette.textSecondary
-                        wrapMode: Text.Wrap
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        visible: (root.currentArtworkSource || "").length > 0
-                            && Object.keys(root.currentArtworkInfo || {}).length === 0
-                        text: I18n.i18nc("@label", "Current artwork metadata is not available.")
-                        color: root.uiPalette.textSecondary
-                        wrapMode: Text.Wrap
-                    }
-                }
-
-                Button {
-                    id: currentArtworkPreviewButton
-                    objectName: "itunesArtworkCurrentPreviewButton"
-                    text: I18n.i18nc("@action:button", "Preview")
-                    enabled: (root.currentArtworkSource || "").length > 0 && !closingState.closing
-                    onClicked: root.showPreview(-1)
-                }
-            }
-        }
-
-        ListView {
-            id: itunesArtworkResultsView
-            objectName: "itunesArtworkResultsView"
+            id: resultsFrame
+            objectName: "itunesArtworkResultsFrame"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
-            spacing: 10
-            boundsBehavior: Flickable.StopAtBounds
-            rightMargin: itunesArtworkScrollBar.visible ? (itunesArtworkScrollBar.width + 10) : 0
-            model: root.uiBridge.itunesArtworkResults
-            visible: count > 0
+            Layout.topMargin: itunesArtworkResultsView.count > 0 ? 0 : Kirigami.Units.smallSpacing
+            color: root.uiPalette.view
+            border.width: 1
+            border.color: root.uiPalette.seam
 
-            ScrollBar.vertical: ScrollBar {
-                id: itunesArtworkScrollBar
-                policy: ScrollBar.AsNeeded
-            }
+            ListView {
+                id: itunesArtworkResultsView
+                objectName: "itunesArtworkResultsView"
+                // The lane the rows leave for the scrollbar, when it shows.
+                readonly property real scrollbarLane: itunesArtworkScrollBar.visible
+                    ? itunesArtworkScrollBar.lane : 0
+                anchors.fill: parent
+                anchors.margins: 1
+                clip: true
+                spacing: 0
+                boundsBehavior: Flickable.StopAtBounds
+                model: root.uiBridge.itunesArtworkResults
+                visible: count > 0
 
-            delegate: Rectangle {
-                required property int index
-                required property var modelData
-                readonly property Item previewButton: suggestionPreviewButton
+                ScrollBar.vertical: Components.LaneScrollBar {
+                    id: itunesArtworkScrollBar
+                    uiPalette: root.uiPalette
+                }
 
-                x: ListView.view.leftMargin
-                width: Math.max(0, ListView.view.width - ListView.view.leftMargin - ListView.view.rightMargin)
-                implicitHeight: 136
-                radius: Kirigami.Units.cornerRadius
-                color: root.uiPalette.view
-                border.color: root.uiPalette.seam
+                delegate: Item {
+                    id: suggestionRow
+                    required property int index
+                    required property var modelData
+                    readonly property Item previewButton: suggestionPreviewButton
+                    readonly property bool assetLoading: (modelData && (modelData.assetLoading || false)) || false
+                    readonly property string assetError: (modelData && (modelData.assetError || "")) || ""
+                    readonly property string artistName: (modelData && (modelData.artistName || "")) || ""
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 12
+                    objectName: "itunesArtworkResultRow"
+                    width: ListView.view.width
+                    height: Math.max(root.thumbnailSize, suggestionText.implicitHeight,
+                        suggestionApplyButton.implicitHeight) + 2 * root.rowPadding
 
-                    Image {
-                        Layout.preferredWidth: 92
-                        Layout.preferredHeight: 92
-                        fillMode: Image.PreserveAspectFit
-                        sourceSize.width: Math.ceil(92 * Screen.devicePixelRatio)
-                        sourceSize.height: Math.ceil(92 * Screen.devicePixelRatio)
-                        source: (modelData && (modelData.previewSource || "")) || ""
-                        smooth: true
-                        asynchronous: true
-                        cache: true
+                    ArtworkThumbnail {
+                        objectName: "itunesArtworkResultThumbnail"
+                        x: root.sideInset
+                        y: Math.round((parent.height - height) / 2)
+                        source: (suggestionRow.modelData && (suggestionRow.modelData.previewSource || "")) || ""
                     }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: (modelData && (modelData.albumTitle || "")) || ""
-                            color: root.uiPalette.text
-                            font.pointSize: root.uiPalette.basePointSize * 1.125
-                            font.weight: Font.DemiBold
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: (modelData && (modelData.artistName || "")) || ""
-                            color: root.uiPalette.textSecondary
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: [
-                                (modelData && (modelData.resolutionText || "")) || "",
-                                (modelData && (modelData.fileType || "")) || "",
-                                (modelData && (modelData.fileSizeText || "")) || ""
-                            ].filter(Boolean).join(" \u00b7 ")
-                            color: root.uiPalette.textSecondary
-                            wrapMode: Text.Wrap
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: ((modelData && (modelData.mimeType || "")) || "").length > 0
-                            text: I18n.i18nc("@info", "MIME: %1", (modelData && (modelData.mimeType || "")) || "")
-                            color: root.uiPalette.textSecondary
-                            elide: Text.ElideRight
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            visible: ((modelData && (modelData.assetLoading || false)) || false)
-                            spacing: 8
-
-                            BusyIndicator {
-                                Layout.preferredWidth: 18
-                                Layout.preferredHeight: 18
-                                running: true
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: I18n.i18nc("@label", "Loading high-resolution artwork\u2026")
-                                color: root.uiPalette.textSecondary
-                                wrapMode: Text.Wrap
-                            }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: ((modelData && (modelData.assetError || "")) || "").length > 0
-                            text: (modelData && (modelData.assetError || "")) || ""
-                            color: root.uiPalette.negative
-                            wrapMode: Text.Wrap
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: !((modelData && (modelData.assetLoading || false)) || false)
-                                && ((modelData && (modelData.detailStatusText || "")) || "").length > 0
-                            text: (modelData && (modelData.detailStatusText || "")) || ""
-                            color: root.uiPalette.textSecondary
-                            wrapMode: Text.Wrap
-                        }
+                    // One secondary line: the artist and the image's
+                    // details; while the high-resolution image loads, that;
+                    // when it failed, why.
+                    ArtworkText {
+                        id: suggestionText
+                        x: root.textX
+                        y: Math.round((parent.height - height) / 2)
+                        width: Math.max(0, suggestionActions.x - 12 - x)
+                        titleObjectName: "itunesArtworkResultTitle"
+                        detailsObjectName: "itunesArtworkResultDetails"
+                        title: (suggestionRow.modelData && (suggestionRow.modelData.albumTitle || "")) || ""
+                        details: suggestionRow.assetError.length > 0 && !suggestionRow.assetLoading
+                            ? suggestionRow.assetError
+                            : [suggestionRow.artistName, suggestionRow.assetLoading
+                                ? I18n.i18nc("@label", "Loading high-resolution artwork…")
+                                : root.imageDetailsText(suggestionRow.modelData)]
+                                .filter(Boolean).join(" · ")
+                        detailsColor: suggestionRow.assetError.length > 0 && !suggestionRow.assetLoading
+                            ? root.uiPalette.negative : root.uiPalette.textSecondary
                     }
 
-                    ColumnLayout {
-                        spacing: 8
+                    // Preview, then Apply, the row's main action, at its end.
+                    Row {
+                        id: suggestionActions
+                        objectName: "itunesArtworkResultActions"
+                        x: parent.width - itunesArtworkResultsView.scrollbarLane - root.sideInset - width
+                        y: Math.round((parent.height - height) / 2)
+                        spacing: Kirigami.Units.smallSpacing
 
-                        Button {
+                        ToolButton {
                             id: suggestionPreviewButton
                             objectName: "itunesArtworkPreviewButton"
-                            text: ((modelData && (modelData.assetLoading || false)) || false)
-                                && root.pendingPreviewIndex === index
-                                ? I18n.i18nc("@action:button", "Loading\u2026")
-                                : I18n.i18nc("@action:button", "Preview")
-                            enabled: !((modelData && (modelData.assetLoading || false)) || false)
-                                && !closingState.closing
-                            onClicked: root.requestSuggestionPreview(index)
+                            flat: true
+                            display: AbstractButton.TextBesideIcon
+                            icon.name: "view-preview"
+                            text: I18n.i18nc("@action:button", "Preview")
+                            enabled: !suggestionRow.assetLoading && !closingState.closing
+                            onClicked: root.requestSuggestionPreview(suggestionRow.index)
                         }
 
-                        Button {
+                        ToolButton {
+                            id: suggestionApplyButton
                             objectName: "itunesArtworkApplyButton"
-                            text: ((modelData && (modelData.assetLoading || false)) || false)
-                                && root.pendingApplyIndex === index
-                                ? I18n.i18nc("@action:button", "Loading\u2026")
-                                : I18n.i18nc("@action:button", "Apply")
-                            enabled: !((modelData && (modelData.assetLoading || false)) || false)
-                                && !closingState.closing
-                            onClicked: root.requestSuggestionApply(index)
+                            flat: true
+                            display: AbstractButton.TextBesideIcon
+                            icon.name: "dialog-ok-apply"
+                            text: I18n.i18nc("@action:button", "Apply")
+                            enabled: !suggestionRow.assetLoading && !closingState.closing
+                            onClicked: root.requestSuggestionApply(suggestionRow.index)
                         }
                     }
+
+                    // The hairline to the next row.
+                    Rectangle {
+                        objectName: "itunesArtworkResultHairline"
+                        visible: suggestionRow.index < itunesArtworkResultsView.count - 1
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 1
+                        color: root.uiPalette.hairline
+                    }
+                }
+            }
+
+            // Searching, or nothing found: what the search says, centred in
+            // the frame, as Kirigami's placeholder message shows it, with a
+            // busy indicator while it searches. Built from its parts:
+            // Kirigami.PlaceholderMessage's selectable text brings Copy and
+            // Select All actions that would take Ctrl+C and Ctrl+A from the
+            // Edit menu's.
+            ColumnLayout {
+                objectName: "itunesArtworkPlaceholder"
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 24)
+                spacing: Kirigami.Units.largeSpacing
+                visible: itunesArtworkResultsView.count === 0
+                    && (root.uiBridge.itunesArtworkLoading || placeholderMessage.text.length > 0)
+
+                BusyIndicator {
+                    objectName: "itunesArtworkBusyIndicator"
+                    Layout.alignment: Qt.AlignHCenter
+                    running: root.uiBridge.itunesArtworkLoading
+                    visible: running
+                }
+
+                Kirigami.Icon {
+                    objectName: "itunesArtworkPlaceholderIcon"
+                    Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: Math.round(Kirigami.Units.iconSizes.huge * 1.5)
+                    Layout.preferredHeight: Layout.preferredWidth
+                    visible: !root.uiBridge.itunesArtworkLoading
+                    source: "search"
+                    color: root.uiPalette.text
+                    opacity: 0.75
+                }
+
+                Kirigami.Heading {
+                    id: placeholderMessage
+                    objectName: "itunesArtworkPlaceholderMessage"
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    text: root.uiBridge.itunesArtworkStatusText || ""
+                    type: Kirigami.Heading.Primary
+                    opacity: 0.75
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
                 }
             }
         }
