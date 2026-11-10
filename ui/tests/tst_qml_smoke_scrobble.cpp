@@ -12,6 +12,7 @@ public:
 private slots:
     void scrobbleIndicatorShowsEveryState();
     void scrobbleIndicatorRingMovesBySecondsWhileListening();
+    void scrobbleIndicatorClosesTheRingWithoutAWaitingFrame();
     void scrobbleIndicatorClickAndMenuPauseScrobbling();
     void scrobbleIndicatorHidesWithoutLastFmOrWhenTurnedOff();
     void lastFmPageShowsTheScrobbleProgressSettingWhileConnected();
@@ -291,6 +292,59 @@ void ScrobbleSmokeTest::scrobbleIndicatorRingMovesBySecondsWhileListening() {
     QCOMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
     QCOMPARE(indicator->property("ringProgress").toDouble(), 1.0);
     QVERIFY(indicator->isVisible());
+}
+
+// The snapshots the backend sends as a play reaches its scrobble point,
+// with each property set as BridgeClient sets them: the count of waiting
+// scrobbles, then the play's state. A scrobble on its way doesn't wait, so
+// the ring goes from filling to closed with nothing in between; only a
+// send that fails shows the scrobble waiting.
+void ScrobbleSmokeTest::scrobbleIndicatorClosesTheRingWithoutAWaitingFrame() {
+    struct Snapshot {
+        int pending;
+        int state;
+        int listenedMs;
+        const char *message;
+    };
+    const auto play = [](const QList<Snapshot> &snapshots, QStringList *looks, QString *error) {
+        ScrobbleHarness harness;
+        if (!makeScrobbleHarness(harness, error)) {
+            return false;
+        }
+        QQuickItem *indicator = harness.indicator;
+        QObject *bridge = harness.bridge;
+        const auto set = [&](const char *name, const QVariant &value) {
+            bridge->setProperty(name, value);
+            const QString look = indicator->property("look").toString();
+            if (looks->isEmpty() || looks->constLast() != look) {
+                looks->append(look);
+            }
+        };
+        for (const Snapshot &snapshot : snapshots) {
+            set("lastFmPendingScrobbleCount", snapshot.pending);
+            set("lastFmScrobbleState", snapshot.state);
+            set("lastFmScrobbleListenedMs", snapshot.listenedMs);
+            set("lastFmScrobbleMessage", QString::fromLatin1(snapshot.message));
+        }
+        return true;
+    };
+
+    // Listening, the tick that queues the scrobble, the service taking it
+    // and sending it, and Last.fm's answer.
+    QStringList looks;
+    QString error;
+    QVERIFY2(play({{0, 1, 119000, ""}, {0, 2, 120000, ""}, {0, 2, 120000, ""}, {0, 3, 120000, ""}},
+                  &looks, &error),
+             qPrintable(error));
+    QCOMPARE(looks, (QStringList{QStringLiteral("listening"), QStringLiteral("scrobbled")}));
+
+    // A send that fails leaves it waiting.
+    looks.clear();
+    QVERIFY2(play({{0, 1, 119000, ""}, {0, 2, 120000, ""}, {1, 5, 120000, "offline for testing"}}, &looks,
+                  &error),
+             qPrintable(error));
+    QCOMPARE(looks, (QStringList{QStringLiteral("listening"), QStringLiteral("scrobbled"),
+                                 QStringLiteral("queued")}));
 }
 
 void ScrobbleSmokeTest::scrobbleIndicatorClickAndMenuPauseScrobbling() {

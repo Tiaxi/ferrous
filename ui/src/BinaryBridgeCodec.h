@@ -457,6 +457,8 @@ struct DecodedLastFm {
     bool enabled{false};
     bool buildConfigured{false};
     int authState{0};
+    // The queued scrobbles that wait to be sent: a scrobble on its way to
+    // Last.fm for the first time is not one of them.
     int pendingScrobbleCount{0};
     QString username;
     QString statusText;

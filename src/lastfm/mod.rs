@@ -58,7 +58,12 @@ pub struct RuntimeState {
     pub build_configured: bool,
     pub username: String,
     pub auth_state: AuthState,
+    /// Every queued scrobble, including one on its way to Last.fm.
     pub pending_scrobble_count: usize,
+    /// The queued scrobbles that wait: all but one that is on its way to
+    /// Last.fm for the first time. A scrobble waits once a send of it
+    /// failed or was held back, or when it cannot be sent at once.
+    pub waiting_scrobble_count: usize,
     pub status_text: String,
     pub auth_url: String,
     /// Whether queued scrobbles exist only in memory, because the queue
@@ -570,6 +575,10 @@ struct Service {
     /// is the queue's last entry: entries are only appended, and leave the
     /// queue in order.
     latest_queued: bool,
+    /// Whether the latest scrobble is queued for the flush that follows it
+    /// at once, which can send it: until then it does not wait. Cleared
+    /// when a flush starts.
+    latest_on_first_send: bool,
     /// Whether scrobbling is paused for this run of the app, shared with
     /// the [`Handle`], which sets it; see [`Handle::set_paused`]. Never
     /// saved.
@@ -787,6 +796,7 @@ impl Service {
             pending_auth: None,
             problems: Vec::new(),
             latest_queued: false,
+            latest_on_first_send: false,
             paused: Arc::new(AtomicBool::new(false)),
             state: RuntimeState {
                 enabled: options.initial_enabled,
@@ -845,6 +855,10 @@ impl Service {
     fn published_state(&self) -> RuntimeState {
         let mut state = self.state.clone();
         state.pending_scrobble_count = self.queue.len();
+        state.waiting_scrobble_count = self
+            .queue
+            .len()
+            .saturating_sub(usize::from(self.latest_queued && self.latest_on_first_send));
         state.status_text = [
             self.queue_load_notice.as_deref(),
             self.queue_save_error.as_deref(),
@@ -924,6 +938,9 @@ impl Service {
             message: String::new(),
         });
         self.latest_queued = true;
+        // A flush follows at once; whether it can send the scrobble is
+        // known now.
+        self.latest_on_first_send = !self.holding() && self.can_send();
     }
 
     /// Records what became of the latest scrobble, if it is still queued,
@@ -1154,12 +1171,24 @@ impl Service {
         self.paused.load(Ordering::SeqCst)
     }
 
+    /// Whether a flush can send what is queued, a wait Last.fm asked for
+    /// aside.
+    fn can_send(&self) -> bool {
+        self.state.enabled
+            && !self.is_paused()
+            && self.network_allowed
+            && self.credentials.is_some()
+            && self.session.is_some()
+    }
+
     /// Submits queued scrobbles in batches. Stops at the first batch that
     /// fails and keeps it queued; only entries that Last.fm accepted or
     /// ignored for good leave the queue. Transient failures schedule a retry.
     /// Between batches, commands that are waiting go first; the flush then
     /// resumes.
     fn flush_queue(&mut self) {
+        // Whatever this flush leaves queued waits.
+        self.latest_on_first_send = false;
         if self.holding() {
             // What is queued waits for the end of the wait Last.fm asked
             // for, when the service loop flushes again.
@@ -1172,8 +1201,7 @@ impl Service {
             return;
         }
         self.retry_due = None;
-        if !self.state.enabled || self.is_paused() || !self.network_allowed || self.queue.is_empty()
-        {
+        if !self.can_send() || self.queue.is_empty() {
             return;
         }
         let (Some(credentials), Some(session)) = (self.credentials.clone(), self.session.clone())
@@ -2739,6 +2767,132 @@ mod tests {
         service.handle_command(Command::SendNowPlaying(now_playing_track()));
         assert_eq!(transport.requests().len(), 1);
         assert_eq!(service.queue, entries(0..2));
+    }
+
+    /// Runs `commands` through the service loop, as the app sends them,
+    /// and returns every state it published after the session loaded.
+    fn states_for(service: Service, commands: Vec<Command>) -> Vec<RuntimeState> {
+        let (cmd_tx, cmd_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        for command in commands {
+            cmd_tx.send(command).expect("queue command");
+        }
+        drop(cmd_tx);
+        run_service_loop(&cmd_rx, &event_tx, service);
+        event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::State(state) => Some(state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The published states' (pending, waiting, the latest's delivery).
+    fn queue_counts(states: &[RuntimeState]) -> Vec<(usize, usize, Option<ScrobbleDelivery>)> {
+        states
+            .iter()
+            .map(|state| {
+                (
+                    state.pending_scrobble_count,
+                    state.waiting_scrobble_count,
+                    state.latest_scrobble.as_ref().map(|latest| latest.delivery),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_scrobble_on_its_first_send_does_not_wait() {
+        let transport = ScriptedTransport::with_replies([accepted_reply(1)]);
+        let service = connected_service(&transport, None, Vec::new());
+
+        let states = states_for(service, vec![Command::QueueScrobble(entry(0))]);
+
+        // Queued and on its way, then accepted: it never waits.
+        assert_eq!(
+            queue_counts(&states),
+            vec![
+                (0, 0, None),
+                (1, 0, Some(ScrobbleDelivery::Pending)),
+                (0, 0, Some(ScrobbleDelivery::Accepted)),
+            ]
+        );
+        assert_eq!(scrobble_requests(&transport).len(), 1);
+    }
+
+    #[test]
+    fn a_scrobble_waits_once_its_send_fails() {
+        let transport = ScriptedTransport::with_replies([Err("connection reset".to_string())]);
+        let service = connected_service(&transport, None, Vec::new());
+
+        let states = states_for(service, vec![Command::QueueScrobble(entry(0))]);
+
+        assert_eq!(
+            queue_counts(&states),
+            vec![
+                (0, 0, None),
+                (1, 0, Some(ScrobbleDelivery::Pending)),
+                (1, 1, Some(ScrobbleDelivery::Waiting)),
+            ]
+        );
+    }
+
+    #[test]
+    fn scrobbles_that_wait_still_wait_while_a_new_one_is_sent() {
+        // Two left by a failed send, retried with the new one.
+        let transport = ScriptedTransport::with_replies([accepted_reply(3)]);
+        let service = connected_service(&transport, None, entries(0..2));
+
+        let states = states_for(service, vec![Command::QueueScrobble(entry(2))]);
+
+        assert_eq!(
+            queue_counts(&states),
+            vec![
+                (2, 2, None),
+                (3, 2, Some(ScrobbleDelivery::Pending)),
+                (0, 0, Some(ScrobbleDelivery::Accepted)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_scrobble_that_cannot_be_sent_at_once_waits_from_the_start() {
+        // Last.fm asked for a wait after a now-playing update.
+        let transport = ScriptedTransport::with_replies([reply_retry_after(
+            503,
+            r#"{"error":16,"message":"Temporary error"}"#,
+            600,
+        )]);
+        let mut service = connected_service(&transport, None, Vec::new());
+        service.handle_command(Command::SendNowPlaying(now_playing_track()));
+
+        let states = states_for(service, vec![Command::QueueScrobble(entry(0))]);
+
+        assert_eq!(
+            queue_counts(&states),
+            vec![
+                (0, 0, None),
+                (1, 1, Some(ScrobbleDelivery::Pending)),
+                (1, 1, Some(ScrobbleDelivery::Waiting)),
+            ]
+        );
+        assert!(scrobble_requests(&transport).is_empty());
+
+        // Paused, too.
+        let transport = ScriptedTransport::default();
+        let service = connected_service(&transport, None, Vec::new());
+        service.paused.store(true, Ordering::SeqCst);
+        let states = states_for(service, vec![Command::QueueScrobble(entry(0))]);
+        assert_eq!(
+            queue_counts(&states),
+            vec![
+                (0, 0, None),
+                (1, 1, Some(ScrobbleDelivery::Pending)),
+                (1, 1, Some(ScrobbleDelivery::Pending)),
+            ]
+        );
+        assert!(transport.requests().is_empty());
     }
 
     #[test]

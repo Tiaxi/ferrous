@@ -21,8 +21,12 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   scrobbled", the empty ring and the glyph in the tertiary colour; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Scrobbled, or being sent: the ring closed, in the link colour.
-// - Queued: "3 scrobbles waiting" and the offline glyph.
+// - Scrobbled, or being sent: the ring closed, in the link colour, from
+//   the moment the play reaches its scrobble point; the send goes on in
+//   the background.
+// - Queued: "3 scrobbles waiting" and the offline glyph, only while
+//   scrobbles stay queued: after a send failed, or while Last.fm holds
+//   them back.
 // - Failed: "Scrobble failed" and the glyph in the negative colour.
 // - Paused by the user: the glyph struck through, in the tertiary colour,
 //   without the ring.
@@ -61,7 +65,10 @@ AbstractButton {
         if (root.scrobbleState === 4) {
             return "failed"
         }
-        // Scrobbles wait while Last.fm can't be reached.
+        // Scrobbles wait while Last.fm can't be reached, or holds them
+        // back. A scrobble on its way for the first time doesn't wait: the
+        // ring closes at once, and the slot says it waits only if the send
+        // fails.
         if (root.pendingCount > 0) {
             return "queued"
         }

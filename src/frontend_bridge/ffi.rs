@@ -3198,7 +3198,8 @@ fn encode_lastfm_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
     push_u8(&mut out, u8::from(snapshot.lastfm.enabled));
     push_u8(&mut out, u8::from(snapshot.lastfm.build_configured));
     push_u8(&mut out, auth_state);
-    push_u32(&mut out, clamp_u32(snapshot.lastfm.pending_scrobble_count));
+    // The UI shows only the scrobbles that wait, not one on its way.
+    push_u32(&mut out, clamp_u32(snapshot.lastfm.waiting_scrobble_count));
     push_string(&mut out, &snapshot.lastfm.username);
     push_string(&mut out, &snapshot.lastfm.status_text);
     push_string(&mut out, &snapshot.lastfm.auth_url);
@@ -3782,7 +3783,8 @@ mod tests {
                 build_configured: true,
                 username: "tester".to_string(),
                 auth_state: crate::lastfm::AuthState::Connected,
-                pending_scrobble_count: 2,
+                pending_scrobble_count: 3,
+                waiting_scrobble_count: 2,
                 status_text: "Connected".to_string(),
                 auth_url: String::new(),
                 ..crate::lastfm::RuntimeState::default()
@@ -5803,6 +5805,7 @@ mod tests {
         lastfm_offset += 1;
         assert_eq!(lastfm[lastfm_offset], 2);
         lastfm_offset += 1;
+        // The scrobbles that wait, not every queued one.
         assert_eq!(read_u32(&lastfm, &mut lastfm_offset), 2);
         assert_eq!(read_string(&lastfm, &mut lastfm_offset), "tester");
         assert_eq!(read_string(&lastfm, &mut lastfm_offset), "Connected");
