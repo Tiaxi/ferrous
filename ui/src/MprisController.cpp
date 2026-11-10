@@ -694,7 +694,12 @@ void MprisController::rebuildMetadata() {
     m_trackIdPath = trackIdPathFor(exportedPath);
     if (exportsPlayingTrack) {
         m_metadataLengthUs = currentLengthUs();
-        m_artUrl = currentArtUrl();
+        // The bridge keeps the track before's cover until the playing
+        // track's is known, also after its text is: until then the
+        // exported track has no art.
+        const bool coverIsExportedTracks = m_bridge != nullptr
+            && m_bridge->currentTrackCoverTrackPath().trimmed() == exportedPath;
+        m_artUrl = coverIsExportedTracks ? currentArtUrl() : QString{};
     } else {
         // A track before that this controller did not export: of it, only
         // its text is known.
