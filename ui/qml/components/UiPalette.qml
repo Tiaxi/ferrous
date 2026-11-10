@@ -32,14 +32,14 @@ QtObject {
     // (7.1:1 on view).
     readonly property color textSecondary: ColorUtils.mixColor(
         root._inactiveText, root.text, root.themeIsDark ? 0.15 : 0.41)
-    // Counts, years and track numbers. #8f959a (6.0:1 on view, 4.6:1 on a
-    // hovered row) / #5b6570 (5.9:1 on view, darkened from the mix to be
-    // 4.5:1 on a hovered row).
+    // Counts, years and track numbers. #91989f / #59626d: lightened or
+    // darkened from the mix to be 4.6:1 on a hovered row, a margin over
+    // 4.5:1 that rendering cannot round away (6.2:1 on view in both).
     // On a selected row, use textTertiaryOn(true): it is 3.7:1 on the
     // focused tint.
     readonly property color textTertiary: root.readableOn(root.themeIsDark
         ? ColorUtils.mixColor(root._inactiveText, root.view, 0.134)
-        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185), [root.view, root.hoveredRow], 4.5)
+        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185), [root.view, root.hoveredRow], 4.6)
     // The artist and album cells of the queue. #c2c2c3 / #5a5c5e.
     readonly property color textColumn: ColorUtils.mixColor(root.text, root.view, 0.25)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
