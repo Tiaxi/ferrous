@@ -682,35 +682,78 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     QCOMPARE(colorOf(title(track)), tokenHex(window, "text"));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // A collapsed album that holds the playing track: the amber glyph at
-    // 60% in the column left of its chevron. Its title stays un-amber.
+    // The playing track's own row has no tick.
+    QVERIFY(!shown(itemNamed(track, QStringLiteral("libraryRowNowTick"))));
+    // Expanded rows neither.
+    QVERIFY(!shown(itemNamed(libraryRow(window, QStringLiteral("album")), QStringLiteral("libraryRowNowTick"))));
+
+    // A collapsed album that holds the playing track: no glyph, but a
+    // 2 x 12 px amber tick at the row's left edge, vertically centred,
+    // clear of its chevron, so it never reads as a second one. Its title
+    // stays un-amber.
+    const auto tick = [](QQuickItem *row) { return itemNamed(row, QStringLiteral("libraryRowNowTick")); };
+    const auto checkTick = [&](QQuickItem *row) {
+        QQuickItem *mark = tick(row);
+        QVERIFY(shown(mark));
+        QCOMPARE(colorOf(mark), tokenHex(window, "now"));
+        QCOMPARE(mark->opacity(), 1.0);
+        QCOMPARE(mark->width(), 2.0);
+        QCOMPARE(mark->height(), 12.0);
+        const QRectF markRect = mark->mapRectToItem(row, QRectF(0, 0, mark->width(), mark->height()));
+        QCOMPARE(markRect.left(), 0.0);
+        QVERIFY(std::abs(markRect.center().y() - row->height() / 2) <= 0.5);
+        QQuickItem *chevron = itemNamed(row, QStringLiteral("libraryRowChevron"));
+        QVERIFY(shown(chevron));
+        const QRectF chevronRect =
+            chevron->mapRectToItem(row, QRectF(0, 0, chevron->width(), chevron->height()));
+        // Apart from the chevron by more than a glyph's gap.
+        QVERIFY2(chevronRect.left() - markRect.right() >= 8.0,
+                 qPrintable(QStringLiteral("tick ends at %1, chevron starts at %2")
+                                .arg(markRect.right())
+                                .arg(chevronRect.left())));
+    };
     libraryModel.toggleKey(QStringLiteral("album|Artist A|Album A"));
     QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
     QQuickItem *album = libraryRow(window, QStringLiteral("album"));
     QVERIFY(album != nullptr);
-    QTRY_COMPARE(glyphName(album), QStringLiteral("media-playback-start"));
-    QCOMPARE(colorOf(glyph(album)), tokenHex(window, "now"));
-    QCOMPARE(glyph(album)->opacity(), 0.6);
-    QCOMPARE(glyph(album)->mapToItem(album, QPointF()).x(), 12.0 + 2.0);
+    QTRY_VERIFY(shown(tick(album)));
+    checkTick(album);
+    QCOMPARE(glyphName(album), QString());
     QCOMPARE(colorOf(title(album)), tokenHex(window, "text"));
     QCOMPARE(title(album)->property("font").value<QFont>().weight(), QFont::Normal);
-    // So does a collapsed artist.
+    // On a hovered and a selected row too, in a colour apart from their tints.
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 1)));
+    named(window, "libraryView")->forceActiveFocus();
+    QTest::mouseMove(window, sceneRect(album).center().toPoint());
+    QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundHover"))));
+    QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundTint"))));
+    checkTick(album);
+    // Drawn over both tints.
+    const QList<QQuickItem *> children = album->childItems();
+    QVERIFY(children.indexOf(tick(album)) > children.indexOf(itemNamed(album, QStringLiteral("rowBackgroundTint"))->parentItem()));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QVERIFY(QMetaObject::invokeMethod(controller, "clearPrimarySelection"));
+    libraryModel.clearSelection();
+    // So does a collapsed artist, where the chevron is nearest the edge.
     libraryModel.collapseAll();
     QTRY_VERIFY(libraryRow(window, QStringLiteral("album")) == nullptr);
     QQuickItem *artist = libraryRow(window, QStringLiteral("artist"));
     QVERIFY(artist != nullptr);
-    QTRY_COMPARE(glyphName(artist), QStringLiteral("media-playback-start"));
-    QCOMPARE(glyph(artist)->opacity(), 0.6);
-    // Paused, the pause glyph; stopped, nothing: amber means now.
+    QTRY_VERIFY(shown(tick(artist)));
+    checkTick(artist);
+    QCOMPARE(glyphName(artist), QString());
+    // Paused too; stopped, nothing: amber means now.
     bridge->setProperty("playbackState", QStringLiteral("Paused"));
-    QTRY_COMPARE(glyphName(artist), QStringLiteral("media-playback-pause"));
+    QVERIFY(shown(tick(artist)));
     bridge->setProperty("playbackState", QStringLiteral("Stopped"));
-    QTRY_COMPARE(glyphName(artist), QString());
+    QTRY_VERIFY(!shown(tick(artist)));
     // Another track, in other rows: nothing.
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(shown(tick(artist)));
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist B/Album/01.flac"));
     bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("artist|Artist B")});
-    QTRY_COMPARE(glyphName(artist), QString());
+    QTRY_VERIFY(!shown(tick(artist)));
 }
 
 void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath() {
@@ -723,8 +766,8 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     const auto artistMark = [&]() {
         QQuickItem *artist = libraryRow(window, QStringLiteral("artist"));
-        QQuickItem *glyph = artist != nullptr ? itemNamed(artist, QStringLiteral("libraryRowState")) : nullptr;
-        return shown(glyph) ? glyph->property("source").toString() : QString();
+        QQuickItem *tick = artist != nullptr ? itemNamed(artist, QStringLiteral("libraryRowNowTick")) : nullptr;
+        return shown(tick);
     };
     // One artist gathers a loose file right in the library folder, tagged
     // with its name, and an album track in its own folder. Its row has the
@@ -737,16 +780,16 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
         // The loose file.
         bridge->setProperty("currentTrackPath", QStringLiteral("/music/single.flac"));
         bridge->setProperty("currentTrackTreeKeys", QStringList{QStringLiteral("root|/music"), kArtistKey});
-        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        QTRY_VERIFY(artistMark());
         // The album track.
         bridge->setProperty("currentTrackPath", kTrackPath);
         bridge->setProperty("currentTrackTreeKeys",
                             QStringList{QStringLiteral("root|/music"), kArtistKey, kAlbumKey});
-        QTRY_COMPARE(artistMark(), QStringLiteral("media-playback-start"));
+        QTRY_VERIFY(artistMark());
         // A track the library does not have: no rows hold it.
         bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/elsewhere.flac"));
         bridge->setProperty("currentTrackTreeKeys", QStringList{});
-        QTRY_COMPARE(artistMark(), QString());
+        QTRY_VERIFY(!artistMark());
     }
 }
 
