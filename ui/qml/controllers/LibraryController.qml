@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import QtQuick 2.15
+import "../logic/ListRows.js" as ListRows
 
 QtObject {
     id: root
@@ -19,6 +20,14 @@ QtObject {
     property string selectedTrackPath: ""
     property string selectedOpenPath: ""
     property var selectedPlayPaths: []
+    // The row the keyboard is on while no row is selected, which the list
+    // rings and the keys move on from: the tree picks one as it gains focus
+    // (see ensureCurrentRow), and a row that loses its selection stays it.
+    property string focusSelectionKey: ""
+    // The row the keyboard is on: the selected row, otherwise that one.
+    readonly property string currentRowKey: root.selectedSelectionKey.length > 0
+        ? root.selectedSelectionKey
+        : root.focusSelectionKey
     property int lastAppliedVersion: -1
     property int pendingVersion: -1
     property bool hasReceivedTreeFrame: false
@@ -228,6 +237,9 @@ QtObject {
     }
 
     function clearPrimarySelection() {
+        if (root.selectedSelectionKey.length > 0) {
+            root.focusSelectionKey = root.selectedSelectionKey
+        }
         root.selectedSelectionKey = ""
         root.selectedSourceIndex = -1
         root.selectedRowType = ""
@@ -561,6 +573,12 @@ QtObject {
                 return selectedIndex
             }
         }
+        if (root.focusSelectionKey.length > 0) {
+            const focusIndex = root.libraryModel.indexForSelectionKey(root.focusSelectionKey)
+            if (focusIndex >= 0) {
+                return focusIndex
+            }
+        }
         if (root.libraryModel.count > 0) {
             return 0
         }
@@ -578,6 +596,56 @@ QtObject {
         root.setSingleSelection(index, rowMap)
         root.scrollSelectionKeyIntoView(rowMap.selectionKey || "")
         return true
+    }
+
+    // As the tree gains the keyboard with no row selected, a row it shows
+    // becomes the current one, so its ring shows where the keyboard is: the
+    // playing track's row, or the closest collapsed row that holds it,
+    // otherwise the first row. The selection stays as it is, and the view
+    // does not move: the row is one it shows.
+    function ensureCurrentRow() {
+        if (!root.view || root.selectedSelectionKey.length > 0) {
+            return
+        }
+        const range = ListRows.shownRange(root.view)
+        if (range.first < 0) {
+            return
+        }
+        const focusIndex = root.focusSelectionKey.length > 0
+            ? root.libraryModel.indexForSelectionKey(root.focusSelectionKey)
+            : -1
+        if (focusIndex >= range.first && focusIndex <= range.last) {
+            return
+        }
+        let current = ""
+        const path = root.uiBridge.currentTrackPath || ""
+        const keys = root.uiBridge.currentTrackTreeKeys || []
+        const playing = path.length > 0 && (root.uiBridge.playbackState || "Stopped") !== "Stopped"
+        for (let i = range.first; i <= range.last; ++i) {
+            const row = root.libraryModel.rowDataForRow(i)
+            const key = row.selectionKey || ""
+            if (key.length === 0) {
+                continue
+            }
+            if (current.length === 0) {
+                current = key
+            }
+            // The rows that hold the track come before it, outer ones
+            // first: the last one shown is the closest.
+            if (playing && ((row.rowType === "track" && row.trackPath === path)
+                            || keys.indexOf(row.key || "") >= 0)) {
+                current = key
+            }
+        }
+        root.focusSelectionKey = current
+    }
+
+    // A click on a row's chevron, with no row selected, makes it the
+    // current row.
+    function focusRow(selectionKey) {
+        if (root.selectedSelectionKey.length === 0 && (selectionKey || "").length > 0) {
+            root.focusSelectionKey = selectionKey
+        }
     }
 
     function scrollSelectionKeyIntoView(selectionKey) {

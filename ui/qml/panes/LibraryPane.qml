@@ -208,6 +208,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(libraryAlbumView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (libraryAlbumView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
                 onContentYChanged: root.controller.scheduleLibraryViewStatePersist()
 
                 onContentHeightChanged: {
@@ -295,7 +301,7 @@ Rectangle {
                     // The row the keyboard is on, in a list with focus.
                     readonly property bool rowCurrent: libraryAlbumView.activeFocus
                         && selectionKeyResolved.length > 0
-                        && selectionKeyResolved === root.controller.selectedSelectionKey
+                        && selectionKeyResolved === root.controller.currentRowKey
                     readonly property string rowKindText: isTrackRow
                         ? I18n.i18nc("@info library row kind", "Track")
                         : (isAlbumRow
@@ -587,6 +593,7 @@ Rectangle {
                             libraryAlbumView.forceActiveFocus()
                             const rowMap = libraryRow.actionRowMap()
                             if (mouse.button === Qt.LeftButton && onChevron(mouse.x)) {
+                                root.controller.focusRow(libraryRow.selectionKeyResolved)
                                 root.controller.toggleNode(key)
                                 return
                             }

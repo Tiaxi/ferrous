@@ -633,6 +633,12 @@ Rectangle {
                 }
 
                 Component.onCompleted: root.controller.registerView(playlistView)
+                // The keyboard comes in: a row shows where it is.
+                onActiveFocusChanged: {
+                    if (playlistView.activeFocus) {
+                        root.controller.ensureCurrentRow()
+                    }
+                }
 
                 // The row being dragged, which Escape stops.
                 property var draggingRow: null

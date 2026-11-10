@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFont>
 #include <QImage>
+#include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QQmlApplicationEngine>
@@ -293,6 +294,7 @@ private slots:
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void listsRingARowAsTheKeyboardComesIn();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
@@ -806,6 +808,130 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// Tab into the library or the queue with no row selected: a row it shows
+// becomes the current one and has the 1 px ring, so the keyboard's place
+// shows. Nothing is selected and the view stays where it is.
+void UiMainWindowTest::listsRingARowAsTheKeyboardComesIn() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, kAllExpanded);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) != nullptr);
+    QQuickItem *libraryView = named(window, "libraryView");
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *library = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(libraryView && queueView && library && queue);
+    const auto rowAt = [](QQuickItem *view, int index) {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        return row;
+    };
+    // Whether row `index` of `view` has the ring alone: no selection tint.
+    const auto ringedAlone = [&rowAt](QQuickItem *view, int index) {
+        QQuickItem *row = rowAt(view, index);
+        QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+        return shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() == 1.0
+            && tint->property("color").value<QColor>().alpha() == 0;
+    };
+    const auto ringedRows = [&rowAt](QQuickItem *view) {
+        QList<int> rows;
+        for (int index = 0; index < view->property("count").toInt(); ++index) {
+            QQuickItem *row = rowAt(view, index);
+            QQuickItem *tint = row != nullptr ? itemNamed(row, QStringLiteral("rowBackgroundTint")) : nullptr;
+            if (shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() > 0) {
+                rows.push_back(index);
+            }
+        }
+        return rows;
+    };
+    const auto tabInto = [window](QQuickItem *view) {
+        named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(!view->hasActiveFocus());
+        view->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(view->hasActiveFocus());
+    };
+
+    // The library: its first row, with nothing selected.
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{0});
+    QVERIFY(ringedAlone(libraryView, 0));
+    QCOMPARE(library->property("selectedSelectionKey").toString(), QString());
+    QCOMPARE(libraryModel.selectedKeys(), QStringList());
+    // The keys go on from it: Down selects the next row.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(library->property("selectedSelectionKey").toString(),
+                 rowAt(libraryView, 1)->property("selectionKeyResolved").toString());
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QVERIFY(!ringedAlone(libraryView, 1));
+    // Deselected, the row stays the current one.
+    QVERIFY(QMetaObject::invokeMethod(library, "clearPrimarySelection"));
+    libraryModel.clearSelection();
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QVERIFY(ringedAlone(libraryView, 1));
+
+    // Playing, a fresh tree rings the playing track's row,
+    playTrack(bridge);
+    library->setProperty("focusSelectionKey", QString());
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{2});
+    QVERIFY(ringedAlone(libraryView, 2));
+    // or the collapsed row that holds it.
+    library->setProperty("focusSelectionKey", QString());
+    libraryModel.toggleKey(kAlbumKey);
+    QTRY_VERIFY(libraryRow(window, QStringLiteral("track")) == nullptr);
+    tabInto(libraryView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{1});
+    QCOMPARE(libraryModel.selectedKeys(), QStringList());
+    // Without the keyboard, no ring.
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(libraryView), QList<int>{});
+
+    // The queue, scrolled down: its first row shown, and it stays put.
+    bridge->setProperty("queueRows", sampleQueueRows(80));
+    bridge->setProperty("queueLength", 80);
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueView->property("count").toInt(), 80);
+    const qreal rowHeight = queueView->property("rowHeight").toReal();
+    QVERIFY(rowHeight > 0);
+    named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+    queueView->setProperty("contentY", 10 * rowHeight);
+    QTRY_VERIFY(rowAt(queueView, 10) != nullptr);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{10});
+    QVERIFY(ringedAlone(queueView, 10));
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    QCOMPARE(queue->property("selectedIndices").toList().size(), 0);
+    // Enter plays the ringed row.
+    QJSValue played = engine.newObject();
+    queue->setProperty("playAt", QVariant::fromValue(
+        engine.evaluate(QStringLiteral("(function(played) { return function(index) { played.index = index } })"))
+            .call({played})));
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE(played.property(QStringLiteral("index")).toInt(), 10);
+    // The playing row, when it shows,
+    bridge->setProperty("playingQueueIndex", 14);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    queue->setProperty("focusRowIndex", -1);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{14});
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    // but not one off the view: the queue does not move to it.
+    bridge->setProperty("playingQueueIndex", 2);
+    queue->setProperty("focusRowIndex", -1);
+    tabInto(queueView);
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{10});
+    QCOMPARE(queueView->property("contentY").toReal(), 10 * rowHeight);
+    QCOMPARE(queue->property("selectedIndices").toList().size(), 0);
+    // Down goes on from it, selecting the next row.
+    QTest::keyClick(window, Qt::Key_Down);
+    QTRY_COMPARE(queue->property("selectedIndices").toList(), QVariantList{11});
+    QTRY_COMPARE(ringedRows(queueView), QList<int>{11});
 }
 
 void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
