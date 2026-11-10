@@ -342,8 +342,8 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"view", QStringLiteral("#141618"), QStringLiteral("#ffffff")},
         {"text", QStringLiteral("#fcfcfc"), QStringLiteral("#232629")},
         {"textSecondary", QStringLiteral("#aeb7bd"), QStringLiteral("#4f5a63")},
-        // Light: darkened from the mix to be 4.5:1 on a hovered row.
-        {"textTertiary", QStringLiteral("#8f959a"), QStringLiteral("#5b6570")},
+        // Lightened or darkened from the mix to be 4.6:1 on a hovered row.
+        {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
         {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#5a5c5e")},
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
@@ -405,8 +405,8 @@ void UiFoundationsTest::tokensMeetTheirContrast_data() {
     QTest::addColumn<bool>("secondaryOnChrome");
     QTest::addColumn<double>("tertiaryRatio");
     // The ratios the design lists, on the backgrounds it measured them on.
-    QTest::newRow("breeze dark") << true << 7.75 << true << 6.0;
-    QTest::newRow("breeze light") << false << 7.1 << false << 5.9;
+    QTest::newRow("breeze dark") << true << 7.75 << true << 6.2;
+    QTest::newRow("breeze light") << false << 7.1 << false << 6.2;
 }
 
 // Text is at least 4.5:1 and graphics 3:1 wherever the design puts them.
@@ -460,7 +460,10 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("secondary on the selection"), secondary, selection, 4.5},
         {QStringLiteral("secondary on the inactive selection"), secondary, selectionInactive, 4.5},
         {QStringLiteral("tertiary on chrome"), tertiary, chrome, 4.5},
-        {QStringLiteral("tertiary on a hovered row"), tertiary, hovered, 4.5},
+        // A margin over 4.5:1 on the view and a hovered row, so rendering
+        // cannot tip the row numbers under it.
+        {QStringLiteral("tertiary on view"), tertiary, view, 4.6},
+        {QStringLiteral("tertiary on a hovered row"), tertiary, hovered, 4.6},
         {QStringLiteral("column text on view"), colorOf(tokens, "textColumn"), view, 4.5},
         {QStringLiteral("column text on the selection"), colorOf(tokens, "textColumn"), selection, 4.5},
         {QStringLiteral("text on the selection"), colorOf(tokens, "text"), selection, 4.5},

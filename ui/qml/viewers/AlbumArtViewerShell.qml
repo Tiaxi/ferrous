@@ -57,6 +57,9 @@ Item {
     // art's top edge while it shows; none while it is turned off.
     readonly property real stripHeight: root.fullscreenWindow && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
+    // How far down the controls' plate in the main window reaches, from the
+    // top of the art: its margin and its height, which follows the font.
+    readonly property real popupControlsBottom: albumArtPopupControls.y + albumArtPopupControls.height
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
 
@@ -267,6 +270,7 @@ Item {
         // once, rather than by the plate's Row, which would wait for the
         // next frame.
         Item {
+            id: albumArtPopupControls
             objectName: "albumArtPopupControls"
             z: 20
             anchors.top: parent.top

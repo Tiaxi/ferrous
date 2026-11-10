@@ -12,8 +12,9 @@ import "../logic/PathUtils.js" as PathUtils
 import "../logic/WheelUtils.js" as WheelUtils
 
 // The album art viewer's view: the art on the view colour, fitted, zoomed
-// and panned; while `infoVisible`, a column of the image's details, 280 px
-// with its 1 px seam, over its right edge. The details lie over the art and
+// and panned; while `infoVisible`, a column of the image's details, about
+// 40 characters wide, 280 px with its 1 px seam at the default font, over
+// its right edge. The details lie over the art and
 // take nothing from its view, so the art keeps its place, zoom and pan.
 // During a preview from Replace from iTunes, the details go on with what the
 // preview shows and its buttons, as a dialog's: Back to Results and, for a
@@ -368,23 +369,26 @@ Item {
     // size; the folder on its own line, then its path, elided in the
     // middle, with Copy Path. The rows' labels share a column as wide as the
     // widest of them, up to two fifths of the row, so every value starts at
-    // the same x and keeps the rest; a label wider than that wraps.
-    // During a preview, the column is about 40 characters wide, 280 px with
-    // the default font, or wider for its buttons, up to half the view: in
-    // a narrower view, the buttons stack, so neither is cut short.
+    // the same x and keeps the rest; a label wider than that wraps between
+    // its words, and the column is never narrower than its widest word.
+    // The column is about 40 characters wide, 280 px with its seam at the
+    // default font, up to two fifths of the view, and never under 280 px.
+    // During a preview, it is wider for its buttons if they need it, up to
+    // half the view: in a narrower view, the buttons stack, so neither is
+    // cut short.
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
-        readonly property real previewWidth: Math.max(279, Math.ceil(infoFontMetrics.averageCharacterWidth * 40) - 1)
+        readonly property real fortyCharacters: Math.max(279, Math.ceil(infoFontMetrics.averageCharacterWidth * 40) - 1)
         visible: root.infoVisible
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: root.previewActive
-            ? Math.max(279, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.previewWidth,
+            ? Math.max(279, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.fortyCharacters,
                 Math.ceil(Math.max(previewBackButton.implicitWidth,
                     previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 32)))
-            : 279
+            : Math.max(279, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         FontMetrics {
             id: infoFontMetrics
@@ -433,8 +437,8 @@ Item {
                 elide: Text.ElideRight
             }
 
-            readonly property real labelColumnWidth: Math.min(Math.ceil(infoRows.widestLabel),
-                                                              Math.floor(infoLayout.width * 0.4))
+            readonly property real labelColumnWidth: Math.max(Math.ceil(infoRows.widestWord),
+                Math.min(Math.ceil(infoRows.widestLabel), Math.floor(infoLayout.width * 0.4)))
 
             // During a preview, a step larger than the details: 12 pt with
             // the default 10 pt font.
@@ -468,6 +472,18 @@ Item {
                     }
                     return widest
                 }
+                // The widest single word of any label: a label wraps only
+                // between its words.
+                readonly property real widestWord: {
+                    let widest = 0
+                    for (let i = 0; i < infoRows.count; ++i) {
+                        const row = infoRows.itemAt(i)
+                        if (row) {
+                            widest = Math.max(widest, row.labelWidestWord)
+                        }
+                    }
+                    return widest
+                }
                 model: [
                     { name: I18n.i18nc("@label image width and height", "Dimensions"),
                       value: root.fileInfo && root.fileInfo.width > 0 && root.fileInfo.height > 0
@@ -490,6 +506,13 @@ Item {
                 delegate: RowLayout {
                     required property var modelData
                     readonly property real labelImplicitWidth: infoLabel.implicitWidth
+                    readonly property real labelWidestWord: {
+                        let widest = 0
+                        for (const word of infoLabel.text.split(/\s+/)) {
+                            widest = Math.max(widest, labelMetrics.advanceWidth(word))
+                        }
+                        return widest
+                    }
                     objectName: "albumArtInfoRow"
                     Layout.fillWidth: true
                     Layout.topMargin: 5
@@ -507,7 +530,12 @@ Item {
                         Layout.alignment: Qt.AlignTop
                         text: modelData.name
                         color: root.uiPalette.textSecondary
-                        wrapMode: Text.Wrap
+                        wrapMode: Text.WordWrap
+
+                        FontMetrics {
+                            id: labelMetrics
+                            font: infoLabel.font
+                        }
                     }
 
                     Label {

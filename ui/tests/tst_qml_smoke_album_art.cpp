@@ -5,6 +5,7 @@
 #include <QFontMetricsF>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QTextOption>
 #include <cmath>
 
 // The album art viewer: its zoom and details, and the iTunes artwork
@@ -736,8 +737,11 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
     // The rows' labels share a column as wide as the widest of them in the
     // current font, so none is cut short: at 14 pt, "Dimensions" is wider
     // than the 76 px the column once had. Past two fifths of the row, a
-    // label wraps, as at 24 pt, and the values keep the rest. Every row's
-    // value starts at the same x, and all stay within the column's margins.
+    // label wraps between its words, never inside one: at 24 pt, the
+    // details' column was a fixed 279 px, and "Dimensions" broke into
+    // "Dime" and "nsions". The column is about 40 characters wide, up to
+    // two fifths of the view, so it grows with the font. Every row's value
+    // starts at the same x, and all stay within the column's margins.
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QTemporaryDir dir;
@@ -773,6 +777,17 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
         });
         QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
         QVERIFY2(column != nullptr, at.constData());
+        // About 40 characters, 279 px and its seam at the default font, up
+        // to two fifths of the view.
+        const qreal fortyCharacters = std::ceil(
+            QFontMetricsF(qvariant_cast<QFont>(palette->property("baseFont"))).averageCharWidth() * 40) - 1;
+        const qreal columnWidth = qMax(279.0, qMin(std::floor(window->width() * 0.4), fortyCharacters));
+        QTRY_COMPARE(column->width(), columnWidth);
+        if (pointSize == 0.0) {
+            QCOMPARE(column->width(), 279.0);
+        } else if (pointSize >= 24.0) {
+            QVERIFY2(column->width() > 279.0, at.constData());
+        }
         QTRY_COMPARE(visibleItemsNamed(column, QStringLiteral("albumArtInfoRow")).size(), 4);
         const QList<QQuickItem *> rows = visibleItemsNamed(column, QStringLiteral("albumArtInfoRow"));
         // Once laid out, each row is the column's width inside its margins.
@@ -783,6 +798,18 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
         QList<QQuickItem *> labels;
         QList<QQuickItem *> values;
         qreal widest = 0;
+        qreal widestWord = 0;
+        const auto wordsOf = [](QQuickItem *label) {
+            return label->property("text").toString().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        };
+        const auto widestWordOf = [&wordsOf](QQuickItem *label) {
+            const QFontMetricsF metrics(qvariant_cast<QFont>(label->property("font")));
+            qreal wordWidth = 0;
+            for (const QString &word : wordsOf(label)) {
+                wordWidth = qMax(wordWidth, metrics.horizontalAdvance(word));
+            }
+            return wordWidth;
+        };
         for (QQuickItem *row : rows) {
             QQuickItem *label = itemNamed(row, QStringLiteral("albumArtInfoLabel"));
             QQuickItem *value = itemNamed(row, QStringLiteral("albumArtInfoValue"));
@@ -798,11 +825,13 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             labels << label;
             values << value;
             widest = qMax(widest, label->implicitWidth());
+            widestWord = qMax(widestWord, widestWordOf(label));
         }
         // The column of the labels: the widest label, up to two fifths of
-        // the row inside the column's 16 px margins.
+        // the row inside the column's 16 px margins, and never narrower
+        // than the widest word.
         const qreal cap = std::floor((column->width() - 32) * 0.4);
-        const qreal labelWidth = qMin(std::ceil(widest), cap);
+        const qreal labelWidth = qMax(std::ceil(widestWord), qMin(std::ceil(widest), cap));
         // Each item's own box: a text's bounding rect is only its painted text.
         const auto boxOf = [](QQuickItem *item) {
             return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
@@ -829,6 +858,11 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             const bool fits = label->implicitWidth() <= label->width() + 0.01;
             QVERIFY2(fits || label->property("lineCount").toInt() > 1, qPrintable(where));
             QVERIFY2(fits == (label->property("lineCount").toInt() == 1), qPrintable(where));
+            // Wrapped only between words: each word fits on a line, and
+            // there are no more lines than words.
+            QCOMPARE(label->property("wrapMode").toInt(), int(QTextOption::WordWrap));
+            QVERIFY2(label->width() + 0.01 >= widestWordOf(label), qPrintable(where));
+            QVERIFY2(label->property("lineCount").toInt() <= wordsOf(label).size(), qPrintable(where));
             // The values all start at the same x, after the labels' column.
             QCOMPARE(boxOf(label).left(), boxOf(labels.first()).left());
             QCOMPARE(boxOf(value).left(), boxOf(values.first()).left());
@@ -839,22 +873,25 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
                      qPrintable(QStringLiteral("%1; tops %2 and %3, value %4 lines")
                                     .arg(where).arg(boxOf(label).top()).arg(boxOf(value).top())
                                     .arg(value->property("lineCount").toInt())));
-            // Within the column's margins, and with room for the value.
+            // Within the column's margins, and with room for the value: the
+            // labels pass their two fifths only for a word that would not
+            // fit, and the values keep at least two fifths.
             QVERIFY2(inside.contains(boxOf(label)) && inside.contains(boxOf(value)),
                      qPrintable(where));
-            QVERIFY2(value->width() >= (column->width() - 32) * 0.5, qPrintable(where));
+            QVERIFY2(value->width() >= cap, qPrintable(where));
         }
         if (pointSize == 0.0) {
             // The usual font fits every label on its line.
             QVERIFY2(labelWidth < cap, at.constData());
         }
         if (pointSize >= 24.0) {
-            // So large that the widest label wraps at the cap.
-            QCOMPARE(labelWidth, cap);
-            QVERIFY2(std::any_of(labels.cbegin(), labels.cend(), [](QQuickItem *label) {
-                         return label->property("lineCount").toInt() > 1;
-                     }),
-                     at.constData());
+            // Every one-word label on one line, "Dimensions" whole.
+            for (QQuickItem *label : std::as_const(labels)) {
+                if (wordsOf(label).size() == 1) {
+                    QVERIFY2(label->property("lineCount").toInt() == 1,
+                             qPrintable(describe(label, values.at(labels.indexOf(label)))));
+                }
+            }
         }
     }
 }
