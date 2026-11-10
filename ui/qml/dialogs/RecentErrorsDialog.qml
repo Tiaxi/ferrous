@@ -427,17 +427,24 @@ Popup {
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
                                     // drawn here.
+                                    // The tint under the text while hovered or pressed;
+                                    // the link is darker where the tint takes it under
+                                    // 4.5:1 on the window colour.
+                                    readonly property color tint: actionButton.down
+                                        ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                                        : (actionButton.hovered ? root.uiPalette.hover : "transparent")
                                     contentItem: Label {
                                         text: actionButton.text
                                         font.pointSize: root.uiPalette.smallPointSize
-                                        color: root.uiPalette.link
+                                        color: actionButton.tint.a > 0
+                                            ? root.uiPalette.linkOn(ColorUtils.drawnOver(actionButton.tint,
+                                                                                         root.uiPalette.chrome))
+                                            : root.uiPalette.link
                                         Accessible.ignored: true
                                     }
                                     background: Rectangle {
                                         radius: 3
-                                        color: actionButton.down
-                                            ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
-                                            : (actionButton.hovered ? root.uiPalette.hover : "transparent")
+                                        color: actionButton.tint
                                         border.width: actionButton.visualFocus ? 2 : 0
                                         border.color: root.uiPalette.focusRing
 

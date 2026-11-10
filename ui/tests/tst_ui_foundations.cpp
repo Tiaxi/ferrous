@@ -326,7 +326,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
         {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#d4edfa")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
-        {"link", QStringLiteral("#3daee9"), QStringLiteral("#1a74a8")},
+        {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
         {"now", QStringLiteral("#f2b035"), QStringLiteral("#955500")},
@@ -398,6 +398,13 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
     const QColor hovered = drawnOver(colorOf(tokens, "hover"), view);
     const QColor secondary = colorOf(tokens, "textSecondary");
     const QColor tertiary = colorOf(tokens, "textTertiary");
+    const auto linkOn = [tokens](const QColor &background) {
+        QVariant link;
+        QMetaObject::invokeMethod(tokens, "linkOn", Q_RETURN_ARG(QVariant, link), Q_ARG(QVariant, background));
+        return link.value<QColor>();
+    };
+    // Where the link already reads, it stays the link.
+    QVERIFY(sameColor(linkOn(view), colorOf(tokens, "link")));
 
     // The ratios the design lists.
     const QColor secondaryBackground = secondaryOnChrome ? chrome : view;
@@ -429,6 +436,10 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("playing title on the selection"), colorOf(tokens, "now"), selection, 4.5},
         {QStringLiteral("playing title on the inactive selection"), colorOf(tokens, "now"), selectionInactive, 4.5},
         {QStringLiteral("link on view"), colorOf(tokens, "link"), view, 4.5},
+        // The dialogs' links: About, About KDE and Recent Issues.
+        {QStringLiteral("link on chrome"), colorOf(tokens, "link"), chrome, 4.5},
+        {QStringLiteral("link on a hovered button on chrome"), linkOn(drawnOver(colorOf(tokens, "hover"), chrome)),
+         drawnOver(colorOf(tokens, "hover"), chrome), 4.5},
         {QStringLiteral("negative on view"), colorOf(tokens, "negative"), view, 4.5},
         {QStringLiteral("negative on chrome"), colorOf(tokens, "negative"), chrome, 4.5},
         {QStringLiteral("focus ring on the selection"), colorOf(tokens, "focusRing"), selection, 3.0},
@@ -779,11 +790,18 @@ void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {
     QVERIFY(!totals->isVisible());
     QCOMPARE(accessible->text(QAccessible::Name), QStringLiteral("Library"));
 
-    // Narrow, the totals elide rather than run into the right end.
+    // Narrow, the totals drop whole totals rather than run into the right
+    // end or end in a part of one; the header still names them all.
     header->setProperty("totals", QStringLiteral("12 artists · 28 albums · 176 tracks"));
     header->setWidth(180);
-    QTRY_VERIFY(totals->property("truncated").toBool());
+    QTRY_VERIFY(totals->property("text").toString() != QStringLiteral("12 artists · 28 albums · 176 tracks"));
+    QVERIFY(totals->isVisible());
+    QVERIFY2(QStringList({QStringLiteral("12 artists"), QStringLiteral("12 artists · 28 albums")})
+                 .contains(totals->property("text").toString()),
+             qPrintable(totals->property("text").toString()));
+    QVERIFY(!totals->property("truncated").toBool());
     QVERIFY(totals->mapToItem(header, QPointF(totals->width(), 0)).x() <= trailing->mapToItem(header, QPointF(0, 0)).x());
+    QCOMPARE(accessible->text(QAccessible::Name), QStringLiteral("Library, 12 artists · 28 albums · 176 tracks"));
 }
 
 void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName_data() {
@@ -793,8 +811,8 @@ void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName_data() {
 }
 
 // However narrow the header, its name stays whole while there is room for
-// it: the totals elide first, down to their first total, and then go. They
-// never run into the name or the items at the right end.
+// it: the totals drop whole totals first, down to their first total, and
+// then go. They never run into the name or the items at the right end.
 void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -837,7 +855,9 @@ void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
     const QFont totalsFont = totals->property("font").value<QFont>();
     const qreal firstTotal = QFontMetricsF(totalsFont).horizontalAdvance(QStringLiteral("13 artists"));
 
-    bool sawElided = false;
+    const QString allTotals = QStringLiteral("13 artists · 29 albums · 180 tracks");
+    const QStringList wholeTotals{QStringLiteral("13 artists"), QStringLiteral("13 artists · 29 albums"), allTotals};
+    bool sawShortened = false;
     bool sawDropped = false;
     for (qreal width = std::ceil(fixed + 8 + totals->implicitWidth() + 40); width >= fixed; width -= 3) {
         header->setWidth(width);
@@ -861,14 +881,18 @@ void UiFoundationsTest::regionHeaderGivesUpTheTotalsBeforeTheName() {
             const qreal totalsLeft = totals->mapToItem(header, QPointF(0, 0)).x();
             QVERIFY2(totalsLeft >= leftInset + titleWidth + 8 - 1, at.constData());
             QVERIFY2(totalsLeft + totals->width() <= trailingLeft + 0.5, at.constData());
-            // At least its first total shows.
+            // At least its first total shows, and only whole totals: never
+            // a part of one, as "29 a…".
             QVERIFY2(totals->width() >= std::floor(firstTotal) - 1, at.constData());
-            sawElided = sawElided || totals->property("truncated").toBool();
+            const QString shown = totals->property("text").toString();
+            QVERIFY2(wholeTotals.contains(shown), qPrintable(QString::fromLatin1(at) + QStringLiteral(": ") + shown));
+            QVERIFY2(!totals->property("truncated").toBool(), qPrintable(QString::fromLatin1(at) + QStringLiteral(": ") + shown));
+            sawShortened = sawShortened || shown != allTotals;
         } else {
             sawDropped = true;
         }
     }
-    QVERIFY(sawElided);
+    QVERIFY(sawShortened);
     QVERIFY(sawDropped);
 }
 

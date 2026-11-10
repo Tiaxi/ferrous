@@ -9,7 +9,8 @@ import "." as Components
 import "../logic/FormatUtils.js" as FormatUtils
 
 // The title strip of a viewer over the whole screen: a 32 px band over the
-// top edge of the view, with a 1 px edge under it, in the colours of the
+// top edge of the view (taller with a larger font, by its line and 4 px
+// above and below it), with a 1 px edge under it, in the colours of the
 // plot it sits on (UiPalette's PlotColors), so it reads over the plot or
 // the art alike. On the left the playing track's title (semibold),
 // "Artist — Album" and "1:17 / 3:49"; on the right flat 24 px tool
@@ -78,7 +79,12 @@ Rectangle {
             FormatUtils.clockText(root.positionText),
             FormatUtils.clockText(root.track.durationText))
 
-    implicitHeight: 33
+    // The band over the edge: 32 px, or the line of its text or its
+    // buttons and 4 px above and below them, whichever is taller.
+    readonly property real bandHeight: Math.max(32,
+        Math.ceil(Math.max(titleLabel.implicitHeight, contextLabel.implicitHeight, timeLabel.implicitHeight)) + 8,
+        controls.implicitHeight + 8)
+    implicitHeight: root.bandHeight + 1
     color: root.plotColors.plotPlate
     opacity: root.available && root.controlsVisible ? 1 : 0
     // Shown at once, so the key that brings the controls back can move
@@ -122,7 +128,7 @@ Rectangle {
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
         x: 12
-        height: 32
+        height: root.bandHeight
         spacing: 12
 
         Label {
@@ -165,7 +171,7 @@ Rectangle {
         objectName: "viewerStripControls"
         anchors.right: parent.right
         anchors.rightMargin: 4
-        y: 4
+        y: Math.round((root.bandHeight - height) / 2)
         uiPalette: root.uiPalette
         plotColors: root.plotColors
         closeViewer: root.closeViewer

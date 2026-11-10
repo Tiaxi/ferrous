@@ -476,6 +476,8 @@ private slots:
     void textMeetsItsContrastAsDrawn_data();
     void textMeetsItsContrastAsDrawn();
     void largeFontRowsAndFooterHoldTheirText();
+    void rowColumnsNeverMeet_data();
+    void rowColumnsNeverMeet();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -1461,6 +1463,90 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
     QCOMPARE(sceneRect(hairline).bottom(), footerRect.top());
     QVERIFY(frame.bottom() <= harness.window->height() - 32.0);
+}
+
+void SearchPaletteTest::rowColumnsNeverMeet_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::newRow("default font") << 0.0 << 1600;
+    QTest::newRow("default font, narrow") << 0.0 << 560;
+    QTest::newRow("24 pt") << 24.0 << 1600;
+    QTest::newRow("24 pt, 1000 px") << 24.0 << 1000;
+    QTest::newRow("24 pt, narrow") << 24.0 << 560;
+}
+
+// A track's length holds its text whole at the right, and the title and
+// the context keep 12 px clear of each other and of it, whatever the font
+// and the palette's width: at 24 pt the length ran 14 px into the context.
+void SearchPaletteTest::rowColumnsNeverMeet() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, windowWidth, 1000), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    // A length of over an hour, and a title and context too long for their
+    // columns.
+    rows[3].lengthText = QStringLiteral("1:05:22");
+    rows[4].label = QStringLiteral("A Remarkably Long Track Title That Will Certainly Not Fit In Its Column");
+    rows[4].album = QStringLiteral("An Album Whose Name Runs On Well Past the Room Its Column Has");
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const QRectF frame = sceneRect(harness.palette());
+    const qreal gap = 12.0;
+
+    int tracks = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("item")) continue;
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || !row->isVisible()) continue;
+        const QString label = harness.model.rowDataAt(i).value(QStringLiteral("label")).toString();
+        const QByteArray at = (label + QStringLiteral(" at ") + QString::number(pointSize) + QStringLiteral(" pt, ")
+                               + QString::number(windowWidth) + QStringLiteral(" px")).toUtf8();
+        const auto runs = visibleNamed(row, QStringLiteral("globalSearchResultTitle"));
+        QVERIFY2(!runs.isEmpty(), at.constData());
+        QQuickItem *context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
+        QVERIFY2(context != nullptr, at.constData());
+        const QRectF contextRect = sceneRect(context);
+        // The title ends 12 px before the context starts.
+        for (QQuickItem *run : runs) {
+            QVERIFY2(sceneRect(run).right() <= contextRect.left() - gap + 0.5,
+                     qPrintable(QStringLiteral("%1: title to %2, context from %3")
+                                    .arg(QString::fromUtf8(at)).arg(sceneRect(run).right()).arg(contextRect.left())));
+        }
+        QVERIFY2(contextRect.right() <= frame.right() - 16.0 + 0.5, at.constData());
+        QQuickItem *length = visibleChildNamed(row, QStringLiteral("globalSearchResultLength"));
+        if (length == nullptr) continue;
+        ++tracks;
+        const QRectF lengthRect = sceneRect(length);
+        // Its text whole inside its box, the box 16 px in from the right and
+        // 12 px clear of the context.
+        QVERIFY2(length->implicitWidth() <= length->width() + 0.5,
+                 qPrintable(QStringLiteral("%1: %2 px of text in %3 px")
+                                .arg(QString::fromUtf8(at)).arg(length->implicitWidth()).arg(length->width())));
+        QVERIFY2(lengthRect.right() <= frame.right() - 16.0 + 0.5, at.constData());
+        QVERIFY2(contextRect.right() <= lengthRect.left() - gap + 0.5,
+                 qPrintable(QStringLiteral("%1: context to %2, length from %3")
+                                .arg(QString::fromUtf8(at)).arg(contextRect.right()).arg(lengthRect.left())));
+        // The usual lengths share one column.
+        if (length->property("text").toString().size() <= 5) {
+            QCOMPARE(length->width(), harness.dialog->property("lengthWidth").toReal());
+        }
+    }
+    QVERIFY(tracks >= 2);
+    if (pointSize == 0.0 && windowWidth == 1600) {
+        // The design's sizes with the usual font.
+        QCOMPARE(harness.dialog->property("lengthWidth").toReal(), 44.0);
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), 300.0);
+    }
 }
 
 int main(int argc, char **argv) {

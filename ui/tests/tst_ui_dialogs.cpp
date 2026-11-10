@@ -27,6 +27,7 @@
 #include <QtTest/QtTest>
 #include <qqml.h>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 
@@ -119,6 +120,33 @@ QColor tokenOf(QQuickWindow *window, const char *name) {
 
 QString hex(const QColor &color) {
     return color.name(QColor::HexArgb);
+}
+
+// WCAG's contrast ratio of opaque colours, and a colour drawn over another.
+double relativeLuminance(const QColor &color) {
+    const auto linear = [](double channel) {
+        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * linear(color.redF()) + 0.7152 * linear(color.greenF()) + 0.0722 * linear(color.blueF());
+}
+
+double contrastRatio(const QColor &a, const QColor &b) {
+    const double la = relativeLuminance(a);
+    const double lb = relativeLuminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+QColor drawnOver(const QColor &top, const QColor &bottom) {
+    const double alpha = top.alphaF();
+    return QColor::fromRgbF(static_cast<float>(top.redF() * alpha + bottom.redF() * (1.0 - alpha)),
+                            static_cast<float>(top.greenF() * alpha + bottom.greenF() * (1.0 - alpha)),
+                            static_cast<float>(top.blueF() * alpha + bottom.blueF() * (1.0 - alpha)));
+}
+
+QString describeContrast(const QString &what, const QColor &text, const QColor &background) {
+    return QStringLiteral("%1: %2 on %3 is %4:1")
+        .arg(what, hex(text), hex(background))
+        .arg(contrastRatio(text, background), 0, 'f', 2);
 }
 
 QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name) {
@@ -1159,6 +1187,20 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     click(prefs, second);
     QTRY_COMPARE(list->property("currentIndex").toInt(), 1);
     QTRY_VERIFY(list->hasActiveFocus());
+    // The track counts read on their rows: the selected one's on the
+    // selection tint, with the list focused or not, and the other's on the
+    // view.
+    const auto trackCountColor = [&](int row) {
+        return itemsNamed(itemsNamed(list, QStringLiteral("libraryRootRow")).at(row),
+                          QStringLiteral("libraryRootTrackCount")).at(0)->property("color").value<QColor>();
+    };
+    QVERIFY2(contrastRatio(trackCountColor(1), tokenOf(window, "selection")) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("selected"), trackCountColor(1), tokenOf(window, "selection"))));
+    QVERIFY2(contrastRatio(trackCountColor(1), tokenOf(window, "selectionInactive")) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("selected, list unfocused"), trackCountColor(1),
+                                         tokenOf(window, "selectionInactive"))));
+    QVERIFY2(contrastRatio(trackCountColor(0), tokenOf(window, "view")) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("unselected"), trackCountColor(0), tokenOf(window, "view"))));
     click(prefs, visibleNamed(prefs, QStringLiteral("libraryRootRemoveButton")));
     QObject *confirm = object(window, QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
@@ -1229,6 +1271,14 @@ void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
              QStringLiteral("Version 0.3.0"));
     QVERIFY(visibleNamed(about, QStringLiteral("aboutHomepageLink")) != nullptr);
     QVERIFY(visibleNamed(about, QStringLiteral("aboutBugReportLink")) != nullptr);
+    // The links read on the window colour they sit on: at least 4.5:1, as
+    // the theme's link colour on Breeze Light's window colour was not.
+    for (const QString &name : {QStringLiteral("aboutHomepageLink"), QStringLiteral("aboutBugReportLink")}) {
+        const QColor link = visibleNamed(about, name)->property("color").value<QColor>();
+        QCOMPARE(hex(link), hex(tokenOf(window, "link")));
+        QVERIFY2(contrastRatio(link, tokenOf(window, "chrome")) >= 4.5,
+                 qPrintable(describeContrast(name, link, tokenOf(window, "chrome"))));
+    }
     QQuickItem *tabs = visibleNamed(about, QStringLiteral("aboutTabs"));
     QVERIFY(tabs != nullptr);
     QCOMPARE(tabs->property("count").toInt(), 4);
@@ -1324,7 +1374,26 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QVERIFY(action->isVisible());
     QCOMPARE(action->property("text").toString(), QStringLiteral("Show in Queue"));
     QVERIFY(action->property("flat").toBool());
-    QCOMPARE(hex(qvariant_cast<QObject *>(action->property("contentItem"))->property("color").value<QColor>()), hex(tokenOf(window, "link")));
+    QObject *actionText = qvariant_cast<QObject *>(action->property("contentItem"));
+    QCOMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
+    // At least 4.5:1 on the popup's window colour, and on the tint over it
+    // while pressed (or hovered, a lighter tint), where it is darker if it
+    // needs to be. Released off the button, so it does nothing.
+    const QColor chrome = tokenOf(window, "chrome");
+    QVERIFY2(contrastRatio(actionText->property("color").value<QColor>(), chrome) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("action"), actionText->property("color").value<QColor>(), chrome)));
+    const QPoint actionCentre = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
+    QTest::mousePress(action->window(), Qt::LeftButton, Qt::NoModifier, actionCentre);
+    QTRY_VERIFY(action->property("down").toBool());
+    const QColor pressedChrome = drawnOver(action->property("tint").value<QColor>(), chrome);
+    QVERIFY(pressedChrome != chrome);
+    QTRY_VERIFY2(contrastRatio(actionText->property("color").value<QColor>(), pressedChrome) >= 4.5,
+                 qPrintable(describeContrast(QStringLiteral("pressed action"),
+                                             actionText->property("color").value<QColor>(), pressedChrome)));
+    QTest::mouseMove(action->window(), sceneRect(heading).center().toPoint());
+    QTest::mouseRelease(action->window(), Qt::LeftButton, Qt::NoModifier, sceneRect(heading).center().toPoint());
+    QTRY_VERIFY(!action->property("down").toBool());
+    QTRY_COMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
     // One sentence: the category is the title; no action for settings.
     QQuickItem *second = rows[1];
     QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0)->property("text").toString(),
@@ -2107,7 +2176,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QGuiApplication::setFont(large);
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
-                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+                                   const TagEditorController::RenameGate &) { return tagRows(12); };
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
@@ -2186,6 +2255,55 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QVERIFY2(!label->property("truncated").toBool(), qPrintable(describeItem(label)));
         QVERIFY2(sceneRect(label).right() <= sceneRect(field).left(), qPrintable(key));
         QVERIFY2(sceneRect(field).right() < sceneRect(table).left(), qPrintable(key));
+    }
+
+    // The table's headers whole, with their Revert beside them once the
+    // edits change their column: at 24 pt Year and Disc elided to a letter.
+    // The columns are wider for them, and the table scrolls sideways
+    // rather than squeeze them; the track numbers are whole too.
+    QVariantList everyRow;
+    for (int row = 0; row < 12; ++row) {
+        everyRow << row;
+    }
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("year"), QStringLiteral("2001"));
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("discNo"), QStringLiteral("1"));
+    editor.applyBulkFieldToRows(everyRow, QStringLiteral("trackNo"), QStringLiteral("10"));
+    QQuickItem *header = visibleNamed(window, QStringLiteral("tagEditorTableHeader"));
+    QVERIFY(header != nullptr);
+    qreal columnsWidth = 0;
+    for (const QString &key : {QStringLiteral("trackNo"), QStringLiteral("title"), QStringLiteral("artist"),
+                               QStringLiteral("album"), QStringLiteral("genre"), QStringLiteral("year"),
+                               QStringLiteral("discNo"), QStringLiteral("fileName"), QStringLiteral("formatKind"),
+                               QStringLiteral("directory"), QStringLiteral("status")}) {
+        QQuickItem *column = named(window, QStringLiteral("tagEditorColumn_") + key);
+        QVERIFY2(column != nullptr, qPrintable(key));
+        columnsWidth += column->width();
+        QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
+        QTRY_VERIFY2(!label->property("truncated").toBool() && label->width() >= label->implicitWidth() - 0.5,
+                     qPrintable(describeItem(label)));
+        QVERIFY2(within(sceneRect(label), sceneRect(column)), qPrintable(describeItem(label)));
+        if (QQuickItem *revert = named(window, QStringLiteral("tagEditorColumnRevert_") + key)) {
+            if (revert->isVisible()) {
+                QVERIFY2(within(sceneRect(revert), sceneRect(column)), qPrintable(key));
+                // Beside the label once the header row lays it out.
+                QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(revert).left() + 0.5
+                                 || sceneRect(revert).right() <= sceneRect(label).left() + 0.5,
+                             qPrintable(key));
+            }
+        }
+    }
+    QVERIFY(named(window, QStringLiteral("tagEditorColumnRevert_year"))->isVisible());
+    QVERIFY(table->property("contentWidth").toReal() >= columnsWidth);
+    QVERIFY(table->property("contentWidth").toReal() > table->width());
+    for (QQuickItem *row : itemsNamed(window->contentItem(), QStringLiteral("tagEditorRow"))) {
+        for (QQuickItem *child : row->childItems()) {
+            for (QQuickItem *cell : child->childItems()) {
+                if (cell->property("text").toString() == QStringLiteral("10")
+                    || cell->property("text").toString() == QStringLiteral("2001")) {
+                    QVERIFY2(!cell->property("truncated").toBool(), qPrintable(describeItem(cell)));
+                }
+            }
+        }
     }
     editor.close();
     QTRY_VERIFY(!tagEditor->property("visible").toBool());
