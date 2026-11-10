@@ -2195,6 +2195,15 @@ ApplicationWindow {
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
 
+    // Remove acts on the selected folder: none at first, then the one
+    // clicked (#373 H4).
+    QQuickItem *removeButton = visibleItemNamed(window, QStringLiteral("libraryRootRemoveButton"));
+    QVERIFY(removeButton != nullptr);
+    QVERIFY(!removeButton->isEnabled());
+    QQuickItem *folder = visibleItemNamed(window, QStringLiteral("libraryRootRow"));
+    QVERIFY(folder != nullptr);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(folder));
+    QTRY_VERIFY(removeButton->isEnabled());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
     QCOMPARE(root->property("removed").toStringList(), QStringList{});

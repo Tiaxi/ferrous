@@ -18,6 +18,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
@@ -421,6 +422,7 @@ private slots:
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void configureFitsItsPagesAtAnyWidth();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
+    void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
@@ -1226,6 +1228,116 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     QVERIFY(dialog->property("opened").toBool());
     // Nothing waits for Apply.
     QVERIFY(!dialog->property("modified").toBool());
+}
+
+// The library folders are a list, not a field (#373 H4): the view colour
+// in a 1 px seam, 26 px rows edge to edge inside it, and no selection until
+// the user selects a folder, so a single folder does not read as a focused
+// text field. The buttons that act on a folder wait for one. A click
+// selects with the tint alone; the ring shows only from the keyboard,
+// which selects the first folder as it arrives.
+void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")},
+                    {QStringLiteral("displayName"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/two")},
+                    {QStringLiteral("displayName"), QStringLiteral("/fixture/two")}, {QStringLiteral("trackCount"), 5}},
+    }));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_COMPARE(itemsNamed(list, QStringLiteral("libraryRootRow")).size(), 2);
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(frame != nullptr);
+
+    // The frame: the view colour in a 1 px seam, square, the list just
+    // inside it.
+    QCOMPARE(hex(frame->property("color").value<QColor>()), hex(tokenOf(window, "view")));
+    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
+             hex(tokenOf(window, "seam")));
+    QCOMPARE(frame->property("radius").toReal(), 0.0);
+    QCOMPARE(sceneRect(list), sceneRect(frame).adjusted(1, 1, -1, -1));
+    // List rows, 26 px with the default font, edge to edge, and the frame
+    // as tall as they are.
+    const qreal rowHeight =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("rowHeight").toReal();
+    QVERIFY(rowHeight >= 24.0 && rowHeight <= 27.0);
+    const QList<QQuickItem *> rows = itemsNamed(list, QStringLiteral("libraryRootRow"));
+    for (QQuickItem *row : rows) {
+        QCOMPARE(row->height(), rowHeight);
+        QCOMPARE(sceneRect(row).left(), sceneRect(list).left());
+        QCOMPARE(sceneRect(row).right(), sceneRect(list).right());
+    }
+    QCOMPARE(frame->height(), 2 * rowHeight + 2);
+
+    // The look of a row: whether it has the tint, and its ring.
+    const auto tintOf = [](QQuickItem *row) { return itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0); };
+    const auto ringWidth = [&](QQuickItem *row) {
+        return QQmlProperty(tintOf(row), QStringLiteral("border.width")).read().toReal();
+    };
+    const QStringList folderButtons{QStringLiteral("libraryRootRenameButton"),
+                                    QStringLiteral("libraryRootRescanButton"),
+                                    QStringLiteral("libraryRootRemoveButton")};
+    const auto buttonsEnabled = [&]() {
+        QStringList enabled;
+        for (const QString &name : folderButtons) {
+            QQuickItem *button = visibleNamed(prefs, name);
+            if (button != nullptr && button->isEnabled()) {
+                enabled << name;
+            }
+        }
+        return enabled;
+    };
+
+    // At first: no selection, no tint on either row, and nothing for the
+    // buttons to act on.
+    QCOMPARE(list->property("currentIndex").toInt(), -1);
+    for (QQuickItem *row : rows) {
+        QVERIFY(tintOf(row) != nullptr);
+        QVERIFY(!tintOf(row)->isVisible());
+    }
+    QCOMPARE(buttonsEnabled(), QStringList{});
+
+    // A click selects with the tint alone, no ring.
+    click(prefs, rows.at(0));
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    QTRY_VERIFY(list->hasActiveFocus());
+    QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
+    QCOMPARE(hex(tintOf(rows.at(0))->property("color").value<QColor>()), hex(tokenOf(window, "selection")));
+    QCOMPARE(ringWidth(rows.at(0)), 0.0);
+    QVERIFY(!tintOf(rows.at(1))->isVisible());
+    QCOMPARE(buttonsEnabled(), folderButtons);
+
+    // The keyboard moves the selection, and the ring shows with it.
+    QTest::keyClick(prefs, Qt::Key_Down);
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 1);
+    QTRY_COMPARE(ringWidth(rows.at(1)), 1.0);
+    QVERIFY(!tintOf(rows.at(0))->isVisible());
+
+    // With nothing selected, the keyboard arriving selects the first
+    // folder, with its ring.
+    list->setProperty("currentIndex", -1);
+    QTRY_VERIFY(!tintOf(rows.at(1))->isVisible());
+    QQuickItem *add = visibleNamed(prefs, QStringLiteral("libraryRootAddButton"));
+    QVERIFY(add != nullptr);
+    add->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(add->hasActiveFocus());
+    QTest::keyClick(prefs, Qt::Key_Backtab);
+    QTRY_VERIFY(list->hasActiveFocus());
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
+    QCOMPARE(ringWidth(rows.at(0)), 1.0);
+
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
 }
 
 void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
