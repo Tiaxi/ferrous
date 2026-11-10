@@ -444,8 +444,12 @@ void WaveformEditorItem::setZoomLevel(double value) {
         const bool detailReady = detailCoversRangeLocked(visibleStart, visibleEnd)
             && detailResolutionCoversLocked(visibleStart, visibleEnd);
         const auto [presentedStart, presentedEnd] = visibleRangeLocked();
+        // The view as it is stays on screen until the detail for the zoom
+        // arrives: drawn from the cache, or while playing from the playback
+        // tiles, which leave no cache.
         const bool canHoldPresentation = cacheCoversRangeLocked(
-            presentedStart, presentedEnd);
+            presentedStart, presentedEnd)
+            || playbackTilesEligibleLocked(presentedStart, presentedEnd);
         const bool deferZoomOut = value < previousPresentedZoom
             && !detailReady
             && canHoldPresentation;
@@ -3000,9 +3004,17 @@ void WaveformEditorItem::rebuildCacheLocked(
     const bool detailOverlapsViewport = m_detail.pointCount > 0
         && visibleStart < m_detail.endSeconds
         && visibleEnd > m_detail.startSeconds;
-    const bool useOverview = m_zoomFallbackToOverview
-        || (detailCoversViewport && !detailReady)
-        || !detailOverlapsViewport;
+    // The overview is one envelope of every channel, which the lanes of the
+    // per-channel view do not show (drawOverviewLocked): there the detail
+    // the view has, of another zoom, stands in for the view's own where it
+    // reaches, rather than nothing.
+    const bool detailStandsIn = m_viewMode == 1
+        && displayedChannelCountLocked() > 1
+        && detailOverlapsViewport;
+    const bool useOverview = !detailStandsIn
+        && (m_zoomFallbackToOverview
+            || (detailCoversViewport && !detailReady)
+            || !detailOverlapsViewport);
     CacheGrid grid;
     if (detailReady) {
         grid = cacheGridForRangeLocked(
@@ -3299,10 +3311,16 @@ void WaveformEditorItem::drawDetailSlice(
         ? std::max(kSampleCurveBoundaryMarginPixels,
             static_cast<int>(std::ceil(sampleSpacing * kSampleCurveContextSamples + 3.0)))
         : 1;
+    // A point of an envelope stands for its frames: a point that ends in
+    // the slice is in it however far before it its middle is.
+    const double pointSeconds = detail.sampleRateHz > 0
+        ? static_cast<double>(detail.framesPerPoint) / static_cast<double>(detail.sampleRateHz)
+        : 0.0;
+    const double pointMargin = sampleCurve ? 0.0 : pointSeconds;
     const double sliceStart = visibleStart
-        + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel;
+        + static_cast<double>(firstX - boundaryMargin) * secondsPerPixel - pointMargin;
     const double sliceEnd = visibleStart
-        + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel;
+        + static_cast<double>(lastX + boundaryMargin) * secondsPerPixel + pointMargin;
     auto [firstPoint, lastPoint] = detailPointRange(detail,
         sliceStart, sliceEnd);
     // The owned samples' points, and as their polyline's indices.
@@ -3342,9 +3360,34 @@ void WaveformEditorItem::drawDetailSlice(
         }
         for (int point = firstPoint; point < lastPoint; ++point) {
             const double time = detailPointTime(detail, point);
-            if (!sampleCurve
-                && (time < visibleStart || time >= visibleEnd)) {
-                continue;
+            // An envelope's point is of the pixels whose middles are in its
+            // frames, and a point narrower than a pixel of the pixel its
+            // frames are in the middle of: points further apart than a
+            // pixel, as when a zoom shows the detail of a wider view until
+            // its own arrives, cover the pixels of their frames.
+            int firstPixel = 0;
+            int endPixel = 0;
+            if (!sampleCurve) {
+                const double pointStart = detail.startSeconds
+                    + static_cast<double>(point) * pointSeconds;
+                const double startPosition = (pointStart - visibleStart) / secondsPerPixel;
+                const double endPosition =
+                    (pointStart + pointSeconds - visibleStart) / secondsPerPixel;
+                firstPixel = static_cast<int>(std::ceil(startPosition - 0.5 - kGridAlignmentEpsilon));
+                endPixel = static_cast<int>(std::ceil(endPosition - 0.5 - kGridAlignmentEpsilon));
+                if (endPixel <= firstPixel) {
+                    if (time < visibleStart || time >= visibleEnd) {
+                        continue;
+                    }
+                    firstPixel = static_cast<int>(std::floor(
+                        (time - visibleStart) / secondsPerPixel + kGridAlignmentEpsilon));
+                    endPixel = firstPixel + 1;
+                }
+                firstPixel = std::max(firstPixel, firstX);
+                endPixel = std::min(endPixel, lastX);
+                if (endPixel <= firstPixel) {
+                    continue;
+                }
             }
             // From the slice's start: the same for a view and for a chunk
             // that starts whole device pixels from it, but for the
@@ -3355,16 +3398,10 @@ void WaveformEditorItem::drawDetailSlice(
                     * kSampleCurveSubpixelScale)
                     / kSampleCurveSubpixelScale
                 : (time - visibleStart) / secondsPerPixel;
-            const int x = std::clamp(
-                static_cast<int>(std::floor(
-                    pixelPosition + kGridAlignmentEpsilon)),
-                0, width - 1);
-            if (sampleCurve) {
-                if (!ownership && (pixelPosition < firstX - boundaryMargin
+            if (sampleCurve
+                && !ownership
+                && (pixelPosition < firstX - boundaryMargin
                     || pixelPosition >= lastX + boundaryMargin)) {
-                    continue;
-                }
-            } else if (x < firstX || x >= lastX) {
                 continue;
             }
             float minimum = 1.0F;
@@ -3386,10 +3423,12 @@ void WaveformEditorItem::drawDetailSlice(
                     pixelPosition,
                     center - static_cast<double>(minimum) * half));
             } else {
-                const auto pixel = static_cast<std::size_t>(x - firstX);
-                pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
-                pixelMaxima[pixel] = std::max(pixelMaxima[pixel], maximum);
-                pixelSeen[pixel] = true;
+                for (int x = firstPixel; x < endPixel; ++x) {
+                    const auto pixel = static_cast<std::size_t>(x - firstX);
+                    pixelMinima[pixel] = std::min(pixelMinima[pixel], minimum);
+                    pixelMaxima[pixel] = std::max(pixelMaxima[pixel], maximum);
+                    pixelSeen[pixel] = true;
+                }
             }
         }
         if (!sampleCurve) {

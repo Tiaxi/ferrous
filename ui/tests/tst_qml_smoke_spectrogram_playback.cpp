@@ -621,7 +621,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramRollingRepeatOneDrawsTheReplay() {
         const QImage shown = canvasInViewOrder(item);
         QCOMPARE(shown.width(), 320);
         const QRgb replayColor = shown.pixel(shown.width() - 1, shown.height() / 2);
-        QVERIFY(replayColor != kSpectrogramFloor);
+        QVERIFY(replayColor != kSpectrogramNoColumn);
         const QRgb leftColor = shown.pixel(0, shown.height() / 2);
         // Further back than the pane's width, the first play is gone from
         // view by 14 s; before that its end shows on the left.
@@ -3054,7 +3054,7 @@ void SpectrogramPlaybackSmokeTest::spectrogramPaintedCenteredViewFollowsASmallEn
     const QImage shown = canvasInViewOrder(item);
     QCOMPARE(shown.width(), static_cast<int>(window));
     for (int x = 0; x < shown.width(); ++x) {
-        QVERIFY2(shown.pixel(x, shown.height() / 2) != kSpectrogramFloor,
+        QVERIFY2(shown.pixel(x, shown.height() / 2) != kSpectrogramNoColumn,
                  qPrintable(QStringLiteral("x %1 is blank").arg(x)));
     }
 
