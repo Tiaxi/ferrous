@@ -20,8 +20,9 @@ Preferences.PreferencesPage {
     required property var openLibraryRootNameDialog
 
     readonly property var rootEntries: root.uiBridge.libraryRootEntries || []
-    // The folder the buttons act on.
-    property int currentRootIndex: 0
+    // The folder the buttons act on: the one the user selects, none at
+    // first, so the list shows no selection until there is one.
+    property int currentRootIndex: -1
     readonly property var currentRoot: root.currentRootIndex >= 0
         && root.currentRootIndex < root.rootEntries.length
         ? root.rootEntries[root.currentRootIndex]
@@ -77,7 +78,7 @@ Preferences.PreferencesPage {
 
     onRootEntriesChanged: {
         if (root.currentRootIndex >= root.rootEntries.length) {
-            root.currentRootIndex = Math.max(0, root.rootEntries.length - 1)
+            root.currentRootIndex = root.rootEntries.length - 1
         }
     }
 
@@ -95,16 +96,19 @@ Preferences.PreferencesPage {
         Layout.maximumWidth: Math.max(Kirigami.Units.gridUnit * 29, rootButtons.implicitWidth)
         spacing: Kirigami.Units.largeSpacing
 
+        // A framed list, as the app's other lists: the view colour in a
+        // 1 px seam, its rows edge to edge inside it (#373 H4).
         Rectangle {
+            id: rootListFrame
+            objectName: "libraryRootListFrame"
+            readonly property int frameWidth: 1
             Layout.fillWidth: true
             implicitHeight: rootList.visible
-                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8) + 6
+                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8) + 2 * frameWidth
                 : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing
             color: root.uiPalette.view
-            radius: 3
-            border.width: 1
-            border.color: Kirigami.ColorUtils.linearInterpolation(
-                root.uiPalette.view, root.uiPalette.text, Kirigami.Theme.frameContrast)
+            border.width: frameWidth
+            border.color: root.uiPalette.seam
 
             Label {
                 id: emptyRootsLabel
@@ -122,7 +126,7 @@ Preferences.PreferencesPage {
                 id: rootList
                 objectName: "libraryRootList"
                 anchors.fill: parent
-                anchors.margins: 3
+                anchors.margins: rootListFrame.frameWidth
                 visible: root.rootEntries.length > 0
                 clip: true
                 model: root.rootEntries
@@ -135,11 +139,23 @@ Preferences.PreferencesPage {
                 Accessible.role: Accessible.List
                 Accessible.name: I18n.i18nc("@label", "Library folders")
                 onCurrentIndexChanged: root.currentRootIndex = currentIndex
+                // The keyboard arriving with no folder selected selects
+                // the first, where its ring then shows; a click selects
+                // the folder it is on.
+                onActiveFocusChanged: {
+                    if (activeFocus && InputModality.keyboard && currentIndex < 0 && count > 0) {
+                        currentIndex = 0
+                    }
+                }
 
                 Keys.onReturnPressed: root.openCurrentRoot()
                 Keys.onEnterPressed: root.openCurrentRoot()
                 Keys.onDeletePressed: root.removeCurrentRoot()
-                Keys.onMenuPressed: rootContextMenu.popup(rootList.currentItem)
+                Keys.onMenuPressed: {
+                    if (rootList.currentItem) {
+                        rootContextMenu.popup(rootList.currentItem)
+                    }
+                }
 
                 delegate: ItemDelegate {
                     id: rootRow
@@ -154,8 +170,11 @@ Preferences.PreferencesPage {
                     readonly property int trackCount: rootEntry.trackCount || 0
 
                     width: ListView.view.width
-                    implicitHeight: Math.max(root.uiPalette.rowHeight + Kirigami.Units.smallSpacing,
-                        rowColumn.implicitHeight + 2 * Kirigami.Units.smallSpacing)
+                    // A list row, and a note under it, with a small
+                    // spacing under the note.
+                    readonly property bool hasNotes: rootRow.unwatchedReason.length > 0
+                        || rootRow.scanProblem.length > 0
+                    implicitHeight: rowColumn.implicitHeight + (rootRow.hasNotes ? Kirigami.Units.smallSpacing : 0)
                     padding: 0
                     highlighted: ListView.isCurrentItem
                     focusPolicy: Qt.NoFocus
@@ -191,15 +210,19 @@ Preferences.PreferencesPage {
                         hovered: rootRow.hovered
                         selected: rootRow.highlighted
                         active: rootList.activeFocus
-                        focused: rootRow.highlighted && rootList.activeFocus
+                        // The ring only while the keyboard is in use, as
+                        // in the app's other lists.
+                        focused: rootRow.highlighted && rootList.activeFocus && InputModality.keyboard
                     }
 
                     contentItem: ColumnLayout {
                         id: rowColumn
                         spacing: 0
 
+                        // The folder's line, a list row's height.
                         RowLayout {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.uiPalette.rowHeight
                             Layout.leftMargin: Kirigami.Units.largeSpacing + 2
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             spacing: Kirigami.Units.largeSpacing + 2

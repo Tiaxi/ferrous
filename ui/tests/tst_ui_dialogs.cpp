@@ -18,6 +18,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
@@ -421,8 +422,11 @@ private slots:
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void configureFitsItsPagesAtAnyWidth();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
+    void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
+    void aboutKdeHasAboutsHeadingAndPage_data();
+    void aboutKdeHasAboutsHeadingAndPage();
     void aboutPagesNeverRunUnderTheButtons_data();
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
@@ -476,8 +480,9 @@ void UiDialogsTest::drawsOffscreenUnlessAPlatformIsChosen() {
     verifyOffscreenPlatformByDefault();
 }
 
-// Configure Ferrous and About are windows of their own, as KConfigDialog
-// and KAboutApplicationDialog: KWin's title bar, no title or close button
+// Configure Ferrous, About and About KDE are windows of their own, as
+// KConfigDialog and KAboutApplicationDialog (About KDE since #373 H4, so
+// the two About dialogs are one model): KWin's title bar, no title or close button
 // of their own and no dimmed main window; above the main window, which they
 // block, resizable, and keeping the user's size. Escape and the title bar's
 // close button reject them, and the main window gets the keyboard back.
@@ -493,7 +498,8 @@ void UiDialogsTest::configureAndAboutAreWindowsOfTheirOwn() {
 
     struct Case { const char *name; QString title; };
     for (const Case &test : {Case{"preferencesDialog", QStringLiteral("Configure \u2014 Ferrous")},
-                             Case{"aboutDialog", QStringLiteral("About Ferrous")}}) {
+                             Case{"aboutDialog", QStringLiteral("About Ferrous")},
+                             Case{"aboutKdeDialog", QStringLiteral("About KDE")}}) {
         const QByteArray at(test.name);
         queue->forceActiveFocus(Qt::OtherFocusReason);
         QTRY_VERIFY2(queue->hasActiveFocus(), at.constData());
@@ -1224,6 +1230,116 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     QVERIFY(!dialog->property("modified").toBool());
 }
 
+// The library folders are a list, not a field (#373 H4): the view colour
+// in a 1 px seam, 26 px rows edge to edge inside it, and no selection until
+// the user selects a folder, so a single folder does not read as a focused
+// text field. The buttons that act on a folder wait for one. A click
+// selects with the tint alone; the ring shows only from the keyboard,
+// which selects the first folder as it arrives.
+void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")},
+                    {QStringLiteral("displayName"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/two")},
+                    {QStringLiteral("displayName"), QStringLiteral("/fixture/two")}, {QStringLiteral("trackCount"), 5}},
+    }));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_COMPARE(itemsNamed(list, QStringLiteral("libraryRootRow")).size(), 2);
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(frame != nullptr);
+
+    // The frame: the view colour in a 1 px seam, square, the list just
+    // inside it.
+    QCOMPARE(hex(frame->property("color").value<QColor>()), hex(tokenOf(window, "view")));
+    QCOMPARE(QQmlProperty(frame, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(hex(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>()),
+             hex(tokenOf(window, "seam")));
+    QCOMPARE(frame->property("radius").toReal(), 0.0);
+    QCOMPARE(sceneRect(list), sceneRect(frame).adjusted(1, 1, -1, -1));
+    // List rows, 26 px with the default font, edge to edge, and the frame
+    // as tall as they are.
+    const qreal rowHeight =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("rowHeight").toReal();
+    QVERIFY(rowHeight >= 24.0 && rowHeight <= 27.0);
+    const QList<QQuickItem *> rows = itemsNamed(list, QStringLiteral("libraryRootRow"));
+    for (QQuickItem *row : rows) {
+        QCOMPARE(row->height(), rowHeight);
+        QCOMPARE(sceneRect(row).left(), sceneRect(list).left());
+        QCOMPARE(sceneRect(row).right(), sceneRect(list).right());
+    }
+    QCOMPARE(frame->height(), 2 * rowHeight + 2);
+
+    // The look of a row: whether it has the tint, and its ring.
+    const auto tintOf = [](QQuickItem *row) { return itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0); };
+    const auto ringWidth = [&](QQuickItem *row) {
+        return QQmlProperty(tintOf(row), QStringLiteral("border.width")).read().toReal();
+    };
+    const QStringList folderButtons{QStringLiteral("libraryRootRenameButton"),
+                                    QStringLiteral("libraryRootRescanButton"),
+                                    QStringLiteral("libraryRootRemoveButton")};
+    const auto buttonsEnabled = [&]() {
+        QStringList enabled;
+        for (const QString &name : folderButtons) {
+            QQuickItem *button = visibleNamed(prefs, name);
+            if (button != nullptr && button->isEnabled()) {
+                enabled << name;
+            }
+        }
+        return enabled;
+    };
+
+    // At first: no selection, no tint on either row, and nothing for the
+    // buttons to act on.
+    QCOMPARE(list->property("currentIndex").toInt(), -1);
+    for (QQuickItem *row : rows) {
+        QVERIFY(tintOf(row) != nullptr);
+        QVERIFY(!tintOf(row)->isVisible());
+    }
+    QCOMPARE(buttonsEnabled(), QStringList{});
+
+    // A click selects with the tint alone, no ring.
+    click(prefs, rows.at(0));
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    QTRY_VERIFY(list->hasActiveFocus());
+    QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
+    QCOMPARE(hex(tintOf(rows.at(0))->property("color").value<QColor>()), hex(tokenOf(window, "selection")));
+    QCOMPARE(ringWidth(rows.at(0)), 0.0);
+    QVERIFY(!tintOf(rows.at(1))->isVisible());
+    QCOMPARE(buttonsEnabled(), folderButtons);
+
+    // The keyboard moves the selection, and the ring shows with it.
+    QTest::keyClick(prefs, Qt::Key_Down);
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 1);
+    QTRY_COMPARE(ringWidth(rows.at(1)), 1.0);
+    QVERIFY(!tintOf(rows.at(0))->isVisible());
+
+    // With nothing selected, the keyboard arriving selects the first
+    // folder, with its ring.
+    list->setProperty("currentIndex", -1);
+    QTRY_VERIFY(!tintOf(rows.at(1))->isVisible());
+    QQuickItem *add = visibleNamed(prefs, QStringLiteral("libraryRootAddButton"));
+    QVERIFY(add != nullptr);
+    add->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(add->hasActiveFocus());
+    QTest::keyClick(prefs, Qt::Key_Backtab);
+    QTRY_VERIFY(list->hasActiveFocus());
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
+    QCOMPARE(ringWidth(rows.at(0)), 1.0);
+
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
 void UiDialogsTest::lastFmPageShowsOnlyTheButtonsThatApply() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1308,6 +1424,121 @@ void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
     QVERIFY(QGuiApplication::clipboard()->text().contains(QStringLiteral("Qt ")));
     click(about, close);
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// About KDE is laid out as About Ferrous (#373 H4): the 48 px icon, the
+// name and the line under it at the same places and in the same fonts and
+// colours, the page at the inset of About's pages, starting where About's
+// tabs do, as it has one page and so no tabs,
+// and Close at the right of the button row, the default button with the
+// keyboard. It opens tall enough for its page, whose last line ends 12 px
+// over the buttons, and scrolls it when made shorter.
+void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *aboutDialog = object(window, QStringLiteral("aboutDialog"));
+    QObject *kdeDialog = object(window, QStringLiteral("aboutKdeDialog"));
+    QVERIFY(aboutDialog != nullptr && kdeDialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(aboutDialog, "open"));
+    QVERIFY(waitForDialogWindow(aboutDialog));
+    QQuickWindow *about = windowOf(aboutDialog);
+    // Where an item is in its window.
+    const auto place = [](QQuickWindow *in, const QString &name) {
+        QQuickItem *item = visibleNamed(in, name);
+        return item != nullptr ? sceneRect(item) : QRectF();
+    };
+    const QRectF aboutIcon = place(about, QStringLiteral("aboutIcon"));
+    const QRectF aboutName = place(about, QStringLiteral("aboutName"));
+    const QRectF aboutVersion = place(about, QStringLiteral("aboutVersion"));
+    const QRectF aboutPage = place(about, QStringLiteral("aboutDescription"));
+    const QRectF aboutTabs = place(about, QStringLiteral("aboutTabs"));
+    const QRectF aboutClose = place(about, QStringLiteral("aboutCloseButton"));
+    const QFont nameFont = visibleNamed(about, QStringLiteral("aboutName"))->property("font").value<QFont>();
+    const qreal aboutRightGap = about->width() - aboutClose.right();
+    const qreal aboutBottomGap = about->height() - aboutClose.bottom();
+    QVERIFY(QMetaObject::invokeMethod(aboutDialog, "reject"));
+    QTRY_VERIFY(!about->isVisible());
+
+    QVERIFY(QMetaObject::invokeMethod(kdeDialog, "open"));
+    QVERIFY(waitForDialogWindow(kdeDialog));
+    QQuickWindow *kde = windowOf(kdeDialog);
+    QVERIFY(kde != about);
+    QQuickItem *icon = visibleNamed(kde, QStringLiteral("aboutKdeIcon"));
+    QQuickItem *name = visibleNamed(kde, QStringLiteral("aboutKdeName"));
+    QQuickItem *motto = visibleNamed(kde, QStringLiteral("aboutKdeMotto"));
+    QQuickItem *text = visibleNamed(kde, QStringLiteral("aboutKdeText"));
+    QQuickItem *view = visibleNamed(kde, QStringLiteral("aboutKdePageView"));
+    QQuickItem *close = visibleNamed(kde, QStringLiteral("aboutKdeCloseButton"));
+    QVERIFY(icon && name && motto && text && view && close);
+    QTRY_VERIFY(!layoutPending(view));
+    // The heading, as About's.
+    QCOMPARE(sceneRect(icon), aboutIcon);
+    QCOMPARE(icon->width(), 48.0);
+    QCOMPARE(sceneRect(name).topLeft(), aboutName.topLeft());
+    QCOMPARE(sceneRect(motto).left(), aboutVersion.left());
+    QCOMPARE(name->property("font").value<QFont>().pointSizeF(), nameFont.pointSizeF());
+    QCOMPARE(name->property("font").value<QFont>().weight(), nameFont.weight());
+    QCOMPARE(name->property("text").toString(), QStringLiteral("KDE"));
+    QCOMPARE(motto->property("text").toString(), QStringLiteral("Be Free!"));
+    QCOMPARE(hex(name->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+    QCOMPARE(hex(motto->property("color").value<QColor>()), hex(tokenOf(window, "textSecondary")));
+    // The page at the inset of About's pages, where About's tabs start: it
+    // has one page, so no tabs. At About's width, which a large font
+    // widens for its four tabs.
+    QCOMPARE(sceneRect(text).left(), aboutPage.left());
+    QCOMPARE(sceneRect(text).top(), aboutTabs.top());
+    if (pointSize == 0.0) {
+        QCOMPARE(kde->width(), about->width());
+    }
+    // Close where About's is, the default button, with the keyboard.
+    QCOMPARE(kde->width() - sceneRect(close).right(), aboutRightGap);
+    QCOMPARE(kde->height() - sceneRect(close).bottom(), aboutBottomGap);
+    QTRY_VERIFY(close->hasActiveFocus());
+    // No in-window popup, nor a dimmed main window.
+    auto *overlay = qvariant_cast<QQuickItem *>(window->property("overlayHost"));
+    QVERIFY(overlay != nullptr);
+    for (QQuickItem *item : overlay->childItems()) {
+        QVERIFY2(!item->isVisible() || item->width() * item->height() == 0, qPrintable(describe(item)));
+    }
+
+    // Opened whole: every line of the page shows, 12 px over the buttons.
+    QVERIFY2(view->property("contentHeight").toReal() <= view->height() + 0.5,
+             qPrintable(QStringLiteral("%1 of %2 px shown").arg(view->height())
+                            .arg(view->property("contentHeight").toReal())));
+    QQuickItem *lastLink = visibleNamed(kde, QStringLiteral("aboutKdeLink3"));
+    QVERIFY(lastLink != nullptr);
+    for (int i = 0; i < 4; ++i) {
+        QQuickItem *link = visibleNamed(kde, QStringLiteral("aboutKdeLink%1").arg(i));
+        QVERIFY(link != nullptr);
+        QVERIFY2(within(sceneRect(link), sceneRect(view)), qPrintable(describeItem(link)));
+        QVERIFY2(sceneRect(link).bottom() <= sceneRect(close).top() - 12 + 0.5, qPrintable(describeItem(link)));
+        // Room in the view for its focus ring, 3 px around it.
+        QVERIFY2(within(sceneRect(link).adjusted(-3, -3, 3, 3), sceneRect(view)), qPrintable(describeItem(link)));
+    }
+    QVERIFY(!text->property("truncated").toBool());
+    // At its least height the page scrolls, clear of the buttons.
+    kde->resize(kde->width(), kde->minimumHeight());
+    QTRY_COMPARE(kde->height(), kde->minimumHeight());
+    QTRY_VERIFY(view->property("interactive").toBool());
+    QVERIFY(sceneRect(view).bottom() <= sceneRect(close).top() - 12 + 0.5);
+    QVERIFY(QMetaObject::invokeMethod(kdeDialog, "reject"));
+    QTRY_VERIFY(!kde->isVisible());
 }
 
 void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
@@ -2329,7 +2560,8 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
     // The windows: no heading of their own.
     QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
     QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
-    for (const char *name : {"preferencesDialog", "aboutDialog", "tagEditorDialog", "itunesArtworkDialog"}) {
+    for (const char *name : {"preferencesDialog", "aboutDialog", "aboutKdeDialog", "tagEditorDialog",
+                             "itunesArtworkDialog"}) {
         QQuickWindow *dialogWindow = windowOf(object(window, QString::fromLatin1(name)));
         QVERIFY2(dialogWindow != nullptr, name);
         QVERIFY2(itemsNamed(dialogWindow->contentItem(), QStringLiteral("dialogHeaderTitle")).isEmpty(), name);
@@ -2343,7 +2575,7 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
     editor.selectAllRows();
     editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
     for (const char *name : {"quitSaveFailedDialog", "tagEditorCloseConfirmDialog", "tagEditorQuitWaitDialog",
-                             "autoNumberDialog", "renamePreviewDialog", "libraryRootNameDialog", "aboutKdeDialog",
+                             "autoNumberDialog", "renamePreviewDialog", "libraryRootNameDialog",
                              "removeLibraryRootConfirmDialog"}) {
         QObject *dialog = object(window, QString::fromLatin1(name));
         QVERIFY2(dialog != nullptr, name);
