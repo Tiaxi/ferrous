@@ -393,6 +393,8 @@ QStringList textsHolding(QObject *root, const QString &needle) {
 }
 
 // Defined with the large-font checks below.
+bool within(const QRectF &inner, const QRectF &outer);
+QString describeItem(QQuickItem *item);
 void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size);
 QList<bool> formModes(QObject *preferences, QQuickItem *stack);
 
@@ -421,6 +423,8 @@ private slots:
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
+    void aboutPagesNeverRunUnderTheButtons_data();
+    void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
@@ -1298,6 +1302,100 @@ void UiDialogsTest::aboutShowsTheIconVersionTabsAndCopiesTheVersion() {
     QVERIFY(QGuiApplication::clipboard()->text().contains(QStringLiteral("Qt ")));
     click(about, close);
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// About opens tall enough for its tallest page at its width, so every tab
+// shows whole, its last line at least 12 px above the buttons. Made shorter
+// than its pages, it scrolls them, still clear of the buttons: at 24 pt
+// the links once sat under them (#373 H3).
+void UiDialogsTest::aboutPagesNeverRunUnderTheButtons() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *about = windowOf(dialog);
+    QQuickItem *view = visibleNamed(about, QStringLiteral("aboutPagesView"));
+    QQuickItem *pages = visibleNamed(about, QStringLiteral("aboutPages"));
+    QQuickItem *copy = visibleNamed(about, QStringLiteral("aboutCopyVersionButton"));
+    QQuickItem *close = visibleNamed(about, QStringLiteral("aboutCloseButton"));
+    QVERIFY(view != nullptr && pages != nullptr && copy != nullptr && close != nullptr);
+    const auto buttonsTop = [&]() { return qMin(sceneRect(copy).top(), sceneRect(close).top()); };
+    const QStringList pageNames{QStringLiteral("aboutPageAbout"), QStringLiteral("aboutPageComponents"),
+                                QStringLiteral("aboutPageAuthors"), QStringLiteral("aboutPageLicense")};
+
+    // Every shown line of the page in view ends 12 px above the buttons,
+    // within the view; `whole`, with every line shown.
+    const auto checkTab = [&](int tab, bool whole, const QString &at) {
+        dialog->setProperty("tabIndex", tab);
+        QQuickItem *page = visibleNamed(about, pageNames.at(tab));
+        QVERIFY2(page != nullptr, qPrintable(at));
+        QTRY_VERIFY2(!layoutPending(page) && !layoutPending(view), qPrintable(at));
+        QVERIFY2(sceneRect(view).bottom() <= buttonsTop() - 12 + 0.5,
+                 qPrintable(QStringLiteral("%1: the pages end at %2, the buttons start at %3")
+                                .arg(at).arg(sceneRect(view).bottom()).arg(buttonsTop())));
+        if (whole) {
+            QVERIFY2(view->property("contentHeight").toReal() <= view->height() + 0.5,
+                     qPrintable(QStringLiteral("%1: %2 of %3 px shown").arg(at).arg(view->height())
+                                    .arg(view->property("contentHeight").toReal())));
+        }
+        const QRectF shown = sceneRect(view);
+        const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+            if (!item->isVisible() || item->opacity() <= 0) {
+                return;
+            }
+            const QRectF rect = sceneRect(item);
+            if (item->width() > 0 && item->height() > 0 && rect.intersects(shown)) {
+                const QRectF visible = rect.intersected(shown);
+                QVERIFY2(visible.bottom() <= buttonsTop() - 12 + 0.5, qPrintable(at + QStringLiteral(": ")
+                                                                                  + describeItem(item)));
+                if (whole) {
+                    QVERIFY2(within(rect, shown), qPrintable(at + QStringLiteral(" cut: ") + describeItem(item)));
+                }
+            }
+            if (whole) {
+                QVERIFY2(!item->property("truncated").toBool(), qPrintable(at + QStringLiteral(" elided: ")
+                                                                            + describeItem(item)));
+            }
+            for (QQuickItem *child : item->childItems()) {
+                visit(child);
+            }
+        };
+        visit(page);
+    };
+
+    // Opened, every tab is whole.
+    for (int tab = 0; tab < pageNames.size(); ++tab) {
+        checkTab(tab, true, QStringLiteral("tab %1").arg(tab));
+        QVERIFY(!QTest::currentTestFailed());
+    }
+    // At its least height the pages scroll, clear of the buttons.
+    about->resize(about->width(), about->minimumHeight());
+    QTRY_COMPARE(about->height(), about->minimumHeight());
+    QTRY_VERIFY(view->property("interactive").toBool());
+    for (int tab = 0; tab < pageNames.size(); ++tab) {
+        checkTab(tab, false, QStringLiteral("least height, tab %1").arg(tab));
+        QVERIFY(!QTest::currentTestFailed());
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!about->isVisible());
 }
 
 void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
