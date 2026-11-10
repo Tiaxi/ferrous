@@ -1019,6 +1019,10 @@ private:
     double m_previousTrackPositionOffset{0.0};
     // Data for a gapless successor arrived before the clock changed tracks.
     bool m_gaplessContinuationPending{false};
+    // A zoom's restart of the successor came while it was pending: its
+    // columns and the times from them start at the previous track's end
+    // already, and m_gaplessPositionOffset places that track before them.
+    bool m_gaplessContinuationRebased{false};
     bool m_precomputedResetPending{false};
     int m_precomputedPendingResetStartIndex{0};
     int m_precomputedPendingResetBins{0};

@@ -2074,12 +2074,20 @@ void SpectrogramItem::continueGaplessLocked(std::chrono::steady_clock::time_poin
                 m_clockState.anchorSeconds / m_clockState.rate * 1'000'000'000.0));
         startPosition = 0.0;
     }
-    const double previousDuration = m_previousTrackClockState.durationSeconds;
-    const double previousEnd = m_previousTrackPositionOffset
-        + (previousDuration > 0.0
-            ? previousDuration
-            : m_previousTrackClockState.positionAt(startNs));
-    m_gaplessPositionOffset = previousEnd - startPosition;
+    if (m_gaplessContinuationRebased) {
+        // A zoom's restart of the successor already counts its columns, and
+        // the times from it, from its start, at the previous track's end:
+        // the playhead follows the successor's clock, as its columns do.
+        m_gaplessContinuationRebased = false;
+        m_gaplessPositionOffset = 0.0;
+    } else {
+        const double previousDuration = m_previousTrackClockState.durationSeconds;
+        const double previousEnd = m_previousTrackPositionOffset
+            + (previousDuration > 0.0
+                ? previousDuration
+                : m_previousTrackClockState.positionAt(startNs));
+        m_gaplessPositionOffset = previousEnd - startPosition;
+    }
     if (m_awaitingZoomData && m_zoomClockEpoch == m_previousTrackClockState.epoch) {
         // Playback goes on in the successor: a zoom asked for before it
         // still waits for its restart, which may be of the successor.
@@ -3253,6 +3261,7 @@ void SpectrogramItem::feedPrecomputedChunk(
                 continueGaplessLocked(m_now());
             } else {
                 m_gaplessContinuationPending = true;
+                m_gaplessContinuationRebased = false;
             }
         } else {
             // Centered mode: the new track uses 0-based coordinates, and
@@ -3823,6 +3832,7 @@ void SpectrogramItem::clearPrecomputed() {
     m_streamOrigin += m_gaplessPositionOffset;
     m_gaplessPositionOffset = 0.0;
     m_gaplessContinuationPending = false;
+    m_gaplessContinuationRebased = false;
     m_positionJumpHoldActive = false;
     m_positionJumpHoldUntilNs = 0;
     m_timeGridDirty = true;
@@ -3869,6 +3879,12 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     int hopSize) {
     // Decided before anything of the reset changes what it looks at.
     const bool restartsForZoom = resetRestartsForZoomLocked(trackToken, hopSize);
+    // A zoom's restart of a gapless successor whose data has come, while
+    // the clock still plays the track before it: the history goes on, and
+    // so does the continuation, which the clock's new track completes.
+    const bool continuesGapless = restartsForZoom
+        && m_gaplessContinuationPending
+        && (trackToken == 0 || trackToken == m_precomputedTrackToken);
     if (generation != 0) {
         m_precomputedSessionGeneration = generation;
         m_precomputedCommittedGeneration = std::max(m_precomputedCommittedGeneration, generation);
@@ -3911,7 +3927,8 @@ void SpectrogramItem::applyPrecomputedResetLocked(
     // counted from the offset's sum (m_streamOrigin).
     m_streamOrigin += m_gaplessPositionOffset;
     m_gaplessPositionOffset = 0.0;
-    m_gaplessContinuationPending = false;
+    m_gaplessContinuationPending = continuesGapless;
+    m_gaplessContinuationRebased = continuesGapless;
     m_precomputedMaxColumnIndex = -1;
     if (!m_zoomFillActive && !keepCanvas) {
         m_precomputedCanvasDisplayLeft = 0;
@@ -3951,6 +3968,26 @@ void SpectrogramItem::applyPrecomputedResetLocked(
         const qint64 displayRight = currentRollingDisplayRightLocked(now);
         truncateRollingTailLocked(displayRight + 1);
         m_rollingEpoch = displayRight - static_cast<qint64>(startIndex);
+    }
+    if (continuesGapless) {
+        // The session's columns, and the times from here on, are counted
+        // from the successor's start, which is where the track still
+        // playing ends: at its length, or, not knowing it, where the
+        // restart's first column is at the playhead. That track plays on
+        // before the successor's start, as the offset places it, until the
+        // clock's new track completes the continuation.
+        const qint64 nowNs = monotonicNs(m_now());
+        const double columnsPerSecond = m_precomputedSampleRateHz > 0 && hopSize > 0
+            ? static_cast<double>(m_precomputedSampleRateHz) / static_cast<double>(hopSize)
+            : 0.0;
+        const double previousEnd = m_clockState.durationSeconds > 0.0
+            ? m_clockState.durationSeconds
+            : std::max(0.0, m_clockState.positionAt(nowNs)
+                - (columnsPerSecond > 0.0
+                    ? static_cast<double>(std::max(0, startIndex)) / columnsPerSecond
+                    : 0.0));
+        m_streamOrigin += previousEnd;
+        m_gaplessPositionOffset = -previousEnd;
     }
     m_precomputedLastRightCol = -1;
     m_precomputedLastDisplaySeq = -1;
