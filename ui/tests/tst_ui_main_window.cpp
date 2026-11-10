@@ -342,6 +342,7 @@ private slots:
     void narrowWindowAtALargeFontFitsTheQueue();
     void firstRunShowsOneMessage();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
+    void transportStartsAndEndsAtTheContentInset();
     void viewersInTheWindowFadeAsTheStylesPopupsDo();
 };
 
@@ -1764,6 +1765,28 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(queue->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
     QTRY_VERIFY(library->hasActiveFocus());
+}
+
+// The transport's first button starts at the content's 12 px inset, where
+// the library's chevrons and the status bar's text do, and its volume ends
+// the same 12 px from the right edge.
+void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    showTree(libraryModel, {});
+    QQuickItem *artist = nullptr;
+    QTRY_VERIFY((artist = libraryRow(window, QStringLiteral("artist"))) != nullptr);
+    QQuickItem *previous = named(window, "transportButton_previous");
+    QQuickItem *volume = named(window, "volumeSlider");
+    QQuickItem *chevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
+    QVERIFY(previous && volume && chevron);
+    QTRY_COMPARE(sceneRect(previous).left(), 12.0);
+    QCOMPARE(sceneRect(chevron).left(), sceneRect(previous).left());
+    QCOMPARE(sceneRect(volume).right(), window->width() - 12.0);
 }
 
 int main(int argc, char **argv) {

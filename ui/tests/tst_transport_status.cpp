@@ -468,7 +468,7 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
 }
 
 // The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
-// from 4 px; the seek bar 16 px after Next; the time 72 px, 16 px after it;
+// from 12 px, the content's inset; the seek bar 16 px after Next; the time 72 px, 16 px after it;
 // the mute button 16 px after that and the 96 px slider 4 px after it,
 // 12 px from the end.
 void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
@@ -488,7 +488,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
         QVERIFY2(button != nullptr, qPrintable(names[i]));
         const QRectF rect = sceneRect(button);
         QCOMPARE(rect.size(), QSizeF(32, 32));
-        QCOMPARE(rect.left(), 4.0 + i * 36.0);
+        QCOMPARE(rect.left(), 12.0 + i * 36.0);
         QCOMPARE(rect.top() - top, 8.0);
         QVERIFY(button->property("flat").toBool());
         QCOMPARE(button->property("glyphSize").toInt(), glyphs[i]);
@@ -504,7 +504,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
     QVERIFY(seek && time && mute && volume && waveform);
     const QRectF seekRect = sceneRect(seek);
-    QCOMPARE(seekRect.left(), 4.0 + 4 * 32.0 + 3 * 4.0 + 16.0);
+    QCOMPARE(seekRect.left(), 12.0 + 4 * 32.0 + 3 * 4.0 + 16.0);
     QCOMPARE(seekRect.height(), 28.0);
     QCOMPARE(seekRect.top() - top, 10.0);
     // The waveform is ±12 px about the bar's middle, 2 px from its edges.
