@@ -147,6 +147,12 @@ void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
     QTest::newRow("a file name in curly quotes, then other curly quotes")
         << QStringLiteral("Couldn't play \u201cSong.flac\u201d (in \u201cMusic\u201d)")
         << QStringLiteral("Couldn't play \u201c<file>.flac\u201d (in \u201cMusic\u201d)");
+    QTest::newRow("an ac3 file name in curly quotes")
+        << QStringLiteral("Couldn't play \u201cPrivate Song.ac3\u201d (Resource not found); skipped it.")
+        << QStringLiteral("Couldn't play \u201c<file>.ac3\u201d (Resource not found); skipped it.");
+    QTest::newRow("a dts file name in curly quotes")
+        << QStringLiteral("Couldn't play \u201cPrivate Song.DTS\u201d (Resource not found); skipped it.")
+        << QStringLiteral("Couldn't play \u201c<file>.DTS\u201d (Resource not found); skipped it.");
     QTest::newRow("words in curly quotes stay")
         << QStringLiteral("Scanning \u201cMusic\u201d: 3 added.")
         << QStringLiteral("Scanning \u201cMusic\u201d: 3 added.");

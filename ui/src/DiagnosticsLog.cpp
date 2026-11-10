@@ -84,14 +84,17 @@ constexpr std::array<QLatin1StringView, 7> kSystemPrefixes{
 };
 
 // The extensions a file name in the log may have that name the user's
-// files: audio, playlists and pictures.
-constexpr std::array<QLatin1StringView, 26> kFileExtensions{
+// files: audio, playlists and pictures. It must include every audio
+// extension the library accepts (`is_supported_audio` in
+// src/library/scan.rs).
+constexpr std::array<QLatin1StringView, 28> kFileExtensions{
     QLatin1StringView("flac"), QLatin1StringView("mp3"),  QLatin1StringView("ogg"),
     QLatin1StringView("oga"),  QLatin1StringView("opus"), QLatin1StringView("m4a"),
     QLatin1StringView("m4b"),  QLatin1StringView("mp4"),  QLatin1StringView("aac"),
     QLatin1StringView("wav"),  QLatin1StringView("aif"),  QLatin1StringView("aiff"),
     QLatin1StringView("wv"),   QLatin1StringView("ape"),  QLatin1StringView("mpc"),
     QLatin1StringView("dsf"),  QLatin1StringView("dff"),  QLatin1StringView("wma"),
+    QLatin1StringView("ac3"),  QLatin1StringView("dts"),
     QLatin1StringView("cue"),  QLatin1StringView("m3u"),  QLatin1StringView("m3u8"),
     QLatin1StringView("pls"),  QLatin1StringView("jpg"),  QLatin1StringView("jpeg"),
     QLatin1StringView("png"),  QLatin1StringView("webp"),
