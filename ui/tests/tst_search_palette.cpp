@@ -23,6 +23,7 @@
 #include <QQmlExpression>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -474,6 +475,7 @@ private slots:
     void clearUsesTheBreezeIconAndNoTextGlyphs();
     void textMeetsItsContrastAsDrawn_data();
     void textMeetsItsContrastAsDrawn();
+    void largeFontRowsAndFooterHoldTheirText();
 };
 
 void SearchPaletteTest::initTestCase() {
@@ -1361,6 +1363,104 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
     check(QStringLiteral("no results hint"), colorOf(harness.item(QStringLiteral("globalSearchNoResultsHint"))), view, 4.5);
 
     QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
+}
+
+namespace {
+
+// Whether `inner` lies within `outer`, give or take half a pixel.
+bool within(const QRectF &inner, const QRectF &outer) {
+    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
+        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
+}
+
+} // namespace
+
+// At 24 pt, the field, the rows and the headings are as tall as their text
+// needs, and the footer's key hints wrap inside the 800 px palette, which
+// grows to hold their lines. With the default font, the sizes stay those
+// of the design, as the tests above pin.
+void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), 24.0);
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const QRectF frame = sceneRect(harness.palette());
+    QCOMPARE(frame.width(), 800.0);
+
+    // The field holds its line.
+    const QFontMetricsF fieldMetrics(harness.field()->property("font").value<QFont>());
+    QVERIFY2(harness.field()->height() >= fieldMetrics.height() + 8,
+             qPrintable(QString::number(harness.field()->height())));
+
+    // Every row in view holds its texts, centred in it; each heading holds
+    // its text and the 5 px under it.
+    int rows = 0;
+    int headings = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || !row->isVisible() || row->height() <= 0) {
+            continue;
+        }
+        const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+        if (kind == QStringLiteral("section")) {
+            QQuickItem *heading = visibleChildNamed(row, QStringLiteral("globalSearchSectionHeading"));
+            QVERIFY(heading != nullptr);
+            QVERIFY2(row->height() >= heading->implicitHeight(),
+                     qPrintable(QStringLiteral("a %1 px heading for %2 px of text")
+                                    .arg(row->height()).arg(heading->implicitHeight())));
+            QVERIFY(!heading->property("truncated").toBool());
+            ++headings;
+        } else if (kind == QStringLiteral("item")) {
+            QList<QQuickItem *> texts = visibleNamed(row, QStringLiteral("globalSearchResultTitle"))
+                + visibleNamed(row, QStringLiteral("globalSearchResultContext"))
+                + visibleNamed(row, QStringLiteral("globalSearchResultLength"));
+            QVERIFY(!texts.isEmpty());
+            for (QQuickItem *text : texts) {
+                QVERIFY2(row->height() >= text->implicitHeight() + 8,
+                         qPrintable(QStringLiteral("a %1 px row for %2 px of text (%3)")
+                                        .arg(row->height()).arg(text->implicitHeight())
+                                        .arg(text->property("text").toString())));
+                QCOMPARE(text->property("verticalAlignment").toInt(), int(Qt::AlignVCenter));
+                QCOMPARE(sceneRect(text).center().y(), sceneRect(row).center().y());
+            }
+            ++rows;
+        }
+    }
+    QVERIFY(rows >= 3);
+    QVERIFY(headings >= 1);
+
+    // The footer's four pairs wrap to more than one line, every pair
+    // whole and inside the palette, and the footer is as tall as its lines.
+    QTRY_COMPARE(harness.hints().size(), 4);
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    const QRectF footerRect = sceneRect(footer);
+    QCOMPARE(footerRect.bottom(), frame.bottom());
+    QList<qreal> lineTops;
+    for (QQuickItem *hint : visibleNamed(footer, QStringLiteral("globalSearchKeyHint"))) {
+        const QRectF rect = sceneRect(hint);
+        QVERIFY2(within(rect, footerRect), qPrintable(hint->property("keyText").toString()));
+        QVERIFY(rect.right() <= frame.right() - 16.0 + 0.5);
+        for (QQuickItem *text : visibleNamed(hint, QStringLiteral("globalSearchKeyHintKey"))
+                                    + visibleNamed(hint, QStringLiteral("globalSearchKeyHintAction"))) {
+            QVERIFY(text->implicitHeight() <= rect.height());
+            QVERIFY(within(sceneRect(text), footerRect));
+        }
+        if (!lineTops.contains(rect.top())) {
+            lineTops << rect.top();
+        }
+    }
+    QVERIFY2(lineTops.size() >= 2, qPrintable(QString::number(lineTops.size())));
+    QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
+    QCOMPARE(sceneRect(hairline).bottom(), footerRect.top());
+    QVERIFY(frame.bottom() <= harness.window->height() - 32.0);
 }
 
 int main(int argc, char **argv) {

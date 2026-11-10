@@ -51,11 +51,17 @@ Dialog {
 
     // The amber of the playing glyph over a cover's scrim.
     readonly property color nowOnScrim: "#f2b035"
-    // The palette's sizes at 1×.
-    readonly property real fieldHeight: 44
-    readonly property real headingHeight: 28
-    readonly property real resultHeight: 32
-    readonly property real footerHeight: 28
+    // The palette's sizes at 1×: these with the default font, and taller
+    // with a larger one, by its line.
+    readonly property real fieldHeight: Math.max(44, Math.round(regularMetrics.height) + 20)
+    readonly property real headingHeight: Math.max(28, Math.round(smallMetrics.height) + 8)
+    readonly property real resultHeight: Math.max(32, Math.round(regularMetrics.height) + 12)
+    // The footer's line of key hints, and the footer: 28 px, or as many
+    // lines as the hints wrap to and 4 px above and below them.
+    readonly property real footerLineHeight: Math.round(smallMetrics.height) + 4
+    readonly property real footerHeight: Math.max(28, footerHints.implicitHeight + 8)
+    // The line under the no-results title.
+    readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
     readonly property real sideInset: 16
     readonly property real leadSize: 24
     readonly property real titleX: root.sideInset + root.leadSize + 12
@@ -232,6 +238,7 @@ Dialog {
     }
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
+    FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
 
     // What the keys act on: the selected result's type, "more", "recent",
     // "suggestion", or "none".
@@ -772,7 +779,7 @@ Dialog {
                 visible: root.noResults
                 y: 8
                 width: parent.width
-                height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + 20
+                height: root.suggestion.length > 0 ? root.resultHeight : root.resultHeight + root.hintHeight
                 Text {
                     objectName: "globalSearchNoResultsTitle"
                     x: root.titleX
@@ -791,7 +798,7 @@ Dialog {
                     x: root.titleX
                     y: root.resultHeight - 6
                     width: parent.width - x - root.sideInset
-                    height: 20
+                    height: root.hintHeight
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideRight
                     text: I18n.i18nc("@info", "Check the spelling, or try fewer words.")
@@ -900,18 +907,22 @@ Dialog {
             y: parent.height - height
             width: parent.width
             height: root.footerHeight
-            Row {
+            // The pairs wrap inside the palette when they don't fit on one
+            // line, as with a large font.
+            Flow {
+                id: footerHints
                 x: root.titleX
-                height: parent.height
-                spacing: 18
+                y: Math.round((parent.height - height) / 2)
+                width: parent.width - x - root.sideInset
                 Repeater {
                     model: root.keyHints
                     delegate: Row {
                         required property var modelData
+                        required property int index
                         objectName: "globalSearchKeyHint"
                         readonly property string keyText: modelData.key
                         readonly property string actionText: modelData.action
-                        height: footerBar.height
+                        height: root.footerLineHeight
                         spacing: 4
                         Text {
                             objectName: "globalSearchKeyHintKey"
@@ -930,6 +941,13 @@ Dialog {
                             font.family: root.uiPalette.baseFont.family
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
+                        }
+                        // 18 px to the next pair; a Flow's spacing would
+                        // put it between the lines too.
+                        Item {
+                            visible: index < root.keyHints.length - 1
+                            width: 18 - parent.spacing
+                            height: 1
                         }
                     }
                 }
