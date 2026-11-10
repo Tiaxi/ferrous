@@ -4173,7 +4173,8 @@ void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
 // the corner controls cut): the title strip over the whole screen, the
 // corner plate in the window, the mode switch and the lanes' Mute and Solo
 // all fade on one curve, at the same opacity in every frame, shown at once
-// for the key that wakes them and hidden only once faded out.
+// for the key that wakes them and hidden only once faded out. The plots'
+// crosshair and its readout fade with them too (#373 H3: it went at once).
 void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QFETCH(bool, wholeScreen);
     LibraryTreeModel libraryModel;
@@ -4194,6 +4195,7 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     bridge->setProperty("spectrogramViewMode", 1);
     bridge->setProperty("channelButtonsVisibility", 2);
     bridge->setProperty("currentTrackChannels", 2);
+    bridge->setProperty("showSpectrogramCrosshair", true);
     playQueueRow(bridge, 0, QStringLiteral("Paused"));
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
                                       Q_ARG(bool, true)));
@@ -4224,6 +4226,17 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
         QTRY_COMPARE(follower->opacity(), 1.0);
         QVERIFY(follower->isVisible());
     }
+    // The crosshair, which each plot draws: the spectrogram's lanes, and
+    // the waveform beside them.
+    QList<QQuickItem *> crosshairs = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"));
+    QVERIFY(!crosshairs.isEmpty());
+    QQuickItem *waveform = itemNamed(spectrogram->parentItem(), QStringLiteral("waveformEditorItem"));
+    QVERIFY(waveform != nullptr);
+    crosshairs.append(waveform);
+    for (QQuickItem *crosshair : crosshairs) {
+        QCOMPARE(crosshair->property("crosshairOpacity").toDouble(), 1.0);
+        QVERIFY(crosshair->property("crosshairEnabled").toBool());
+    }
 
     QString failure;
     int frames = 0;
@@ -4234,6 +4247,15 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
                 || follower->isVisible() != controls->isVisible()) {
                 return QStringLiteral("%1 at %2 (%3), the controls at %4 (%5)")
                     .arg(follower->objectName()).arg(follower->opacity()).arg(follower->isVisible())
+                    .arg(controls->opacity()).arg(controls->isVisible());
+            }
+        }
+        for (QQuickItem *crosshair : crosshairs) {
+            const double opacity = crosshair->property("crosshairOpacity").toDouble();
+            const bool enabled = crosshair->property("crosshairEnabled").toBool();
+            if (std::abs(opacity - controls->opacity()) > 1e-9 || enabled != controls->isVisible()) {
+                return QStringLiteral("the crosshair of %1 at %2 (%3), the controls at %4 (%5)")
+                    .arg(crosshair->objectName()).arg(opacity).arg(enabled)
                     .arg(controls->opacity()).arg(controls->isVisible());
             }
         }

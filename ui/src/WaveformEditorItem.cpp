@@ -524,6 +524,24 @@ QRectF WaveformEditorItem::fpsCounterRect() const {
 void WaveformEditorItem::setZoomEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_zoomEnabled == value) return; m_zoomEnabled = value; } emit zoomEnabledChanged(); }
 void WaveformEditorItem::setGridEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_gridEnabled == value) return; m_gridEnabled = value; } emit gridEnabledChanged(); update(); }
 void WaveformEditorItem::setCrosshairEnabled(bool value) { { QMutexLocker lock(&m_stateMutex); if (m_crosshairEnabled == value) return; m_crosshairEnabled = value; } emit crosshairEnabledChanged(); update(); }
+double WaveformEditorItem::crosshairOpacity() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_crosshairOpacity;
+}
+void WaveformEditorItem::setCrosshairOpacity(double value) {
+    value = std::clamp(value, 0.0, 1.0);
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (qFuzzyCompare(m_crosshairOpacity + 1.0, value + 1.0)) {
+            return;
+        }
+        m_crosshairOpacity = value;
+    }
+    emit crosshairOpacityChanged();
+    if (m_crosshairEnabled) {
+        update();
+    }
+}
 void WaveformEditorItem::setShowFpsOverlay(bool value) {
     {
         QMutexLocker lock(&m_stateMutex);
@@ -2193,6 +2211,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     QPointF hover;
     bool hoverActive = false;
     bool crosshair = false;
+    double crosshairOpacity = 1.0;
     double position = 0.0;
     double cacheStart = 0.0;
     double cacheSecondsPerPixel = 0.0;
@@ -2315,6 +2334,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
         hover = m_hoverPosition;
         hoverActive = m_hoverActive;
         crosshair = m_crosshairEnabled;
+        crosshairOpacity = m_crosshairOpacity;
         scale = renderScaleLocked();
         position = displayedPositionSecondsLocked(frameNs);
         // Tiles made here, a few at a time, come in the next frames; tiles
@@ -2437,10 +2457,13 @@ void WaveformEditorItem::paint(QPainter *painter) {
         line(x + pixel, colors.playheadCasing);
         line(x, colors.playhead);
     }
-    if (crosshair && hoverActive) {
+    if (crosshair && hoverActive && crosshairOpacity > 0.0) {
         QMutexLocker lock(&m_stateMutex);
         m_hoverPosition = hover;
+        painter->save();
+        painter->setOpacity(crosshairOpacity);
         drawCrosshair(*painter, canvasWidth, canvasHeight, visibleStart, visibleEnd);
+        painter->restore();
     }
     if (showFps && fpsValue > 0) drawFpsOverlay(*painter, canvasWidth, fpsValue, reservedCorner);
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS

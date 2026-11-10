@@ -16,6 +16,10 @@ Item {
     property var clock: null
     property var seekCommitted: null
     property bool interactiveOverlaysVisible: true
+    // The overlays as they fade with the viewer's controls, from 1 to 0:
+    // the crosshair shows until they have faded out. Without a level of
+    // the viewer's, they show and hide at once.
+    property real interactiveOverlaysLevel: root.interactiveOverlaysVisible ? 1 : 0
     // Whether the plot draws the playhead; see Main.qml's mode switch.
     property bool playheadVisible: true
     property var pointerActivity: null
@@ -88,7 +92,8 @@ Item {
         // labels collide with the data.
         gridEnabled: false
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
-            && root.interactiveOverlaysVisible
+            && (root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0)
+        crosshairOpacity: root.interactiveOverlaysLevel
         showFpsOverlay: root.uiBridge.showFps
         reservedCorner: root.reservedCorner
         laneHeadBounds: root.laneHeadBounds

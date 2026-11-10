@@ -45,6 +45,10 @@ Item {
         return !(first && first.spectrogramItem && first.spectrogramItem.precomputedReady)
     }
     property bool interactiveOverlaysVisible: true
+    // The overlays as they fade with the viewer's controls, from 1 to 0:
+    // the crosshair shows until they have faded out. Without a level of
+    // the viewer's, they show and hide at once.
+    property real interactiveOverlaysLevel: root.interactiveOverlaysVisible ? 1 : 0
     // Whether the lanes draw the playhead; see Main.qml's mode switch.
     property bool playheadVisible: true
     property var pointerActivity: null
@@ -345,7 +349,8 @@ Item {
                     playing: (root.uiBridge.playbackState || "") === "Playing"
                     displayMode: root.uiBridge.spectrogramDisplayMode
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
-                        && root.interactiveOverlaysVisible
+                        && (root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0)
+                    crosshairOpacity: root.interactiveOverlaysLevel
                     // The crosshair's readout is drawn on the plot: the time
                     // on the bottom edge of the lowest lane.
                     showCrosshairTime: index === spectrogramRepeater.count - 1

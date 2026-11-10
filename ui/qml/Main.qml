@@ -1724,6 +1724,7 @@ ApplicationWindow {
             layer.enabled: opacity > 0 && opacity < 1
             viewerMode: viewerController.spectrogramViewerOpen
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            interactiveOverlaysLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
@@ -1745,6 +1746,7 @@ ApplicationWindow {
             z: visualizationSurface.settledMode === 1 ? 0 : 1
             layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
+            interactiveOverlaysLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
