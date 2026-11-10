@@ -16,6 +16,9 @@ import "../logic/FormatUtils.js" as FormatUtils
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
 //   lines beside it, then 12 px before the library.
 // - Nothing loaded: one row with the album glyph and "Nothing playing".
+// - A track without a cover or without tags keeps the layout: the tile
+//   on the view colour with a small mark, and a line of space for each
+//   line it has no text for.
 //
 // Lines that do not fit are elided, with the whole text in a tooltip.
 Item {
@@ -92,14 +95,16 @@ Item {
         narrowDetails: root.narrowDetailsText
     })
 
-    // A track change cross-fades (#373 Motion), line by line: a line that
-    // differs for the next track fades the one before out over it, in
-    // place, and its fields, and the words of a field in which only a
-    // number changes, that are the same for both and do not move stay
-    // still (#537); a line that is the same stays still. The next track of the same album
-    // fades over shortDuration; a track of another album, or with another
-    // cover, fades the cover and the lines together on one curve over
-    // longDuration. A line that comes to differ while the track change
+    // A track change fades (#373 Motion), line by line: a line that differs
+    // for the next track fades the one before out, in place, then the next
+    // track's in, so that no frame shows both texts at once (#373 H1); its
+    // fields, and the words of a field in which only a number changes,
+    // that are the same for both and do not move stay still (#537); a line
+    // that is the same stays still. The next track of the same album fades
+    // over shortDuration; a track of another album, or with another cover,
+    // fades the cover and the lines together over longDuration: the cover
+    // cross-fades over all of it, the lines go out over its first half and
+    // come in over its second. A line that comes to differ while the track change
     // fades (the metadata comes after the path) joins the fade from full
     // opacity, and the lines already fading go on from theirs. A cover
     // that changes later for the same track fades too: during a track
@@ -131,8 +136,8 @@ Item {
     // to differ join; and whether it runs over longDuration (`long`): for
     // another cover or another album, even when the two look alike.
     property var outgoing: null
-    // How far the fade has come: 0 when it starts, 1 once the playing
-    // track alone shows.
+    // How far the fade has come in its time: 0 when it starts, 1 once the
+    // playing track alone shows. Each layer eases on its own part of it.
     property real handover: 1
     readonly property NumberAnimation handoverAnimation: NumberAnimation {
         objectName: "nowPlayingHandoverAnimation"
@@ -140,9 +145,31 @@ Item {
         property: "handover"
         from: 0
         to: 1
-        easing.type: Easing.OutCubic
+        easing.type: Easing.Linear
         onFinished: root.outgoing = null
     }
+
+    // The OutCubic curve of the motion, over a part of the fade's time.
+    function _eased(progress) {
+        const rest = 1 - Math.min(1, Math.max(0, progress))
+        return 1 - rest * rest * rest
+    }
+    // At `at` of the fade, how much of their opacity the lines before keep,
+    // going out over the first half; how far the playing track's lines have
+    // come in, over the second; and how much of their opacity the covers
+    // before keep, going out over all of it.
+    function _linesOutLevel(at) {
+        return 1 - root._eased(2 * at)
+    }
+    function _linesInLevel(at) {
+        return root._eased(2 * at - 1)
+    }
+    function _coversOutLevel(at) {
+        return 1 - root._eased(at)
+    }
+    readonly property real linesOutLevel: root._linesOutLevel(root.handover)
+    readonly property real linesInLevel: root._linesInLevel(root.handover)
+    readonly property real coversOutLevel: root._coversOutLevel(root.handover)
     // The most layers a line, or the cover, fades out at once: those of
     // the two tracks before the playing one. Past that, a change adds no
     // layer, and none is dropped while it shows: the playing track's own
@@ -186,18 +213,26 @@ Item {
     // on the fade's curve.
     function _outgoingLineOpacity(key) {
         const line = root._outgoingLine(key)
-        if (line === null)
+        if (line === null || line.layers.length === 0)
             return 0
-        return Math.max(...line.layers.map(layer => root._layerFrom(layer))) * (1 - root.handover)
+        return Math.max(...line.layers.map(layer => root._layerFrom(layer)))
+            * root._linesOutLevel(root.handover)
+    }
+
+    // How much of the playing track's text of `key` has still to come in.
+    function _incomingLineRest(key) {
+        const line = root._outgoingLine(key)
+        return line === null ? 0 : line.incomingFrom * (1 - root._linesInLevel(root.handover))
     }
 
     function _layerFrom(layer) {
         return Math.max(...layer.parts.map(part => part.from))
     }
 
-    // The line of `key` while it still fades, or null.
+    // The line of `key` while it still fades, out or in, or null.
     function _shownLine(key) {
-        return root._outgoingLineOpacity(key) > 0 ? root._outgoingLine(key) : null
+        return root._outgoingLineOpacity(key) > 0 || root._incomingLineRest(key) > 0
+            ? root._outgoingLine(key) : null
     }
 
     // Whether `text` has a right-to-left character: its fields are then
@@ -365,7 +400,10 @@ Item {
     // line once it fades out as many layers as it can. What stayed still
     // and `after` no longer has in its place fades out from full opacity,
     // as it showed, in the newest layer, and the playing track's text there
-    // fades in with the rest of it.
+    // fades in with the rest of it; so that no frame shows two texts in one
+    // place, the playing track's line, once it has begun to come in, then
+    // goes out as a layer of its own too, from where it had come in to,
+    // and comes in again after.
     // `newTrack`: the fade is another track's, whose lines are still the
     // track before's.
     function _nextLine(key, before, after, track, newTrack) {
@@ -377,15 +415,19 @@ Item {
                 return null
             return root._fadingLine(runs, [root._layer(before, [{ at: 0, from: 1 }])], 1, true)
         }
-        const level = 1 - root.handover
+        const level = root._linesOutLevel(root.handover)
         const still = root._commonRuns(line.still, runs)
         const givenUp = root._givenUp(line.still, still, before)
         let layers = line.layers
             .map(layer => root._layer(layer.text, layer.parts.map(part => ({ at: part.at, from: part.from * level }))))
             .filter(layer => root._layerFrom(layer) > 0)
         const own = !newTrack && line.own
-        let incomingFrom = line.incomingFrom * level
-        if (changes && !own && layers.length < root.maxOutgoingLayers) {
+        let incomingFrom = root._incomingLineRest(key)
+        // What stayed still and goes out needs a layer to go out in, and
+        // must not show over the playing track's text where that has begun
+        // to come in.
+        const givesUp = givenUp.length > 0 && (incomingFrom < 1 || layers.length === 0)
+        if (changes && (!own || givesUp) && layers.length < root.maxOutgoingLayers) {
             layers.push(root._layer(before, [{ at: 0, from: 1 - incomingFrom }]))
             incomingFrom = 1
         }
@@ -395,7 +437,10 @@ Item {
             (parts, span) => root._withFrom(parts, span[0], span[1], index === layers.length - 1 ? 1 : 0),
             layer.parts))))
             .filter(layer => root._layerFrom(layer) > 0)
-        return layers.length > 0 ? root._fadingLine(still, layers, incomingFrom, own || changes) : null
+        // A line with nothing before it left to go out may still be coming
+        // in: it goes on from where it is.
+        return layers.length > 0 || incomingFrom > 0
+            ? root._fadingLine(still, layers, incomingFrom, own || changes) : null
     }
 
     // Parts that fade alike are one.
@@ -411,7 +456,7 @@ Item {
     // tint of the translucent placeholder. A cover image right over the
     // same image adds nothing either, so the one it replaces goes.
     function _nextCovers(was, next) {
-        const level = 1 - root.handover
+        const level = root._coversOutLevel(root.handover)
         const covers = root.outgoing === null ? [] : root.outgoing.covers
             .map(cover => ({ coverPath: cover.coverPath, from: cover.from * level }))
             .filter(cover => cover.from > 0)
@@ -614,7 +659,7 @@ Item {
         readonly property var texts: line.layers.map(layer => layer.text).concat([line.text])
         // The playing track's text where it does not stay still, fading in.
         readonly property real incomingOpacity: line.fading
-            ? 1 - line.before.incomingFrom * (1 - root.handover) : 1
+            ? 1 - line.before.incomingFrom * (1 - root.linesInLevel) : 1
         // Where the line stays still while it fades, [left, right] for each
         // run of `still`: from the middle of the gap before it to the middle
         // of the gap after it, where no text has a glyph. A run whose gap
@@ -716,8 +761,10 @@ Item {
         }
 
         Layout.fillWidth: true
+        // An empty line keeps its place, a line of the font's height, so the
+        // text block, and the library under it, stay where they are for a
+        // track with tags missing (#373 H1).
         implicitHeight: stillText.implicitHeight
-        visible: line.text.length > 0 || line.layers.some(layer => layer.text.length > 0)
 
         FontMetrics {
             id: metrics
@@ -738,6 +785,7 @@ Item {
                 text: line.text
                 Accessible.role: Accessible.StaticText
                 Accessible.name: text
+                Accessible.ignored: text.length === 0
             }
         }
 
@@ -794,7 +842,7 @@ Item {
                         width: part.modelData.width
                         height: line.height
                         clip: true
-                        opacity: part.modelData.from * (1 - root.handover)
+                        opacity: part.modelData.from * root.linesOutLevel
 
                         LineText {
                             objectName: "nowPlayingOutgoing" + line.name
@@ -881,8 +929,9 @@ Item {
         width: root.layoutMode === "narrow" ? root.narrowCoverSize : root.width
         height: width
         uiBridge: root.uiBridge
-        placeholderColor: Qt.rgba(root.uiPalette.text.r, root.uiPalette.text.g,
-                                  root.uiPalette.text.b, 0.04)
+        // No surface of its own: the sidebar's view colour, with the mark
+        // in the tertiary text colour.
+        placeholderColor: root.uiPalette.view
         placeholderGlyphColor: root.uiPalette.textTertiary
         // The sidebar's, which shows around the cover.
         backdropColor: root.uiPalette.view
@@ -892,7 +941,7 @@ Item {
         // The covers before, over this one while they fade out.
         outgoingSlots: root.maxOutgoingLayers
         outgoingCovers: root.outgoing !== null ? root.outgoing.covers : []
-        outgoingLevel: 1 - root.handover
+        outgoingLevel: root.coversOutLevel
     }
 
     // The playing track's lines, each of which fades on its own over a

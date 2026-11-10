@@ -745,6 +745,28 @@ PanelLook panelLook(QQuickItem *panel, const QStringList &names) {
     return look;
 }
 
+// The now-playing fade's curves, as NowPlayingPanel has them: its handover
+// runs over the fade's time, linearly; the lines before go out over its
+// first half and the playing track's come in over its second, so that no
+// frame shows both (#373 H1); the covers before go out over all of it. Each
+// is on the OutCubic curve.
+double eased(double progress) {
+    const double rest = 1.0 - std::clamp(progress, 0.0, 1.0);
+    return 1.0 - rest * rest * rest;
+}
+
+double linesOut(double at) {
+    return 1.0 - eased(2.0 * at);
+}
+
+double linesIn(double at) {
+    return eased(2.0 * at - 1.0);
+}
+
+double coversOut(double at) {
+    return 1.0 - eased(at);
+}
+
 bool sameOpacity(double left, double right) {
     return std::abs(left - right) < 1e-9;
 }
@@ -909,6 +931,12 @@ private slots:
     void animationsOffMakeEveryChangeInstant();
     void nothingAnimatesOnceTheMotionIsDone();
     void nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown();
+    void nowPlayingNoFrameShowsTwoTextsInALine();
+    void nowPlayingNoFrameShowsTwoTextsInALine_data();
+    void visualizationModeSwitchKeepsAPlotOnScreen();
+    void visualizationModeSwitchKeepsAPlotOnScreen_data();
+    void viewerControlsFadeWithTheStrip();
+    void viewerControlsFadeWithTheStrip_data();
 };
 
 void UiMotionTest::initTestCase() {
@@ -1170,9 +1198,10 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges_data() {
 }
 
 // The next track of the same album: the cover stays, and of the lines only
-// what changes cross-fades, in place, over shortDuration: the title, and
-// the track number in the details, between "Track" and "of 2", which stay
-// still with the year and the genre. The artist and the album stay at full
+// what changes fades, in place, over shortDuration: the title, and the
+// track number in the details, between "Track" and "of 2", which stay still
+// with the year and the genre. What changes goes out, then comes in: no
+// frame shows both texts (#373 H1). The artist and the album stay at full
 // opacity in every frame, and no edge cuts a glyph.
 void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     QFETCH(bool, narrow);
@@ -1231,7 +1260,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         }
         for (const QString &name : {title, details}) {
             const PanelLine line = panelLine(panel, name);
-            if (!qFuzzyCompare(line.incomingOpacity() + line.outgoingOpacity() + 1.0, 2.0)) {
+            if (line.incomingOpacity() > 0 && line.outgoingOpacity() > 0) {
                 failure = QStringLiteral("%1 fades in at %2 and out at %3 in check %4")
                               .arg(name).arg(line.incomingOpacity()).arg(line.outgoingOpacity()).arg(checks);
             }
@@ -1266,7 +1295,7 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
 
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), 600);
-    QCOMPARE(easingOf(handover), QEasingCurve::OutCubic);
+    QCOMPARE(easingOf(handover), QEasingCurve::Linear);
     // The playing track's lines, coming in; the track before's going out
     // where they differ.
     const PanelLine titleLine = panelLine(panel, title);
@@ -1294,8 +1323,10 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
         checkFrame();
         QVERIFY(QTest::qWaitFor([&]() { return frames > framesBefore; }));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
-        QCOMPARE(titleLine.outgoingOpacity(), 1.0 - at);
-        QCOMPARE(detailsLine.outgoingOpacity(), 1.0 - at);
+        QCOMPARE(titleLine.outgoingOpacity(), linesOut(at));
+        QCOMPARE(detailsLine.outgoingOpacity(), linesOut(at));
+        QCOMPARE(titleLine.incomingOpacity(), linesIn(at));
+        QCOMPARE(detailsLine.incomingOpacity(), linesIn(at));
     }
     panel->setProperty("handover", 0.0);
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -1322,9 +1353,10 @@ void UiMotionTest::nowPlayingNextTrackOfAnAlbumFadesOnlyWhatChanges() {
     QVERIFY(allLinesStill(panel));
 }
 
-// Another album: every line that differs cross-fades, on one curve with
-// the cover over longDuration; the artist both share stays still, and so
-// does what is between the year and the number.
+// Another album: every line that differs fades with the cover over
+// longDuration, the cover cross-fading over all of it, the lines going out
+// over its first half and coming in over its second; the artist both share
+// stays still, and so does what is between the year and the number.
 void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     Covers covers;
     LibraryTreeModel libraryModel;
@@ -1355,25 +1387,27 @@ void UiMotionTest::nowPlayingCrossFadesCoverAndTextForAnotherAlbum() {
     QVERIFY(units != nullptr);
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
-    QCOMPARE(easingOf(handover), QEasingCurve::OutCubic);
+    QCOMPARE(easingOf(handover), QEasingCurve::Linear);
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
     QVERIFY(outgoingCover->isVisible());
-    // One curve: the cover and every line going out are at the same point.
-    const auto oneCurve = [&]() {
+    // Every point of the fade: the cover on its curve, every line on its.
+    const auto onTheCurves = [&](double at) {
         for (const QString &name : kWideLines) {
             const PanelLine line = panelLine(panel, name);
-            if (!line.fades() || line.outgoingOpacity() != outgoingCover->opacity()) {
+            if (!sameOpacity(line.outgoingOpacity(), linesOut(at))
+                || !sameOpacity(line.incomingOpacity(), linesIn(at))) {
                 return false;
             }
         }
-        return true;
+        return sameOpacity(outgoingCover->opacity(), coversOut(at));
     };
-    QVERIFY(oneCurve());
-    // Half-way, still on the one curve.
+    QVERIFY(onTheCurves(0.0));
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
-    QCOMPARE(outgoingCover->opacity(), 0.5);
-    QVERIFY(oneCurve());
+    for (const double at : {0.25, 0.5, 0.75}) {
+        panel->setProperty("handover", at);
+        QVERIFY2(onTheCurves(at), qPrintable(QString::number(at)));
+    }
+    panel->setProperty("handover", 0.25);
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("Second"));
     QCOMPARE(textOf(panel, "nowPlayingOutgoingArtistAlbum"), QStringLiteral("Artist A — Album A"));
     QCOMPARE(textOf(panel, "nowPlayingOutgoingDetails"), QStringLiteral("2005 · Track 2"));
@@ -1413,7 +1447,8 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
     // Part of the way.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     panel->setProperty("handover", 0.45);
-    QCOMPARE(title.outgoingOpacity(), 0.55);
+    QCOMPARE(title.outgoingOpacity(), linesOut(0.45));
+    QVERIFY(title.outgoingOpacity() > 0.0);
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
     const double titleBefore = title.outgoingOpacity();
 
@@ -1432,7 +1467,7 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
     QCOMPARE(title.outgoingOpacity(), titleBefore);
     QCOMPARE(title.outgoingText(), QStringLiteral("First"));
 
-    // Then each goes one way only, on the one curve, to the playing track.
+    // Then each goes one way only, on its curve, to the playing track.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     double titleOut = titleBefore;
     double lineOut = 1.0;
@@ -1440,11 +1475,11 @@ void UiMotionTest::nowPlayingLineThatComesToDifferJoinsTheFade() {
         panel->setProperty("handover", at);
         const double nextTitle = title.outgoingOpacity();
         const double nextLine = artistAlbum.outgoingOpacity();
-        QVERIFY(nextTitle < titleOut);
-        QVERIFY(nextLine < lineOut);
-        QCOMPARE(nextTitle, titleBefore * (1.0 - at));
-        QCOMPARE(nextLine, 1.0 - at);
-        QCOMPARE(artistAlbum.incomingOpacity(), at);
+        QVERIFY(nextTitle <= titleOut);
+        QVERIFY(nextLine < lineOut || nextLine == 0.0);
+        QCOMPARE(nextTitle, titleBefore * linesOut(at));
+        QCOMPARE(nextLine, linesOut(at));
+        QCOMPARE(artistAlbum.incomingOpacity(), linesIn(at));
         titleOut = nextTitle;
         lineOut = nextLine;
     }
@@ -1463,8 +1498,9 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole_data() {
 // playing track's metadata changes later, fades out from full opacity, as
 // it showed, and so does what stayed still after it: it does not take on
 // the rest's progress, and nothing jumps. The playing track's text fades in
-// as one where the line no longer stays still, so none of its glyphs is
-// cut where the line before's pieces are, however long its new field.
+// as one where the line no longer stays still, once all that goes out is
+// out, so none of its glyphs is cut where the line before's pieces are,
+// however long its new field.
 void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
     QFETCH(QString, genre);
     LibraryTreeModel libraryModel;
@@ -1489,9 +1525,12 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
     bridge->setProperty("currentTrackNumber", 2);
     QVERIFY(details.fades());
     QCOMPARE(details.stillTexts(), QStringList{QStringLiteral("2005 · Rock · Track")});
-    // Half-way.
+    // A quarter of the way: the number before going out, the next not in.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
+    panel->setProperty("handover", 0.25);
+    const double numberLeft = linesOut(0.25);
+    QVERIFY(numberLeft > 0.0);
+    QCOMPARE(linesIn(0.25), 0.0);
     const QFontMetricsF metrics(details.font());
     const double inGenre = metrics.horizontalAdvance(QStringLiteral("2005 · R"));
     const double inTrack = metrics.horizontalAdvance(QStringLiteral("2005 · Rock · Tr"));
@@ -1499,7 +1538,7 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
                              + metrics.horizontalAdvance(QStringLiteral("2005 · Rock · Track 1"))) / 2;
     QCOMPARE(details.opacitiesAt(inGenre), std::make_pair(1.0, 1.0));
     QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(1.0, 1.0));
-    QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(0.5, 0.5));
+    QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(numberLeft, 0.0));
     QCOMPARE(details.opacitiesAt(metrics.horizontalAdvance(QStringLiteral("20"))), std::make_pair(1.0, 1.0));
 
     // The file's genre replaces the queue's.
@@ -1507,37 +1546,34 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
     QCOMPARE(details.text(), QStringLiteral("2005 · %1 · Track 2").arg(genre));
     QCOMPARE(details.outgoingText(), QStringLiteral("2005 · Rock · Track 1"));
     // At once: the genre before, and "Track" after it, which moves or might,
-    // show whole, as they did, and fade out from there; the number before,
-    // and the playing track's text, go on from where they were.
+    // show whole, as they did, and fade out from there; the number before
+    // goes on from where it was, and the playing track's text, not in yet,
+    // comes in once they are out.
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(panel->property("handover").toDouble(), 0.0);
-    QCOMPARE(details.opacitiesAt(inGenre), std::make_pair(1.0, 0.5));
-    QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(1.0, 0.5));
-    QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(0.5, 0.5));
+    QCOMPARE(details.opacitiesAt(inGenre), std::make_pair(1.0, 0.0));
+    QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(1.0, 0.0));
+    QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(numberLeft, 0.0));
     QCOMPARE(details.opacitiesAt(metrics.horizontalAdvance(QStringLiteral("20"))), std::make_pair(1.0, 1.0));
     // The playing track's text is cut only where both share a gap, after
-    // "2005 ·", wherever its own fields are; the line before's pieces only
-    // in its own gaps.
+    // "2005 ·", wherever its own fields are; the lines before's pieces only
+    // in their own gaps.
     QCOMPARE(details.stillTexts(), QStringList{QStringLiteral("2005 ·")});
     QCOMPARE(itemsNamed(details.line(), QStringLiteral("nowPlayingIncomingDetails")).size(), 1);
     const QList<Window> incoming = details.incomingWindows();
     QCOMPARE(incoming.size(), 1);
     QCOMPARE(incoming.first().first, details.stillWindows().first().second);
     QCOMPARE(incoming.first().second, details.line()->width());
-    const QList<double> edges = details.innerEdges();
-    QCOMPARE(edges.size(), 1);
-    QVERIFY(edges.first() > metrics.horizontalAdvance(QStringLiteral("2005 · Rock · Track")));
-    QVERIFY(edges.first() < metrics.horizontalAdvance(QStringLiteral("2005 · Rock · Track ")));
+    QCOMPARE(details.parts().size(), 2);
     QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
 
-    // Then each goes on, on the one curve.
+    // Then each goes on, on its curve: out, then in.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     for (const double at : {0.25, 0.6}) {
         panel->setProperty("handover", at);
-        const double level = 1.0 - at;
-        QCOMPARE(details.opacitiesAt(inGenre), std::make_pair(level, 1.0 - 0.5 * level));
-        QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(level, 1.0 - 0.5 * level));
-        QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(0.5 * level, 1.0 - 0.5 * level));
+        QCOMPARE(details.opacitiesAt(inGenre), std::make_pair(linesOut(at), linesIn(at)));
+        QCOMPARE(details.opacitiesAt(inTrack), std::make_pair(linesOut(at), linesIn(at)));
+        QCOMPARE(details.opacitiesAt(inNumber), std::make_pair(numberLeft * linesOut(at), linesIn(at)));
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
@@ -1545,7 +1581,7 @@ void UiMotionTest::nowPlayingStillFieldThatChangesLateFadesFromWhole() {
 }
 
 // A line with right-to-left text is not laid out from the left: none of it
-// stays still, and the whole of it cross-fades, as one.
+// stays still, and the whole of it fades out, then in, as one.
 void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1575,9 +1611,9 @@ void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
         QCOMPARE(parts.size(), 1);
         QCOMPARE(parts.first()->x(), 0.0);
         QCOMPARE(parts.first()->width(), artistAlbum.line()->width());
-        QCOMPARE(parts.first()->opacity(), 1.0 - at);
+        QCOMPARE(parts.first()->opacity(), linesOut(at));
         QCOMPARE(artistAlbum.incomingWindows(), (QList<Window>{{0.0, artistAlbum.line()->width()}}));
-        QCOMPARE(artistAlbum.incomingOpacity(), at);
+        QCOMPARE(artistAlbum.incomingOpacity(), linesIn(at));
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
@@ -1585,9 +1621,9 @@ void UiMotionTest::nowPlayingRightToLeftLineFadesWhole() {
 }
 
 // A line that comes to have right-to-left text while it fades is not laid
-// out from the left any more: none of it stays still, and the playing
-// track's text fades in as one, from the opacity it had; the line before's
-// parts go on, the start that showed whole fading from there.
+// out from the left any more: none of it stays still. What it showed goes
+// out, from the opacity it had, the start that showed whole from there, and
+// the playing track's text then comes in as one: no frame shows both.
 void UiMotionTest::nowPlayingLineThatTurnsRightToLeftFadesInWhole() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1602,30 +1638,38 @@ void UiMotionTest::nowPlayingLineThatTurnsRightToLeftFadesInWhole() {
     QTRY_VERIFY(artistAlbum.line()->width() > 0);
     showTrack(bridge, kTrackB1, QStringLiteral("Third"), QStringLiteral("Album Bee"));
     QCOMPARE(artistAlbum.stillTexts(), QStringList{QStringLiteral("Artist A —")});
+    // Three quarters of the way: the album before out, the next coming in.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
-    QCOMPARE(artistAlbum.incomingOpacity(), 0.5);
+    panel->setProperty("handover", 0.75);
+    const double cameIn = linesIn(0.75);
+    QVERIFY(cameIn > 0.0 && cameIn < 1.0);
+    QCOMPARE(artistAlbum.incomingOpacity(), cameIn);
+    QCOMPARE(artistAlbum.outgoingOpacity(), 0.0);
 
     // The file names the artist in Hebrew.
     bridge->setProperty("currentTrackArtist", QStringLiteral("להקת הים"));
     QCOMPARE(artistAlbum.text(), QStringLiteral("להקת הים — Album Bee"));
-    QCOMPARE(artistAlbum.outgoingText(), QStringLiteral("Artist A — Album A"));
+    // What showed goes out: the album as far as it came in, the artist,
+    // which was still, whole.
+    QCOMPARE(artistAlbum.outgoingText(), QStringLiteral("Artist A — Album Bee"));
     QCOMPARE(panel->property("handover").toDouble(), 0.0);
     QCOMPARE(artistAlbum.stillWindows(), QList<Window>());
     QCOMPARE(itemsNamed(artistAlbum.line(), QStringLiteral("nowPlayingIncomingArtistAlbum")).size(), 1);
     QCOMPARE(artistAlbum.incomingWindows(), (QList<Window>{{0.0, artistAlbum.line()->width()}}));
-    // No higher than it showed where the line was not still.
-    QCOMPARE(artistAlbum.incomingOpacity(), 0.5);
+    QCOMPARE(artistAlbum.incomingOpacity(), 0.0);
     const QFontMetricsF metrics(artistAlbum.font());
     const double inArtist = metrics.horizontalAdvance(QStringLiteral("Art"));
     const double inAlbum = metrics.horizontalAdvance(QStringLiteral("Artist A — Al"));
-    QCOMPARE(artistAlbum.opacitiesAt(inArtist), std::make_pair(1.0, 0.5));
-    QCOMPARE(artistAlbum.opacitiesAt(inAlbum), std::make_pair(0.5, 0.5));
+    QCOMPARE(artistAlbum.opacitiesAt(inArtist), std::make_pair(1.0, 0.0));
+    QCOMPARE(artistAlbum.opacitiesAt(inAlbum), std::make_pair(cameIn, 0.0));
+    QVERIFY2(cutGlyph(artistAlbum).isEmpty(), qPrintable(cutGlyph(artistAlbum)));
 
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
-    QCOMPARE(artistAlbum.opacitiesAt(inArtist), std::make_pair(0.5, 0.75));
-    QCOMPARE(artistAlbum.opacitiesAt(inAlbum), std::make_pair(0.25, 0.75));
+    for (const double at : {0.25, 0.75}) {
+        panel->setProperty("handover", at);
+        QCOMPARE(artistAlbum.opacitiesAt(inArtist), std::make_pair(linesOut(at), linesIn(at)));
+        QCOMPARE(artistAlbum.opacitiesAt(inAlbum), std::make_pair(cameIn * linesOut(at), linesIn(at)));
+    }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     QVERIFY(allLinesStill(panel));
@@ -1653,7 +1697,7 @@ void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
     bridge->setProperty("currentTrackNumber", 2);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
+    panel->setProperty("handover", 0.25);
     // A late genre: two pieces, split after "Track", which stayed still
     // with the genre before.
     bridge->setProperty("currentTrackGenre", QStringLiteral("Jazz"));
@@ -1892,8 +1936,8 @@ void UiMotionTest::nowPlayingOnlyTheNumberThatChangesFades() {
                 }
             };
             if (x >= from && x < to) {
-                expect(glyphAt(metrics, before, x), 1.0 - at);
-                expect(glyphAt(metrics, after, x), at);
+                expect(glyphAt(metrics, before, x), linesOut(at));
+                expect(glyphAt(metrics, after, x), linesIn(at));
             } else {
                 expect(glyphAt(metrics, after, x), 1.0);
             }
@@ -2005,8 +2049,8 @@ void UiMotionTest::nowPlayingFieldThatMovesFades() {
     for (const double at : {0.0, 0.5, 0.8}) {
         panel->setProperty("handover", at);
         QCOMPARE(details.stillTexts(), still);
-        QCOMPARE(details.opacitiesAt(inBefore), std::make_pair(1.0 - at, at));
-        QCOMPARE(details.opacitiesAt(inAfter), std::make_pair(1.0 - at, at));
+        QCOMPARE(details.opacitiesAt(inBefore), std::make_pair(linesOut(at), linesIn(at)));
+        QCOMPARE(details.opacitiesAt(inAfter), std::make_pair(linesOut(at), linesIn(at)));
         QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -2034,7 +2078,7 @@ void UiMotionTest::nowPlayingElidedLineKeepsWhatStaysStillAfterAChange() {
     QTRY_VERIFY(details.line()->width() > 0);
     tellDetails(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), 2020, genre, 5, 8);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
+    panel->setProperty("handover", 0.25);
     const QString before = details.outgoingText();
     const QString after = details.text();
     const QFontMetricsF metrics(details.font());
@@ -2055,7 +2099,8 @@ void UiMotionTest::nowPlayingElidedLineKeepsWhatStaysStillAfterAChange() {
         details.line()->setWidth(width);
         const QString where = QStringLiteral(" at %1 px").arg(width);
         QVERIFY2(!details.stillAt(inYear), qPrintable(QStringLiteral("the year is still") + where));
-        QVERIFY2(details.opacitiesAt(inYear) == std::make_pair(0.5, 0.5), qPrintable(QStringLiteral("year") + where));
+        QVERIFY2(details.opacitiesAt(inYear) == std::make_pair(linesOut(0.25), linesIn(0.25)),
+                 qPrintable(QStringLiteral("year") + where));
         QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details) + where));
         for (const Window &window : details.stillWindows()) {
             if (window.second < width) {
@@ -2105,9 +2150,9 @@ void UiMotionTest::nowPlayingRightToLeftDetailsFadeWhole() {
         QCOMPARE(parts.size(), 1);
         QCOMPARE(parts.first()->x(), 0.0);
         QCOMPARE(parts.first()->width(), details.line()->width());
-        QCOMPARE(parts.first()->opacity(), 1.0 - at);
+        QCOMPARE(parts.first()->opacity(), linesOut(at));
         QCOMPARE(details.incomingWindows(), (QList<Window>{{0.0, details.line()->width()}}));
-        QCOMPARE(details.incomingOpacity(), at);
+        QCOMPARE(details.incomingOpacity(), linesIn(at));
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
@@ -2133,10 +2178,11 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill_data() {
                                             << "2019 · Syn";
 }
 
-// A → B, then C half-way through (#463 with #537): every layer goes on
-// from what it showed, what stays still for all three stays still, at full
-// opacity, all along, and what C no longer has in place goes out whole, in
-// B's layer, as it showed. Nothing cuts a glyph.
+// A → B, then C while A goes out or while B comes in (#463 with #537):
+// every layer goes on from what it showed, what stays still for all three
+// stays still, at full opacity, all along, and what C no longer has in
+// place goes out whole, in B's layer, as it showed. A layer at 0 is
+// dropped. C's text comes in once all of it is out. Nothing cuts a glyph.
 void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
     QFETCH(QList<int>, years);
     QFETCH(QStringList, genres);
@@ -2145,73 +2191,90 @@ void UiMotionTest::nowPlayingInterruptionKeepsWhatStaysStill() {
     QFETCH(QStringList, stillForB);
     QFETCH(QStringList, stillForC);
     QFETCH(QString, givenUp);
-    LibraryTreeModel libraryModel;
-    QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
-    QVERIFY(window != nullptr);
-    QObject *bridge = bridgeOf(window);
-    QQuickItem *panel = named(window, "nowPlayingPanel");
-    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    Kirigami::Platform::Units *units = unitsOf(window);
-    QVERIFY(units != nullptr);
-    units->setShortDuration(1000);
-    units->setLongDuration(1000);
-    const QStringList paths{kTrackA1, kTrackA2, QStringLiteral("/music/Artist A/Album A/03.flac")};
-    const QStringList titles{QStringLiteral("First"), QStringLiteral("Second"), QStringLiteral("Third")};
-    // Another year is another album.
-    const auto album = [&](int index) {
-        return years.at(index) == years.first() ? QStringLiteral("Album A") : QStringLiteral("Album %1").arg(index);
-    };
-    const auto tell = [&](int index) {
-        tellDetails(bridge, paths.at(index), titles.at(index), album(index), years.at(index), genres.at(index),
-                    numbers.at(index), total);
-    };
-    tell(0);
-    const PanelLine details = panelLine(panel, QStringLiteral("Details"));
-    QTRY_VERIFY(details.line()->width() > 0);
-    tell(1);
-    QVERIFY(handover->property("running").toBool());
-    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    QCOMPARE(details.stillTexts(), stillForB);
-    panel->setProperty("handover", 0.4);
-    const PanelLook before = panelLook(panel, kWideLines);
-    const QString textB = details.text();
+    for (const double interruptAt : {0.25, 0.75}) {
+        const QString where = QStringLiteral(" (C at %1)").arg(interruptAt);
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = loadMainWindow(engine, libraryModel);
+        QVERIFY(window != nullptr);
+        QObject *bridge = bridgeOf(window);
+        QQuickItem *panel = named(window, "nowPlayingPanel");
+        QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+        Kirigami::Platform::Units *units = unitsOf(window);
+        QVERIFY(units != nullptr);
+        units->setShortDuration(1000);
+        units->setLongDuration(1000);
+        const QStringList paths{kTrackA1, kTrackA2, QStringLiteral("/music/Artist A/Album A/03.flac")};
+        const QStringList titles{QStringLiteral("First"), QStringLiteral("Second"), QStringLiteral("Third")};
+        // Another year is another album.
+        const auto album = [&](int index) {
+            return years.at(index) == years.first() ? QStringLiteral("Album A")
+                                                    : QStringLiteral("Album %1").arg(index);
+        };
+        const auto tell = [&](int index) {
+            tellDetails(bridge, paths.at(index), titles.at(index), album(index), years.at(index),
+                        genres.at(index), numbers.at(index), total);
+        };
+        tell(0);
+        const PanelLine details = panelLine(panel, QStringLiteral("Details"));
+        QTRY_VERIFY(details.line()->width() > 0);
+        tell(1);
+        QVERIFY(handover->property("running").toBool());
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        QCOMPARE(details.stillTexts(), stillForB);
+        panel->setProperty("handover", interruptAt);
+        // A as far as it has gone out, B as far as it has come in.
+        const double leftOfA = linesOut(interruptAt);
+        const double inOfB = linesIn(interruptAt);
+        QVERIFY2((leftOfA > 0.0) != (inOfB > 0.0), qPrintable(where));
+        const PanelLook before = panelLook(panel, kWideLines);
+        const QString textB = details.text();
 
-    tell(2);
-    QVERIFY(handover->property("running").toBool());
-    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    QCOMPARE(panel->property("handover").toDouble(), 0.0);
-    // At once: every layer where it was, drawing what it drew.
-    const QString change = lookChange(before, panelLook(panel, kWideLines), kWideLines, true, false);
-    QVERIFY2(change.isEmpty(), qPrintable(change));
-    QCOMPARE(details.stillTexts(), stillForC);
-    const QList<QQuickItem *> layers = layersOf(details);
-    QCOMPARE(layers.size(), 2);
-    QCOMPARE(layers.at(1)->property("text").toString(), textB);
-    QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
-    const QFontMetricsF metrics(details.font());
-    const double inGivenUp = metrics.horizontalAdvance(givenUp);
-    for (const double at : {0.25, 0.5, 0.9}) {
-        panel->setProperty("handover", at);
-        const double level = 1.0 - at;
-        // A's and B's pieces, from 0.6 and 0.4, and C's text, from 0.
-        for (QQuickItem *part : partsOf(details, layers.at(0))) {
-            QVERIFY(sameOpacity(part->opacity(), 0.6 * level));
-        }
-        if (!givenUp.isEmpty()) {
-            QCOMPARE(details.opacitiesAt(inGivenUp), std::make_pair(level, at));
-        }
-        for (QQuickItem *part : partsOf(details, layers.at(1))) {
-            const bool whole = !givenUp.isEmpty() && inGivenUp >= part->x() && inGivenUp < part->x() + part->width();
-            QVERIFY(sameOpacity(part->opacity(), (whole ? 1.0 : 0.4) * level));
-        }
-        QCOMPARE(details.incomingOpacity(), at);
+        tell(2);
+        QVERIFY(handover->property("running").toBool());
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        QCOMPARE(panel->property("handover").toDouble(), 0.0);
+        // At once: every layer where it was, drawing what it drew.
+        const QString change = lookChange(before, panelLook(panel, kWideLines), kWideLines, true, false);
+        QVERIFY2(change.isEmpty(), qPrintable(change + where));
         QCOMPARE(details.stillTexts(), stillForC);
-        QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
+        // A's layer while it still shows; B's while it shows. The newest
+        // draws what goes out whole: what stayed still is the same in both;
+        // B's holds it when A's is gone.
+        const QList<QQuickItem *> layers = layersOf(details);
+        const bool hasA = leftOfA > 0.0;
+        const bool hasB = inOfB > 0.0 || (!givenUp.isEmpty() && !hasA);
+        QCOMPARE(layers.size(), (hasA ? 1 : 0) + (hasB ? 1 : 0));
+        if (hasB) {
+            QCOMPARE(layers.last()->property("text").toString(), textB);
+        }
+        QCOMPARE(details.incomingOpacity(), 0.0);
+        QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details) + where));
+        const QFontMetricsF metrics(details.font());
+        const double inGivenUp = metrics.horizontalAdvance(givenUp);
+        for (const double at : {0.25, 0.5, 0.9}) {
+            panel->setProperty("handover", at);
+            const double level = linesOut(at);
+            // A's and B's pieces from where they were, and C's text from 0.
+            if (!givenUp.isEmpty()) {
+                QCOMPARE(details.opacitiesAt(inGivenUp), std::make_pair(level, linesIn(at)));
+            }
+            for (qsizetype index = 0; index < layers.size(); ++index) {
+                const double from = hasA && index == 0 ? leftOfA : inOfB;
+                for (QQuickItem *part : partsOf(details, layers.at(index))) {
+                    const bool whole = index == layers.size() - 1 && !givenUp.isEmpty()
+                        && inGivenUp >= part->x() && inGivenUp < part->x() + part->width();
+                    QVERIFY(sameOpacity(part->opacity(), (whole ? 1.0 : from) * level));
+                }
+            }
+            QCOMPARE(details.incomingOpacity(), linesIn(at));
+            QCOMPARE(details.stillTexts(), stillForC);
+            QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details) + where));
+        }
+        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+        QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+        QVERIFY(panelIdle(panel, kWideLines));
     }
-    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
-    QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
-    QVERIFY(panelIdle(panel, kWideLines));
 }
 
 // Playback cleared and a track loaded while a fade runs: nothing of the
@@ -2250,7 +2313,8 @@ void UiMotionTest::nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack() {
 }
 
 // The next track of the album, whose own cover comes during the fade of the
-// lines: the cover joins them, on one long curve.
+// lines: the cover joins them, over longDuration, the cover on its curve
+// over all of it, the lines on theirs.
 void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     Covers covers;
     LibraryTreeModel libraryModel;
@@ -2279,11 +2343,14 @@ void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
     QVERIFY(title.fades());
     QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
     QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
-    // Half-way, still together.
+    // Along the way, together.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.5);
-    QCOMPARE(outgoingCover->opacity(), 0.5);
-    QCOMPARE(outgoingCover->opacity(), title.outgoingOpacity());
+    for (const double at : {0.25, 0.5, 0.75}) {
+        panel->setProperty("handover", at);
+        QCOMPARE(outgoingCover->opacity(), coversOut(at));
+        QCOMPARE(title.outgoingOpacity(), linesOut(at));
+        QCOMPARE(title.incomingOpacity(), linesIn(at));
+    }
     // The album line is the same: it stays still all along.
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -2294,14 +2361,14 @@ void UiMotionTest::nowPlayingLateCoverJoinsTheFadeOfTheLines() {
 
 void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows_data() {
     QTest::addColumn<double>("at");
-    // C comes while A, fading out, still shows more than B.
+    // C comes while A goes out.
     QTest::newRow("early") << 0.3;
-    // C comes once B shows more than A.
+    // C comes while B comes in.
     QTest::newRow("late") << 0.7;
 }
 
 // A → B → C within one fade: the next fade starts from what shows, A's
-// layers and B's as far as each got, never from a track that was gone, and
+// layers or B's as far as each got, never from a track that was gone, and
 // ends on C alone.
 void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     QFETCH(double, at);
@@ -2329,13 +2396,14 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     const QString change = lookChange(before, panelLook(panel, kWideLines), kWideLines, true, true);
     QVERIFY2(change.isEmpty(), qPrintable(change));
     QCOMPARE(title.text(), QStringLiteral("Third"));
-    // A's title at the bottom, then B's, each where it was; C's over them.
+    // A's title as far as it went out, or B's as far as it came in, where
+    // it was; C's over it, to come in once it is out.
     const QList<QQuickItem *> layers = layersOf(title);
-    QCOMPARE(layers.size(), 2);
-    QCOMPARE(partText(title, partsOf(title, layers.at(0)).first()), QStringLiteral("First"));
-    QCOMPARE(partsOf(title, layers.at(0)).first()->opacity(), 1.0 - at);
-    QCOMPARE(partText(title, partsOf(title, layers.at(1)).first()), QStringLiteral("Second"));
-    QCOMPARE(partsOf(title, layers.at(1)).first()->opacity(), at);
+    QCOMPARE(layers.size(), 1);
+    const bool early = linesOut(at) > 0.0;
+    QCOMPARE(partText(title, partsOf(title, layers.first()).first()),
+             early ? QStringLiteral("First") : QStringLiteral("Second"));
+    QCOMPARE(partsOf(title, layers.first()).first()->opacity(), early ? linesOut(at) : linesIn(at));
     QCOMPARE(title.incomingOpacity(), 0.0);
     // B's cover whole, as it showed, under A's.
     const QList<std::pair<QString, double>> cover = coverLook(panel);
@@ -2343,7 +2411,7 @@ void UiMotionTest::nowPlayingRapidChangesFadeFromWhatShows() {
     QCOMPARE(cover.at(0).first, covers.second);
     QCOMPARE(cover.at(0).second, 1.0);
     QCOMPARE(cover.at(1).first, covers.first);
-    QCOMPARE(cover.at(1).second, 1.0 - at);
+    QCOMPARE(cover.at(1).second, coversOut(at));
 
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
@@ -2371,7 +2439,7 @@ void UiMotionTest::nowPlayingCoverAfterTheFadeFadesAlone() {
     bridge->setProperty("currentTrackCoverPath", covers.second);
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
-    QCOMPARE(easingOf(handover), QEasingCurve::OutCubic);
+    QCOMPARE(easingOf(handover), QEasingCurve::Linear);
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
     QVERIFY(outgoingCover->isVisible());
     QCOMPARE(outgoingCover->childItems().first()->property("source").toUrl().toString(), covers.first);
@@ -2418,18 +2486,18 @@ void UiMotionTest::nowPlayingLeavesNothingPlayingWithoutAFade() {
 }
 
 void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous_data() {
-    QTest::addColumn<double>("linesLeft");
-    // The cover comes while the lines before still show more.
-    QTest::newRow("before half") << 0.7;
-    // The cover comes once the playing track's lines show more.
-    QTest::newRow("after half") << 0.3;
+    QTest::addColumn<double>("at");
+    // The cover comes while the lines before go out.
+    QTest::newRow("before half") << 0.25;
+    // The cover comes while the playing track's lines come in.
+    QTest::newRow("after half") << 0.75;
 }
 
 // The next track's own cover comes while its lines fade in: no layer jumps.
 // The lines go on from the opacity they have onto the cover's long curve;
 // the cover before, which showed whole, fades out from 1.
 void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
-    QFETCH(double, linesLeft);
+    QFETCH(double, at);
     Covers covers;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2450,10 +2518,11 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 1.0 - linesLeft);
-    QCOMPARE(title.outgoingOpacity(), linesLeft);
+    panel->setProperty("handover", at);
     const double outgoingBefore = title.outgoingOpacity();
     const double liveBefore = title.incomingOpacity();
+    QCOMPARE(outgoingBefore, linesOut(at));
+    QCOMPARE(liveBefore, linesIn(at));
     QVERIFY(!outgoingCover->isVisible());
 
     bridge->setProperty("currentTrackCoverPath", covers.second);
@@ -2462,30 +2531,38 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), units->longDuration());
     QCOMPARE(panel->property("handover").toDouble(), 0.0);
-    QVERIFY(title.fades());
-    QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
+    QCOMPARE(title.fades(), outgoingBefore > 0.0);
+    if (title.fades()) {
+        QCOMPARE(textOf(panel, "nowPlayingOutgoingTitle"), QStringLiteral("First"));
+    }
     QCOMPARE(title.outgoingOpacity(), outgoingBefore);
     QCOMPARE(title.incomingOpacity(), liveBefore);
     QVERIFY(outgoingCover->isVisible());
     QCOMPARE(outgoingCover->opacity(), 1.0);
     QCOMPARE(outgoingCover->childItems().first()->property("source").toUrl().toString(), covers.first);
 
-    // Then each goes one way only, on the one curve, to the playing track.
+    // Then each goes one way only, on its curve, to the playing track: the
+    // lines before out, then the playing track's in from where they were.
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     double lines = outgoingBefore;
+    double live = liveBefore;
     double cover = 1.0;
-    for (const double at : {0.25, 0.5, 0.9}) {
-        panel->setProperty("handover", at);
+    for (const double next : {0.25, 0.5, 0.9}) {
+        panel->setProperty("handover", next);
         const double nextLines = title.outgoingOpacity();
+        const double nextLive = title.incomingOpacity();
         QVERIFY(outgoingCover->isVisible());
         const double nextCover = outgoingCover->opacity();
-        QVERIFY(nextLines < lines);
+        QVERIFY(nextLines <= lines);
+        QVERIFY(nextLive >= live);
         QVERIFY(nextCover < cover);
-        QCOMPARE(nextLines, outgoingBefore * (1.0 - at));
-        QCOMPARE(nextCover, 1.0 - at);
-        QCOMPARE(title.incomingOpacity() + nextLines, 1.0);
+        QCOMPARE(nextLines, outgoingBefore * linesOut(next));
+        QCOMPARE(nextLive, 1.0 - (1.0 - liveBefore) * (1.0 - linesIn(next)));
+        QCOMPARE(nextCover, coversOut(next));
+        QVERIFY(nextLines == 0.0 || nextLive == 0.0);
         QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
         lines = nextLines;
+        live = nextLive;
         cover = nextCover;
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -2496,18 +2573,19 @@ void UiMotionTest::nowPlayingLateCoverKeepsEveryLayerContinuous() {
 
 void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer_data() {
     QTest::addColumn<double>("at");
-    // C comes while A, fading out, still shows more than B.
+    // C comes while A's lines go out.
     QTest::newRow("before half") << 0.3;
-    // C comes once B shows more than A.
+    // C comes while B's lines come in.
     QTest::newRow("after half") << 0.7;
 }
 
 // A → B, B's own cover late, then C during that joined fade (#463): C's fade
-// starts from what shows. B's lines, part faded in, go out as layers of
-// their own over A's, each part from where it got to and cut in B's own
-// gaps; what stayed still and C's lines change, B's go out whole; B's
-// cover goes out whole, as it showed, under A's. No layer jumps, each then
-// goes one way only, and the fade ends on C alone.
+// starts from what shows. A's lines go on out from where they got to; B's,
+// as far as they came in, go out as layers of their own, each part from
+// where it got to and cut in B's own gaps; what stayed still and C's lines
+// change, B's go out whole; B's cover goes out whole, as it showed, under
+// A's. No layer jumps, each then goes one way only, C's lines come in once
+// the others are out, and the fade ends on C alone.
 void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QFETCH(double, at);
     Covers covers;
@@ -2536,16 +2614,19 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QVERIFY(handover->property("running").toBool());
     QCOMPARE(handover->property("duration").toInt(), 1000);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
-    panel->setProperty("handover", 0.3);
+    panel->setProperty("handover", 0.25);
     // B's own cover, late: it joins the fade.
     bridge->setProperty("currentTrackCoverPath", covers.all.at(1));
     QCOMPARE(handover->property("duration").toInt(), 1500);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     panel->setProperty("handover", at);
-    // A's lines, from 0.7 when the cover came, along the long curve.
-    const double a = 0.7 * (1.0 - at);
+    // A's lines, from where they were when the cover came, going out; B's
+    // coming in once they are out.
+    const double a = linesOut(0.25) * linesOut(at);
+    const double b = linesIn(at);
+    QVERIFY((a > 0.0) != (b > 0.0));
     QCOMPARE(title.outgoingOpacity(), a);
-    QCOMPARE(title.incomingOpacity(), 1.0 - a);
+    QCOMPARE(title.incomingOpacity(), b);
     QCOMPARE(details.stillTexts(), QStringList{QStringLiteral("2005 · Rock · Track")});
     QVERIFY(lineStill(panel, QStringLiteral("ArtistAlbum")));
     const PanelLook before = panelLook(panel, kWideLines);
@@ -2561,13 +2642,15 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     const QString change = lookChange(before, panelLook(panel, kWideLines), kWideLines, true, true);
     QVERIFY2(change.isEmpty(), qPrintable(change));
 
-    // The title: A's at the bottom, then B's as far as it came in, then
-    // C's, from 0.
+    // The title: A's as far as it went out, or B's as far as it came in;
+    // C's over it, from 0.
     QCOMPARE(title.text(), QStringLiteral("Third"));
     const QList<QQuickItem *> titleLayers = layersOf(title);
-    QCOMPARE(titleLayers.size(), 2);
-    QCOMPARE(partText(title, partsOf(title, titleLayers.at(0)).first()), QStringLiteral("First"));
-    QCOMPARE(partText(title, partsOf(title, titleLayers.at(1)).first()), QStringLiteral("Second"));
+    QCOMPARE(titleLayers.size(), 1);
+    QCOMPARE(partText(title, partsOf(title, titleLayers.first()).first()),
+             a > 0.0 ? QStringLiteral("First") : QStringLiteral("Second"));
+    const double titleFrom = a > 0.0 ? a : b;
+    QCOMPARE(partsOf(title, titleLayers.first()).first()->opacity(), titleFrom);
     QCOMPARE(title.incomingOpacity(), 0.0);
     // C's details have another year, of as many digits: what A's and B's
     // kept still past it stays still. B's year goes out whole, as it
@@ -2575,12 +2658,11 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     // which B's covers, and A's number goes on where it was.
     QCOMPARE(details.stillTexts(), QStringList{QStringLiteral("· Rock · Track")});
     const QList<QQuickItem *> detailsLayers = layersOf(details);
-    QCOMPARE(detailsLayers.size(), 2);
-    const QList<QQuickItem *> partsA = partsOf(details, detailsLayers.at(0));
-    const QList<QQuickItem *> partsB = partsOf(details, detailsLayers.at(1));
-    QCOMPARE(partsA.size(), 1);
-    QCOMPARE(partsB.size(), 2);
-    QCOMPARE(partText(details, partsA.first()), QStringLiteral("2005 · Rock · Track 1"));
+    QCOMPARE(detailsLayers.size(), a > 0.0 ? 2 : 1);
+    const QList<QQuickItem *> partsA = a > 0.0 ? partsOf(details, detailsLayers.first()) : QList<QQuickItem *>();
+    const QList<QQuickItem *> partsB = partsOf(details, detailsLayers.last());
+    QCOMPARE(partsA.size(), a > 0.0 ? 1 : 0);
+    QCOMPARE(partsB.size(), b > 0.0 ? 2 : 1);
     QCOMPARE(partText(details, partsB.first()), QStringLiteral("2005 · Rock · Track 2"));
     const QFontMetricsF metrics(details.font());
     const QString shared = QStringLiteral("2005 · Rock · Track");
@@ -2588,11 +2670,21 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QVERIFY(partsB.at(0)->width() > metrics.horizontalAdvance(QStringLiteral("2005")));
     QVERIFY(partsB.at(0)->width() < metrics.horizontalAdvance(QStringLiteral("2005 ")));
     QCOMPARE(partsB.at(0)->opacity(), 1.0);
-    QVERIFY(partsB.at(1)->x() > metrics.horizontalAdvance(shared));
-    QVERIFY(partsB.at(1)->x() < metrics.horizontalAdvance(shared + QLatin1Char(' ')));
-    QCOMPARE(partsB.at(1)->opacity(), 1.0 - a);
-    QCOMPARE(partsA.first()->x(), partsB.at(1)->x());
-    QCOMPARE(partsA.first()->opacity(), a);
+    // Where a number starts: in the gap after what all share.
+    const auto inTheNumbersGap = [&](QQuickItem *part) {
+        return part->x() > metrics.horizontalAdvance(shared)
+            && part->x() < metrics.horizontalAdvance(shared + QLatin1Char(' '));
+    };
+    if (b > 0.0) {
+        QVERIFY(inTheNumbersGap(partsB.at(1)));
+        QCOMPARE(partsB.at(1)->opacity(), b);
+    }
+    if (a > 0.0) {
+        QCOMPARE(partText(details, partsA.first()), QStringLiteral("2005 · Rock · Track 1"));
+        QVERIFY(inTheNumbersGap(partsA.first()));
+        QCOMPARE(partsA.first()->opacity(), a);
+    }
+    QCOMPARE(details.incomingOpacity(), 0.0);
     QVERIFY2(cutGlyph(details).isEmpty(), qPrintable(cutGlyph(details)));
     // The album line was the same for A and B: B's goes out from full
     // opacity, past the artist they share with C's.
@@ -2604,26 +2696,29 @@ void UiMotionTest::nowPlayingThirdTrackGoesOnFromEveryLayer() {
     QCOMPARE(cover.size(), 2);
     QCOMPARE(cover.at(0).first, covers.all.at(1));
     QCOMPARE(cover.at(1).first, covers.all.at(0));
-    QCOMPARE(cover.at(1).second, 1.0 - at);
+    QCOMPARE(cover.at(1).second, coversOut(at));
 
-    // Then each goes one way only, on the one curve, to C.
+    // Then each goes one way only, on its curve, to C.
     for (const double next : {0.25, 0.5, 0.9}) {
         panel->setProperty("handover", next);
-        const double level = 1.0 - next;
-        QCOMPARE(partsOf(title, titleLayers.at(0)).first()->opacity(), a * level);
-        QCOMPARE(partsOf(title, titleLayers.at(1)).first()->opacity(), (1.0 - a) * level);
-        QCOMPARE(title.incomingOpacity(), next);
+        const double level = linesOut(next);
+        QCOMPARE(partsOf(title, titleLayers.first()).first()->opacity(), titleFrom * level);
+        QCOMPARE(title.incomingOpacity(), linesIn(next));
         QCOMPARE(partsB.at(0)->opacity(), level);
-        QCOMPARE(partsB.at(1)->opacity(), (1.0 - a) * level);
-        QCOMPARE(partsA.first()->opacity(), a * level);
-        QCOMPARE(details.incomingOpacity(), next);
+        if (b > 0.0) {
+            QCOMPARE(partsB.at(1)->opacity(), b * level);
+        }
+        if (a > 0.0) {
+            QCOMPARE(partsA.first()->opacity(), a * level);
+        }
+        QCOMPARE(details.incomingOpacity(), linesIn(next));
         QCOMPARE(artistAlbum.outgoingOpacity(), level);
         cover = coverLook(panel);
         QCOMPARE(cover.size(), 3);
         QCOMPARE(cover.at(0).first, covers.all.at(2));
         QCOMPARE(cover.at(1).first, covers.all.at(1));
-        QCOMPARE(cover.at(1).second, level);
-        QCOMPARE(cover.at(2).second, (1.0 - at) * level);
+        QCOMPARE(cover.at(1).second, coversOut(next));
+        QCOMPARE(cover.at(2).second, coversOut(at) * coversOut(next));
     }
     panel->setProperty("handover", 0.0);
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -2673,11 +2768,13 @@ void UiMotionTest::nowPlayingSkippingThroughTracksKeepsEveryLayer() {
         // At once: B's lines, at 0, are dropped.
         {QStringLiteral("/music/Artist A/Album C/01.flac"), QStringLiteral("Third"), QStringLiteral("Album C"), 2003,
          -1.0, true, true},
-        // A's and C's lines; the covers are two already.
+        // While C's lines come in: A's are out, and C's go out from where
+        // they got to; the covers are two already.
         {QStringLiteral("/music/Artist A/Album D/01.flac"), QStringLiteral("Fourth"), QStringLiteral("Album D"), 2004,
-         0.4, true, false},
+         0.75, true, false},
+        // While C's lines go out: D's, at 0, are dropped.
         {QStringLiteral("/music/Artist A/Album E/01.flac"), QStringLiteral("Fifth"), QStringLiteral("Album E"), 2005,
-         0.4, false, false},
+         0.25, false, false},
     };
     const PanelLine title = panelLine(panel, QStringLiteral("Title"));
     for (qsizetype index = 0; index < tracks.size(); ++index) {
@@ -2708,9 +2805,8 @@ void UiMotionTest::nowPlayingSkippingThroughTracksKeepsEveryLayer() {
         for (QQuickItem *layer : layersOf(title)) {
             outgoing.push_back(partText(title, partsOf(title, layer).first()));
         }
-        const QStringList expected = index == 1 ? QStringList{QStringLiteral("First")}
-            : index == 2                        ? QStringList{QStringLiteral("First")}
-                                                : QStringList{QStringLiteral("First"), QStringLiteral("Third")};
+        const QStringList expected =
+            index <= 2 ? QStringList{QStringLiteral("First")} : QStringList{QStringLiteral("Third")};
         QCOMPARE(outgoing, expected);
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
@@ -2807,7 +2903,7 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
     QVERIFY(handover->property("running").toBool());
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     panel->setProperty("handover", 0.4);
-    const QList<std::pair<QString, double>> fading{{QString(), 1.0}, {covers.first, 0.6}};
+    const QList<std::pair<QString, double>> fading{{QString(), 1.0}, {covers.first, coversOut(0.4)}};
     QCOMPARE(coverLook(panel), fading);
     const PanelLook before = panelLook(panel, kWideLines);
 
@@ -2828,7 +2924,8 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
     QCOMPARE(shown, 1);
 
     panel->setProperty("handover", 0.5);
-    QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{{QString(), 1.0}, {covers.first, 0.3}}));
+    QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{
+                                   {QString(), 1.0}, {covers.first, coversOut(0.4) * coversOut(0.5)}}));
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
     QVERIFY(panelIdle(panel, kWideLines));
@@ -2925,16 +3022,17 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     panel->setProperty("handover", 0.4);
     QTRY_VERIFY(loaded());
-    // A at 0.6 over B, around B's image over the colour behind it.
-    const QColor bare = mixed(squareColor, 0.6, view);
-    const QColor inImage = mixed(squareColor, 0.6, wideColor);
+    // A going out over B, around B's image over the colour behind it.
+    const double leftOfA = coversOut(0.4);
+    const QColor bare = mixed(squareColor, leftOfA, view);
+    const QColor inImage = mixed(squareColor, leftOfA, wideColor);
     QTRY_VERIFY(near(drawn().first, bare) && near(drawn().second, inImage));
 
     // A again.
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
     QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
     QCOMPARE(panel->property("handover").toDouble(), 0.0);
-    QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{{covers.landscape, 1.0}, {covers.first, 0.6}}));
+    QCOMPARE(coverLook(panel), (QList<std::pair<QString, double>>{{covers.landscape, 1.0}, {covers.first, leftOfA}}));
     // B's cover shows at once, not its backdrop: the image cache has it, as
     // it showed.
     QVERIFY(loaded());
@@ -2942,9 +3040,9 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
     QVERIFY2(near(above, bare), qPrintable(QStringLiteral("around B's image: %1, not %2").arg(above.name(), bare.name())));
     QVERIFY2(near(middle, inImage), qPrintable(QStringLiteral("in B's image: %1, not %2").arg(middle.name(), inImage.name())));
 
-    // Half-way: B's cover at 0.5 over A's own, A's going out at 0.3 over it.
+    // Half-way: B's cover going out over A's own, A's before going out over it.
     panel->setProperty("handover", 0.5);
-    const QColor overA = mixed(squareColor, 0.3, mixed(view, 0.5, squareColor));
+    const QColor overA = mixed(squareColor, leftOfA * coversOut(0.5), mixed(view, coversOut(0.5), squareColor));
     QTRY_VERIFY(near(drawn().first, overA));
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
@@ -3296,6 +3394,431 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     UiMotionTest test;
     return QTest::qExec(&test, argc, argv);
+}
+
+void UiMotionTest::nowPlayingNoFrameShowsTwoTextsInALine_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("wide") << false;
+    QTest::newRow("narrow") << true;
+}
+
+// A track change never draws two texts over each other in a line (#373 H1:
+// "Hollow Arc" over "Moth Copper"): at every point of every line, at most
+// one text shows, in every frame and at every point of the fade the test
+// sets, through the next track of an album, another album, metadata that
+// comes late, and a third track while the text before goes out or the next
+// comes in.
+void UiMotionTest::nowPlayingNoFrameShowsTwoTextsInALine() {
+    QFETCH(bool, narrow);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    if (narrow) {
+        window->resize(1000, 720);
+    }
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames in each half.
+    units->setShortDuration(400);
+    units->setLongDuration(600);
+    const QStringList names = narrow ? kNarrowLines : kWideLines;
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Lantern Signal"));
+    bridge->setProperty("currentTrackGenre", QStringLiteral("Ambient"));
+    tellTrack(bridge, kTrackA1, QStringLiteral("Moth Copper"), QStringLiteral("Album A"), 2005, 1, covers.all.at(0));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    QTRY_VERIFY(panelLine(panel, names.first()).line()->width() > 0);
+    QVERIFY(panelIdle(panel, names));
+
+    // Where a line shows two texts at once, or "".
+    const auto twoTexts = [&]() -> QString {
+        for (const QString &name : names) {
+            const PanelLine line = panelLine(panel, name);
+            for (double x = 0.5; x < line.line()->width(); x += 1.0) {
+                QList<Drawn> drawn = drawnAt(line, x);
+                drawn.removeIf([](const Drawn &each) { return each.glyph.isNull(); });
+                if (drawn.size() > 1) {
+                    QStringList shown;
+                    for (const Drawn &each : drawn) {
+                        shown.push_back(QStringLiteral("%1 %2").arg(each.glyph).arg(each.opacity));
+                    }
+                    return QStringLiteral("%1 at %2 px, handover %3: [%4]")
+                        .arg(name).arg(x).arg(panel->property("handover").toDouble()).arg(shown.join(", "));
+                }
+            }
+        }
+        return {};
+    };
+    QString failure;
+    int frames = 0;
+    const QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (failure.isEmpty() && handover->property("running").toBool()) {
+                ++frames;
+                failure = twoTexts();
+            }
+        });
+    // Along a fade at the points the test sets, then to its end in frames.
+    const auto followTheFade = [&](const char *what) {
+        QVERIFY2(handover->property("running").toBool(), what);
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        for (const double at : {0.0, 0.1, 0.25, 0.45, 0.5, 0.55, 0.75, 0.95}) {
+            panel->setProperty("handover", at);
+            const QString each = twoTexts();
+            QVERIFY2(each.isEmpty(), qPrintable(QString::fromLatin1(what) + QStringLiteral(": ") + each));
+        }
+        panel->setProperty("handover", 0.0);
+        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+        QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
+        QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(what) + QStringLiteral(": ") + failure));
+        QVERIFY(panelIdle(panel, names));
+    };
+
+    // The next track of the album.
+    tellTrack(bridge, kTrackA2, QStringLiteral("Hollow Arc"), QStringLiteral("Album A"), 2005, 2, covers.all.at(0));
+    followTheFade("the next track");
+
+    // Another album, with its cover.
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Mlantern Signal"));
+    tellTrack(bridge, kTrackB1, QStringLiteral("Moth Copper"), QStringLiteral("Album B"), 2007, 1, covers.all.at(1));
+    followTheFade("another album");
+
+    // Metadata that comes late, in each half of the fade.
+    for (const double lateAt : {0.25, 0.75}) {
+        tellTrack(bridge, lateAt < 0.5 ? kTrackA1 : kTrackA2, QStringLiteral("Hollow Arc"), QStringLiteral("Album B"),
+                  2007, lateAt < 0.5 ? 2 : 3, covers.all.at(1));
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        panel->setProperty("handover", lateAt);
+        bridge->setProperty("currentTrackGenre", lateAt < 0.5 ? QStringLiteral("Drone") : QStringLiteral("Ambient"));
+        followTheFade("late metadata");
+    }
+
+    // A third track, while the text before goes out, and while the next
+    // comes in.
+    for (const double thirdAt : {0.25, 0.75}) {
+        tellTrack(bridge, kTrackA1, QStringLiteral("Lantern"), QStringLiteral("Album A"), 2005, 4, covers.all.at(0));
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        panel->setProperty("handover", thirdAt);
+        bridge->setProperty("currentTrackArtist", QStringLiteral("Signal"));
+        tellTrack(bridge, kTrackB1, QStringLiteral("Copper Moth"), QStringLiteral("Album C"), 2009, 5,
+                  covers.all.at(2));
+        followTheFade("a third track");
+    }
+    QObject::disconnect(connection);
+    QVERIFY(frames > 0);
+}
+
+void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen_data() {
+    QTest::addColumn<int>("displayMode");
+    QTest::addColumn<int>("channels");
+    QTest::addColumn<bool>("animated");
+    QTest::newRow("rolling, stereo") << 0 << 2 << true;
+    QTest::newRow("centered, stereo") << 1 << 2 << true;
+    QTest::newRow("centered, 5.1") << 1 << 6 << true;
+    QTest::newRow("rolling, 5.1") << 0 << 6 << true;
+    QTest::newRow("animations off") << 1 << 2 << false;
+}
+
+// The visualization mode switch (#373 Motion; H1: a black frame on the way
+// back to the spectrogram): in every frame, a plot that has its data shows
+// whole. The chosen plot comes in over the one before, which stays whole
+// under it until the chosen one can draw: the spectrogram, hidden, gives its
+// columns up, and shown again waits for a fresh session's. Then it fades in
+// over shortDuration on OutCubic, as one picture, and the plot before goes.
+// With animations off it shows at once once it can draw, with no blank
+// frame.
+void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
+    QFETCH(int, displayMode);
+    QFETCH(int, channels);
+    QFETCH(bool, animated);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setShortDuration(animated ? 400 : 0);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *surface = named(window, "visualizationSurface");
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QQuickItem *waveform = named(window, "mainWaveformSurface");
+    QVERIFY(viewer && surface && spectrogram && waveform);
+    QObject *fade = qvariant_cast<QObject *>(surface->property("modeFadeAnimation"));
+    QVERIFY(fade != nullptr);
+    QCOMPARE(fade->property("duration").toInt(), units->shortDuration());
+    QCOMPARE(easingOf(fade), QEasingCurve::OutCubic);
+
+    bridge->setProperty("spectrogramDisplayMode", displayMode);
+    bridge->setProperty("spectrogramViewMode", channels > 2 ? 1 : 0);
+    bridge->setProperty("durationSeconds", 60.0);
+    bridge->setProperty("currentTrackChannels", channels);
+    playQueueRow(bridge, 0);
+    // The waveform has its overview.
+    bridge->setProperty("waveformCoverageSeconds", 60.0);
+    bridge->setProperty("waveformComplete", true);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, channels),
+                                      Q_ARG(bool, true)));
+    // The spectrogram's lanes, and their columns.
+    const auto panes = [&]() {
+        QList<SpectrogramItem *> found;
+        for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+            found.push_back(qobject_cast<SpectrogramItem *>(item));
+        }
+        return found;
+    };
+    QTRY_COMPARE(panes().size(), channels);
+    const auto feedColumns = [&]() {
+        constexpr int bins = 4'097;
+        constexpr int columns = 200;
+        const QList<SpectrogramItem *> lanes = panes();
+        for (qsizetype index = 0; index < lanes.size(); ++index) {
+            lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins,
+                                                  static_cast<int>(index), columns, 0, 2'000, 48'000, 1'024,
+                                                  false, true, 1, false);
+        }
+    };
+    feedColumns();
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+    QVERIFY(!waveform->property("awaitingData").toBool());
+    QTRY_VERIFY(spectrogram->isVisible() && !waveform->isVisible());
+    QCOMPARE(spectrogram->opacity(), 1.0);
+
+    // Whether a plot with data shows whole: visible, at full opacity.
+    const auto whole = [](QQuickItem *plot) {
+        return plot->isVisible() && plot->opacity() == 1.0 && !plot->property("awaitingData").toBool();
+    };
+    QString failure;
+    int frames = 0;
+    const QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            ++frames;
+            if (failure.isEmpty() && !whole(spectrogram) && !whole(waveform)) {
+                failure = QStringLiteral("no plot whole at frame %1: spectrogram %2 at %3, waveform %4 at %5")
+                              .arg(frames)
+                              .arg(spectrogram->isVisible()).arg(spectrogram->opacity())
+                              .arg(waveform->isVisible()).arg(waveform->opacity());
+            }
+        });
+    const auto check = [&](const char *where) {
+        QVERIFY2(whole(spectrogram) || whole(waveform), where);
+        QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(where) + QStringLiteral(": ") + failure));
+    };
+
+    // To the waveform, which has its data: it comes in over the
+    // spectrogram at once, or with animations off replaces it.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QVERIFY(waveform->isVisible());
+    QCOMPARE(spectrogram->isVisible(), animated);
+    check("to the waveform");
+    if (animated) {
+        QVERIFY(fade->property("running").toBool());
+        QVERIFY(waveform->z() > spectrogram->z());
+        QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
+        surface->setProperty("modeFade", 0.5);
+        QCOMPARE(waveform->opacity(), 0.5);
+        QCOMPARE(spectrogram->opacity(), 1.0);
+        // Its floor and its lanes as one picture.
+        QObject *layer = waveform->property("layer").value<QObject *>();
+        QVERIFY(layer != nullptr && layer->property("enabled").toBool());
+        QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+        QTRY_VERIFY(!spectrogram->isVisible());
+    } else {
+        QVERIFY(!fade->property("running").toBool());
+        QVERIFY(!spectrogram->isVisible());
+    }
+    QCOMPARE(waveform->opacity(), 1.0);
+    check("on the waveform");
+
+    // The spectrogram, hidden, gives its columns up, as BridgeClient has it
+    // do when no pane shows.
+    for (SpectrogramItem *pane : panes()) {
+        pane->releaseStorage();
+    }
+    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
+
+    // Back to the spectrogram: it shows, so that its analysis runs, but at
+    // 0 under the waveform until its columns come.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    QVERIFY(spectrogram->isVisible());
+    QCOMPARE(spectrogram->opacity(), 0.0);
+    QVERIFY(whole(waveform));
+    QVERIFY(!fade->property("running").toBool());
+    for (SpectrogramItem *pane : panes()) {
+        pane->retainStorage();
+    }
+    const int framesBefore = frames;
+    window->update();
+    QTRY_VERIFY(frames > framesBefore);
+    QTest::qWait(100);
+    check("waiting for the spectrogram");
+    QVERIFY(whole(waveform));
+    QCOMPARE(spectrogram->opacity(), 0.0);
+
+    // Its first columns: it comes in over the waveform.
+    feedColumns();
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+    check("the spectrogram's data");
+    if (animated) {
+        QVERIFY(fade->property("running").toBool());
+        QVERIFY(spectrogram->z() > waveform->z());
+        QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
+        surface->setProperty("modeFade", 0.5);
+        QCOMPARE(spectrogram->opacity(), 0.5);
+        QVERIFY(whole(waveform));
+        QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+        QTRY_VERIFY(!waveform->isVisible());
+    } else {
+        QVERIFY(!fade->property("running").toBool());
+        QVERIFY(!waveform->isVisible());
+    }
+    QCOMPARE(spectrogram->opacity(), 1.0);
+    check("on the spectrogram");
+
+    // Back before the spectrogram can draw: the waveform, which never
+    // left, stays, and the spectrogram goes.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    if (animated) {
+        QTRY_VERIFY(!spectrogram->isVisible());
+    }
+    for (SpectrogramItem *pane : panes()) {
+        pane->releaseStorage();
+    }
+    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    QCOMPARE(spectrogram->opacity(), 0.0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QVERIFY(!spectrogram->isVisible());
+    QVERIFY(whole(waveform));
+    QVERIFY(!fade->property("running").toBool());
+    check("back to the waveform");
+
+    QObject::disconnect(connection);
+    QVERIFY(frames > 0);
+
+    // Stopped, nothing is waited for: the spectrogram, with no columns,
+    // shows at once.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    QVERIFY(spectrogram->isVisible());
+    if (animated) {
+        QVERIFY(fade->property("running").toBool());
+    }
+    QTRY_VERIFY(!waveform->isVisible());
+    QCOMPARE(spectrogram->opacity(), 1.0);
+}
+
+void UiMotionTest::viewerControlsFadeWithTheStrip_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("whole screen") << true;
+    QTest::newRow("in the window") << false;
+}
+
+// The viewer's controls hide and show together (#373 H1: the strip faded,
+// the corner controls cut): the title strip over the whole screen, the
+// corner plate in the window, the mode switch and the lanes' Mute and Solo
+// all fade on one curve, at the same opacity in every frame, shown at once
+// for the key that wakes them and hidden only once faded out.
+void UiMotionTest::viewerControlsFadeWithTheStrip() {
+    QFETCH(bool, wholeScreen);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setShortDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(viewer && autoHide && spectrogram);
+    // Two named lanes, with Mute and Solo always shown.
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("channelButtonsVisibility", 2);
+    bridge->setProperty("currentTrackChannels", 2);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QQuickWindow *host = window;
+    if (wholeScreen) {
+        QTRY_VERIFY(spectrogram->window() != nullptr && spectrogram->window() != window);
+        host = spectrogram->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    } else {
+        QTRY_VERIFY(itemNamed(window->contentItem(), QStringLiteral("spectrogramPopupControls")) != nullptr);
+    }
+    // The controls that hide with the viewer's: the strip, or the corner
+    // plate, then the mode switch and the lanes' buttons.
+    QQuickItem *controls = itemNamed(host->contentItem(), wholeScreen ? QStringLiteral("spectrogramFullscreenStrip")
+                                                                       : QStringLiteral("spectrogramPopupControls"));
+    QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(controls && modeSwitch);
+    QList<QQuickItem *> followers{modeSwitch};
+    QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
+    followers.append(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")));
+    // The pointer resting on the view, which reveals the mode switch.
+    QTest::mouseMove(host, QPoint(host->width() / 2, host->height() / 2));
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QTRY_COMPARE(controls->opacity(), 1.0);
+    for (QQuickItem *follower : followers) {
+        QTRY_COMPARE(follower->opacity(), 1.0);
+        QVERIFY(follower->isVisible());
+    }
+
+    QString failure;
+    int frames = 0;
+    // Where a follower is not at the controls' opacity, or "".
+    const auto apart = [&]() -> QString {
+        for (QQuickItem *follower : followers) {
+            if (std::abs(follower->opacity() - controls->opacity()) > 1e-9
+                || follower->isVisible() != controls->isVisible()) {
+                return QStringLiteral("%1 at %2 (%3), the controls at %4 (%5)")
+                    .arg(follower->objectName()).arg(follower->opacity()).arg(follower->isVisible())
+                    .arg(controls->opacity()).arg(controls->isVisible());
+            }
+        }
+        return {};
+    };
+    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+        ++frames;
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+
+    // The pointer resting: they fade out together, and hide once out.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QVERIFY(controls->isVisible());
+    QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_VERIFY(!controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+
+    // A key wakes them: shown at once, fading in together.
+    autoHide->setProperty("hideDelay", 600000);
+    QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+    QVERIFY(controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_VERIFY(controls->opacity() > 0.0 && controls->opacity() < 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_COMPARE(controls->opacity(), 1.0);
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY(frames > 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
 
 #include "tst_ui_motion.moc"

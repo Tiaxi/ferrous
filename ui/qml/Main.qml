@@ -1565,6 +1565,84 @@ ApplicationWindow {
                      viewerController.spectrogramViewerOpen
                          ? spectrogramViewerShell.reservedCorner.height : 0))
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
+
+        // The mode switch (#373 Motion): the plot that shows whole stays on
+        // screen, under the chosen one, until that one can draw, and the
+        // chosen one then fades in over it over shortDuration; the labels,
+        // the switch and the meter stay put. The spectrogram, hidden, gives
+        // its analysis and columns up, so shown again it waits for a fresh
+        // session's first columns. With animations off it shows once it can
+        // draw, with no fade. The plot before goes once the chosen one shows
+        // whole.
+        readonly property int chosenMode: viewerController.visualizationMode
+        // The plot that shows whole, under the chosen one while it comes in.
+        property int settledMode: -1
+        // How far the chosen plot has come in over the settled one.
+        property real modeFade: 0
+        // Read through functions, so that a handler sees them as they are now
+        // rather than as a binding last left them.
+        function isModeSwitching() {
+            return visualizationSurface.settledMode >= 0
+                && viewerController.visualizationMode !== visualizationSurface.settledMode
+        }
+        function plotAwaitsData(mode) {
+            return mode === 0 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
+        }
+        // Whether the chosen plot still waits for its data while the one
+        // before has some to show. Without a track to wait for, or with
+        // nothing to show before either, it shows at once.
+        function chosenPlotWaits() {
+            return visualizationSurface.isModeSwitching()
+                && plotLayer.trackLoaded
+                && visualizationSurface.plotAwaitsData(viewerController.visualizationMode)
+                && !visualizationSurface.plotAwaitsData(visualizationSurface.settledMode)
+        }
+        readonly property bool modeSwitching: visualizationSurface.isModeSwitching()
+        // What the switch follows: the mode chosen, and whether each plot
+        // has data to show. Not what it sets itself, so that settling in a
+        // handler of it is no binding loop.
+        readonly property var modeInputs: [viewerController.visualizationMode, plotLayer.trackLoaded,
+            spectrogramSurface.awaitingData, waveformSurface.awaitingData]
+        readonly property NumberAnimation modeFadeAnimation: NumberAnimation {
+            objectName: "visualizationModeFade"
+            target: visualizationSurface
+            property: "modeFade"
+            from: 0
+            to: 1
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+            onFinished: visualizationSurface.settleMode()
+        }
+        function settleMode() {
+            visualizationSurface.modeFadeAnimation.stop()
+            visualizationSurface.settledMode = viewerController.visualizationMode
+            visualizationSurface.modeFade = 0
+        }
+        function followMode() {
+            if (!visualizationSurface.isModeSwitching()) {
+                // Back to the plot that showed whole: the other goes.
+                visualizationSurface.modeFadeAnimation.stop()
+                visualizationSurface.modeFade = 0
+            } else if (visualizationSurface.chosenPlotWaits()) {
+                visualizationSurface.modeFadeAnimation.stop()
+                visualizationSurface.modeFade = 0
+            } else if (Kirigami.Units.shortDuration <= 0) {
+                visualizationSurface.settleMode()
+            } else if (!visualizationSurface.modeFadeAnimation.running) {
+                visualizationSurface.modeFadeAnimation.start()
+            }
+        }
+        onModeInputsChanged: visualizationSurface.followMode()
+        Component.onCompleted: visualizationSurface.settledMode = viewerController.visualizationMode
+        // Whether `mode`'s plot shows: settled, or chosen and coming in.
+        function plotShown(mode) {
+            return visualizationSurface.settledMode === mode || visualizationSurface.chosenMode === mode
+        }
+        // The chosen plot over the settled one, at how far it has come in.
+        function plotOpacity(mode) {
+            return visualizationSurface.settledMode === mode || !visualizationSurface.modeSwitching
+                ? 1 : visualizationSurface.modeFade
+        }
         // The shown plot's zoom, 1 at the default: the spectrogram's
         // relative to its own, which stretches a short track.
         readonly property real zoomLevel: visualizationSurface.spectrogramShown
@@ -1599,7 +1677,13 @@ ApplicationWindow {
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
-            visible: visualizationSurface.spectrogramShown
+            // Shown while it comes in, at 0 while it waits for its data, so
+            // that its analysis runs.
+            visible: visualizationSurface.plotShown(0)
+            opacity: visualizationSurface.plotOpacity(0)
+            z: visualizationSurface.settledMode === 0 ? 0 : 1
+            // Its lanes, floors and seams fade in as one picture.
+            layer.enabled: opacity > 0 && opacity < 1
             viewerMode: viewerController.spectrogramViewerOpen
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
@@ -1617,7 +1701,10 @@ ApplicationWindow {
             objectName: "mainWaveformSurface"
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
-            visible: !visualizationSurface.spectrogramShown
+            visible: visualizationSurface.plotShown(1)
+            opacity: visualizationSurface.plotOpacity(1)
+            z: visualizationSurface.settledMode === 1 ? 0 : 1
+            layer.enabled: opacity > 0 && opacity < 1
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
@@ -1633,6 +1720,8 @@ ApplicationWindow {
         // whichever plot shows, in its colours.
         Viewers.PlotLayer {
             id: plotLayer
+            // Over both plots while one comes in over the other.
+            z: 2
             anchors.fill: parent
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
