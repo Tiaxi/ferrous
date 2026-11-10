@@ -20,6 +20,7 @@
 #include <cmath>
 #include <functional>
 #include <optional>
+#include <vector>
 
 #include "AppIcon.h"
 #include "TestPlatform.h"
@@ -49,6 +50,12 @@ bool near(QRgb pixel, QRgb colour, int tolerance) {
 // edge pixels count too.
 bool glideInk(QRgb pixel) {
     return qRed(pixel) >= 150 && qGreen(pixel) >= 100;
+}
+
+// Either stroke over the tile or the floor, edge pixels included: the tile and
+// the floor have almost no green, the glide and the harmonic plenty.
+bool strokeInk(QRgb pixel) {
+    return qAlpha(pixel) == 255 && qGreen(pixel) >= 48;
 }
 
 int countWhere(const QImage &image, const QRect &area, const std::function<bool(QRgb)> &test) {
@@ -131,8 +138,10 @@ private slots:
     void everySizeIsBuiltIn();
     void smallSizesRiseFromTheFloorAndStayOffTheCorner_data();
     void smallSizesRiseFromTheFloorAndStayOffTheCorner();
-    void harmonicFromTwentyTwoPixels_data() { addSizeRows(); }
-    void harmonicFromTwentyTwoPixels();
+    void harmonicAtEverySize_data() { addSizeRows(); }
+    void harmonicAtEverySize();
+    void strokesRiseTogetherFromTheFloor_data() { addSizeRows(); }
+    void strokesRiseTogetherFromTheFloor();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
@@ -209,16 +218,63 @@ void AppIconTest::smallSizesRiseFromTheFloorAndStayOffTheCorner() {
     }
 }
 
-void AppIconTest::harmonicFromTwentyTwoPixels() {
+void AppIconTest::harmonicAtEverySize() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
-    // The harmonic's red-orange, distinct from the glide's amber.
+    // The harmonic's red-orange, distinct from the glide's amber; at 16 and
+    // 22 px a stair of whole pixels.
     const int harmonic = countWhere(image, image.rect(), [](QRgb p) { return near(p, kHarmonic, 40); });
-    if (size >= 22) {
-        QVERIFY2(harmonic >= 2, qPrintable(QString::number(harmonic)));
-    } else {
-        QCOMPARE(harmonic, 0);
+    QVERIFY2(harmonic >= 4, qPrintable(QString::number(harmonic)));
+}
+
+// The glide and its harmonic are one sweep growing out of the floor band, not
+// strokes floating in the tile (#373 hill climb): their ink is one shape, it
+// stands on the band, and it starts in the tile's left third.
+void AppIconTest::strokesRiseTogetherFromTheFloor() {
+    QFETCH(int, size);
+    const QImage image = render(FerrousAppIcon::resourcePath(size), size);
+    const QRect tile = tileOf(image);
+    const std::optional<int> floorTop = floorTopOf(image, tile);
+    QVERIFY(floorTop.has_value());
+
+    // The strokes' ink, in shapes of touching pixels, corners included.
+    std::vector<int> shape(static_cast<size_t>(size * size), -1);
+    int shapes = 0;
+    int lowest = -1;
+    int lowestX = -1;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            if (!strokeInk(image.pixel(x, y)) || shape[static_cast<size_t>(y * size + x)] >= 0) {
+                continue;
+            }
+            std::vector<QPoint> pending{QPoint(x, y)};
+            shape[static_cast<size_t>(y * size + x)] = shapes;
+            while (!pending.empty()) {
+                const QPoint p = pending.back();
+                pending.pop_back();
+                if (p.y() > lowest || (p.y() == lowest && p.x() < lowestX)) {
+                    lowest = p.y();
+                    lowestX = p.x();
+                }
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const QPoint q(p.x() + dx, p.y() + dy);
+                        if (!image.rect().contains(q) || !strokeInk(image.pixel(q))
+                            || shape[static_cast<size_t>(q.y() * size + q.x())] >= 0) {
+                            continue;
+                        }
+                        shape[static_cast<size_t>(q.y() * size + q.x())] = shapes;
+                        pending.push_back(q);
+                    }
+                }
+            }
+            ++shapes;
+        }
     }
+    QCOMPARE(shapes, 1);
+    // It reaches the band's top row, at its start in the tile's left third.
+    QVERIFY2(lowest >= *floorTop - 1, qPrintable(QStringLiteral("%1 above %2").arg(lowest).arg(*floorTop)));
+    QVERIFY2(lowestX < tile.left() + tile.width() / 3, qPrintable(QString::number(lowestX)));
 }
 
 void AppIconTest::windowIconHasEachSizesDrawing() {
