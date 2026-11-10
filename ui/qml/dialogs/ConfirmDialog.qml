@@ -11,7 +11,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // Asks before an action that cannot be undone. Escape and Cancel keep
 // things as they are; only the confirm button sends `confirmed`, once each
-// time the dialog shows: its buttons take no click as it fades out.
+// time the dialog shows: its buttons take no click as it fades out. The
+// confirm button is the default one, which Enter presses, unless the action
+// destroys data: then Cancel is, as KDE's guidelines ask.
 Dialog {
     id: root
 
@@ -20,6 +22,9 @@ Dialog {
     property string message: ""
     property string details: ""
     property string confirmText: I18n.i18nc("@action:button", "OK")
+    // Whether the action destroys data, such as a file it deletes or
+    // replaces.
+    property bool destructive: false
 
     signal confirmed()
 
@@ -52,7 +57,7 @@ Dialog {
 
         id: dialogButtons
         enabled: !closingState.closing
-        primary: confirmDialogConfirmButton
+        primary: root.destructive ? confirmDialogCancelButton : confirmDialogConfirmButton
         Button {
             id: confirmDialogConfirmButton
             objectName: "confirmDialogConfirmButton"
@@ -60,6 +65,7 @@ Dialog {
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
         }
         Button {
+            id: confirmDialogCancelButton
             objectName: "confirmDialogCancelButton"
             text: I18n.i18nc("@action:button", "Cancel")
             icon.name: "dialog-cancel"

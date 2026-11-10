@@ -846,7 +846,7 @@ void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard_d
     QTest::newRow("quit, discard") << true << false;
 }
 
-// The reload question makes Discard the default button; the close and quit
+// The reload question makes Cancel the default button; the close and quit
 // questions that follow it still have Save and Discard (#559).
 void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard() {
     QFETCH(bool, quit);
@@ -900,7 +900,7 @@ void TagEditorSmokeTest::askingToCloseAfterAReloadQuestionOffersSaveAndDiscard()
     }
 }
 
-// Moving the default button between Save and Discard destroys neither, and
+// Moving the default button between Save and Cancel destroys no button, and
 // Enter presses the one that is the default now (#559).
 void TagEditorSmokeTest::switchingTheTagEditorQuestionsKeepsEveryButton() {
     TagEditorWindow fixture;
@@ -921,7 +921,9 @@ void TagEditorSmokeTest::switchingTheTagEditorQuestionsKeepsEveryButton() {
         QCOMPARE(fixture.confirmButtonShown(discardName), discard.data());
         QCOMPARE(fixture.confirmButtonShown(keepEditingName), keepEditing.data());
         QVERIFY(!save->isVisible());
-        QVERIFY(isDefaultButton(discard));
+        // Discarding drops the edits, so Cancel is the default button.
+        QVERIFY(isDefaultButton(keepEditing));
+        QVERIFY(!isDefaultButton(discard));
         QVERIFY(!isDefaultButton(save));
         QVERIFY(clickButton(fixture.window, keepEditingName));
         QTRY_VERIFY(!fixture.confirmShown());
@@ -945,16 +947,15 @@ void TagEditorSmokeTest::switchingTheTagEditorQuestionsKeepsEveryButton() {
     QVERIFY(fixture.editor.dirty());
     QCOMPARE(fixture.saves->saveCount(), 0);
 
-    // Enter in the question presses Discard and Reload on the reload
-    // question...
+    // Enter in the question presses Cancel on the reload question, which
+    // keeps the edits...
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
     QTRY_VERIFY(fixture.confirm->property("opened").toBool());
     QVERIFY(fixture.focusConfirmContent());
     QTest::keyClick(fixture.window, Qt::Key_Return);
-    QTRY_COMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0"));
-    QTRY_VERIFY(!fixture.editor.loading());
-    QVERIFY(!fixture.editor.dirty());
     QTRY_VERIFY(!fixture.confirmShown());
+    QVERIFY(fixture.editor.dirty());
+    QVERIFY(!fixture.editor.loading());
     QVERIFY(fixture.editorShown());
     QCOMPARE(fixture.saves->saveCount(), 0);
 
@@ -1007,19 +1008,20 @@ void TagEditorSmokeTest::enterAnswersTheTagEditorsQuestionAsSoonAsItShows() {
     QCOMPARE(kept.count(), 2);
 
     // The reload question, asked next, has the keyboard in its content, not
-    // on the button Tab left it on. Enter, as it fades in, discards and
-    // reloads once, and Enter again, as it fades out, does nothing more.
+    // on the button Tab left it on. Enter, as it fades in, presses its
+    // default button, Cancel, once: the edits stay. Enter again, as it
+    // fades out, does nothing more.
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorReloadButton")));
     QVERIFY(fixture.confirmShown() && !fixture.confirm->property("opened").toBool());
     QVERIFY(keyboardInPopupContent(fixture.confirm));
     QTest::keyClick(fixture.window, Qt::Key_Return);
-    QCOMPARE(discards.count(), 1);
+    QCOMPARE(kept.count(), 3);
     QVERIFY(popupFadingOut(fixture.confirm));
     QTest::keyClick(fixture.window, Qt::Key_Return);
     QTRY_VERIFY(popupsSettled());
-    QCOMPARE(discards.count(), 1);
-    QTRY_VERIFY(!fixture.editor.loading());
-    QVERIFY(!fixture.editor.dirty());
+    QCOMPARE(kept.count(), 3);
+    QCOMPARE(discards.count(), 0);
+    QVERIFY(fixture.editor.dirty());
     QVERIFY(fixture.editorShown());
 
     // The close question: Enter, at once, saves once and closes the editor.
@@ -1033,8 +1035,8 @@ void TagEditorSmokeTest::enterAnswersTheTagEditorsQuestionAsSoonAsItShows() {
     QCOMPARE(saves.count(), 1);
     QCOMPARE(fixture.saves->saveCount(), 1);
     QVERIFY(!fixture.editor.isOpen());
-    QCOMPARE(discards.count(), 1);
-    QCOMPARE(kept.count(), 2);
+    QCOMPARE(discards.count(), 0);
+    QCOMPARE(kept.count(), 3);
 }
 
 // The quit wait takes Enter for Keep Waiting once it offers the choice,

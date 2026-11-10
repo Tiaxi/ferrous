@@ -706,6 +706,8 @@ Dialog {
             + "image that is there, or embeds it in the album's tracks in place of their artwork. "
             + "It keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
+        // The current album art is gone once replaced.
+        destructive: true
         // The answer takes the suggestion it was asked for, at once.
         onConfirmed: {
             const index = suggestionIndex

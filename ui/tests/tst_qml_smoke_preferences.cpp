@@ -523,11 +523,40 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(root->property("clears").toInt(), 0);
 
-    // Asked again, it has the keyboard in its content, not on the button
-    // Tab left it on, and Enter, as it fades in, clears the log once.
-    // Enter again, as it fades out, clears nothing more.
+    // Deleting the log destroys it, so Cancel is the default button, as
+    // KDE's guidelines ask, and Delete Log is not. Asked again, the
+    // question has the keyboard in its content, not on the button Tab left
+    // it on, and Enter, as it fades in, answers Cancel: the log stays.
+    QVERIFY(confirm->property("destructive").toBool());
     QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
     QVERIFY(confirm->property("visible").toBool() && !confirm->property("opened").toBool());
+    QQuickItem *footer = qvariant_cast<QQuickItem *>(confirm->property("footer"));
+    QQuickItem *deleteButton = visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton"));
+    QQuickItem *cancelButton = visibleItemNamed(window, QStringLiteral("confirmDialogCancelButton"));
+    QVERIFY(footer != nullptr && deleteButton != nullptr && cancelButton != nullptr);
+    QCOMPARE(qvariant_cast<QQuickItem *>(footer->property("primary")), cancelButton);
+    const auto isDefault = [](QQuickItem *button) {
+        return QQmlExpression(qmlContext(button), button, QStringLiteral("Accessible.defaultButton"))
+            .evaluate().toBool();
+    };
+    QVERIFY(isDefault(cancelButton));
+    QVERIFY(!isDefault(deleteButton));
+    QCOMPARE(deleteButton->property("text").toString(), QStringLiteral("Delete Log"));
+    QVERIFY(keyboardInPopupContent(confirm));
+    QTest::keyClick(window, Qt::Key_Return);
+    QVERIFY(popupFadingOut(confirm));
+    QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QCOMPARE(dialog->property("diagnosticsText").toString(), QStringLiteral("a line worth keeping"));
+
+    // A question whose action destroys nothing has its confirm button as
+    // the default: Enter, as it fades in, answers it once. Enter again, as
+    // it fades out, answers nothing more.
+    QVERIFY(confirm->setProperty("destructive", false));
+    QVERIFY(clickVisibleButton(window, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(confirm->property("visible").toBool() && !confirm->property("opened").toBool());
+    QVERIFY(isDefault(deleteButton));
+    QVERIFY(!isDefault(cancelButton));
     QVERIFY(keyboardInPopupContent(confirm));
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(root->property("clears").toInt(), 1);
