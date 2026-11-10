@@ -392,17 +392,22 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     QObject *dialog = window->findChild<QObject *>(QStringLiteral("preferencesDialog"));
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    // Configure Ferrous has a window of its own, which takes the keys.
+    auto *prefs = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(prefs != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(prefs));
+    QVERIFY(QTest::qWaitForWindowActive(prefs));
     QObject *pages = nullptr;
-    QTRY_VERIFY((pages = visibleItemNamed(window, QStringLiteral("preferencesPages"))) != nullptr);
+    QTRY_VERIFY((pages = visibleItemNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     // The page list is a list of page tabs, and has the keyboard first.
-    QQuickItem *pageList = visibleItemNamed(window, QStringLiteral("preferencesPageList"));
+    QQuickItem *pageList = visibleItemNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(pageList != nullptr);
     QCOMPARE(accessibleRole(pageList), QAccessible::PageTabList);
     QTRY_VERIFY(pageList->hasActiveFocus());
     const int pageCount = 5;
     for (int i = 0; i < pageCount; ++i) {
         QQuickItem *page = nullptr;
-        QTRY_VERIFY((page = visibleItemNamed(window, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
+        QTRY_VERIFY((page = visibleItemNamed(prefs, QStringLiteral("preferencesPage_%1").arg(i))) != nullptr);
         QCOMPARE(accessibleRole(page), QAccessible::PageTab);
     }
     QCOMPARE(pages->property("currentIndex").toInt(), 0);
@@ -410,41 +415,41 @@ void AccessibilityTest::everyPreferencesPageIsReachableByTab() {
     // The arrow keys move down the list, and Ctrl+Tab cycles the pages.
     const auto tabTo = [&](QQuickItem *target) {
         for (int presses = 0; presses < 60 && !target->hasActiveFocus(); ++presses) {
-            QTest::keyClick(window, Qt::Key_Tab);
+            QTest::keyClick(prefs, Qt::Key_Tab);
         }
         return target->hasActiveFocus();
     };
     for (int i = 1; i < pageCount; ++i) {
-        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(prefs, Qt::Key_Down);
         QTRY_COMPARE(pages->property("currentIndex").toInt(), i);
     }
-    QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_Tab, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 0);
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 1);
-    QTest::keyClick(window, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
+    QTest::keyClick(prefs, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), pageCount - 2);
 
     // The check boxes on the pages take focus too, and Space toggles them;
     // OK applies the change.
-    QTest::keyClick(window, Qt::Key_PageUp, Qt::ControlModifier);
+    QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTRY_COMPARE(pages->property("currentIndex").toInt(), 2);
-    QQuickItem *levelMeterBox = visibleItemNamed(window, QStringLiteral("showLevelMeterCheckBox"));
+    QQuickItem *levelMeterBox = visibleItemNamed(prefs, QStringLiteral("showLevelMeterCheckBox"));
     QVERIFY(levelMeterBox != nullptr);
     // Off by default for a new install.
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QVERIFY(!levelMeterBox->property("checked").toBool());
     QVERIFY(tabTo(levelMeterBox));
-    QTest::keyClick(window, Qt::Key_Space);
+    QTest::keyClick(prefs, Qt::Key_Space);
     QTRY_VERIFY(levelMeterBox->property("checked").toBool());
     // Nothing changes until OK.
     QVERIFY(!bridge->property("showLevelMeter").toBool());
-    QQuickItem *ok = visibleItemNamed(window, QStringLiteral("preferencesOkButton"));
+    QQuickItem *ok = visibleItemNamed(prefs, QStringLiteral("preferencesOkButton"));
     QVERIFY(ok != nullptr);
     QVERIFY(tabTo(ok));
-    QTest::keyClick(window, Qt::Key_Space);
-    QTRY_VERIFY(visibleItemNamed(window, QStringLiteral("preferencesPages")) == nullptr);
+    QTest::keyClick(prefs, Qt::Key_Space);
+    QTRY_VERIFY(!prefs->isVisible());
     QVERIFY(bridge->property("showLevelMeter").toBool());
 }
 

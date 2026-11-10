@@ -56,15 +56,23 @@ Preferences.PreferencesPage {
         }
     }
 
+    // The slider takes the column's width up to 18 grid units, and gives
+    // way before its value does, which always shows.
     RowLayout {
+        id: dbRangeRow
+        objectName: "dbRangeRow"
         Kirigami.FormData.label: I18n.i18nc("@label:slider", "Dynamic range:")
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 18
+        Layout.fillWidth: true
+        Layout.preferredWidth: Kirigami.Units.gridUnit * 12
+        Layout.minimumWidth: Kirigami.Units.gridUnit * 6 + dbRangeRow.spacing + dbRangeValueLabel.Layout.minimumWidth
+        Layout.maximumWidth: Kirigami.Units.gridUnit * 18
         spacing: Kirigami.Units.largeSpacing
 
         Slider {
             id: dbRangeSlider
             objectName: "dbRangeSlider"
             Layout.fillWidth: true
+            Layout.minimumWidth: Kirigami.Units.gridUnit * 6
             from: 50
             to: 150
             stepSize: 1
@@ -76,14 +84,16 @@ Preferences.PreferencesPage {
         }
 
         Label {
+            id: dbRangeValueLabel
             objectName: "dbRangeValueLabel"
             text: I18n.i18nc("@label:slider value in decibels", "%1 dB", Math.round(dbRangeSlider.value))
             font.features: root.uiPalette.tabularFigures
-            Layout.minimumWidth: dbRangeMetrics.advanceWidth
+            Layout.minimumWidth: Math.ceil(dbRangeMetrics.advanceWidth)
             horizontalAlignment: Text.AlignRight
 
             TextMetrics {
                 id: dbRangeMetrics
+                font: dbRangeValueLabel.font
                 text: I18n.i18nc("@label:slider value in decibels", "%1 dB", 150)
             }
         }

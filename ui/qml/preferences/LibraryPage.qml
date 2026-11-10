@@ -83,11 +83,16 @@ Preferences.PreferencesPage {
 
     title: I18n.i18nc("@title preferences page", "Library")
 
+    // The folders take the column's width up to 29 grid units, and no less
+    // than their buttons need: a long path elides.
     ColumnLayout {
         Kirigami.FormData.label: I18n.i18nc("@label", "Library folders:")
         // Next to the label's first line.
         Kirigami.FormData.labelAlignment: Qt.AlignTop
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 29
+        Layout.fillWidth: true
+        Layout.minimumWidth: rootButtons.implicitWidth
+        Layout.preferredWidth: Math.max(Kirigami.Units.gridUnit * 16, rootButtons.implicitWidth)
+        Layout.maximumWidth: Math.max(Kirigami.Units.gridUnit * 29, rootButtons.implicitWidth)
         spacing: Kirigami.Units.largeSpacing
 
         Rectangle {
@@ -270,6 +275,7 @@ Preferences.PreferencesPage {
         }
 
         RowLayout {
+            id: rootButtons
             spacing: Kirigami.Units.largeSpacing
 
             Button {

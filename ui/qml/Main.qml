@@ -1296,12 +1296,15 @@ ApplicationWindow {
         openLibraryRootNameDialog: root.openLibraryRootNameDialog
     }
 
+    // Over Configure Ferrous while it is open, whose Library page asks for
+    // it; over the main window otherwise.
     Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
         objectName: "libraryRootNameDialog"
+        parent: preferencesDialog.visible ? preferencesDialog.contentItem : root.contentItem
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
-        windowRoot: root
+        windowRoot: preferencesDialog.visible ? preferencesDialog : root
         dialogMode: root.pendingLibraryRootDialogMode
         pathValue: root.pendingLibraryRootPath
         nameValue: root.pendingLibraryRootName
@@ -1365,6 +1368,9 @@ ApplicationWindow {
     Platform.FolderDialog {
         id: scanFolderDialog
         objectName: "scanFolderDialog"
+        // Over Configure Ferrous while it is open, which blocks the main
+        // window.
+        parentWindow: preferencesDialog.visible ? preferencesDialog : root
         title: pendingFolderDialogContext === "append-external-folder"
             ? I18n.i18nc("@title:window", "Add Folder to Queue")
             : I18n.i18nc("@title:window", "Add Library Folder")
