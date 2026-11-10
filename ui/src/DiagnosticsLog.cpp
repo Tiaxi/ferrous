@@ -140,16 +140,53 @@ bool opensPath(QChar c) {
     return c.isSpace() || QStringView(u"\"'([<=,").contains(c);
 }
 
-// Where a quote that opened before `from` closes: at a quote followed by
-// the end of the line, a space or punctuation, which a path seldom has.
+// The first quote at or after `from` that no backslash escapes, or -1. The
+// log quotes a path as quotedPath does, and Rust's `{:?}` the same way.
 qsizetype closingQuote(QStringView line, qsizetype from) {
-    for (qsizetype j = line.indexOf(QLatin1Char('"'), from); j >= 0;
-         j = line.indexOf(QLatin1Char('"'), j + 1)) {
-        if (j + 1 == line.size() || QStringView(u" .,:;)]").contains(line.at(j + 1))) {
+    for (qsizetype j = from; j < line.size(); ++j) {
+        if (line.at(j) == QLatin1Char('\\')) {
+            ++j;
+        } else if (line.at(j) == QLatin1Char('"')) {
             return j;
         }
     }
     return -1;
+}
+
+// The quotes from `from` on that no backslash escapes.
+qsizetype unescapedQuotes(QStringView line, qsizetype from) {
+    qsizetype count = 0;
+    for (qsizetype j = from; j < line.size(); ++j) {
+        if (line.at(j) == QLatin1Char('\\')) {
+            ++j;
+        } else if (line.at(j) == QLatin1Char('"')) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Whether the quote at `close` closes a quoted path for certain: it is
+// followed by the end of the line, a space or punctuation, and the quotes
+// after it pair up. A path an older build logged without escaping its
+// quotes fails this, and is then redacted to the end of the line.
+bool closesQuotedPath(QStringView line, qsizetype close) {
+    const bool followedByBreak =
+        close + 1 == line.size() || QStringView(u" .,:;)]}").contains(line.at(close + 1));
+    return followedByBreak && unescapedQuotes(line, close + 1) % 2 == 0;
+}
+
+// `text` with its backslash escapes undone.
+QString unescaped(QStringView text) {
+    QString out;
+    out.reserve(text.size());
+    for (qsizetype j = 0; j < text.size(); ++j) {
+        if (text.at(j) == QLatin1Char('\\') && j + 1 < text.size()) {
+            ++j;
+        }
+        out += text.at(j);
+    }
+    return out;
 }
 
 // Where the path that starts at `start` ends, and whether the quote or
@@ -159,6 +196,9 @@ std::pair<qsizetype, bool> pathEnd(QStringView line, qsizetype start) {
     qsizetype end = -1;
     if (opener == QLatin1Char('"')) {
         end = closingQuote(line, start);
+        if (end >= 0 && !closesQuotedPath(line, end)) {
+            end = -1;
+        }
     } else {
         // A bracket or a single quote may also be in the path, so the last
         // one closes it; a path ends there or before.
@@ -214,7 +254,7 @@ public:
             }
             if (line.at(i) == QLatin1Char('"')) {
                 const qsizetype close = closingQuote(line, i + 1);
-                const QStringView quoted = close > i ? line.mid(i + 1, close - i - 1) : QStringView();
+                const QString quoted = close > i ? unescaped(line.mid(i + 1, close - i - 1)) : QString();
                 if (!quoted.isEmpty() && !quoted.contains(QLatin1Char('/')) && hasFileExtension(quoted)) {
                     out += QStringLiteral("\"<file>") + extensionOf(quoted);
                     i = close;
@@ -263,7 +303,10 @@ private:
     Classified classify(QStringView line, qsizetype start) const {
         const auto [end, delimited] = pathEnd(line, start);
         const QStringView path = line.mid(start, end - start);
-        const QString extension = delimited ? extensionOf(path) : QString();
+        // A path in double quotes has its quotes and backslashes escaped.
+        const bool escaped = start > 0 && line.at(start - 1) == QLatin1Char('"') && delimited;
+        const QString candidate = escaped ? unescaped(path) : path.toString();
+        const QString extension = delimited ? extensionOf(candidate) : QString();
         if (path.startsWith(QLatin1StringView("file://"))) {
             // A URI has no spaces; its extension is its path's.
             qsizetype uriEnd = 0;
@@ -273,23 +316,20 @@ private:
             const QStringView uri = path.first(delimited ? path.size() : uriEnd);
             return {QStringLiteral("<path>") + extensionOf(uri), uri.size()};
         }
+        // A root is the whole path or a folder of it: "/srv/music.old" and
+        // "/srv/music (backup)" are other folders, redacted as any other.
         for (qsizetype n = 0; n < m_roots.size(); ++n) {
             const QString &root = m_roots.at(n);
-            if (root.isEmpty() || !path.startsWith(root)) {
+            if (!isBelowOrAt(candidate, root)) {
                 continue;
             }
             const QString placeholder = QStringLiteral("<library %1>").arg(n + 1);
-            if (path.size() > root.size() && path.at(root.size()) == QLatin1Char('/')) {
-                return {placeholder + QStringLiteral("/\u2026") + extension, path.size()};
+            if (candidate.size() == root.size()) {
+                return {placeholder, path.size()};
             }
-            const bool rootAlone = path.size() == root.size()
-                || !(path.at(root.size()).isLetterOrNumber()
-                     || QStringView(u"_-").contains(path.at(root.size())));
-            if (rootAlone) {
-                return {placeholder, root.size()};
-            }
+            return {placeholder + QStringLiteral("/\u2026") + extension, path.size()};
         }
-        if (kept(path) || kept(QStringView(homeShortened(path)))) {
+        if (kept(candidate) || kept(QStringView(homeShortened(candidate)))) {
             // Kept as it is up to the end of its word, unless quoted, and the
             // rest of the line is read on.
             qsizetype keptEnd = path.size();
@@ -381,6 +421,93 @@ QString withoutPaths(const QString &text, const PathRedaction &redaction) {
         out += redactor.redact(line);
     }
     return out;
+}
+
+QString quotedPath(const QString &path) {
+    QString out;
+    out.reserve(path.size() + 2);
+    out += QLatin1Char('"');
+    for (const QChar c : path) {
+        if (c == QLatin1Char('"') || c == QLatin1Char('\\')) {
+            out += QLatin1Char('\\');
+        }
+        out += c;
+    }
+    out += QLatin1Char('"');
+    return out;
+}
+
+Writer::Writer(Append append)
+    : m_append(std::move(append)),
+      m_thread([this]() { run(); }) {}
+
+Writer::~Writer() {
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_stopping = true;
+    }
+    m_wake.notify_one();
+    m_thread.join();
+}
+
+void Writer::post(const QString &logPath, QStringList lines) {
+    if (logPath.isEmpty() || lines.isEmpty()) {
+        return;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_jobs.push_back(Job{logPath, std::move(lines), false});
+        ++m_posted;
+    }
+    m_wake.notify_one();
+}
+
+void Writer::removeLog(const QString &logPath) {
+    if (logPath.isEmpty()) {
+        return;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_jobs.push_back(Job{logPath, {}, true});
+        ++m_posted;
+    }
+    m_wake.notify_one();
+}
+
+void Writer::waitUntilWritten() {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    const quint64 target = m_posted;
+    m_written.wait(lock, [this, target]() { return m_done >= target; });
+}
+
+void Writer::run() {
+    std::unique_lock<std::mutex> lock(m_mutex);
+    for (;;) {
+        m_wake.wait(lock, [this]() { return m_stopping || !m_jobs.empty(); });
+        if (m_jobs.empty()) {
+            // Stopping, with everything written.
+            return;
+        }
+        Job job = std::move(m_jobs.front());
+        m_jobs.pop_front();
+        quint64 jobs = 1;
+        // Lines posted meanwhile go in the same write.
+        while (!job.remove && !m_jobs.empty() && !m_jobs.front().remove
+               && m_jobs.front().logPath == job.logPath) {
+            job.lines += m_jobs.front().lines;
+            m_jobs.pop_front();
+            ++jobs;
+        }
+        lock.unlock();
+        if (job.remove) {
+            QFile::remove(job.logPath);
+        } else {
+            (void)m_append(job.logPath, job.lines);
+        }
+        lock.lock();
+        m_done += jobs;
+        m_written.notify_all();
+    }
 }
 
 } // namespace DiagnosticsLog

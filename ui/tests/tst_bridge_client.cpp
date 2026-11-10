@@ -41,6 +41,7 @@
 
 #define private public
 #include "../src/BridgeClient.h"
+#include "../src/DiagnosticsLog.h"
 #include "../src/TagEditorController.h"
 #include "../src/CoverImageProvider.h"
 #include "../src/CoverRevisionLinks.h"
@@ -394,6 +395,7 @@ private slots:
     void mprisRateWritePausesOnlyForZero();
     void mprisOpenUriOpensOnlyLocalFiles();
     void eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths();
+    void loggingDoesNotWaitForAStalledDisk();
     void mprisSeekedReportsEachSeekWhereItLanded();
     void mprisCannotSeekAStoppedTrack();
     void mprisReportsAReplayOfTheSameFileAsSeeked();
@@ -4926,12 +4928,64 @@ void BridgeClientTest::diagnosticsWritesBatchOffHotPath() {
     QVERIFY(!QFileInfo::exists(logPath));
 
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
     const QString contents = QString::fromUtf8(file.readAll());
     QVERIFY(contents.contains(QStringLiteral("[ui] first line")));
     QVERIFY(contents.contains(QStringLiteral("[ui] second line")));
+}
+
+void BridgeClientTest::loggingDoesNotWaitForAStalledDisk() {
+    // Outlive the client, whose writer waits on them.
+    QSemaphore writing;
+    QSemaphore diskAnswers;
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    client.m_sendCommandOverride = [](const QByteArray &) { return true; };
+    client.m_diagnosticsFlushTimer.stop();
+    client.m_diagnosticsLogPath = logPath;
+    client.m_pendingDiagnosticsDiskLines.clear();
+    // A disk that does not answer until the test lets it.
+    client.m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>(
+        [&writing, &diskAnswers](const QString &path, const QStringList &lines) {
+            writing.release();
+            diskAnswers.acquire();
+            return DiagnosticsLog::appendLines(path, lines);
+        });
+
+    client.logInfo(QStringLiteral("app"), QStringLiteral("line 0"));
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY(writing.tryAcquire(1, 5000));
+    // The writer is held up in its write; logging goes on without waiting.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    MprisController controller(&client);
+    for (int n = 1; n <= 200; ++n) {
+        client.logInfo(QStringLiteral("app"), QStringLiteral("line %1").arg(n));
+        client.flushPendingDiagnosticDiskLines();
+    }
+    controller.next();
+    client.flushPendingDiagnosticDiskLines();
+    QVERIFY2(elapsed.elapsed() < 1000, qPrintable(QString::number(elapsed.elapsed())));
+    QVERIFY(!QFileInfo::exists(logPath));
+
+    // Once the disk answers, every line is there, in order.
+    diskAnswers.release(1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
+    QFile file(logPath);
+    QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+    const QStringList lines =
+        QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QCOMPARE(lines.size(), 202);
+    for (int n = 0; n <= 200; ++n) {
+        QVERIFY2(lines[n].endsWith(QStringLiteral("[app] info: line %1").arg(n)), qPrintable(lines[n]));
+    }
+    QVERIFY(lines[201].endsWith(QStringLiteral("[mpris] info: Next.")));
 }
 
 void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
@@ -4974,6 +5028,7 @@ void BridgeClientTest::reportedErrorsAreLoggedWithTheirCategoryAndSeverity() {
 
     // The diagnostics log has each too, one line each, with what it is about.
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
     const QStringList lines =
@@ -5030,6 +5085,7 @@ void BridgeClientTest::clearDiagnosticsDropsPendingDiskWrites() {
     QVERIFY(client.m_diagnosticsFlushTimer.isActive());
 
     QTRY_COMPARE_WITH_TIMEOUT(client.m_pendingDiagnosticsDiskLines.size(), 0, 1000);
+    client.m_diagnosticsWriter->waitUntilWritten();
 
     QFile file(logPath);
     QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -6764,8 +6820,9 @@ void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(client.libraryRoots(), QStringList{root});
 
-    const QString song = root + QStringLiteral("/Fixture Artist/Fixture Album (1999)/01 Fixture Song.flac");
-    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning \"%1\".").arg(song));
+    const QString song =
+        root + QStringLiteral("/Fixture Artist/Fixture Album \"Deluxe\" (1999)/01 Fixture Song.flac");
+    client.logInfo(QStringLiteral("library"), QStringLiteral("Scanning %1.").arg(DiagnosticsLog::quotedPath(song)));
     MprisController controller(&client);
     controller.next();
     controller.setShuffle(true);
@@ -6783,7 +6840,7 @@ void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
             return line.startsWith(QLatin1Char('[')) && line.endsWith(tail);
         });
     };
-    QVERIFY2(lineEnding(QStringLiteral("] [library] info: Scanning \"%1\".").arg(song)),
+    QVERIFY2(lineEnding(QStringLiteral("] [library] info: Scanning %1.").arg(DiagnosticsLog::quotedPath(song))),
              qPrintable(client.diagnosticsText()));
     QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Next.")));
     QVERIFY(lineEnding(QStringLiteral("] [mpris] info: Shuffle set on.")));
@@ -6794,7 +6851,8 @@ void BridgeClientTest::eventsAreLoggedAsInfoLinesAndCopiedWithoutPaths() {
     QCOMPARE(copied.count(QLatin1Char('\n')), client.diagnosticsText().count(QLatin1Char('\n')));
     for (const QString &leak : {root, QStringLiteral("Fixture Artist"), QStringLiteral("Fixture Album"),
                                 QStringLiteral("Fixture Song"), QStringLiteral("Other Song"),
-                                QStringLiteral("Loose Song"), QStringLiteral("/media/stick")}) {
+                                QStringLiteral("Loose Song"), QStringLiteral("/media/stick"),
+                                QStringLiteral("Deluxe")}) {
         QVERIFY2(!copied.contains(leak), qPrintable(leak + QStringLiteral(" in:\n") + copied));
     }
     QVERIFY2(copied.contains(QStringLiteral("[library] info: Scanning \"<library 1>/\u2026.flac\".")),

@@ -1057,19 +1057,25 @@ impl Service {
                 self.state.status_text.clear();
                 self.flush_queue();
             }
+            // The log is shared in bug reports, so it never names the
+            // account.
             Ok(None) => {
-                eprintln!(
-                    "Last.fm: no session key found in keyring for user \"{username}\" — \
-                     was the keyring cleared or is the keyring daemon unavailable?"
+                log_warning(
+                    ErrorCategory::LastFm,
+                    "No session key was found in the keyring for the saved account. Was the \
+                     keyring cleared, or is the keyring daemon unavailable?",
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Disconnected;
                 self.fail("Reconnect Last.fm to resume scrobbling.".to_string(), true);
             }
             Err(err) => {
-                let message = request_error_message(&RequestError::Keyring(err));
-                eprintln!(
-                    "Last.fm: keyring error loading session for user \"{username}\": {message}"
+                // The keyring's own error may name its entry, the account.
+                let message = request_error_message(&RequestError::Keyring(err))
+                    .replace(username.as_str(), "the saved account");
+                log_warning(
+                    ErrorCategory::LastFm,
+                    &format!("The saved account's session key could not be read: {message}"),
                 );
                 self.state.username = username;
                 self.state.auth_state = AuthState::Error;
@@ -3862,13 +3868,26 @@ mod tests {
             service.state
         };
 
+        test_log::clear();
         let missing = load(MemorySessionKeys::default());
         assert_eq!(missing.auth_state, AuthState::Disconnected);
         assert_eq!(missing.username, USERNAME);
 
-        let failing = load(MemorySessionKeys::failing("keyring locked"));
+        let failing = load(MemorySessionKeys::failing(&format!(
+            "keyring locked for entry ferrous.lastfm/{USERNAME}"
+        )));
         assert_eq!(failing.auth_state, AuthState::Error);
         assert!(failing.status_text.contains("keyring locked"));
+
+        // The log tells both, without the account's name.
+        let logged = test_log::lines_containing("[ferrous] [lastfm] warning: ");
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged[0].contains("No session key was found"), "{logged:?}");
+        assert!(logged[1].contains("could not be read: "), "{logged:?}");
+        assert!(logged[1].contains("keyring locked"), "{logged:?}");
+        for line in test_log::all() {
+            assert!(!line.contains(USERNAME), "{line}");
+        }
     }
 
     #[test]

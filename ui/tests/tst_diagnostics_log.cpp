@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <QTemporaryDir>
 #include <QtTest/QtTest>
 
 #include "DiagnosticsLog.h"
@@ -26,6 +27,8 @@ private slots:
     void pathsBecomePlaceholders_data();
     void pathsBecomePlaceholders();
     void noLibraryPathOrFileNameIsLeft();
+    void pathsAreQuotedWithTheirQuotesEscaped();
+    void writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed();
 };
 
 void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
@@ -43,6 +46,40 @@ void DiagnosticsLogTest::pathsBecomePlaceholders_data() {
         << QStringLiteral("[library] info: Scanning \"<library 2>\".");
     QTest::newRow("a longer name is another folder")
         << QStringLiteral("Read \"/srv/fixture-music-old/x.flac\".") << QStringLiteral("Read \"<path>.flac\".");
+    QTest::newRow("a dotted sibling of a root")
+        << QStringLiteral("[playback] info: Track started (user): \"/srv/fixture-music.old/Artist/Private Song.flac\".")
+        << QStringLiteral("[playback] info: Track started (user): \"<path>.flac\".");
+    QTest::newRow("a sibling of a root with a space")
+        << QStringLiteral("[library] info: Scanning \"/home/fixture-user/Music (backup)/Private Song.flac\".")
+        << QStringLiteral("[library] info: Scanning \"<path>.flac\".");
+    QTest::newRow("an unquoted sibling of a root")
+        << QStringLiteral("could not open /srv/fixture-music (backup)/Private Song.flac: denied")
+        << QStringLiteral("could not open <path>");
+    QTest::newRow("escaped quotes in a path")
+        << QStringLiteral("[playback] info: Track started (user): "
+                          "\"/srv/fixture-music/Album \\\"Deluxe\\\" Edition/01 Private Song.flac\".")
+        << QStringLiteral("[playback] info: Track started (user): \"<library 1>/….flac\".");
+    QTest::newRow("escaped backslashes in a path")
+        << QStringLiteral("[tags] info: Renamed \"/srv/fixture-music/AC\\\\DC\\\\\" to \"/srv/fixture-music/b.flac\".")
+        << QStringLiteral("[tags] info: Renamed \"<library 1>/…\" to \"<library 1>/….flac\".");
+    QTest::newRow("a quoted root with an escaped quote")
+        << QStringLiteral("Read \"/srv/fixture-music\\\"x/Private Song.flac\".")
+        << QStringLiteral("Read \"<path>.flac\".");
+    QTest::newRow("Rust's debug strings")
+        << QStringLiteral("[ferrous] [system] debug: Command: Queue(Append([\"/srv/fixture-music/A \\\"B\\\"/1.flac\", "
+                          "\"/media/stick/C\\\\D.mp3\"]))")
+        << QStringLiteral("[ferrous] [system] debug: Command: Queue(Append([\"<library 1>/….flac\", "
+                          "\"<path>.mp3\"]))");
+    QTest::newRow("an older line with unescaped quotes")
+        << QStringLiteral("[playback] info: Track started (user): "
+                          "\"/srv/fixture-music/Album \"Deluxe\" Edition/01 Private Song.flac\".")
+        << QStringLiteral("[playback] info: Track started (user): \"<library 1>/…");
+    QTest::newRow("an older line with an unescaped quote before a space")
+        << QStringLiteral("[playback] info: Track started (user): \"/srv/fixture-music/A\" B/01 Private Song.flac\".")
+        << QStringLiteral("[playback] info: Track started (user): \"<library 1>/…");
+    QTest::newRow("a quoted file name with escaped quotes")
+        << QStringLiteral("[tags] warning: \"01 \\\"Private\\\" Song.flac\" is read-only")
+        << QStringLiteral("[tags] warning: \"<file>.flac\" is read-only");
     QTest::newRow("two quoted paths")
         << QStringLiteral("[tags] info: Renamed \"/srv/fixture-music/A/1.flac\" to \"/srv/fixture-music/A/01 B.flac\".")
         << QStringLiteral("[tags] info: Renamed \"<library 1>/….flac\" to \"<library 1>/….flac\".");
@@ -107,6 +144,42 @@ void DiagnosticsLogTest::noLibraryPathOrFileNameIsLeft() {
         QVERIFY2(!copied.contains(leak), qPrintable(leak + QStringLiteral(" in:\n") + copied));
     }
     QVERIFY(copied.contains(QStringLiteral("[tags] info: Saved the tags of 2 files (album):")));
+}
+
+void DiagnosticsLogTest::pathsAreQuotedWithTheirQuotesEscaped() {
+    QCOMPARE(DiagnosticsLog::quotedPath(QStringLiteral("/srv/a \"b\"\\c.flac")),
+             QStringLiteral("\"/srv/a \\\"b\\\"\\\\c.flac\""));
+}
+
+void DiagnosticsLogTest::writerKeepsTheOrderAndWritesWhatWaitsWhenDestroyed() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString logPath = dir.filePath(QStringLiteral("diagnostics.log"));
+    const auto read = [&logPath]() {
+        QFile file(logPath);
+        return file.open(QIODevice::ReadOnly | QIODevice::Text)
+            ? QString::fromUtf8(file.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts)
+            : QStringList();
+    };
+    {
+        DiagnosticsLog::Writer writer;
+        writer.post(logPath, {QStringLiteral("one"), QStringLiteral("two")});
+        writer.post(logPath, {QStringLiteral("three")});
+        writer.waitUntilWritten();
+        QCOMPARE(read(), (QStringList{QStringLiteral("one"), QStringLiteral("two"), QStringLiteral("three")}));
+        // Removing the log comes after the lines before it, and before those
+        // after it.
+        writer.removeLog(logPath);
+        writer.post(logPath, {QStringLiteral("after the removal")});
+        writer.waitUntilWritten();
+        QCOMPARE(read(), QStringList{QStringLiteral("after the removal")});
+        for (int n = 0; n < 100; ++n) {
+            writer.post(logPath, {QStringLiteral("waiting %1").arg(n)});
+        }
+    }
+    const QStringList lines = read();
+    QCOMPARE(lines.size(), 101);
+    QCOMPARE(lines.last(), QStringLiteral("waiting 99"));
 }
 
 int main(int argc, char **argv) {

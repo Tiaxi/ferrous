@@ -54,7 +54,7 @@ void logStartup(BridgeClient &bridge, const QString &logPath) {
     bridge.logInfo(
         QStringLiteral("app"),
         QStringLiteral("Ferrous %1 started: Qt %2 (built with %3), KDE Frameworks %4, "
-                       "desktop %5, platform %6, style %7, icon theme %8, locale %9; log \"%10\".")
+                       "desktop %5, platform %6, style %7, icon theme %8, locale %9; log %10.")
             .arg(QStringLiteral(FERROUS_APP_VERSION),
                  QString::fromLatin1(qVersion()),
                  QStringLiteral(QT_VERSION_STR),
@@ -64,7 +64,7 @@ void logStartup(BridgeClient &bridge, const QString &logPath) {
                  QQuickStyle::name(),
                  QIcon::themeName(),
                  QLocale().name(),
-                 logPath));
+                 DiagnosticsLog::quotedPath(logPath)));
     if (!BridgeClient::debugLoggingEnabled()) {
         return;
     }

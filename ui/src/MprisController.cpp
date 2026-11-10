@@ -3,6 +3,7 @@
 #include "MprisController.h"
 
 #include "BridgeClient.h"
+#include "DiagnosticsLog.h"
 #include "CoverImageProvider.h"
 #include "WindowActivation.h"
 
@@ -484,7 +485,7 @@ QString MprisController::localPathForOpenUri(const QString &uri) {
 bool MprisController::openUri(const QString &uri) {
     const QString localPath = localPathForOpenUri(uri);
     logCommand(localPath.isEmpty() ? QStringLiteral("OpenUri with a URI that is not a local file")
-                                   : QStringLiteral("OpenUri \"%1\"").arg(localPath));
+                                   : QStringLiteral("OpenUri %1").arg(DiagnosticsLog::quotedPath(localPath)));
     if (localPath.isEmpty()) {
         if (calledFromDBus()) {
             sendErrorReply(

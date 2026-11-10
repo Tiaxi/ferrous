@@ -41,6 +41,9 @@ class QNetworkReply;
 class QSocketNotifier;
 class QTemporaryDir;
 class QQuickWindow;
+namespace DiagnosticsLog {
+class Writer;
+}
 
 class BridgeClient : public QObject {
     Q_OBJECT
@@ -988,6 +991,9 @@ private:
     QString m_diagnosticsLogPath;
     QStringList m_diagnosticsLines;
     QStringList m_pendingDiagnosticsDiskLines;
+    // Writes the log's lines off the GUI thread. Destroyed after the
+    // destructor's last flush, it writes what still waits.
+    std::unique_ptr<DiagnosticsLog::Writer> m_diagnosticsWriter;
     QString m_libraryLastError;
     // The roots, with their reasons, already reported or logged as not watched.
     QSet<QString> m_reportedUnwatchedRoots;

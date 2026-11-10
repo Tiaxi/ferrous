@@ -638,6 +638,7 @@ BridgeClient::BridgeClient(QObject *parent)
     connect(&m_queueRowsModel, &QAbstractItemModel::rowsMoved, this, followQueueRows);
     connect(&m_queueRowsModel, &QAbstractItemModel::modelReset, this, followQueueRows);
     connect(&m_queueRowsModel, &QAbstractItemModel::dataChanged, this, followQueueRows);
+    m_diagnosticsWriter = std::make_unique<DiagnosticsLog::Writer>();
     m_diagnosticsLogPath = resolveDiagnosticsLogPath();
     m_diagnosticsFlushTimer.setSingleShot(true);
     m_diagnosticsFlushTimer.setInterval(readEnvMillis("FERROUS_DIAGNOSTICS_FLUSH_MS", 25));
@@ -4222,15 +4223,17 @@ void BridgeClient::clearDiagnostics() {
     m_pendingDiagnosticsDiskLines.clear();
     m_diagnosticsLines.clear();
     m_diagnosticsText.clear();
-    if (!m_diagnosticsLogPath.isEmpty()) {
-        QFile::remove(m_diagnosticsLogPath);
-    }
+    // After the lines already handed to the writer.
+    m_diagnosticsWriter->removeLog(m_diagnosticsLogPath);
     emit diagnosticsChanged();
     logDiagnostic(QStringLiteral("ui"), QStringLiteral("diagnostics cleared"));
 }
 
 void BridgeClient::reloadDiagnosticsFromDisk() {
     flushPendingDiagnosticDiskLines();
+    // Reading the log, which the user asked for, waits for the lines
+    // logged before it; logging itself never waits.
+    m_diagnosticsWriter->waitUntilWritten();
     QStringList lines;
     if (!m_diagnosticsLogPath.isEmpty()) {
         QFile file(m_diagnosticsLogPath);
@@ -4343,10 +4346,10 @@ void BridgeClient::flushPendingDiagnosticDiskLines() {
     if (m_diagnosticsLogPath.isEmpty() || m_pendingDiagnosticsDiskLines.isEmpty()) {
         return;
     }
-    const QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
+    QStringList lines = std::move(m_pendingDiagnosticsDiskLines);
     m_pendingDiagnosticsDiskLines.clear();
-    const bool written = DiagnosticsLog::appendLines(m_diagnosticsLogPath, lines);
-    (void)written;
+    // The disk is the writer's: the GUI thread never waits for it.
+    m_diagnosticsWriter->post(m_diagnosticsLogPath, std::move(lines));
 }
 
 void BridgeClient::rebuildDiagnosticsText() {

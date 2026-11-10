@@ -121,7 +121,8 @@ Dialog {
                 ToolTip.visible: hovered
                 ToolTip.delay: Kirigami.Units.toolTipDelay
                 ToolTip.text: I18n.i18nc("@info:tooltip",
-                    "Copy the log with the library's folders and file names replaced, for a bug report")
+                    "Copy the log with folders and file names replaced, for a bug report. Artist and track "
+                    + "names in the Last.fm lines are kept.")
                 onClicked: root.uiBridge.copyDiagnosticsWithoutPaths()
             }
         }

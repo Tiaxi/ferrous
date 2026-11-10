@@ -5,11 +5,62 @@
 #include <QString>
 #include <QStringList>
 
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+
 namespace DiagnosticsLog {
 
 QString defaultLogPath();
 bool appendLine(const QString &logPath, const QString &line);
 bool appendLines(const QString &logPath, const QStringList &lines);
+
+// `path` in double quotes, with its quotes and backslashes escaped, as log
+// lines quote a path, in C++ and in Rust (`quoted_path`), so that
+// withoutPaths can tell where it ends.
+QString quotedPath(const QString &path);
+
+// Writes lines to the log on a thread of its own, in the order they were
+// posted, so that the thread that logs never waits for the disk: the GUI
+// thread logs through it. The destructor writes what is still waiting.
+class Writer {
+public:
+    using Append = std::function<bool(const QString &logPath, const QStringList &lines)>;
+
+    explicit Writer(Append append = appendLines);
+    ~Writer();
+
+    Writer(const Writer &) = delete;
+    Writer &operator=(const Writer &) = delete;
+
+    // Queues `lines` for the log at `logPath` and returns at once.
+    void post(const QString &logPath, QStringList lines);
+    // Queues deleting the log at `logPath`, after the lines posted before.
+    void removeLog(const QString &logPath);
+    // Waits until everything posted before has been written.
+    void waitUntilWritten();
+
+private:
+    struct Job {
+        QString logPath;
+        QStringList lines;
+        bool remove{false};
+    };
+
+    void run();
+
+    const Append m_append;
+    std::mutex m_mutex;
+    std::condition_variable m_wake;
+    std::condition_variable m_written;
+    std::deque<Job> m_jobs;
+    quint64 m_posted{0};
+    quint64 m_done{0};
+    bool m_stopping{false};
+    std::thread m_thread;
+};
 
 // What withoutPaths needs to know to tell paths apart.
 struct PathRedaction {

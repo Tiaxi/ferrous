@@ -132,11 +132,22 @@ pub(crate) fn log_debug(category: ErrorCategory, message: impl FnOnce() -> Strin
     }
 }
 
-/// `path` as the log lines quote a path, in double quotes, so that Copy Log
-/// Without Paths (`DiagnosticsLog::withoutPaths` in the UI) can tell where
-/// it ends.
+/// `path` as the log lines quote a path: in double quotes, with its quotes
+/// and backslashes escaped, as `DiagnosticsLog::quotedPath` in the UI and
+/// Rust's `{:?}` quote them, so that Copy Log Without Paths
+/// (`DiagnosticsLog::withoutPaths`) can tell where it ends.
 pub(crate) fn quoted_path(path: &Path) -> String {
-    format!("\"{}\"", path.display())
+    let shown = path.display().to_string();
+    let mut quoted = String::with_capacity(shown.len() + 2);
+    quoted.push('"');
+    for c in shown.chars() {
+        if c == '"' || c == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// A playback position or a duration as the log shows it: `m:ss.t`, with
@@ -182,6 +193,25 @@ fn log_only(category: ErrorCategory, level: &str, message: &str) {
     eprintln!("{line}");
     #[cfg(test)]
     test_log::record(line);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quoted_path_escapes_its_quotes_and_backslashes() {
+        assert_eq!(
+            quoted_path(Path::new("/fixture/library/Album \"Deluxe\" AC\\DC.flac")),
+            r#""/fixture/library/Album \"Deluxe\" AC\\DC.flac""#
+        );
+        // As Rust's own debug strings quote it.
+        let path = Path::new("/fixture/a \"b\" \\c");
+        assert_eq!(
+            quoted_path(path),
+            format!("{:?}", path.display().to_string())
+        );
+    }
 }
 
 /// Tests that do not care about the category send system errors.
