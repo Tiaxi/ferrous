@@ -1164,6 +1164,7 @@ void UiMainWindowTest::firstRunShowsOneMessage() {
                  ->property("text").toString(),
              QString());
     QCOMPARE(colorOf(named(window, "spectrogramPane")), QStringLiteral("#ff000000"));
+    QVERIFY(!shown(named(window, "plotAnalysingText")));
     QVERIFY(shown(named(window, "nowPlayingEmptyRow")));
     // The empty queue's header shows only its name, and Tab skips its
     // resize handles.
