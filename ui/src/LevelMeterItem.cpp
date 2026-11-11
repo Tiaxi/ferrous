@@ -3,6 +3,7 @@
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
 #include "PlaybackClock.h"
+#include "SpectrogramColorMap.h"
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
@@ -25,11 +26,13 @@ constexpr double kRequestLeadSeconds = 0.5;
 constexpr double kLookaheadSeconds = 0.5;
 // How often readers of the levels hear of new ones.
 constexpr int kReadoutIntervalMs = 250;
-// The scale's gaps, in dB.
-constexpr double kGapsDb[] = {-6.0, -12.0, -24.0};
+// The scale's ticks, in dB, and those of a short lane.
+constexpr double kTicksDb[] = {0.0, -12.0, -24.0, -48.0};
+constexpr double kShortLaneTicksDb[] = {-12.0, -24.0};
 // Per lane: the column's floor, the track, the lamp, the gap under it, the
-// fill, the three gaps of the scale and the peak tick.
-constexpr int kNodesPerLane = 9;
+// fill, the four ticks of the scale, the gap under the peak tick and the
+// peak tick.
+constexpr int kNodesPerLane = 11;
 
 using Self = LevelMeterItem;
 
@@ -85,6 +88,16 @@ void setRect(QSGNode *node, const QRectF &rect, const QColor &color) {
     if (rectNode->rect() != rect) rectNode->setRect(rect);
     if (rectNode->color() != color) rectNode->setColor(color);
 }
+}
+
+std::vector<double> LevelMeterItem::ticksDb(double laneHeight) {
+    return laneHeight < kFullScaleLaneHeight
+        ? std::vector<double>(std::begin(kShortLaneTicksDb), std::end(kShortLaneTicksDb))
+        : std::vector<double>(std::begin(kTicksDb), std::end(kTicksDb));
+}
+
+QColor LevelMeterItem::colorMapColor(double db, double dbRange) {
+    return QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, dbRange));
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {
@@ -258,6 +271,36 @@ void LevelMeterItem::setActive(bool value) {
     update();
     // An inactive meter reads nothing: its readers hear of it.
     noteReadout();
+}
+
+void LevelMeterItem::setColorMapFill(bool value) {
+    if (m_colorMapFill == value) return;
+    m_colorMapFill = value;
+    emit colorsChanged();
+    update();
+}
+
+void LevelMeterItem::setDbRange(double value) {
+    if (!std::isfinite(value) || m_dbRange == value) return;
+    m_dbRange = value;
+    emit colorsChanged();
+    update();
+}
+
+void LevelMeterItem::setScaleShown(bool value) {
+    if (m_scaleShown == value) return;
+    m_scaleShown = value;
+    emit scaleShownChanged();
+    update();
+}
+
+void LevelMeterItem::setEdgeGap(double value) {
+    value = std::isfinite(value) ? std::max(0.0, value) : kDefaultEdgeGap;
+    if (m_edgeGap == value) return;
+    m_edgeGap = value;
+    setImplicitWidth(kTrackLeft + kTrackWidth + m_edgeGap);
+    emit edgeGapChanged();
+    update();
 }
 
 void LevelMeterItem::setReadoutWanted(bool value) {
@@ -646,17 +689,25 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
         next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
-        // when these change.
+        // when these change. The map's colour is that of the level at the
+        // fill's top, which changes with it.
         const double fill = shown.fill / dpr;
-        next(bar(meterBottom - fill, fill), m_fillColor);
-        const bool shortLane = bottom - top < kFullScaleLaneHeight;
-        for (const double gapDb : kGapsDb) {
-            const bool shown = !(shortLane && gapDb == -12.0);
-            const double y = snap(meterBottom - meterPosition(gapDb, scaleHeight));
-            next(shown ? track(y, 1.0) : QRectF(), m_gapColor);
+        const QColor fillColor = m_colorMapFill
+            ? colorMapColor(levelAt(shown.fill, scaleHeight * dpr), m_dbRange) : m_fillColor;
+        next(bar(meterBottom - fill, fill), fillColor);
+        // The scale's ticks, while the plot shows its scale.
+        const std::vector<double> ticks = m_scaleShown ? ticksDb(bottom - top) : std::vector<double>{};
+        for (std::size_t i = 0; i < std::size(kTicksDb); ++i) {
+            const double y = i < ticks.size()
+                ? std::max(scaleTop, snap(meterBottom - meterPosition(ticks[i], scaleHeight))) : 0.0;
+            next(i < ticks.size() ? track(y, 1.0) : QRectF(), m_tickColor);
         }
-        // The 2 px tick is centred on its level, inside the scale.
+        // The 2 px tick is centred on its level, inside the scale. On the
+        // fill, a 1 px gap under it keeps it a mark of its own, whatever
+        // the fill's colour.
         const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
+        const bool onFill = shown.peak >= 0 && meterBottom - fill < tickY + 3.0 && tickY + 3.0 <= meterBottom;
+        next(onFill ? track(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
         next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
     }
     return node;

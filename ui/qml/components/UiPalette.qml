@@ -195,12 +195,15 @@ QtObject {
         required property color plotLaneSeam
         required property color plotTick
         required property color plotLink
-        // The level meter: its track, the bar on it, and its scale's gaps.
+        // The level meter: its track, the bar on it, the gaps under its
+        // lamp and its peak tick, and its scale's ticks. On the
+        // spectrogram, the fill is the colour map's.
         required property color meterTrough
         required property color meterFill
         required property color meterSeam
         required property color meterPeak
         required property color meterClipOff
+        required property color meterTick
         // A checked tool button on a plate: a solid fill, at least 3:1 on
         // the plate, and its glyph or letter, at least 4.5:1 on the fill.
         required property color checkedFill
@@ -232,13 +235,15 @@ QtObject {
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
-        // as part of the plot. The fill is a step under the plot text,
-        // quieter than the queue's scrollbar thumb.
+        // as part of the plot. The fill takes the colour map's colour of
+        // its level (LevelMeterItem's colorMapFill); meterFill is its
+        // colour without one.
         meterTrough: "#2b1f43"
         meterFill: "#8f87a3"
         meterSeam: "#0a0318"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
+        meterTick: Qt.rgba(1, 1, 1, 0.4)
         checkedFill: root.accent
         checkedGlyph: spectrogramColors.plotBg
         // The dark theme's selection, on the floor.
@@ -272,6 +277,8 @@ QtObject {
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
+        // The waveform has no scale: the meter shows no ticks on it.
+        meterTick: ColorUtils.withAlpha(root.text, 0.4)
         // The accent is 2.4:1 on white: the light fill is the focus ring's
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing

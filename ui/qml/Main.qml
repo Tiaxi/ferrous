@@ -1604,13 +1604,16 @@ ApplicationWindow {
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
 
         // The mode switch (#373 Motion): the plot that shows whole stays on
-        // screen, under the chosen one, until that one can draw, and the
-        // chosen one then fades in over it over shortDuration; the labels,
-        // the switch and the meter stay put. The spectrogram, hidden, gives
-        // its analysis and columns up, so shown again it waits for a fresh
-        // session's columns to fill its whole view. With animations off it
-        // shows once it can draw, with no fade. The plot before goes once the chosen one shows
-        // whole.
+        // screen, under the chosen one, and the chosen one fades in over it
+        // over shortDuration from the click; the labels, the switch and the
+        // meter stay put. The plot before goes once the chosen one shows
+        // whole. With animations off the chosen one shows at once.
+        // The spectrogram stays live under the waveform, at 0 and taking no
+        // input (#373 H7): hidden, it gave its analysis and columns up, so
+        // that shown again it waited about 250 ms for a fresh session's
+        // columns to fill its view. Kept live, its view is drawn when it is
+        // chosen, and it comes in at the click. The waveform, which draws
+        // from its overview, waits only for that.
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
         property int settledMode: -1
@@ -1626,10 +1629,12 @@ ApplicationWindow {
             return mode === 0 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
         }
         // Whether `mode`'s plot can come in: the waveform once it has its
-        // data, the spectrogram once each lane has drawn the whole view
-        // (#373 H6: it faded in black and then filled in blocks).
+        // data; the spectrogram, kept live, at once, with its view as it
+        // has drawn it: whole, unless no session has filled it yet, as
+        // right after a track starts, when its columns come in as they
+        // would were it shown.
         function plotCanComeIn(mode) {
-            return mode === 0 ? spectrogramSurface.viewFilled : !waveformSurface.awaitingData
+            return mode === 0 || !waveformSurface.awaitingData
         }
         // Whether the chosen plot still waits for its data while the one
         // before has some to show. Without a track to wait for, or with
@@ -1645,7 +1650,7 @@ ApplicationWindow {
         // has data to show. Not what it sets itself, so that settling in a
         // handler of it is no binding loop.
         readonly property var modeInputs: [viewerController.visualizationMode, plotLayer.trackLoaded,
-            spectrogramSurface.awaitingData, spectrogramSurface.viewFilled, waveformSurface.awaitingData]
+            spectrogramSurface.awaitingData, waveformSurface.awaitingData]
         readonly property NumberAnimation modeFadeAnimation: NumberAnimation {
             objectName: "visualizationModeFade"
             target: visualizationSurface
@@ -1730,12 +1735,17 @@ ApplicationWindow {
             Accessible.description: I18n.i18nc("@info", "Frequencies of the playing track over time")
             anchors.fill: parent
             plotWidth: plotLayer.plotWidth
-            // Shown while it comes in, at 0 while it waits for its data, so
-            // that its analysis runs.
-            visible: visualizationSurface.plotShown(0)
-            opacity: visualizationSurface.plotOpacity(0)
+            // Live while the waveform shows, at 0, so that its analysis runs
+            // and its view is drawn for the switch back; then it takes no
+            // pointer or keys, and assistive technology skips it.
+            readonly property bool standby: !visualizationSurface.plotShown(0)
+            opacity: spectrogramSurface.standby ? 0 : visualizationSurface.plotOpacity(0)
+            enabled: !spectrogramSurface.standby
+            Accessible.ignored: spectrogramSurface.standby
             playheadVisible: visualizationSurface.playheadShown(0)
-            z: visualizationSurface.settledMode === 0 ? 0 : 1
+            // Under the waveform while it stands by, so that the waveform
+            // has the pointer and its hover.
+            z: spectrogramSurface.standby ? -1 : (visualizationSurface.settledMode === 0 ? 0 : 1)
             // Its lanes, floors and seams fade in as one picture.
             layer.enabled: opacity > 0 && opacity < 1
             viewerMode: visualizationSurface.inViewer
