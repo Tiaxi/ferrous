@@ -365,8 +365,24 @@ QVariantList sampleQueueRows(int count) {
     return rows;
 }
 
+// A cover for the playing track, made once in a temporary directory of the
+// test's own: the panel takes its wide layout only for a track with one
+// (#373 H8).
+QString testCoverUrl() {
+    static QTemporaryDir dir;
+    static const QString url = [] {
+        const QString path = dir.filePath(QStringLiteral("cover.png"));
+        QImage image(64, 64, QImage::Format_RGB32);
+        image.fill(QColor(200, 120, 40));
+        image.save(path);
+        return QUrl::fromLocalFile(path).toString();
+    }();
+    return url;
+}
+
 void playTrack(QObject *bridge, const QString &state = QStringLiteral("Playing")) {
     bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("currentTrackCoverPath", testCoverUrl());
     bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
     bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours"));
@@ -1069,11 +1085,12 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
     QTest::newRow("dark") << true;
 }
 
-// A track without a cover keeps the cover's square (#373 H1), on a
+// A track without a cover takes the narrow layout in the wide window too
+// (#373 H8: the empty 360 px square was a dead slab), its 96 px tile a
 // placeholder (#373 H6): the view colour, with no lighter slab and no
 // frame, and a disc mark at its centre, a neutral grey from the tertiary
-// colour at 3:1 on the view, 48 px wide and a third of the narrow 96 px
-// tile (#373 H7: at 64 px and 2:1 it was faint). A track without tags shows its file name for a title,
+// colour at 3:1 on the view, 32 px, a third of the tile (#373 H7: at 64 px
+// and 2:1 it was faint). A track without tags shows its file name for a title,
 // and its lines with no text take no room: no blank lines are left in the
 // block (#373 H6, a file without tags left two).
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
@@ -1099,10 +1116,11 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
             QTRY_COMPARE(window->width(), 1000);
         }
         playTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", QString());
         QVERIFY(grown(window));
-        QTRY_COMPARE(panel->property("layoutMode").toString(),
-                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+        QTRY_COMPARE(cover->width(), 96.0);
+        QTRY_COMPARE(panel->property("coverGrowth").toReal(), 0.0);
         const QRectF tagged = sceneRect(header);
         const QRectF tileRect = sceneRect(cover);
 
@@ -1110,7 +1128,7 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         QVERIFY(bridge->property("currentTrackCoverPath").toString().isEmpty());
         QCOMPARE(colorOf(cover), tokenHex(window, "view"));
         QVERIFY(shown(mark));
-        QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
+        QCOMPARE(mark->width(), 32.0);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), tileRect.center());
         QCOMPARE(mark->property("source").toString(), QStringLiteral("media-optical-audio-symbolic"));
@@ -1129,36 +1147,25 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         clearTrackTags(bridge);
         QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
         QCOMPARE(panel->property("detailsText").toString(), QString());
-        QCOMPARE(panel->property("layoutMode").toString(),
-                 narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+        QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
         QCOMPARE(sceneRect(cover), tileRect);
-        QQuickItem *title = named(window, narrow ? "nowPlayingNarrowTitle" : "nowPlayingTitle");
+        QQuickItem *title = named(window, "nowPlayingNarrowTitle");
         QVERIFY(shown(title));
         QTRY_COMPARE(title->property("text").toString(), QFileInfo(kTrackPath).fileName());
-        for (const char *name : narrow
-                 ? std::initializer_list<const char *>{"nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
-                                                       "nowPlayingNarrowDetails"}
-                 : std::initializer_list<const char *>{"nowPlayingArtistAlbum", "nowPlayingWideArtist",
-                                                       "nowPlayingWideAlbum", "nowPlayingDetails"}) {
+        for (const char *name : {"nowPlayingNarrowArtist", "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}) {
             QQuickItem *line = named(window, name);
             QVERIFY2(line != nullptr, name);
             QTRY_VERIFY2(!line->isVisible(), name);
         }
-        if (narrow) {
-            // Beside the cover, which is taller than the title: the block
-            // keeps the cover's height.
-            QTRY_COMPARE(sceneRect(seam).top() - tileRect.bottom(), 12.0);
-            QCOMPARE(sceneRect(header), tagged);
-        } else {
-            // The seam 14 px under the title, and the library up by the
-            // lines that went.
-            QTRY_COMPARE(sceneRect(seam).top() - sceneRect(title).bottom(), 14.0);
-            QVERIFY(sceneRect(header).top() < tagged.top());
-        }
+        // Beside the cover, which is taller than the title: the block keeps
+        // the cover's height.
+        QTRY_COMPARE(sceneRect(seam).top() - tileRect.bottom(), 12.0);
+        QCOMPARE(sceneRect(header), tagged);
         QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 
         // The tags back: the lines back, where they were.
         playTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", QString());
         QTRY_COMPARE(sceneRect(header), tagged);
     }
 }
@@ -1292,11 +1299,11 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont_data() {
 }
 
 // The marks of the now-playing panel follow the font as the transport's
-// glyphs do (#373 H3): the disc mark of a track without a cover, 48 px in
-// the wide tile and 32 px in the narrow one with the default font, never
-// over a third of the tile, which keeps its size, and even, at the tile's
-// centre on whole pixels; and the 16 px mark of nothing playing's compact
-// row (#373 H7).
+// glyphs do (#373 H3): the disc mark of a track without a cover, which
+// takes the narrow layout in either window (#373 H8), 32 px, never over a
+// third of the tile, which keeps its size, and even, at the tile's centre
+// on whole pixels; and the 16 px mark of nothing playing's compact row
+// (#373 H7).
 void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
     QFETCH(qreal, pointSize);
     LibraryTreeModel libraryModel;
@@ -1330,13 +1337,14 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
             QTRY_COMPARE(window->width(), 1000);
         }
         playTrack(bridgeOf(window));
+        bridgeOf(window)->setProperty("currentTrackCoverPath", QString());
         QVERIFY(grown(window));
-        QTRY_COMPARE(panel->property("layoutMode").toString(),
-                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+        QTRY_COMPARE(cover->width(), 96.0);
         QVERIFY(shown(mark));
         // Even, so that it sits on whole pixels at the tile's centre.
-        const qreal expected = 2 * std::round(std::min(std::round(cover->width() / 3), scaled(narrow ? 32 : 48)) / 2);
+        const qreal expected = 2 * std::round(std::min(std::round(cover->width() / 3), scaled(48)) / 2);
+        QCOMPARE(expected, 32.0);
         QTRY_COMPARE(mark->width(), expected);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), sceneRect(cover).center());
@@ -1431,10 +1439,13 @@ void UiMainWindowTest::nothingPlayingIsACompactRow() {
     QTRY_VERIFY2(std::abs(idleLibrary - library->height() - grownBy)
                      < paletteOf(window)->property("rowHeight").toReal(),
                  qPrintable(QStringLiteral("%1 to %2").arg(idleLibrary).arg(library->height())));
-    // A track without a cover: the placeholder's surface, with its mark.
+    // A track without a cover: the narrow layout, and the placeholder's
+    // surface, with its mark.
+    bridgeOf(window)->setProperty("currentTrackCoverPath", QString());
+    QTRY_COMPARE(cover->width(), 96.0);
     QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
     QVERIFY(shown(mark));
-    QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
+    QCOMPARE(mark->width(), 32.0);
     QCOMPARE(colorOf(cover), tokenHex(window, "view"));
     QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
                  qPrintable(placeholderSurfaceProblem(window, cover, mark)));
