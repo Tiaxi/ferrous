@@ -30,10 +30,6 @@ Item {
     // title strip.
     property var uiBridge: null
     property string positionText: "00:00"
-    // The view's zoom, 1 at the default, and what resets it: the same as
-    // View › Reset Zoom.
-    property real zoomLevel: 1.0
-    property var resetView: null
     // How far the corner controls keep from the right edge, clear of the
     // level meter's column.
     property real cornerRightMargin: 4
@@ -54,7 +50,7 @@ Item {
     readonly property size reservedCorner: root.useWholeScreenViewerMode
         ? Qt.size(0, 0)
         : Qt.size(popupControls.width + 4,
-                  popupControls.anchors.topMargin + popupControls.height)
+                  popupControls.anchors.topMargin + popupControls.height + 1)
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole
     // screen, the title strip's height while it can show. They show only
@@ -66,6 +62,12 @@ Item {
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    // Whether the pointer is on the viewer's own controls, the corner plate
+    // in the window or the title strip over the whole screen: that counts as
+    // on the view, so the plot's mode switch stays.
+    readonly property bool controlsHovered: root.wholeScreenOpen
+        ? (root.fullscreenWindow !== null && root.fullscreenWindow.strip.hovered)
+        : (root.viewerOpen && popupControls.hovered)
     // The controls as they fade: 1 shown, 0 hidden. Everything that hides
     // with them takes it, the strip, the corner controls, the mode switch,
     // the lanes' buttons and what the plot draws for the pointer.
@@ -270,8 +272,6 @@ Item {
                 controlsVisible: root.fullscreenControlsVisible
                 controlsLevel: root.fullscreenControlsLevel
                 pointerActivity: root.noteFullscreenPointerActivity
-                zoomLevel: root.zoomLevel
-                resetView: root.resetView
                 errorController: root.errorController
                 closeViewer: root.closeViewer
             }
@@ -390,8 +390,6 @@ Item {
                         controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
-                        zoomLevel: root.zoomLevel
-                        resetView: root.resetView
                         errorController: root.errorController
                         closeViewer: root.closeViewer
                     }

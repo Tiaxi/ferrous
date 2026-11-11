@@ -27,7 +27,7 @@ constexpr double kLookaheadSeconds = 0.5;
 constexpr int kReadoutIntervalMs = 250;
 // The scale's gaps, in dB.
 constexpr double kGapsDb[] = {-6.0, -12.0, -24.0};
-// Per lane: the column's floor, the trough, the lamp, the gap under it, the
+// Per lane: the column's floor, the track, the lamp, the gap under it, the
 // fill, the three gaps of the scale and the peak tick.
 constexpr int kNodesPerLane = 9;
 
@@ -622,19 +622,20 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     const double dpr = window()->effectiveDevicePixelRatio();
     const auto snap = [dpr](double value) { return std::round(value * dpr) / dpr; };
     m_painted = painted(m_shown);
-    const double left = 1.0;
-    const double meterWidth = std::max(0.0, width() - left);
     QSGNode *child = node->firstChild()->nextSibling();
     const auto next = [&child](const QRectF &rect, const QColor &color) {
         setRect(child, rect, color);
         child = child->nextSibling();
     };
+    // Across the track, and along the bar on it.
+    const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
+    const auto bar = [](double y, double height) { return QRectF(kBarLeft, y, kBarWidth, height); };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
-        next(QRectF(left, top, meterWidth, bottom - top), m_backgroundColor);
+        next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
         const double meterTop = top + kInset;
         const double meterBottom = std::max(meterTop, bottom - kInset);
-        next(QRectF(left, meterTop, meterWidth, meterBottom - meterTop), m_troughColor);
+        next(track(meterTop, meterBottom - meterTop), m_troughColor);
         const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
@@ -642,21 +643,21 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
             for (int i = 2; i < kNodesPerLane; ++i) next(QRectF(), m_backgroundColor);
             continue;
         }
-        next(QRectF(left, meterTop, meterWidth, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
-        next(QRectF(left, meterTop + kLampHeight, meterWidth, 1.0), m_backgroundColor);
+        next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
+        next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
         // when these change.
         const double fill = shown.fill / dpr;
-        next(QRectF(left, meterBottom - fill, meterWidth, fill), m_fillColor);
+        next(bar(meterBottom - fill, fill), m_fillColor);
         const bool shortLane = bottom - top < kFullScaleLaneHeight;
         for (const double gapDb : kGapsDb) {
             const bool shown = !(shortLane && gapDb == -12.0);
             const double y = snap(meterBottom - meterPosition(gapDb, scaleHeight));
-            next(shown ? QRectF(left, y, meterWidth, 1.0) : QRectF(), m_backgroundColor);
+            next(shown ? track(y, 1.0) : QRectF(), m_gapColor);
         }
         // The 2 px tick is centred on its level, inside the scale.
         const double tickY = std::clamp(meterBottom - shown.peak / dpr - 1.0, scaleTop, meterBottom - 2.0);
-        next(shown.peak >= 0 ? QRectF(left, tickY, meterWidth, 2.0) : QRectF(), m_peakColor);
+        next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
     }
     return node;
 }

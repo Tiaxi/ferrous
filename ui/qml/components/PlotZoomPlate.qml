@@ -4,9 +4,10 @@ import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
 
-// The main pane's zoom while the plot is zoomed, which nothing else there
-// shows with the scale off: the viewers' readout and Reset, on a plate in
-// the plot's colours. Not zoomed, it is hidden and no Tab stop.
+// The plot's zoom while it is zoomed, which nothing else shows with the
+// scale off: a readout and Reset, on a plate in the plot's colours, left of
+// the mode switch in the main pane and in both viewers. Not zoomed, it is
+// hidden and no Tab stop.
 Components.PlotPlate {
     id: root
     objectName: "plotZoomPlate"
@@ -15,8 +16,7 @@ Components.PlotPlate {
     property real zoomLevel: 1.0
     property var resetView: null
     property var pointerActivity: null
-    // Whether it may show at all: a viewer shows the zoom in its own
-    // controls.
+    // Whether it may show at all: not while a viewer's controls are hidden.
     property bool available: true
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
 

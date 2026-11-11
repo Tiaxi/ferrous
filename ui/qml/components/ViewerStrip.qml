@@ -12,15 +12,18 @@ import "../logic/FormatUtils.js" as FormatUtils
 // top edge of the view (taller with a larger font, by its line and 4 px
 // above and below it), with a 1 px edge under it, in the colours of the
 // plot it sits on (UiPalette's PlotColors), so it reads over the plot or
-// the art alike. On the left the playing track's title (semibold),
-// "Artist — Album" and "1:17 / 3:49"; on the right flat 24 px tool
-// buttons: a zoom readout and Reset while the view is zoomed, the new
-// issues while there are any, the viewer's own buttons (declared inside
-// the strip, from the left, each taking the strip's `plotColors`) and
-// Close. The whole strip shows and hides with the viewer's controls,
-// fading as they do; it is drawn over the view, which never resizes for it.
-// Turned off in Preferences (`available` false), it never shows: the
-// viewer's keys, a double-click and a middle click do what its buttons do.
+// the art alike. Shown, it is opaque (plotStrip): the plot, its playhead
+// and its crosshair end at its lower edge rather than show through. On the
+// left the playing track's title (semibold), "Artist — Album" and
+// "1:17 / 3:49"; on the right flat 24 px tool buttons: a zoom readout and
+// Reset while the view is zoomed (the album art's; the visualization shows
+// its zoom on the plot, beside its mode switch), the new issues while there
+// are any, the viewer's own buttons (declared inside the strip, from the
+// left, each taking the strip's `plotColors`) and Close. The whole strip
+// shows and hides with the viewer's controls, fading as they do; it is
+// drawn over the view, which never resizes for it. Turned off in
+// Preferences (`available` false), it never shows: the viewer's keys, a
+// double-click and a middle click do what its buttons do.
 Rectangle {
     id: root
 
@@ -48,6 +51,8 @@ Rectangle {
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own buttons, before Close.
     default property alias viewerControls: controls.viewerControls
+    // Whether the pointer is on the strip, which counts as on the view.
+    readonly property bool hovered: stripHover.hovered
     // Whether keyboard focus is on one of the strip's buttons, which keeps
     // the viewer's controls shown.
     readonly property bool focusInside: {
@@ -88,7 +93,7 @@ Rectangle {
         Math.ceil(Math.max(titleLabel.implicitHeight, contextLabel.implicitHeight, timeLabel.implicitHeight)) + 8,
         controls.implicitHeight + 8)
     implicitHeight: root.bandHeight + 1
-    color: root.plotColors.plotPlate
+    color: root.plotColors.plotStrip
     opacity: root.available ? root.controlsLevel : 0
     // Shown at once, so the key that brings the controls back can move
     // focus to them; it fades out, and hidden it takes no pointer.
@@ -104,6 +109,7 @@ Rectangle {
     }
 
     HoverHandler {
+        id: stripHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

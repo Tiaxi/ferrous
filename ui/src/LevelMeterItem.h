@@ -21,10 +21,12 @@
 // The level meter of the visualization: a 10 px column at the right end of
 // each lane, with a 1 px seam on its left. Each column is a vertical meter
 // from -60 to 0 dBFS, with its listed levels evenly spaced (-6, -12, -24 and
-// -48 dB at 4/5 to 1/5 of the height): the fill from the bottom, 1 px gaps at
-// -6, -12 and -24 dB (only -6 and -24 in a lane under 64 px), a 2 px peak
-// tick across the column and a 3 px clip lamp at the top. Without a track,
-// stopped, it is an empty trough.
+// -48 dB at 4/5 to 1/5 of the height): an 8 px track the lane's height, and
+// on it, centred in the column, a 6 px bar, so that it reads as a meter
+// rather than a scrollbar: the fill from the bottom and a 3 px clip lamp at
+// the top. Across the track, 1 px gaps at -6, -12 and -24 dB (only -6 and
+// -24 in a lane under 64 px) and a 2 px peak tick. Without a track,
+// stopped, it is an empty track.
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
@@ -37,6 +39,8 @@ class LevelMeterItem : public QQuickItem {
     // The plot's colours (UiPalette's PlotColors).
     Q_PROPERTY(QColor backgroundColor MEMBER m_backgroundColor WRITE setBackgroundColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor seamColor MEMBER m_seamColor WRITE setSeamColor NOTIFY colorsChanged)
+    // The scale's gaps across the track, and the one under the lamp.
+    Q_PROPERTY(QColor gapColor MEMBER m_gapColor WRITE setGapColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor troughColor MEMBER m_troughColor WRITE setTroughColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor fillColor MEMBER m_fillColor WRITE setFillColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor peakColor MEMBER m_peakColor WRITE setPeakColor NOTIFY colorsChanged)
@@ -64,8 +68,13 @@ public:
     static constexpr double kClipHoldSeconds = 2.0;
     // A bin at full scale clips; its level is rounded to 0.001 of a dB.
     static constexpr double kClipDb = -0.001;
-    // The column: a 1 px seam and the 9 px meter.
+    // The column: a 1 px seam, the 8 px track and 1 px of the plot's floor.
     static constexpr double kColumnWidth = 10.0;
+    static constexpr double kTrackLeft = 1.0;
+    static constexpr double kTrackWidth = 8.0;
+    // The bar on the track, centred in the column: the fill and the lamp.
+    static constexpr double kBarLeft = 2.0;
+    static constexpr double kBarWidth = 6.0;
     // The meter keeps 3 px clear above and below in its lane; its top 3 px
     // are the clip lamp, with a 1 px gap under it.
     static constexpr double kInset = 3.0;
@@ -95,6 +104,7 @@ public:
     void setReadoutWanted(bool value);
     void setBackgroundColor(const QColor &value) { setColor(m_backgroundColor, value); }
     void setSeamColor(const QColor &value) { setColor(m_seamColor, value); }
+    void setGapColor(const QColor &value) { setColor(m_gapColor, value); }
     void setTroughColor(const QColor &value) { setColor(m_troughColor, value); }
     void setFillColor(const QColor &value) { setColor(m_fillColor, value); }
     void setPeakColor(const QColor &value) { setColor(m_peakColor, value); }
@@ -216,6 +226,7 @@ private:
     void announceReadout();
     QColor m_backgroundColor{QStringLiteral("#000000")};
     QColor m_seamColor{QStringLiteral("#1a1a1a")};
+    QColor m_gapColor{QStringLiteral("#000000")};
     QColor m_troughColor{QStringLiteral("#2a2a2a")};
     QColor m_fillColor{QStringLiteral("#a3a3a3")};
     QColor m_peakColor{QStringLiteral("#f4f4f6")};

@@ -954,6 +954,9 @@ private slots:
     void visualizationPaneFloorFollowsTheMode_data();
     void viewerControlsFadeWithTheStrip();
     void viewerControlsFadeWithTheStrip_data();
+    void viewerPlatesAndGlyphsRevealOnOneLevel();
+    void windowedViewerOpensOverThePanesLastFrame();
+    void viewerPlatesAndGlyphsRevealOnOneLevel_data();
 };
 
 void UiMotionTest::initTestCase() {
@@ -4398,6 +4401,280 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QObject::disconnect(connection);
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("whole screen") << true;
+    QTest::newRow("in the window") << false;
+}
+
+namespace {
+
+// How opaque `item` is drawn: its opacity and that of every item it is in,
+// or 0 while any of them is hidden.
+double drawnOpacity(const QQuickItem *item) {
+    double opacity = 1.0;
+    for (; item != nullptr; item = item->parentItem()) {
+        if (!item->isVisible()) {
+            return 0.0;
+        }
+        opacity *= item->opacity();
+    }
+    return opacity;
+}
+
+} // namespace
+
+// The viewer's controls come back as one (#373 H5: the plates' fill came in
+// about 130 ms before the lanes' M and S): with the pointer moving on a
+// lane, the title strip or the corner plate, the mode switch and the lane's
+// Mute and Solo, each plate's fill and each button's glyph, are at the
+// auto-hide's one level in every frame, from hidden to shown. The lanes'
+// buttons show on the pointer (the default), not always.
+void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
+    QFETCH(bool, wholeScreen);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setShortDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(viewer && autoHide && spectrogram);
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("channelButtonsVisibility", 1);
+    bridge->setProperty("currentTrackChannels", 2);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QQuickWindow *host = window;
+    if (wholeScreen) {
+        QTRY_VERIFY(spectrogram->window() != nullptr && spectrogram->window() != window);
+        host = spectrogram->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    }
+    QQuickItem *controls = nullptr;
+    QTRY_VERIFY((controls = itemNamed(host->contentItem(), wholeScreen ? QStringLiteral("spectrogramFullscreenStrip")
+                                                                         : QStringLiteral("spectrogramPopupControls")))
+                != nullptr);
+    QTRY_VERIFY(spectrogram->window() == host);
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    if (!wholeScreen) {
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
+    QQuickItem *laneButtons = itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).first();
+    // Each plate's fill and a glyph on it.
+    QList<QPair<QString, QQuickItem *>> drawn{
+        {QStringLiteral("the mode switch's plate"), itemNamed(modeSwitch, QStringLiteral("plotPlateFill"))},
+        {QStringLiteral("the mode switch's icon"), itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
+        {QStringLiteral("the lane's plate"), itemNamed(laneButtons, QStringLiteral("plotPlateFill"))},
+        {QStringLiteral("the lane's M"), itemNamed(laneButtons, QStringLiteral("plotToolButtonGlyph"))},
+        {QStringLiteral("the viewer's controls"), controls},
+        {QStringLiteral("the viewer's Close"),
+         itemNamed(itemNamed(controls, wholeScreen ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                                   : QStringLiteral("spectrogramPopupCloseButton")),
+                   wholeScreen ? QStringLiteral("viewerToolButtonIcon") : QStringLiteral("plotToolButtonIcon"))},
+    };
+    if (!wholeScreen) {
+        drawn.append({QStringLiteral("the corner plate"), itemNamed(controls, QStringLiteral("plotPlateFill"))});
+    }
+    for (const auto &[what, item] : drawn) {
+        QVERIFY2(item != nullptr, qPrintable(what));
+    }
+    // The pointer resting on the first lane, away from every control.
+    const QPoint onLane(host->width() / 2, host->height() / 4);
+    QTest::mouseMove(host, onLane);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QTRY_COMPARE(laneButtons->opacity(), 1.0);
+
+    QString failure;
+    int fadingFrames = 0;
+    double popupOpacity = 1.0;
+    // Where a plate or a glyph is not at the level, or "".
+    const auto apart = [&]() -> QString {
+        const double level = autoHide->property("level").toDouble() * popupOpacity;
+        for (const auto &[what, item] : drawn) {
+            const double opacity = drawnOpacity(item);
+            if (std::abs(opacity - level) > 1e-9) {
+                return QStringLiteral("%1 at %2, the level at %3").arg(what).arg(opacity).arg(level);
+            }
+        }
+        return {};
+    };
+    if (!wholeScreen) {
+        popupOpacity = drawnOpacity(qobject_cast<QQuickItem *>(controls->parentItem()));
+    }
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+
+    // Hidden, with the pointer resting.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!controls->isVisible());
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 0.0);
+    autoHide->setProperty("hideDelay", 600000);
+
+    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+        const double level = autoHide->property("level").toDouble();
+        if (level > 0.0 && level < 1.0) {
+            ++fadingFrames;
+        }
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+    // The pointer moving on the lane wakes them; then, hidden again, the
+    // pointer comes back onto the lane from outside the view, which also
+    // reveals the plates that show on the pointer.
+    for (const bool fromOutside : {false, true}) {
+        if (fromOutside) {
+            autoHide->setProperty("hideDelay", 1);
+            QTRY_VERIFY(!controls->isVisible());
+            QTest::mouseMove(host, QPoint(-20, -20));
+            QTRY_COMPARE(modeSwitch->property("revealLevel").toDouble(), 0.0);
+            QTRY_COMPARE(laneButtons->property("revealLevel").toDouble(), 0.0);
+            autoHide->setProperty("hideDelay", 600000);
+            fadingFrames = 0;
+        }
+        const QByteArray where = fromOutside ? "from outside" : "on the lane";
+        QTest::mouseMove(host, onLane + QPoint(fromOutside ? 0 : 3, 0));
+        QTRY_VERIFY2(autoHide->property("controlsVisible").toBool(), where.constData());
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QTRY_VERIFY(autoHide->property("level").toDouble() > 0.0 && autoHide->property("level").toDouble() < 1.0);
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QVERIFY2(failure.isEmpty(), qPrintable(where + ": " + failure));
+        QVERIFY2(fadingFrames >= 3, qPrintable(where + ": " + QString::number(fadingFrames)));
+    }
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// The viewer in the window opens over the pane's last frame (#373 H5: the
+// pane went blank for about 46 ms, as the visualization left it at once and
+// the viewer faded in over the empty pane). In every frame from the open,
+// the visualization is either still in the pane or the pane has kept its
+// last frame; under the open viewer, the pane shows what it showed before.
+// Closed, the visualization is back and the kept frame goes.
+void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *surface = named(window, "visualizationSurface");
+    QQuickItem *lastFrame = named(window, "spectrogramPaneLastFrame");
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QVERIFY(bridge && viewer && pane && surface && lastFrame && popup);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // Before any audio, the pane shows its mode switch on its floor.
+    QQuickItem *modeSwitch = itemNamed(surface, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QVERIFY(pane->isAncestorOf(surface));
+    QVERIFY(!lastFrame->isVisible());
+
+    // The window's layout settles first: the pane keeps its place for a
+    // while.
+    const auto paneSceneRect = [pane]() { return pane->mapRectToScene(QRectF(0, 0, pane->width(), pane->height())); };
+    QRectF settled = paneSceneRect();
+    QElapsedTimer still;
+    still.start();
+    QVERIFY(QTest::qWaitFor([&]() {
+        if (paneSceneRect() != settled) {
+            settled = paneSceneRect();
+            still.restart();
+        }
+        return still.elapsed() >= 300;
+    }, 5000));
+    const QRectF paneRect = pane->mapRectToScene(QRectF(0, 0, pane->width(), pane->height()));
+    const auto paneImage = [&]() {
+        const QImage image = window->grabWindow();
+        const double scale = double(image.width()) / window->width();
+        return image.copy(QRectF(paneRect.topLeft() * scale, paneRect.size() * scale).toAlignedRect())
+            .convertToFormat(QImage::Format_RGB32);
+    };
+    const QImage before = paneImage();
+    QVERIFY(!before.isNull());
+    const QColor floor = pane->property("color").value<QColor>();
+    // The pane shows something besides its floor, which a blank pane would
+    // not.
+    int drawn = 0;
+    for (int y = 0; y < before.height(); ++y) {
+        for (int x = 0; x < before.width(); ++x) {
+            const QColor at = before.pixelColor(x, y);
+            drawn += std::abs(at.red() - floor.red()) + std::abs(at.green() - floor.green())
+                    + std::abs(at.blue() - floor.blue()) > 24;
+        }
+    }
+    QVERIFY2(drawn > 100, qPrintable(QString::number(drawn)));
+
+    QString failure;
+    int frames = 0;
+    const QMetaObject::Connection connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+        ++frames;
+        if (failure.isEmpty() && !pane->isAncestorOf(surface)
+            && !(lastFrame->isVisible() && pane->property("lastFrameKept").toBool())) {
+            failure = QStringLiteral("frame %1: the visualization gone from the pane, its frame not kept").arg(frames);
+        }
+    });
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    // The pane keeps the frame first; the visualization goes after.
+    QVERIFY(pane->isAncestorOf(surface));
+    QTRY_VERIFY(!pane->isAncestorOf(surface));
+    QVERIFY(pane->property("lastFrameKept").toBool());
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY(frames > 0);
+
+    // Under the viewer, the pane shows what it showed before.
+    QCOMPARE(paneSceneRect(), paneRect);
+    popup->setProperty("opacity", 0.0);
+    const QImage under = paneImage();
+    popup->setProperty("opacity", 1.0);
+    QCOMPARE(under.size(), before.size());
+    int differing = 0;
+    for (int y = 0; y < under.height(); ++y) {
+        for (int x = 0; x < under.width(); ++x) {
+            const QColor a = under.pixelColor(x, y);
+            const QColor b = before.pixelColor(x, y);
+            differing += std::abs(a.red() - b.red()) > 3 || std::abs(a.green() - b.green()) > 3
+                         || std::abs(a.blue() - b.blue()) > 3;
+        }
+    }
+    QVERIFY2(differing <= under.width() * under.height() / 1000,
+             qPrintable(QStringLiteral("%1 of %2 pixels differ").arg(differing).arg(under.width() * under.height())));
+
+    // Closed: the visualization is back, and the kept frame goes.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    QVERIFY(pane->isAncestorOf(surface));
+    QVERIFY(!lastFrame->isVisible());
+    QVERIFY(!pane->property("lastFrameKept").toBool());
+
+    // Opened again, it keeps a frame again.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(!pane->isAncestorOf(surface));
+    QVERIFY(lastFrame->isVisible());
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }

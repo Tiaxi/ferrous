@@ -176,6 +176,9 @@ QtObject {
         // A label plate, with a 1 px edge outside it.
         required property color plotPlate
         required property color plotPlateEdge
+        // A viewer's title strip over the plot: opaque, so nothing under it,
+        // such as the playhead or the plot itself, shows through.
+        required property color plotStrip
         required property color plotText
         required property color plotTextSecondary
         // Text.Outline around scale labels.
@@ -184,8 +187,10 @@ QtObject {
         required property color plotLaneSeam
         required property color plotTick
         required property color plotLink
+        // The level meter: its track, the bar on it, and its scale's gaps.
         required property color meterTrough
         required property color meterFill
+        required property color meterSeam
         required property color meterPeak
         required property color meterClipOff
         // A checked tool button on a plate: a solid fill, at least 3:1 on
@@ -209,6 +214,8 @@ QtObject {
         // A neutral dark lifted from the floor.
         plotPlate: Qt.rgba(20 / 255, 20 / 255, 20 / 255, 0.88)
         plotPlateEdge: Qt.rgba(1, 1, 1, 0.14)
+        // The plate over the floor, solid: #121212.
+        plotStrip: Qt.tint(spectrogramColors.plotBg, spectrogramColors.plotPlate)
         plotText: "#ececec"
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
@@ -216,8 +223,12 @@ QtObject {
         plotLaneSeam: "#1a1a1a"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
-        meterTrough: "#2a2a2a"
-        meterFill: "#a3a3a3"
+        // In the colour map's violet, not neutral grey, so the meter reads
+        // as part of the plot. The fill is a step under the plot text,
+        // quieter than the queue's scrollbar thumb.
+        meterTrough: "#2b1f43"
+        meterFill: "#8f87a3"
+        meterSeam: "#0a0318"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         checkedFill: root.accent
@@ -235,6 +246,7 @@ QtObject {
         plotBg: root.view
         plotPlate: ColorUtils.withAlpha(root.view, 0.94)
         plotPlateEdge: root.seam
+        plotStrip: root.view
         plotText: root.text
         plotTextSecondary: root.textSecondary
         plotOutline: root.view
@@ -249,6 +261,7 @@ QtObject {
                                             ColorUtils.drawnOver(waveformColors.meterTrough, root.view)) >= 3
             ? root._waveformMeterFill
             : ColorUtils.mixColor(root.text, root.view, root.themeIsDark ? 0.45 : 0.27)
+        meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
         // The accent is 2.4:1 on white: the light fill is the focus ring's

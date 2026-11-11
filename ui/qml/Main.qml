@@ -1555,6 +1555,12 @@ ApplicationWindow {
                     openViewer: viewerController.openSpectrogramViewer
                     uiPalette: root.uiPalette
                     visualizationMode: viewerController.visualizationMode
+                    visualization: visualizationSurface
+                    // Under the viewer in this window, which fades in over
+                    // the pane; the one over the whole screen covers it.
+                    keepsLastFrame: viewerController.spectrogramViewerOpen
+                        && !root.useWholeScreenViewerMode
+                        && spectrogramPane.canKeepLastFrame
                 }
             }
         }
@@ -1566,19 +1572,28 @@ ApplicationWindow {
         // The fullscreen window is made as the viewer first opens, so for a
         // moment it may not be there yet: the views stay where they are
         // until it is, rather than leave every window.
+        // The viewer in the main window takes them once the pane has kept
+        // their last frame, which it shows under the viewer as that fades
+        // in.
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
                 ? (spectrogramViewerShell.windowHost || spectrogramPane.hostItem)
-                : spectrogramViewerShell.popupHost)
+                : (spectrogramPane.lastFrameKept || !spectrogramPane.canKeepLastFrame
+                    ? spectrogramViewerShell.popupHost
+                    : spectrogramPane.hostItem))
             : spectrogramPane.hostItem
         visible: parent !== null
         anchors.fill: parent
+        // Whether a viewer shows them: where they are, not whether a viewer
+        // is open, so that the pane's last frame is laid out as the pane
+        // showed it.
+        readonly property bool inViewer: visualizationSurface.parent !== spectrogramPane.hostItem
         // What the plot keeps clear of in its top right corner: the mode
         // switch, and in the viewer in the main window its controls beside it.
         readonly property size reservedCorner: Qt.size(
             plotLayer.reservedCorner.width - plotLayer.meterWidth,
             Math.max(plotLayer.reservedCorner.height,
-                     viewerController.spectrogramViewerOpen
+                     visualizationSurface.inViewer
                          ? spectrogramViewerShell.reservedCorner.height : 0))
         readonly property bool spectrogramShown: viewerController.visualizationMode === 0
 
@@ -1711,7 +1726,7 @@ ApplicationWindow {
             z: visualizationSurface.settledMode === 0 ? 0 : 1
             // Its lanes, floors and seams fade in as one picture.
             layer.enabled: opacity > 0 && opacity < 1
-            viewerMode: viewerController.spectrogramViewerOpen
+            viewerMode: visualizationSurface.inViewer
             interactiveOverlaysVisible: spectrogramViewerShell.fullscreenControlsVisible
             interactiveOverlaysLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
@@ -1761,7 +1776,7 @@ ApplicationWindow {
             controlsVisible: spectrogramViewerShell.fullscreenControlsVisible
             controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
-            trailingInset: viewerController.spectrogramViewerOpen
+            trailingInset: visualizationSurface.inViewer
                 ? spectrogramViewerShell.reservedCorner.width : 0
             topInset: spectrogramViewerShell.controlsTopInset
             laneCount: visualizationSurface.spectrogramShown
@@ -1770,7 +1785,7 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
-            paneHovered: visualizationHover.hovered
+            paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
             analysing: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
@@ -1778,7 +1793,6 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
-            zoomReadoutAvailable: !viewerController.spectrogramViewerOpen
         }
     }
 
@@ -1799,8 +1813,6 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        zoomLevel: visualizationSurface.zoomLevel
-        resetView: visualizationSurface.resetZoom
         cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }

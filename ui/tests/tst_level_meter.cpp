@@ -635,6 +635,7 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
     item.setPeakColor(QColor(0x50, 0x00, 0x00));
     item.setClipOffColor(QColor(0x60, 0x00, 0x00));
     item.setClipColor(QColor(0x70, 0x00, 0x00));
+    item.setGapColor(QColor(0x80, 0x00, 0x00));
     view.show();
     QTRY_VERIFY(view.isExposed());
     for (int lanes : {1, 2, 6}) {
@@ -667,20 +668,37 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
             QCOMPARE(pixel(5, at(-18)), 0x30);
             QCOMPARE(pixel(5, at(-40) - 0.5), 0x40);
             QCOMPARE(pixel(5, top + 4), lane == 0 ? 0x70 : 0x60);
-            QCOMPARE(pixel(5, top + 6.5), 0x10);
-            // The fill spans the column's 9 px, nothing 4 or 5 px wide.
-            QCOMPARE(pixel(1.5, at(-40) - 0.5), 0x40);
-            QCOMPARE(pixel(9.5, at(-40) - 0.5), 0x40);
-            // The gaps: -6 and -24 dB always, -12 dB in lanes of 64 px or more.
-            QCOMPARE(pixel(5, std::round(at(-6)) + 0.5), 0x10);
-            QCOMPARE(pixel(5, std::round(at(-24)) + 0.5), 0x10);
-            QCOMPARE(pixel(5, std::round(at(-12)) + 0.5), height >= 64 ? 0x10 : 0x30);
+            QCOMPARE(pixel(5, top + 6.5), 0x80);
+            // A meter, not a scrollbar (#373 H5): the 8 px track the lane's
+            // height, x 1 to 9, and on it the 6 px bar centred in the
+            // column, x 2 to 8, with the track showing either side of it.
+            // Nothing is 4 or 5 px wide.
+            for (const double y : {at(-40) - 0.5, top + 4}) {
+                QCOMPARE(pixel(1.5, y), 0x30);
+                QCOMPARE(pixel(8.5, y), 0x30);
+                QCOMPARE(pixel(9.5, y), 0x10);
+            }
+            QCOMPARE(pixel(1.5, at(-18)), 0x30);
+            QCOMPARE(pixel(8.5, at(-18)), 0x30);
+            QCOMPARE(pixel(2.5, at(-40) - 0.5), 0x40);
+            QCOMPARE(pixel(7.5, at(-40) - 0.5), 0x40);
+            QCOMPARE(pixel(2.5, top + 4), lane == 0 ? 0x70 : 0x60);
+            QCOMPARE(pixel(7.5, top + 4), lane == 0 ? 0x70 : 0x60);
+            // The gaps, across the track: -6 and -24 dB always, -12 dB in
+            // lanes of 64 px or more.
+            QCOMPARE(pixel(5, std::round(at(-6)) + 0.5), 0x80);
+            QCOMPARE(pixel(5, std::round(at(-24)) + 0.5), 0x80);
+            QCOMPARE(pixel(1.5, std::round(at(-24)) + 0.5), 0x80);
+            QCOMPARE(pixel(8.5, std::round(at(-24)) + 0.5), 0x80);
+            QCOMPARE(pixel(5, std::round(at(-12)) + 0.5), height >= 64 ? 0x80 : 0x30);
             if (lane == 0) {
-                // The peak: 2 px across the column at -9 dB.
+                // The peak: 2 px across the track at -9 dB.
                 const double peak = at(-9);
                 QCOMPARE(pixel(5, peak - 0.5), 0x50);
                 QCOMPARE(pixel(5, peak + 0.5), 0x50);
                 QCOMPARE(pixel(1.5, peak - 0.5), 0x50);
+                QCOMPARE(pixel(8.5, peak - 0.5), 0x50);
+                QCOMPARE(pixel(9.5, peak - 0.5), 0x10);
                 QCOMPARE(pixel(5, peak - 2.5), 0x30);
             }
         }

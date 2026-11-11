@@ -48,12 +48,10 @@ Item {
     // Opens Recent Issues.
     property var openIssues: function() {}
     // The shown plot's zoom, 1 at the default, and what resets it. While it
-    // is zoomed, a readout shows it beside the mode switch, unless
-    // `zoomReadoutAvailable` is false, as in a viewer, whose own controls
-    // show it.
+    // is zoomed, a readout and Reset show it left of the mode switch, in the
+    // main pane and in both viewers alike: [Zoom ↺] [mode] [✕ of a viewer].
     property real zoomLevel: 1.0
     property var resetZoom: null
-    property bool zoomReadoutAvailable: true
 
     // The mode's plot colours, also while the plot is bare, before any
     // audio and while it waits for its data: the floor is the mode's own
@@ -72,13 +70,14 @@ Item {
     readonly property real cutSeconds: root.uiBridge.waveformEndsEarly
         ? root.uiBridge.waveformCoverageSeconds : -1
     // What the mode switch takes of the top right corner, with the gap
-    // beside it and the zoom readout left of it while that shows, for the
-    // plot's own overlays to keep clear of.
+    // beside it and the zoom readout left of it while that shows, and the
+    // plates' 1 px edges outside them, for the plot's own overlays to keep
+    // clear of.
     readonly property size reservedCorner: Qt.size(
         modeSwitch.anchors.rightMargin + modeSwitch.width
-            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0),
+            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0) + 1,
         modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
-                                                zoomPlate.visible ? zoomPlate.height : 0))
+                                                zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
@@ -121,14 +120,16 @@ Item {
 
     // The zoom, 8 px left of the mode switch: shown whenever the plot is
     // zoomed, not only with the switch, as nothing else shows it. It keeps
-    // its place while the switch hides.
+    // its place while the switch hides. In a viewer, it hides and shows
+    // with the viewer's controls, at their level.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
         anchors.rightMargin: 8
-        available: root.zoomReadoutAvailable
+        available: root.controlsVisible || root.controlsLevel > 0
+        fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         zoomLevel: root.zoomLevel
@@ -316,6 +317,7 @@ Item {
         readoutWanted: meterLanes.hoveredLane >= 0
         backgroundColor: root.plotColors.plotBg
         seamColor: root.plotColors.plotLaneSeam
+        gapColor: root.plotColors.meterSeam
         troughColor: root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
         peakColor: root.plotColors.meterPeak

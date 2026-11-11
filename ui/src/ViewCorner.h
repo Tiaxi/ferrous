@@ -22,16 +22,22 @@ inline QRectF fpsCounterRect(double viewWidth, const QSizeF &reserved, const QSi
     return QRectF(std::max(4.0, right - textSize.width()), top, textSize.width(), textSize.height());
 }
 
-// Where a label on the view's right edge goes: at `x`, or to the left of the
-// corner's controls if it would be under them.
+// How far a label on the view keeps from the corner's controls, so that it
+// reads as apart from their plates rather than butting against them.
+constexpr int kLabelGap = 6;
+
+// Where a label on the view's right edge goes: at `x`, or kLabelGap left of
+// the corner's controls if it would be under them or within kLabelGap of
+// them, beside or below.
 inline int labelXClearOfCorner(
     int x, int y, int labelWidth, int labelHeight, int viewWidth, const QSizeF &reserved) {
     const int cornerLeft = viewWidth - static_cast<int>(std::ceil(reserved.width()));
-    if (reserved.isEmpty() || y >= reserved.height() || y + labelHeight <= 0
-        || x + labelWidth <= cornerLeft) {
+    const int cornerBottom = static_cast<int>(std::ceil(reserved.height()));
+    if (reserved.isEmpty() || y >= cornerBottom + kLabelGap || y + labelHeight <= 0
+        || x + labelWidth + kLabelGap <= cornerLeft) {
         return x;
     }
-    return std::max(0, cornerLeft - labelWidth);
+    return std::max(0, cornerLeft - kLabelGap - labelWidth);
 }
 
 } // namespace ViewCorner
