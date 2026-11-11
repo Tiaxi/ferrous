@@ -9,12 +9,14 @@
 #include <QApplication>
 #include <QColor>
 #include <QFile>
+#include <QFileInfo>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QImage>
 #include <QJSValue>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QPalette>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlListReference>
@@ -377,6 +379,64 @@ void playTrack(QObject *bridge, const QString &state = QStringLiteral("Playing")
     bridge->setProperty("playbackState", state);
 }
 
+// The playing track's tags all gone, as for a file without them.
+void clearTrackTags(QObject *bridge) {
+    for (const char *property : {"currentTrackTitle", "currentTrackArtist", "currentTrackAlbum", "currentTrackGenre"}) {
+        bridge->setProperty(property, QString());
+    }
+    bridge->setProperty("currentTrackYear", QVariant());
+    bridge->setProperty("currentTrackNumber", 0);
+    bridge->setProperty("currentTrackTotal", 0);
+}
+
+// Breeze Dark's window, view and text for the application, until the guard
+// it returns goes.
+auto useDarkPalette(bool dark) {
+    const QPalette before = QGuiApplication::palette();
+    if (dark) {
+        QPalette palette = before;
+        palette.setColor(QPalette::Window, QColor(QStringLiteral("#202326")));
+        palette.setColor(QPalette::Base, QColor(QStringLiteral("#141618")));
+        palette.setColor(QPalette::Text, QColor(QStringLiteral("#fcfcfc")));
+        palette.setColor(QPalette::WindowText, QColor(QStringLiteral("#fcfcfc")));
+        QGuiApplication::setPalette(palette);
+    }
+    return qScopeGuard([before]() { QGuiApplication::setPalette(before); });
+}
+
+// Whether `color` is `from` mixed `share` of the way toward `to`.
+bool isMix(const QColor &color, const QColor &from, const QColor &to, qreal share) {
+    const auto near = [&](qreal got, qreal a, qreal b) { return std::abs(got - (a + (b - a) * share)) < 1.5 / 255; };
+    return near(color.redF(), from.redF(), to.redF()) && near(color.greenF(), from.greenF(), to.greenF())
+        && near(color.blueF(), from.blueF(), to.blueF()) && color.alphaF() == 1.0f;
+}
+
+// Why the drawn now-playing tile is not one surface in the view colour, its
+// mark aside, with no frame or slab of another colour on it, or "".
+QString placeholderSurfaceProblem(QQuickWindow *window, QQuickItem *cover, QQuickItem *mark) {
+    const QImage image = window->grabWindow();
+    const qreal ratio = image.devicePixelRatio();
+    const QColor view = tokenOf(window, "view");
+    const QRectF tile = sceneRect(cover);
+    // The mark, and a pixel around it for its edge's smoothing.
+    const QRectF markRect = sceneRect(mark).adjusted(-1, -1, 1, 1);
+    int checked = 0;
+    for (int y = int(std::ceil(tile.top() * ratio)); y < int(std::floor(tile.bottom() * ratio)); ++y) {
+        for (int x = int(std::ceil(tile.left() * ratio)); x < int(std::floor(tile.right() * ratio)); ++x) {
+            if (markRect.contains(QPointF((x + 0.5) / ratio, (y + 0.5) / ratio))) {
+                continue;
+            }
+            const QColor pixel = image.pixelColor(x, y);
+            if (std::abs(pixel.red() - view.red()) > 1 || std::abs(pixel.green() - view.green()) > 1
+                || std::abs(pixel.blue() - view.blue()) > 1) {
+                return QStringLiteral("%1 at %2,%3, not the view's %4").arg(pixel.name()).arg(x).arg(y).arg(view.name());
+            }
+            ++checked;
+        }
+    }
+    return checked > 0 ? QString() : QStringLiteral("no pixel of the tile checked");
+}
+
 } // namespace
 
 class UiMainWindowTest : public QObject {
@@ -398,7 +458,8 @@ private slots:
     void nowPlayingTitleIsAStepOverItsLines_data();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
-    void nowPlayingWithoutCoverOrTagsKeepsItsLayout();
+    void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
+    void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
     void nowPlayingMarksFollowTheFont();
@@ -924,22 +985,33 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     QCOMPARE(lineText(title)->property("lineCount").toInt(), 2);
 }
 
-// A track without a cover, or without tags, keeps the layout of one with
-// them (#373 H1): the tile keeps its size, on the view colour mixed 6%
-// toward the text (#373 H5), and shows Breeze's album cover mark (#373 H3)
-// in the tertiary colour at its centre, 64 px wide and a third of the narrow
-// 96 px tile; the text block keeps its three lines, so the library under it
-// does not move between tracks.
-void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
+void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// A track without a cover keeps the cover's square (#373 H1), on the
+// placeholder that nothing playing shows too (#373 H6): the view colour,
+// with no lighter slab and no frame, and a quiet disc mark at its centre,
+// the tertiary colour at 38% on the view, 64 px wide and a third of the
+// narrow 96 px tile. A track without tags shows its file name for a title,
+// and its lines with no text take no room: no blank lines are left in the
+// block (#373 H6, a file without tags left two).
+void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
     QObject *bridge = bridgeOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *header = named(window, "libraryHeader");
-    QVERIFY(panel && cover && header);
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QVERIFY(panel && cover && header && seam);
     QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
     QVERIFY(mark != nullptr);
 
@@ -955,52 +1027,57 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsKeepsItsLayout() {
         const QRectF tagged = sceneRect(header);
         const QRectF tileRect = sceneRect(cover);
 
-        // No cover: the view colour 6% toward the text, a step off the
-        // sidebar so the tile reads as the cover's place, and the mark.
+        // No cover: the view colour, as the sidebar, and the quiet mark.
         QVERIFY(bridge->property("currentTrackCoverPath").toString().isEmpty());
-        const QColor view = tokenOf(window, "view");
-        const QColor text = tokenOf(window, "text");
-        const QColor tile = cover->property("color").value<QColor>();
-        QVERIFY(hex(tile) != tokenHex(window, "view"));
-        for (const auto &[got, from, to] : {std::tuple{tile.redF(), view.redF(), text.redF()},
-                                            std::tuple{tile.greenF(), view.greenF(), text.greenF()},
-                                            std::tuple{tile.blueF(), view.blueF(), text.blueF()}}) {
-            QVERIFY2(std::abs(got - (from + (to - from) * 0.06)) < 1.5 / 255,
-                     qPrintable(QStringLiteral("%1 is not 6% from %2 to %3").arg(hex(tile), hex(view), hex(text))));
-        }
-        QCOMPARE(tile.alphaF(), 1.0f);
+        QCOMPARE(colorOf(cover), tokenHex(window, "view"));
         QVERIFY(shown(mark));
         QCOMPARE(mark->width(), narrow ? 32.0 : 64.0);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), tileRect.center());
-        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-album-cover"));
+        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-optical-audio-symbolic"));
         QVERIFY(mark->property("valid").toBool());
         QVERIFY(mark->property("isMask").toBool());
-        QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
+        const QColor markColor = mark->property("color").value<QColor>();
+        QVERIFY2(isMix(markColor, tokenOf(window, "view"), tokenOf(window, "textTertiary"), 0.38),
+                 qPrintable(hex(markColor)));
+        QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
+                     qPrintable(placeholderSurfaceProblem(window, cover, mark)));
 
-        // No tags: the file name for a title, the other lines empty; the
-        // block keeps its height, and the library stays where it was.
-        for (const char *property : {"currentTrackTitle", "currentTrackArtist", "currentTrackAlbum",
-                                     "currentTrackGenre"}) {
-            bridge->setProperty(property, QString());
-        }
-        bridge->setProperty("currentTrackYear", QVariant());
-        bridge->setProperty("currentTrackNumber", 0);
-        bridge->setProperty("currentTrackTotal", 0);
+        // No tags: the file name for a title, and no line for the rest.
+        clearTrackTags(bridge);
         QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
         QCOMPARE(panel->property("detailsText").toString(), QString());
         QCOMPARE(panel->property("layoutMode").toString(),
                  narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTRY_COMPARE(sceneRect(header), tagged);
         QCOMPARE(sceneRect(cover), tileRect);
+        QQuickItem *title = named(window, narrow ? "nowPlayingNarrowTitle" : "nowPlayingTitle");
+        QVERIFY(shown(title));
+        QTRY_COMPARE(title->property("text").toString(), QFileInfo(kTrackPath).fileName());
         for (const char *name : narrow
-                 ? std::initializer_list<const char *>{"nowPlayingNarrowTitle", "nowPlayingNarrowArtist",
-                                                       "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}
-                 : std::initializer_list<const char *>{"nowPlayingTitle", "nowPlayingArtistAlbum",
-                                                       "nowPlayingDetails"}) {
+                 ? std::initializer_list<const char *>{"nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
+                                                       "nowPlayingNarrowDetails"}
+                 : std::initializer_list<const char *>{"nowPlayingArtistAlbum", "nowPlayingWideArtist",
+                                                       "nowPlayingWideAlbum", "nowPlayingDetails"}) {
             QQuickItem *line = named(window, name);
-            QVERIFY2(line != nullptr && line->height() > 0.0, name);
+            QVERIFY2(line != nullptr, name);
+            QTRY_VERIFY2(!line->isVisible(), name);
         }
+        if (narrow) {
+            // Beside the cover, which is taller than the title: the block
+            // keeps the cover's height.
+            QTRY_COMPARE(sceneRect(seam).top() - tileRect.bottom(), 12.0);
+            QCOMPARE(sceneRect(header), tagged);
+        } else {
+            // The seam 14 px under the title, and the library up by the
+            // lines that went.
+            QTRY_COMPARE(sceneRect(seam).top() - sceneRect(title).bottom(), 14.0);
+            QVERIFY(sceneRect(header).top() < tagged.top());
+        }
+        QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
+
+        // The tags back: the lines back, where they were.
+        playTrack(bridge);
+        QTRY_COMPARE(sceneRect(header), tagged);
     }
 }
 
@@ -1132,7 +1209,7 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont_data() {
 }
 
 // The mark of the now-playing tile follows the font as the transport's
-// glyphs do (#373 H3): the album cover mark of a track without a cover, and
+// glyphs do (#373 H3): the disc mark of a track without a cover, and
 // of nothing playing, 64 px in the wide tile and 32 px in the narrow one
 // with the default font, never over a third of the tile, which keeps its
 // size, and even, at the tile's centre on whole pixels.
@@ -1178,8 +1255,8 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
         QTRY_COMPARE(mark->width(), expected);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), sceneRect(cover).center());
-        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-album-cover"));
-        QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
+        QCOMPARE(mark->property("source").toString(), QStringLiteral("media-optical-audio-symbolic"));
+        QCOMPARE(colorOf(mark), hex(panel->property("placeholderMarkColor").value<QColor>()));
         // The tile keeps the size a cover has.
         QCOMPARE(cover->height(), cover->width());
     }
@@ -1209,28 +1286,32 @@ void UiMainWindowTest::nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist() 
 
 void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace_data() {
     QTest::addColumn<bool>("narrow");
-    QTest::newRow("wide") << false;
-    QTest::newRow("narrow") << true;
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("wide, light") << false << false;
+    QTest::newRow("wide, dark") << false << true;
+    QTest::newRow("narrow, light") << true << false;
+    QTest::newRow("narrow, dark") << true << true;
 }
 
-// With nothing playing the cover keeps its square, as a quiet placeholder
-// (#373 H5): the view colour, Breeze's album cover mark at its centre in
-// the tertiary colour, and a 1 px seam on the edges that face the panel,
-// its foot and, in narrow, its right edge; "Nothing playing" in the title's
-// line. The first Play moves nothing: the cover, the title's line and the
-// library stay where they were, and the seams go.
+// With nothing playing the cover keeps its square (#373 H5), as the one
+// placeholder a track without a cover shows too (#373 H6): the view colour,
+// with no frame or seam on it, and the quiet disc mark at its centre;
+// "Nothing playing" in the title's line. The first Play, of a track without
+// a cover, changes nothing of it and moves nothing: the cover, its surface
+// and mark, the title's line and the library stay as they were.
 void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace() {
     QFETCH(bool, narrow);
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel, narrow ? 1000 : 1600, narrow ? 720 : 1000);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *header = named(window, "libraryHeader");
-    QQuickItem *footSeam = named(window, "nowPlayingIdleFootSeam");
-    QQuickItem *sideSeam = named(window, "nowPlayingIdleSideSeam");
-    QVERIFY(panel && cover && header && footSeam && sideSeam);
+    QVERIFY(panel && cover && header);
     QVERIFY(panel->property("idle").toBool());
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
     QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
@@ -1239,19 +1320,16 @@ void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace() {
     QCOMPARE(colorOf(cover), tokenHex(window, "view"));
     QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
     QVERIFY(shown(mark));
-    QCOMPARE(mark->property("source").toString(), QStringLiteral("media-album-cover"));
+    QCOMPARE(mark->property("source").toString(), QStringLiteral("media-optical-audio-symbolic"));
     QCOMPARE(mark->width(), narrow ? 32.0 : 64.0);
     QCOMPARE(sceneRect(mark).center(), sceneRect(cover).center());
-    QCOMPARE(colorOf(mark), tokenHex(window, "textTertiary"));
-    // The seams, inside the tile, so it keeps its size.
-    QVERIFY(shown(footSeam));
-    QCOMPARE(colorOf(footSeam), tokenHex(window, "seam"));
-    QCOMPARE(sceneRect(footSeam), QRectF(sceneRect(cover).left(), sceneRect(cover).bottom() - 1, cover->width(), 1));
-    QCOMPARE(shown(sideSeam), narrow);
-    if (narrow) {
-        QCOMPARE(colorOf(sideSeam), tokenHex(window, "seam"));
-        QCOMPARE(sceneRect(sideSeam), QRectF(sceneRect(cover).right() - 1, sceneRect(cover).top(), 1, cover->height()));
-    }
+    const QString markColor = colorOf(mark);
+    QCOMPARE(markColor, hex(panel->property("placeholderMarkColor").value<QColor>()));
+    // No frame: no seam on the tile, and nothing drawn on it but the mark.
+    QVERIFY(named(window, "nowPlayingIdleFootSeam") == nullptr);
+    QVERIFY(named(window, "nowPlayingIdleSideSeam") == nullptr);
+    QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
+                 qPrintable(placeholderSurfaceProblem(window, cover, mark)));
     // Nothing to open or show from the keyboard while nothing plays; the
     // mark keeps its colour.
     QQuickItem *stop = itemNamed(cover, QStringLiteral("albumArtFocusTarget"));
@@ -1267,7 +1345,8 @@ void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace() {
     const QRectF idleHeader = sceneRect(header);
     const QRectF idlePanel = sceneRect(panel);
 
-    // The first Play, of a track without a cover: nothing moves.
+    // The first Play, of a track without a cover: nothing moves, and the
+    // placeholder stays as it was.
     playTrack(bridgeOf(window));
     QTRY_VERIFY(!panel->property("idle").toBool());
     QTRY_COMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
@@ -1275,10 +1354,12 @@ void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace() {
     QCOMPARE(sceneRect(title), idleTitle);
     QCOMPARE(sceneRect(panel), idlePanel);
     QCOMPARE(sceneRect(header), idleHeader);
-    QVERIFY(!shown(footSeam));
-    QVERIFY(!shown(sideSeam));
     QVERIFY(shown(mark));
-    QCOMPARE(colorOf(cover), hex(panel->property("noCoverColor").value<QColor>()));
+    QCOMPARE(colorOf(cover), tokenHex(window, "view"));
+    QCOMPARE(colorOf(mark), markColor);
+    QCOMPARE(mark->width(), narrow ? 32.0 : 64.0);
+    QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
+                 qPrintable(placeholderSurfaceProblem(window, cover, mark)));
 }
 
 // The cover is a keyboard stop while a track plays (#373 H5): Tab reaches it

@@ -8,10 +8,10 @@ import FerrousUi 1.0
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
 // track without a cover keeps the tile's place, on the placeholder colour,
-// with Breeze's album cover mark at its centre: the cover is missing, and
+// with Breeze's audio disc mark at its centre: the cover is missing, and
 // nothing more is said about it (#373 H1, H3). With nothing playing
-// (`idle`) the tile keeps its place too, on the idle colour with the same
-// mark, so nothing moves when playback starts (#373 H5).
+// (`idle`) the tile keeps its place too, the same placeholder, so nothing
+// moves when playback starts (#373 H5, H6).
 //
 // The tile is a keyboard stop while a track plays: a 1 px ring shows its
 // focus while the keyboard is in use, and the Menu key or Shift+F10 opens
@@ -23,12 +23,11 @@ Rectangle {
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
-    // The tile and its mark while the track has no cover: the now-playing
-    // panel passes the palette's.
+    // The tile and its mark while the track has no cover, and while
+    // nothing plays: the now-playing panel passes the palette's.
     property color placeholderColor: "transparent"
-    // Nothing playing: the tile shows no cover, and the mark on `idleColor`.
+    // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
-    property color idleColor: root.placeholderColor
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
@@ -37,7 +36,9 @@ Rectangle {
     // now-playing panel sizes it from the font.
     property real placeholderGlyphSize: Math.min(Kirigami.Units.iconSizes.large,
         Math.round(Math.min(root.width, root.height) / 3))
-    readonly property string placeholderGlyphSource: "media-album-cover"
+    // A disc with a note, which says music rather than a missing picture,
+    // as the album cover mark's frame did (#373 H6).
+    readonly property string placeholderGlyphSource: "media-optical-audio-symbolic"
     // What shows around a cover that does not fill the tile, or through
     // one that is partly transparent: the colour behind the tile, which the
     // now-playing panel passes. Each cover draws on it, so a cover at full
@@ -65,7 +66,7 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: root.idle ? root.idleColor : (root.hasCover ? root.backdropColor : root.placeholderColor)
+    color: root.hasCover ? root.backdropColor : root.placeholderColor
     // The keyboard stop over it speaks for it.
     Accessible.ignored: true
 
