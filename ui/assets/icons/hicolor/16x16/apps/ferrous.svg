@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 16 px, drawn on the pixel grid in Breeze's 1 px margin: the fundamental and its 2nd harmonic, each 2 px tall in every column, start in one column with a clear row between them. The fundamental climbs one row every two columns and the harmonic one row every column, the two clean pixel diagonals, so the harmonic rises twice as fast and the two fan out from one point; shallower stairs broke into dashes that read as stripes (#373 hill climb, H6). -->
+<!-- Ferrous, 16 px, drawn on the pixel grid in Breeze's 1 px margin: the fundamental and its 2nd harmonic of a chirp on a log-frequency axis, one 2 px stair shifted up by 4 rows. Each rises a row a column at first and bends over to a row every three columns; they start and end in one column, with clear pixels between them everywhere, corners included (#373 hill climb, H8) -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
   <rect id="tile" fill="#3a1490" x="1" y="1" width="14" height="14" rx="1.5"/>
-  <path id="h2" fill="#f0602a" d="M11 2h1v1h-1z M10 3h2v1h-2z M9 4h2v1h-2z M8 5h2v1h-2z M7 6h2v1h-2z M6 7h2v1h-2z M5 8h2v1h-2z M4 9h2v1h-2z M4 10h1v1h-1z"/>
-  <path id="fundamental" fill="#ffb000" d="M10 9h2v1h-2z M8 10h4v1h-4z M6 11h4v1h-4z M4 12h4v1h-4z M4 13h2v1h-2z"/>
+  <path id="h2" fill="#f25a7e" d="M11 2h3v1h-3z M9 3h5v1h-5z M7 4h4v1h-4z M5 5h4v1h-4z M4 6h3v1h-3z M3 7h2v1h-2z M2 8h2v1h-2z M2 9h1v1h-1z"/>
+  <path id="fundamental" fill="#f2b035" d="M11 6h3v1h-3z M9 7h5v1h-5z M7 8h4v1h-4z M5 9h4v1h-4z M4 10h3v1h-3z M3 11h2v1h-2z M2 12h2v1h-2z M2 13h1v1h-1z"/>
 </svg>
