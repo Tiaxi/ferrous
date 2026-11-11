@@ -1573,10 +1573,14 @@ ApplicationWindow {
         // until it is, rather than leave every window.
         // The viewer in the main window takes them once the pane has kept
         // their last frame, which it shows under the viewer as that fades
-        // in.
+        // in. The whole-screen window takes them only once that frame no
+        // longer refers to them, as it would keep them in this window
+        // (#373 H6); the pane lets them go as soon as it keeps no frame.
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
-                ? (spectrogramViewerShell.windowHost || spectrogramPane.hostItem)
+                ? (spectrogramPane.holdsVisualization
+                    ? spectrogramPane.hostItem
+                    : (spectrogramViewerShell.windowHost || spectrogramPane.hostItem))
                 : (spectrogramPane.lastFrameKept || !spectrogramPane.canKeepLastFrame
                     ? spectrogramViewerShell.popupHost
                     : spectrogramPane.hostItem))
