@@ -21,6 +21,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   lines beside it, or under it when there is no room beside it, then
 //   12 px before the seam. Under it, the title and the artist wrap onto a
 //   second line rather than be cut off, and the lines are 4 px apart.
+//   A sidebar too short for the wide layout to leave the library about six
+//   rows, as with a large font or a short window, takes it too (#373 H6).
 // - Nothing loaded: the same layout, so nothing moves on the first Play
 //   (#373 H5): the cover's square, and "Nothing playing" in the title's
 //   line, in the secondary colour, with a line of space for each line
@@ -51,6 +53,21 @@ Item {
     // 1000 px window and the 408 px of a 1600 px one.
     readonly property real narrowWidth: Math.max(320, Math.round(160 * root.uiPalette.fontScale))
     readonly property bool narrow: root.width < root.narrowWidth
+    // The sidebar's height, and what of it the library under the panel
+    // needs: its header and about six rows (SidebarPane). Where the wide
+    // layout would leave it less, as with a large font or in a short
+    // window, the panel takes the narrow one (#373 H6: at 24 pt in a
+    // 1000 px high window the library showed three rows). The wide
+    // layout's height is from the font and the width alone, all its lines
+    // counted, so the switch does not change what it is decided by, and
+    // a track does not switch it.
+    property real availableHeight: 0
+    property real libraryReserve: 0
+    readonly property real wideReservedHeight: root.width + root.textInset
+        + wideTitleProbe.implicitHeight + 2 + wideLineProbe.implicitHeight + 2
+        + wideDetailsProbe.implicitHeight + root.regionGap + root.seamHeight
+    readonly property bool shortHeight: root.availableHeight > 0
+        && root.availableHeight - root.wideReservedHeight < root.libraryReserve
     readonly property int textInset: 12
     readonly property int narrowCoverSize: 96
 
@@ -64,7 +81,7 @@ Item {
     }
     // Nothing loaded: the layout stays, with the idle placeholder.
     readonly property bool idle: !root.hasTrack
-    readonly property string layoutMode: root.narrow ? "narrow" : "wide"
+    readonly property string layoutMode: root.narrow || root.shortHeight ? "narrow" : "wide"
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
 
     readonly property string titleText: {
@@ -707,6 +724,30 @@ Item {
     FontMetrics {
         id: baseMetrics
         font: root.uiPalette.baseFont
+    }
+
+    // A line of the wide layout's title, of its artist and album, and of
+    // its details, as tall as their text lays them out, whatever the track:
+    // the wide layout's height, which wideReservedHeight counts.
+    component LineProbe: Text {
+        visible: false
+        text: "X"
+        textFormat: Text.PlainText
+        font.family: root.uiPalette.baseFont.family
+        Accessible.ignored: true
+    }
+    LineProbe {
+        id: wideTitleProbe
+        font.pointSize: root.titlePointSize
+        font.weight: Font.DemiBold
+    }
+    LineProbe {
+        id: wideLineProbe
+        font.pointSize: root.uiPalette.basePointSize
+    }
+    LineProbe {
+        id: wideDetailsProbe
+        font.pointSize: root.uiPalette.smallPointSize
     }
 
     // Wide: the artist and the album on a line each where "Artist — Album"

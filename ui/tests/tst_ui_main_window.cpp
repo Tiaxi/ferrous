@@ -460,6 +460,8 @@ private slots:
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
+    void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
+    void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
     void nowPlayingMarksFollowTheFont();
@@ -583,7 +585,10 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
     QTest::addColumn<bool>("narrow");
     QTest::newRow("10 pt, 1600 by 1000") << 10.0 << 1600 << 1000 << 360.0 << 250.0 << false;
     QTest::newRow("10 pt, 1000 by 720") << 10.0 << 1000 << 720 << 260.0 << 250.0 << true;
-    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000 << 408.0 << 360.0 << false;
+    // The panel narrow at 24 pt in 1000 px of height: the wide layout would
+    // leave the library about three rows (#373 H6).
+    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000 << 408.0 << 360.0 << true;
+    QTest::newRow("24 pt, 1600 by 1400") << 24.0 << 1600 << 1400 << 408.0 << 360.0 << false;
     QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720 << 360.0 << 360.0 << true;
 }
 
@@ -592,7 +597,7 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
 // names and the now-playing lines are more than fragments (#373 H5): at
 // 24 pt, 360 px in the narrow window, where the now-playing panel stays
 // narrow and the queue keeps its title and length, and 408 px in the wide
-// one, where the panel stays wide. Its least width follows the font too, and
+// one, where the panel is wide where the window is tall enough for it. Its least width follows the font too, and
 // the window still fits 1000 px. A width the user dragged it to is kept.
 void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont() {
     QFETCH(qreal, pointSize);
@@ -618,7 +623,7 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont() {
     QTRY_COMPARE(sidebar->width(), expectedWidth);
     QCOMPARE(QQmlProperty(sidebar, QStringLiteral("SplitView.minimumWidth"), qmlContext(sidebar)).read().toReal(),
              expectedMinimum);
-    QCOMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
     QVERIFY2(window->minimumWidth() <= 1000, qPrintable(QString::number(window->minimumWidth())));
     // The queue keeps its title column, at least its minimum, and Length.
     QVERIFY(queue->width() >= queue->property("minimumContentWidth").toReal() - 0.5);
@@ -649,8 +654,9 @@ void UiMainWindowTest::nothingPlayingShowsWholeAtALargeFont_data() {
 }
 
 // "Nothing playing" shows whole, in the title's line under the idle cover's
-// square, at any font and in either window, and the library's header is
-// right under the panel.
+// square, or beside it, at any font and in either window, and the library's
+// header is right under the panel. At 24 pt the panel is narrow in both
+// windows, the wide one too short for its wide layout (#373 H6).
 void UiMainWindowTest::nothingPlayingShowsWholeAtALargeFont() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
@@ -671,7 +677,7 @@ void UiMainWindowTest::nothingPlayingShowsWholeAtALargeFont() {
     QQuickItem *header = named(window, "libraryHeader");
     QVERIFY(panel && cover && header);
     QVERIFY(panel->property("idle").toBool());
-    const bool narrow = windowWidth == 1000;
+    const bool narrow = windowWidth == 1000 || pointSize > 0;
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
     QQuickItem *label = named(window, narrow ? "nowPlayingNarrowTitle" : "nowPlayingTitle");
     QVERIFY(shown(label));
@@ -823,7 +829,8 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
     QFETCH(qreal, pointSize);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    // Tall enough for the wide layout at 24 pt.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1400);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QFont font = window->property("font").value<QFont>();
     font.setPointSizeF(pointSize);
@@ -1102,7 +1109,8 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     QFETCH(bool, narrow);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    // Tall enough for the wide layout at 24 pt.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1400);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QFont font = window->property("font").value<QFont>();
     font.setPointSizeF(pointSize);
@@ -1217,7 +1225,8 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
     QFETCH(qreal, pointSize);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    // Tall enough for the wide layout at 24 pt.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1400);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QFont font = window->property("font").value<QFont>();
     font.setPointSizeF(pointSize);
@@ -1360,6 +1369,92 @@ void UiMainWindowTest::nothingPlayingKeepsTheCoversPlace() {
     QCOMPARE(mark->width(), narrow ? 32.0 : 64.0);
     QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
                  qPrintable(placeholderSurfaceProblem(window, cover, mark)));
+}
+
+void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("shortHeight");
+    QTest::addColumn<int>("tallHeight");
+    // The default font: wide in 1000 px of height, narrow in 700.
+    QTest::newRow("default font") << 0.0 << 700 << 1000;
+    // 24 pt: narrow in 1000 px of height (#373 H6), wide in 1400.
+    QTest::newRow("24 pt") << 24.0 << 1000 << 1400;
+}
+
+// Where the wide layout would leave the library fewer than six rows under
+// its header, as with a large font or in a short window, the now-playing
+// panel takes its narrow layout, with its 96 px cover (#373 H6: at 24 pt in
+// 1600 by 1000 the library showed three rows). It is decided by the font,
+// the sidebar's width and height, not by the layout it chooses nor by the
+// track, so it does not switch back and forth: once as the window gets
+// short, once as it gets tall again, never for a track.
+void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, shortHeight);
+    QFETCH(int, tallHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, tallHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *palette = paletteOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *library = named(window, "libraryView");
+    QVERIFY(panel && cover && library);
+    const qreal rowHeight = palette->property("rowHeight").toReal();
+    // How many library rows show.
+    const auto rows = [&]() { return library->height() / rowHeight; };
+
+    // Tall: wide, and the library has its rows. The height the switch is
+    // decided by is the wide layout's own, all its lines counted, as
+    // nothing playing shows it.
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QVERIFY(!panel->property("shortHeight").toBool());
+    QTRY_COMPARE(cover->width(), panel->width());
+    const qreal reserved = panel->property("wideReservedHeight").toReal();
+    QTRY_VERIFY2(std::abs(panel->height() - reserved) <= 1.0,
+                 qPrintable(QStringLiteral("%1 against %2").arg(panel->height()).arg(reserved)));
+    QVERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
+
+    QSignalSpy switches(panel, SIGNAL(layoutModeChanged()));
+    QVERIFY(switches.isValid());
+
+    // Short: narrow, the 96 px cover, and at least six rows of the library.
+    window->resize(1600, shortHeight);
+    QTRY_COMPARE(window->height(), shortHeight);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QVERIFY(panel->property("shortHeight").toBool());
+    QTRY_COMPARE(cover->width(), 96.0);
+    QCOMPARE(panel->property("wideReservedHeight").toReal(), reserved);
+    QTRY_VERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
+    QTest::qWait(100);
+    QCOMPARE(switches.count(), 1);
+
+    // A track, with tags and then without, switches nothing.
+    QObject *bridge = bridgeOf(window);
+    playTrack(bridge);
+    QTRY_VERIFY(!panel->property("idle").toBool());
+    clearTrackTags(bridge);
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    playTrack(bridge);
+    QTest::qWait(100);
+    QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QCOMPARE(switches.count(), 1);
+
+    // Tall again: wide again, once.
+    window->resize(1600, tallHeight);
+    QTRY_COMPARE(window->height(), tallHeight);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QTRY_COMPARE(cover->width(), panel->width());
+    QTest::qWait(100);
+    QCOMPARE(switches.count(), 2);
 }
 
 // The cover is a keyboard stop while a track plays (#373 H5): Tab reaches it
