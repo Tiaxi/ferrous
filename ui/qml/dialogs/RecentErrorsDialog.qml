@@ -245,12 +245,18 @@ Popup {
         RowLayout {
             objectName: "errorHistoryHeader"
             Layout.fillWidth: true
-            Layout.preferredHeight: Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6
+            // 32 px with the default font, and as tall as the title and
+            // Clear All need with 4 px above and below at a larger one: at
+            // 24 pt, the title ran into the first issue (#373 H10).
+            Layout.preferredHeight: Math.max(Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6,
+                Math.ceil(Math.max(errorHistoryTitle.implicitHeight, errorHistoryClearButton.implicitHeight))
+                    + 2 * Kirigami.Units.smallSpacing)
             Layout.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             Layout.rightMargin: Kirigami.Units.smallSpacing + 2
             spacing: Kirigami.Units.largeSpacing
 
             Label {
+                id: errorHistoryTitle
                 objectName: "errorHistoryTitle"
                 text: I18n.i18nc("@title", "Recent Issues")
                 font.weight: Font.DemiBold
@@ -270,6 +276,7 @@ Popup {
             Item { Layout.fillWidth: true }
 
             ToolButton {
+                id: errorHistoryClearButton
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
                 flat: true

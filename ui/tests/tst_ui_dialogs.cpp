@@ -497,6 +497,7 @@ private slots:
     void aboutPagesNeverRunUnderTheButtons_data();
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
+    void recentIssuesHeaderHoldsItsTitleAtLargeFonts();
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
@@ -2084,6 +2085,46 @@ void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
     QCOMPARE(diagnostics->property("text").toString(), QStringLiteral("Open Diagnostics\u2026"));
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!popup->property("visible").toBool());
+}
+
+// The header is as tall as its title needs: at 24 pt, its fixed 32 px left
+// the title over the first issue's category line (#373 H10).
+void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *header = visibleNamed(window, QStringLiteral("errorHistoryHeader"));
+    QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
+    QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
+    QQuickItem *category = itemsNamed(rows.first(), QStringLiteral("errorHistoryCategory")).at(0);
+    QVERIFY(header != nullptr && title != nullptr && clear != nullptr && category != nullptr);
+    QTRY_VERIFY(!layoutPending(header));
+    const QString where = QStringLiteral("header %1..%2, title %3..%4, Clear All %5..%6, category from %7")
+        .arg(sceneRect(header).top()).arg(sceneRect(header).bottom())
+        .arg(sceneRect(title).top()).arg(sceneRect(title).bottom())
+        .arg(sceneRect(clear).top()).arg(sceneRect(clear).bottom()).arg(sceneRect(category).top());
+    QVERIFY2(title->height() >= 40, qPrintable(where));
+    // The title and Clear All inside the header, 4 px clear of its edges,
+    // and the first issue below it.
+    for (QQuickItem *item : {title, clear}) {
+        QVERIFY2(sceneRect(item).top() >= sceneRect(header).top() + 4 - 0.5
+                     && sceneRect(item).bottom() <= sceneRect(header).bottom() - 4 + 0.5,
+                 qPrintable(where));
+    }
+    QVERIFY2(sceneRect(title).bottom() <= sceneRect(category).top() + 0.5, qPrintable(where));
+    QVERIFY2(!sceneRect(title).intersects(sceneRect(category)), qPrintable(where));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }
 
 void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
