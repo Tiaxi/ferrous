@@ -430,6 +430,11 @@ Rectangle {
     onPlaybackStateChanged: root.followNowRow()
     Component.onCompleted: root.followNowRow()
 
+    // Where the list starts in the pane, and the height of its rows: the
+    // default split puts the list on their grid.
+    readonly property real listTop: queueHeader.implicitHeight
+    readonly property real rowPitch: playlistView.rowHeight
+
     color: root.uiPalette.view
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight

@@ -1530,7 +1530,9 @@ ApplicationWindow {
                         queuePane.SplitView.minimumHeight,
                         spectrogramPane.SplitView.minimumHeight + root.splitHandleAllowance,
                         windowLayoutController.queueDefaultHeight(
-                            rightSplit.height, root.uiPalette.rowHeight))
+                            rightSplit.height, root.uiPalette.rowHeight),
+                        queuePane.listTop,
+                        queuePane.rowPitch)
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText

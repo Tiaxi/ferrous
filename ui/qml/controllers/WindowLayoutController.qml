@@ -133,7 +133,7 @@ QtObject {
     // user drags the split: a little under half, so the window reads as an
     // instrument with a queue rather than a playlist with a footer (#373
     // H8: at 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
-    // there, and the queue keeps 17 rows with the default font.
+    // there, and a little more, as the queue keeps whole rows (queueHeight).
     readonly property real visualizationDefaultShare: 0.47
     // The rows, its header among them, the queue keeps by default before
     // the visualization has its share, as with a large font in a short
@@ -148,12 +148,25 @@ QtObject {
     }
 
     // The queue's height in a split `splitHeight` high, leaving the
-    // visualization `otherMinimum`.
-    function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight) {
-        const preferred = root.queueHeightRatio > 0
-            ? splitHeight * root.queueHeightRatio
-            : defaultHeight
-        return Math.round(root.clamp(preferred, minimum, Math.max(minimum, splitHeight - otherMinimum)))
+    // visualization `otherMinimum`. Before the user drags the split, the
+    // queue's list, `listTop` down the pane, is a whole number of its rows,
+    // `rowPitch` high, and the visualization takes what is left over (#373
+    // H9 T8: a row cut at the seam); a dragged split stays where it was put.
+    function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight, listTop, rowPitch) {
+        const most = Math.max(minimum, splitHeight - otherMinimum)
+        if (root.queueHeightRatio > 0) {
+            return Math.round(root.clamp(splitHeight * root.queueHeightRatio, minimum, most))
+        }
+        const height = Math.round(root.clamp(defaultHeight, minimum, most))
+        if (!(rowPitch > 0) || !(listTop >= 0) || height <= listTop) {
+            return height
+        }
+        const down = listTop + Math.floor((height - listTop) / rowPitch) * rowPitch
+        if (down >= minimum) {
+            return down
+        }
+        // Rounding down would take the queue under its minimum.
+        return down + rowPitch <= most ? down + rowPitch : height
     }
 
     // A handle was dragged to give the pane `size` of `splitSize`.
