@@ -446,6 +446,10 @@ private slots:
     void lastFmSlotRingProgressReadsAtOneX_data();
     void lastFmSlotRingProgressReadsAtOneX();
     void lastFmSlotToolTipShowsOnKeyboardFocus();
+    void lastFmSlotSendingAndScrobbledLookApart_data();
+    void lastFmSlotSendingAndScrobbledLookApart();
+    void lastFmSlotGlyphReadsAtOneX_data();
+    void lastFmSlotGlyphReadsAtOneX();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
     void statusBarHasNoDividers();
@@ -1527,9 +1531,10 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QTRY_VERIFY2(!slot->isVisible(), qPrintable(QString::number(state)));
     }
 
-    // Scrobbled, and while it is sent: the ring closed in the arc's colour,
-    // with no fill and no colour (#373 H2); the glyph is secondary while it
-    // is sent, and the text colour once accepted.
+    // Scrobbled, and while it is sent: the ring closed, with no fill and no
+    // colour (#373 H2); while it is sent in the arc's text colour with the
+    // glyph at half strength, and once accepted both in the secondary
+    // colour (#373 H5).
     // Between the top of the ring and the glyph.
     const auto insideRing = [box]() { return box->mapToScene(QPointF(box->width() / 2, 5.5)); };
     qreal scale = 1;
@@ -1538,9 +1543,10 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
         QTRY_VERIFY2(slot->isVisible(), qPrintable(QString::number(state)));
         QVERIFY(ring->isVisible());
         QCOMPARE(progress(), 1.0);
-        QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("text")));
-        QVERIFY(sameColor(glyph->property("color").value<QColor>(),
-                          harness.token(state == 3 ? "text" : "textSecondary")));
+        QVERIFY(sameColor(slot->property("ringColor").value<QColor>(),
+                          harness.token(state == 3 ? "textSecondary" : "text")));
+        QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
+        QCOMPARE(glyph->opacity(), state == 3 ? 1.0 : 0.5);
         QVERIFY(!label->isVisible());
         // Inside the ring, left of the glyph: the status bar, unfilled.
         QTRY_VERIFY2(sameColor(pixelAt(grabbed(harness.window, &scale), insideRing(), scale),
@@ -1805,8 +1811,9 @@ void TransportStatusTest::lastFmSlotRingTrackReadsAndScrobbledCloses() {
                                     .arg(drawnInGap().name(), closed.name(), track.name())));
         QVERIFY(sameColor(drawnInside(), chrome));
     }
-    // No colour for a routine success: the accepted ring is the text's.
-    QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("text")));
+    // No colour for a routine success, and no more than the status bar's
+    // other words: the accepted ring is the secondary text's.
+    QVERIFY(sameColor(slot->property("ringColor").value<QColor>(), harness.token("textSecondary")));
 }
 
 void TransportStatusTest::lastFmSlotRingProgressReadsAtOneX_data() {
@@ -1886,6 +1893,144 @@ void TransportStatusTest::lastFmSlotRingProgressReadsAtOneX() {
     for (qsizetype i = 1; i < shares.size(); ++i) {
         QVERIFY2(shares[i] - shares[i - 1] >= 0.2, qPrintable(QString::number(shares[i] - shares[i - 1])));
     }
+}
+
+void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// Being sent and scrobbled look apart as drawn (#373 H5: they drew alike):
+// the closed ring in the text colour while the scrobble is sent, the glyph
+// at half strength; once accepted, the ring and the glyph settle in the
+// secondary colour, which is no brighter than the status bar's other
+// words, and still 3:1 on it.
+void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *ring = harness.item(QStringLiteral("scrobbleIndicatorRing"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QVERIFY(slot && ring && glyph);
+    const QColor chrome = harness.token("chrome");
+    const QColor text = harness.token("text");
+    const QColor secondary = harness.token("textSecondary");
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleListenedMs", 120000);
+
+    qreal scale = 1;
+    // The ring's colour at its left, on the arc's middle, and the glyph's
+    // strongest pixel.
+    const auto drawn = [&](QColor *ringDrawn, QColor *glyphDrawn) {
+        const QImage image = grabbed(harness.window, &scale);
+        const qreal radius = slot->property("ringRadius").toReal();
+        *ringDrawn = pixelAt(image, ring->mapToScene(QPointF(ring->width() / 2 - radius, ring->height() / 2)), scale);
+        *glyphDrawn = chrome;
+        // Within 5 px of the centre, inside the ring.
+        for (int y = 0; y < int(glyph->height()); ++y) {
+            for (int x = 0; x < int(glyph->width()); ++x) {
+                if (std::hypot(x + 0.5 - glyph->width() / 2, y + 0.5 - glyph->height() / 2) > 5.0) {
+                    continue;
+                }
+                const QColor pixel = pixelAt(image, glyph->mapToScene(QPointF(x + 0.5, y + 0.5)), scale);
+                if (channelDistance(pixel, chrome) > channelDistance(*glyphDrawn, chrome)) {
+                    *glyphDrawn = pixel;
+                }
+            }
+        }
+    };
+    QColor sendingRing;
+    QColor sendingGlyph;
+    harness.bridge->setProperty("lastFmScrobbleState", 2);
+    QTRY_VERIFY(slot->isVisible() && ring->isVisible());
+    QTRY_VERIFY((drawn(&sendingRing, &sendingGlyph), channelDistance(sendingRing, text) <= 2));
+    QCOMPARE(glyph->opacity(), 0.5);
+    QColor scrobbledRing;
+    QColor scrobbledGlyph;
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_VERIFY((drawn(&scrobbledRing, &scrobbledGlyph), channelDistance(scrobbledRing, secondary) <= 2));
+    QVERIFY2(channelDistance(sendingRing, scrobbledRing) >= 48,
+             qPrintable(sendingRing.name() + QStringLiteral(" / ") + scrobbledRing.name()));
+    // The glyph: the secondary colour, at half strength while it is sent.
+    // Offscreen, without the desktop's platform theme, Kirigami draws a mask
+    // file uncoloured, so the drawn glyph shows its strength, not its colour.
+    QVERIFY(sameColor(glyph->property("color").value<QColor>(), secondary));
+    QCOMPARE(glyph->opacity(), 1.0);
+    // Scrobbled no brighter than the status bar's words, and 3:1.
+    QVERIFY(contrastRatio(scrobbledRing, chrome) < contrastRatio(text, chrome));
+    QVERIFY2(contrastRatio(scrobbledRing, chrome) >= 3.0,
+             qPrintable(describe(QStringLiteral("scrobbled ring"), scrobbledRing, chrome)));
+    // The glyph at half strength reads less than the scrobbled one.
+    QVERIFY2(contrastRatio(sendingGlyph, chrome) < contrastRatio(scrobbledGlyph, chrome),
+             qPrintable(sendingGlyph.name() + QStringLiteral(" / ") + scrobbledGlyph.name()));
+}
+
+void TransportStatusTest::lastFmSlotGlyphReadsAtOneX_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The Last.fm glyph in the ring is drawn for 1x (#373 H5: a smudge): 10 px,
+// centred in the ring, its ink within 5 px of the centre, 1 px clear of
+// the track's inner edge, and the a's bowl open: a whole pixel of its
+// stroke beside a clear one.
+void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.window->effectiveDevicePixelRatio(), 1.0);
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *ring = harness.item(QStringLiteral("scrobbleIndicatorRing"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QVERIFY(slot && ring && glyph);
+    const QColor chrome = harness.token("chrome");
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
+    QTRY_VERIFY(slot->isVisible() && ring->isVisible());
+    qreal scale = 1;
+    // Once the status bar has laid the slot out.
+    grabbed(harness.window, &scale);
+    QCOMPARE(glyph->size(), QSizeF(10, 10));
+    const QPointF centre = sceneRect(ring).center();
+    QCOMPARE(sceneRect(glyph).center(), centre);
+    // On whole pixels.
+    QCOMPARE(sceneRect(glyph).topLeft(), QPointF(std::floor(sceneRect(glyph).left()), std::floor(sceneRect(glyph).top())));
+    const qreal trackInner = slot->property("ringTrackRadius").toReal() - slot->property("ringTrackStroke").toReal() / 2;
+    QCOMPARE(trackInner, 6.0);
+
+    // The glyph alone, without the ring.
+    ring->setVisible(false);
+    const QImage image = grabbed(harness.window, &scale);
+    // Every pixel all of which is 5 px or more from the centre is clear.
+    const QRectF area = sceneRect(ring).adjusted(-2, -2, 2, 2);
+    int inked = 0;
+    for (int y = int(area.top()); y < int(area.bottom()); ++y) {
+        for (int x = int(area.left()); x < int(area.right()); ++x) {
+            const QColor pixel = pixelAt(image, QPointF(x + 0.5, y + 0.5), scale);
+            const qreal nearestX = std::clamp(centre.x(), qreal(x), qreal(x + 1));
+            const qreal nearestY = std::clamp(centre.y(), qreal(y), qreal(y + 1));
+            const qreal nearest = std::hypot(nearestX - centre.x(), nearestY - centre.y());
+            const bool ink = channelDistance(pixel, chrome) > 8;
+            inked += ink ? 1 : 0;
+            QVERIFY2(!ink || nearest < trackInner - 1.0,
+                     qPrintable(QStringLiteral("ink at %1,%2, %3 px from the centre").arg(x).arg(y).arg(nearest)));
+        }
+    }
+    QVERIFY2(inked >= 20, qPrintable(QString::number(inked)));
+    // The a's bowl: its left stroke a whole pixel of ink, the counter
+    // beside it clear. Ink, not its colour: offscreen, without the
+    // desktop's platform theme, Kirigami draws a mask file uncoloured.
+    const QPointF glyphTopLeft = sceneRect(glyph).topLeft();
+    const QColor stroke = pixelAt(image, glyphTopLeft + QPointF(1.5, 5.5), scale);
+    QVERIFY2(channelDistance(stroke, chrome) > 24, qPrintable(stroke.name()));
+    const QColor counter = pixelAt(image, glyphTopLeft + QPointF(2.5, 5.5), scale);
+    QVERIFY2(channelDistance(counter, chrome) * 4 <= channelDistance(stroke, chrome),
+             qPrintable(counter.name() + QStringLiteral(" beside ") + stroke.name()));
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
