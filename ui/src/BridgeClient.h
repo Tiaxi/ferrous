@@ -745,6 +745,8 @@ private:
     // The largest rendition of the iTunes artwork whose 100 px thumbnail is
     // `artworkUrl100`, or empty when it is not an Apple thumbnail URL.
     static QString itunesArtworkUrl(const QString &artworkUrl100);
+    // The line over `count` iTunes artwork suggestions, in plain words.
+    static QString itunesArtworkFoundText(int count);
     void startItunesArtworkAssetDownload(int candidateIndex);
     void applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result);
     void resetItunesArtworkTempDir();

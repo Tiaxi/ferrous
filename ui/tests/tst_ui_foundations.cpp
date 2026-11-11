@@ -345,6 +345,9 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         // Lightened or darkened from the mix to be 4.6:1 on a hovered row.
         {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
         {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#5a5c5e")},
+        // The theme's placeholder colour, darkened on light to be 4.6:1 on
+        // the view, which Breeze Light's 4.2:1 was not (#373 H6).
+        {"placeholderText", QStringLiteral("#a1a9b1"), QStringLiteral("#697582")},
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
@@ -465,6 +468,9 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
         {QStringLiteral("tertiary on view"), tertiary, view, 4.6},
         {QStringLiteral("tertiary on a hovered row"), tertiary, hovered, 4.6},
         {QStringLiteral("column text on view"), colorOf(tokens, "textColumn"), view, 4.5},
+        // A field's placeholder carries what saving does ("Multiple
+        // values"), so it reads as text, with the margin tertiary has.
+        {QStringLiteral("placeholder on view"), colorOf(tokens, "placeholderText"), view, 4.6},
         {QStringLiteral("column text on the selection"), colorOf(tokens, "textColumn"), selection, 4.5},
         {QStringLiteral("text on the selection"), colorOf(tokens, "text"), selection, 4.5},
         {QStringLiteral("playing title on view"), colorOf(tokens, "now"), view, 4.5},
@@ -713,10 +719,14 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
     QVERIFY(hoverTint != nullptr && tintRect != nullptr);
 
-    // The row leaves the 8 px scrollbar lane free.
+    // The row's tints run to its right edge, under an overlay scrollbar
+    // (#373 H6); a list whose scrollbar takes a lane leaves it free.
     QCOMPARE(background->x(), 0.0);
-    QCOMPARE(background->width(), row->width() - 8.0);
+    QCOMPARE(background->width(), row->width());
     QCOMPARE(background->height(), row->height());
+    background->setProperty("scrollbarLane", 8);
+    QCOMPARE(background->width(), row->width() - 8.0);
+    background->setProperty("scrollbarLane", 0);
 
     background->setProperty("hovered", hovered);
     background->setProperty("selected", selected);
@@ -741,7 +751,7 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
 }
 
 // The focused, selected row draws its 1 px ring on the edge of its tint,
-// and nothing in the scrollbar lane.
+// and nothing beyond the row.
 void UiFoundationsTest::rowBackgroundDrawsTheRingAndTintAsOneRectangle() {
     QQmlEngine engine;
     QString errorText;
@@ -780,7 +790,7 @@ void UiFoundationsTest::rowBackgroundDrawsTheRingAndTintAsOneRectangle() {
     expectPixel(QPointF(topLeft.x() + width - 0.5, middle), ring, "the ring's right edge");
     expectPixel(QPointF(topLeft.x() + width / 2, topLeft.y() + 0.5), ring, "the ring's top edge");
     expectPixel(QPointF(topLeft.x() + 1.5 * scale, middle), selection, "the tint inside the ring");
-    expectPixel(QPointF(topLeft.x() + width + 4 * scale, middle), view, "the scrollbar lane");
+    expectPixel(QPointF(topLeft.x() + width + 4 * scale, middle), view, "beyond the row");
 }
 
 void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {

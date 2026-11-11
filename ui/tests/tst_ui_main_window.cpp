@@ -478,6 +478,7 @@ private slots:
     void collapsedRowNameElidesBeforeTheYear();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
@@ -1983,10 +1984,12 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QQuickItem *tint = itemNamed(album, QStringLiteral("rowBackgroundTint"));
     QQuickItem *hover = itemNamed(album, QStringLiteral("rowBackgroundHover"));
     QVERIFY(tint && hover);
-    // The rows leave the 8 px scrollbar lane free; the scrollbar shows only
-    // when the tree is longer than the view.
-    QCOMPARE(tint->width(), album->width() - 8);
+    // The tints run to the pane's right edge (#373 H6: they stopped 8 px
+    // short of it); the scrollbar shows only when the tree is longer than
+    // the view.
+    QCOMPARE(tint->width(), album->width());
     QCOMPARE(tint->mapToItem(album, QPointF()).x(), 0.0);
+    QCOMPARE(sceneRect(album).right(), sceneRect(view).right());
     QQuickItem *scrollBar = named(window, "libraryScrollBar");
     QVERIFY(scrollBar != nullptr);
     QVERIFY(!scrollBar->isVisible());
@@ -2027,6 +2030,59 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// The queue's selection tint runs to the pane's right edge, with no
+// scrollbar and with one, whose thumb draws over it (#373 H6: the tints
+// stopped 8 px short of the edge).
+void UiMainWindowTest::queueRowTintsRunToThePaneEdgeUnderTheScrollBar() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView != nullptr && queue != nullptr);
+    QQuickItem *scrollBar = nullptr;
+    for (QQuickItem *child : queueView->childItems()) {
+        if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))) {
+            scrollBar = child;
+        }
+    }
+    QVERIFY(scrollBar != nullptr);
+    for (const int count : {3, 80}) {
+        bridge->setProperty("queueRows", sampleQueueRows(count));
+        bridge->setProperty("queueLength", count);
+        QTRY_COMPARE(queueView->property("count").toInt(), count);
+        QTRY_COMPARE(scrollBar->isVisible(), count > 3);
+        QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
+        QQuickItem *row = nullptr;
+        // The second row, beside the thumb, which starts a little below the
+        // first row's middle.
+        QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr && rowTinted(queueView, 1));
+        QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right());
+        const QColor tintColor = tint->property("color").value<QColor>();
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / qreal(window->width());
+        const QPointF middle(0, sceneRect(row).center().y());
+        const auto pixel = [&](qreal x) {
+            return image.pixelColor(int(std::floor(x * scale)), int(std::floor(middle.y() * scale)));
+        };
+        const qreal right = sceneRect(queueView).right();
+        const auto sameAsTint = [&](const QColor &color) {
+            return std::abs(color.red() - tintColor.red()) <= 2 && std::abs(color.green() - tintColor.green()) <= 2
+                && std::abs(color.blue() - tintColor.blue()) <= 2;
+        };
+        // The tint in the scrollbar's lane, at the edge.
+        QVERIFY2(sameAsTint(pixel(right - 0.5)),
+                 qPrintable(QStringLiteral("%1 at the edge, tint %2").arg(pixel(right - 0.5).name(), tintColor.name())));
+        QVERIFY2(sameAsTint(pixel(right - 16)), qPrintable(pixel(right - 16).name()));
+        // The thumb, 4 px wide, 2 px from the edge, over the tint.
+        QCOMPARE(!sameAsTint(pixel(right - 4)), count > 3);
+    }
 }
 
 // Tab into the library or the queue with no row selected: a row it shows
@@ -2327,6 +2383,12 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     handle->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(line->isVisible());
     QCOMPARE(colorOf(line), tokenHex(window, "focusRing"));
+    // With focus, a 2 px line the header's full height, not a short tick
+    // (#373 H6).
+    QCOMPARE(line->width(), 2.0);
+    QCOMPARE(sceneRect(line).top(), sceneRect(queueHeader).top());
+    QCOMPARE(sceneRect(line).height(), sceneRect(queueHeader).height());
+    QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
@@ -2350,10 +2412,24 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
     QVERIFY(!albumHandle->isVisible());
     QVERIFY(!albumHandle->activeFocusOnTab());
     QVERIFY(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1);
-    // Artist keeps its share of the text columns' room.
+    // The minimum stays where it was before Artist's default share grew
+    // (#373 H6): it is counted with Artist at 26% of the width.
+    const qreal minimumShare = queue->property("minimumArtistColumnShare").toReal();
+    QCOMPARE(minimumShare, 0.26);
+    QVERIFY(minimumShare < queue->property("defaultArtistColumnShare").toReal());
+    QVERIFY(std::abs(queue->property("minimumWithArtistWidth").toReal()
+                     - (queue->property("minimumTitleOnlyWidth").toReal()
+                        - queue->property("minimumLengthColumnWidth").toReal()
+                        + queue->property("defaultLengthColumnWidth").toReal())
+                         / (1 - minimumShare)) < 0.01);
+    // Artist has what the title's minimum leaves, about a quarter of the
+    // text columns' room: the share the window's minimum width is counted
+    // with, under its default.
     QQuickItem *artist = named(window, "queueHeader_artist");
-    QVERIFY(std::abs(artist->width() - queue->property("defaultTextColumnsRoom").toReal()
-                     * queue->property("defaultArtistColumnShare").toReal()) <= 1);
+    const qreal textRoom = queue->property("defaultTextColumnsRoom").toReal();
+    QVERIFY2(artist->width() >= textRoom * queue->property("minimumArtistColumnShare").toReal() - 1
+                 && artist->width() <= textRoom * queue->property("defaultArtistColumnShare").toReal() + 1,
+             qPrintable(QStringLiteral("artist %1 of %2").arg(artist->width()).arg(textRoom)));
     // Wider, Album comes back.
     window->resize(1600, 1000);
     QTRY_VERIFY(album->isVisible());
@@ -2362,9 +2438,10 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
 
 // The queue's columns at 1600 and 1000 px (#373 H5): Length has a fixed
 // room from the font, about 56 px; of what is left for the text, the
-// title has half, Artist about a quarter and Album a little less, so long
-// titles have the slack rather than a gap after the album. In the 1000 px
-// window Album drops before Artist, and Length keeps its room.
+// title has a little under half, Artist a little over a quarter and Album
+// a little less (#373 H6: half the room left a gap after short titles, and
+// Artist about 24 px narrower at 1600 px). In the 1000 px window Album
+// drops before Artist, and Length keeps its room.
 void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2391,10 +2468,12 @@ void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
     const QString widths = QStringLiteral("title %1, artist %2, album %3, length %4 of %5 (room %6)")
         .arg(title->width()).arg(artist->width()).arg(album->width()).arg(length->width())
         .arg(queue->width()).arg(room);
-    QVERIFY2(std::abs(artist->width() - 0.26 * room) <= 1, qPrintable(widths));
-    QVERIFY2(std::abs(album->width() - 0.24 * room) <= 1, qPrintable(widths));
-    QVERIFY2(std::abs(title->width() - 0.5 * room) <= 2, qPrintable(widths));
-    QVERIFY2(title->width() > artist->width() + album->width() - 2, qPrintable(widths));
+    QVERIFY2(std::abs(artist->width() - 0.283 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(album->width() - 0.263 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(title->width() - 0.454 * room) <= 2, qPrintable(widths));
+    // About 24 px more each than half the room for the title gave them.
+    QVERIFY2(artist->width() - 0.26 * room >= 20 && album->width() - 0.24 * room >= 20, qPrintable(widths));
+    QVERIFY2(title->width() > artist->width() && title->width() > album->width(), qPrintable(widths));
     // Album ends a gap before Length, which ends at the queue's inset.
     QVERIFY2(std::abs(sceneRect(length).left() - sceneRect(album).right() - gap) <= 1, qPrintable(widths));
 

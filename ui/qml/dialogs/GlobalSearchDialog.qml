@@ -778,7 +778,9 @@ Dialog {
                                 root.controller.activateSelection()
                             } else if (mouse.button === Qt.RightButton && resultRow.isResult) {
                                 root.contextRowData = root.controller.globalSearchModelApi.rowDataAt(resultRow.index)
-                                resultMenu.popup()
+                                // Where the click was, from the event rather
+                                // than the cursor's last known place.
+                                resultMenu.popup(rowMouse, mouse.x, mouse.y)
                             } else resultsView.forceActiveFocus()
                         }
                         onDoubleClicked: function(mouse) {
@@ -1008,7 +1010,7 @@ Dialog {
             id: resultMenu
             MenuItem { text: I18n.i18nc("@action:inmenu", "Play"); icon.name: "media-playback-start"; onTriggered: root.controller.activateRow(root.contextRowData) }
             MenuItem { text: I18n.i18nc("@action:inmenu", "Add to Queue"); icon.name: "list-add"; onTriggered: root.controller.queueRow(root.contextRowData) }
-            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); onTriggered: root.controller.navigateSelectionToLibrary() }
+            MenuItem { text: I18n.i18nc("@action:inmenu", "Show in Library"); icon.name: "go-jump"; onTriggered: root.controller.navigateSelectionToLibrary() }
             MenuSeparator {}
             MenuItem { text: I18n.i18nc("@action:inmenu", "Open Containing Folder"); icon.name: "document-open-folder"; onTriggered: root.controller.openRowInFileBrowser(root.contextRowData) }
         }

@@ -37,6 +37,8 @@ Components.DialogWindow {
     readonly property int quitWaitBoundMs: 5000
     readonly property real tableRowHeight: root.uiPalette.rowHeight
     // Shown in a field whose rows hold different values, which saving keeps.
+    // The status of a row with unsaved edits, which its column holds whole.
+    readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
@@ -58,48 +60,111 @@ Components.DialogWindow {
     ]
     // The table's columns, each at its width with the default 10 pt font,
     // scaled with a larger one, or wider when its header or sample needs
-    // it; the last one takes the room that is left. `sample` is the widest
-    // value a short column holds whole.
+    // it. `sample` is the widest value a short column holds whole. Where
+    // the view is narrower than they are together, the columns that may
+    // `give` way do, before the table scrolls sideways: first File Name,
+    // Folder and Status, down to their `least` widths, then the tags, down
+    // to four fifths of theirs where that is enough; the numbers and
+    // Format keep theirs. Where
+    // the view is wider, File Name and Folder, which `stretch`, take the
+    // rest. File names and folders elide in the middle, with the whole
+    // name in a tooltip (#373 H6: no sideways scroll bar at 1400 px).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110 },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200, give: 2 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160, give: 2 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140, give: 2 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110, give: 2 },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56, sample: "0000" },
         { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48, sample: "00" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220 },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 96, stretch: true, path: true },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156 },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120 }
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 72, stretch: true, path: true },
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 72, sample: root.modifiedText }
     ]
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header takes beside its label for the column's
     // Revert, while it shows.
     readonly property real columnRevertRoom: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
-    // Each column's width: its own, or what its header takes whole, semibold
-    // and with its Revert, or its sample value, with the cell's padding.
-    // The table scrolls sideways when they are wider than the view, rather
-    // than elide a header to a letter.
-    readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
+    // What a column needs whatever the room: its header whole, semibold and
+    // with its Revert, or its sample value, with the cell's padding, rather
+    // than a header elided to a letter.
+    function columnNeed(column) {
         const header = columnHeaderMetrics.advanceWidth(column.label)
             + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : 0)
         const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
-        return Math.max(root.uiPalette.scaledSize(column.width),
-            Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing)
+        return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
+    }
+    // Each column's width with room enough.
+    readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
+        return Math.max(root.uiPalette.scaledSize(column.width), root.columnNeed(column))
     })
-    readonly property real fixedColumnsWidth: root.tableColumnWidths.reduce(
-        function(sum, width, index) {
-            return index === root.tableColumnWidths.length - 1 ? sum : sum + width
-        }, 2 * root.tableInset)
-    readonly property real tableContentWidth: Math.max(
-        root.fixedColumnsWidth + root.tableColumnWidths[root.tableColumnWidths.length - 1],
-        tagEditorTable.width)
+    // The narrowest each column gives way to.
+    readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
+        const preferred = root.tableColumnWidths[index]
+        const least = column.give === 1 ? root.uiPalette.scaledSize(column.least)
+            : (column.give === 2 ? Math.round(preferred * 0.8) : preferred)
+        return Math.min(preferred, Math.max(least, root.columnNeed(column)))
+    })
+    // The widths the columns are shown at in the table's width.
+    readonly property var shownColumnWidths: {
+        const preferred = root.tableColumnWidths
+        const least = root.tableColumnLeastWidths
+        const room = tagEditorTable.width - 2 * root.tableInset
+        const total = preferred.reduce(function(sum, width) { return sum + width }, 0)
+        const widths = preferred.slice()
+        let over = total - room
+        if (over <= 0) {
+            const stretching = root.tableColumns.filter(function(column) { return column.stretch }).length
+            const extra = Math.floor(-over / stretching)
+            root.tableColumns.forEach(function(column, i) {
+                if (column.stretch) {
+                    widths[i] += extra
+                }
+            })
+            over = 0
+        }
+        for (const group of [1, 2]) {
+            let slack = 0
+            root.tableColumns.forEach(function(column, i) {
+                if (column.give === group) {
+                    slack += widths[i] - least[i]
+                }
+            })
+            // The tags give way only where that spares the scroll bar: in
+            // a table that scrolls anyway, as at a large font, they keep
+            // their widths.
+            if (slack <= 0 || over <= 0 || (group === 2 && slack < over)) {
+                continue
+            }
+            const taken = Math.min(over, slack)
+            root.tableColumns.forEach(function(column, i) {
+                if (column.give === group) {
+                    widths[i] = Math.max(least[i], Math.floor(widths[i] - taken * (widths[i] - least[i]) / slack))
+                }
+            })
+            over -= taken
+        }
+        // The whole pixels the rounding left go to the last column that
+        // stretches, so Status ends at the table's inset.
+        const left = Math.floor(room - widths.reduce(function(sum, width) { return sum + width }, 0))
+        if (left > 0) {
+            for (let i = root.tableColumns.length - 1; i >= 0; --i) {
+                if (root.tableColumns[i].stretch) {
+                    widths[i] += left
+                    break
+                }
+            }
+        }
+        return widths
+    }
+    // The rows' width: the view's, or the columns' where they are wider
+    // still, when the table scrolls sideways.
+    readonly property real tableContentWidth: Math.max(tagEditorTable.width,
+        root.shownColumnWidths.reduce(function(sum, width) { return sum + width }, 2 * root.tableInset))
 
     function columnWidth(index) {
-        return index === root.tableColumns.length - 1
-            ? root.tableContentWidth - root.fixedColumnsWidth
-            : root.tableColumnWidths[index]
+        return root.shownColumnWidths[index]
     }
 
     FontMetrics {
@@ -190,8 +255,8 @@ Components.DialogWindow {
     }
     readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
     // Wide enough for the fields and every column of the table through
-    // Format, clear of its scroll bar, within the screen; the table scrolls
-    // to the rest.
+    // Format at its width, clear of its scroll bar, within the screen; the
+    // columns that give way make room for Folder and Status.
     defaultWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
         + root.tableWidthThrough("formatKind") + Kirigami.Units.gridUnit)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
@@ -467,7 +532,7 @@ Components.DialogWindow {
             return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
         }
         case "status":
-            return row.errorText.length > 0 ? row.errorText : (row.dirty ? I18n.i18nc("@item tag editor row status", "Modified") : "")
+            return row.errorText.length > 0 ? row.errorText : (row.dirty ? root.modifiedText : "")
         default:
             return row[columnKey] || ""
         }
@@ -671,6 +736,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
+        placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
             : leftPadding
@@ -1140,8 +1206,10 @@ Components.DialogWindow {
                         Repeater {
                             model: root.tableColumns
                             delegate: Label {
+                                id: tableCell
                                 required property var modelData
                                 required property int index
+                                objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
                                 height: parent.height
                                 leftPadding: Kirigami.Units.largeSpacing
@@ -1155,7 +1223,21 @@ Components.DialogWindow {
                                         : root.uiPalette.text)
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
-                                elide: Text.ElideRight
+                                // A file name or folder keeps its start and
+                                // its end, as PathLabel does, with the whole
+                                // in a tooltip while it is cut short.
+                                elide: modelData.path ? Text.ElideMiddle : Text.ElideRight
+                                readonly property string toolTipText: modelData.path && tableCell.truncated
+                                    ? (modelData.key === "directory" ? tableRow.directory : tableCell.text) : ""
+
+                                HoverHandler {
+                                    id: cellHover
+                                    enabled: tableCell.toolTipText.length > 0
+                                }
+
+                                ToolTip.visible: cellHover.hovered && tableCell.toolTipText.length > 0
+                                ToolTip.delay: Kirigami.Units.toolTipDelay
+                                ToolTip.text: tableCell.toolTipText
                             }
                         }
                     }

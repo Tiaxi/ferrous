@@ -40,6 +40,12 @@ QtObject {
     readonly property color textTertiary: root.readableOn(root.themeIsDark
         ? ColorUtils.mixColor(root._inactiveText, root.view, 0.134)
         : ColorUtils.mixColor(root._inactiveText, root.text, 0.185), [root.view, root.hoveredRow], 4.6)
+    // A field's placeholder, such as Edit Tags' "Multiple values", which
+    // tells what saving does: the theme's own placeholder colour, its
+    // inactive text, darkened or lightened where it is under 4.6:1 on the
+    // view, a margin over 4.5:1. #a1a9b1 / #697582 (Breeze Light's own is
+    // 4.2:1 on white).
+    readonly property color placeholderText: root.readableOn(root._inactiveText, [root.view], 4.6)
     // The artist and album cells of the queue. #c2c2c3 / #5a5c5e.
     readonly property color textColumn: ColorUtils.mixColor(root.text, root.view, 0.25)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
