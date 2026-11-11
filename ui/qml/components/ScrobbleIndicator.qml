@@ -2,42 +2,44 @@
 
 import QtQuick 2.15
 import QtQuick.Controls 2.15
-import QtQuick.Shapes 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
-// The status bar's Last.fm slot (#373, #470): a fixed 20 px box, with a
-// few words before it when something needs saying.
-// - Listening: a small Last.fm glyph in a ring whose arc, in the text
-//   colour over a thin quieter track, grows with the listening done
-//   towards the scrobble; its tooltip says how much is left. Both
-//   come from the scrobbler's listened time, which a seek doesn't move
-//   and a pause holds; a new play (a new track, a replay, Repeat One)
-//   starts it over.
+// The status bar's Last.fm slot (#373, #470): the Last.fm glyph, with a
+// short bar beneath it, and a few words before it when something needs
+// saying (#373 H6: a 10 px glyph inside a ring was a smudge at 1x, and
+// its states looked alike).
+// The bar is the glyph's: as wide as it, 2 px tall and 2 px under it, with
+// no trough, no rounded ends and none of the scan bar's colours, so that
+// it reads as part of the glyph and not as a second scan or a download.
+// - Listening: the glyph in the secondary colour, and the bar in the text
+//   colour growing under it with the listening done towards the scrobble;
+//   the tooltip says how much is left. Both come from the scrobbler's
+//   listened time, which a seek doesn't move and a pause holds; a new play
+//   (a new track, a replay, Repeat One) starts it over. Before any of it,
+//   the glyph alone.
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
-//   scrobbled", the empty ring and the glyph in the tertiary colour; the
+//   scrobbled" and the glyph in the tertiary colour, without the bar; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Being sent: the ring closed in the arc's text colour, from the moment
-//   the play reaches its scrobble point, and the glyph at half strength
-//   while the send goes on in the background.
-// - Scrobbled: once Last.fm has accepted it, the closed ring and the glyph
-//   settle in the secondary colour, so that the routine success is no
-//   louder than the status bar's other words (#373 H5: in the text colour
-//   it was the brightest mark on the right, and looked like being sent).
-//   A ring with no gap is the end of the listening ring, apart from one
-//   nearly full by its shape; no fill.
+// - Being sent: the bar full in the text colour, from the moment the play
+//   reaches its scrobble point, and the glyph at half strength while the
+//   send goes on in the background.
+// - Scrobbled: once Last.fm has accepted it, the full bar settles in a
+//   quiet grey under the glyph at full strength, so that the routine
+//   success is no louder than the status bar's other words, and apart from
+//   being sent by both the bar and the glyph.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
-// - Failed: "Scrobble failed", and the closed ring and the glyph in the
+// - Failed: "Scrobble failed", and the glyph and the full bar in the
 //   negative colour: the slot's only colour.
 // - Paused by the user: the glyph struck through, in the tertiary colour,
-//   without the ring.
+//   without the bar.
 // - Otherwise (not eligible, skipped, signed out): nothing.
 // Clicking it pauses or resumes scrobbling; its menu has the settings.
 AbstractButton {
@@ -75,7 +77,7 @@ AbstractButton {
         }
         // Scrobbles wait while Last.fm can't be reached, or holds them
         // back. A scrobble on its way for the first time doesn't wait: the
-        // ring closes at once, and the slot says it waits only if the send
+        // bar fills at once, and the slot says it waits only if the send
         // fails.
         if (root.pendingCount > 0) {
             return "queued"
@@ -100,49 +102,49 @@ AbstractButton {
     readonly property int thresholdSeconds: Math.ceil(Math.max(0, root.thresholdMs) / 1000)
     readonly property int secondsLeft: Math.max(0, root.thresholdSeconds - root.listenedSeconds)
 
-    // The ring around the glyph (#373 H3): a 16 px ring whose 2 px arc of
-    // the listening done covers a 1 px track, which lies along the arc's
-    // inner edge, so that both sit on whole pixels at the top, bottom and
-    // sides. A thick arc over a thin track tells a quarter from a half
-    // from nearly done at 1x, where two strokes of one width did not.
-    // ringRadius is the arc's centre line; ringProgress how much of it is
-    // drawn, 0 to 1. The share moves by whole pixels of the arc too, so a
-    // long scrobble point redraws it more rarely still.
-    readonly property bool ringShown: root.look === "listening" || root.look === "notScrobbled"
-        || root.look === "scrobbled" || root.look === "failed"
-    readonly property int ringSize: Kirigami.Units.iconSizes.small
-    readonly property real ringStroke: 2
-    readonly property real ringTrackStroke: 1
-    readonly property real ringRadius: (root.ringSize - root.ringStroke) / 2
-    readonly property real ringTrackRadius: root.ringRadius - (root.ringStroke - root.ringTrackStroke) / 2
-    readonly property real ringProgress: {
+    // The glyph: 16 px, drawn for 1x on whole pixels, and larger with a
+    // larger font, as the status bar's other glyphs are.
+    readonly property int glyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
+    // The bar under it: the glyph's width, 2 px tall and 2 px below it at
+    // the default font, a little more with a larger one, within the status
+    // bar's height.
+    readonly property int barWidth: root.glyphSize
+    readonly property int barHeight: Math.max(2, Math.round(root.glyphSize / 12))
+    readonly property int barGap: root.barHeight
+    readonly property bool barShown: root.look === "listening" || root.look === "scrobbled"
+        || root.look === "failed"
+    // How much of the bar is drawn, 0 to 1: the listening done, by whole
+    // device pixels of the bar, so a long scrobble point redraws it more
+    // rarely still; full once the play has reached its scrobble point.
+    readonly property real barProgress: {
         if (root.look === "scrobbled" || root.look === "failed") {
             return 1
         }
         if (root.look !== "listening" || root.thresholdSeconds <= 0) {
             return 0
         }
-        const steps = Math.max(1, Math.round(2 * Math.PI * root.ringRadius * Math.max(1, Screen.devicePixelRatio)))
+        const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    // The arc, and the closed ring: the text colour while listening and
-    // sending, the secondary one once scrobbled, and the negative one when
-    // Last.fm refused the scrobble.
-    readonly property color ringColor: {
+    // The bar once scrobbled: opaque, the least of the text colour over the
+    // status bar that is 3.5:1 on it, so that it still reads (WCAG 1.4.11)
+    // and is quieter than the status bar's words. A grey of its own: the
+    // secondary and tertiary text colours are bluish and, in a light
+    // theme, all but the scan bar's fill.
+    readonly property color settledBarColor: ColorUtils.mixColor(root.uiPalette.chrome,
+        root.uiPalette.text,
+        ColorUtils.opacityForContrast(root.uiPalette.text, root.uiPalette.chrome, 0.2, 3.5))
+    // The bar: the text colour while listening and sending, the settled
+    // grey once scrobbled, and the negative colour when Last.fm refused the
+    // scrobble. Never the scan bar's colours.
+    readonly property color barColor: {
         if (root.look === "failed") {
             return root.uiPalette.negative
         }
-        return root.scrobbleAccepted ? root.uiPalette.textSecondary : root.uiPalette.text
+        return root.scrobbleAccepted ? root.settledBarColor : root.uiPalette.text
     }
-    // The ring's track, where the listening is still to come: opaque, the
-    // least of the arc's colour over the status bar that is 3.5:1 on it,
-    // so that the empty ring reads (WCAG 1.4.11) once the 1 px stroke is
-    // antialiased, and stays far quieter than the arc.
-    readonly property color ringTrackColor: ColorUtils.mixColor(root.uiPalette.chrome,
-        root.uiPalette.text,
-        ColorUtils.opacityForContrast(root.uiPalette.text, root.uiPalette.chrome, 0.2, 3.5))
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -198,9 +200,6 @@ AbstractButton {
         }
     }
 
-    // The box the glyph and its ring are drawn in: the ring, with 2 px
-    // around it.
-    readonly property int boxSize: Kirigami.Units.iconSizes.small + 4
     readonly property string glyphSource: {
         switch (root.look) {
         case "queued":
@@ -208,22 +207,13 @@ AbstractButton {
         case "paused":
             return Qt.resolvedUrl("../assets/lastfm-paused.svg")
         default:
-            return root.ringShown
-                ? Qt.resolvedUrl("../assets/lastfm-ring.svg")
-                : Qt.resolvedUrl("../assets/lastfm.svg")
+            return Qt.resolvedUrl("../assets/lastfm.svg")
         }
     }
-    // Inside the ring, a 10 px glyph drawn for 1x with a 1.5 px stroke,
-    // whose ink stays within 5 px of the centre, 1 px clear of the
-    // track's inner edge; the offline glyph is a 14 px one.
-    readonly property int glyphSize: {
-        if (root.ringShown) {
-            return root.ringSize - 6
-        }
-        return root.look === "queued"
-            ? Kirigami.Units.iconSizes.small - 2
-            : Kirigami.Units.iconSizes.small
-    }
+    // The offline glyph is a 14 px one, centred where the Last.fm glyph is.
+    readonly property int drawnGlyphSize: root.look === "queued"
+        ? root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small - 2)
+        : root.glyphSize
     readonly property color glyphColor: {
         switch (root.look) {
         case "failed":
@@ -249,8 +239,10 @@ AbstractButton {
     // with no fade.
     visible: root.occupied
     implicitWidth: leftPadding + slotRow.implicitWidth + rightPadding
-    // 22 px, or a little more than its words at a larger font.
-    implicitHeight: Math.max(22, Math.round(slotLabel.implicitHeight) + 4)
+    // 22 px, or a little more than its words or its glyph and bar at a
+    // larger font.
+    implicitHeight: Math.max(22, Math.round(slotLabel.implicitHeight) + 4,
+        root.glyphSize + root.barGap + root.barHeight)
     leftPadding: root.labelText.length > 0 ? 6 : 3
     rightPadding: 3
     topPadding: 0
@@ -348,64 +340,37 @@ AbstractButton {
                 Accessible.ignored: true
             }
 
-            // The fixed glyph box.
+            // The glyph, and the bar's place under it, which is kept
+            // when there is no bar, so that the glyph never moves.
             Item {
                 objectName: "scrobbleIndicatorBox"
                 anchors.verticalCenter: parent.verticalCenter
-                width: root.boxSize
-                height: root.boxSize
-
-                // The ring: its track, and the listening done on it from
-                // the top, clockwise.
-                Shape {
-                    objectName: "scrobbleIndicatorRing"
-                    anchors.centerIn: parent
-                    width: root.ringSize
-                    height: root.ringSize
-                    visible: root.ringShown
-                    preferredRendererType: Shape.CurveRenderer
-
-                    ShapePath {
-                        objectName: "scrobbleIndicatorRingTrack"
-                        strokeColor: root.ringProgress < 1 ? root.ringTrackColor : "transparent"
-                        strokeWidth: root.ringTrackStroke
-                        fillColor: "transparent"
-                        PathAngleArc {
-                            centerX: root.ringSize / 2
-                            centerY: root.ringSize / 2
-                            radiusX: root.ringTrackRadius
-                            radiusY: root.ringTrackRadius
-                            startAngle: 0
-                            sweepAngle: 360
-                        }
-                    }
-                    ShapePath {
-                        objectName: "scrobbleIndicatorRingArc"
-                        strokeColor: root.ringProgress > 0 ? root.ringColor : "transparent"
-                        strokeWidth: root.ringStroke
-                        fillColor: "transparent"
-                        capStyle: ShapePath.FlatCap
-                        PathAngleArc {
-                            centerX: root.ringSize / 2
-                            centerY: root.ringSize / 2
-                            radiusX: root.ringRadius
-                            radiusY: root.ringRadius
-                            startAngle: -90
-                            sweepAngle: 360 * root.ringProgress
-                        }
-                    }
-                }
+                width: root.glyphSize
+                height: root.glyphSize + root.barGap + root.barHeight
 
                 Kirigami.Icon {
                     objectName: "scrobbleIndicatorGlyph"
-                    anchors.centerIn: parent
-                    width: root.glyphSize
+                    x: Math.round((root.glyphSize - width) / 2)
+                    y: Math.round((root.glyphSize - height) / 2)
+                    width: root.drawnGlyphSize
                     height: width
                     source: root.glyphSource
                     color: root.glyphColor
                     // Half strength while the scrobble is being sent.
                     opacity: root.look === "scrobbled" && !root.scrobbleAccepted ? 0.5 : 1
                     isMask: true
+                }
+
+                // The listening done, from the left; nothing drawn where it
+                // is still to come.
+                Rectangle {
+                    objectName: "scrobbleIndicatorBar"
+                    x: 0
+                    y: root.glyphSize + root.barGap
+                    width: root.barWidth * root.barProgress
+                    height: root.barHeight
+                    visible: root.barShown && width > 0
+                    color: root.barColor
                 }
             }
         }

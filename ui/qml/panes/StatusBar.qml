@@ -30,8 +30,8 @@ ToolBar {
     // The Last.fm slot asked for the Last.fm preferences.
     signal lastFmSettingsRequested()
 
-    // The narrow window's status bar: the format only, and the scan
-    // without its folder and bar.
+    // The narrow window's status bar: the scan without its folder and bar.
+    // The format group goes by the room it has instead.
     readonly property bool narrow: root.width < 1200
 
     // The bar under its 1 px seam: 24 px, or the small text's line and 4 px
@@ -77,8 +77,8 @@ ToolBar {
         const v = Number(root.uiBridge.currentTrackCurrentBitrateKbps)
         return isFinite(v) && v > 0 ? Math.round(v) : 0
     }
-    // "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps"; only "FLAC" when
-    // narrow. Nothing while stopped.
+    // "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps", of which the format
+    // group shows as many as fit. Nothing while stopped.
     readonly property var formatParts: {
         if (root.playbackState === "Stopped") {
             return []
@@ -86,9 +86,6 @@ ToolBar {
         const parts = []
         if (root.formatLabel.length > 0) {
             parts.push(root.formatLabel)
-        }
-        if (root.narrow) {
-            return parts
         }
         if (root.bitDepthSampleRateText.length > 0) {
             parts.push(root.bitDepthSampleRateText)
@@ -177,7 +174,7 @@ ToolBar {
         StatusLabel {
             objectName: "statusBarBackendStoppedLabel"
             visible: root.backendStopped
-            text: I18n.i18nc("@info:status", "Backend stopped")
+            text: I18n.i18nc("@info:status", "Playback engine stopped")
             color: root.uiPalette.negative
             font.weight: Font.DemiBold
         }
@@ -225,7 +222,8 @@ ToolBar {
             }
         }
 
-        // Repeat, in words, and shuffle; nothing when both are off.
+        // Repeat and shuffle, each a glyph and its menu item's words;
+        // nothing when both are off.
         Row {
             objectName: "statusBarRepeatShuffle"
             visible: root.showTrackSections && (root.uiBridge.repeatMode === 1
@@ -252,41 +250,75 @@ ToolBar {
                 }
             }
 
-            StatusGlyph {
-                objectName: "statusBarShuffleGlyph"
-                anchors.verticalCenter: parent.verticalCenter
+            Row {
+                objectName: "statusBarShuffle"
                 visible: root.uiBridge.shuffleEnabled === true
-                source: "media-playlist-shuffle"
-                Accessible.role: Accessible.StaticText
-                Accessible.name: I18n.i18nc("@info:status", "Shuffle On")
+                spacing: 6
+                anchors.verticalCenter: parent.verticalCenter
 
-                HoverHandler {
-                    id: shuffleHover
+                StatusGlyph {
+                    objectName: "statusBarShuffleGlyph"
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: "media-playlist-shuffle"
                 }
-                ToolTip.visible: shuffleHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: I18n.i18nc("@info:tooltip", "Shuffle On")
+
+                StatusLabel {
+                    objectName: "statusBarShuffleLabel"
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: I18n.i18nc("@info:status", "Shuffle")
+                }
             }
         }
 
         // The format group: "FLAC · 16-bit / 44.1 kHz · Stereo · 557 kbps".
-        // It fills the room left, and is cut at its end when there is too
-        // little.
+        // It fills the room left, and shows as many of its parts as fit
+        // there whole, dropping them from the end (#373 H6: it went by the
+        // window's width, and showed "FLAC" alone with most of the bar
+        // empty). Its width is the layout's, never its text's, so what it
+        // shows cannot move the layout.
         Item {
+            id: formatGroup
             objectName: "statusBarFormat"
             Layout.fillWidth: true
             Layout.minimumWidth: 0
             Layout.fillHeight: true
             clip: formatRow.implicitWidth > width
-            readonly property string text: root.formatParts.join(" · ")
+            // How many of the parts fit: each one's width, after the first
+            // with a dot and its 6 px either side.
+            readonly property int shownCount: {
+                const parts = root.formatParts
+                const dot = Math.ceil(formatMetrics.advanceWidth("·")) + 12
+                let used = 0
+                for (let i = 0; i < parts.length; ++i) {
+                    used += Math.ceil(formatMetrics.advanceWidth(parts[i])) + (i > 0 ? dot : 0)
+                    if (used > formatGroup.width) {
+                        return i
+                    }
+                }
+                return parts.length
+            }
+            readonly property var shownParts: root.formatParts.slice(0, formatGroup.shownCount)
+            readonly property string text: formatGroup.shownParts.join(" · ")
+
+            // The status bar's 12 px label font, with its tabular figures.
+            FontMetrics {
+                id: formatMetrics
+                font: formatProbe.font
+            }
+            StatusLabel {
+                id: formatProbe
+                visible: false
+                Accessible.ignored: true
+            }
 
             Row {
                 id: formatRow
+                objectName: "statusBarFormatRow"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.showTrackSections
 
                 Repeater {
-                    model: root.formatParts
+                    model: formatGroup.shownParts
 
                     delegate: Row {
                         required property int index
