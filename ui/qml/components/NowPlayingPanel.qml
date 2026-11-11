@@ -21,13 +21,18 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   lines beside it, or under it when there is no room beside it, then
 //   12 px before the seam. Under it, the title and the artist wrap onto a
 //   second line rather than be cut off, and the lines are 4 px apart.
+//   A sidebar too short for the wide layout to leave the library about six
+//   rows, as with a large font or a short window, takes it too (#373 H6).
 // - Nothing loaded: the same layout, so nothing moves on the first Play
-//   (#373 H5): the cover's square on the view colour with Breeze's album
-//   cover mark, a 1 px seam on its edges that face the panel, and "Nothing
-//   playing" in the title's line, in the secondary colour.
-// - A track without a cover or without tags keeps the layout: the tile
-//   on the view colour mixed 6% toward the text, with the same mark, and a
-//   line of space for each line it has no text for.
+//   (#373 H5): the cover's square, and "Nothing playing" in the title's
+//   line, in the secondary colour, with a line of space for each line
+//   under it.
+// - A track without a cover keeps the cover's square. The square of a
+//   track without a cover and of nothing playing is one placeholder (#373
+//   H6): the view colour, with no frame, and a quiet disc mark at its
+//   centre, so it reads as the cover's place rather than as a broken image.
+// - A line a track has no text for, as for a file without tags, takes no
+//   room (#373 H6): the lines under it move up.
 //
 // The title is a step over the rest: DemiBold, larger; the artist and the
 // album are in the text colour, and the details in the tertiary one.
@@ -48,6 +53,21 @@ Item {
     // 1000 px window and the 408 px of a 1600 px one.
     readonly property real narrowWidth: Math.max(320, Math.round(160 * root.uiPalette.fontScale))
     readonly property bool narrow: root.width < root.narrowWidth
+    // The sidebar's height, and what of it the library under the panel
+    // needs: its header and about six rows (SidebarPane). Where the wide
+    // layout would leave it less, as with a large font or in a short
+    // window, the panel takes the narrow one (#373 H6: at 24 pt in a
+    // 1000 px high window the library showed three rows). The wide
+    // layout's height is from the font and the width alone, all its lines
+    // counted, so the switch does not change what it is decided by, and
+    // a track does not switch it.
+    property real availableHeight: 0
+    property real libraryReserve: 0
+    readonly property real wideReservedHeight: root.width + root.textInset
+        + wideTitleProbe.implicitHeight + 2 + wideLineProbe.implicitHeight + 2
+        + wideDetailsProbe.implicitHeight + root.regionGap + root.seamHeight
+    readonly property bool shortHeight: root.availableHeight > 0
+        && root.availableHeight - root.wideReservedHeight < root.libraryReserve
     readonly property int textInset: 12
     readonly property int narrowCoverSize: 96
 
@@ -61,7 +81,7 @@ Item {
     }
     // Nothing loaded: the layout stays, with the idle placeholder.
     readonly property bool idle: !root.hasTrack
-    readonly property string layoutMode: root.narrow ? "narrow" : "wide"
+    readonly property string layoutMode: root.narrow || root.shortHeight ? "narrow" : "wide"
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
 
     readonly property string titleText: {
@@ -706,6 +726,30 @@ Item {
         font: root.uiPalette.baseFont
     }
 
+    // A line of the wide layout's title, of its artist and album, and of
+    // its details, as tall as their text lays them out, whatever the track:
+    // the wide layout's height, which wideReservedHeight counts.
+    component LineProbe: Text {
+        visible: false
+        text: "X"
+        textFormat: Text.PlainText
+        font.family: root.uiPalette.baseFont.family
+        Accessible.ignored: true
+    }
+    LineProbe {
+        id: wideTitleProbe
+        font.pointSize: root.titlePointSize
+        font.weight: Font.DemiBold
+    }
+    LineProbe {
+        id: wideLineProbe
+        font.pointSize: root.uiPalette.basePointSize
+    }
+    LineProbe {
+        id: wideDetailsProbe
+        font.pointSize: root.uiPalette.smallPointSize
+    }
+
     // Wide: the artist and the album on a line each where "Artist — Album"
     // would be cut off on one, 4 px apart, so the album shows (#373 H3).
     // With only one of them there is nothing to split.
@@ -726,9 +770,13 @@ Item {
     readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
         root.uiPalette.scaledSize(root.layoutMode === "narrow"
             ? Kirigami.Units.iconSizes.medium : Kirigami.Units.iconSizes.huge)) / 2)
-    // The tile of a track without a cover: the view colour, 6% toward the
-    // text, so it reads as the cover's place rather than as a void.
-    readonly property color noCoverColor: ColorUtils.mixColor(root.uiPalette.view, root.uiPalette.text, 0.06)
+    // The tile of a track without a cover and of nothing playing: the
+    // sidebar's view colour, as one surface with it (#373 H6: a lighter
+    // tile read as a broken image), and its mark, the tertiary text colour
+    // at 38% on it, quiet.
+    readonly property color placeholderColor: root.uiPalette.view
+    readonly property color placeholderMarkColor: ColorUtils.mixColor(root.uiPalette.view,
+                                                                      root.uiPalette.textTertiary, 0.38)
 
     // The block follows its text: in narrow, at least the cover's height,
     // and more when the lines need it.
@@ -794,6 +842,10 @@ Item {
         readonly property var features: root.tabularLines[line.lineKey] === true
             ? root.uiPalette.tabularFigures : ({})
         property color color: root.uiPalette.text
+        // Whether the layout shows the line, which then takes no room when
+        // a track has no text for it.
+        property bool shownLine: true
+        readonly property bool collapsed: !root.idle && line.text.length === 0
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
@@ -915,10 +967,12 @@ Item {
         }
 
         Layout.fillWidth: true
-        // An empty line keeps its place, a line of the font's height, so the
-        // text block, and the library under it, stay where they are for a
-        // track with tags missing (#373 H1).
+        // A line of the font's height. While nothing plays, the empty lines
+        // keep their place, so the first Play moves nothing (#373 H5); a
+        // track's empty line takes none, rather than leave a blank line in
+        // the block (#373 H6).
         implicitHeight: stillText.implicitHeight
+        visible: line.shownLine && !line.collapsed
 
         FontMetrics {
             id: metrics
@@ -1051,11 +1105,9 @@ Item {
         height: width
         uiBridge: root.uiBridge
         idle: root.idle
-        // Nothing playing: the sidebar's view colour; no cover: a step off
-        // it. The mark in the tertiary text colour on both.
-        idleColor: root.uiPalette.view
-        placeholderColor: root.noCoverColor
-        placeholderGlyphColor: root.uiPalette.textTertiary
+        // Nothing playing and no cover: one placeholder, on the sidebar.
+        placeholderColor: root.placeholderColor
+        placeholderGlyphColor: root.placeholderMarkColor
         placeholderGlyphSize: root.coverMarkSize
         hoverVeilColor: root.uiPalette.hover
         focusRingColor: root.uiPalette.focusRing
@@ -1068,29 +1120,6 @@ Item {
         outgoingSlots: root.maxOutgoingLayers
         outgoingCovers: root.outgoing !== null ? root.outgoing.covers : []
         outgoingLevel: root.coversOutLevel
-
-        // Nothing playing: a 1 px seam on the tile's edges that face the
-        // panel, where its square would otherwise not show: its foot, and
-        // in narrow its right edge. The others are the window's edge and
-        // the seams around the sidebar.
-        Rectangle {
-            objectName: "nowPlayingIdleFootSeam"
-            visible: root.idle
-            x: 0
-            y: parent.height - height
-            width: parent.width
-            height: root.seamHeight
-            color: root.uiPalette.seam
-        }
-        Rectangle {
-            objectName: "nowPlayingIdleSideSeam"
-            visible: root.idle && root.layoutMode === "narrow"
-            x: parent.width - width
-            y: 0
-            width: root.seamHeight
-            height: parent.height
-            color: root.uiPalette.seam
-        }
     }
 
     // The playing track's lines, each of which fades on its own over a
@@ -1143,21 +1172,21 @@ Item {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
-                visible: !root.wideArtistAlbumSplit
+                shownLine: !root.wideArtistAlbumSplit
                 text: root.trackLines.artistAlbum
             }
             FadingLine {
                 id: wideArtist
                 lineKey: "artist"
                 name: "WideArtist"
-                visible: root.wideArtistAlbumSplit
+                shownLine: root.wideArtistAlbumSplit
                 text: root.trackLines.artist
             }
             FadingLine {
                 id: wideAlbum
                 lineKey: "album"
                 name: "WideAlbum"
-                visible: root.wideArtistAlbumSplit
+                shownLine: root.wideArtistAlbumSplit
                 text: root.trackLines.album
                 // With the column's 2 px spacing, 4 px under the artist.
                 Layout.topMargin: root.wideArtistAlbumGap - wideColumn.spacing
