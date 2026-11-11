@@ -560,7 +560,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(sameColor(colorOf(spectrogram, "meterSeam"), fromHex(QStringLiteral("#0a0318"))));
     // On the colour map's black floor, what is drawn is neutral, not tinted,
     // except the level meter, which is in the colour map's violet (#373 H5).
-    for (const char *token : {"plotPlate", "plotText", "plotTextSecondary", "plotLaneSeam",
+    for (const char *token : {"plotPlate", "plotStrip", "plotText", "plotTextSecondary", "plotLaneSeam",
                               "plotTick"}) {
         const QColor color = colorOf(spectrogram, token);
         QVERIFY2(color.red() == color.green() && color.green() == color.blue(),
@@ -573,6 +573,12 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
             < contrastRatio(colorOf(spectrogram, "plotText"), colorOf(spectrogram, "plotBg")));
+    // A viewer's title strip is opaque (#373 H5: the playhead showed through
+    // it): the plate on the floor, and the view on the waveform.
+    QCOMPARE(colorOf(spectrogram, "plotStrip").alphaF(), 1.0f);
+    QVERIFY(channelDistance(colorOf(spectrogram, "plotStrip"),
+                            drawnOver(colorOf(spectrogram, "plotPlate"), colorOf(spectrogram, "plotBg")))
+            <= 1);
 
     // The waveform's set is the view's.
     const QColor view = colorOf(tokens, "view");
@@ -584,6 +590,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(waveform, "plotLaneSeam"), colorOf(tokens, "hairline")), qPrintable(colorOf(waveform, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "hairline").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(waveform, "plotLink"), colorOf(tokens, "link")), qPrintable(colorOf(waveform, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "link").name(QColor::HexArgb)));
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
+    QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
     QVERIFY(channelDistance(colorOf(waveform, "meterFill"),
                             fromHex(dark ? QStringLiteral("#7d8790") : QStringLiteral("#5b6670")))

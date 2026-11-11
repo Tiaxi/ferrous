@@ -172,6 +172,9 @@ QtObject {
         // A label plate, with a 1 px edge outside it.
         required property color plotPlate
         required property color plotPlateEdge
+        // A viewer's title strip over the plot: opaque, so nothing under it,
+        // such as the playhead or the plot itself, shows through.
+        required property color plotStrip
         required property color plotText
         required property color plotTextSecondary
         // Text.Outline around scale labels.
@@ -207,6 +210,8 @@ QtObject {
         // A neutral dark lifted from the floor.
         plotPlate: Qt.rgba(20 / 255, 20 / 255, 20 / 255, 0.88)
         plotPlateEdge: Qt.rgba(1, 1, 1, 0.14)
+        // The plate over the floor, solid: #121212.
+        plotStrip: Qt.tint(spectrogramColors.plotBg, spectrogramColors.plotPlate)
         plotText: "#ececec"
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
@@ -237,6 +242,7 @@ QtObject {
         plotBg: root.view
         plotPlate: ColorUtils.withAlpha(root.view, 0.94)
         plotPlateEdge: root.seam
+        plotStrip: root.view
         plotText: root.text
         plotTextSecondary: root.textSecondary
         plotOutline: root.view

@@ -25,6 +25,7 @@ private slots:
     void visualizationModeSwitchShowsBeforeAnyAudio();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
+    void fullscreenStripHidesWhatTheViewDrawsUnderIt();
     void fullscreenViewersGiveTheViewTheWholeScreen();
     void viewerStripHoldsItsTextAtALargeFont_data();
     void viewerStripHoldsItsTextAtALargeFont();
@@ -1169,14 +1170,15 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QCOMPARE(fullscreen->title(), shown.title);
         QCOMPARE(window->title(), mainTitle);
 
-        // A 32 px band on the plot's plate colour with its edge under it,
-        // over the top of the view.
+        // A 32 px band on the plot's strip colour, opaque, with its edge
+        // under it, over the top of the view.
         QObject *plotColors = qvariant_cast<QObject *>(palette->property(shown.plotColors));
         QVERIFY(plotColors != nullptr);
         QQuickItem *strip = visibleItemNamed(fullscreen, shown.stripName);
         QVERIFY2(strip != nullptr, name.constData());
         QTRY_COMPARE(sceneRectOf(strip), QRectF(0, 0, fullscreen->width(), 33));
-        QCOMPARE(colorOf(strip, "color"), colorOf(plotColors, "plotPlate"));
+        QCOMPARE(colorOf(strip, "color"), colorOf(plotColors, "plotStrip"));
+        QCOMPARE(qAlpha(colorOf(strip, "color")), 255);
         QQuickItem *hairline = itemNamed(strip, QStringLiteral("viewerStripHairline"));
         QVERIFY(hairline != nullptr);
         QCOMPARE(sceneRectOf(hairline), QRectF(0, 32, fullscreen->width(), 1));
@@ -1758,6 +1760,77 @@ void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(close));
         QTRY_VERIFY2(!viewer->property(shown.openProperty).toBool(), name.constData());
         QTRY_COMPARE(window->title(), mainTitle);
+    }
+}
+
+// The title strip over the whole screen is opaque (#373 H5: the playhead
+// and the spectrogram showed through it): a line the view draws the whole
+// height, as the playhead and the crosshair are, ends at the strip's lower
+// edge. The strip still draws over the view, which keeps its size.
+void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && palette != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("viewerFullscreenMode", 1);
+    for (const int mode : {0, 1}) {
+        const QByteArray where = mode == 0 ? "spectrogram" : "waveform";
+        viewer->setProperty("visualizationMode", mode);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QQuickWindow *fullscreen = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+        QVERIFY(fullscreen != nullptr);
+        QVERIFY(QTest::qWaitForWindowActive(fullscreen));
+        QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
+        auto *surface = window->findChild<QQuickItem *>(QStringLiteral("visualizationSurface"));
+        QVERIFY(strip != nullptr && surface != nullptr);
+        QTRY_COMPARE(surface->window(), fullscreen);
+        QQuickItem *host = surface->parentItem();
+        QTRY_COMPARE(strip->opacity(), 1.0);
+        // The view under the strip, the whole window.
+        QTRY_COMPARE(sceneRectOf(host), QRectF(0, 0, fullscreen->width(), fullscreen->height()));
+        QObject *plotColors = qvariant_cast<QObject *>(palette->property(mode == 0 ? "spectrogramPlot"
+                                                                                      : "waveformPlot"));
+        const QColor stripColor = plotColors->property("plotStrip").value<QColor>();
+        QCOMPARE(stripColor.alphaF(), 1.0f);
+
+        // A line in the view, as the playhead, from its top to its bottom,
+        // in the middle, clear of the strip's text and buttons.
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nRectangle { width: 1; color: \"#ff00ff\" }", QUrl());
+        std::unique_ptr<QQuickItem> line(qobject_cast<QQuickItem *>(component.create()));
+        QVERIFY2(line != nullptr, qPrintable(component.errorString()));
+        line->setParentItem(host);
+        line->setZ(100);
+        line->setX(std::round(host->width() / 2));
+        line->setHeight(host->height());
+        QTRY_VERIFY(fullscreen->isExposed());
+        const QImage image = fullscreen->grabWindow();
+        QVERIFY(!image.isNull());
+        const double scale = double(image.width()) / fullscreen->width();
+        const auto pixel = [&](double x, double y) {
+            return image.pixelColor(int((x + 0.5) * scale), int((y + 0.5) * scale));
+        };
+        const double x = line->x();
+        // Under the strip: its colour, as beside the line.
+        for (int y = 1; y < 32; y += 3) {
+            const QColor at = pixel(x, y);
+            QVERIFY2(std::abs(at.red() - stripColor.red()) <= 1 && std::abs(at.green() - stripColor.green()) <= 1
+                         && std::abs(at.blue() - stripColor.blue()) <= 1,
+                     qPrintable(QStringLiteral("%1: %2 at y %3, the strip %4")
+                                    .arg(QLatin1String(where), at.name(), QString::number(y), stripColor.name())));
+        }
+        // Below it, the line shows.
+        QCOMPARE(pixel(x, 33 + 20).name(), QStringLiteral("#ff00ff"));
+        line.reset();
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
     }
 }
 
