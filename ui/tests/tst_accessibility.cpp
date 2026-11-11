@@ -3695,18 +3695,19 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     QVERIFY(!meter->isVisible());
     QCOMPARE(surface->property("plotWidth").toReal(), layer->width());
     QVERIFY(itemsNamed(layer, QStringLiteral("levelMeterLane")).isEmpty());
-    // On: a 10 px column at the end of each lane, also with nothing playing.
+    // On: its column at the end of each lane, also with nothing playing.
     QVERIFY(bridge->setProperty("showLevelMeter", true));
     QTRY_VERIFY(meter->isVisible());
-    QCOMPARE(meter->width(), 10.0);
+    const double column = LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth + meter->edgeGap();
+    QCOMPARE(meter->width(), column);
     QCOMPARE(meter->laneCount(), 2);
     QVERIFY(!meter->active());
-    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     // Play and stop leave the plot's width alone.
     for (const QString &state : {QStringLiteral("Playing"), QStringLiteral("Paused"), QStringLiteral("Stopped")}) {
         QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
         QVERIFY(bridge->setProperty("playbackState", state));
-        QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+        QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     }
     // Each lane's column: its channel and level for assistive technology,
     // and the exact levels in its tooltip.
@@ -3761,7 +3762,7 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     };
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Paused")));
     QTRY_VERIFY(!meter->active());
-    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - 10.0);
+    QCOMPARE(surface->property("plotWidth").toReal(), layer->width() - column);
     QVERIFY(meter->isVisible());
     auto [lamp, gap] = lampRow();
     QVERIFY2(near(lamp, trough), qPrintable(lamp.name() + QStringLiteral(" vs ") + trough.name()));

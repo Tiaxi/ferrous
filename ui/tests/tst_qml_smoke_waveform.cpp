@@ -590,13 +590,18 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     const double originalHeight = spectrogram->height();
     bridge->setProperty("showLevelMeter", true);
     QTRY_VERIFY(meter->isVisible());
-    // A 10 px column at the right end of the lanes, as tall as the pane.
-    QCOMPARE(meter->width(), 10.0);
+    // A column at the right end of the lanes, as tall as the pane: the
+    // seam, the track and the plot's floor out of the queue scrollbar's
+    // lane.
+    const double column = LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth
+        + meter->edgeGap();
+    QVERIFY(column > LevelMeterItem::kColumnWidth);
+    QCOMPARE(meter->width(), column);
     QCOMPARE(meter->height(), surface->height());
-    QCOMPARE(meter->mapToItem(surface, QPointF()).x(), surface->width() - 10.0);
+    QCOMPARE(meter->mapToItem(surface, QPointF()).x(), surface->width() - column);
     QCOMPARE(spectrogram->height(), originalHeight);
-    QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - 10.0);
-    QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - 10.0);
+    QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - column);
+    QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - column);
     QCOMPARE(queue->height(), 580.0);
     auto *originalParent = surface->parentItem();
     for (int mode : {0, 1}) {
@@ -709,7 +714,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
                 QTRY_COMPARE(meter->height(), surface->height());
                 QTRY_COMPARE(spectrogram->height(), surface->height());
                 QTRY_COMPARE(spectrogram->property("plotWidth").toReal(),
-                             surface->width() - (enabled ? 10.0 : 0.0));
+                             surface->width() - (enabled ? column : 0.0));
                 QCOMPARE(meter->sourcePath().isEmpty(), !enabled);
             }
             controller->setProperty("spectrogramViewerOpen", false);
