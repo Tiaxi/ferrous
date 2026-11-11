@@ -41,6 +41,10 @@ QtObject {
     property string pendingRevealKey: ""
     property string pendingRevealPurpose: ""
     property string pendingExpandFitKey: ""
+    // A row the user expanded whose children the backend had not sent:
+    // it sends a collapsed row's children only once asked, with a later
+    // tree, and they open then as the toggle would have.
+    property string pendingOpenKey: ""
     property int pendingExpandFitAttempts: 0
     property bool restoredViewStateApplied: false
     property string pendingRestoredSelectionKey: ""
@@ -350,22 +354,14 @@ QtObject {
             root.pendingExpandFitAttempts = 0
         }
         root.pendingAnchorValid = false
-        // The view slides its rows for this change alone, which it lays
-        // out here rather than with the next frame.
-        const animates = !!root.view && root.view.animatesToggle !== undefined
-            && typeof root.view.forceLayout === "function"
-        if (animates) {
-            root.view.animatesToggle = true
-        }
+        root.pendingOpenKey = ""
         const countBefore = root.libraryModel.count
-        root.libraryModel.toggleKey(key)
-        if (animates) {
-            root.view.forceLayout()
-            // The children fold with the rows below, from the same frame.
-            if (typeof root.view.startFold === "function") {
-                root.view.startFold(index, root.libraryModel.count - countBefore)
-            }
-            root.view.animatesToggle = false
+        root.openToggledRows(index, function() {
+            root.libraryModel.toggleKey(key)
+            return root.libraryModel.count - countBefore
+        })
+        if (expanding && root.libraryModel.count === countBefore) {
+            root.pendingOpenKey = key
         }
         // Rows a collapse hides leave the selection.
         root.syncSelectionToVisibleRows()
@@ -374,6 +370,67 @@ QtObject {
                 root.applyPendingExpansionFit()
             })
         }
+    }
+
+    // Applies `change`, which returns how many rows it inserted (or, below
+    // zero, removed) under the row at `index`, and lets the view slide its
+    // rows for this change alone, which it lays out here rather than with
+    // the next frame.
+    function openToggledRows(index, change) {
+        const animates = !!root.view && root.view.animatesToggle !== undefined
+            && typeof root.view.forceLayout === "function"
+        if (animates) {
+            root.view.animatesToggle = true
+        }
+        const delta = change()
+        if (animates) {
+            root.view.forceLayout()
+            // The children fold with the rows below, from the same frame.
+            if (typeof root.view.startFold === "function") {
+                root.view.startFold(index, delta)
+            }
+            root.view.animatesToggle = false
+        }
+    }
+
+    // The tree just applied may hold the children of the row expanded while
+    // they were not loaded: they open as the toggle would have, before the
+    // view lays them out.
+    function openArrivedChildren() {
+        const key = root.pendingOpenKey
+        if (key.length === 0) {
+            return
+        }
+        const index = root.libraryModel.indexForSelectionKey(key)
+        const rowMap = index >= 0 ? (root.libraryModel.rowDataForRow(index) || ({})) : ({})
+        if (!rowMap.expanded) {
+            root.pendingOpenKey = ""
+            return
+        }
+        const children = root.lastDescendantIndex(index, rowMap) - index
+        if (children <= 0) {
+            // A tree the backend sent before it was asked.
+            return
+        }
+        root.pendingOpenKey = ""
+        root.openToggledRows(index, function() {
+            return children
+        })
+    }
+
+    // The last row under the row at `rowIndex`, or the row itself.
+    function lastDescendantIndex(rowIndex, rowMap) {
+        const baseDepth = rowMap.depth !== undefined ? rowMap.depth : 0
+        let last = rowIndex
+        for (let i = rowIndex + 1; i < root.libraryModel.count; ++i) {
+            const descendant = root.libraryModel.rowDataForRow(i) || ({})
+            const descendantDepth = descendant.depth !== undefined ? descendant.depth : 0
+            if (descendantDepth <= baseDepth) {
+                break
+            }
+            last = i
+        }
+        return last
     }
 
     function captureViewAnchor() {
@@ -470,16 +527,7 @@ QtObject {
         }
 
         const rowHeight = root.rowHeight()
-        const baseDepth = rowMap.depth !== undefined ? rowMap.depth : 0
-        let lastDescendantIndex = rowIndex
-        for (let i = rowIndex + 1; i < root.libraryModel.count; ++i) {
-            const descendant = root.libraryModel.rowDataForRow(i) || ({})
-            const descendantDepth = descendant.depth !== undefined ? descendant.depth : 0
-            if (descendantDepth <= baseDepth) {
-                break
-            }
-            lastDescendantIndex = i
-        }
+        const lastDescendantIndex = root.lastDescendantIndex(rowIndex, rowMap)
 
         if ((rowMap.count || 0) > 0 && lastDescendantIndex === rowIndex) {
             return
@@ -510,6 +558,7 @@ QtObject {
         }
         root.lastAppliedVersion = root.pendingVersion
         root.pendingVersion = -1
+        root.openArrivedChildren()
         root.syncSelectionToVisibleRows()
         if (root.pendingAnchorValid) {
             if (root.pendingExpandFitKey.length === 0) {

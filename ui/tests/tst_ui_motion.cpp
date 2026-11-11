@@ -215,8 +215,10 @@ const QString kTrackA2 = QStringLiteral("/music/Artist A/Album A/02.flac");
 const QString kTrackB1 = QStringLiteral("/music/Artist A/Album B/01.flac");
 
 // An artist with two albums: Album A of two tracks, Album B of one, in the
-// bridge's tree format.
-QByteArray libraryTree() {
+// bridge's tree format. Without `albumATracks`, Album A's tracks are left
+// out, as the backend leaves out the children of a row it has not been
+// told is expanded.
+QByteArray libraryTree(bool albumATracks = true) {
     struct Row {
         quint8 rowType;
         quint16 depth;
@@ -236,9 +238,15 @@ QByteArray libraryTree() {
         {2, 1, 0, 1, 2007, QStringLiteral("Album B"), kAlbumBKey, QStringLiteral("/music/Artist A/Album B"), {}},
         {4, 2, 1, 0, 0, QStringLiteral("Third"), QStringLiteral("track|") + kTrackB1, kTrackB1, kTrackB1},
     };
-    QByteArray out;
-    appendLe<quint32>(out, static_cast<quint32>(rows.size()));
+    QList<Row> sent;
     for (const Row &row : rows) {
+        if (albumATracks || !row.trackPath.startsWith(QStringLiteral("/music/Artist A/Album A/"))) {
+            sent.push_back(row);
+        }
+    }
+    QByteArray out;
+    appendLe<quint32>(out, static_cast<quint32>(sent.size()));
+    for (const Row &row : sent) {
         out.append(static_cast<char>(row.rowType));
         appendLe<quint16>(out, row.depth);
         appendLe<qint32>(out, -1);
@@ -996,6 +1004,7 @@ private slots:
     void nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong();
     void nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt();
     void treeToggleOpensDownwardAndKeepsTheRowPut();
+    void treeToggleOpensChildrenThatArriveLater();
     void treeToggleIsInstantWithAnimationsOff();
     void treeChangesOtherThanAToggleAreInstant();
     void queueRowsADragDisplacesSlide();
@@ -3877,6 +3886,87 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
              qPrintable(QStringLiteral("collapse %1 ms, expand %2 ms").arg(collapseMs).arg(expandMs)));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
+}
+
+// The backend sends a collapsed row's children only once the row is
+// expanded, with a later tree: they open then as a toggle's, Album B
+// sliding down from where it was and uncovering them, not at once (#373
+// H10: in the app, expanding was instant while collapsing slid). A tree
+// without them, sent before the backend was asked, moves nothing.
+void UiMotionTest::treeToggleOpensChildrenThatArriveLater() {
+    LibraryTreeModel libraryModel;
+    libraryModel.setExpandedKeys({kArtistKey});
+    libraryModel.setLibraryTreeFromBinary(libraryTree(false));
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QQuickItem *view = named(window, "libraryView");
+    QVERIFY(QTest::qWaitFor([&]() { return view->property("count").toInt() == 3; }));
+    QObject *controller = qvariant_cast<QObject *>(named(window, "libraryPane")->property("controller"));
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    QQuickItem *albumA = libraryRowWithKey(window, kAlbumAKey);
+    QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
+    const double rowHeight = view->property("rowHeight").toDouble();
+    const double albumAY = albumA->y();
+    QCOMPARE(albumB->y(), 2 * rowHeight);
+    const auto shown = [](QQuickItem *row) {
+        auto *clip = row->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
+        return clip != nullptr && clip->isVisible() ? clip->height() : 0.0;
+    };
+    // A tree as the bridge delivers it.
+    const auto applyTree = [&](int version, bool albumATracks) {
+        return QMetaObject::invokeMethod(controller, "requestTreeApply", Q_ARG(QVariant, version),
+                                         Q_ARG(QVariant, QVariant(libraryTree(albumATracks))));
+    };
+
+    SteppedAnimationDriver driver;
+    QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
+    // Nothing to open yet.
+    QCOMPARE(view->property("count").toInt(), 3);
+    QVERIFY(!view->property("folding").toBool());
+    QCOMPARE(albumB->y(), 2 * rowHeight);
+
+    // A tree from before the backend was asked: still nothing.
+    QVERIFY(applyTree(2, false));
+    QCOMPARE(view->property("count").toInt(), 3);
+    QVERIFY(!view->property("folding").toBool());
+
+    // The children come: in place at once, under Album B, which starts
+    // where it was.
+    QVERIFY(applyTree(3, true));
+    QCOMPARE(view->property("count").toInt(), 5);
+    QCOMPARE(albumA->y(), albumAY);
+    QQuickItem *firstChild = libraryRowWithPath(window, kTrackA1);
+    QQuickItem *secondChild = libraryRowWithPath(window, kTrackA2);
+    QVERIFY(firstChild != nullptr && secondChild != nullptr);
+    QCOMPARE(firstChild->y(), 2 * rowHeight);
+    QCOMPARE(albumB->y(), 2 * rowHeight);
+    QVERIFY(view->property("folding").toBool());
+    QCOMPARE(shown(firstChild), 0.0);
+    QCOMPARE(shown(secondChild), 0.0);
+    // Then as a toggle with its children loaded: over longDuration, the
+    // children never under Album B.
+    int expandMs = 0;
+    bool halfShown = false;
+    while (albumB->y() < 4 * rowHeight || view->property("folding").toBool()) {
+        QVERIFY(driver.step(16));
+        expandMs += 16;
+        QVERIFY2(expandMs <= units->longDuration() + 48, qPrintable(QString::number(albumB->y())));
+        for (QQuickItem *child : {firstChild, secondChild}) {
+            QVERIFY(shown(child) == 0.0 || child->y() + shown(child) <= albumB->y() + 0.01);
+        }
+        halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+    }
+    QVERIFY(halfShown);
+    QVERIFY(expandMs >= units->longDuration() - 16);
+    QCOMPARE(albumB->y(), 4 * rowHeight);
+    QCOMPARE(shown(secondChild), rowHeight);
+
+    // The next tree, the same rows again, moves nothing.
+    QVERIFY(applyTree(4, true));
+    QVERIFY(!view->property("folding").toBool());
+    QCOMPARE(albumB->y(), 4 * rowHeight);
 }
 
 // With animations off, a toggle moves the rows at once, both ways, and the
