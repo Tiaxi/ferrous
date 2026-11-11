@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The status bar's Last.fm glyph (#373 H6), drawn for 16 px at 1x: a bold "as", 2 px strokes on whole
-     pixels, 10 px tall (y 3 to 13), the a 7 px wide with a 3 px counter, 1 px apart from the s, whose three
-     bars have 2 px between them. A one-colour mask, drawn in the text colours. -->
+<!-- The status bar's Last.fm glyph (#373 H8), drawn for 16 px at 1x on whole pixels: a lowercase
+     "as" in Breeze's stroke weight, 2 px verticals and 1 px horizontals, 10 px tall (rows 3 to 12). The
+     a is two-storey: an arch over an open bowl, its 2 px stem on the right from the arch to the
+     baseline, and the bowl open to the left under the arch, so that it never reads as an o, a 0 or a Q
+     (H6's bold one read "QS"). One clear column between the a and the s. A one-colour mask, drawn in
+     the text colours. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-<rect x="2" y="4" width="5" height="8" rx="2" fill="none" stroke="#000" stroke-width="2"/>
-<path d="M7 4V13" stroke="#000" stroke-width="2"/>
-<path d="M15 4H12Q10 4 10 6Q10 8 12 8Q14 8 14 10Q14 12 12 12H9" fill="none" stroke="#000" stroke-width="2"/>
+<path fill="#000" d="M2 3h4v1h-4z M10 3h4v1h-4z M6 4h2v1h-2z M9 4h2v1h-2z M13 4h2v1h-2z M6 5h2v1h-2z M9 5h2v1h-2z M6 6h2v1h-2z M9 6h2v1h-2z M2 7h6v1h-6z M10 7h4v1h-4z M1 8h2v1h-2z M6 8h2v1h-2z M13 8h2v1h-2z M1 9h2v1h-2z M6 9h2v1h-2z M13 9h2v1h-2z M1 10h2v1h-2z M6 10h2v1h-2z M13 10h2v1h-2z M1 11h2v1h-2z M5 11h3v1h-3z M9 11h2v1h-2z M13 11h2v1h-2z M2 12h3v1h-3z M6 12h2v1h-2z M10 12h4v1h-4z"/>
 </svg>

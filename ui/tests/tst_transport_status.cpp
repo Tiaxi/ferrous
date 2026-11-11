@@ -2085,7 +2085,7 @@ void TransportStatusTest::lastFmSlotPausedLooksStruckThrough() {
         differing += paused[i] != listening[i] ? 1 : 0;
         pausedInk += paused[i] ? 1 : 0;
     }
-    QVERIFY2(differing >= 40, qPrintable(QString::number(differing)));
+    QVERIFY2(differing >= 30, qPrintable(QString::number(differing)));
     // The stroke crosses the box's middle, from corner to corner.
     const int side = int(sceneRect(box).width());
     QVERIFY(pausedInk > 0);
@@ -2256,9 +2256,11 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX_data() {
 }
 
 // The Last.fm glyph is drawn for 1x at 16 px on whole pixels (#373 H6: a
-// 10 px glyph in a ring was a smudge): its ink within rows 3 to 12 and
-// columns 1 to 14, the a's 2 px strokes whole pixels of ink with clear
-// pixels beside them, its counter open and the a apart from the s.
+// 10 px glyph in a ring was a smudge; H8: H6's bold one read "QS"): its ink
+// within rows 3 to 12 and columns 1 to 14, every pixel ink or clear, in
+// Breeze's stroke weight (2 px verticals, 1 px horizontals, about 1.5 px),
+// and a two-storey a that reads as one: its bowl's counter open, the bowl
+// open to the left under the arch, the stem whole, and apart from the s.
 void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2303,18 +2305,76 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
         }
     }
     QVERIFY2(inked >= 50, qPrintable(QString::number(inked)));
-    // Down the middle rows: the a's left stroke in columns 1 and 2, its
-    // counter 3 to 5, its stem 6 and 7, and a clear column before the s.
-    for (int y = 7; y <= 9; ++y) {
-        for (int x = 0; x <= 8; ++x) {
-            const bool stroke = x == 1 || x == 2 || x == 6 || x == 7;
-            QVERIFY2(stroke ? ink(x, y) >= 0.9 : ink(x, y) <= 0.1,
+    // On the pixel grid: no antialiased edge, every pixel ink or clear.
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            QVERIFY2(ink(x, y) >= 0.9 || ink(x, y) <= 0.1,
                      qPrintable(QStringLiteral("%1 at %2,%3").arg(ink(x, y)).arg(x).arg(y)));
         }
     }
-    // The s's middle bar, between clear rows.
-    QVERIFY(ink(12, 7) >= 0.9 && ink(12, 8) >= 0.9);
-    QVERIFY(ink(12, 5) <= 0.1 && ink(11, 10) <= 0.1);
+    // The stroke weight: how thick the stroke is at each pixel of ink, its
+    // shortest run of ink across, down or along either diagonal. Never more
+    // than 2 px, and about 1.5 on average, the weight of the status bar's
+    // other glyphs: H6's 2 px strokes everywhere, 1.8 on this measure, read
+    // blocky beside Breeze's line icons.
+    const auto isInk = [&](int x, int y) { return x >= 0 && x < 16 && y >= 0 && y < 16 && ink(x, y) >= 0.9; };
+    double weight = 0;
+    int weighed = 0;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            if (!isInk(x, y)) {
+                continue;
+            }
+            int thickness = 16;
+            for (const QPoint step : {QPoint(1, 0), QPoint(0, 1), QPoint(1, 1), QPoint(1, -1)}) {
+                int run = 1;
+                for (const int sign : {1, -1}) {
+                    for (int k = 1; isInk(x + sign * k * step.x(), y + sign * k * step.y()); ++k) {
+                        ++run;
+                    }
+                }
+                thickness = std::min(thickness, run);
+            }
+            QVERIFY2(thickness <= 2, qPrintable(QStringLiteral("%1 px at %2,%3").arg(thickness).arg(x).arg(y)));
+            weight += thickness;
+            ++weighed;
+        }
+    }
+    weight /= weighed;
+    QVERIFY2(weight >= 1.2 && weight <= 1.6, qPrintable(QString::number(weight)));
+    const auto clear = [&](int left, int top, int right, int bottom) {
+        for (int y = top; y <= bottom; ++y) {
+            for (int x = left; x <= right; ++x) {
+                if (ink(x, y) > 0.1) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    const auto solid = [&](int left, int top, int right, int bottom) {
+        for (int y = top; y <= bottom; ++y) {
+            for (int x = left; x <= right; ++x) {
+                if (ink(x, y) < 0.9) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    // The a: an arch over the stem, the stem whole in columns 6 and 7 from
+    // the arch to the baseline, a bowl with a 3 px counter, and under the
+    // arch the bowl open to the left, so that it is no o, 0 or Q.
+    QVERIFY(solid(2, 3, 5, 3));
+    QVERIFY(solid(6, 4, 7, 12));
+    QVERIFY(solid(2, 7, 5, 7) && solid(1, 8, 2, 10));
+    QVERIFY(clear(3, 8, 5, 10));
+    QVERIFY(clear(1, 4, 5, 6));
+    // A clear column between the a and the s.
+    QVERIFY(clear(8, 3, 8, 12));
+    // The s: three bars with its two counters open between them.
+    QVERIFY(solid(10, 3, 13, 3) && solid(10, 7, 13, 7) && solid(10, 12, 13, 12));
+    QVERIFY(clear(11, 5, 14, 6) && clear(9, 8, 12, 10));
 }
 
 void TransportStatusTest::lastFmBarReadsApartFromTheScanBar_data() {
