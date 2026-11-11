@@ -124,16 +124,18 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
-    // The zoom, 8 px left of the mode switch: shown whenever the plot is
-    // zoomed, not only with the switch, as nothing else shows it. It keeps
-    // its place while the switch hides. In a viewer, it hides and shows
-    // with the viewer's controls, at their level.
+    // The zoom, left of the mode switch as far as a viewer's controls are
+    // right of it, so that the corner's plates read as one row (#373 H6):
+    // shown whenever the plot is zoomed, not only with the switch, as
+    // nothing else shows it. It keeps its place while the switch hides. In
+    // a viewer, it hides and shows with the viewer's controls, at their
+    // level.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        anchors.rightMargin: 8
+        anchors.rightMargin: 4
         available: root.controlsVisible || root.controlsLevel > 0
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors

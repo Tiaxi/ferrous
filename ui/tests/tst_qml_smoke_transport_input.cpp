@@ -1995,11 +1995,11 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             for (QQuickItem *own : ownReadouts) {
                 QVERIFY(!own->isVisible());
             }
-            // Laid out: the readout, Reset, the mode switch 8 px right of
+            // Laid out: the readout, Reset, the mode switch 4 px right of
             // them, and Close right of that on the plate in the corner, or
             // over the whole screen on the strip above them.
             QTRY_VERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left()
-                        && sceneRectOf(zoomPlate).right() + 8 == sceneRectOf(modeSwitch).left());
+                        && sceneRectOf(zoomPlate).right() + 4 == sceneRectOf(modeSwitch).left());
             if (fullscreenMode == 1) {
                 QVERIFY(sceneRectOf(close).bottom() <= sceneRectOf(modeSwitch).top());
                 QVERIFY(sceneRectOf(close).right() >= sceneRectOf(modeSwitch).right());
@@ -2033,7 +2033,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
 }
 
 // The main pane shows its zoom while it is zoomed (#373 H4: nothing did,
-// with the scale off): the viewers' readout and Reset, on a plate 8 px left
+// with the scale off): the viewers' readout and Reset, on a plate 4 px left
 // of the mode switch, there also while the switch hides. The plot keeps its
 // place and size; its overlays keep clear of the plate. A viewer shows the
 // same plate (#373 H5: one plate order everywhere).
@@ -2086,20 +2086,20 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(reset->property("text").toString(), QStringLiteral("Reset Zoom"));
         QCOMPARE(plate->property("plotColors").value<QObject *>(),
                  layer->property("plotColors").value<QObject *>());
-        // 8 px left of the switch, on its top, also while the switch hides
+        // 4 px left of the switch, on its top, also while the switch hides
         // (the click on Reset below puts the pointer on the pane, which
         // reveals it).
         if (mode == 0) {
             QCOMPARE(modeSwitch->opacity(), 0.0);
         }
-        QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
+        QTRY_COMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
         QCOMPARE(sceneRectOf(plate).top(), sceneRectOf(modeSwitch).top());
         QCOMPARE(sceneRectOf(plate).height(), sceneRectOf(modeSwitch).height());
         QVERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left());
         // The plot stays where it is; its overlays keep clear of the plate.
         QCOMPARE(sceneRectOf(spectrogramSurface), plotBefore);
         const QSizeF corner = surface->property("reservedCorner").toSizeF();
-        QCOMPARE(corner.width(), cornerBefore.width() + 8 + plate->width());
+        QCOMPARE(corner.width(), cornerBefore.width() + 4 + plate->width());
         QCOMPARE(corner.height(), cornerBefore.height());
 
         // Reset: the default zoom, and the plate goes.
@@ -2125,7 +2125,34 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     QVERIFY(controls != nullptr);
     QTRY_VERIFY(plate->isVisible());
     QVERIFY(itemsNamed(controls, QStringLiteral("viewerZoomReadout")).isEmpty());
-    QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
+    QTRY_COMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
+
+    // One row of plates in the corner (#373 H6): the zoom's, the mode
+    // switch's and the viewer's Close on the one plot plate, in its fill and
+    // edge, as tall and on one top, 4 px apart.
+    QQuickItem *cornerPlate = itemNamed(controls, QStringLiteral("viewerCornerPlate"));
+    QVERIFY(cornerPlate != nullptr);
+    QTRY_COMPARE(sceneRectOf(modeSwitch).right() + 4, sceneRectOf(cornerPlate).left());
+    for (QQuickItem *other : {modeSwitch, cornerPlate}) {
+        QCOMPARE(sceneRectOf(other).top(), sceneRectOf(plate).top());
+        QCOMPARE(sceneRectOf(other).height(), sceneRectOf(plate).height());
+        for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {
+            QQuickItem *mine = itemNamed(plate, QString::fromLatin1(part));
+            QQuickItem *theirs = itemNamed(other, QString::fromLatin1(part));
+            QVERIFY(mine != nullptr && theirs != nullptr);
+            QCOMPARE(theirs->property("color").value<QColor>(), mine->property("color").value<QColor>());
+            QCOMPARE(theirs->property("radius").toDouble(), mine->property("radius").toDouble());
+            QCOMPARE(theirs->property("border").value<QObject *>()->property("color").value<QColor>(),
+                     mine->property("border").value<QObject *>()->property("color").value<QColor>());
+        }
+    }
+    // The readout 6 px in from the plate, and 6 px from Reset's glyph box.
+    QQuickItem *resetGlyph = itemNamed(reset, QStringLiteral("plotToolButtonIcon"));
+    QVERIFY(resetGlyph != nullptr);
+    const double textLeft = sceneRectOf(readout).left() + readout->property("leftPadding").toDouble();
+    const double textRight = textLeft + readout->property("contentWidth").toDouble();
+    QCOMPARE(textLeft - sceneRectOf(plate).left(), 6.0);
+    QCOMPARE(sceneRectOf(resetGlyph).left() - textRight, 6.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
