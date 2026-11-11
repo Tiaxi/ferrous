@@ -1707,8 +1707,11 @@ void AccessibilityTest::seekBarPlayheadStaysOnTheBarAtEitherEnd() {
         QSet<qint64> barWidths;
         int oddBars = 0;
         // Harness widths, some fractional, that give the bar even and odd
-        // widths; the layout gives it whole logical pixels.
-        for (const qreal width : {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0}) {
+        // widths, three or more of each whatever the width of the time
+        // beside it, which follows the font; the layout gives it whole
+        // logical pixels.
+        for (const qreal width :
+             {1000.0, 1001.0, 1002.0, 1003.0, 1004.5, 1005.25, 1006.75, 1007.0, 1008.0}) {
             harness->setWidth(width);
             control.polishItems();
             const qreal barWidth = bar->width();

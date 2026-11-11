@@ -122,6 +122,16 @@ ToolBar {
     // The tool buttons: 32 px, or a 20 px glyph and 6 px around it, which
     // holds the 22 px Play/Pause glyph too.
     readonly property real buttonSize: Math.max(32, root.scaled(20) + 12)
+    // The 16 px glyphs: Previous, Next and the volume's.
+    readonly property int smallGlyphSize: root.scaled(Kirigami.Units.iconSizes.small)
+    // The clear space around a 16 px glyph in its button.
+    readonly property real smallGlyphInset: (root.buttonSize - root.smallGlyphSize) / 2
+    // The right of the transport on one rhythm (#373 H8): the seek bar,
+    // 16 px, the time, 24 px, the volume glyph, 8 px, the volume slider,
+    // measured between what is drawn, not between the buttons' frames.
+    readonly property real seekToTimeGap: 2 * Kirigami.Units.largeSpacing
+    readonly property real timeToVolumeGap: 3 * Kirigami.Units.largeSpacing
+    readonly property real volumeGlyphToSliderGap: Kirigami.Units.largeSpacing
 
     // A text of the transport's tooltips: the action and its shortcut.
     function actionToolTip(label, shortcutText) {
@@ -244,7 +254,7 @@ ToolBar {
         required property string name
         // The glyph's size: 16 px, 22 px for Play/Pause, 14 px for Stop,
         // larger with a larger font.
-        property int glyphSize: root.scaled(Kirigami.Units.iconSizes.small)
+        property int glyphSize: root.smallGlyphSize
         // The action's text without its mnemonic, and its shortcut.
         readonly property string label: FormatUtils.withoutMnemonic(
             transportButton.action ? transportButton.action.text || "" : "")
@@ -822,17 +832,30 @@ ToolBar {
                 : I18n.i18nc("@info:status no time", "–:––")
             readonly property string text: timePosition.text + timeLength.text
 
-            Layout.leftMargin: 16
+            Layout.leftMargin: root.seekToTimeGap
             Layout.alignment: Qt.AlignVCenter
-            // 72 px, or what a time in hours needs. The position is never
-            // wider than the length.
-            Layout.preferredWidth: Math.max(72, Math.ceil(timeMetrics.advanceWidth))
+            // As wide as a time in minutes, "0:00 / 0:00", which ends where
+            // the box does, so that the volume glyph keeps its distance
+            // from what is drawn; or what a longer time needs. The figures
+            // are tabular, so every time in minutes is as wide, and the
+            // position is never wider than the length. Stopped, the box
+            // keeps its width, so that the volume doesn't move.
+            Layout.preferredWidth: Math.max(Math.ceil(minutesMetrics.advanceWidth),
+                Math.ceil(timeMetrics.advanceWidth))
             Layout.preferredHeight: timeRow.implicitHeight
 
             TextMetrics {
                 id: timeMetrics
                 font: timePosition.font
                 text: transportTime.lengthText + timeLength.text
+            }
+
+            TextMetrics {
+                id: minutesMetrics
+                font: timePosition.font
+                text: FormatUtils.clockText("00:00")
+                    + I18n.i18nc("@info:status the track's length after its position", " / %1",
+                        FormatUtils.clockText("00:00"))
             }
 
             Row {
@@ -865,7 +888,8 @@ ToolBar {
         ToolButton {
             id: muteButton
             objectName: "muteButton"
-            Layout.leftMargin: 16
+            // 24 px from the time to the glyph.
+            Layout.leftMargin: Math.max(0, root.timeToVolumeGap - root.smallGlyphInset)
             Layout.alignment: Qt.AlignVCenter
             implicitWidth: root.buttonSize
             implicitHeight: root.buttonSize
@@ -875,10 +899,15 @@ ToolBar {
             text: root.volumeMuted
                 ? I18n.i18nc("@action:button", "Unmute")
                 : I18n.i18nc("@action:button", "Mute")
-            icon.name: root.volumeSilent ? "audio-volume-muted" : "audio-volume-high"
+            // Ferrous's own glyphs, at the weight of the transport's beside
+            // them (#373 H8: Breeze's speaker, with 1 px waves, read lighter
+            // than Next), and at their size.
+            icon.source: root.volumeSilent
+                ? Qt.resolvedUrl("../assets/volume-muted.svg")
+                : Qt.resolvedUrl("../assets/volume.svg")
             icon.color: root.uiPalette.text
-            icon.width: root.scaled(Kirigami.Units.iconSizes.small)
-            icon.height: root.scaled(Kirigami.Units.iconSizes.small)
+            icon.width: root.smallGlyphSize
+            icon.height: root.smallGlyphSize
             ToolTip.visible: hovered || visualFocus
             ToolTip.delay: Kirigami.Units.toolTipDelay
             ToolTip.text: text
@@ -897,7 +926,7 @@ ToolBar {
                     anchors.centerIn: parent
                     width: muteButton.icon.width
                     height: muteButton.icon.height
-                    source: muteButton.icon.name
+                    source: muteButton.icon.source
                     color: muteButton.icon.color
                     isMask: true
                 }
@@ -912,7 +941,8 @@ ToolBar {
             id: volumeSlider
             objectName: "volumeSlider"
             focusPolicy: Qt.TabFocus
-            Layout.leftMargin: Kirigami.Units.smallSpacing
+            // 8 px from the glyph to the groove.
+            Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
             Layout.alignment: Qt.AlignVCenter
             Layout.preferredWidth: root.narrow ? 72 : 96
             Layout.preferredHeight: 20

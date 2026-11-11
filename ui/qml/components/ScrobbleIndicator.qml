@@ -4,7 +4,6 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
-import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -12,9 +11,12 @@ import "../logic/KeyUtils.js" as KeyUtils
 // short bar beneath it, and a few words before it when something needs
 // saying (#373 H6: a 10 px glyph inside a ring was a smudge at 1x, and
 // its states looked alike).
-// The bar is the glyph's: as wide as it, 2 px tall and 2 px under it, with
+// The bar is the glyph's: as wide as it, 3 px tall and 2 px under it, with
 // no trough, no rounded ends and none of the scan bar's colours, so that
-// it reads as part of the glyph and not as a second scan or a download.
+// it reads as part of the glyph and not as a second scan or a download
+// (the scan bar is 72 by 4 px). Listening, being sent and scrobbled differ
+// by shape, not by shade (#373 H8): a bar growing, a full bar at half
+// strength, and no bar.
 // - Listening: the glyph in the secondary colour, and the bar in the text
 //   colour growing under it with the listening done towards the scrobble;
 //   the tooltip says how much is left. Both come from the scrobbler's
@@ -26,13 +28,14 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Being sent: the bar full in the text colour, from the moment the play
-//   reaches its scrobble point, and the glyph at half strength while the
-//   send goes on in the background.
-// - Scrobbled: once Last.fm has accepted it, the full bar settles in a
-//   quiet grey under the glyph at full strength, so that the routine
-//   success is no louder than the status bar's other words, and apart from
-//   being sent by both the bar and the glyph.
+// - Being sent: the bar full length in the text colour at half strength,
+//   from the moment the play reaches its scrobble point, while the send
+//   goes on in the background. Full length and not half length, so that it
+//   can't be taken for a play halfway to its scrobble point; half strength,
+//   so that it can't be taken for a listening bar a moment from full.
+// - Scrobbled: once Last.fm has accepted it, the glyph alone in the
+//   secondary colour, so that the routine success is no louder than the
+//   status bar's other words.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
@@ -105,20 +108,25 @@ AbstractButton {
     // The glyph: 16 px, drawn for 1x on whole pixels, and larger with a
     // larger font, as the status bar's other glyphs are.
     readonly property int glyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
-    // The bar under it: the glyph's width, 2 px tall and 2 px below it at
+    // The bar under it: the glyph's width, 3 px tall and 2 px below it at
     // the default font, a little more with a larger one, within the status
-    // bar's height.
+    // bar's height: the status bar grows with the small font's line, which
+    // grows more slowly than the glyph.
     readonly property int barWidth: root.glyphSize
-    readonly property int barHeight: Math.max(2, Math.round(root.glyphSize / 12))
-    readonly property int barGap: root.barHeight
-    readonly property bool barShown: root.look === "listening" || root.look === "scrobbled"
-        || root.look === "failed"
+    readonly property int barHeight: Math.max(3, Math.round(root.glyphSize / 10))
+    readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 16))
+    // Last.fm accepted the scrobble.
+    readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
+    readonly property bool barShown: root.look === "listening" || root.look === "failed"
+        || (root.look === "scrobbled" && !root.scrobbleAccepted)
+    // Half strength while the scrobble is being sent.
+    readonly property real barOpacity: root.look === "scrobbled" ? 0.5 : 1
     // How much of the bar is drawn, 0 to 1: the listening done, by whole
     // device pixels of the bar, so a long scrobble point redraws it more
     // rarely still; full once the play has reached its scrobble point.
     readonly property real barProgress: {
         if (root.look === "scrobbled" || root.look === "failed") {
-            return 1
+            return root.barShown ? 1 : 0
         }
         if (root.look !== "listening" || root.thresholdSeconds <= 0) {
             return 0
@@ -126,25 +134,10 @@ AbstractButton {
         const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    // Last.fm accepted the scrobble.
-    readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    // The bar once scrobbled: opaque, the least of the text colour over the
-    // status bar that is 3.5:1 on it, so that it still reads (WCAG 1.4.11)
-    // and is quieter than the status bar's words. A grey of its own: the
-    // secondary and tertiary text colours are bluish and, in a light
-    // theme, all but the scan bar's fill.
-    readonly property color settledBarColor: ColorUtils.mixColor(root.uiPalette.chrome,
-        root.uiPalette.text,
-        ColorUtils.opacityForContrast(root.uiPalette.text, root.uiPalette.chrome, 0.2, 3.5))
-    // The bar: the text colour while listening and sending, the settled
-    // grey once scrobbled, and the negative colour when Last.fm refused the
-    // scrobble. Never the scan bar's colours.
-    readonly property color barColor: {
-        if (root.look === "failed") {
-            return root.uiPalette.negative
-        }
-        return root.scrobbleAccepted ? root.settledBarColor : root.uiPalette.text
-    }
+    // The bar: the text colour while listening and sending, and the
+    // negative colour when Last.fm refused the scrobble. Never the scan
+    // bar's colours.
+    readonly property color barColor: root.look === "failed" ? root.uiPalette.negative : root.uiPalette.text
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -356,8 +349,6 @@ AbstractButton {
                     height: width
                     source: root.glyphSource
                     color: root.glyphColor
-                    // Half strength while the scrobble is being sent.
-                    opacity: root.look === "scrobbled" && !root.scrobbleAccepted ? 0.5 : 1
                     isMask: true
                 }
 
@@ -371,6 +362,7 @@ AbstractButton {
                     height: root.barHeight
                     visible: root.barShown && width > 0
                     color: root.barColor
+                    opacity: root.barOpacity
                 }
             }
         }

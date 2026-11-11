@@ -30,6 +30,12 @@
 namespace {
 
 constexpr QRgb kTile = 0x3a1490;
+// The tile's 1 px rim, lighter than the tile, so that the tile holds its
+// edge on a dark panel (#373 hill climb, H9). Within a trace's distance of
+// the tile: no trace is that close to it.
+constexpr QRgb kRim = 0x6a4ad0;
+// Breeze Dark's window.
+constexpr QRgb kBreezeDarkWindow = 0x202326;
 // The chirp: the fundamental in amber, its 2nd harmonic in rose and its 3rd
 // in magenta, lower on the colour map and each 3:1 or more on the tile.
 constexpr QRgb kGlide = 0xf2b035;
@@ -124,6 +130,17 @@ int breezeMargin(int size) {
 // antialiasing: there an antialiased stroke broke into dashes and dots.
 bool onPixelGrid(int size) {
     return size <= 32;
+}
+
+// How tall the pixel grid's stairs are in every column: 3 px at 16 and 22
+// px, where 2 px read thin (#373 hill climb, H9), and 2 px at 32 px.
+int stairHeight(int size) {
+    return size <= 22 ? 3 : 2;
+}
+
+// The tile inside its rim.
+QRect insideRim(const QRect &tile) {
+    return tile.adjusted(1, 1, -1, -1);
 }
 
 // The bounding box of the pixels that pass a test.
@@ -265,6 +282,8 @@ class AppIconTest : public QObject {
 private slots:
     void everySizeIsBuiltIn_data() { addSizeRows(); }
     void everySizeIsBuiltIn();
+    void tileHasALighterRim_data() { addSizeRows(); }
+    void tileHasALighterRim();
     void tracesStandOnThePlainTile_data() { addSizeRows(); }
     void tracesStandOnThePlainTile();
     void harmonicsAreOneSweepOnALogAxis_data() { addSizeRows(); }
@@ -294,7 +313,7 @@ void AppIconTest::everySizeIsBuiltIn() {
     const QRect all = image.rect();
     const int opaque = countWhere(image, all, [](QRgb p) { return qAlpha(p) == 255; });
     QVERIFY2(opaque >= size * size / 2, qPrintable(QString::number(opaque)));
-    QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kTile, 4); }) >= size * size / 3);
+    QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kTile, 4); }) >= size * size / 4);
     QVERIFY(countWhere(image, all, [](QRgb p) { return near(p, kGlide, 24); }) >= size / 2);
     // Centred, in Breeze's app-icon margin.
     const QRect tile = tileOf(image);
@@ -307,6 +326,34 @@ void AppIconTest::everySizeIsBuiltIn() {
     QCOMPARE(FerrousAppIcon::resourcePath(24), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
 }
 
+// The tile has a 1 px rim lighter than itself just inside its edge, at
+// every size, so that it holds its edge on a dark panel (#373 hill climb,
+// H9: on Breeze Dark the indigo tile was 1.3:1 on the window); the tile's
+// own colour is inside it.
+void AppIconTest::tileHasALighterRim() {
+    QFETCH(int, size);
+    const QImage image = render(FerrousAppIcon::resourcePath(size), size);
+    const QRect tile = tileOf(image);
+    const QPoint middle = tile.center();
+    for (const QPoint &edge : {QPoint(middle.x(), tile.top()), QPoint(middle.x(), tile.bottom()),
+                               QPoint(tile.left(), middle.y()), QPoint(tile.right(), middle.y())}) {
+        QVERIFY2(near(image.pixel(edge), kRim, 2),
+                 qPrintable(QStringLiteral("#%1 at %2, %3")
+                                .arg(image.pixel(edge) & 0xffffff, 6, 16, QLatin1Char('0'))
+                                .arg(edge.x())
+                                .arg(edge.y())));
+    }
+    // One pixel: inside it, at the bottom's middle, the tile.
+    QVERIFY(near(image.pixel(middle.x(), tile.bottom() - 1), kTile, 2));
+    // Lighter than the tile, and it holds the edge on Breeze Dark where the
+    // tile alone doesn't; no trace.
+    QVERIFY(contrastRatio(kTile, kBreezeDarkWindow) < 1.5);
+    QVERIFY2(contrastRatio(kRim, kBreezeDarkWindow) >= 2.5,
+             qPrintable(QString::number(contrastRatio(kRim, kBreezeDarkWindow))));
+    QVERIFY(contrastRatio(kRim, kBreezeDarkWindow) > contrastRatio(kTile, kBreezeDarkWindow));
+    QVERIFY(!traceInk(qRgba(qRed(kRim), qGreen(kRim), qBlue(kRim), 255)));
+}
+
 // The traces stand on the plain tile: H1 to H5 drew the spectrogram's floor
 // under them as a magenta band, which read as an unrelated underline or a
 // progress bar, so it is gone at every size (#373 hill climb, H5).
@@ -317,18 +364,19 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const std::vector<Trace> traces = tracesOf(image);
     QVERIFY(!traces.empty());
 
-    // Nothing but the tile under the lowest trace, down to the tile's edge:
+    // Nothing but the tile under the lowest trace, down to the tile's rim:
     // no band, no line. From 48 px up the fundamental's antialiased edge
-    // reaches a row below its ink; the stairs at 16 to 32 px have none, and
-    // at 16 px they fill the tile to a row of its edge.
+    // reaches a row below its ink; the stairs at 16 to 32 px have none; at
+    // 22 px a row of the tile is left above the rim, and at 16 px they fill
+    // the tile to its rim.
     int lowest = 0;
     for (const Trace &trace : traces) {
         lowest = std::max(lowest, trace.bounds.bottom());
     }
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
-    const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, tile.bottom() - top + 1);
-    QVERIFY2(below.height() >= (size > 16 ? 2 : 1), qPrintable(QString::number(lowest)));
+    const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
+    QVERIFY2(below.height() >= (size > 22 ? 2 : size > 16 ? 1 : 0), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
     // Every mark rises: none is a flat band or line under the traces.
@@ -340,10 +388,13 @@ void AppIconTest::tracesStandOnThePlainTile() {
                                                      .arg(trace.bounds.bottom())));
     }
 
-    // Every trace is inside the tile, clear of its edges.
+    // Every trace is inside the tile's rim.
     for (const Trace &trace : traces) {
-        QVERIFY(trace.bounds.left() > tile.left() && trace.bounds.right() < tile.right());
-        QVERIFY(trace.bounds.top() > tile.top() && trace.bounds.bottom() < tile.bottom());
+        QVERIFY2(insideRim(tile).contains(trace.bounds), qPrintable(QStringLiteral("%1,%2 %3x%4")
+                                                                          .arg(trace.bounds.x())
+                                                                          .arg(trace.bounds.y())
+                                                                          .arg(trace.bounds.width())
+                                                                          .arg(trace.bounds.height())));
     }
 
     // The traces sit in the middle of the tile, to within a pixel or so.
@@ -418,9 +469,9 @@ void AppIconTest::harmonicsAreOneSweepOnALogAxis() {
         QVERIFY2(std::abs(ratio - std::log(3.0) / std::log(2.0)) <= 0.12, qPrintable(QString::number(ratio)));
     }
 
-    // A log sweep: steep at first, bending over. The fundamental rises three
-    // times as far or more in its first third as in its last, never falls,
-    // and rises a quarter of the tile or more.
+    // A log sweep: steep at first, bending over. The fundamental rises
+    // twice as far or more in its first third as in its last, never falls,
+    // and rises a quarter of the tile inside its rim or more.
     const auto centre = [&](int x) { return traces[0].centreIn(image, x); };
     const int third = (end - start) / 3;
     const double first = centre(start) - centre(start + third);
@@ -429,7 +480,7 @@ void AppIconTest::harmonicsAreOneSweepOnALogAxis() {
     for (int x = start + 1; x <= end; ++x) {
         QVERIFY2(centre(x) <= centre(x - 1) + 0.25, qPrintable(QString::number(x)));
     }
-    QVERIFY2(centre(start) - centre(end) >= tile.height() / 4.0,
+    QVERIFY2(centre(start) - centre(end) >= insideRim(tile).height() / 4.0,
              qPrintable(QString::number(centre(start) - centre(end))));
 
     // Strokes of one weight: in every column each harmonic has as much ink as
@@ -472,10 +523,11 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid_data() {
 
 // At 16 and 22 px antialiased traces broke into stepped stripes or merged
 // into soft blobs, and at 32 px the thinner harmonics broke into dots. Each
-// is a drawing of its own on the pixel grid: filled whole-pixel stairs, 2 px
-// tall in every column, with clear rows between neighbours along their whole
-// length and no two touching even at a corner; two traces at 16 and 22 px,
-// three at 32 (#373 hill climb, H6, H8).
+// is a drawing of its own on the pixel grid: filled whole-pixel stairs, 3 px
+// tall in every column at 16 and 22 px (H9: 2 px read thin there) and 2 px
+// at 32, with clear rows between neighbours along their whole length and no
+// two touching even at a corner; two traces at 16 and 22 px, three at 32
+// (#373 hill climb, H6, H8, H9).
 void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -507,11 +559,12 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
     QCOMPARE(ids, expected);
 
     // Rendered: away from the tile's rounded corners, every pixel is the
-    // tile's colour or a trace's, with no antialiased edge between.
+    // tile's colour, its rim's or a trace's, with no antialiased edge
+    // between.
     const QImage image = render(path, size);
     const QRect tile = tileOf(image);
     const int corner = std::max(2, size / 8);
-    const QRgb colours[] = {kTile, kGlide, kHarmonic, kThirdHarmonic};
+    const QRgb colours[] = {kTile, kRim, kGlide, kHarmonic, kThirdHarmonic};
     for (int y = tile.top(); y <= tile.bottom(); ++y) {
         for (int x = tile.left(); x <= tile.right(); ++x) {
             const bool inCorner = (x < tile.left() + corner || x > tile.right() - corner)
@@ -525,7 +578,8 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
         }
     }
 
-    // Each trace 2 px tall in every column, and a clear row of the tile
+    // Each trace as tall as the size's stairs in every column, and a clear
+    // row of the tile
     // between neighbours in every column. That they are found as separate
     // traces at all means no two touch, even at a corner.
     const std::vector<Trace> traces = tracesOf(image);
@@ -550,7 +604,8 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
                     ++count;
                 }
             }
-            QVERIFY2(count == 2 && bottom == top + 1, qPrintable(QStringLiteral("column %1: %2 px").arg(x).arg(count)));
+            QVERIFY2(count == stairHeight(size) && bottom == top + count - 1,
+                     qPrintable(QStringLiteral("column %1: %2 px").arg(x).arg(count)));
             // The clear rows under each trace, the same in every column: the
             // harmonics are the fundamental's stair shifted up.
             if (n > 0) {
@@ -564,9 +619,10 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
         }
     }
     // A pixel log sweep: each stair climbs a row a column at first, never
-    // two (where a 2 px stair would break at its corners), and its runs on
-    // one row only lengthen as it bends over, apart from the last, which the
-    // time line cuts.
+    // two (where a stair would break at its corners), and its runs on one
+    // row only lengthen as it bends over, apart from the last, which the
+    // time line cuts. Five runs or more: at 16 px the 3 px stairs, 5 rows
+    // apart, leave room inside the rim to climb 4 rows.
     for (const std::vector<int> &stair : tops) {
         std::vector<int> runs{1};
         for (size_t c = 1; c < stair.size(); ++c) {
@@ -579,7 +635,7 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
             }
         }
         QCOMPARE(runs.front(), 1);
-        QVERIFY2(runs.size() >= 6, qPrintable(QString::number(runs.size())));
+        QVERIFY2(runs.size() >= (size > 16 ? 6u : 5u), qPrintable(QString::number(runs.size())));
         for (size_t r = 1; r + 1 < runs.size(); ++r) {
             QVERIFY2(runs[r] >= runs[r - 1], qPrintable(QStringLiteral("run %1: %2 after %3").arg(r).arg(runs[r]).arg(runs[r - 1])));
         }

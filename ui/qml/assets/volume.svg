@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The transport's volume glyph (#373 H8), drawn for 16 px at 1x on whole pixels at the weight of
+     the transport's glyphs beside it (Breeze's speaker, with 1 px waves, read lighter than Next): a
+     solid speaker in columns 1 to 7 and rows 2 to 13, as tall as Next, and two 2 px waves, with a
+     clear pixel between each part, corners included. A one-colour mask, drawn in the text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M6 2h2v1h-2z M11 2h2v1h-2z M5 3h3v1h-3z M12 3h2v1h-2z M4 4h4v1h-4z M13 4h2v1h-2z M1 5h7v1h-7z M9 5h2v1h-2z M13 5h2v1h-2z M1 6h7v1h-7z M10 6h2v1h-2z M14 6h2v1h-2z M1 7h7v1h-7z M10 7h2v1h-2z M14 7h2v1h-2z M1 8h7v1h-7z M10 8h2v1h-2z M14 8h2v1h-2z M1 9h7v1h-7z M10 9h2v1h-2z M14 9h2v1h-2z M1 10h7v1h-7z M9 10h2v1h-2z M13 10h2v1h-2z M4 11h4v1h-4z M13 11h2v1h-2z M5 12h3v1h-3z M12 12h2v1h-2z M6 13h2v1h-2z M11 13h2v1h-2z"/>
+</svg>
