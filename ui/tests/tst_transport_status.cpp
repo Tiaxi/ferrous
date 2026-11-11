@@ -422,6 +422,8 @@ private slots:
     void seekFocusDrawsOneRingAroundTheBar();
     void transportButtonsDrawTheAppsFocusRing_data();
     void transportButtonsDrawTheAppsFocusRing();
+    void transportPressedReadsApartFromHover_data();
+    void transportPressedReadsApartFromHover();
     void seekWithoutATrackIsALineAndNoTime();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
@@ -938,6 +940,75 @@ void TransportStatusTest::transportButtonsDrawTheAppsFocusRing() {
     QVERIFY(muteGlyph != nullptr && muteGlyph->isVisible());
     QVERIFY(sameColor(muteGlyph->property("color").value<QColor>(), harness.token("text")));
     QCOMPARE(muteGlyph->width(), 16.0);
+}
+
+void TransportStatusTest::transportPressedReadsApartFromHover_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A pressed transport button reads apart from a hovered one (#373 H5: the
+// press, text 10%, was the hover's tint in the dark and lighter than it in
+// the light): the pressed tint, 17% / 25% text, a clear step past the
+// hover's 10% / 14%, as drawn on the chrome. The status bar's buttons
+// share it.
+void TransportStatusTest::transportPressedReadsApartFromHover() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    const QColor chrome = harness.token("chrome");
+    const QColor hover = harness.token("hover");
+    const QColor pressed = harness.token("pressed");
+    QCOMPARE(std::lround(pressed.alphaF() * 100), dark ? 17L : 25L);
+    QCOMPARE(std::lround(hover.alphaF() * 100), dark ? 10L : 14L);
+    QVERIFY(sameColor(QColor::fromRgbF(pressed.redF(), pressed.greenF(), pressed.blueF()), harness.token("text")));
+    const QColor hoverDrawn = drawnOver(hover, chrome);
+    const QColor pressedDrawn = drawnOver(pressed, chrome);
+    QVERIFY2(contrastRatio(pressedDrawn, hoverDrawn) >= 1.2,
+             qPrintable(describe(QStringLiteral("pressed on hover"), pressedDrawn, hoverDrawn)));
+
+    QQuickItem *button = harness.item(QStringLiteral("transportButton_previous"));
+    QVERIFY(button != nullptr);
+    button->setProperty("hoverEnabled", true);
+    auto *background = button->property("background").value<QQuickItem *>();
+    QVERIFY(background != nullptr);
+    auto *tint = background->findChild<QQuickItem *>(QStringLiteral("transportButtonHover"));
+    QVERIFY(tint != nullptr);
+    // From elsewhere: a move to where the pointer last was is no move.
+    QTest::mouseMove(harness.window, QPoint(10, harness.window->height() - 10));
+    QTest::mouseMove(harness.window, sceneCentre(button));
+    QTRY_VERIFY(tint->isVisible() && tint->opacity() == 1.0);
+    QVERIFY(sameColor(tint->property("color").value<QColor>(), hover));
+    qreal scale = 1;
+    const QPointF corner = sceneRect(button).topLeft() + QPointF(4.5, 4.5);
+    QTRY_VERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), corner, scale), hoverDrawn) <= 2);
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(button));
+    QTRY_VERIFY(button->property("down").toBool());
+    QVERIFY(sameColor(tint->property("color").value<QColor>(), pressed));
+    QTRY_VERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), corner, scale), pressedDrawn) <= 2);
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(button));
+
+    // The status bar's issues button and Last.fm slot take the same tint.
+    QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
+                                      Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
+    takeWarnings(); // The controller logs each report as a warning.
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    for (const auto &[name, backgroundName] :
+         {std::pair{QStringLiteral("statusBarErrorsButton"), QStringLiteral("statusBarErrorsBackground")},
+          std::pair{QStringLiteral("scrobbleIndicator"), QStringLiteral("scrobbleIndicatorBackground")}}) {
+        QQuickItem *statusButton = harness.item(name);
+        QQuickItem *statusBackground = harness.item(backgroundName);
+        QVERIFY2(statusButton && statusBackground, qPrintable(name));
+        QTRY_VERIFY2(statusButton->isVisible(), qPrintable(name));
+        // No press of the issues button, which would open them.
+        statusButton->setProperty("down", true);
+        QTRY_VERIFY2(sameColor(statusBackground->property("color").value<QColor>(), pressed), qPrintable(name));
+        // An invalid value resets it, to follow the press again.
+        statusButton->setProperty("down", QVariant());
+    }
 }
 
 void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {

@@ -185,8 +185,8 @@ ToolBar {
     }
 
     // The background of the transport's tool buttons, in the window's
-    // tokens rather than the style's: the hover tint, which fades, and
-    // text 10% while pressed. Keyboard focus is one 2 px ring 3 px outside
+    // tokens rather than the style's: the hover tint, which fades, and the
+    // stronger pressed tint while pressed. Keyboard focus is one 2 px ring 3 px outside
     // the button, in the focus colour of the seek bar's and the volume's
     // rings, rather than the style's frame, which is 2.18:1 on the light
     // chrome.
@@ -201,7 +201,7 @@ ToolBar {
             anchors.fill: parent
             radius: 3
             color: buttonBackground.button.down
-                ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                ? root.uiPalette.pressed
                 : root.uiPalette.hover
             opacity: buttonBackground.button.hovered || buttonBackground.button.down ? 1 : 0
             visible: opacity > 0

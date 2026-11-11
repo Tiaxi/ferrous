@@ -440,9 +440,10 @@ ToolBar {
             background: Rectangle {
                 objectName: "statusBarErrorsBackground"
                 radius: 3
-                // A text-10% tint while the issues are open or pressed.
-                color: root.issuesOpen || issuesButton.down
-                    ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                // The pressed tint while pressed, and a text-10% one while
+                // the issues are open.
+                color: issuesButton.down ? root.uiPalette.pressed
+                    : root.issuesOpen ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
                     : (issuesButton.hovered ? root.uiPalette.hover : "transparent")
                 border.width: issuesButton.visualFocus ? 2 : 0
                 border.color: root.uiPalette.focusRing

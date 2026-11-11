@@ -311,7 +311,7 @@ AbstractButton {
         objectName: "scrobbleIndicatorBackground"
         radius: 3
         color: root.down
-            ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+            ? root.uiPalette.pressed
             : (root.hovered ? root.uiPalette.hover : "transparent")
         border.width: root.visualFocus ? 2 : 0
         border.color: root.uiPalette.focusRing

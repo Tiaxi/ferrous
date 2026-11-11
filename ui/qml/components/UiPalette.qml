@@ -56,6 +56,10 @@ QtObject {
     // any theme: 10% (#2b2d2f) / 14% (#e0e1e1). It stays nearer to the view
     // than the selection, which is further from it in hue as well.
     readonly property color hover: root._tintOf(root.text, root.view, 1.3)
+    // A pressed button: text over it, a clear step past the hover tint, so
+    // a press reads apart from a hover (#373 H5: 10% read as the hover).
+    // The least, in whole percent, that is 1.65:1 on the view: 17% / 25%.
+    readonly property color pressed: root._tintOf(root.text, root.view, 1.65)
     // A hovered row: the hover tint on the view.
     readonly property color hoveredRow: ColorUtils.drawnOver(root.hover, root.view)
     // The view mixed with the accent. #1f3e4e / #d4edfa.
