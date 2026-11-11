@@ -6121,11 +6121,19 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     QVERIFY(pane->isAncestorOf(surface));
 
     // The kept frame shows what the viewer showed: with the fade too slow
-    // to move, the window draws as it did before the viewer closed.
+    // to move, the window draws as it did before the viewer closed. The
+    // viewer's controls stay while it is open, however slowly the test runs.
+    QVERIFY(shell->setProperty("fullscreenControlsHideDelay", 600000));
     openInWindow();
     if (QTest::currentTestFailed()) {
         return;
     }
+    // Back in the viewer, the plot's mode switch fades in with the viewer's
+    // controls; once it has, nothing in the viewer moves. Grabbed before,
+    // the window would miss what the kept frame shows of it.
+    QQuickItem *modeSwitch = itemNamed(surface, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_COMPARE(drawnOpacity(modeSwitch), 1.0);
     window->update();
     QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
     QVERIFY(swapped.wait(2000));
@@ -6147,16 +6155,27 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     const QImage after = window->grabWindow().convertToFormat(QImage::Format_RGB32);
     QCOMPARE(after.size(), before.size());
     int differing = 0;
+    // Where they differ, for the message.
+    QRect differs;
     for (int y = 0; y < after.height(); ++y) {
         for (int x = 0; x < after.width(); ++x) {
             const QColor a = after.pixelColor(x, y);
             const QColor b = before.pixelColor(x, y);
-            differing += std::abs(a.red() - b.red()) > 8 || std::abs(a.green() - b.green()) > 8
-                         || std::abs(a.blue() - b.blue()) > 8;
+            if (std::abs(a.red() - b.red()) > 8 || std::abs(a.green() - b.green()) > 8
+                || std::abs(a.blue() - b.blue()) > 8) {
+                ++differing;
+                differs |= QRect(x, y, 1, 1);
+            }
         }
     }
     QVERIFY2(differing <= after.width() * after.height() / 1000,
-             qPrintable(QStringLiteral("%1 of %2 pixels differ").arg(differing).arg(after.width() * after.height())));
+             qPrintable(QStringLiteral("%1 of %2 pixels differ, within %3×%4 at %5,%6")
+                            .arg(differing)
+                            .arg(after.width() * after.height())
+                            .arg(differs.width())
+                            .arg(differs.height())
+                            .arg(differs.x())
+                            .arg(differs.y())));
 
     // Opened over the whole screen while it fades: the viewer gives up its
     // frame, and the visualization goes whole into that window.
