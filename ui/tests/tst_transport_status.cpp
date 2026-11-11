@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFontMetricsF>
 #include <QImage>
 #include <QLocale>
 #include <QMutex>
@@ -22,6 +23,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QScopeGuard>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
@@ -469,6 +471,7 @@ private slots:
     void statusBarShowsTheNeutralPlaybackState();
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
+    void statusBarFormatShowsWhatFitsWhole();
     void statusBarShowsTheScanWithItsBar();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
@@ -1621,11 +1624,62 @@ void TransportStatusTest::statusBarShowsTheFormatGroupWithoutThePosition() {
         harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
         QCOMPARE(format->property("text").toString(), QString());
     }
-    // Narrow: the format only.
-    Harness narrow;
+}
+
+// The format group shows what fits whole, not what the window's width
+// allows (#373 H6: at 1000 px it showed "FLAC" alone, with most of the bar
+// empty). With the room, all of it; with less, it drops parts from the end,
+// each only once it no longer fits, and never cuts one.
+void TransportStatusTest::statusBarFormatShowsWhatFitsWhole() {
+    Harness harness;
     QString errorText;
-    QVERIFY2(narrow.load(kBreezeDark, 1000, &errorText), qPrintable(errorText));
-    QCOMPARE(narrow.item(QStringLiteral("statusBarFormat"))->property("text").toString(), QStringLiteral("FLAC"));
+    QVERIFY2(harness.load(kBreezeDark, 1000, &errorText), qPrintable(errorText));
+    QQuickItem *format = harness.item(QStringLiteral("statusBarFormat"));
+    QQuickItem *row = harness.item(QStringLiteral("statusBarFormatRow"));
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *stateLabel = harness.item(QStringLiteral("statusBarPlaybackStateLabel"));
+    QVERIFY(format && row && status && stateLabel);
+    const QStringList parts{QStringLiteral("FLAC"), QStringLiteral("16-bit / 44.1 kHz"), QStringLiteral("Stereo"),
+                            QStringLiteral("557 kbps")};
+    const QString separator = QStringLiteral(" · ");
+    QTRY_COMPARE(format->property("text").toString(), parts.join(separator));
+    QTRY_VERIFY(row->implicitWidth() > 0 && row->implicitWidth() <= format->width());
+
+    // The width of each part as a label of the status bar draws it, and of
+    // the dot between two with its 6 px either side.
+    const QFontMetricsF metrics(stateLabel->property("font").value<QFont>());
+    const qreal dot = metrics.horizontalAdvance(QStringLiteral("·")) + 12;
+    qsizetype previous = parts.size();
+    QSet<qsizetype> seen;
+    for (int width = 1000; width >= 96; width -= 8) {
+        harness.window->setWidth(width);
+        QTRY_COMPARE(status->width(), qreal(width));
+        QCoreApplication::processEvents();
+        const QString text = format->property("text").toString();
+        const qsizetype shown = text.isEmpty() ? 0 : text.split(separator).size();
+        // Whole parts, from the first.
+        QCOMPARE(text, parts.mid(0, shown).join(separator));
+        QVERIFY2(shown <= previous, qPrintable(QStringLiteral("%1 at %2 px").arg(text).arg(width)));
+        // Within the room, and dropping the next part only because it
+        // wouldn't fit.
+        QVERIFY2(row->implicitWidth() <= format->width() + 0.5,
+                 qPrintable(QStringLiteral("%1 px in %2 at %3").arg(row->implicitWidth()).arg(format->width()).arg(width)));
+        if (shown < parts.size()) {
+            const qreal next = metrics.horizontalAdvance(parts[shown]) + (shown > 0 ? dot : 0);
+            QVERIFY2(row->implicitWidth() + next > format->width() - 1.0,
+                     qPrintable(QStringLiteral("\"%1\" dropped with %2 px free at %3")
+                                    .arg(parts[shown])
+                                    .arg(format->width() - row->implicitWidth())
+                                    .arg(width)));
+        }
+        seen.insert(shown);
+        previous = shown;
+    }
+    // On the way down, each count from all four to none.
+    QCOMPARE(seen, (QSet<qsizetype>{0, 1, 2, 3, 4}));
+    // And back: all of it once there is room again.
+    harness.window->setWidth(1000);
+    QTRY_COMPARE(format->property("text").toString(), parts.join(separator));
 }
 
 void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
