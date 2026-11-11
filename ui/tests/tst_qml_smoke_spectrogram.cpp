@@ -53,6 +53,10 @@ private slots:
     void spectrogramCrosshairReadoutPlatesTakeThePlotColors();
     void spectrogramCrosshairReadoutShowsAfterEveryClick();
     void spectrogramGridOverlayGeneratesWhenEnabled();
+    void spectrogramAtRestDrawsItsScaleFaintly_data();
+    void spectrogramAtRestDrawsItsScaleFaintly();
+    void spectrogramAtRestFollowsTheScaleSetting();
+    void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
     void spectrogramTimeScaleOfAStretchedShortTrackShowsTenths();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -2408,6 +2412,155 @@ Window {
     // Off the plot, none.
     QTest::mouseMove(window, QPoint(320, 300));
     QTRY_VERIFY(pane->crosshairReadout().isEmpty());
+}
+
+void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly_data() {
+    QTest::addColumn<double>("scale");
+    QTest::addColumn<bool>("logScale");
+    QTest::addColumn<int>("rate");
+    QTest::addColumn<bool>("capped");
+    for (const double scale : {1.0, 2.0}) {
+        for (const bool logScale : {false, true}) {
+            QTest::addRow("%gx%s", scale, logScale ? ", log" : "") << scale << logScale << 44'100 << false;
+        }
+    }
+    // A capped 96 kHz session sends the bins up to 24 kHz only.
+    QTest::newRow("96 kHz, capped") << 1.0 << false << 96'000 << true;
+}
+
+// The lane at rest (#373 H6 P6): before it has columns, a 1 px line across
+// it at each tick of the frequency scale, where a session at the analysis's
+// settings and the lane's rate puts the scale, and the scale's labels where
+// it puts them, in the secondary text colour.
+void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
+    QFETCH(double, scale);
+    QFETCH(bool, logScale);
+    QFETCH(int, rate);
+    QFETCH(bool, capped);
+    constexpr int fftSize = 4'096;
+    SpectrogramItem item;
+    item.setSampleRateHz(rate);
+    item.setAnalysisFftSize(fftSize);
+    item.setFrequencyCap(capped);
+    item.setLogScale(logScale);
+    item.setGridEnabled(true);
+    const QSize lane(600, 240);
+    const int width = static_cast<int>(std::lround(lane.width() * scale));
+    const int height = static_cast<int>(std::lround(lane.height() * scale));
+    SpectrogramOverlayLayout rest;
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasScale = scale;
+        item.updateRestGridOverlayLocked(width, height);
+        rest = item.m_restGrid;
+    }
+    QVERIFY(rest.valid);
+    QVERIFY(!rest.lines.isEmpty());
+    QCOMPARE(rest.images.size(), rest.lines.size());
+    for (const QRect &line : std::as_const(rest.lines)) {
+        // Across the lane.
+        QCOMPARE(line.x(), 0);
+        QCOMPARE(line.width(), width);
+    }
+    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
+        QCOMPARE(label.kind, SpectrogramOverlayImage::RestScaleLabel);
+    }
+
+    // The scale a session at those settings shows.
+    const int bins = capped ? fftSize / 4 + 1 : fftSize / 2 + 1;
+    constexpr int columns = 10;
+    item.feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, 0, columns, 0, 100, rate, 1'024,
+                              false, true, 1, false, 0, 0, fftSize);
+    {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_binsPerColumn = item.m_precomputedBinsPerColumn;
+        item.m_fftSize = item.m_precomputedFftSize;
+        item.m_sampleRateHz = item.m_precomputedSampleRateHz;
+        item.invalidateMapping();
+        item.ensureMapping(height);
+        item.updateFreqGridOverlayLocked(width, height);
+    }
+    const SpectrogramOverlayLayout &scaleShown = item.m_freqGrid;
+    QCOMPARE(rest.lines.size(), scaleShown.lines.size());
+    for (qsizetype i = 0; i < rest.lines.size(); ++i) {
+        // On the tick's rows, as thick.
+        QCOMPARE(rest.lines.at(i).y(), scaleShown.lines.at(i).y());
+        QCOMPARE(rest.lines.at(i).height(), scaleShown.lines.at(i).height());
+        QCOMPARE(rest.images.at(i).text, scaleShown.images.at(i).text);
+        QCOMPARE(rest.images.at(i).rect, scaleShown.images.at(i).rect);
+    }
+}
+
+// With the scale hidden (Preferences), the lane at rest keeps its lines,
+// the plot's structure, and shows no labels.
+void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    const auto layOut = [&item]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.updateRestGridOverlayLocked(600, 240);
+        return item.m_restGrid;
+    };
+    item.setGridEnabled(true);
+    const SpectrogramOverlayLayout shown = layOut();
+    QVERIFY(!shown.images.isEmpty());
+    QSignalSpy updates(&item, &SpectrogramItem::gridEnabledChanged);
+    item.setGridEnabled(false);
+    QCOMPARE(updates.count(), 1);
+    const SpectrogramOverlayLayout hidden = layOut();
+    QVERIFY(hidden.images.isEmpty());
+    QCOMPARE(hidden.lines, shown.lines);
+}
+
+// As drawn: in white 8% on the black floor, with labels in plotTextSecondary,
+// only while the lane has no columns to show.
+void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
+    QQuickWindow window;
+    window.resize(400, 200);
+    auto *item = new SpectrogramItem(window.contentItem());
+    item->setSize(QSizeF(400, 200));
+    item->setSampleRateHz(48'000);
+    item->setDisplayMode(1);
+    item->setGridEnabled(true);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramOverlayLayout rest;
+    QTRY_VERIFY((rest = [item]() {
+        QMutexLocker lock(&item->m_stateMutex);
+        return item->m_restGrid;
+    }()).valid);
+    QVERIFY(!rest.lines.isEmpty() && !rest.images.isEmpty());
+    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
+    const QImage atRest = grab();
+    QCOMPARE(atRest.width(), 400);
+    const QColor black(0, 0, 0);
+    const QColor line(20, 20, 20);
+    for (const QRect &rule : std::as_const(rest.lines)) {
+        QCOMPARE(atRest.pixelColor(100, rule.y()), line);
+        QCOMPARE(atRest.pixelColor(100, rule.y() - 3), black);
+        QCOMPARE(atRest.pixelColor(100, rule.y() + 3), black);
+    }
+    // The labels: plotText at 72% on black, not plotText.
+    for (const SpectrogramOverlayImage &label : std::as_const(rest.images)) {
+        int brightest = 0;
+        const QRect area = label.rect.toAlignedRect();
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            for (int x = area.left(); x <= area.right(); ++x) {
+                brightest = std::max(brightest, atRest.pixelColor(x, y).red());
+            }
+        }
+        QVERIFY2(brightest >= 160 && brightest <= 175, qPrintable(QString::number(brightest)));
+    }
+
+    // Columns of silence, the floor: the lines go with the first of them.
+    constexpr int bins = 4'097;
+    constexpr int columns = 1'000;
+    item->feedPrecomputedChunk(QByteArray(bins * columns, '\0'), bins, 0, columns, 0, columns, 48'000,
+                               1'024, false, true, 1, false);
+    QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), black);
+    // Its columns gone, the lane is at rest again.
+    item->clearPrecomputed();
+    QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
 }
 
 void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {

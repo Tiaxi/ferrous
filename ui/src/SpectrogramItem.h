@@ -209,8 +209,9 @@ struct SpectrogramRasterJob {
 // dotted line. The scene node keeps its texture while the overlay shows it.
 struct SpectrogramOverlayImage {
     // A scale label: outlined text on the plot. The crosshair's dashed lines,
-    // and its readout's plates (see CrosshairReadout).
-    enum Kind { ScaleLabel, DashedColumn, DashedRow, ReadoutPlate };
+    // and its readout's plates (see CrosshairReadout). A scale label of the
+    // lane at rest, before it has columns, in the secondary text colour.
+    enum Kind { ScaleLabel, DashedColumn, DashedRow, ReadoutPlate, RestScaleLabel };
     Kind kind{ScaleLabel};
     // A label's text, or a dotted line's length in device pixels.
     QString text;
@@ -303,6 +304,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(double markerSeconds READ markerSeconds WRITE setMarkerSeconds NOTIFY markerSecondsChanged)
     Q_PROPERTY(double markerX READ markerX NOTIFY markerXChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
+    // The analysis's FFT size and whether it caps the band (Preferences):
+    // a lane at rest, without columns, draws its scale's lines where a
+    // session of them will put the scale.
+    Q_PROPERTY(int analysisFftSize READ analysisFftSize WRITE setAnalysisFftSize NOTIFY analysisFftSizeChanged)
+    Q_PROPERTY(bool frequencyCap READ frequencyCap WRITE setFrequencyCap NOTIFY frequencyCapChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
@@ -380,6 +386,11 @@ public:
 
     bool gridEnabled() const;
     void setGridEnabled(bool value);
+
+    int analysisFftSize() const;
+    void setAnalysisFftSize(int value);
+    bool frequencyCap() const;
+    void setFrequencyCap(bool value);
 
     bool showTimeLabels() const;
     void setShowTimeLabels(bool value);
@@ -472,6 +483,8 @@ signals:
     void markerSecondsChanged();
     void markerXChanged();
     void gridEnabledChanged();
+    void analysisFftSizeChanged();
+    void frequencyCapChanged();
     void showTimeLabelsChanged();
     void crosshairSharedXChanged();
     void crosshairHoverChanged(double x);
@@ -719,6 +732,14 @@ private:
     // Names the layout's images' textures, at the canvas scale.
     void nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const;
     void updateFreqGridOverlayLocked(int width, int height);
+    // How far below the lane's top the frequency scale's labels start, in
+    // logical pixels.
+    int frequencyScaleTopClearanceLocked() const;
+    // The lane at rest, without columns: a faint line across it at each
+    // tick of the frequency scale, and with the scale shown, its labels,
+    // where a session at the analysis's settings and the lane's rate will
+    // put them.
+    void updateRestGridOverlayLocked(int width, int height);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
@@ -1210,6 +1231,11 @@ private:
     // playback.
     SpectrogramOverlayLayout m_freqGrid;
     bool m_freqGridDirty{true};
+    // The lane at rest (updateRestGridOverlayLocked), and the analysis's
+    // settings it is laid out for: the app's default FFT size until told.
+    SpectrogramOverlayLayout m_restGrid;
+    int m_analysisFftSize{8192};
+    bool m_frequencyCap{false};
     int m_freqGridCachedSampleRateHz{0};
     int m_freqGridCachedBinsPerColumn{0};
 

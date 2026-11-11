@@ -361,6 +361,10 @@ Item {
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     gridEnabled: root.uiBridge.showSpectrogramScale
+                    // At rest, the scale's lines where a session will put
+                    // its ticks.
+                    analysisFftSize: root.uiBridge.fftSize || 0
+                    frequencyCap: root.uiBridge.spectrogramFrequencyCap === true
                     // The time scale runs along the top of the first lane.
                     showTimeLabels: index === 0
                     markerSeconds: index === 0 ? root.markerSeconds : -1
