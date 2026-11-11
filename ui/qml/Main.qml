@@ -1605,8 +1605,8 @@ ApplicationWindow {
         // chosen one then fades in over it over shortDuration; the labels,
         // the switch and the meter stay put. The spectrogram, hidden, gives
         // its analysis and columns up, so shown again it waits for a fresh
-        // session's first columns. With animations off it shows once it can
-        // draw, with no fade. The plot before goes once the chosen one shows
+        // session's columns to fill its whole view. With animations off it
+        // shows once it can draw, with no fade. The plot before goes once the chosen one shows
         // whole.
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
@@ -1622,13 +1622,19 @@ ApplicationWindow {
         function plotAwaitsData(mode) {
             return mode === 0 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
         }
+        // Whether `mode`'s plot can come in: the waveform once it has its
+        // data, the spectrogram once each lane has drawn the whole view
+        // (#373 H6: it faded in black and then filled in blocks).
+        function plotCanComeIn(mode) {
+            return mode === 0 ? spectrogramSurface.viewFilled : !waveformSurface.awaitingData
+        }
         // Whether the chosen plot still waits for its data while the one
         // before has some to show. Without a track to wait for, or with
         // nothing to show before either, it shows at once.
         function chosenPlotWaits() {
             return visualizationSurface.isModeSwitching()
                 && plotLayer.trackLoaded
-                && visualizationSurface.plotAwaitsData(viewerController.visualizationMode)
+                && !visualizationSurface.plotCanComeIn(viewerController.visualizationMode)
                 && !visualizationSurface.plotAwaitsData(visualizationSurface.settledMode)
         }
         readonly property bool modeSwitching: visualizationSurface.isModeSwitching()
@@ -1636,7 +1642,7 @@ ApplicationWindow {
         // has data to show. Not what it sets itself, so that settling in a
         // handler of it is no binding loop.
         readonly property var modeInputs: [viewerController.visualizationMode, plotLayer.trackLoaded,
-            spectrogramSurface.awaitingData, waveformSurface.awaitingData]
+            spectrogramSurface.awaitingData, spectrogramSurface.viewFilled, waveformSurface.awaitingData]
         readonly property NumberAnimation modeFadeAnimation: NumberAnimation {
             objectName: "visualizationModeFade"
             target: visualizationSurface
@@ -1778,6 +1784,7 @@ ApplicationWindow {
             setVisualizationMode: viewerController.setVisualizationMode
             controlsVisible: spectrogramViewerShell.fullscreenControlsVisible
             controlsLevel: spectrogramViewerShell.fullscreenControlsLevel
+            controlsAutoHide: visualizationSurface.inViewer
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             trailingInset: visualizationSurface.inViewer
                 ? spectrogramViewerShell.reservedCorner.width : 0

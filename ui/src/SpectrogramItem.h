@@ -209,8 +209,9 @@ struct SpectrogramRasterJob {
 // dotted line. The scene node keeps its texture while the overlay shows it.
 struct SpectrogramOverlayImage {
     // A scale label: outlined text on the plot. The crosshair's dashed lines,
-    // and its readout's plates (see CrosshairReadout).
-    enum Kind { ScaleLabel, DashedColumn, DashedRow, ReadoutPlate };
+    // and its readout's plates (see CrosshairReadout). A scale label of the
+    // lane at rest, before it has columns, in the secondary text colour.
+    enum Kind { ScaleLabel, DashedColumn, DashedRow, ReadoutPlate, RestScaleLabel };
     Kind kind{ScaleLabel};
     // A label's text, or a dotted line's length in device pixels.
     QString text;
@@ -303,6 +304,16 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(double markerSeconds READ markerSeconds WRITE setMarkerSeconds NOTIFY markerSecondsChanged)
     Q_PROPERTY(double markerX READ markerX NOTIFY markerXChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)
+    // The analysis's FFT size and whether it caps the band (Preferences):
+    // a lane at rest, without columns, draws its scale's lines where a
+    // session of them will put the scale.
+    Q_PROPERTY(int analysisFftSize READ analysisFftSize WRITE setAnalysisFftSize NOTIFY analysisFftSizeChanged)
+    Q_PROPERTY(bool frequencyCap READ frequencyCap WRITE setFrequencyCap NOTIFY frequencyCapChanged)
+    // Whether the lane has shown its whole view since its columns came:
+    // every column of the view that the session has, up to the playhead
+    // in rolling mode and up to the view's end or the track's in centered
+    // mode. False again until a new session's columns fill it.
+    Q_PROPERTY(bool viewFilled READ viewFilled NOTIFY viewFilledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
@@ -380,6 +391,12 @@ public:
 
     bool gridEnabled() const;
     void setGridEnabled(bool value);
+
+    int analysisFftSize() const;
+    void setAnalysisFftSize(int value);
+    bool frequencyCap() const;
+    void setFrequencyCap(bool value);
+    bool viewFilled() const;
 
     bool showTimeLabels() const;
     void setShowTimeLabels(bool value);
@@ -472,6 +489,9 @@ signals:
     void markerSecondsChanged();
     void markerXChanged();
     void gridEnabledChanged();
+    void analysisFftSizeChanged();
+    void frequencyCapChanged();
+    void viewFilledChanged();
     void showTimeLabelsChanged();
     void crosshairSharedXChanged();
     void crosshairHoverChanged(double x);
@@ -719,6 +739,20 @@ private:
     // Names the layout's images' textures, at the canvas scale.
     void nameOverlayImagesLocked(SpectrogramOverlayLayout &layout) const;
     void updateFreqGridOverlayLocked(int width, int height);
+    // How far below the lane's top the frequency scale's labels start, in
+    // logical pixels.
+    int frequencyScaleTopClearanceLocked() const;
+    // The lane at rest, without columns: a faint line across it at each
+    // tick of the frequency scale, and with the scale shown, its labels,
+    // where a session at the analysis's settings and the lane's rate will
+    // put them.
+    void updateRestGridOverlayLocked(int width, int height);
+    // Whether the frame shows every column of the view that there is.
+    bool viewShownWholeLocked(qint64 displayLeft, qint64 displayRight, bool rollingMode,
+        double canvasZoom, int cw, qint64 displaySeq, int visibleWindowCols) const;
+    // Sets whether the lane has shown its whole view since its columns
+    // came, from either thread, and tells the GUI thread when it changes.
+    void publishViewFilledLocked(bool filled);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
@@ -1210,6 +1244,14 @@ private:
     // playback.
     SpectrogramOverlayLayout m_freqGrid;
     bool m_freqGridDirty{true};
+    // The lane at rest (updateRestGridOverlayLocked), and the analysis's
+    // settings it is laid out for: the app's default FFT size until told.
+    SpectrogramOverlayLayout m_restGrid;
+    int m_analysisFftSize{8192};
+    bool m_frequencyCap{false};
+    // Whether the lane has shown its whole view since its columns came:
+    // set as the render thread lays a frame out, cleared with the columns.
+    bool m_viewFilled{false};
     int m_freqGridCachedSampleRateHz{0};
     int m_freqGridCachedBinsPerColumn{0};
 

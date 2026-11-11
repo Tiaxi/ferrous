@@ -43,11 +43,13 @@ Item {
     implicitWidth: closeButton.x + closeButton.width
     implicitHeight: root.uiPalette.toolButtonSize
 
-    // Quiet: only while the view is zoomed.
+    // Quiet: only while the view is zoomed. On the album art viewer's
+    // corner plate, 6 px in from its edge, as the plot's zoom readout is.
     Components.ZoomReadout {
         id: readout
         objectName: "viewerZoomReadout"
         x: 0
+        leftPadding: 4
         visible: root.readoutShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors

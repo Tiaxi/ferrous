@@ -35,6 +35,11 @@ Item {
     // Those controls as they fade (FullscreenControlsAutoHide's level),
     // which the mode switch and the lanes' buttons take as their opacity.
     property real controlsLevel: root.controlsVisible ? 1 : 0
+    // In a viewer, whose controls show on the pointer's activity and hide
+    // after it as one layer: the mode switch and the lanes' Mute and Solo
+    // show whenever they do, on their level alone, rather than each on the
+    // pointer over the pane or its lane, a moment apart (#373 H6).
+    property bool controlsAutoHide: false
     property var pointerActivity: null
     // What the viewer keeps clear on the right of the mode switch.
     property real trailingInset: 0
@@ -97,7 +102,8 @@ Item {
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
     // the newest part of the plot. Before any audio the plot has nothing
-    // to cover, and the switch shows, so a mode can be picked first.
+    // to cover, and the switch shows, so a mode can be picked first. In a
+    // viewer, it shows with the viewer's controls.
     Components.PlotModeSwitch {
         id: modeSwitch
         z: 2
@@ -108,7 +114,7 @@ Item {
         // In a viewer, it hides and shows with the viewer's controls, at
         // their level; hidden, it takes no pointer.
         visible: root.controlsVisible || root.controlsLevel > 0
-        revealed: root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
+        revealed: root.controlsAutoHide || root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
             || modeSwitch.pointerHovered || modeSwitch.focusInside
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
@@ -118,16 +124,18 @@ Item {
         pointerActivity: root.pointerActivity
     }
 
-    // The zoom, 8 px left of the mode switch: shown whenever the plot is
-    // zoomed, not only with the switch, as nothing else shows it. It keeps
-    // its place while the switch hides. In a viewer, it hides and shows
-    // with the viewer's controls, at their level.
+    // The zoom, left of the mode switch as far as a viewer's controls are
+    // right of it, so that the corner's plates read as one row (#373 H6):
+    // shown whenever the plot is zoomed, not only with the switch, as
+    // nothing else shows it. It keeps its place while the switch hides. In
+    // a viewer, it hides and shows with the viewer's controls, at their
+    // level.
     Components.PlotZoomPlate {
         id: zoomPlate
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        anchors.rightMargin: 8
+        anchors.rightMargin: 4
         available: root.controlsVisible || root.controlsLevel > 0
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
@@ -172,6 +180,7 @@ Item {
             buttonsVisibility: root.uiBridge.channelButtonsVisibility
             controlsShown: root.controlsVisible
             controlsLevel: root.controlsLevel
+            revealedWithControls: root.controlsAutoHide
             laneHovered: root.hoveredLane === index
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }

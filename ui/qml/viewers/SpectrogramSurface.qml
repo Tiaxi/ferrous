@@ -44,6 +44,21 @@ Item {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return !(first && first.spectrogramItem && first.spectrogramItem.precomputedReady)
     }
+    // Whether every lane has shown its whole view since its columns came:
+    // the mode switch brings the spectrogram in only then, so that it never
+    // fades in over the waveform half drawn.
+    readonly property bool viewFilled: {
+        if (spectrogramRepeater.count <= 0) {
+            return false
+        }
+        for (let i = 0; i < spectrogramRepeater.count; ++i) {
+            const pane = spectrogramRepeater.itemAt(i)
+            if (!pane || !pane.spectrogramItem || !pane.spectrogramItem.viewFilled) {
+                return false
+            }
+        }
+        return true
+    }
     property bool interactiveOverlaysVisible: true
     // The overlays as they fade with the viewer's controls, from 1 to 0:
     // the crosshair shows until they have faded out. Without a level of
@@ -361,6 +376,10 @@ Item {
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
                     gridEnabled: root.uiBridge.showSpectrogramScale
+                    // At rest, the scale's lines where a session will put
+                    // its ticks.
+                    analysisFftSize: root.uiBridge.fftSize || 0
+                    frequencyCap: root.uiBridge.spectrogramFrequencyCap === true
                     // The time scale runs along the top of the first lane.
                     showTimeLabels: index === 0
                     markerSeconds: index === 0 ? root.markerSeconds : -1
