@@ -12,7 +12,9 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFontInfo>
 #include <QFontMetricsF>
+#include <QHash>
 #include <QImage>
 #include <QLocale>
 #include <QMutex>
@@ -174,6 +176,9 @@ ApplicationWindow {
     Action { id: previousAction; text: "P&revious"; icon.name: "media-skip-backward"; shortcut: "Ctrl+Left" }
     Action { id: playAction; text: "Play"; icon.name: "media-playback-start" }
     Action { id: pauseAction; text: "Pause"; icon.name: "media-playback-pause" }
+    // The transport reads only its shortcut's text, for the Play/Pause
+    // tooltip; disabled, so that Space stays with the focused control.
+    Action { id: playPauseAction; text: "&Pause"; shortcut: "Space"; enabled: false }
     Action { id: stopAction; text: "&Stop"; icon.name: "media-playback-stop"; shortcut: "Ctrl+Shift+Space" }
     Action { id: nextAction; text: "&Next"; icon.name: "media-skip-forward"; shortcut: "Ctrl+Right" }
 
@@ -213,6 +218,7 @@ ApplicationWindow {
                 pauseAction: pauseAction
                 stopAction: stopAction
                 nextAction: nextAction
+                playPauseAction: playPauseAction
                 volumeMuted: window.muted
                 mutedVolume: window.mutedVolume
                 keyboardSeekStepSeconds: 5
@@ -455,6 +461,8 @@ private slots:
     void seekFocusDrawsOneRingAroundTheBar();
     void volumeGlyphHasTheTransportsWeight_data();
     void volumeGlyphHasTheTransportsWeight();
+    void transportGlyphsDrawOnOneScale_data();
+    void transportGlyphsDrawOnOneScale();
     void transportButtonsDrawTheAppsFocusRing_data();
     void transportButtonsDrawTheAppsFocusRing();
     void transportPressedReadsApartFromHover_data();
@@ -533,8 +541,9 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
 
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
-    // Play/Pause a step above its neighbours, in the same 32 px button.
-    const QList<int> glyphs{16, 22, 14, 16};
+    // Play/Pause a step above its neighbours, in the same 32 px button, and
+    // the others one size (#373 H9: 22, 16 and 14 read as three weights).
+    const QList<int> glyphs{16, 20, 16, 16};
     for (int i = 0; i < names.size(); ++i) {
         QQuickItem *button = harness.item(QStringLiteral("transportButton_") + names[i]);
         QVERIFY2(button != nullptr, qPrintable(names[i]));
@@ -545,13 +554,13 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
         QVERIFY(button->property("flat").toBool());
         QCOMPARE(button->property("glyphSize").toInt(), glyphs[i]);
     }
-    // Both Play/Pause glyphs are drawn at 22 px, centred in the button.
+    // Both Play/Pause glyphs are drawn at 20 px, centred in the button.
     const QRectF playPauseRect = sceneRect(harness.item(QStringLiteral("transportButton_playPause")));
     for (const QString &name : {QStringLiteral("transportPlayPauseGlyph_play"),
                                 QStringLiteral("transportPlayPauseGlyph_pause")}) {
         QQuickItem *glyph = harness.item(name);
         QVERIFY2(glyph != nullptr, qPrintable(name));
-        QCOMPARE(glyph->size(), QSizeF(22, 22));
+        QCOMPARE(glyph->size(), QSizeF(20, 20));
         QCOMPARE(sceneRect(glyph).center(), playPauseRect.center());
         QVERIFY2(within(sceneRect(glyph), playPauseRect), qPrintable(name));
     }
@@ -761,7 +770,12 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     QVERIFY(next && stop && playPause);
     QCOMPARE(toolTipText(next), QStringLiteral("Next · Ctrl+Right"));
     QCOMPARE(toolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
-    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause"));
+    // Play and Pause have no shortcut of their own: Space toggles them
+    // (#373 H9: Previous named its shortcut and Pause none).
+    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause · Space"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
     // Keyboard focus shows it, as hover does.
     next->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(toolTipShown(next));
@@ -1044,6 +1058,137 @@ void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
     QTRY_VERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
     QTRY_VERIFY((volumeInk = ink(muteGlyph)) > 0);
     QVERIFY2(volumeInk * 10 >= nextInk * 7, qPrintable(QStringLiteral("%1 / %2").arg(volumeInk).arg(nextInk)));
+}
+
+void TransportStatusTest::transportGlyphsDrawOnOneScale_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("small");
+    QTest::addColumn<int>("large");
+    QTest::newRow("10 pt") << 10.0 << 16 << 20;
+    QTest::newRow("24 pt") << 24.0 << 38 << 48;
+}
+
+// The transport's glyphs on one scale (#373 H9: Play/Pause 22, Previous and
+// Next 16 and Stop 14 read as three weights): Previous, Stop, Next and the
+// volume 16 px, their ink 12 px tall, and Play/Pause a step above at 20 px,
+// its ink 14 px tall; Stop's and Pause's ink at most 1.4 times Next's. They
+// grow with the font on whole pixels, to at least 0.9 of its pixel size at
+// 24 pt, and are drawn at that size (H9: Kirigami rounded a 24 pt font's
+// 38 px glyphs down to 32 px theme icons, and would draw a 20 px one at 16).
+void TransportStatusTest::transportGlyphsDrawOnOneScale() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, small);
+    QFETCH(int, large);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), pointSize);
+    const auto glyphOf = [&harness](const QString &button) -> QQuickItem * {
+        QList<QQuickItem *> pending{harness.item(QStringLiteral("transportButton_") + button)};
+        while (!pending.isEmpty()) {
+            QQuickItem *item = pending.takeFirst();
+            if (item != nullptr && item->objectName() == QStringLiteral("transportButtonGlyph")) {
+                return item;
+            }
+            if (item != nullptr) {
+                pending.append(item->childItems());
+            }
+        }
+        return nullptr;
+    };
+    struct Glyph {
+        const char *name;
+        QQuickItem *item;
+        int side;
+        int inkHeight;
+    };
+    // Playing: Pause shows.
+    QQuickItem *pause = harness.item(QStringLiteral("transportPlayPauseGlyph_pause"));
+    QTRY_VERIFY(pause != nullptr && pause->opacity() == 1.0);
+    const QList<Glyph> glyphs{
+        {"previous", glyphOf(QStringLiteral("previous")), small, small * 12 / 16},
+        {"pause", pause, large, large * 14 / 20},
+        {"stop", glyphOf(QStringLiteral("stop")), small, small * 12 / 16},
+        {"next", glyphOf(QStringLiteral("next")), small, small * 12 / 16},
+        {"volume", harness.item(QStringLiteral("muteButtonGlyph")), small, small * 12 / 16},
+    };
+    const int fontPixels = QFontInfo(font).pixelSize();
+    for (const Glyph &glyph : glyphs) {
+        QVERIFY2(glyph.item != nullptr, glyph.name);
+        QCOMPARE(glyph.item->size(), QSizeF(glyph.side, glyph.side));
+        QCOMPARE(glyph.item->property("paintedWidth").toReal(), qreal(glyph.side));
+        QVERIFY2(glyph.side >= 0.9 * fontPixels || pointSize < 24,
+                 qPrintable(QStringLiteral("%1: %2 px for a %3 px font").arg(glyph.name).arg(glyph.side).arg(fontPixels)));
+    }
+    QQuickItem *play = harness.item(QStringLiteral("transportPlayPauseGlyph_play"));
+    QVERIFY(play != nullptr);
+    QCOMPARE(play->size(), QSizeF(large, large));
+
+    // As drawn: the pixels at least half as strong as the glyph's strongest,
+    // so that how a mask is coloured offscreen doesn't count; their count
+    // and the rows they span, in scene pixels.
+    const QColor chrome = harness.token("chrome");
+    struct Ink {
+        int pixels = 0;
+        int height = 0;
+    };
+    const auto inkOf = [&](QQuickItem *item) {
+        qreal scale = 1;
+        const QImage image = grabbed(harness.window, &scale);
+        QList<int> distances;
+        for (int y = 0; y < int(item->height()); ++y) {
+            for (int x = 0; x < int(item->width()); ++x) {
+                distances.append(
+                    channelDistance(pixelAt(image, item->mapToScene(QPointF(x + 0.5, y + 0.5)), scale), chrome));
+            }
+        }
+        Ink ink;
+        const int strongest = *std::max_element(distances.cbegin(), distances.cend());
+        if (strongest < 16) {
+            return ink;
+        }
+        int top = -1;
+        int bottom = -1;
+        for (int i = 0; i < distances.size(); ++i) {
+            if (distances[i] * 2 >= strongest) {
+                ink.pixels += 1;
+                const int y = i / int(item->width());
+                top = top < 0 ? y : top;
+                bottom = y;
+            }
+        }
+        ink.height = bottom - top + 1;
+        return ink;
+    };
+    QHash<QString, Ink> inks;
+    for (const Glyph &glyph : glyphs) {
+        Ink ink;
+        QTRY_VERIFY((ink = inkOf(glyph.item)).pixels > 0);
+        inks.insert(QString::fromLatin1(glyph.name), ink);
+        QVERIFY2(std::abs(ink.height - glyph.inkHeight) <= 1,
+                 qPrintable(QStringLiteral("%1: %2 px of ink in a %3 px glyph, not %4")
+                                .arg(glyph.name).arg(ink.height).arg(glyph.side).arg(glyph.inkHeight)));
+    }
+    const int next = inks.value(QStringLiteral("next")).pixels;
+    for (const char *name : {"previous", "pause", "stop"}) {
+        const int pixels = inks.value(QString::fromLatin1(name)).pixels;
+        QVERIFY2(pixels * 10 >= next * 8 && pixels * 5 <= next * 7,
+                 qPrintable(QStringLiteral("%1: %2 px of ink, Next %3").arg(name).arg(pixels).arg(next)));
+    }
+    // Play, as Pause's step above, and its ink in the same rows.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_VERIFY(play->opacity() == 1.0 && !pause->isVisible());
+    Ink playInk;
+    QTRY_VERIFY((playInk = inkOf(play)).pixels > 0);
+    // Give or take the triangle's thin tips, at most a pixel at each end.
+    QVERIFY2(std::abs(playInk.height - inks.value(QStringLiteral("pause")).height) <= 2,
+             qPrintable(QStringLiteral("Play %1 px, Pause %2 px").arg(playInk.height)
+                            .arg(inks.value(QStringLiteral("pause")).height)));
 }
 
 void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
@@ -1970,11 +2115,12 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
     // Until the track's length is known, there is no scrobble point: the
-    // glyph alone.
+    // bar at its 3 px start, as listening always has (#373 H9).
     bridge->setProperty("lastFmScrobbleThresholdMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
     QCOMPARE(progress(), 0.0);
-    QVERIFY(!bar->isVisible());
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->width(), 3.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
@@ -2206,10 +2352,11 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough_data() {
 }
 
 // The bar under the glyph, as drawn at 1x (#373 H6): as many whole pixels
-// of the glyph's 16 as the listening done, from the left, and the chrome
-// everywhere else: no trough, so at 0 % there is the glyph alone, and
-// nothing between the glyph and the bar. Each step reads apart from the
-// last, the bar 3:1 on the chrome; being sent fills it at half strength,
+// of the glyph's 16 as the listening done, from the left, but never fewer
+// than its 3 px height, and the chrome everywhere else: no trough, and
+// nothing between the glyph and the bar. At 0 % a 3 px square, so that
+// listening never looks like scrobbled (#373 H9: both were the bare glyph).
+// The bar is 3:1 on the chrome; being sent fills it at half strength,
 // scrobbled leaves it out, failed fills it in the negative colour.
 void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     QFETCH(bool, dark);
@@ -2259,19 +2406,15 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     };
     const QColor text = harness.token("text");
     QVERIFY2(contrastRatio(text, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), text, chrome)));
-    int previous = -1;
-    for (const double done : {0.0, 0.25, 0.5, 0.9}) {
+    for (const auto &[done, columns] :
+         {std::pair{0.0, 3}, std::pair{0.1, 3}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
-        const int columns = int(std::floor(done * 16));
-        QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 16.0);
+        QTRY_COMPARE(slot->property("barProgress").toDouble(), std::floor(done * 16) / 16.0);
         Drawn now;
         QTRY_VERIFY2((now = drawn(text), now.lit == 3 * columns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.lit)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of trough or ink").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
-        // Apart from the last by a quarter of the bar or more.
-        QVERIFY2(columns - previous >= 4 || previous < 0, qPrintable(QString::number(columns - previous)));
-        previous = columns;
     }
 
     // Being sent: full, the text colour at half strength. Scrobbled: no bar
@@ -2771,7 +2914,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     const QRectF band = sceneRect(transport);
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
-    const QList<int> glyphs{38, 53, 34, 38};
+    const QList<int> glyphs{38, 48, 38, 38};
     qreal previousRight = band.left();
     qreal buttonSize = 0;
     for (int i = 0; i < names.size(); ++i) {

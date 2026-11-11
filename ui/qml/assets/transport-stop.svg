@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The transport's Stop glyph (#373 H9), drawn for 16 px at 1x on whole pixels in Breeze's 16 px
+     geometry: a square, its ink about as heavy as the Pause glyph's, 12 px tall in rows 2 to 13, as
+     Previous, Stop, Next and the volume all are. Ferrous's own, so that the transport keeps one
+     scale at every font size: a theme draws its larger sizes from other designs, with more space
+     around the glyph. A one-colour mask, drawn in the text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M2 2h12v12h-12z"/>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The transport's Pause glyph (#373 H9), drawn for 20 px at 1x on whole pixels: Breeze's two bars,
+     5 px wide with 4 px between them, 14 px tall in rows 3 to 16, as tall as the Play glyph it
+     cross-fades with. A one-colour mask, drawn in the text colour. -->
+<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M3 3h5v14h-5z M12 3h5v14h-5z"/>
+</svg>

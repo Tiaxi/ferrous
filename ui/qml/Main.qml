@@ -1441,6 +1441,7 @@ ApplicationWindow {
             pauseAction: pauseAction
             stopAction: stopAction
             nextAction: nextAction
+            playPauseAction: playPauseAction
             volumeMuted: playbackController.volumeMuted
             mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
