@@ -7,9 +7,15 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 
 // The playing track's cover, edge to edge: no inset, radius or frame. A
-// track without a cover keeps the tile's place, on the colour around it,
+// track without a cover keeps the tile's place, on the placeholder colour,
 // with Breeze's album cover mark at its centre: the cover is missing, and
-// nothing more is said about it (#373 H1, H3).
+// nothing more is said about it (#373 H1, H3). With nothing playing
+// (`idle`) the tile keeps its place too, on the idle colour with the same
+// mark, so nothing moves when playback starts (#373 H5).
+//
+// The tile is a keyboard stop while a track plays: a 1 px ring shows its
+// focus while the keyboard is in use, and the Menu key or Shift+F10 opens
+// its context menu. The pointer over it lays a faint veil on it.
 Rectangle {
     id: root
 
@@ -20,6 +26,12 @@ Rectangle {
     // The tile and its mark while the track has no cover: the now-playing
     // panel passes the palette's.
     property color placeholderColor: "transparent"
+    // Nothing playing: the tile shows no cover, and the mark on `idleColor`.
+    property bool idle: false
+    property color idleColor: root.placeholderColor
+    // The veil the pointer lays on the tile, and the keyboard focus ring.
+    property color hoverVeilColor: "transparent"
+    property color focusRingColor: Kirigami.Theme.focusColor
     property color placeholderGlyphColor: Kirigami.Theme.textColor
     // The mark's size: 48 px, and a third of a smaller tile, unless the
     // now-playing panel sizes it from the font.
@@ -31,7 +43,13 @@ Rectangle {
     // now-playing panel passes. Each cover draws on it, so a cover at full
     // opacity hides all under it, the covers fading out under it too.
     property color backdropColor: "transparent"
-    readonly property bool hasCover: root.uiBridge.currentTrackCoverPath.length > 0
+    readonly property bool hasCover: !root.idle && root.uiBridge.currentTrackCoverPath.length > 0
+    // Hovered by the pointer.
+    readonly property bool hovered: tileMouseArea.containsMouse
+    // The ring shows keyboard focus only, as in the lists (#373 H2).
+    readonly property bool focusRingShown: focusTarget.activeFocus && InputModality.keyboard
+    // What takes the keyboard's focus, the pointer and the keys.
+    readonly property Item focusItem: focusTarget
     // The covers before, or their placeholder for none, over this one
     // while they fade out: the now-playing panel's album change. Oldest
     // first, each {coverPath, from}, showing at `from` times
@@ -47,14 +65,17 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: root.hasCover ? root.backdropColor : root.placeholderColor
-    Accessible.role: Accessible.Graphic
-    Accessible.name: root.hasCover
-        ? I18n.i18nc("@info", "Album art")
-        : I18n.i18nc("@info", "No album art")
+    color: root.idle ? root.idleColor : (root.hasCover ? root.backdropColor : root.placeholderColor)
+    // The keyboard stop over it speaks for it.
+    Accessible.ignored: true
+
+    function openContextMenu(x, y) {
+        albumArtMenu.popup(root, x, y)
+    }
 
     Image {
         anchors.fill: parent
+        visible: !root.idle
         source: root.uiBridge.currentTrackCoverPath
         fillMode: Image.PreserveAspectFit
         smooth: true
@@ -131,25 +152,82 @@ Rectangle {
         }
     }
 
-    MouseArea {
+    // The keyboard stop, over the covers, with the pointer's veil, the
+    // focus ring and the pointer's input. Disabled while nothing plays, as
+    // there is nothing to show or open: out of the Tab order then, and it
+    // gives up the focus if it has it. Only this item is disabled, so the
+    // mark under it keeps its colour.
+    Item {
+        id: focusTarget
+        objectName: "albumArtFocusTarget"
         anchors.fill: parent
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        enabled: !root.idle
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Graphic
+        Accessible.name: root.hasCover
+            ? I18n.i18nc("@info", "Album art")
+            : I18n.i18nc("@info", "No album art")
+        Accessible.focusable: true
 
-        onPressed: function(mouse) {
-            if (mouse.button === Qt.RightButton) {
-                albumArtMenu.popup()
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Menu
+                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                root.openContextMenu(0, root.height)
+                event.accepted = true
             }
         }
 
-        onDoubleClicked: function(mouse) {
-            if (mouse.button === Qt.LeftButton) {
-                root.openAlbumArtViewer()
+        // The pointer's veil, over the covers.
+        Rectangle {
+            objectName: "albumArtHoverVeil"
+            anchors.fill: parent
+            color: root.hoverVeilColor
+            opacity: root.hovered ? 1 : 0
+            visible: opacity > 0
+
+            Behavior on opacity {
+                enabled: Kirigami.Units.shortDuration > 0
+                NumberAnimation {
+                    duration: Kirigami.Units.shortDuration
+                    easing.type: Easing.OutCubic
+                }
+            }
+        }
+
+        // Keyboard focus: a 1 px ring inside the tile, which runs edge to
+        // edge.
+        Rectangle {
+            objectName: "albumArtFocusRing"
+            anchors.fill: parent
+            visible: root.focusRingShown
+            color: "transparent"
+            border.width: 1
+            border.color: root.focusRingColor
+        }
+
+        MouseArea {
+            id: tileMouseArea
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+            onPressed: function(mouse) {
+                if (mouse.button === Qt.RightButton) {
+                    root.openContextMenu(mouse.x, mouse.y)
+                }
+            }
+
+            onDoubleClicked: function(mouse) {
+                if (mouse.button === Qt.LeftButton) {
+                    root.openAlbumArtViewer()
+                }
             }
         }
     }
 
     Menu {
         id: albumArtMenu
+        objectName: "albumArtMenu"
 
         MenuItem { action: root.replaceFromItunesAction }
 

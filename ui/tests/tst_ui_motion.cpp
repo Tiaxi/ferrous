@@ -2409,7 +2409,7 @@ void UiMotionTest::nowPlayingClearedAndReloadedMidFadeShowsNoStaleTrack() {
     bridge->setProperty("currentTrackTitle", QString());
     bridge->setProperty("currentTrackAlbum", QString());
     bridge->setProperty("currentTrackCoverPath", QString());
-    QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("empty"));
+    QVERIFY(panel->property("idle").toBool());
     QVERIFY(!handover->property("running").toBool());
 
     showTrack(bridge, kTrackA2, QStringLiteral("Third"), QStringLiteral("Album C"), covers.first);
@@ -2582,7 +2582,7 @@ void UiMotionTest::nowPlayingLeavesNothingPlayingWithoutAFade() {
     QObject *bridge = bridgeOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("empty"));
+    QVERIFY(panel->property("idle").toBool());
 
     showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first,
               coverFirst ? Order::CoverFirst : Order::PathFirst);
