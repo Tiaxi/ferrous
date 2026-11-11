@@ -6,10 +6,10 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 
-// The playing track's cover, edge to edge: no inset, radius or frame. A
-// track without a cover keeps the tile's place, on the placeholder colour,
-// with Breeze's audio disc mark at its centre: the cover is missing, and
-// nothing more is said about it (#373 H1, H3). With nothing playing
+// The playing track's cover, edge to edge: no inset, radius or frame. With
+// no cover the tile shows the placeholder colour, with Breeze's audio disc
+// mark at its centre (#373 H1, H3); the now-playing panel shows no tile for
+// a track without a cover (#373 H9). With nothing playing
 // (`idle`) it shows no cover, only the placeholder: the now-playing panel
 // shows its compact row then, and the tile only as it shrinks into it.
 //
@@ -44,7 +44,10 @@ Rectangle {
     // now-playing panel passes. Each cover draws on it, so a cover at full
     // opacity hides all under it, the covers fading out under it too.
     property color backdropColor: "transparent"
-    readonly property bool hasCover: !root.idle && root.uiBridge.currentTrackCoverPath.length > 0
+    // The cover it shows: the playing track's, unless the now-playing
+    // panel shows another, as the one before while it shrinks away.
+    property string coverPath: root.uiBridge.currentTrackCoverPath
+    readonly property bool hasCover: !root.idle && root.coverPath.length > 0
     // Hovered by the pointer.
     readonly property bool hovered: tileMouseArea.containsMouse
     // The ring shows keyboard focus only, as in the lists (#373 H2).
@@ -59,7 +62,9 @@ Rectangle {
     property real outgoingLevel: 0
     // The most covers before that fade out at once.
     property int outgoingSlots: 0
-    readonly property real coverSourceSize: Math.max(256, root.width)
+    // The size its images are loaded at: the now-playing panel keeps it
+    // while the tile grows or shrinks.
+    property real coverSourceSize: Math.max(256, root.width)
 
     implicitWidth: 320
     implicitHeight: 320
@@ -74,10 +79,16 @@ Rectangle {
         albumArtMenu.popup(root, x, y)
     }
 
+    // The menu, at `x`, `y` of `item`: the now-playing panel's for a track
+    // without a cover, which shows no tile.
+    function popupMenu(item, x, y) {
+        albumArtMenu.popup(item, x, y)
+    }
+
     Image {
         anchors.fill: parent
         visible: !root.idle
-        source: root.uiBridge.currentTrackCoverPath
+        source: root.coverPath
         fillMode: Image.PreserveAspectFit
         smooth: true
         asynchronous: true

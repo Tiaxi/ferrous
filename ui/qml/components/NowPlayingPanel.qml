@@ -32,17 +32,23 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   lines and the library moving down with its foot, so nothing jumps
 //   (#373 H5); going back to nothing loaded, as when the queue is
 //   cleared, shrinks it back. With animations off, both are at once.
-// - A track without a cover takes the narrow layout wherever the sidebar
-//   is (#373 H8: the empty 360 px square was the one dead slab left), its
-//   96 px tile on the view colour, with no frame, and a disc mark at its
-//   centre, so it reads as the cover's place rather than as a broken image
-//   (#373 H6); the mark is 32 px and 3:1 on the view (#373 H7). Between a
-//   track with a cover and one without, the cover's place grows or shrinks
-//   between the two sizes on the curve of the first track's growth, the
-//   panel's height and the lines with it: the wide lines move with the
-//   cover's foot, the narrow ones with its right edge, and the two
-//   cross-fade on that progress, so no line blinks. With animations off,
-//   at once.
+// - A track without a cover has no cover's place (#373 H9: a 96 px tile
+//   with a mark floating in it, and the text at x=108, on no grid): the
+//   compact row's language, a 16 px disc mark, larger with a larger font,
+//   at the 12 px inset, beside the title, and the lines where a library
+//   row has its text; the block is as tall as the lines the track has,
+//   with Kirigami's large spacing above and below them. The lines are
+//   those of the sidebar's layout, wide or narrow, so a cover that comes
+//   or goes changes only where they are.
+// - Between a track with a cover and one without, one change over
+//   longDuration (#373 H9: the two layouts cross-faded over the moving
+//   cover, the mark drew over it, and the text overlapped): the lines
+//   before fade out over its first half; from geometryStart the cover's
+//   place grows or shrinks at its top left, OutCubic, the lines and the
+//   library moving with it; the cover fades over the first half of that,
+//   and the mark comes in, or goes, only while no cover shows, so the two
+//   never show at once; everything ends with the change. The lines of the
+//   playing track come in over all of it. With animations off, at once.
 // - A line a track has no text for, as for a file without tags, takes no
 //   room (#373 H6): the lines under it move up.
 //
@@ -94,44 +100,86 @@ Item {
     // Nothing loaded: the compact row.
     readonly property bool idle: !root.hasTrack
     // Whether the sidebar has room for the wide layout, and whether the
-    // playing track has a cover to fill it: one without takes the narrow
-    // layout (#373 H8). "Nothing playing" keeps the layout of the track
+    // playing track has a cover: one without has no cover's place
+    // ("bare", #373 H9). "Nothing playing" keeps the layout of the track
     // before, which it shrinks from, until the next track.
     readonly property bool wideRoom: !root.narrow && !root.shortHeight
     readonly property bool hasCover: root.coverPath.length > 0
     property bool fullCover: true
-    readonly property string layoutMode: root.wideRoom && root.fullCover ? "wide" : "narrow"
-    // How far the layout is from the narrow one towards the wide one: 0 or
-    // 1, between while the cover's place grows or shrinks between them. A
-    // sidebar that loses the room for the wide layout, as the window is
-    // made smaller, takes the narrow one at once.
-    property real coverGrowth: 1
-    readonly property real wideShare: root.wideRoom ? root.coverGrowth : 0
+    readonly property string layoutMode: !root.fullCover ? "bare" : (root.wideRoom ? "wide" : "narrow")
+
+    // The change between a track with a cover and one without (see the
+    // top): `layoutStep`, its time, 0 to 1, linear, from which every part
+    // of it eases; each part goes on from where it was when the change
+    // started (`growthFrom`, `coverFadeFrom`, `bareMarkFrom`), so a change
+    // that turns back mid-way jumps nothing.
+    property real layoutStep: 1
+    property real growthFrom: 1
+    property real growthTo: 1
+    property real coverFadeFrom: 1
+    property real bareMarkFrom: 0
+    // The lines before fade out over the change's first half
+    // (`stagedLinesOut`); the cover's place starts to move at
+    // `geometryStart`, once they are nearly gone; the cover fades over
+    // the first half of its move, until `coverFadeEnd`, and the mark of a
+    // track without one comes in after that, so the two never show at once.
+    readonly property real stagedLinesOut: 0.5
+    readonly property real geometryStart: 0.4
+    readonly property real coverFadeEnd: 0.7
+    readonly property real _geometryLevel: root._eased(
+        (root.layoutStep - root.geometryStart) / (1 - root.geometryStart))
+    readonly property real _coverFadeLevel: root._eased(
+        (root.layoutStep - root.geometryStart) / (root.coverFadeEnd - root.geometryStart))
+    // How far the layout is from the one without a cover towards the
+    // cover's: 0 or 1, between while the cover's place grows or shrinks.
+    readonly property real coverGrowth: root.growthFrom
+        + (root.growthTo - root.growthFrom) * root._geometryLevel
+    // The cover's opacity in the change, and the mark's.
+    readonly property real coverLevel: root.growthTo > 0
+        ? root.coverFadeFrom + (1 - root.coverFadeFrom) * root._coverFadeLevel
+        : root.coverFadeFrom * (1 - root._coverFadeLevel)
+    readonly property real bareMarkLevel: root.growthTo > 0
+        ? root.bareMarkFrom * (1 - root._eased(root.layoutStep / root.geometryStart))
+        : root.bareMarkFrom + (1 - root.bareMarkFrom)
+            * root._eased((root.layoutStep - root.coverFadeEnd) / (1 - root.coverFadeEnd))
     readonly property NumberAnimation coverGrowthAnimation: NumberAnimation {
         objectName: "nowPlayingCoverGrowthAnimation"
         target: root
-        property: "coverGrowth"
-        easing.type: Easing.OutCubic
-        onFinished: root.coverGrowth = root.coverGrowthAnimation.to
+        property: "layoutStep"
+        from: 0
+        to: 1
+        easing.type: Easing.Linear
+        onFinished: root.layoutStep = 1
     }
-    readonly property bool coverGrowing: root.wideShare > 0 && root.wideShare < 1
+    readonly property bool coverGrowing: root.coverGrowth > 0 && root.coverGrowth < 1
 
     // A track with a cover after one without, or the other way round: the
-    // cover's place grows or shrinks, as the first track's does from the
-    // compact row. While "Nothing playing" shows, nothing changes; the next
-    // track takes its layout at once while nothing of it shows yet.
-    function followCover() {
+    // change above. While "Nothing playing" shows, nothing changes; the
+    // next track takes its layout at once while nothing of it shows yet.
+    function followCover(instant) {
         if (root.idle)
             return
         root.fullCover = root.hasCover
         const to = root.fullCover ? 1 : 0
+        if (root.growthTo === to)
+            return
+        const growth = root.coverGrowth
+        const cover = root.coverLevel
+        const mark = root.bareMarkLevel
         root.coverGrowthAnimation.stop()
-        if (Kirigami.Units.longDuration <= 0 || root.presence <= 0 || root.coverGrowth === to) {
-            root.coverGrowth = to
+        if (instant === true || Kirigami.Units.longDuration <= 0 || root.presence <= 0) {
+            root.growthFrom = to
+            root.growthTo = to
+            root.coverFadeFrom = to
+            root.bareMarkFrom = 1 - to
+            root.layoutStep = 1
             return
         }
-        root.coverGrowthAnimation.from = root.coverGrowth
-        root.coverGrowthAnimation.to = to
+        root.layoutStep = 0
+        root.growthFrom = growth
+        root.growthTo = to
+        root.coverFadeFrom = cover
+        root.bareMarkFrom = mark
         root.coverGrowthAnimation.duration = Kirigami.Units.longDuration
         root.coverGrowthAnimation.start()
     }
@@ -146,10 +194,11 @@ Item {
     readonly property int idleGlyphGap: 6
     // The panel's height with nothing loaded: the row and the seam.
     readonly property real restHeight: root.idleRowHeight + root.seamHeight
-    // The side of the cover's square in the layout, and between the two
-    // while it grows or shrinks.
-    readonly property real coverSize: root._whileGrowing(
-        root.narrowCoverSize + Math.max(0, root.width - root.narrowCoverSize) * root.wideShare)
+    // The side of the cover's square: the sidebar's width in the wide
+    // layout, 96 px in the narrow one, none without a cover, and between
+    // while it grows or shrinks, at the panel's top left.
+    readonly property real artCoverSize: root.wideRoom ? root.width : root.narrowCoverSize
+    readonly property real coverSize: root._whileGrowing(root.artCoverSize * root.coverGrowth)
     // How far the playing track's layout has grown from the compact row:
     // 0 with nothing loaded, 1 with a track, between while it grows or
     // shrinks. The cover's place, the panel's height and the cover's
@@ -280,6 +329,9 @@ Item {
     readonly property string trackKey: root.hasTrack
         ? root._trimmed(root.uiBridge.currentTrackPath) : ""
     readonly property string coverPath: root.uiBridge.currentTrackCoverPath || ""
+    // The last cover a track had, which the cover's place shows while it
+    // shrinks away for a track without one.
+    property string lastCoverPath: ""
     // The playing track as last seen.
     property var shown: null
     // Whether the track has just left "Nothing playing" and has had no
@@ -318,8 +370,13 @@ Item {
     // over all of it, so that what goes out and what comes in add up to a
     // whole line in every frame; and how much of their opacity the covers
     // before keep, going out over all of it too.
+    // In a change between a track with a cover and one without
+    // (`outgoing.staged`), the lines before go out over its first half,
+    // before the cover's place moves (#373 H9: over all of it they
+    // overlapped the playing track's for 117 ms).
     function _linesOutLevel(at) {
-        return 1 - root._eased(at)
+        const staged = root.outgoing !== null && root.outgoing.staged === true
+        return 1 - root._eased(staged ? at / root.stagedLinesOut : at)
     }
     function _linesInLevel(at) {
         return root._eased(at)
@@ -498,7 +555,7 @@ Item {
 
     // The lines that wrap onto a second line rather than be cut off, under
     // the narrow cover: the title and the artist.
-    readonly property var wrappingLines: root.layoutMode === "narrow" && root.narrowStacked
+    readonly property var wrappingLines: !root.wideRoom && root.narrowStacked
         ? ({ title: true, artist: true }) : ({})
     readonly property int stackedLineGap: 4
 
@@ -671,12 +728,14 @@ Item {
     // a cover over the same one adds nothing to an image and doubles the
     // tint of the translucent placeholder. A cover image right over the
     // same image adds nothing either, so the one it replaces goes.
-    function _nextCovers(was, next) {
+    // `adds`: whether the cover that showed fades out over the playing
+    // track's; the covers already fading go on either way.
+    function _nextCovers(was, next, adds) {
         const level = root._coversOutLevel(root.handover)
         const covers = root.outgoing === null ? [] : root.outgoing.covers
             .map(cover => ({ coverPath: cover.coverPath, from: cover.from * level }))
             .filter(cover => cover.from > 0)
-        if (was.coverPath !== next.coverPath) {
+        if (adds && was.coverPath !== next.coverPath) {
             const newest = covers.length > 0 ? covers[covers.length - 1] : null
             if (newest !== null && was.coverPath.length > 0 && newest.coverPath === was.coverPath)
                 covers.pop()
@@ -767,15 +826,24 @@ Item {
             if (line !== null)
                 lines[key] = line
         }
-        const covers = root._nextCovers(was, next)
+        // A change between a track with a cover and one without: the
+        // cover's place shrinks with the cover before, or grows with the
+        // playing track's, and fades no cover over another. Read from the
+        // cover itself: `hasCover`, and the change it starts, may follow
+        // only after this.
+        const staged = (root.coverPath.length > 0) !== root.fullCover || root.coverGrowthAnimation.running
+        const covers = root._nextCovers(was, next, !staged)
         const out = {
             lines: lines,
             covers: covers,
             track: track,
-            long: covers.length > 0 || was.album !== next.album || (root.outgoing !== null && root.outgoing.long)
+            staged: staged,
+            long: staged || covers.length > 0 || was.album !== next.album
+                || (root.outgoing !== null && root.outgoing.long)
         }
         const duration = out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
-        const fades = out.track || out.long || Object.keys(out.lines).length > 0
+        const fades = out.track || covers.length > 0 || Object.keys(out.lines).length > 0
+            || (out.long && !staged)
         if (!fades || duration <= 0) {
             root.endHandover()
             return
@@ -795,12 +863,16 @@ Item {
 
     onTrackLinesChanged: root.followTrack()
     onTrackKeyChanged: root.followTrack()
-    onCoverPathChanged: root.followTrack()
+    onCoverPathChanged: {
+        if (root.coverPath.length > 0)
+            root.lastCoverPath = root.coverPath
+        root.followTrack()
+    }
     Component.onCompleted: {
         // What shows at the start is the start: nothing grows into it.
         root.presenceAnimation.stop()
         root.presence = root.idle ? 0 : 1
-        root.followCover()
+        root.followCover(true)
         root.followTrack()
     }
 
@@ -817,6 +889,22 @@ Item {
     readonly property int seamHeight: 1
     // The top of the lines beside the narrow cover.
     readonly property int narrowTextTop: 10
+    // Without a cover: the space above the lines and under them, and
+    // where they start, as a library row's text and the compact row's do,
+    // after the mark at the 12 px inset.
+    readonly property int bareInset: Kirigami.Units.largeSpacing
+    readonly property int bareTextX: root.textInset + root.idleGlyphSize + root.idleGlyphGap
+    // How far the lines and the mark are from where they are without a
+    // cover towards where the cover's layout has them.
+    function _towardsCover(bare, art) {
+        return bare + (art - bare) * root.coverGrowth
+    }
+    // Where the line under the cover, or with none, starts down: under the
+    // cover's place, and while the track's layout grows from the compact
+    // row, or shrinks into it, never above the row's foot, so the lines do
+    // not show where the row's text does.
+    readonly property real footTop: Math.max(coverArea.height,
+        Math.round((1 - root.presence) * root.idleRowHeight))
     // The least width of the lines beside the narrow cover: about 12
     // characters of the font.
     readonly property real narrowLineMinimum: 12 * baseMetrics.averageCharacterWidth
@@ -885,13 +973,13 @@ Item {
         && artistAlbumMetrics.advanceWidth(root.artistAlbumText) > wideColumn.width
     readonly property int wideArtistAlbumGap: 4
 
-    // The mark of a track without a cover, which takes the narrow tile: a
-    // third of it, 32 px, and never over 48 px, more with a larger font,
-    // while the tile grows into a cover's or shrinks from it. Even, so that
-    // it sits on whole pixels at the centre of the tile.
+    // The tile's own mark, which shows only while the tile grows from the
+    // compact row before the cover is known, or shrinks into it: a third
+    // of the tile, and never over 48 px, more with a larger font. Even, so
+    // that it sits on whole pixels at the centre of the tile.
     readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
         root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)) / 2)
-    // The tile of a track without a cover: the sidebar's view colour, as
+    // The tile with no cover in it: the sidebar's view colour, as
     // one surface with it (#373 H6: a lighter tile read as a broken image),
     // and its mark, the tertiary text colour mixed into the view, neutral,
     // at 3:1 on it, the least for a graphic to read (#373 H7: at 38% it was
@@ -910,9 +998,14 @@ Item {
         + root.textInset + root.seamHeight
     readonly property real wideLayoutHeight: root.width + root.textInset + liveText.wideHeight
         + root.regionGap + root.seamHeight
-    readonly property real layoutHeight: root.wideShare >= 1 ? root.wideLayoutHeight
-        : root.wideShare <= 0 ? root.narrowLayoutHeight
-        : root.narrowLayoutHeight + (root.wideLayoutHeight - root.narrowLayoutHeight) * root.wideShare
+    // Without a cover: the lines, the sidebar's, and bareInset above and
+    // under them.
+    readonly property real bareLayoutHeight: 2 * root.bareInset
+        + (root.wideRoom ? liveText.wideHeight : liveText.narrowHeight) + root.seamHeight
+    readonly property real artLayoutHeight: root.wideRoom ? root.wideLayoutHeight : root.narrowLayoutHeight
+    readonly property real layoutHeight: root.coverGrowth >= 1 ? root.artLayoutHeight
+        : root.coverGrowth <= 0 ? root.bareLayoutHeight
+        : root.bareLayoutHeight + (root.artLayoutHeight - root.bareLayoutHeight) * root.coverGrowth
     // The compact row with nothing loaded, the block with a track, and
     // between them while one grows into the other.
     implicitHeight: root._whileGrowing(root.restHeight
@@ -1238,7 +1331,7 @@ Item {
         width: root.coverSize
         height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
             + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
-        visible: root.presence > 0
+        visible: root.presence > 0 && root.coverSize > 0 && root.coverLevel > 0
         clip: coverArea.height < root.coverSize
 
         Components.AlbumArtTile {
@@ -1248,9 +1341,16 @@ Item {
             y: Math.round((coverArea.height - cover.height) / 2)
             width: root.coverSize
             height: width
-            opacity: root.presence
+            opacity: root.presence * root.coverLevel
             uiBridge: root.uiBridge
             idle: root.idle
+            // The track's cover, and the one before while it shrinks away
+            // for a track without one, so no placeholder shows in it.
+            coverPath: root.coverPath.length > 0 ? root.coverPath : root.lastCoverPath
+            // The size it loads its image at: the largest the cover is, so
+            // its image is not loaded again while it grows or shrinks, which
+            // would change it after the change ends.
+            coverSourceSize: Math.max(256, root.width)
             // No cover: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             placeholderGlyphColor: root.placeholderMarkColor
@@ -1308,6 +1408,72 @@ Item {
         }
     }
 
+    // A track without a cover: the disc mark at the 12 px inset, beside
+    // the title, as in the compact row; it comes in only once the cover
+    // before is gone. It is the keyboard stop the cover is for a track with
+    // one, with the cover's menu, which the pointer opens on the lines too.
+    Item {
+        id: bareMark
+        objectName: "nowPlayingBareMark"
+        readonly property Item column: root.wideRoom ? wideColumn : narrowColumn
+        readonly property bool focusRingShown: bareMark.activeFocus && InputModality.keyboard
+        x: root.textInset
+        // At the middle of the title's first line.
+        y: bareMark.column.y + Math.round((wideTitleProbe.implicitHeight - bareMark.height) / 2)
+        width: root.idleGlyphSize
+        height: width
+        z: 1
+        opacity: root.bareMarkLevel
+        visible: !root.idle && bareMark.opacity > 0
+        activeFocusOnTab: !root.idle && root.layoutMode === "bare"
+        Accessible.role: Accessible.Graphic
+        Accessible.name: I18n.i18nc("@info", "No album art")
+        Accessible.focusable: true
+
+        Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Menu
+                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                cover.popupMenu(bareMark, 0, bareMark.height)
+                event.accepted = true
+            }
+        }
+
+        Kirigami.Icon {
+            objectName: "nowPlayingBareGlyph"
+            anchors.fill: parent
+            source: "media-optical-audio-symbolic"
+            roundToIconSize: false
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+
+        // Keyboard focus: a 1 px ring around the mark, as the cover has.
+        Rectangle {
+            objectName: "nowPlayingBareMarkFocusRing"
+            anchors.fill: parent
+            anchors.margins: -3
+            visible: bareMark.focusRingShown
+            color: "transparent"
+            border.width: 1
+            border.color: root.uiPalette.focusRing
+        }
+    }
+
+    // The cover's menu, from the lines and the mark of a track without one.
+    MouseArea {
+        id: bareMenuArea
+        objectName: "nowPlayingBareMenuArea"
+        x: 0
+        y: 0
+        width: root.width
+        height: Math.max(0, root.height - root.seamHeight)
+        enabled: !root.idle && root.layoutMode === "bare"
+        acceptedButtons: Qt.RightButton
+        onPressed: function(mouse) {
+            cover.popupMenu(bareMenuArea, mouse.x, mouse.y)
+        }
+    }
+
     // The playing track's lines, each of which fades on its own over a
     // track change.
     Item {
@@ -1315,7 +1481,7 @@ Item {
 
         readonly property real wideHeight: wideColumn.implicitHeight
         readonly property real narrowHeight: narrowColumn.implicitHeight
-        readonly property bool truncated: root.layoutMode === "wide"
+        readonly property bool truncated: root.wideRoom
             ? (wideTitle.truncated || wideDetails.truncated
                 || (root.wideArtistAlbumSplit
                     ? wideArtist.truncated || wideAlbum.truncated
@@ -1331,16 +1497,18 @@ Item {
         width: root.width
         height: root.height
 
-        // Wide: the text block under the cover.
+        // Wide: the text block under the cover, or, without one, after the
+        // mark. Its width is the one it goes to, so a change of layout cuts
+        // no line off anew while it moves.
         ColumnLayout {
             id: wideColumn
             objectName: "nowPlayingWideText"
-            visible: root.wideShare > 0 && !root.idle
-            opacity: root.coverGrowing ? root.wideShare : 1
-            x: root.textInset
+            visible: root.wideRoom && !root.idle
+            x: root._whileGrowing(root._towardsCover(root.bareTextX, root.textInset))
             // Under the cover's place, with which it moves while that grows.
-            y: coverArea.height + root.textInset
-            width: Math.max(0, root.width - 2 * root.textInset)
+            y: root._whileGrowing(root.footTop + root._towardsCover(root.bareInset, root.textInset))
+            width: Math.max(0, root.width - root.textInset
+                - (root.fullCover ? root.textInset : root.bareTextX))
             spacing: 2
 
             HoverHandler {
@@ -1395,21 +1563,22 @@ Item {
         Column {
             id: narrowColumn
             objectName: "nowPlayingNarrowText"
-            visible: root.wideShare < 1 && !root.idle
-            opacity: root.coverGrowing ? 1 - root.wideShare : 1
-            // Beside the cover, at its right edge, with which it moves while
-            // the cover's place grows into the wide layout or shrinks out of
-            // it; its width stays the narrow layout's.
-            readonly property real narrowX: root.narrowStacked
+            visible: !root.wideRoom && !root.idle
+            // Beside the cover or under it, or, without one, after the mark;
+            // between while the cover's place grows or shrinks. Its width is
+            // the one it goes to.
+            readonly property real artX: root.narrowStacked
                 ? root.textInset : root.narrowCoverSize + root.textInset
-            x: root.narrowStacked ? narrowColumn.narrowX : root.coverSize + root.textInset
+            x: root._whileGrowing(root._towardsCover(root.bareTextX, narrowColumn.artX))
             // Under the cover's place, with which it moves while that grows;
             // beside it, from under the compact row up into place, so its
             // text does not show where the row's does.
-            y: root.narrowStacked
-                ? coverArea.height + root.textInset
-                : root.narrowTextTop + Math.round((1 - root.presence) * root.idleRowHeight)
-            width: Math.max(0, root.width - narrowColumn.narrowX - root.textInset)
+            y: root._whileGrowing(root.narrowStacked
+                ? root.footTop + root._towardsCover(root.bareInset, root.textInset)
+                : root._towardsCover(root.bareInset, root.narrowTextTop)
+                    + Math.round((1 - root.presence) * root.idleRowHeight))
+            width: Math.max(0, root.width - root.textInset
+                - (root.fullCover ? narrowColumn.artX : root.bareTextX))
             spacing: root.narrowStacked ? root.stackedLineGap : 0
 
             HoverHandler {
@@ -1430,6 +1599,7 @@ Item {
             // it the column's spacing.
             Item {
                 visible: !root.narrowStacked
+                    && (narrowArtist.visible || narrowAlbum.visible || narrowDetails.visible)
                 width: 1
                 height: 2
             }
@@ -1475,10 +1645,10 @@ Item {
     readonly property bool textTruncated: liveText.truncated
 
     ToolTip {
-        parent: root.layoutMode === "wide" ? liveText.wideItem : liveText.narrowItem
+        parent: root.wideRoom ? liveText.wideItem : liveText.narrowItem
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
-        text: root.layoutMode === "wide"
+        text: root.wideRoom
             ? root._joined([root.titleText, root.artistAlbumText, root.detailsText], "\n")
             : root._joined([root.titleText, root.artistText, root.narrowAlbumText,
                             root.narrowDetailsText], "\n")
