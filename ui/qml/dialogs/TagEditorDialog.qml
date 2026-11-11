@@ -293,10 +293,13 @@ Components.DialogWindow {
         return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
     }
     // Wide enough for the fields and every column of the table at its
-    // width, clear of its scroll bar, within the screen: on a smaller one,
+    // width, clear of its scroll bar, within the screen and no wider than
+    // the window it opens from, frame and all, as the two have the same
+    // frame (#373 H9: 1624 px from a 1600 px main window): with less room,
     // File Name and Folder give way first, then the tags.
-    defaultWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
-        + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
+    defaultWidth: Math.min(Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
+            + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit),
+        root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
     // and no taller than 46 grid units: a few files leave no wide empty
     // table, and the user may make it taller.

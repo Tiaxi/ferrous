@@ -104,6 +104,9 @@ QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &li
         || !QTest::qWaitFor([&]() { return window->width() == width && window->height() == height; })) {
         return nullptr;
     }
+    // The window reads its new size at once, but tells its bindings with
+    // the window system's geometry event, which comes after.
+    QCoreApplication::processEvents();
     return window;
 }
 
@@ -508,6 +511,7 @@ private slots:
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
+    void editTagsOpensNoWiderThanTheMainWindow();
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
@@ -2835,10 +2839,10 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
 // The table's columns at the default font, or a smaller one (#373 H8): the
 // window opens wide enough for every column at its width beside the
 // fields, the numbers and Format as narrow as their headers and values
-// allow: # about 36 px, Year 52, Disc 40 and Format 56. In a 1600 px
-// screen, File Name and Folder give way first, and Title, Artist and
-// Album keep 160 px or more. Status takes no room while no row has a
-// status.
+// allow: # about 36 px, Year 52, Disc 40 and Format 56, from a main
+// window wide enough. In a 1600 px screen, File Name and Folder give way
+// first, and Title, Artist and Album keep 160 px or more. Status takes no
+// room while no row has a status.
 void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // The default 10 pt font, which the reviews see.
     const QFont applicationFont = QGuiApplication::font();
@@ -2852,7 +2856,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    // The editor opens no wider than the main window (#373 H9), which is
+    // as wide as a large screen here.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1920, 1200);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
@@ -2944,6 +2950,68 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
+}
+
+// The editor opens no wider than the main window it opens from, frames
+// and all (#373 H9: 1624 px from a 1600 px main window). From a 1600 by
+// 1000 px window, File Name and Folder give way first, Title, Artist and
+// Album keep 160 px or more, and the table does not scroll sideways; from
+// a 1000 by 720 px one, it is as wide as the main window.
+void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont standard = applicationFont;
+    standard.setPointSizeF(10);
+    QGuiApplication::setFont(standard);
+    for (const QSize mainSize : {QSize(1600, 1000), QSize(1000, 720)}) {
+        const QString at = QStringLiteral("%1x%2").arg(mainSize.width()).arg(mainSize.height());
+        TagEditorController editor(nullptr);
+        editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                       const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+        QQuickWindow *window = loadMainWindow(engine, libraryModel, mainSize.width(), mainSize.height());
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+        QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+        QTRY_VERIFY(!editor.loading());
+        QVERIFY(waitForDialogWindow(dialog));
+        QQuickWindow *tags = windowOf(dialog);
+        QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+        QVERIFY(table != nullptr);
+        QTRY_VERIFY(!layoutPending(table));
+        const QString where = QStringLiteral("%1: editor %2 (frame %3), main window %4 (frame %5)")
+            .arg(at).arg(tags->width()).arg(tags->frameGeometry().width()).arg(window->width())
+            .arg(window->frameGeometry().width());
+        // It needs more than either main window gives it.
+        QVERIFY2(dialog->property("defaultWidth").toReal() <= mainSize.width(), qPrintable(where));
+        QVERIFY2(tags->width() <= window->width(), qPrintable(where));
+        QVERIFY2(tags->frameGeometry().width() <= window->frameGeometry().width(), qPrintable(where));
+        if (mainSize.width() == 1000) {
+            QCOMPARE(tags->width(), window->width());
+            continue;
+        }
+        QCOMPARE(tags->width(), window->width());
+        const auto columnWidth = [tags](const QString &key) {
+            QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
+            return column != nullptr ? column->width() : -1.0;
+        };
+        const QString columns = QStringLiteral("%1; title %2, artist %3, album %4, file name %5, folder %6, "
+                                               "content %7 in %8")
+            .arg(where).arg(columnWidth(QStringLiteral("title"))).arg(columnWidth(QStringLiteral("artist")))
+            .arg(columnWidth(QStringLiteral("album"))).arg(columnWidth(QStringLiteral("fileName")))
+            .arg(columnWidth(QStringLiteral("directory"))).arg(table->property("contentWidth").toReal())
+            .arg(table->width());
+        QVERIFY2(columnWidth(QStringLiteral("fileName")) < 220 || columnWidth(QStringLiteral("directory")) < 156,
+                 qPrintable(columns));
+        for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album")}) {
+            QVERIFY2(columnWidth(key) >= 160, qPrintable(key + QStringLiteral(": ") + columns));
+        }
+        QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(columns));
+        editor.close();
+        QTRY_VERIFY(!tags->isVisible());
+    }
 }
 
 // A field whose files hold different values says so with its placeholder,
