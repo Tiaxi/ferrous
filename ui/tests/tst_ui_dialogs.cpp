@@ -1015,6 +1015,8 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QCOMPARE(nameWindow->transientParent(), window);
     QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
     QTRY_VERIFY(name->hasActiveFocus());
+    // Its placeholder reads at AA, like the tag editor's (#373 H7).
+    QCOMPARE(hex(name->property("placeholderTextColor").value<QColor>()), hex(tokenOf(window, "placeholderText")));
     QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
     QTest::keyClick(nameWindow, Qt::Key_J);
     QTest::keyClick(nameWindow, Qt::Key_Return);
@@ -2027,6 +2029,11 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QVERIFY(diagnosticsDialog != nullptr);
     QVERIFY(waitForDialogWindow(diagnosticsDialog));
     QQuickWindow *diagnosticsWindow = windowOf(diagnosticsDialog);
+    // "Loading the log…" reads at AA, like every placeholder (#373 H7).
+    QCOMPARE(hex(named(diagnosticsWindow, QStringLiteral("diagnosticsTextArea"))
+                     ->property("placeholderTextColor")
+                     .value<QColor>()),
+             hex(tokenOf(window, "placeholderText")));
 
     // Copy Log Without Paths asks the bridge for the copy once there is a log.
     QObject *bridge = bridgeOf(window);

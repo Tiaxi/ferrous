@@ -84,6 +84,7 @@ Components.CompactDialogWindow {
             Layout.fillWidth: true
             text: root.nameValue || ""
             placeholderText: I18n.i18nc("@info:placeholder", "The folder’s path")
+            placeholderTextColor: root.uiPalette.placeholderText
             selectByMouse: true
             onAccepted: root.accept()
         }

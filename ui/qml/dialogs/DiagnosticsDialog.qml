@@ -150,6 +150,7 @@ Components.DialogWindow {
                 placeholderText: (root.uiBridge.diagnosticsLoading || false)
                     ? I18n.i18nc("@info:placeholder", "Loading the log\u2026")
                     : ""
+                placeholderTextColor: root.uiPalette.placeholderText
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.NoWrap
