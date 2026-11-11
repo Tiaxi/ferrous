@@ -2230,10 +2230,24 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
     QVERIFY(!albumHandle->isVisible());
     QVERIFY(!albumHandle->activeFocusOnTab());
     QVERIFY(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1);
-    // Artist keeps its share of the text columns' room.
+    // The minimum stays where it was before Artist's default share grew
+    // (#373 H6): it is counted with Artist at 26% of the width.
+    const qreal minimumShare = queue->property("minimumArtistColumnShare").toReal();
+    QCOMPARE(minimumShare, 0.26);
+    QVERIFY(minimumShare < queue->property("defaultArtistColumnShare").toReal());
+    QVERIFY(std::abs(queue->property("minimumWithArtistWidth").toReal()
+                     - (queue->property("minimumTitleOnlyWidth").toReal()
+                        - queue->property("minimumLengthColumnWidth").toReal()
+                        + queue->property("defaultLengthColumnWidth").toReal())
+                         / (1 - minimumShare)) < 0.01);
+    // Artist has what the title's minimum leaves, about a quarter of the
+    // text columns' room: the share the window's minimum width is counted
+    // with, under its default.
     QQuickItem *artist = named(window, "queueHeader_artist");
-    QVERIFY(std::abs(artist->width() - queue->property("defaultTextColumnsRoom").toReal()
-                     * queue->property("defaultArtistColumnShare").toReal()) <= 1);
+    const qreal textRoom = queue->property("defaultTextColumnsRoom").toReal();
+    QVERIFY2(artist->width() >= textRoom * queue->property("minimumArtistColumnShare").toReal() - 1
+                 && artist->width() <= textRoom * queue->property("defaultArtistColumnShare").toReal() + 1,
+             qPrintable(QStringLiteral("artist %1 of %2").arg(artist->width()).arg(textRoom)));
     // Wider, Album comes back.
     window->resize(1600, 1000);
     QTRY_VERIFY(album->isVisible());
@@ -2242,9 +2256,10 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
 
 // The queue's columns at 1600 and 1000 px (#373 H5): Length has a fixed
 // room from the font, about 56 px; of what is left for the text, the
-// title has half, Artist about a quarter and Album a little less, so long
-// titles have the slack rather than a gap after the album. In the 1000 px
-// window Album drops before Artist, and Length keeps its room.
+// title has a little under half, Artist a little over a quarter and Album
+// a little less (#373 H6: half the room left a gap after short titles, and
+// Artist about 24 px narrower at 1600 px). In the 1000 px window Album
+// drops before Artist, and Length keeps its room.
 void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2271,10 +2286,12 @@ void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
     const QString widths = QStringLiteral("title %1, artist %2, album %3, length %4 of %5 (room %6)")
         .arg(title->width()).arg(artist->width()).arg(album->width()).arg(length->width())
         .arg(queue->width()).arg(room);
-    QVERIFY2(std::abs(artist->width() - 0.26 * room) <= 1, qPrintable(widths));
-    QVERIFY2(std::abs(album->width() - 0.24 * room) <= 1, qPrintable(widths));
-    QVERIFY2(std::abs(title->width() - 0.5 * room) <= 2, qPrintable(widths));
-    QVERIFY2(title->width() > artist->width() + album->width() - 2, qPrintable(widths));
+    QVERIFY2(std::abs(artist->width() - 0.283 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(album->width() - 0.263 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(title->width() - 0.454 * room) <= 2, qPrintable(widths));
+    // About 24 px more each than half the room for the title gave them.
+    QVERIFY2(artist->width() - 0.26 * room >= 20 && album->width() - 0.24 * room >= 20, qPrintable(widths));
+    QVERIFY2(title->width() > artist->width() && title->width() > album->width(), qPrintable(widths));
     // Album ends a gap before Length, which ends at the queue's inset.
     QVERIFY2(std::abs(sceneRect(length).left() - sceneRect(album).right() - gap) <= 1, qPrintable(widths));
 

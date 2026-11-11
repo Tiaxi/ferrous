@@ -47,8 +47,9 @@ Rectangle {
     // fit its column is elided, so it never runs into the next. Length has
     // its room first, as wide as its longest value and a little more; of
     // the room left for the text, the title takes what the others leave,
-    // half by default, with Artist about a quarter and Album a little
-    // less, as album names run shorter. Artist, Album and Length have
+    // a little under half by default, with Artist a little over a quarter
+    // and Album a little less, as album names run shorter. Artist, Album
+    // and Length have
     // the widths the user dragged their handles to, which the settings
     // keep, or those defaults. A column's width is that of its text; the
     // gaps between the columns come on top. Sizes are those of the design
@@ -61,9 +62,11 @@ Rectangle {
     // the inset.
     readonly property real rightPadding: Math.round(24 * root.sizeScale)
     // The share of the text columns' room Artist and Album have by default;
-    // the title has the rest.
-    readonly property real defaultArtistColumnShare: 0.26
-    readonly property real defaultAlbumColumnShare: 0.24
+    // the title has the rest, 45%. Half left a gap after short titles and
+    // elided artists at a large font while the title had room; these give
+    // Artist and Album about 24 px more each at 1600 px (#373 H6).
+    readonly property real defaultArtistColumnShare: 0.283
+    readonly property real defaultAlbumColumnShare: 0.263
     readonly property real defaultTitleColumnShare: 1 - root.defaultArtistColumnShare - root.defaultAlbumColumnShare
     // What Title, Artist and Album share: the table, less the columns that
     // have their room first and the gaps before Artist and Album.
@@ -317,8 +320,8 @@ Rectangle {
     readonly property real minimumTitleColumnWidth: Math.ceil(Math.min(240 * root.sizeScale,
         Math.max(240, columnFontMetrics.averageCharacterWidth * 12)))
     readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
-    // Without Album, and the title at its minimum: with Artist at its
-    // default share of the width and Length at its default, or, where that
+    // Without Album, and the title at its minimum: with Artist at
+    // minimumArtistColumnShare of the width and Length at its default, or, where that
     // is wider than minimumWidthLimit, without Artist, as wide as the limit
     // allows. Without Artist, Length counts at its least width, its heading
     // or its longest value: in the narrowest queue it gives up the two
@@ -330,7 +333,11 @@ Rectangle {
         + root.columnGap + root.minimumLengthColumnWidth + root.rightPadding
     readonly property real minimumWithArtistWidth: (root.minimumTitleOnlyWidth
         - root.minimumLengthColumnWidth + root.defaultLengthColumnWidth)
-        / (1 - root.defaultArtistColumnShare)
+        / (1 - root.minimumArtistColumnShare)
+    // The share of the width the narrowest queue is counted with for Artist:
+    // the one it had before its default grew (#373 H6), so the window's
+    // minimum width stays. There Artist gives way to the title's minimum.
+    readonly property real minimumArtistColumnShare: 0.26
     readonly property real minimumContentWidth: Math.ceil(Math.min(
         root.minimumWithArtistWidth,
         Math.max(root.minimumTitleOnlyWidth, root.minimumWidthLimit)))
