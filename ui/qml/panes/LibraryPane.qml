@@ -174,9 +174,11 @@ Rectangle {
 
                 // Expanding a row opens its children downward: they are in
                 // place at once, under the rows below, which slide down and
-                // uncover them; collapsing slides those rows back up over
-                // the children as they fade. The toggled row and the rows
-                // above it stay put. Only a toggle moves: the controller
+                // uncover them as the children fade in; collapsing is the
+                // same played back, the rows sliding up over the children
+                // as they fade out, on the same duration and curve (#373
+                // H7: the expand was instant beside the collapse's fade).
+                // The toggled row and the rows above it stay put. Only a toggle moves: the controller
                 // sets `animatesToggle` while the view lays it out, so
                 // scans, searches and restores change the rows at once.
                 property bool animatesToggle: false
@@ -185,7 +187,21 @@ Rectangle {
                     && libraryAlbumView.toggleDuration > 0
                 readonly property QtObject openAnimation: treeOpenAnimation
                 readonly property QtObject closeAnimation: treeCloseAnimation
+                readonly property QtObject openFadeAnimation: treeOpenFadeAnimation
                 readonly property QtObject closeFadeAnimation: treeCloseFadeAnimation
+                add: Transition {
+                    objectName: "libraryOpenAddTransition"
+                    enabled: libraryAlbumView.togglesMove
+                    NumberAnimation {
+                        id: treeOpenFadeAnimation
+                        objectName: "libraryOpenFadeAnimation"
+                        property: "opacity"
+                        from: 0
+                        to: 1
+                        duration: libraryAlbumView.toggleDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 addDisplaced: Transition {
                     objectName: "libraryOpenTransition"
                     enabled: libraryAlbumView.togglesMove
