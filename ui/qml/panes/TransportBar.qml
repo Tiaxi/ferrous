@@ -24,6 +24,9 @@ ToolBar {
     required property var pauseAction
     required property var stopAction
     required property var nextAction
+    // The action Space triggers, whose shortcut the Play/Pause tooltip
+    // names: Play and Pause have none of their own.
+    property var playPauseAction: null
     required property bool volumeMuted
     // The volume a mute put aside, which the slider keeps showing while
     // muted.
@@ -265,7 +268,7 @@ ToolBar {
         // The action's text without its mnemonic, and its shortcut.
         readonly property string label: FormatUtils.withoutMnemonic(
             transportButton.action ? transportButton.action.text || "" : "")
-        readonly property string shortcutText: transportButton.action && transportButton.action.shortcut
+        property string shortcutText: transportButton.action && transportButton.action.shortcut
             ? String(transportButton.action.shortcut)
             : ""
         readonly property color glyphColor: transportButton.enabled
@@ -342,6 +345,10 @@ ToolBar {
                 // A step above its neighbours, within the same button.
                 glyphSize: root.playPauseGlyphSize
                 action: root.playing ? root.pauseAction : root.playAction
+                // Space plays and pauses, as the tooltip says.
+                shortcutText: root.playPauseAction && root.playPauseAction.shortcut
+                    ? String(root.playPauseAction.shortcut)
+                    : ""
 
                 contentItem: Item {
                     id: playPauseGlyphs

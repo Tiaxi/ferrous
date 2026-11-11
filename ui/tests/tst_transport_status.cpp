@@ -176,6 +176,9 @@ ApplicationWindow {
     Action { id: previousAction; text: "P&revious"; icon.name: "media-skip-backward"; shortcut: "Ctrl+Left" }
     Action { id: playAction; text: "Play"; icon.name: "media-playback-start" }
     Action { id: pauseAction; text: "Pause"; icon.name: "media-playback-pause" }
+    // The transport reads only its shortcut's text, for the Play/Pause
+    // tooltip; disabled, so that Space stays with the focused control.
+    Action { id: playPauseAction; text: "&Pause"; shortcut: "Space"; enabled: false }
     Action { id: stopAction; text: "&Stop"; icon.name: "media-playback-stop"; shortcut: "Ctrl+Shift+Space" }
     Action { id: nextAction; text: "&Next"; icon.name: "media-skip-forward"; shortcut: "Ctrl+Right" }
 
@@ -215,6 +218,7 @@ ApplicationWindow {
                 pauseAction: pauseAction
                 stopAction: stopAction
                 nextAction: nextAction
+                playPauseAction: playPauseAction
                 volumeMuted: window.muted
                 mutedVolume: window.mutedVolume
                 keyboardSeekStepSeconds: 5
@@ -766,7 +770,12 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
     QVERIFY(next && stop && playPause);
     QCOMPARE(toolTipText(next), QStringLiteral("Next · Ctrl+Right"));
     QCOMPARE(toolTipText(stop), QStringLiteral("Stop · Ctrl+Shift+Space"));
-    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause"));
+    // Play and Pause have no shortcut of their own: Space toggles them
+    // (#373 H9: Previous named its shortcut and Pause none).
+    QCOMPARE(toolTipText(playPause), QStringLiteral("Pause · Space"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(toolTipText(playPause), QStringLiteral("Play · Space"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
     // Keyboard focus shows it, as hover does.
     next->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(toolTipShown(next));
