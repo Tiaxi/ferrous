@@ -96,8 +96,20 @@ std::vector<double> LevelMeterItem::ticksDb(double laneHeight) {
         : std::vector<double>(std::begin(kTicksDb), std::end(kTicksDb));
 }
 
+double LevelMeterItem::lightness(const QColor &color) {
+    return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF();
+}
+
 QColor LevelMeterItem::colorMapColor(double db, double dbRange) {
-    return QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, dbRange));
+    const QColor mapped = QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, dbRange));
+    static const double cap = kFillLightness * lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(1.0)));
+    const double shown = lightness(mapped);
+    if (shown <= cap) return mapped;
+    // Luma is linear in the components, so scaling them all darkens the
+    // colour to the cap and keeps its hue. Rounded down, it stays under.
+    const double factor = cap / shown;
+    const auto scaled = [factor](int component) { return int(std::floor(component * factor)); };
+    return QColor(scaled(mapped.red()), scaled(mapped.green()), scaled(mapped.blue()));
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {

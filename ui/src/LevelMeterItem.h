@@ -29,10 +29,12 @@
 // right edge it shares, so it needs no strip of the plot's floor beside it
 // (#373 H8; H7's 8 px strip read as a black edge on the window). The fill
 // takes the spectrogram's colour of its level while `colorMapFill` is set,
-// so that the meter reads as part of the plot. While `scaleShown`, 1 px
-// ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24 in a
-// lane under 64 px), and a 2 px peak tick, with a 1 px gap under it where
-// it is on the fill. Without a track, stopped, it is an empty track.
+// at most kFillLightness of the map's top, so that the meter reads as part
+// of the plot rather than as its brightest highlight. While `scaleShown`,
+// 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
+// in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
+// 1 px gap under it where it is on the fill. Without a track, stopped, it
+// is an empty track.
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
@@ -98,8 +100,15 @@ public:
     static constexpr double kFullScaleLaneHeight = 64.0;
     // The ticks of the scale, in dB, as a lane of `laneHeight` shows them.
     static std::vector<double> ticksDb(double laneHeight);
+    // The colour-map fill's lightness at most: this much of the lightness
+    // of the map's top (see lightness()).
+    static constexpr double kFillLightness = 0.7;
+    // A colour's lightness, from 0 to 1: its luma, the Rec. 709 weights of
+    // its gamma-encoded components, as a picture's brightness is measured.
+    static double lightness(const QColor &color);
     // The fill's colour of a level of `db` dBFS on the spectrogram's map in
-    // a view of `dbRange` dB.
+    // a view of `dbRange` dB: the map's colour, darkened to at most
+    // kFillLightness of the lightness of the map's top, with its hue.
     static QColor colorMapColor(double db, double dbRange);
 
     explicit LevelMeterItem(QQuickItem *parent = nullptr);
