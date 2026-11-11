@@ -453,6 +453,8 @@ private slots:
     void seekHoverDrawsALineAndANativeToolTip();
     void seekFocusDrawsOneRingAroundTheBar_data();
     void seekFocusDrawsOneRingAroundTheBar();
+    void volumeGlyphHasTheTransportsWeight_data();
+    void volumeGlyphHasTheTransportsWeight();
     void transportButtonsDrawTheAppsFocusRing_data();
     void transportButtonsDrawTheAppsFocusRing();
     void transportPressedReadsApartFromHover_data();
@@ -515,9 +517,11 @@ void TransportStatusTest::drawsOffscreenUnlessAPlatformIsChosen() {
 }
 
 // The sizes of the design at 1×: a 48 px band; 32 px buttons 4 px apart
-// from 12 px, the content's inset; the seek bar 16 px after Next; the time 72 px, 16 px after it;
-// the mute button 16 px after that and the 96 px slider 4 px after it,
-// 12 px from the end.
+// from 12 px, the content's inset; the seek bar 16 px after Next; then on
+// one rhythm (#373 H8), between what is drawn: the time 16 px after the
+// seek bar, as wide as "0:00 / 0:00", the volume glyph 24 px after it, and
+// the 96 px slider's groove 8 px after the glyph, 12 px from the end. The
+// volume glyph is the size of Previous and Next.
 void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     Harness harness;
     QString errorText;
@@ -572,13 +576,37 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QCOMPARE(sceneRect(waveform).width(), seekRect.width());
     const QRectF timeRect = sceneRect(time);
     QCOMPARE(timeRect.left(), seekRect.right() + 16.0);
-    QCOMPARE(timeRect.width(), 72.0);
+    // The time's text ends where its box does: the box is as wide as a time
+    // in minutes in the label's font.
+    QQuickItem *position = harness.item(QStringLiteral("transportTimePosition"));
+    QQuickItem *length = harness.item(QStringLiteral("transportTimeLength"));
+    QVERIFY(position && length);
+    QFont timeFont = position->property("font").value<QFont>();
+    const qreal minutesWidth = QFontMetricsF(timeFont).horizontalAdvance(QStringLiteral("0:00 / 0:00"));
+    QCOMPARE(timeRect.width(), std::ceil(minutesWidth));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(length->isVisible());
+    QVERIFY2(std::abs(sceneRect(length).right() - timeRect.right()) < 1.0,
+             qPrintable(QStringLiteral("%1 %2").arg(sceneRect(length).right()).arg(timeRect.right())));
     const QRectF muteRect = sceneRect(mute);
-    QCOMPARE(muteRect.left(), timeRect.right() + 16.0);
     QCOMPARE(muteRect.size(), QSizeF(32, 32));
+    QQuickItem *muteGlyph = harness.item(QStringLiteral("muteButtonGlyph"));
+    QVERIFY(muteGlyph != nullptr);
+    const QRectF muteGlyphRect = sceneRect(muteGlyph);
+    QCOMPARE(muteGlyphRect.size(), QSizeF(glyphs.first(), glyphs.first()));
+    QCOMPARE(muteGlyphRect.center(), muteRect.center());
+    QCOMPARE(muteGlyphRect.left() - timeRect.right(), 24.0);
     const QRectF volumeRect = sceneRect(volume);
-    QCOMPARE(volumeRect.left(), muteRect.right() + 4.0);
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QVERIFY(groove != nullptr);
+    QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 8.0);
     QCOMPARE(volumeRect.width(), 96.0);
+    // Stopped, "–:––" leaves the box as wide, and the volume where it is.
+    harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_VERIFY(!length->isVisible());
+    QCOMPARE(sceneRect(time), timeRect);
+    QCOMPARE(sceneRect(muteGlyph), muteGlyphRect);
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QCOMPARE(sceneRect(transport).right() - volumeRect.right(), 12.0);
 }
 
@@ -954,6 +982,68 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     const QVariantList seeks = harness.root->property("seeks").value<QJSValue>().toVariant().toList();
     QCOMPARE(seeks.size(), 1);
     QCOMPARE(seeks.first().toDouble(), 82.0);
+}
+
+void TransportStatusTest::volumeGlyphHasTheTransportsWeight_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// The volume glyph is drawn at the weight of Next beside it (#373 H8:
+// Breeze's speaker, with 1 px waves, read lighter than Play and Next), in
+// both of its looks: at least 80 % of Next's ink, where Breeze's speaker
+// had 63 %, and in Next's box.
+void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *next = harness.item(QStringLiteral("transportButton_next"));
+    QQuickItem *muteGlyph = harness.item(QStringLiteral("muteButtonGlyph"));
+    QVERIFY(next && muteGlyph);
+    QQuickItem *nextGlyph = nullptr;
+    QList<QQuickItem *> pending{next};
+    while (!pending.isEmpty() && nextGlyph == nullptr) {
+        QQuickItem *item = pending.takeFirst();
+        if (item->objectName() == QStringLiteral("transportButtonGlyph")) {
+            nextGlyph = item;
+        }
+        pending.append(item->childItems());
+    }
+    QVERIFY(nextGlyph != nullptr);
+    QCOMPARE(muteGlyph->size(), nextGlyph->size());
+    const QColor chrome = harness.token("chrome");
+    // The pixels drawn at least half as strongly as the glyph's strongest,
+    // so that how a mask is coloured doesn't count: offscreen, without the
+    // desktop's platform theme, Kirigami draws a mask file uncoloured, which
+    // is dark on the dark chrome.
+    const auto ink = [&](QQuickItem *glyph) {
+        qreal scale = 1;
+        const QImage image = grabbed(harness.window, &scale);
+        QList<int> distances;
+        for (int y = 0; y < int(glyph->height()); ++y) {
+            for (int x = 0; x < int(glyph->width()); ++x) {
+                distances.append(
+                    channelDistance(pixelAt(image, glyph->mapToScene(QPointF(x + 0.5, y + 0.5)), scale), chrome));
+            }
+        }
+        const int strongest = *std::max_element(distances.cbegin(), distances.cend());
+        return strongest < 16 ? 0
+                              : int(std::count_if(distances.cbegin(), distances.cend(),
+                                                  [strongest](int distance) { return distance * 2 >= strongest; }));
+    };
+    int nextInk = 0;
+    QTRY_VERIFY((nextInk = ink(nextGlyph)) > 0);
+    int volumeInk = 0;
+    QTRY_VERIFY((volumeInk = ink(muteGlyph)) > 0);
+    QVERIFY2(volumeInk * 5 >= nextInk * 4, qPrintable(QStringLiteral("%1 / %2").arg(volumeInk).arg(nextInk)));
+    // Muted.
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier,
+                      sceneCentre(harness.item(QStringLiteral("muteButton"))));
+    QTRY_VERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
+    QTRY_VERIFY((volumeInk = ink(muteGlyph)) > 0);
+    QVERIFY2(volumeInk * 10 >= nextInk * 7, qPrintable(QStringLiteral("%1 / %2").arg(volumeInk).arg(nextInk)));
 }
 
 void TransportStatusTest::transportButtonsDrawTheAppsFocusRing_data() {
@@ -1447,12 +1537,12 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QCOMPARE(volume->property("value").toDouble(), 0.8);
     const qreal thumbX = thumb->x();
     const qreal fillWidth = fill->width();
-    QCOMPARE(muteGlyph->property("source").toString(), QStringLiteral("audio-volume-high"));
+    QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume.svg")));
 
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
     QTRY_VERIFY(harness.root->property("muted").toBool());
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.0);
-    QCOMPARE(muteGlyph->property("source").toString(), QStringLiteral("audio-volume-muted"));
+    QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
     // The thumb and the fill stay; the fill dims to the groove's colour.
     QCOMPARE(volume->property("value").toDouble(), 0.8);
     QCOMPARE(thumb->x(), thumbX);
