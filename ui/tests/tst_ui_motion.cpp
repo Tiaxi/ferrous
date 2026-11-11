@@ -979,6 +979,8 @@ private slots:
     void viewerControlsFadeWithTheStrip_data();
     void viewerPlatesAndGlyphsRevealOnOneLevel();
     void windowedViewerOpensOverThePanesLastFrame();
+    void viewerTakesTheVisualizationWholeIntoEitherWindow();
+    void viewerTakesTheVisualizationWholeIntoEitherWindow_data();
     void viewerPlatesAndGlyphsRevealOnOneLevel_data();
 };
 
@@ -4666,7 +4668,8 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
 // the viewer faded in over the empty pane). In every frame from the open,
 // the visualization is either still in the pane or the pane has kept its
 // last frame; under the open viewer, the pane shows what it showed before.
-// Closed, the visualization is back and the kept frame goes.
+// Closed, the visualization is back and the kept frame goes. The pane makes
+// the frame only while it keeps one.
 void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -4676,16 +4679,16 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QQuickItem *pane = named(window, "spectrogramPane");
     QQuickItem *surface = named(window, "visualizationSurface");
-    QQuickItem *lastFrame = named(window, "spectrogramPaneLastFrame");
+    const auto lastFrame = [window]() { return named(window, "spectrogramPaneLastFrame"); };
     QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
-    QVERIFY(bridge && viewer && pane && surface && lastFrame && popup);
+    QVERIFY(bridge && viewer && pane && surface && popup);
     bridge->setProperty("viewerFullscreenMode", 0);
     // Before any audio, the pane shows its mode switch on its floor.
     QQuickItem *modeSwitch = itemNamed(surface, QStringLiteral("visualizationModeSwitch"));
     QVERIFY(modeSwitch != nullptr);
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(pane->isAncestorOf(surface));
-    QVERIFY(!lastFrame->isVisible());
+    QVERIFY(lastFrame() == nullptr);
 
     // The window's layout settles first: the pane keeps its place for a
     // while.
@@ -4727,7 +4730,7 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     const QMetaObject::Connection connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
         ++frames;
         if (failure.isEmpty() && !pane->isAncestorOf(surface)
-            && !(lastFrame->isVisible() && pane->property("lastFrameKept").toBool())) {
+            && !(lastFrame() != nullptr && lastFrame()->isVisible() && pane->property("lastFrameKept").toBool())) {
             failure = QStringLiteral("frame %1: the visualization gone from the pane, its frame not kept").arg(frames);
         }
     });
@@ -4763,15 +4766,154 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     QVERIFY(pane->isAncestorOf(surface));
-    QVERIFY(!lastFrame->isVisible());
+    QVERIFY(lastFrame() == nullptr);
     QVERIFY(!pane->property("lastFrameKept").toBool());
+    QVERIFY(!pane->property("holdsVisualization").toBool());
 
     // Opened again, it keeps a frame again.
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QTRY_VERIFY(!pane->isAncestorOf(surface));
-    QVERIFY(lastFrame->isVisible());
+    QVERIFY(lastFrame() != nullptr && lastFrame()->isVisible());
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+// The viewer takes the visualization whole into its window, whichever
+// window it opened in before and when the setting changes while it is open
+// (#373 H6: the pane's kept frame, a ShaderEffectSource of the
+// visualization, kept it in the main window's scene when the whole-screen
+// window took it; the two windows' render threads drew its nodes at once,
+// and the app crashed. The setting comes from the backend after it is
+// set, so a viewer opened just after it is set opens in the window first).
+// Wherever the viewer shows the visualization, every item of it is in that
+// window; the pane keeps no frame of it, and has no frame, unless it is in
+// the main window.
+void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow_data() {
+    QTest::addColumn<bool>("wholeScreenFirst");
+    QTest::addColumn<bool>("whileOpen");
+    QTest::newRow("window, then whole screen") << false << false;
+    QTest::newRow("whole screen, then window") << true << false;
+    QTest::newRow("window, whole screen while open") << false << true;
+    QTest::newRow("whole screen, window while open") << true << true;
+}
+
+void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow() {
+    QFETCH(bool, wholeScreenFirst);
+    QFETCH(bool, whileOpen);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *surface = named(window, "visualizationSurface");
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(bridge && viewer && pane && surface && popup && spectrogram);
+    // A track the spectrogram shows the columns of.
+    bridge->setProperty("durationSeconds", 60.0);
+    bridge->setProperty("currentTrackChannels", 2);
+    bridge->setProperty("waveformCoverageSeconds", 60.0);
+    bridge->setProperty("waveformComplete", true);
+    playQueueRow(bridge, 0);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QList<QQuickItem *> lanes;
+    QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), 2);
+    for (qsizetype index = 0; index < lanes.size(); ++index) {
+        constexpr int bins = 4'097;
+        constexpr int columns = 200;
+        qobject_cast<SpectrogramItem *>(lanes.at(index))
+            ->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index), columns, 0,
+                                   2'000, 48'000, 1'024, false, true, 1, false);
+    }
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+
+    // Whether the visualization is whole in `host`: every item of it there,
+    // and, in another window, no frame of the pane's.
+    const auto whole = [&](QQuickWindow *host) -> QString {
+        QString failure;
+        const std::function<void(QQuickItem *)> visit = [&](QQuickItem *item) {
+            if (failure.isEmpty() && item->window() != host) {
+                failure = QStringLiteral("%1 (%2) in another window")
+                              .arg(item->objectName(), QString::fromLatin1(item->metaObject()->className()));
+            }
+            for (QQuickItem *child : item->childItems()) {
+                visit(child);
+            }
+        };
+        visit(surface);
+        if (failure.isEmpty() && host != window
+            && (pane->property("holdsVisualization").toBool()
+                || named(window, "spectrogramPaneLastFrame") != nullptr)) {
+            failure = QStringLiteral("the pane keeps a frame of it");
+        }
+        return failure;
+    };
+    // The visualization is in the viewer, whole, for a few frames.
+    const auto shownWhole = [&](bool wholeScreen, const QString &where) -> QString {
+        if (!QTest::qWaitFor([&]() { return !pane->isAncestorOf(surface); })) {
+            return where + QStringLiteral(": still in the pane");
+        }
+        QQuickWindow *host = window;
+        if (wholeScreen) {
+            if (!QTest::qWaitFor([&]() {
+                    return surface->parentItem() != nullptr && surface->parentItem()->window() != nullptr
+                           && surface->parentItem()->window() != window;
+                })) {
+                return where + QStringLiteral(": not in the whole-screen window");
+            }
+            host = surface->parentItem()->window();
+            if (!QTest::qWaitForWindowExposed(host)) {
+                return where + QStringLiteral(": the whole-screen window not shown");
+            }
+        } else if (!QTest::qWaitFor([&]() { return popup->property("opened").toBool(); })) {
+            return where + QStringLiteral(": the viewer not open");
+        }
+        for (int frame = 0; frame < 3; ++frame) {
+            QSignalSpy swapped(host, &QQuickWindow::frameSwapped);
+            host->update();
+            if (!swapped.wait(2000)) {
+                return where + QStringLiteral(": no frame");
+            }
+        }
+        const QString apart = whole(host);
+        return apart.isEmpty() ? QString() : where + QStringLiteral(": ") + apart;
+    };
+
+    for (int round = 0; round < 2; ++round) {
+        for (const bool wholeScreen : {wholeScreenFirst, !wholeScreenFirst}) {
+            const QString where = QStringLiteral("round %1, %2").arg(round).arg(
+                wholeScreen ? QStringLiteral("whole screen") : QStringLiteral("window"));
+            bridge->setProperty("viewerFullscreenMode", (whileOpen ? !wholeScreen : wholeScreen) ? 1 : 0);
+            QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+            QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+            if (whileOpen) {
+                // Open in the other mode, the setting then changes: once
+                // the viewer shows, and then at once, while the pane may
+                // still be keeping its frame.
+                if (round == 0) {
+                    const QString before = shownWhole(!wholeScreen, where + QStringLiteral(", before the change"));
+                    QVERIFY2(before.isEmpty(), qPrintable(before));
+                }
+                bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+            }
+            const QString shown = shownWhole(wholeScreen, where);
+            QVERIFY2(shown.isEmpty(), qPrintable(shown));
+
+            QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+            QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+            QTRY_VERIFY2(pane->isAncestorOf(surface), qPrintable(where));
+            QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
+            window->update();
+            QVERIFY2(swapped.wait(2000), qPrintable(where));
+            const QString back = whole(window);
+            QVERIFY2(back.isEmpty(), qPrintable(where + QStringLiteral(", closed: ") + back));
+            QVERIFY2(named(window, "spectrogramPaneLastFrame") == nullptr, qPrintable(where));
+            QVERIFY(!pane->property("holdsVisualization").toBool());
+        }
+    }
 }
 
 #include "tst_ui_motion.moc"
