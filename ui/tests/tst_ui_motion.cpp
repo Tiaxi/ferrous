@@ -993,6 +993,9 @@ private slots:
     void viewerTakesTheVisualizationWholeIntoEitherWindow();
     void viewerTakesTheVisualizationWholeIntoEitherWindow_data();
     void viewerPlatesAndGlyphsRevealOnOneLevel_data();
+    void albumArtViewerFadesWithItsArt_data();
+    void albumArtViewerFadesWithItsArt();
+    void windowedViewerClosesOverItsLastFrame();
 };
 
 void UiMotionTest::initTestCase() {
@@ -5146,11 +5149,12 @@ void UiMotionTest::windowedViewerOpensOverThePanesLastFrame() {
     QVERIFY2(differing <= under.width() * under.height() / 1000,
              qPrintable(QStringLiteral("%1 of %2 pixels differ").arg(differing).arg(under.width() * under.height())));
 
-    // Closed: the visualization is back, and the kept frame goes.
+    // Closed: the pane's kept frame goes, and the visualization is back
+    // once the closing viewer keeps a frame of its own.
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
-    QVERIFY(pane->isAncestorOf(surface));
     QVERIFY(lastFrame() == nullptr);
+    QTRY_VERIFY(pane->isAncestorOf(surface));
     QVERIFY(!pane->property("lastFrameKept").toBool());
     QVERIFY(!pane->property("holdsVisualization").toBool());
 
@@ -5298,6 +5302,326 @@ void UiMotionTest::viewerTakesTheVisualizationWholeIntoEitherWindow() {
             QVERIFY(!pane->property("holdsVisualization").toBool());
         }
     }
+}
+
+
+namespace {
+
+// The item a Popup draws itself and its content in.
+QQuickItem *popupItemOf(QObject *popup) {
+    auto *content = qvariant_cast<QQuickItem *>(popup->property("contentItem"));
+    return content != nullptr ? content->parentItem() : nullptr;
+}
+
+} // namespace
+
+void UiMotionTest::albumArtViewerFadesWithItsArt_data() {
+    QTest::addColumn<bool>("opening");
+    QTest::newRow("opening") << true;
+    QTest::newRow("closing") << false;
+}
+
+// The album art viewer in the window fades in and out with its art and its
+// details (#373 H8: as it closed, the art went at once and the viewer's
+// black floor faded out alone, a blink of about 100 ms). In every frame the
+// viewer draws, the art and the details are drawn at the viewer's own
+// opacity, the art loaded: none of them shows before the viewer or goes
+// before it.
+void UiMotionTest::albumArtViewerFadesWithItsArt() {
+    QFETCH(bool, opening);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setLongDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QQuickItem *preload = named(window, "albumArtViewerPreloadImage");
+    QVERIFY(bridge && viewer && popup && surface && preload);
+    QQuickItem *mainHost = surface->parentItem();
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
+    QQuickItem *title = itemNamed(surface, QStringLiteral("albumArtInfoTitle"));
+    QVERIFY(mainHost && image && column && title);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    // The window holds the cover decoded as the viewer shows it.
+    QTRY_COMPARE(preload->property("status").toInt(), 1);
+    QVERIFY(!surface->isVisible());
+
+    QQuickItem *popupItem = popupItemOf(popup);
+    QVERIFY(popupItem != nullptr);
+    QString failure;
+    int frames = 0;
+    int fadingFrames = 0;
+    // What is not drawn at the viewer's opacity, or "".
+    const auto apart = [&](bool details) -> QString {
+        if (popupItem == nullptr || !popupItem->isVisible()) {
+            return {};
+        }
+        const double shown = drawnOpacity(popupItem);
+        if (!popupItem->isAncestorOf(surface)) {
+            return QStringLiteral("the art out of the viewer, at %1").arg(shown);
+        }
+        if (shown > 0.0 && image->property("status").toInt() != 1) {
+            return QStringLiteral("the art not loaded, the viewer at %1").arg(shown);
+        }
+        QList<QPair<QString, QQuickItem *>> drawn{{QStringLiteral("the art"), image}};
+        if (details) {
+            drawn.append({QStringLiteral("the details"), column});
+            drawn.append({QStringLiteral("the file's name"), title});
+        }
+        for (const auto &[what, item] : drawn) {
+            const double opacity = drawnOpacity(item);
+            if (std::abs(opacity - shown) > 1e-9) {
+                return QStringLiteral("%1 at %2, the viewer at %3").arg(what).arg(opacity).arg(shown);
+            }
+        }
+        return {};
+    };
+
+    const auto sampleFade = [&](bool details) {
+        const QMetaObject::Connection connection =
+            QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+                ++frames;
+                if (popupItem != nullptr && popupItem->isVisible()) {
+                    const double shown = drawnOpacity(popupItem);
+                    fadingFrames += shown > 0.0 && shown < 1.0;
+                }
+                if (failure.isEmpty()) {
+                    failure = apart(details);
+                }
+            });
+        return connection;
+    };
+
+    if (opening) {
+        const QMetaObject::Connection connection = sampleFade(false);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+        QTRY_VERIFY(popupItem->isVisible());
+        // Halfway, the art is there, at the viewer's opacity.
+        QTRY_VERIFY(drawnOpacity(popupItem) > 0.2 && drawnOpacity(popupItem) < 0.8);
+        QVERIFY2(apart(false).isEmpty(), qPrintable(apart(false)));
+        QVERIFY(drawnOpacity(image) > 0.2);
+        QTRY_VERIFY(popup->property("opened").toBool() && drawnOpacity(popupItem) == 1.0);
+        QObject::disconnect(connection);
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
+        QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+        units->setLongDuration(0);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+        QTRY_VERIFY(!popup->property("visible").toBool());
+        return;
+    }
+
+    units->setLongDuration(0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QVERIFY(popupItem->isAncestorOf(surface));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "toggleAlbumArtInfoVisible", Q_ARG(QVariant, QVariant())));
+    QTRY_VERIFY(column->isVisible());
+    QTRY_COMPARE(image->property("status").toInt(), 1);
+    QCOMPARE(drawnOpacity(popupItem), 1.0);
+    units->setLongDuration(400);
+
+    const QMetaObject::Connection connection = sampleFade(true);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QVERIFY(!viewer->property("albumArtViewerOpen").toBool());
+    // At once, the art is still in the viewer, which goes on showing.
+    QVERIFY2(apart(true).isEmpty(), qPrintable(apart(true)));
+    // Halfway, the art and the details are there, at the viewer's opacity.
+    QTRY_VERIFY(drawnOpacity(popupItem) > 0.2 && drawnOpacity(popupItem) < 0.8);
+    QVERIFY2(apart(true).isEmpty(), qPrintable(apart(true)));
+    QVERIFY(drawnOpacity(image) > 0.2 && drawnOpacity(column) > 0.2);
+    // Faded out, the art leaves the viewer.
+    QTRY_VERIFY(!popupItem->isVisible());
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+    QTRY_VERIFY(surface->parentItem() == mainHost);
+    QVERIFY(!surface->isVisible());
+    QVERIFY(frames > 0);
+}
+
+// The visualization viewer in the window fades out over its last frame as
+// it closes, while the pane under it shows the visualization live again
+// (#373 H8: the visualization went back to the pane at once, and the
+// viewer's black floor faded out alone over it). In every frame the viewer
+// draws, it shows the visualization, live or as its kept frame, at its own
+// opacity; once the frame is kept, the pane has the visualization. Faded
+// out, the frame goes. Opened over the whole screen while it fades, the
+// viewer gives the visualization up whole to that window.
+void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *surface = named(window, "visualizationSurface");
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QObject *shell = window->findChild<QObject *>(QStringLiteral("spectrogramViewerShell"));
+    QVERIFY(bridge && viewer && popup && pane && surface && spectrogram && shell);
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // Columns the spectrogram shows, in colour.
+    bridge->setProperty("durationSeconds", 60.0);
+    bridge->setProperty("currentTrackChannels", 2);
+    bridge->setProperty("waveformCoverageSeconds", 60.0);
+    bridge->setProperty("waveformComplete", true);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QList<QQuickItem *> lanes;
+    QTRY_COMPARE((lanes = itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))).size(), 2);
+    for (qsizetype index = 0; index < lanes.size(); ++index) {
+        constexpr int bins = 4'097;
+        constexpr int columns = 200;
+        qobject_cast<SpectrogramItem *>(lanes.at(index))
+            ->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, static_cast<int>(index), columns, 0,
+                                   2'000, 48'000, 1'024, false, true, 1, false);
+    }
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+
+    QQuickItem *popupItem = nullptr;
+    QQuickItem *host = nullptr;
+    const auto closingFrame = [&]() {
+        return popupItem != nullptr ? itemNamed(popupItem, QStringLiteral("spectrogramViewerClosingFrame")) : nullptr;
+    };
+    const auto openInWindow = [&]() {
+        units->setLongDuration(0);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_VERIFY(!pane->isAncestorOf(surface));
+        popupItem = popupItemOf(popup);
+        QVERIFY(popupItem != nullptr && popupItem->isAncestorOf(surface));
+        host = surface->parentItem();
+        QCOMPARE(drawnOpacity(popupItem), 1.0);
+    };
+
+    // What the viewer does not show at its opacity, or "".
+    const auto apart = [&]() -> QString {
+        if (!popupItem->isVisible()) {
+            return {};
+        }
+        const double shown = drawnOpacity(popupItem);
+        if (popupItem->isAncestorOf(surface)) {
+            const double opacity = drawnOpacity(surface);
+            return std::abs(opacity - shown) > 1e-9
+                ? QStringLiteral("the visualization at %1, the viewer at %2").arg(opacity).arg(shown)
+                : QString();
+        }
+        QQuickItem *frame = closingFrame();
+        if (frame == nullptr || !frame->property("grabbed").toBool()) {
+            return QStringLiteral("the visualization gone from the viewer, its frame not kept, at %1").arg(shown);
+        }
+        if (std::abs(drawnOpacity(frame) - shown) > 1e-9) {
+            return QStringLiteral("the frame at %1, the viewer at %2").arg(drawnOpacity(frame)).arg(shown);
+        }
+        if (frame->size() != host->size()) {
+            return QStringLiteral("the frame %1×%2, the view %3×%4").arg(frame->width()).arg(frame->height())
+                .arg(host->width()).arg(host->height());
+        }
+        if (!pane->isAncestorOf(surface)) {
+            return QStringLiteral("the visualization in neither the viewer nor the pane");
+        }
+        return {};
+    };
+
+    openInWindow();
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QVERIFY(closingFrame() == nullptr);
+    units->setLongDuration(400);
+    QString failure;
+    int fadingFrames = 0;
+    QMetaObject::Connection connection = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+        const double shown = drawnOpacity(popupItem);
+        fadingFrames += shown > 0.0 && shown < 1.0;
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QVERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+    // At once, the visualization is still in the viewer; it goes back to
+    // the pane once the viewer keeps its frame.
+    QVERIFY(popupItem->isAncestorOf(surface));
+    QTRY_VERIFY(pane->isAncestorOf(surface));
+    QVERIFY(closingFrame() != nullptr && closingFrame()->property("grabbed").toBool());
+    // Halfway, the frame shows at the viewer's opacity over the pane.
+    QTRY_VERIFY(drawnOpacity(popupItem) > 0.2 && drawnOpacity(popupItem) < 0.8);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QVERIFY(drawnOpacity(closingFrame()) > 0.2);
+    // Faded out, the frame goes.
+    QTRY_VERIFY(!popupItem->isVisible());
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+    QTRY_VERIFY(closingFrame() == nullptr);
+    QVERIFY(!shell->property("keepsVisualization").toBool());
+    QVERIFY(pane->isAncestorOf(surface));
+
+    // The kept frame shows what the viewer showed: with the fade too slow
+    // to move, the window draws as it did before the viewer closed.
+    openInWindow();
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    window->update();
+    QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
+    QVERIFY(swapped.wait(2000));
+    const QImage before = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    QColor floor(Qt::black);
+    int drawn = 0;
+    for (int y = 0; y < before.height(); y += 4) {
+        for (int x = 0; x < before.width(); x += 4) {
+            const QColor at = before.pixelColor(x, y);
+            drawn += std::abs(at.red() - floor.red()) + std::abs(at.green() - floor.green())
+                    + std::abs(at.blue() - floor.blue()) > 24;
+        }
+    }
+    QVERIFY2(drawn > 1000, qPrintable(QString::number(drawn)));
+    units->setLongDuration(600000);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(pane->isAncestorOf(surface));
+    QVERIFY(closingFrame() != nullptr && closingFrame()->isVisible());
+    const QImage after = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    QCOMPARE(after.size(), before.size());
+    int differing = 0;
+    for (int y = 0; y < after.height(); ++y) {
+        for (int x = 0; x < after.width(); ++x) {
+            const QColor a = after.pixelColor(x, y);
+            const QColor b = before.pixelColor(x, y);
+            differing += std::abs(a.red() - b.red()) > 8 || std::abs(a.green() - b.green()) > 8
+                         || std::abs(a.blue() - b.blue()) > 8;
+        }
+    }
+    QVERIFY2(differing <= after.width() * after.height() / 1000,
+             qPrintable(QStringLiteral("%1 of %2 pixels differ").arg(differing).arg(after.width() * after.height())));
+
+    // Opened over the whole screen while it fades: the viewer gives up its
+    // frame, and the visualization goes whole into that window.
+    bridge->setProperty("viewerFullscreenMode", 1);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+    QVERIFY(QTest::qWaitForWindowExposed(surface->window()));
+    QVERIFY(closingFrame() == nullptr);
+    QVERIFY(!shell->property("holdsVisualization").toBool());
+    QVERIFY(!pane->property("holdsVisualization").toBool());
+    units->setLongDuration(0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(pane->isAncestorOf(surface));
 }
 
 #include "tst_ui_motion.moc"

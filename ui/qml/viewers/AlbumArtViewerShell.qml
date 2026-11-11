@@ -42,6 +42,9 @@ Item {
     property bool stripEnabled: true
 
     property alias popupHost: albumArtPopupHost
+    // Whether the viewer in the main window shows: while it is open, and
+    // while it fades out after it closes, when it still shows the art.
+    readonly property bool popupShown: albumArtViewer.visible
     // The window of the viewer over the whole screen, and the item in it
     // that holds the album art; null until the viewer first opens there.
     readonly property Window fullscreenWindow: albumArtFullscreenWindowLoader.item

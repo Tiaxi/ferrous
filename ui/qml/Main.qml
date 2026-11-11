@@ -1579,15 +1579,21 @@ ApplicationWindow {
         // in. The whole-screen window takes them only once that frame no
         // longer refers to them, as it would keep them in this window
         // (#373 H6); the pane lets them go as soon as it keeps no frame.
+        // Closed, the viewer in the main window keeps their last frame as it
+        // fades out, and gives them back to the pane once it has (#373 H8);
+        // it too keeps them out of the whole-screen window while its frame
+        // refers to them.
         parent: viewerController.spectrogramViewerOpen
             ? (root.useWholeScreenViewerMode
-                ? (spectrogramPane.holdsVisualization
+                ? (spectrogramPane.holdsVisualization || spectrogramViewerShell.holdsVisualization
                     ? spectrogramPane.hostItem
                     : (spectrogramViewerShell.windowHost || spectrogramPane.hostItem))
                 : (spectrogramPane.lastFrameKept || !spectrogramPane.canKeepLastFrame
                     ? spectrogramViewerShell.popupHost
                     : spectrogramPane.hostItem))
-            : spectrogramPane.hostItem
+            : (spectrogramViewerShell.keepsVisualization
+                ? spectrogramViewerShell.popupHost
+                : spectrogramPane.hostItem)
         visible: parent !== null
         anchors.fill: parent
         // Whether a viewer shows them: where they are, not whether a viewer
@@ -1821,8 +1827,10 @@ ApplicationWindow {
 
     Viewers.SpectrogramViewerShell {
         id: spectrogramViewerShell
+        objectName: "spectrogramViewerShell"
         windowRoot: root
         uiPalette: root.uiPalette
+        visualization: visualizationSurface
         viewerOpen: viewerController.spectrogramViewerOpen
         useWholeScreenViewerMode: root.useWholeScreenViewerMode
         titleText: root.titleFor(root.visualizationViewerName)
@@ -1890,6 +1898,9 @@ ApplicationWindow {
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 
+    // The viewer in the main window shows the art until it has faded out,
+    // not only while it is open (#373 H8: the art went the moment the viewer
+    // closed, and its black floor faded out alone).
     Viewers.AlbumArtSurface {
         id: albumArtSurface
         objectName: "albumArtSurface"
@@ -1897,8 +1908,8 @@ ApplicationWindow {
             ? (root.useWholeScreenViewerMode
                 ? (albumArtViewerShell.windowHost || albumArtMainHost)
                 : albumArtViewerShell.popupHost)
-            : albumArtMainHost
-        visible: viewerController.albumArtViewerOpen
+            : (albumArtViewerShell.popupShown ? albumArtViewerShell.popupHost : albumArtMainHost)
+        visible: viewerController.albumArtViewerOpen || albumArtViewerShell.popupShown
         anchors.fill: parent
         viewerOpen: viewerController.albumArtViewerOpen
         viewerSource: viewerController.albumArtViewerSource
