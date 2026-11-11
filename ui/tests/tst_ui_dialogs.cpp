@@ -421,6 +421,7 @@ private slots:
     void titleStripSettingIsOnlyForTheWholeScreen();
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void configureFitsItsPagesAtAnyWidth();
+    void configureLabelsEndAtOnePlaceOnEveryPage();
     void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
@@ -1173,6 +1174,54 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QTRY_VERIFY(formModes(dialog, stack).contains(false));
     checkPreferencesPages(dialog, prefs, stack, QStringLiteral("narrowest"));
     QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+// The labels' column is as wide on every page of Configure (#373 H5): the
+// fields of the labelled rows start at one x as the pages change, rather
+// than where each page's own widest label ends.
+void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
+    // The x of each labelled field, on page `page`.
+    const auto fieldsOf = [&](int page) {
+        QList<qreal> xs;
+        QQuickItem *form = itemsNamed(stack->childItems().at(page), QStringLiteral("preferencesForm")).value(0);
+        if (form == nullptr || !form->isVisible() || layoutPending(form)) {
+            return xs;
+        }
+        for (QQuickItem *item : form->childItems()) {
+            if (item->isVisible()
+                && !evaluate(item, QStringLiteral("Kirigami.FormData.label")).toString().trimmed().isEmpty()) {
+                xs.push_back(sceneRect(item).left());
+            }
+        }
+        return xs;
+    };
+    QList<qreal> all;
+    QStringList described;
+    for (int page = 0; page < 5; ++page) {
+        dialog->setProperty("pageIndex", page);
+        QList<qreal> xs;
+        QTRY_VERIFY2(!(xs = fieldsOf(page)).isEmpty(), qPrintable(QString::number(page)));
+        QStringList texts;
+        for (qreal x : xs) {
+            texts << QString::number(x);
+        }
+        described << QStringLiteral("page %1: %2").arg(page).arg(texts.join(QLatin1Char(' ')));
+        all += xs;
+    }
+    const auto [lowest, highest] = std::minmax_element(all.begin(), all.end());
+    QVERIFY2(*highest - *lowest <= 1, qPrintable(described.join(QLatin1Char('\n'))));
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }

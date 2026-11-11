@@ -6,10 +6,12 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 
 // A page of Configure Ferrous: its title on the content edge, then a form
-// with right-aligned labels sized to the longest one. A page taller than
-// the dialog scrolls. The form takes the page's width: its labels beside
-// the fields while the page has the room for both, above them when it has
-// not, whatever the font; help texts wrap to the fields' column.
+// with right-aligned labels. Their column is as wide on every page, from
+// the widest label of them all, so the labels end and the fields start at
+// one place as the pages change. A page taller than the dialog scrolls.
+// The form takes the page's width: its labels beside the fields while the
+// page has the room for both, above them when it has not, whatever the
+// font; help texts wrap to the fields' column.
 ScrollView {
     id: root
 
@@ -24,13 +26,34 @@ ScrollView {
     readonly property real pageTopInset: Kirigami.Units.gridUnit - 2
     // The form's width: the page's, less its insets.
     readonly property real formWidth: Math.max(0, root.availableWidth - 2 * root.pageSideInset)
-    // What the form's rows need across. The labels' column: the widest
-    // label, in the font Kirigami draws it in. The fields' column: the
-    // widest field as it would be laid out, and at its narrowest; a help
-    // text wraps, from about 20 characters. A row's own layout counts, not
-    // whether it shows: a page out of view hides its rows.
-    readonly property var formNeeds: {
+    // The widest label of this page's form, in the font Kirigami draws it
+    // in. A row's own label counts, not whether it shows: a page out of
+    // view hides its rows.
+    readonly property real labelWidth: {
         let labels = 0
+        const children = form.children
+        for (let i = 0; i < children.length; ++i) {
+            const item = children[i]
+            const label = item instanceof GridLayout ? "" : item.Kirigami.FormData.label
+            if (label && label.trim().length > 0) {
+                labels = Math.max(labels, labelMetrics.advanceWidth(label))
+            }
+        }
+        return labels
+    }
+    // The widest label of every page, which Configure gives each page.
+    property real sharedLabelWidth: 0
+    // The labels' column: as wide as on the other pages, or wider for a
+    // label of this page's own.
+    readonly property real labelColumnWidth: Math.max(root.labelWidth, root.sharedLabelWidth)
+    // How far the form moves in for its labels to end where the other
+    // pages' do: Kirigami sizes the labels' column to this page's widest.
+    readonly property real labelShift: form.wideMode ? root.labelColumnWidth - root.labelWidth : 0
+    // What the form's rows need across. The labels' column, and the
+    // fields': the widest field as it would be laid out, and at its
+    // narrowest; a help text wraps, from about 20 characters. A row's own
+    // layout counts, not whether it shows.
+    readonly property var formNeeds: {
         let fields = 0
         let narrowest = 0
         const children = form.children
@@ -39,10 +62,6 @@ ScrollView {
             // The form's own grid, which holds the rows' places.
             if (item instanceof GridLayout) {
                 continue
-            }
-            const label = item.Kirigami.FormData.label
-            if (label && label.trim().length > 0) {
-                labels = Math.max(labels, labelMetrics.advanceWidth(label))
             }
             if (item.formHelpText === true) {
                 fields = Math.max(fields, item.indent + item.minimumTextWidth)
@@ -55,7 +74,7 @@ ScrollView {
                 item.Layout.fillWidth ? 0 : preferred)
         }
         return {
-            wide: Math.ceil(labels) + Kirigami.Units.largeSpacing + Math.ceil(fields),
+            wide: Math.ceil(root.labelColumnWidth) + Kirigami.Units.largeSpacing + Math.ceil(fields),
             narrow: Math.ceil(narrowest)
         }
     }
@@ -70,6 +89,22 @@ ScrollView {
         id: labelMetrics
         font: Kirigami.Theme.defaultFont
     }
+
+    // The form's last row: nothing to see, but the one field that takes
+    // any width left over. Every other field has a maximum, and without it
+    // the grid would give what they leave to the labels' column too,
+    // which would then be wider than its labels, by more on some pages
+    // than on others.
+    readonly property Item fieldColumnFill: Item {
+        objectName: "preferencesFieldColumnFill"
+        implicitWidth: 0
+        implicitHeight: 0
+        Layout.fillWidth: true
+        Accessible.ignored: true
+    }
+
+    // After the page's own rows.
+    Component.onCompleted: root.fieldColumnFill.parent = form
 
     clip: true
     contentWidth: availableWidth
@@ -102,11 +137,11 @@ ScrollView {
             // column to the page's edge, for the help texts to wrap in.
             // It has that layout while the labels and the fields fit side
             // by side, whatever the font.
-            implicitWidth: root.formWidth
+            implicitWidth: root.formWidth - root.labelShift
             wideMode: root.formWidth >= root.formNeeds.wide
             Layout.fillWidth: false
-            Layout.preferredWidth: root.formWidth
-            Layout.leftMargin: root.pageSideInset
+            Layout.preferredWidth: root.formWidth - root.labelShift
+            Layout.leftMargin: root.pageSideInset + root.labelShift
             Layout.rightMargin: root.pageSideInset
             Layout.bottomMargin: root.pageTopInset
         }

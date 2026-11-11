@@ -394,6 +394,11 @@ Components.DialogWindow {
                     // every page's wide layout.
                     readonly property real minimumWidth: pagesStack.widest("minimumWidth")
                     readonly property real wideWidth: pagesStack.widest("wideWidth")
+                    // The labels' column of every page: the widest label of
+                    // them all, up to a limit, past which a page with a
+                    // longer one has a wider column of its own.
+                    readonly property real labelWidth: Math.min(pagesStack.widest("labelWidth"),
+                        Kirigami.Units.gridUnit * 14)
 
                     function widest(property) {
                         let widest = 0
@@ -405,6 +410,7 @@ Components.DialogWindow {
                     currentIndex: root.pageIndex
 
                     Preferences.LibraryPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLibraryPage"
                         uiBridge: root.uiBridge
                         uiPalette: root.uiPalette
@@ -415,6 +421,7 @@ Components.DialogWindow {
                     }
 
                     Preferences.SpectrogramPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesSpectrogramPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
@@ -422,12 +429,14 @@ Components.DialogWindow {
                     }
 
                     Preferences.DisplayPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesAppearancePage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                     }
 
                     Preferences.LastFmPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLastFmPage"
                         uiBridge: root.uiBridge
                         uiPalette: root.uiPalette
@@ -435,6 +444,7 @@ Components.DialogWindow {
                     }
 
                     Preferences.SystemMediaPage {
+                        sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesMediaControlsPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
