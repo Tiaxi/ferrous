@@ -1839,7 +1839,8 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
 // The pointer on the viewer's own controls is on the view (#373 H5: in the
 // viewer in the window, the mode switch went as the pointer reached the
 // corner plate beside it): the switch stays, in the window on the corner
-// plate and its Close, and over the whole screen on the title strip.
+// plate and its Close, and over the whole screen on the title strip. It
+// shows with the viewer's controls, which it hides with.
 void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1891,9 +1892,19 @@ void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewers
             QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
             QVERIFY(modeSwitch->isVisible());
         }
-        // Off the view and its controls, it goes.
+        // Off the view and its controls, it stays while the viewer's
+        // controls show, as their part (#373 H6), and goes with them, at
+        // their level.
         QTest::mouseMove(host, QPoint(-20, -20));
-        QTRY_VERIFY2(!modeSwitch->property("revealed").toBool(), where.constData());
+        QTest::qWait(300);
+        QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
+        QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
+        QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+        QVERIFY(autoHide != nullptr);
+        autoHide->setProperty("hideDelay", 1);
+        QTRY_VERIFY2(!modeSwitch->isVisible(), where.constData());
+        QCOMPARE(modeSwitch->opacity(), 0.0);
+        autoHide->setProperty("hideDelay", 5000);
         QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
         window->requestActivate();

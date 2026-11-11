@@ -4664,15 +4664,19 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
         }
     });
     // The pointer moving on the lane wakes them; then, hidden again, the
-    // pointer comes back onto the lane from outside the view, which also
-    // reveals the plates that show on the pointer.
+    // pointer comes back onto the lane from outside the view. In a viewer
+    // the plates that show on the pointer show with its controls (#373 H6:
+    // the mode switch, then the lane's buttons, came in on their own curves
+    // after the strip), so the pointer leaving the view leaves them as they
+    // are.
     for (const bool fromOutside : {false, true}) {
         if (fromOutside) {
             autoHide->setProperty("hideDelay", 1);
             QTRY_VERIFY(!controls->isVisible());
             QTest::mouseMove(host, QPoint(-20, -20));
-            QTRY_COMPARE(modeSwitch->property("revealLevel").toDouble(), 0.0);
-            QTRY_COMPARE(laneButtons->property("revealLevel").toDouble(), 0.0);
+            QTest::qWait(50);
+            QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
+            QCOMPARE(laneButtons->property("revealLevel").toDouble(), 1.0);
             autoHide->setProperty("hideDelay", 600000);
             fadingFrames = 0;
         }
@@ -4687,9 +4691,27 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
         QVERIFY2(failure.isEmpty(), qPrintable(where + ": " + failure));
         QVERIFY2(fadingFrames >= 3, qPrintable(where + ": " + QString::number(fadingFrames)));
     }
-    QObject::disconnect(connection);
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+
+    // The controls shown, the pointer comes onto the lane from outside the
+    // view, as when it reaches a viewer that has just opened: nothing comes
+    // in on a curve of its own after them (#373 H6, 73 ms after the strip).
+    QTest::mouseMove(host, QPoint(-20, -20));
+    QVERIFY(QMetaObject::invokeMethod(autoHide, "wake"));
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(QStringLiteral("shown, the pointer outside: ") + apart()));
+    // Sampled along what would be a fade, as no frame need be drawn.
+    QTest::mouseMove(host, onLane);
+    for (int sample = 0; sample < 20; ++sample) {
+        QTest::qWait(units->shortDuration() / 10);
+        QVERIFY2(apart().isEmpty(), qPrintable(QStringLiteral("the pointer arrived, sample %1: %2")
+                                                   .arg(sample).arg(apart())));
+    }
+    QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
+    QCOMPARE(laneButtons->property("revealLevel").toDouble(), 1.0);
+    QVERIFY2(failure.isEmpty(), qPrintable(QStringLiteral("the pointer arrived: ") + failure));
+    QObject::disconnect(connection);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }

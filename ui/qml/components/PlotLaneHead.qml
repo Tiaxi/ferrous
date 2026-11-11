@@ -6,8 +6,8 @@ import "." as Components
 
 // A lane's label, and 8 px right of it its Mute and Solo buttons on one
 // plate. The buttons show while the pointer is on the lane or the plate, and
-// while keyboard focus is on either of them; hidden, they stay Tab stops,
-// so the keyboard reveals them.
+// while keyboard focus is on either of them, and in a viewer with its
+// controls; hidden, they stay Tab stops, so the keyboard reveals them.
 Item {
     id: root
 
@@ -25,6 +25,9 @@ Item {
     property bool controlsShown: true
     // The viewer's controls as they fade, which the buttons fade with.
     property real controlsLevel: root.controlsShown ? 1 : 0
+    // In a viewer, buttons that show on the pointer show with the viewer's
+    // controls, which the pointer's activity shows, on their level alone.
+    property bool revealedWithControls: false
     property bool laneHovered: false
     property var toggleMute: function() {}
     property var toggleSolo: function() {}
@@ -34,7 +37,8 @@ Item {
     // hiding fades them through `controlsLevel` instead, on its curve.
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
         || (root.buttonsVisibility === 1
-            && (root.laneHovered || buttonsHover.hovered || root.focusInside))
+            && (root.revealedWithControls || root.laneHovered || buttonsHover.hovered
+                || root.focusInside))
 
     // The label's box: the buttons' plate, taller, is centred on it and
     // overhangs it above and below.
