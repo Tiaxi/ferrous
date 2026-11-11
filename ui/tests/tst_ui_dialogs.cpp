@@ -451,6 +451,7 @@ private slots:
     void configureFitsItsPagesAtAnyWidth();
     void configureLabelsEndAtOnePlaceOnEveryPage();
     void configureGroupsItsSettingsOnFourPages();
+    void configureFitsTheVisualizationPageAtTheDefaultFont();
     void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
@@ -1213,10 +1214,64 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
 
 // Configure has four pages (#373 H7, P12): Library, Visualization,
 // General and Last.fm. Visualization holds every plot setting, in three
-// groups 16 px apart: how the plot is drawn, what shows over it, and its
-// zoom. General holds the fullscreen viewers and, under a plain
+// groups under subheadings (#373 H8): Analysis, Display and Interaction,
+// with the "Show:" check boxes together. General holds the fullscreen viewers and, under a plain
 // subheading, Plasma's media controls. A help text is 4 px under its
 // control, 12 px above the next row, and at most about 440 px wide.
+// At the default 10 pt font, Configure opens tall enough for the
+// Visualization page, its tallest, with its three subheadings: it shows
+// whole, with no vertical scroll bar, whichever page Configure opens on
+// (#373 H8: its last row was under the buttons). The pages are laid out
+// only once the window shows, so its height cannot follow them (#585).
+void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont standard = applicationFont;
+    standard.setPointSizeF(10);
+    QGuiApplication::setFont(standard);
+    for (const int openOn : {0, 1}) {
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = loadMainWindow(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
+        QObject *dialog = openPreferences(window, openOn);
+        QVERIFY(dialog != nullptr);
+        QQuickWindow *prefs = windowOf(dialog);
+        // Within the 1000 px screen of the reviews.
+        QVERIFY2(prefs->height() <= 1000 - 2 * 18 - 28, qPrintable(QString::number(prefs->height())));
+        QQuickItem *stack = nullptr;
+        QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+        dialog->setProperty("pageIndex", 1);
+        QQuickItem *page = stack->childItems().at(1);
+        QTRY_VERIFY(page->isVisible() && !layoutPending(page));
+        QTRY_VERIFY(visibleNamed(prefs, QStringLiteral("stretchShortTracksCheckBox")) != nullptr);
+        QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
+                 qPrintable(QStringLiteral("opened on %1: %2 of %3 px, window %4")
+                                .arg(openOn).arg(page->property("contentHeight").toReal()).arg(page->height())
+                                .arg(prefs->height())));
+        // No vertical scroll bar shows.
+        for (QQuickItem *child : page->childItems()) {
+            if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
+                && child->property("orientation").toInt() == Qt::Vertical) {
+                QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6 || !child->isVisible(),
+                         qPrintable(describeItem(child)));
+            }
+        }
+        // Each subheading in view, the last row above the buttons.
+        for (const QString &name : {QStringLiteral("visualizationAnalysisHeading"),
+                                    QStringLiteral("visualizationDisplayHeading"),
+                                    QStringLiteral("visualizationInteractionHeading"),
+                                    QStringLiteral("stretchShortTracksCheckBox")}) {
+            QQuickItem *item = visibleNamed(prefs, name);
+            QVERIFY2(item != nullptr, qPrintable(name));
+            QVERIFY2(within(sceneRect(item), sceneRect(page)), qPrintable(describeItem(item)));
+        }
+        QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+        QTRY_VERIFY(!prefs->isVisible());
+    }
+}
+
 void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1244,13 +1299,14 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     // Each setting on its page, in the order the page shows them.
     const QList<QPair<int, QStringList>> placement{
         {0, {QStringLiteral("libraryWatchCheckBox"), QStringLiteral("librarySortComboBox")}},
-        {1, {QStringLiteral("spectrogramViewComboBox"), QStringLiteral("spectrogramDisplayComboBox"),
+        {1, {QStringLiteral("visualizationAnalysisHeading"), QStringLiteral("spectrogramViewComboBox"),
              QStringLiteral("spectrogramFftComboBox"), QStringLiteral("dbRangeSlider"),
              QStringLiteral("spectrogramLogScaleCheckBox"), QStringLiteral("spectrogramFrequencyCapCheckBox"),
+             QStringLiteral("visualizationDisplayHeading"), QStringLiteral("spectrogramDisplayComboBox"),
              QStringLiteral("spectrogramScaleCheckBox"), QStringLiteral("spectrogramCrosshairCheckBox"),
              QStringLiteral("spectrogramFpsCheckBox"), QStringLiteral("showLevelMeterCheckBox"),
-             QStringLiteral("channelButtonsComboBox"), QStringLiteral("spectrogramZoomCheckBox"),
-             QStringLiteral("stretchShortTracksCheckBox")}},
+             QStringLiteral("visualizationInteractionHeading"), QStringLiteral("channelButtonsComboBox"),
+             QStringLiteral("spectrogramZoomCheckBox"), QStringLiteral("stretchShortTracksCheckBox")}},
         {2, {QStringLiteral("viewerFullscreenComboBox"), QStringLiteral("showFullscreenTitleStripCheckBox"),
              QStringLiteral("preventDisplaySleepInFullscreenCheckBox"),
              QStringLiteral("systemMediaControlsCheckBox")}},
@@ -1292,7 +1348,8 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     };
     const auto named = [&](const char *name) { return visibleNamed(prefs, QString::fromLatin1(name)); };
 
-    // Visualization: rendering, then overlays, then navigation, 16 px apart.
+    // Visualization: analysis, then display, then interaction, each under
+    // its subheading, 16 px below the group above and 8 px above its rows.
     dialog->setProperty("pageIndex", 1);
     QTRY_VERIFY(named("spectrogramZoomCheckBox") != nullptr);
     QTRY_VERIFY(!layoutPending(stack->childItems().at(1)));
@@ -1306,8 +1363,33 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     QQuickItem *crosshairHelp = helpLabel("crosshairHelp");
     QQuickItem *zoomHelp = helpLabel("zoomHelp");
     QVERIFY(capHelp != nullptr && crosshairHelp != nullptr && zoomHelp != nullptr);
-    QVERIFY(gapIs(capHelp, named("spectrogramScaleCheckBox"), 16));
-    QVERIFY(gapIs(named("channelButtonsComboBox"), named("spectrogramZoomCheckBox"), 16));
+    const auto subheading = [&](const char *row) {
+        QQuickItem *item = named(row);
+        return item != nullptr ? itemsNamed(item, QStringLiteral("formSubheading")).value(0) : nullptr;
+    };
+    QQuickItem *analysis = subheading("visualizationAnalysisHeading");
+    QQuickItem *display = subheading("visualizationDisplayHeading");
+    QQuickItem *interaction = subheading("visualizationInteractionHeading");
+    QVERIFY(analysis != nullptr && display != nullptr && interaction != nullptr);
+    QCOMPARE(analysis->property("text").toString(), QStringLiteral("Analysis"));
+    QCOMPARE(display->property("text").toString(), QStringLiteral("Display"));
+    QCOMPARE(interaction->property("text").toString(), QStringLiteral("Interaction"));
+    for (QQuickItem *heading : {analysis, display, interaction}) {
+        QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
+    }
+    // The first starts the form, under the page's title.
+    QQuickItem *visualizationTitle = itemsNamed(stack->childItems().at(1), QStringLiteral("preferencesPageTitle")).value(0);
+    QVERIFY(visualizationTitle != nullptr);
+    QVERIFY(gapIs(visualizationTitle, analysis, 14));
+    QVERIFY(gapIs(analysis, named("spectrogramViewComboBox"), 8));
+    QVERIFY(gapIs(capHelp, display, 16));
+    QVERIFY(gapIs(display, named("spectrogramDisplayComboBox"), 8));
+    QVERIFY(gapIs(named("showLevelMeterCheckBox"), interaction, 16));
+    QVERIFY(gapIs(interaction, named("channelButtonsComboBox"), 8));
+    // Where the fields start.
+    for (QQuickItem *heading : {analysis, display, interaction}) {
+        QCOMPARE(sceneRect(heading).left(), sceneRect(named("spectrogramViewComboBox")).left());
+    }
     // Within a group, the rows are 4 px apart; a help text is 4 px under
     // its control and 12 px above the next row.
     QVERIFY(gapIs(named("spectrogramFpsCheckBox"), named("showLevelMeterCheckBox"), 4));
