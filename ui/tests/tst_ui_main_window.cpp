@@ -2314,6 +2314,16 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
              qPrintable(QStringLiteral("%1 > %2").arg(sceneRect(length).right()).arg(narrowPane.right() - 8)));
     QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
              qPrintable(QString::number(title->width())));
+    // The window's minimum is the panes' and fits 1000 px beside the wider
+    // sidebar (#373 H6): the queue's counts Length at its least width, as
+    // Length gives up the two characters' room before it in a queue that
+    // narrow, rather than its default.
+    QVERIFY(length->width() >= queue->property("minimumLengthColumnWidth").toReal() - 0.5);
+    QVERIFY(queue->property("minimumTitleOnlyWidth").toReal()
+            < queue->property("minimumWidthLimit").toReal() + 0.5);
+    const qreal panesMinimum = named(window, "sidebarPane")->property("minimumWidth").toReal()
+        + queue->property("minimumContentWidth").toReal() + 1;
+    QCOMPARE(window->minimumWidth(), static_cast<int>(std::ceil(panesMinimum)));
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {
