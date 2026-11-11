@@ -365,8 +365,24 @@ QVariantList sampleQueueRows(int count) {
     return rows;
 }
 
+// A cover for the playing track, made once in a temporary directory of the
+// test's own: the panel takes its wide layout only for a track with one
+// (#373 H8).
+QString testCoverUrl() {
+    static QTemporaryDir dir;
+    static const QString url = [] {
+        const QString path = dir.filePath(QStringLiteral("cover.png"));
+        QImage image(64, 64, QImage::Format_RGB32);
+        image.fill(QColor(200, 120, 40));
+        image.save(path);
+        return QUrl::fromLocalFile(path).toString();
+    }();
+    return url;
+}
+
 void playTrack(QObject *bridge, const QString &state = QStringLiteral("Playing")) {
     bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("currentTrackCoverPath", testCoverUrl());
     bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
     bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours"));
@@ -564,6 +580,10 @@ private slots:
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
+    void queueKeepsArtistAtALargeFont_data();
+    void queueKeepsArtistAtALargeFont();
+    void visualizationTakesNearlyHalfTheRightColumn_data();
+    void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void transportStartsAndEndsAtTheContentInset();
@@ -1065,11 +1085,12 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
     QTest::newRow("dark") << true;
 }
 
-// A track without a cover keeps the cover's square (#373 H1), on a
+// A track without a cover takes the narrow layout in the wide window too
+// (#373 H8: the empty 360 px square was a dead slab), its 96 px tile a
 // placeholder (#373 H6): the view colour, with no lighter slab and no
 // frame, and a disc mark at its centre, a neutral grey from the tertiary
-// colour at 3:1 on the view, 48 px wide and a third of the narrow 96 px
-// tile (#373 H7: at 64 px and 2:1 it was faint). A track without tags shows its file name for a title,
+// colour at 3:1 on the view, 32 px, a third of the tile (#373 H7: at 64 px
+// and 2:1 it was faint). A track without tags shows its file name for a title,
 // and its lines with no text take no room: no blank lines are left in the
 // block (#373 H6, a file without tags left two).
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
@@ -1095,10 +1116,11 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
             QTRY_COMPARE(window->width(), 1000);
         }
         playTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", QString());
         QVERIFY(grown(window));
-        QTRY_COMPARE(panel->property("layoutMode").toString(),
-                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+        QTRY_COMPARE(cover->width(), 96.0);
+        QTRY_COMPARE(panel->property("coverGrowth").toReal(), 0.0);
         const QRectF tagged = sceneRect(header);
         const QRectF tileRect = sceneRect(cover);
 
@@ -1106,7 +1128,7 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         QVERIFY(bridge->property("currentTrackCoverPath").toString().isEmpty());
         QCOMPARE(colorOf(cover), tokenHex(window, "view"));
         QVERIFY(shown(mark));
-        QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
+        QCOMPARE(mark->width(), 32.0);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), tileRect.center());
         QCOMPARE(mark->property("source").toString(), QStringLiteral("media-optical-audio-symbolic"));
@@ -1125,36 +1147,25 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         clearTrackTags(bridge);
         QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
         QCOMPARE(panel->property("detailsText").toString(), QString());
-        QCOMPARE(panel->property("layoutMode").toString(),
-                 narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+        QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
         QCOMPARE(sceneRect(cover), tileRect);
-        QQuickItem *title = named(window, narrow ? "nowPlayingNarrowTitle" : "nowPlayingTitle");
+        QQuickItem *title = named(window, "nowPlayingNarrowTitle");
         QVERIFY(shown(title));
         QTRY_COMPARE(title->property("text").toString(), QFileInfo(kTrackPath).fileName());
-        for (const char *name : narrow
-                 ? std::initializer_list<const char *>{"nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
-                                                       "nowPlayingNarrowDetails"}
-                 : std::initializer_list<const char *>{"nowPlayingArtistAlbum", "nowPlayingWideArtist",
-                                                       "nowPlayingWideAlbum", "nowPlayingDetails"}) {
+        for (const char *name : {"nowPlayingNarrowArtist", "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}) {
             QQuickItem *line = named(window, name);
             QVERIFY2(line != nullptr, name);
             QTRY_VERIFY2(!line->isVisible(), name);
         }
-        if (narrow) {
-            // Beside the cover, which is taller than the title: the block
-            // keeps the cover's height.
-            QTRY_COMPARE(sceneRect(seam).top() - tileRect.bottom(), 12.0);
-            QCOMPARE(sceneRect(header), tagged);
-        } else {
-            // The seam 14 px under the title, and the library up by the
-            // lines that went.
-            QTRY_COMPARE(sceneRect(seam).top() - sceneRect(title).bottom(), 14.0);
-            QVERIFY(sceneRect(header).top() < tagged.top());
-        }
+        // Beside the cover, which is taller than the title: the block keeps
+        // the cover's height.
+        QTRY_COMPARE(sceneRect(seam).top() - tileRect.bottom(), 12.0);
+        QCOMPARE(sceneRect(header), tagged);
         QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 
         // The tags back: the lines back, where they were.
         playTrack(bridge);
+        bridge->setProperty("currentTrackCoverPath", QString());
         QTRY_COMPARE(sceneRect(header), tagged);
     }
 }
@@ -1288,11 +1299,11 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont_data() {
 }
 
 // The marks of the now-playing panel follow the font as the transport's
-// glyphs do (#373 H3): the disc mark of a track without a cover, 48 px in
-// the wide tile and 32 px in the narrow one with the default font, never
-// over a third of the tile, which keeps its size, and even, at the tile's
-// centre on whole pixels; and the 16 px mark of nothing playing's compact
-// row (#373 H7).
+// glyphs do (#373 H3): the disc mark of a track without a cover, which
+// takes the narrow layout in either window (#373 H8), 32 px, never over a
+// third of the tile, which keeps its size, and even, at the tile's centre
+// on whole pixels; and the 16 px mark of nothing playing's compact row
+// (#373 H7).
 void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
     QFETCH(qreal, pointSize);
     LibraryTreeModel libraryModel;
@@ -1326,13 +1337,14 @@ void UiMainWindowTest::nowPlayingMarksFollowTheFont() {
             QTRY_COMPARE(window->width(), 1000);
         }
         playTrack(bridgeOf(window));
+        bridgeOf(window)->setProperty("currentTrackCoverPath", QString());
         QVERIFY(grown(window));
-        QTRY_COMPARE(panel->property("layoutMode").toString(),
-                     narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-        QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+        QTRY_COMPARE(cover->width(), 96.0);
         QVERIFY(shown(mark));
         // Even, so that it sits on whole pixels at the tile's centre.
-        const qreal expected = 2 * std::round(std::min(std::round(cover->width() / 3), scaled(narrow ? 32 : 48)) / 2);
+        const qreal expected = 2 * std::round(std::min(std::round(cover->width() / 3), scaled(48)) / 2);
+        QCOMPARE(expected, 32.0);
         QTRY_COMPARE(mark->width(), expected);
         QCOMPARE(mark->height(), mark->width());
         QCOMPARE(sceneRect(mark).center(), sceneRect(cover).center());
@@ -1427,10 +1439,13 @@ void UiMainWindowTest::nothingPlayingIsACompactRow() {
     QTRY_VERIFY2(std::abs(idleLibrary - library->height() - grownBy)
                      < paletteOf(window)->property("rowHeight").toReal(),
                  qPrintable(QStringLiteral("%1 to %2").arg(idleLibrary).arg(library->height())));
-    // A track without a cover: the placeholder's surface, with its mark.
+    // A track without a cover: the narrow layout, and the placeholder's
+    // surface, with its mark.
+    bridgeOf(window)->setProperty("currentTrackCoverPath", QString());
+    QTRY_COMPARE(cover->width(), 96.0);
     QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
     QVERIFY(shown(mark));
-    QCOMPARE(mark->width(), narrow ? 32.0 : 48.0);
+    QCOMPARE(mark->width(), 32.0);
     QCOMPARE(colorOf(cover), tokenHex(window, "view"));
     QTRY_VERIFY2(placeholderSurfaceProblem(window, cover, mark).isEmpty(),
                  qPrintable(placeholderSurfaceProblem(window, cover, mark)));
@@ -2504,11 +2519,13 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
                          / (1 - minimumShare)) < 0.01);
     // Artist has what the title's minimum leaves, about a quarter of the
     // text columns' room: the share the window's minimum width is counted
-    // with, under its default.
+    // with, under its default, or sixteen characters where the title gives
+    // them way (#373 H8).
     QQuickItem *artist = named(window, "queueHeader_artist");
     const qreal textRoom = queue->property("defaultTextColumnsRoom").toReal();
     QVERIFY2(artist->width() >= textRoom * queue->property("minimumArtistColumnShare").toReal() - 1
-                 && artist->width() <= textRoom * queue->property("defaultArtistColumnShare").toReal() + 1,
+                 && artist->width() <= std::max(textRoom * queue->property("defaultArtistColumnShare").toReal(),
+                                                queue->property("minimumArtistColumnWidth").toReal()) + 1,
              qPrintable(QStringLiteral("artist %1 of %2").arg(artist->width()).arg(textRoom)));
     // Wider, Album comes back.
     window->resize(1600, 1000);
@@ -2659,6 +2676,180 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     const qreal panesMinimum = named(window, "sidebarPane")->property("minimumWidth").toReal()
         + queue->property("minimumContentWidth").toReal() + 1;
     QCOMPARE(window->minimumWidth(), static_cast<int>(std::ceil(panesMinimum)));
+}
+
+void UiMainWindowTest::queueKeepsArtistAtALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font, 1600 by 1000") << 0.0 << 1600 << 1000;
+    QTest::newRow("default font, 1000 by 720") << 0.0 << 1000 << 720;
+    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000;
+    QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
+}
+
+// Artist has at least sixteen characters of the font by default where the
+// title, given way down to its minimum, leaves them (#373 H8: at 24 pt in
+// 1600 px it was cut to eleven beside a title column twice as wide as its
+// titles). With the default font Artist's share is wider, and stays.
+// In 1000 px at 24 pt the title at its minimum leaves Artist less than the
+// least it is shown at, so Artist drops there and the title keeps its
+// minimum.
+void UiMainWindowTest::queueKeepsArtistAtALargeFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal() >= 20, pointSize > 0);
+    QObject *bridge = bridgeOf(window);
+    QVariantList rows = sampleQueueRows(20);
+    const QString artistName = QStringLiteral("The Quiet Meridian");
+    for (QVariant &row : rows) {
+        QVariantMap map = row.toMap();
+        map.insert(QStringLiteral("artist"), artistName);
+        row = map;
+    }
+    bridge->setProperty("queueRows", rows);
+    bridge->setProperty("queueLength", rows.size());
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *title = named(window, "queueHeader_title");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QVERIFY(queue && title && artist);
+    window->resize(windowWidth, windowHeight);
+    QTRY_COMPARE(window->width(), windowWidth);
+    QTRY_VERIFY(sceneRect(queue).right() <= windowWidth + 0.5 && sceneRect(queue).right() >= windowWidth - 1);
+    QTRY_VERIFY(sceneRect(named(window, "sidebarPane")).right() + 1 >= sceneRect(queue).left() - 0.5);
+    const QFont font = paletteOf(window)->property("baseFont").value<QFont>();
+    const qreal minimum = std::ceil(QFontMetricsF(font).averageCharWidth() * 16);
+    QTRY_COMPARE(queue->property("minimumArtistColumnWidth").toReal(), minimum);
+    const qreal titleMinimum = queue->property("minimumTitleColumnWidth").toReal();
+    const qreal gap = queue->property("columnGap").toReal();
+    const qreal reserved = queue->property("reservedColumnsWidth").toReal();
+    const QString widths = QStringLiteral("queue %1, title %2 (least %3), artist %4 (least %5)")
+        .arg(queue->width()).arg(title->width()).arg(titleMinimum).arg(artist->width()).arg(minimum);
+    const bool roomForArtist = queue->width() - reserved - titleMinimum - gap
+        >= queue->property("minimumShownTextColumnWidth").toReal();
+    if (pointSize > 0 && windowWidth == 1000) {
+        // 24 pt in 1000 px: no room beside the title's minimum.
+        QVERIFY2(!roomForArtist, qPrintable(widths));
+        QTRY_VERIFY2(!shown(artist), qPrintable(widths));
+        QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(widths));
+        return;
+    }
+    QVERIFY2(roomForArtist, qPrintable(widths));
+    QTRY_VERIFY2(shown(artist), qPrintable(widths));
+    QTRY_VERIFY2(artist->width() >= minimum - 1, qPrintable(widths));
+    QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(widths));
+    if (pointSize > 0) {
+        // The title gave way, and the name shows whole.
+        QVERIFY2(artist->width() > queue->property("defaultTextColumnsRoom").toReal()
+                     * queue->property("defaultArtistColumnShare").toReal() + 1,
+                 qPrintable(widths));
+        QQuickItem *view = named(window, "playlistView");
+        QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
+        QQuickItem *cell = itemNamed(viewRowAt(view, 0), QStringLiteral("queueCell_artist"));
+        QVERIFY(shown(cell));
+        QTRY_COMPARE(cell->property("text").toString(), artistName);
+        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(widths));
+    } else {
+        // With the default font, its share, as before.
+        QVERIFY2(std::abs(artist->width() - queue->property("defaultTextColumnsRoom").toReal()
+                                                * queue->property("defaultArtistColumnShare").toReal())
+                     <= 1,
+                 qPrintable(widths));
+    }
+}
+
+void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font, 1600 by 1000") << 0.0 << 1600 << 1000;
+    QTest::newRow("default font, 1000 by 720") << 0.0 << 1000 << 720;
+    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000;
+    QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
+}
+
+// Before the user drags the split, the visualization takes 47% of the right
+// column (#373 H8: at 42% the pane read as a footer under a playlist): 423
+// px at 1600 by 1000, where the queue keeps 16 rows and more with the
+// default font. The queue keeps its header and six rows first, and each
+// pane its minimum, the queue's its header and four rows: at 24 pt in a
+// 720 px window the visualization has its minimum and the queue the rest,
+// and the window's least height still fits 720 px. A split the user
+// dragged wins.
+void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(windowWidth, windowHeight);
+    QTRY_COMPARE(window->height(), windowHeight);
+    QVERIFY2(window->minimumHeight() <= 720, qPrintable(QString::number(window->minimumHeight())));
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(50));
+    bridge->setProperty("queueLength", 50);
+    QQuickItem *split = named(window, "rightSplit");
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *header = named(window, "queueHeader");
+    QVERIFY(split && queue && pane && header);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    // Laid out for the window's height: the split down to the status bar.
+    QTRY_VERIFY(sceneRect(split).bottom() <= windowHeight - 10 && sceneRect(split).bottom() >= windowHeight - 80
+                && std::abs(queue->height() + pane->height() + 1 - split->height()) <= 1);
+    const qreal queueMinimum = std::max<qreal>(220, 5 * rowHeight);
+    const QString heights = QStringLiteral("split %1, queue %2, visualization %3, row %4")
+        .arg(split->height()).arg(queue->height()).arg(pane->height()).arg(rowHeight);
+    QCOMPARE(QQmlProperty(queue, QStringLiteral("SplitView.minimumHeight"), qmlContext(queue)).read().toReal(),
+             queueMinimum);
+    QVERIFY2(queue->height() >= queueMinimum - 0.5 && pane->height() >= 220 - 0.5, qPrintable(heights));
+    const qreal share = pane->height() / split->height();
+    if (pointSize > 0 && windowHeight == 720) {
+        // The visualization at its minimum; the queue the rest.
+        QVERIFY2(std::abs(pane->height() - 220) <= 1, qPrintable(heights));
+    } else {
+        QVERIFY2(std::abs(pane->height() - std::round(split->height() * 0.47)) <= 1.5 || share < 0.47,
+                 qPrintable(heights));
+        // The queue's header and six rows at least.
+        QVERIFY2(queue->height() >= 7 * rowHeight - 0.5, qPrintable(heights));
+    }
+    if (pointSize == 0 && windowHeight == 1000) {
+        QVERIFY2(share >= 0.45 && share <= 0.48, qPrintable(heights));
+        // 16 whole rows under the header, and more.
+        QVERIFY2(std::floor((queue->height() - header->height()) / rowHeight) >= 16, qPrintable(heights));
+    }
+
+    // A split the user dragged, as the settings keep it, wins.
+    QObject *layout = window->findChild<QObject *>(QStringLiteral("windowLayoutController"));
+    QVERIFY(layout != nullptr);
+    const qreal dragged = std::round(split->height() * 0.7);
+    QVERIFY(QMetaObject::invokeMethod(layout, "noteQueueHeight", Q_ARG(QVariant, dragged),
+                                      Q_ARG(QVariant, split->height())));
+    // As a share of the split.
+    const auto expected = [&]() { return std::min(split->height() * 0.7, split->height() - 220 - 1); };
+    QTRY_VERIFY2(std::abs(queue->height() - expected()) <= 1,
+                 qPrintable(QStringLiteral("%1, not %2").arg(queue->height()).arg(expected())));
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {

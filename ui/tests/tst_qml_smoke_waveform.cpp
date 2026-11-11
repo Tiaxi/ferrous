@@ -583,7 +583,13 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     // height in either state.
     QVERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(surface->height() > 20);
-    QTRY_COMPARE(queue->height(), 580.0);
+    // The queue at its default height: the visualization has 47% of the
+    // right column (#373 H8). The meter changes neither.
+    auto *rightSplit = root->findChild<QQuickItem *>(QStringLiteral("rightSplit"));
+    QVERIFY(rightSplit != nullptr);
+    QTRY_VERIFY(rightSplit->height() > 800);
+    const double queueHeight = std::round(rightSplit->height() * (1 - 0.47));
+    QTRY_COMPARE(queue->height(), queueHeight);
     QVERIFY(!meter->isVisible());
     QTRY_COMPARE(spectrogram->height(), surface->height());
     QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width());
@@ -601,7 +607,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QCOMPARE(spectrogram->height(), originalHeight);
     QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - column);
     QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - column);
-    QCOMPARE(queue->height(), 580.0);
+    QCOMPARE(queue->height(), queueHeight);
     auto *originalParent = surface->parentItem();
     for (int mode : {0, 1}) {
         controller->setProperty("visualizationMode", mode);
@@ -683,7 +689,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QTRY_VERIFY(!bridge->property("showLevelMeter").toBool());
     QTRY_VERIFY(!meter->isVisible());
     QTRY_COMPARE(spectrogram->property("plotWidth").toReal(), surface->width());
-    QCOMPARE(queue->height(), 580.0);
+    QCOMPARE(queue->height(), queueHeight);
     QCOMPARE(spectrogram->height(), originalHeight);
     QCOMPARE(waveform->height(), originalHeight);
     QVERIFY(cancelled->load());
@@ -698,7 +704,7 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     QVERIFY(QMetaObject::invokeMethod(root->findChild<QObject *>(QStringLiteral("preferencesDialog")), "accept"));
     QTRY_VERIFY(meter->isVisible());
     QTRY_COMPARE(meter->sourcePath(), QStringLiteral("/fixture/next.wav"));
-    QCOMPARE(queue->height(), 580.0);
+    QCOMPARE(queue->height(), queueHeight);
     // The viewers show the same pane, with its meter when it is on.
     for (int mode : {0, 1}) {
         controller->setProperty("visualizationMode", mode);
