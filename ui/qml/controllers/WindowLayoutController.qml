@@ -100,6 +100,26 @@ QtObject {
         return Math.max(minimum, Math.min(maximum, value))
     }
 
+    // The library pane's least width at `fontScale` (UiPalette.fontScale):
+    // 250 px with the default font, and wider with a larger one, so that its
+    // names and the now-playing lines keep more than a few characters: 360 px
+    // at 24 pt (#373 H5).
+    function sidebarMinimumWidth(fontScale) {
+        return Math.max(250, Math.round(150 * fontScale))
+    }
+
+    // The library pane's width in a split `splitWidth` wide before the user
+    // drags it: 22.5% of it, 260 px in a 1000 px window and 360 px in a
+    // 1600 px one with the default font. With a larger font the share grows
+    // with the font's square root, between bounds that grow with it: at
+    // 24 pt, 360 px in a 1000 px window and 408 px in a 1600 px one, which
+    // leave the queue its columns.
+    function sidebarDefaultWidth(splitWidth, fontScale) {
+        const least = Math.max(260, Math.round(150 * fontScale))
+        const most = Math.max(360, Math.round(170 * fontScale))
+        return root.clamp(Math.round(splitWidth * 0.225 * Math.sqrt(fontScale)), least, most)
+    }
+
     // The library pane's width in a split `splitWidth` wide, leaving the
     // pane after it `otherMinimum`.
     function sidebarWidth(splitWidth, minimum, otherMinimum, defaultWidth) {

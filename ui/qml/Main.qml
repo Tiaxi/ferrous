@@ -1491,8 +1491,8 @@ ApplicationWindow {
                     mainSplit.width,
                     sidebarPane.SplitView.minimumWidth,
                     rightSplit.SplitView.minimumWidth + root.splitHandleAllowance,
-                    // 360 px in a 1600 px window, 260 px in a 1000 px one.
-                    Math.max(260, Math.min(360, Math.round(mainSplit.width * 0.225))))
+                    windowLayoutController.sidebarDefaultWidth(mainSplit.width, root.uiPalette.fontScale))
+                minimumWidth: windowLayoutController.sidebarMinimumWidth(root.uiPalette.fontScale)
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason
                 openAlbumArtViewer: viewerController.openAlbumArtViewer

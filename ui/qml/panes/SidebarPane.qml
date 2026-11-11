@@ -14,6 +14,8 @@ Rectangle {
     required property var libraryModel
     required property var uiPalette
     required property real splitPreferredWidth
+    // The least width, which follows the font (WindowLayoutController).
+    property real minimumWidth: 250
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
@@ -28,7 +30,7 @@ Rectangle {
     // of the library.
     color: root.uiPalette.view
     SplitView.preferredWidth: root.splitPreferredWidth
-    SplitView.minimumWidth: 250
+    SplitView.minimumWidth: root.minimumWidth
 
     ColumnLayout {
         anchors.fill: parent
