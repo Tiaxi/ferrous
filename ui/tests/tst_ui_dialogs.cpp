@@ -446,6 +446,7 @@ private slots:
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
+    void editTagsMultipleValuesPlaceholderReads();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
@@ -2590,6 +2591,40 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
             }
         }
     }
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
+}
+
+// A field whose files hold different values says so with its placeholder,
+// "Multiple values", which tells what saving does: in the palette's
+// placeholder colour, at least 4.5:1 on the field, where Breeze Light's own
+// was 4.2:1 (#373 H6). The colour's contrast in both themes is tested with
+// the palette's tokens.
+void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && dialog->property("opened").toBool());
+    editor.selectAllRows();
+    QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
+    QQuickWindow *tags = windowOf(dialog);
+    QQuickItem *title = nullptr;
+    QTRY_VERIFY((title = visibleNamed(tags, QStringLiteral("tagEditorField_title"))) != nullptr);
+    QTRY_COMPARE(title->property("placeholderText").toString(), QStringLiteral("Multiple values"));
+    const QColor placeholder = title->property("placeholderTextColor").value<QColor>();
+    QCOMPARE(hex(placeholder), hex(tokenOf(window, "placeholderText")));
+    QVERIFY2(contrastRatio(placeholder, tokenOf(window, "view")) >= 4.5,
+             qPrintable(describeContrast(QStringLiteral("placeholder"), placeholder, tokenOf(window, "view"))));
+    // A field whose files agree has no placeholder.
+    QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_artist"))->property("placeholderText").toString(),
+             QString());
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
 }

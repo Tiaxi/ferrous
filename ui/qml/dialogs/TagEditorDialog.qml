@@ -671,6 +671,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
+        placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
             : leftPadding
