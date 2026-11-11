@@ -290,6 +290,13 @@ QtObject {
         return visualizationMode === 1 ? root.waveformPlot : root.spectrogramPlot
     }
 
+    // A media surface, such as the album art viewer: dark in both themes,
+    // as a cover reads best on black and a light theme's white around it
+    // would outshine it (#373 H7, P10). It is the spectrogram's set, so
+    // both viewers are of one family: the art on the plot's floor, the
+    // title strip and the details on its strip colour.
+    readonly property PlotColors mediaPlot: root.spectrogramPlot
+
     // The colours before #373's tokens. They stay until every user has
     // moved to the tokens above.
     readonly property color uiPaneColor: root.windowRoot.palette.window
