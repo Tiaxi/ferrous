@@ -250,6 +250,11 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/lastfm-paused.svg
         qml/assets/status-offline.svg
         qml/assets/status-warning.svg
+        qml/assets/transport-next.svg
+        qml/assets/transport-pause.svg
+        qml/assets/transport-play.svg
+        qml/assets/transport-previous.svg
+        qml/assets/transport-stop.svg
         qml/assets/volume.svg
         qml/assets/volume-muted.svg
         qml/logic/ChannelLabels.js

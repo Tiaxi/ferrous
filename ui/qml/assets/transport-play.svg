@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The transport's Play glyph (#373 H9), drawn for 20 px at 1x: Breeze's triangle, its corners on
+     whole pixels, 14 px tall in rows 3 to 16, a step above the 12 px of Previous, Stop and Next
+     beside it, as Breeze's 22 px glyph is above its 16 px ones. A one-colour mask, drawn in the
+     text colour. -->
+<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+<path fill="#000" d="M3 3v14l14-7z"/>
+</svg>

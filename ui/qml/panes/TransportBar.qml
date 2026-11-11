@@ -12,7 +12,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // The transport (#373): Previous, Play/Pause, Stop and Next as flat 32 px
 // tool buttons, the seek waveform, the time and the volume, on the chrome.
-// The glyphs and buttons grow with a font larger than the default.
+// The glyphs and buttons grow with a font larger than the default, and are
+// drawn at the size they are given, not rounded down to a theme icon size.
 ToolBar {
     id: root
 
@@ -119,11 +120,13 @@ ToolBar {
     function scaled(size) {
         return Math.max(size, Math.round(size * root.fontScale))
     }
-    // The tool buttons: 32 px, or a 20 px glyph and 6 px around it, which
-    // holds the 22 px Play/Pause glyph too.
-    readonly property real buttonSize: Math.max(32, root.scaled(20) + 12)
-    // The 16 px glyphs: Previous, Next and the volume's.
+    // The transport's two glyph sizes (#373 H9: Play/Pause 22, Previous and
+    // Next 16 and Stop 14 read as three weights): 20 px for Play/Pause, a
+    // step above the 16 px of the others, the volume's included.
+    readonly property int playPauseGlyphSize: root.scaled(20)
     readonly property int smallGlyphSize: root.scaled(Kirigami.Units.iconSizes.small)
+    // The tool buttons: 32 px, or the Play/Pause glyph and 6 px around it.
+    readonly property real buttonSize: Math.max(32, root.playPauseGlyphSize + 12)
     // The clear space around a 16 px glyph in its button.
     readonly property real smallGlyphInset: (root.buttonSize - root.smallGlyphSize) / 2
     // The right of the transport on one rhythm (#373 H8): the seek bar,
@@ -252,9 +255,13 @@ ToolBar {
         id: transportButton
 
         required property string name
-        // The glyph's size: 16 px, 22 px for Play/Pause, 14 px for Stop,
-        // larger with a larger font.
+        // The glyph's size: 16 px, 20 px for Play/Pause, larger with a
+        // larger font.
         property int glyphSize: root.smallGlyphSize
+        // Ferrous's own glyph, drawn for the size on whole pixels, which
+        // scales as one with the others: a theme's larger icons are other
+        // designs, with more space around the glyph.
+        property url glyphSource
         // The action's text without its mnemonic, and its shortcut.
         readonly property string label: FormatUtils.withoutMnemonic(
             transportButton.action ? transportButton.action.text || "" : "")
@@ -299,7 +306,10 @@ ToolBar {
                 anchors.centerIn: parent
                 width: transportButton.glyphSize
                 height: transportButton.glyphSize
-                source: transportButton.icon.name
+                // At its size: Kirigami would draw a 38 px glyph of a
+                // 24 pt font at 32 px.
+                roundToIconSize: false
+                source: transportButton.glyphSource
                 color: transportButton.glyphColor
                 isMask: true
             }
@@ -315,6 +325,7 @@ ToolBar {
 
             TransportButton {
                 name: "previous"
+                glyphSource: Qt.resolvedUrl("../assets/transport-previous.svg")
                 action: root.previousAction
             }
 
@@ -329,7 +340,7 @@ ToolBar {
                 id: playPauseButton
                 name: "playPause"
                 // A step above its neighbours, within the same button.
-                glyphSize: root.scaled(22)
+                glyphSize: root.playPauseGlyphSize
                 action: root.playing ? root.pauseAction : root.playAction
 
                 contentItem: Item {
@@ -367,12 +378,15 @@ ToolBar {
                         function onPlayingChanged() { playPauseGlyphs.follow() }
                     }
 
+                    // Ferrous's own Play and Pause, drawn for 20 px on whole
+                    // pixels: the theme's are drawn for 16 and 22 px.
                     Kirigami.Icon {
                         objectName: "transportPlayPauseGlyph_play"
                         anchors.centerIn: parent
                         width: playPauseButton.glyphSize
                         height: playPauseButton.glyphSize
-                        source: root.playAction ? root.playAction.icon.name : ""
+                        roundToIconSize: false
+                        source: Qt.resolvedUrl("../assets/transport-play.svg")
                         color: playPauseButton.glyphColor
                         isMask: true
                         opacity: 1 - playPauseGlyphs.pauseProgress
@@ -384,7 +398,8 @@ ToolBar {
                         anchors.centerIn: parent
                         width: playPauseButton.glyphSize
                         height: playPauseButton.glyphSize
-                        source: root.pauseAction ? root.pauseAction.icon.name : ""
+                        roundToIconSize: false
+                        source: Qt.resolvedUrl("../assets/transport-pause.svg")
                         color: playPauseButton.glyphColor
                         isMask: true
                         opacity: playPauseGlyphs.pauseProgress
@@ -395,12 +410,13 @@ ToolBar {
 
             TransportButton {
                 name: "stop"
-                glyphSize: root.scaled(14)
+                glyphSource: Qt.resolvedUrl("../assets/transport-stop.svg")
                 action: root.stopAction
             }
 
             TransportButton {
                 name: "next"
+                glyphSource: Qt.resolvedUrl("../assets/transport-next.svg")
                 action: root.nextAction
             }
         }
@@ -926,6 +942,7 @@ ToolBar {
                     anchors.centerIn: parent
                     width: muteButton.icon.width
                     height: muteButton.icon.height
+                    roundToIconSize: false
                     source: muteButton.icon.source
                     color: muteButton.icon.color
                     isMask: true
