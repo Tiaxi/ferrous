@@ -24,6 +24,9 @@ ToolBar {
     required property var stopAction
     required property var nextAction
     required property bool volumeMuted
+    // The volume a mute put aside, which the slider keeps showing while
+    // muted.
+    property real mutedVolume: 1.0
     // How far the arrow keys move the seek bar.
     required property real keyboardSeekStepSeconds
     // The position as shown, which moves by positionStepSeconds.
@@ -75,9 +78,14 @@ ToolBar {
         : Qt.rgba(1, 1, 1, 0.85)
     readonly property color seekHoverLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.7)
     readonly property color seekEmptyLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.18)
-    // The volume slider's groove.
-    readonly property color volumeFilledColor: ColorUtils.withAlpha(root.uiPalette.text, 0.65)
-    readonly property color volumeUnfilledColor: ColorUtils.withAlpha(root.uiPalette.text, 0.25)
+    // The volume slider, in the seek bar's language (#373 H5): its groove
+    // filled up to the thumb in the played colour and the rest in the
+    // unplayed one, opaque, and a solid thumb in the played colour. While
+    // muted, the filled part dims to the unplayed colour and the thumb
+    // stays at the volume a mute put aside.
+    readonly property color volumeFilledColor: root.seekPlayedColor
+    readonly property color volumeUnfilledColor: ColorUtils.mixColor(
+        root.uiPalette.chrome, root.seekPlayedColor, root.seekUnplayedOpacity)
 
     // The window's device pixels to a logical one, which fractional scaling
     // can make differ from its screen's. Qt before 6.11 gives only the
@@ -866,18 +874,34 @@ ToolBar {
             hoverEnabled: true
             readonly property string percentText: I18n.i18nc("@info volume in percent", "%1%",
                 Math.round(value * 100))
+            readonly property string toolTipText: root.volumeMuted
+                ? I18n.i18nc("@info:tooltip volume in percent, while muted", "Volume %1, muted",
+                    volumeSlider.percentText)
+                : I18n.i18nc("@info:tooltip volume in percent", "Volume %1", volumeSlider.percentText)
+            // A 3 px groove and a 12 px thumb, both centred on the
+            // groove's middle, which lies on whole device pixels.
+            readonly property real grooveHeight: 3
+            readonly property real grooveY: root.snapped((height - grooveHeight) / 2)
+            readonly property real thumbSize: 12
             Accessible.name: I18n.i18nc("@label", "Volume")
             Accessible.description: volumeSlider.percentText
-            ToolTip.visible: hovered || visualFocus || pressed
-            ToolTip.delay: pressed ? 0 : Kirigami.Units.toolTipDelay
-            ToolTip.text: I18n.i18nc("@info:tooltip volume in percent", "Volume %1",
-                volumeSlider.percentText)
             // Every move, including a release's, sends its value, so the
             // volume follows a drag or a held key.
             onMoved: root.setAppVolume(value)
 
-            // A 2 px groove: filled up to the thumb at text 65%, the rest at
-            // text 25%.
+            // Its own tooltip, rather than the shared one, whose text a
+            // drag or a key that moves the slider before the hover's delay
+            // ends left at the volume it had (#373 H5: "Volume 100%" with
+            // the thumb at 40%). A press shows it at once.
+            ToolTip {
+                id: volumeToolTip
+                objectName: "volumeToolTip"
+                parent: volumeSlider
+                visible: volumeSlider.hovered || volumeSlider.visualFocus || volumeSlider.pressed
+                delay: volumeSlider.pressed ? 0 : Kirigami.Units.toolTipDelay
+                text: volumeSlider.toolTipText
+            }
+
             background: Item {
                 implicitWidth: 96
                 implicitHeight: 20
@@ -886,9 +910,9 @@ ToolBar {
                     objectName: "volumeGroove"
                     x: 0
                     width: parent.width
-                    y: root.snapped((parent.height - height) / 2)
-                    height: 2
-                    radius: 1
+                    y: volumeSlider.grooveY
+                    height: volumeSlider.grooveHeight
+                    radius: height / 2
                     color: root.volumeUnfilledColor
                 }
 
@@ -898,31 +922,26 @@ ToolBar {
                     width: volumeSlider.handle
                         ? volumeSlider.handle.x + volumeSlider.handle.width / 2
                         : 0
-                    y: root.snapped((parent.height - height) / 2)
-                    height: 2
-                    radius: 1
-                    color: root.volumeFilledColor
+                    y: volumeSlider.grooveY
+                    height: volumeSlider.grooveHeight
+                    radius: height / 2
+                    color: root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor
                 }
             }
 
-            // A 14 px thumb. Hover tints it with the accent; keyboard focus
-            // draws a 2 px ring around it.
+            // The solid thumb: the played colour, and the text colour while
+            // hovered or dragged. Keyboard focus draws a 2 px ring around it.
             handle: Rectangle {
                 objectName: "volumeThumb"
                 readonly property bool tinted: volumeSlider.hovered || volumeSlider.pressed
                 x: volumeSlider.leftPadding + volumeSlider.visualPosition
                     * (volumeSlider.availableWidth - width)
-                y: volumeSlider.topPadding + (volumeSlider.availableHeight - height) / 2
-                implicitWidth: 14
-                implicitHeight: 14
+                y: volumeSlider.grooveY + (volumeSlider.grooveHeight - height) / 2
+                implicitWidth: volumeSlider.thumbSize
+                implicitHeight: volumeSlider.thumbSize
                 radius: width / 2
-                color: tinted
-                    ? ColorUtils.mixColor(volumeSlider.palette.button, root.uiPalette.accent, 0.2)
-                    : volumeSlider.palette.button
-                border.width: 1
-                border.color: tinted
-                    ? root.uiPalette.accent
-                    : ColorUtils.withAlpha(root.uiPalette.text, 0.5)
+                color: tinted ? root.uiPalette.text : root.volumeFilledColor
+                border.width: 0
 
                 Behavior on color {
                     enabled: Kirigami.Units.shortDuration > 0
@@ -945,10 +964,12 @@ ToolBar {
             }
         }
 
+        // The volume, or while muted the one a mute put aside, so the thumb
+        // stays where it was.
         Binding {
             target: volumeSlider
             property: "value"
-            value: root.uiBridge.volume
+            value: root.volumeMuted ? root.mutedVolume : root.uiBridge.volume
             when: !volumeSlider.adjusting
             // As for the seek slider.
             restoreMode: Binding.RestoreNone

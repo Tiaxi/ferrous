@@ -125,6 +125,9 @@ ApplicationWindow {
     property real positionSeconds: 77
     property string positionText: "01:17"
     property var seeks: []
+    // A mute as the playback controller's: the volume put aside, and 0.
+    property bool muted: false
+    property real mutedVolume: 1.0
 
     QtObject {
         id: bridge
@@ -205,12 +208,27 @@ ApplicationWindow {
                 pauseAction: pauseAction
                 stopAction: stopAction
                 nextAction: nextAction
-                volumeMuted: false
+                volumeMuted: window.muted
+                mutedVolume: window.mutedVolume
                 keyboardSeekStepSeconds: 5
                 displayedPositionSeconds: window.positionSeconds
                 positionText: window.positionText
-                toggleMutedVolume: function() {}
-                setAppVolume: function(value) { bridge.volume = value }
+                toggleMutedVolume: function() {
+                    if (window.muted) {
+                        window.muted = false
+                        bridge.volume = window.mutedVolume
+                    } else {
+                        window.mutedVolume = bridge.volume
+                        window.muted = true
+                        bridge.volume = 0
+                    }
+                }
+                setAppVolume: function(value) {
+                    if (value > 0) {
+                        window.muted = false
+                    }
+                    bridge.volume = value
+                }
                 normalizedVolumeValue: function(value) { return value }
                 seekCommitted: function(value) { window.seeks = window.seeks.concat([value]) }
             }
@@ -433,6 +451,9 @@ private slots:
     void timeReadoutShowsPositionAndLength();
     void volumeDrawsGrooveHoverAndFocus_data();
     void volumeDrawsGrooveHoverAndFocus();
+    void volumeMuteKeepsTheThumb_data();
+    void volumeMuteKeepsTheThumb();
+    void volumeToolTipFollowsTheDrag();
     void statusBarShowsTheNeutralPlaybackState();
     void statusBarShowsRepeatAndShuffleInWords();
     void statusBarShowsTheFormatGroupWithoutThePosition();
@@ -1233,42 +1254,62 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus_data() {
     QTest::newRow("breeze light") << false;
 }
 
+// The volume slider in the seek bar's language (#373 H5): a 3 px groove,
+// filled up to the thumb in the seek bar's played colour and the rest in
+// its unplayed one, opaque, and a solid 12 px thumb in the played colour,
+// centred on the groove. Hover brightens the thumb to the text colour and
+// shows "Volume 80%"; keyboard focus draws a 2 px ring around the thumb.
 void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QFETCH(bool, dark);
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
     QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
     QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
     QQuickItem *fill = harness.item(QStringLiteral("volumeGrooveFill"));
     QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
     QQuickItem *ring = harness.item(QStringLiteral("volumeFocusRing"));
-    QVERIFY(volume && groove && fill && thumb && ring);
-    const QColor text = harness.token("text");
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(transport && volume && groove && fill && thumb && ring && tip);
     const QColor chrome = harness.token("chrome");
+    const QColor played = transport->property("seekPlayedColor").value<QColor>();
+    const QColor unplayed = mixed(chrome, played, transport->property("seekUnplayedOpacity").toDouble());
 
-    // A 2 px groove, filled at text 65% up to the thumb's centre, the rest
-    // at 25%; a 14 px thumb.
-    QCOMPARE(groove->height(), 2.0);
+    QCOMPARE(groove->height(), 3.0);
     QCOMPARE(groove->width(), volume->width());
-    QVERIFY(sameColor(groove->property("color").value<QColor>(), withAlpha(text, 0.25)));
-    QVERIFY(sameColor(fill->property("color").value<QColor>(), withAlpha(text, 0.65)));
+    QVERIFY(sameColor(groove->property("color").value<QColor>(), unplayed));
+    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
     QCOMPARE(fill->width(), thumb->x() + thumb->width() / 2);
-    QCOMPARE(thumb->width(), 14.0);
-    QCOMPARE(thumb->height(), 14.0);
-    QVERIFY2(contrastRatio(drawnOver(withAlpha(text, 0.65), chrome), chrome) >= 3.0,
-             qPrintable(describe(QStringLiteral("filled groove"), drawnOver(withAlpha(text, 0.65), chrome), chrome)));
-    const QColor restBorder = evaluateOn(thumb, QStringLiteral("border.color")).value<QColor>();
+    QCOMPARE(thumb->width(), 12.0);
+    QCOMPARE(thumb->height(), 12.0);
+    QCOMPARE(sceneRect(thumb).center().y(), sceneRect(groove).center().y());
+    // The groove's top on a whole pixel.
+    QCOMPARE(sceneRect(groove).top(), std::floor(sceneRect(groove).top()));
+    // Solid: the thumb is filled, with no border of another colour.
     const QColor restFill = thumb->property("color").value<QColor>();
-    QVERIFY(sameColor(restBorder, withAlpha(text, 0.5)));
+    QVERIFY(sameColor(restFill, played));
+    QCOMPARE(evaluateOn(thumb, QStringLiteral("border.width")).toInt(), 0);
+    // As drawn: the unfilled groove 3:1 on the chrome, as the unplayed
+    // waveform is, and the thumb and the filled part more.
+    QVERIFY2(contrastRatio(unplayed, chrome) >= 3.0, qPrintable(describe(QStringLiteral("unfilled"), unplayed, chrome)));
+    QVERIFY2(contrastRatio(played, chrome) > contrastRatio(unplayed, chrome),
+             qPrintable(describe(QStringLiteral("filled"), played, chrome)));
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    const QRectF thumbRect = sceneRect(thumb);
+    QVERIFY(channelDistance(pixelAt(image, thumbRect.center(), scale), played) <= 2);
+    QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(groove).right() - 2, sceneRect(groove).center().y()), scale),
+                            unplayed) <= 2);
+    QVERIFY(channelDistance(pixelAt(image, QPointF(sceneRect(groove).left() + 2, sceneRect(groove).center().y()), scale),
+                            played) <= 2);
 
-    // Hover tints the thumb and shows "Volume 80%".
+    // Hover brightens the thumb and shows "Volume 80%".
     QTest::mouseMove(harness.window, sceneCentre(volume));
     QTRY_VERIFY(volume->property("hovered").toBool());
-    QTRY_VERIFY(!sameColor(thumb->property("color").value<QColor>(), restFill));
-    QVERIFY(sameColor(evaluateOn(thumb, QStringLiteral("border.color")).value<QColor>(), harness.token("accent")));
-    QCOMPARE(toolTipText(volume), QStringLiteral("Volume 80%"));
-    QTRY_VERIFY(toolTipShown(volume));
+    QTRY_VERIFY(sameColor(thumb->property("color").value<QColor>(), harness.token("text")));
+    QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
+    QTRY_VERIFY(tip->property("visible").toBool());
     QVERIFY(!ring->isVisible());
 
     // Away, the thumb is at rest again; keyboard focus draws a 2 px ring
@@ -1283,10 +1324,108 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QVERIFY(sameColor(evaluateOn(ring, QStringLiteral("border.color")).value<QColor>(), harness.token("focusRing")));
     QVERIFY2(contrastRatio(harness.token("focusRing"), chrome) >= 3.0,
              qPrintable(describe(QStringLiteral("volume focus"), harness.token("focusRing"), chrome)));
-    QTRY_VERIFY(toolTipShown(volume));
+    QTRY_VERIFY(tip->property("visible").toBool());
     // A key's step is the slider's tenth.
     QTest::keyClick(harness.window, Qt::Key_Left);
-    QTRY_COMPARE(toolTipText(volume), QStringLiteral("Volume 70%"));
+    QTRY_COMPARE(tip->property("text").toString(), QStringLiteral("Volume 70%"));
+    QCOMPARE(harness.bridge->property("volume").toDouble(), 0.7);
+}
+
+void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A mute leaves the thumb at the volume it put aside (#373 H5: it threw the
+// thumb to 0), dims the filled groove to the unfilled colour and shows the
+// muted glyph; the tooltip says so. Unmuting brings the fill back.
+void TransportStatusTest::volumeMuteKeepsTheThumb() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *mute = harness.item(QStringLiteral("muteButton"));
+    QQuickItem *muteGlyph = harness.item(QStringLiteral("muteButtonGlyph"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QQuickItem *fill = harness.item(QStringLiteral("volumeGrooveFill"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(transport && mute && muteGlyph && volume && groove && fill && thumb && tip);
+    const QColor played = transport->property("seekPlayedColor").value<QColor>();
+    QCOMPARE(volume->property("value").toDouble(), 0.8);
+    const qreal thumbX = thumb->x();
+    const qreal fillWidth = fill->width();
+    QCOMPARE(muteGlyph->property("source").toString(), QStringLiteral("audio-volume-high"));
+
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
+    QTRY_VERIFY(harness.root->property("muted").toBool());
+    QCOMPARE(harness.bridge->property("volume").toDouble(), 0.0);
+    QCOMPARE(muteGlyph->property("source").toString(), QStringLiteral("audio-volume-muted"));
+    // The thumb and the fill stay; the fill dims to the groove's colour.
+    QCOMPARE(volume->property("value").toDouble(), 0.8);
+    QCOMPARE(thumb->x(), thumbX);
+    QCOMPARE(fill->width(), fillWidth);
+    QVERIFY(sameColor(fill->property("color").value<QColor>(), groove->property("color").value<QColor>()));
+    QVERIFY(sameColor(thumb->property("color").value<QColor>(), played));
+    QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%, muted"));
+    QCOMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("80%"));
+
+    QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
+    QTRY_VERIFY(!harness.root->property("muted").toBool());
+    QCOMPARE(harness.bridge->property("volume").toDouble(), 0.8);
+    QCOMPARE(thumb->x(), thumbX);
+    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
+    QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
+}
+
+// The volume's tooltip shows the value it is dragged to, even when the drag
+// starts before the hover's delay has shown it (#373 H5: "Volume 100%"
+// with the thumb at 40%: the shared tooltip kept the text it had when the
+// delay began).
+void TransportStatusTest::volumeToolTipFollowsTheDrag() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
+    QVERIFY(volume && thumb && tip);
+    Kirigami::Platform::Units *units = unitsOf(volume);
+    QVERIFY(units != nullptr);
+    // A delay long enough that the drag starts and ends within it.
+    units->setToolTipDelay(400);
+    harness.bridge->setProperty("volume", 1.0);
+    QTRY_COMPARE(volume->property("value").toDouble(), 1.0);
+
+    // Onto the thumb, which starts the hover's delay; then a drag to 40%.
+    const QRectF rect = sceneRect(volume);
+    const QPoint start = sceneCentre(thumb);
+    QTest::mouseMove(harness.window, start);
+    QTRY_VERIFY(volume->property("hovered").toBool());
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, start);
+    const qreal travel = rect.width() - thumb->width();
+    const QPoint end(static_cast<int>(std::round(rect.left() + thumb->width() / 2 + 0.4 * travel)),
+                     start.y());
+    for (int step = 1; step <= 8; ++step) {
+        QTest::mouseMove(harness.window, start + (end - start) * step / 8);
+    }
+    QTRY_VERIFY(std::abs(volume->property("value").toDouble() - 0.4) < 0.02);
+    QTRY_VERIFY(tip->property("opened").toBool());
+    const QString expected = QStringLiteral("Volume %1%").arg(std::lround(volume->property("value").toDouble() * 100));
+    QCOMPARE(tip->property("text").toString(), expected);
+    // As drawn: the tooltip's label.
+    auto *label = tip->property("contentItem").value<QQuickItem *>();
+    QVERIFY(label != nullptr);
+    const QList<QObject *> texts = label->findChildren<QObject *>();
+    bool drawn = label->property("text").toString() == expected;
+    for (QObject *text : texts) {
+        drawn = drawn || text->property("text").toString() == expected;
+    }
+    QVERIFY2(drawn, qPrintable(expected));
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, end);
 }
 
 void TransportStatusTest::statusBarShowsTheNeutralPlaybackState() {
