@@ -536,15 +536,17 @@ Components.DialogWindow {
 
         // The results: a flat list on the view colour, in the view's frame,
         // with a hairline between rows. Searching, or with nothing found,
-        // the frame holds a placeholder message instead.
+        // there is no frame, only a placeholder message on the dialog's own
+        // colour (#373 H8: an empty well framed the message).
         Rectangle {
             id: resultsFrame
             objectName: "itunesArtworkResultsFrame"
+            readonly property bool framed: itunesArtworkResultsView.count > 0
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.topMargin: itunesArtworkResultsView.count > 0 ? 0 : Kirigami.Units.smallSpacing
-            color: root.uiPalette.view
-            border.width: 1
+            Layout.topMargin: resultsFrame.framed ? 0 : Kirigami.Units.smallSpacing
+            color: resultsFrame.framed ? root.uiPalette.view : "transparent"
+            border.width: resultsFrame.framed ? 1 : 0
             border.color: root.uiPalette.seam
 
             ListView {
@@ -652,14 +654,14 @@ Components.DialogWindow {
                 }
             }
 
-            // Searching, or nothing found: what the search says, centred in
-            // the frame, with a busy indicator while it searches, or a 32 px
-            // search glyph once it found nothing. Quieter than Kirigami's
-            // placeholder message, in the base font: finding nothing is a
-            // routine outcome (#373 H7). Built from its parts:
-            // Kirigami.PlaceholderMessage's selectable text brings Copy and
-            // Select All actions that would take Ctrl+C and Ctrl+A from the
-            // Edit menu's.
+            // Searching, or nothing found: what the search says, centred
+            // where the results would be, with a busy indicator above it
+            // while it searches. Quiet, as the queue's empty state: the base
+            // font in the secondary colour, with no glyph, for finding
+            // nothing is a routine outcome (#373 H7, H8). Built from its
+            // parts: Kirigami.PlaceholderMessage's selectable text brings
+            // Copy and Select All actions that would take Ctrl+C and Ctrl+A
+            // from the Edit menu's.
             ColumnLayout {
                 objectName: "itunesArtworkPlaceholder"
                 anchors.centerIn: parent
@@ -668,21 +670,14 @@ Components.DialogWindow {
                 visible: itunesArtworkResultsView.count === 0
                     && (root.uiBridge.itunesArtworkLoading || placeholderMessage.text.length > 0)
 
+                // The style's spinner, 32 px: the state's one glyph.
                 BusyIndicator {
                     objectName: "itunesArtworkBusyIndicator"
                     Layout.alignment: Qt.AlignHCenter
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
                     running: root.uiBridge.itunesArtworkLoading
                     visible: running
-                }
-
-                Kirigami.Icon {
-                    objectName: "itunesArtworkPlaceholderIcon"
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                    Layout.preferredHeight: Layout.preferredWidth
-                    visible: !root.uiBridge.itunesArtworkLoading
-                    source: "search"
-                    color: root.uiPalette.textSecondary
                 }
 
                 Label {

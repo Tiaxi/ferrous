@@ -1809,10 +1809,10 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
 }
 
 void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound() {
-    // While it searches, and when it found nothing, the results' frame
-    // holds a placeholder message, as Kirigami's looks, with a busy
-    // indicator while searching,
-    // under the current art, which stays the dialog's first line.
+    // While it searches, and when it found nothing, a placeholder message
+    // where the results would be, with no frame or well around it (#373
+    // H8), and a running busy indicator above it while searching, under
+    // the current art, which stays the dialog's first line.
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -1842,8 +1842,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
     QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
             && results != nullptr && currentRow != nullptr);
-    QQuickItem *icon = itemNamed(content, QStringLiteral("itunesArtworkPlaceholderIcon"));
-    QVERIFY(icon != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(dialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
 
     const auto checkState = [&](bool searching, const QString &text) {
         const QByteArray at = searching ? "searching" : "nothing found";
@@ -1852,22 +1852,48 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QCOMPARE(message->property("text").toString(), text);
         QCOMPARE(busy->isVisible(), searching);
         QCOMPARE(busy->property("running").toBool(), searching);
-        // A quiet placeholder (#373 H7): a 32 px search glyph once nothing
-        // was found, 12 px above a centred line in the base font, regular,
-        // in the secondary colour.
-        QCOMPARE(icon->isVisible(), !searching);
-        QCOMPARE(icon->width(), 32.0);
-        QCOMPARE(icon->height(), 32.0);
+        if (searching) {
+            // The style's spinner shows, at full opacity.
+            auto *spinner = qvariant_cast<QQuickItem *>(busy->property("contentItem"));
+            QVERIFY2(spinner != nullptr && spinner->isVisible(), at.constData());
+            QTRY_COMPARE(spinner->opacity(), 1.0);
+            QCOMPARE(busy->width(), 32.0);
+            QCOMPARE(busy->height(), 32.0);
+        }
+        // No frame or well: the dialog's own colour behind the message.
+        QCOMPARE(frame->property("color").value<QColor>().alpha(), 0);
+        QCOMPARE(frame->property("border").value<QObject *>()->property("width").toReal(), 0.0);
+        for (QQuickItem *rect : rectanglesIn(frame)) {
+            QVERIFY2(rect->property("color").value<QColor>().alpha() == 0
+                         && rect->property("border").value<QObject *>()->property("width").toReal() == 0.0,
+                     qPrintable(rect->objectName()));
+        }
+        // A quiet placeholder, as the queue's empty state (#373 H7, H8): a
+        // centred line in the base font, regular, in the secondary colour,
+        // with no glyph.
+        QCOMPARE(message->property("color").value<QColor>().rgba(),
+                 palette->property("textSecondary").value<QColor>().rgba());
+        // The only glyph: the busy indicator's, while searching.
+        int glyphs = 0;
+        const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
+            if (!item->isVisible()) {
+                return;
+            }
+            if (QString::fromLatin1(item->metaObject()->className()).contains(QStringLiteral("Icon"))) {
+                ++glyphs;
+            }
+            for (QQuickItem *child : item->childItems()) {
+                countGlyphs(child);
+            }
+        };
+        countGlyphs(placeholder);
+        QCOMPARE(glyphs, searching ? 1 : 0);
         QCOMPARE(message->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
         const QFont font = message->property("font").value<QFont>();
         QCOMPARE(font.weight(), QFont::Normal);
         QCOMPARE(font.pointSizeF(), QGuiApplication::font().pointSizeF());
         QCOMPARE(message->property("opacity").toReal(), 1.0);
-        if (!searching) {
-            // Once laid out without the busy indicator.
-            QTRY_COMPARE(sceneRectOf(message).top() - sceneRectOf(icon).bottom(), 12.0);
-        }
-        // In the results' frame, centred there.
+        // Where the results would be, centred there.
         QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
         QVERIFY2(qAbs(sceneRectOf(placeholder).center().y() - sceneRectOf(frame).center().y()) <= 1.0,
                  at.constData());
