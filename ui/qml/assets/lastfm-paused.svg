@@ -1,18 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-<!-- The status bar's Last.fm glyph while scrobbling is paused: lastfm.svg struck through, with a gap
-     around the stroke. A one-colour mask, drawn in the text colours. -->
+<!-- The status bar's Last.fm glyph while scrobbling is paused: lastfm.svg struck through on the
+     pixel grid: a staircase of two pixels a row from corner to corner, about 1.4 px across, with a
+     clear diagonal of pixels on either side. A
+     one-colour mask, drawn in the text colours. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-<defs>
-<mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
-<rect width="16" height="16" fill="#fff"/>
-<path d="M1.5 1.5 14.5 14.5" stroke="#000" stroke-width="4.5" stroke-linecap="round"/>
-</mask>
-</defs>
-<g mask="url(#gap)">
-<rect x="2" y="4" width="5" height="8" rx="2" fill="none" stroke="#000" stroke-width="2"/>
-<path d="M7 4V13" stroke="#000" stroke-width="2"/>
-<path d="M15 4H12Q10 4 10 6Q10 8 12 8Q14 8 14 10Q14 12 12 12H9" fill="none" stroke="#000" stroke-width="2"/>
-</g>
-<path d="M1.5 1.5 14.5 14.5" stroke="#000" stroke-width="1.5" stroke-linecap="round"/>
+<path fill="#000" d="M1 1h2v1h-2z M2 2h2v1h-2z M3 3h2v1h-2z M10 3h4v1h-4z M4 4h2v1h-2z M7 4h1v1h-1z M9 4h2v1h-2z M13 4h2v1h-2z M5 5h2v1h-2z M9 5h2v1h-2z M6 6h2v1h-2z M9 6h2v1h-2z M2 7h4v1h-4z M7 7h2v1h-2z M10 7h4v1h-4z M1 8h2v1h-2z M6 8h1v1h-1z M8 8h2v1h-2z M13 8h2v1h-2z M1 9h2v1h-2z M6 9h2v1h-2z M9 9h2v1h-2z M13 9h2v1h-2z M1 10h2v1h-2z M6 10h2v1h-2z M10 10h2v1h-2z M13 10h2v1h-2z M1 11h2v1h-2z M5 11h3v1h-3z M9 11h1v1h-1z M11 11h2v1h-2z M14 11h1v1h-1z M2 12h3v1h-3z M6 12h2v1h-2z M10 12h1v1h-1z M12 12h2v1h-2z M13 13h2v1h-2z M14 14h1v1h-1z"/>
 </svg>
