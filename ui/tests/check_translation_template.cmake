@@ -34,7 +34,7 @@ foreach(expected
         # JavaScript.
         "msgid \"Repeat one\""
         # C++, and a C++ plural.
-        "msgid \"Searching iTunes...\""
+        "msgid \"Searching iTunes…\""
         "msgid \"Saved %1 file.\"\nmsgid_plural \"Saved %1 files.\""
         # KI18n's placeholders.
         "#, kde-format")

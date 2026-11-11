@@ -747,6 +747,10 @@ private:
     static QString itunesArtworkUrl(const QString &artworkUrl100);
     // The line over `count` iTunes artwork suggestions, in plain words.
     static QString itunesArtworkFoundText(int count);
+    // A suggestion's details before its full-size image has come, and while
+    // it downloads.
+    static QString itunesArtworkPendingDetailsText();
+    static QString itunesArtworkLoadingDetailsText();
     void startItunesArtworkAssetDownload(int candidateIndex);
     void applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult result);
     void resetItunesArtworkTempDir();

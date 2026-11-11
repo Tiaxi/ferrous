@@ -1803,7 +1803,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QObject *bridge = qvariant_cast<QObject *>(root->property("bridge"));
     QVERIFY(dialog != nullptr && bridge != nullptr);
     bridge->setProperty("itunesArtworkLoading", true);
-    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes..."));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Searching iTunes…"));
     QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QVERIFY(QTest::qWaitForWindowExposed(qobject_cast<QQuickWindow *>(dialog)));
@@ -1829,10 +1829,21 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QCOMPARE(message->property("text").toString(), text);
         QCOMPARE(busy->isVisible(), searching);
         QCOMPARE(busy->property("running").toBool(), searching);
-        // A placeholder message, as Kirigami's: its icon once nothing was
-        // found, and a centred heading.
+        // A quiet placeholder (#373 H7): a 32 px search glyph once nothing
+        // was found, 12 px above a centred line in the base font, regular,
+        // in the secondary colour.
         QCOMPARE(icon->isVisible(), !searching);
+        QCOMPARE(icon->width(), 32.0);
+        QCOMPARE(icon->height(), 32.0);
         QCOMPARE(message->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
+        const QFont font = message->property("font").value<QFont>();
+        QCOMPARE(font.weight(), QFont::Normal);
+        QCOMPARE(font.pointSizeF(), QGuiApplication::font().pointSizeF());
+        QCOMPARE(message->property("opacity").toReal(), 1.0);
+        if (!searching) {
+            // Once laid out without the busy indicator.
+            QTRY_COMPARE(sceneRectOf(message).top() - sceneRectOf(icon).bottom(), 12.0);
+        }
         // In the results' frame, centred there.
         QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
         QVERIFY2(qAbs(sceneRectOf(placeholder).center().y() - sceneRectOf(frame).center().y()) <= 1.0,
@@ -1848,7 +1859,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         texts.removeAll(QString());
         QCOMPARE(texts.count(text), 1);
     };
-    checkState(true, QStringLiteral("Searching iTunes..."));
+    checkState(true, QStringLiteral("Searching iTunes…"));
 
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));

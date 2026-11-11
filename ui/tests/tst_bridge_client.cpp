@@ -5733,6 +5733,11 @@ void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
     QCOMPARE(BridgeClient::itunesArtworkFoundText(5),
              QStringLiteral("Found 5 suggestions. Each full-size image downloads when you preview or apply it."));
     QVERIFY(!BridgeClient::itunesArtworkFoundText(5).contains(QLatin1Char('/')));
+    // So does each suggestion's line before its image has come (#373 H7),
+    // with a one-character ellipsis while it downloads.
+    QCOMPARE(BridgeClient::itunesArtworkPendingDetailsText(),
+             QStringLiteral("Its size and format show once you preview or apply it."));
+    QCOMPARE(BridgeClient::itunesArtworkLoadingDetailsText(), QStringLiteral("Loading high-resolution artwork\u2026"));
 }
 
 void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources_data() {
