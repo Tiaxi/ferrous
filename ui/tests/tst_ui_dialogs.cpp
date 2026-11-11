@@ -1776,7 +1776,19 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QQuickItem *time = itemsNamed(first, QStringLiteral("errorHistoryTime")).at(0);
     QVERIFY(QRegularExpression(QStringLiteral("^\\d\\d:\\d\\d$")).match(time->property("text").toString()).hasMatch());
     QCOMPARE(hex(time->property("color").value<QColor>()), hex(tokenOf(window, "textTertiary")));
-    QVERIFY(sceneRect(time).right() > sceneRect(heading).right());
+    // The title names the problem, in the body size; the category is the
+    // quietest line, small and tertiary, above it with the time (#373 H5).
+    QCOMPARE(heading->property("font").value<QFont>().pointSizeF(),
+             paletteOf(window)->property("basePointSize").toReal());
+    QCOMPARE(hex(heading->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+    QQuickItem *category = itemsNamed(first, QStringLiteral("errorHistoryCategory")).at(0);
+    QCOMPARE(category->property("text").toString(), QStringLiteral("Playback"));
+    QCOMPARE(category->property("font").value<QFont>().pointSizeF(), small);
+    QCOMPARE(category->property("font").value<QFont>().weight(), QFont::Normal);
+    QCOMPARE(hex(category->property("color").value<QColor>()), hex(tokenOf(window, "textTertiary")));
+    QVERIFY(sceneRect(category).bottom() <= sceneRect(heading).top() + 0.5);
+    QVERIFY(std::abs(sceneRect(time).top() - sceneRect(category).top()) <= 0.5);
+    QVERIFY(sceneRect(time).right() > sceneRect(category).right() - 0.5);
     // The file is named in the title, so its path does not repeat.
     QVERIFY(!itemsNamed(first, QStringLiteral("errorHistorySubject")).at(0)->isVisible());
     QQuickItem *glyph = itemsNamed(first, QStringLiteral("errorHistoryGlyph")).at(0);
@@ -1806,12 +1818,14 @@ void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     QTest::mouseRelease(action->window(), Qt::LeftButton, Qt::NoModifier, sceneRect(heading).center().toPoint());
     QTRY_VERIFY(!action->property("down").toBool());
     QTRY_COMPARE(hex(actionText->property("color").value<QColor>()), hex(tokenOf(window, "link")));
-    // One sentence: the category is the title; no action for settings.
+    // One sentence: it is the title, under its category, with nothing
+    // under it; no action for settings.
     QQuickItem *second = rows[1];
     QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryHeading")).at(0)->property("text").toString(),
-             QStringLiteral("Settings and saving"));
-    QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryMessage")).at(0)->property("text").toString(),
              QStringLiteral("The settings could not be saved: disk full"));
+    QCOMPARE(itemsNamed(second, QStringLiteral("errorHistoryCategory")).at(0)->property("text").toString(),
+             QStringLiteral("Settings and saving"));
+    QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryMessage")).at(0)->isVisible());
     QVERIFY(!itemsNamed(second, QStringLiteral("errorHistoryActionButton")).at(0)->isVisible());
     // A file that left the queue is shown in the library instead.
     QVERIFY(bridge->setProperty("queueRows", queueRowsOf({QStringLiteral("/music/a.flac")})));

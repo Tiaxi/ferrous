@@ -203,7 +203,8 @@ void ErrorsSmokeTest::repeatedErrorsAreCounted() {
     QCOMPARE(entries->index(0, 0).data(entries->roleNames().key("count")).toInt(), 3);
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_COMPARE(visibleTextItems(popupContent(dialog), QStringLiteral("Playback (\u00d73)")).size(), 1);
+    // The title names the problem, with how often it came.
+    QTRY_COMPARE(visibleTextItems(popupContent(dialog), message + QStringLiteral(" (\u00d73)")).size(), 1);
 
     // The same message about another file, or of another category, is another error.
     QVERIFY(sendBridgeError(bridge, message, 1, 0, QStringLiteral("/music/other.flac")));
