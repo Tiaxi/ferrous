@@ -347,6 +347,9 @@ AbstractButton {
                     y: Math.round((root.glyphSize - height) / 2)
                     width: root.drawnGlyphSize
                     height: width
+                    // At its size, as wide as the bar under it at a large
+                    // font, not rounded down to a theme icon size.
+                    roundToIconSize: false
                     source: root.glyphSource
                     color: root.glyphColor
                     isMask: true

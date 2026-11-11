@@ -761,6 +761,10 @@ Rectangle {
                             anchors.centerIn: parent
                             width: root.uiPalette.scaledSize(12)
                             height: root.uiPalette.scaledSize(12)
+                            // At its size, which grows with the font
+                            // (#373 H9: Kirigami drew the 29 px glyph of a
+                            // 24 pt font at 22 px).
+                            roundToIconSize: false
                             source: glyph
                             isMask: true
                             color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
@@ -785,6 +789,7 @@ Rectangle {
                             anchors.centerIn: parent
                             width: root.uiPalette.scaledSize(12)
                             height: root.uiPalette.scaledSize(12)
+                            roundToIconSize: false
                             source: visible ? queueNowFade.target.glyph : ""
                             isMask: true
                             color: root.uiPalette.now

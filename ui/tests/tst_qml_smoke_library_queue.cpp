@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QFontInfo>
+
 // The library tree, the queue and global search.
 class LibraryQueueSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -36,6 +38,8 @@ private slots:
     void emptyLibraryAndFileMenuAddALibraryFolder();
     void draggingAHighlightedQueueRowMovesEveryHighlightedRow();
     void queueRowsShowTheirStatesInThePaletteColours();
+    void queueStateGlyphGrowsWithTheFont_data();
+    void queueStateGlyphGrowsWithTheFont();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
@@ -3208,6 +3212,102 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QTRY_COMPARE(row(1)->height(), palette->property("rowHeight").toReal());
     QQuickItem *titleCell = cell(1, "title");
     QVERIFY(titleCell->y() >= 0 && titleCell->y() + titleCell->height() <= row(1)->height() + 0.5);
+}
+
+void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("side");
+    QTest::newRow("10 pt") << 10.0 << 12;
+    QTest::newRow("24 pt") << 24.0 << 29;
+}
+
+// The playing row's glyph grows with the font, from its 12 px at the
+// default 10 pt, on whole pixels, and is drawn at that size (#373 H9: at
+// 24 pt Kirigami rounded the 29 px glyph down to a 22 px theme icon, a
+// 16 px triangle beside 33 px text).
+void LibraryQueueSmokeTest::queueStateGlyphGrowsWithTheFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, side);
+    QueueRowsModel rows;
+    loadQueueRows(rows, 4);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    // An application window, whose font the palette follows.
+    QByteArray source = kQueuePaneHarness;
+    source.replace("Window {\n    id: harness", "ApplicationWindow {\n    id: harness");
+    // The glyph's column as wide as the app makes it, which grows with the
+    // rows.
+    source.replace("playlistIndicatorColumnWidth: 22",
+                   "playlistIndicatorColumnWidth: Math.round(palette.rowHeight * 28 / 26)");
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, source, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(controller != nullptr && bridge != nullptr);
+    QFont font = root->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(root->setProperty("font", font));
+    bridge->setProperty("playingQueueIndex", 1);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    QQuickItem *glyph = nullptr;
+    QTRY_VERIFY([&]() {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, 1));
+        glyph = row != nullptr ? row->findChild<QQuickItem *>(QStringLiteral("queueRowState")) : nullptr;
+        return glyph != nullptr && glyph->isVisible() && glyph->width() == side;
+    }());
+    QCOMPARE(glyph->height(), qreal(side));
+    // At least 0.9 of the font's pixel size from 24 pt.
+    const int fontPixels = QFontInfo(font).pixelSize();
+    if (pointSize >= 24) {
+        QVERIFY2(side >= 0.9 * fontPixels, qPrintable(QStringLiteral("%1 for %2 px").arg(side).arg(fontPixels)));
+    }
+    QTRY_COMPARE(glyph->property("source").toString(), QStringLiteral("media-playback-start"));
+    // Painted at its size, not at a theme icon size under it.
+    QCOMPARE(glyph->property("paintedWidth").toReal(), qreal(side));
+
+    // As drawn: Breeze's play triangle is 3/4 of its 16 px icon's height
+    // and 2/3 of its 24 px one's, less its thin tips; rounded down to 22 px,
+    // it had 14 px of ink in the 29. The pixels at least half as strong as
+    // the strongest, so that how the mask is coloured offscreen doesn't
+    // count.
+    const QRect inked = [&]() {
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QRectF rect(glyph->mapToScene(QPointF(0, 0)), glyph->size());
+        const QRect device(QPoint(int(std::floor(rect.left() * scale)), int(std::floor(rect.top() * scale))),
+                           QPoint(int(std::ceil(rect.right() * scale)) - 1, int(std::ceil(rect.bottom() * scale)) - 1));
+        const QColor background = image.pixelColor(device.topLeft());
+        const auto distance = [&background](const QColor &pixel) {
+            return std::max({std::abs(pixel.red() - background.red()), std::abs(pixel.green() - background.green()),
+                             std::abs(pixel.blue() - background.blue())});
+        };
+        int strongest = 0;
+        for (int y = device.top(); y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                strongest = std::max(strongest, distance(image.pixelColor(x, y)));
+            }
+        }
+        QRect bounds;
+        for (int y = device.top(); strongest >= 16 && y <= device.bottom(); ++y) {
+            for (int x = device.left(); x <= device.right(); ++x) {
+                if (distance(image.pixelColor(x, y)) * 2 >= strongest) {
+                    bounds |= QRect(int(x / scale), int(y / scale), 1, 1);
+                }
+            }
+        }
+        return bounds;
+    }();
+    QVERIFY2(inked.height() >= 0.55 * side,
+             qPrintable(QStringLiteral("%1 px of ink in a %2 px glyph").arg(inked.height()).arg(side)));
 }
 
 void LibraryQueueSmokeTest::draggingAHighlightedQueueRowMovesEveryHighlightedRow() {
