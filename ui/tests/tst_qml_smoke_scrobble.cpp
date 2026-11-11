@@ -218,21 +218,36 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
         QCOMPARE(QAccessible::queryAccessibleInterface(indicator)->text(QAccessible::Name), c.tooltip);
     }
 
-    // Being sent and scrobbled look apart (#373 H5, H6): the full bar in
-    // the text colour with the glyph at half strength while it is sent,
-    // then the bar settled in a quiet grey under the glyph at full strength
-    // in the secondary colour.
+    // Listening, being sent and scrobbled look apart by shape (#373 H8): a
+    // 3 px bar growing in the text colour, the full bar at half strength,
+    // and no bar under the glyph in the secondary colour. The glyph is the
+    // same in all three.
+    QQuickItem *bar = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorBar"));
+    QVERIFY(bar != nullptr);
     bridge->setProperty("lastFmScrobblingPaused", false);
     bridge->setProperty("lastFmPendingScrobbleCount", 0);
     bridge->setProperty("lastFmScrobbleIneligibility", 0);
+    bridge->setProperty("lastFmScrobbleListenedMs", 60000);
+    bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
+    QTRY_VERIFY(bar->isVisible());
+    const qreal glyphWidth = glyph->width();
+    QCOMPARE(bar->height(), 3.0);
+    QCOMPARE(bar->width(), glyphWidth / 2);
+    QCOMPARE(bar->opacity(), 1.0);
+    QCOMPARE(bar->property("color").value<QColor>(), text);
     bridge->setProperty("lastFmScrobbleState", 2);
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
-    QCOMPARE(indicator->property("barColor").value<QColor>(), text);
-    QCOMPARE(glyph->opacity(), 0.5);
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->height(), 3.0);
+    QCOMPARE(bar->width(), glyphWidth);
+    QCOMPARE(bar->opacity(), 0.5);
+    QCOMPARE(bar->property("color").value<QColor>(), text);
+    QCOMPARE(glyph->property("color").value<QColor>(), secondary);
+    QCOMPARE(glyph->opacity(), 1.0);
     bridge->setProperty("lastFmScrobbleState", 3);
-    const QColor settled = indicator->property("settledBarColor").value<QColor>();
-    QCOMPARE(indicator->property("barColor").value<QColor>(), settled);
-    QVERIFY(settled != text && settled != secondary && settled != tertiary);
+    QTRY_VERIFY(!bar->isVisible());
+    QVERIFY(indicator->isVisible());
     QCOMPARE(glyph->property("color").value<QColor>(), secondary);
     QCOMPARE(glyph->opacity(), 1.0);
 }
@@ -314,10 +329,14 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     QCOMPARE(textChanged.count(), 0);
     QCOMPARE(frames, 0);
 
-    // Its scrobble fills the bar at once.
-    bridge->setProperty("lastFmScrobbleState", 3);
+    // Its scrobble being sent fills the bar at once; once accepted, the bar
+    // goes.
+    bridge->setProperty("lastFmScrobbleState", 2);
     QCOMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
     QCOMPARE(indicator->property("barProgress").toDouble(), 1.0);
+    QVERIFY(indicator->isVisible());
+    bridge->setProperty("lastFmScrobbleState", 3);
+    QCOMPARE(indicator->property("barProgress").toDouble(), 0.0);
     QVERIFY(indicator->isVisible());
 }
 
