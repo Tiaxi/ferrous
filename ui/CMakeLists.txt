@@ -1014,11 +1014,28 @@ if(BUILD_TESTING)
     set_target_properties(ferrous_ui_motion_tests PROPERTIES
         QT_QML_MODULE_NO_IMPORT_SCAN TRUE
     )
-    add_test(NAME ferrous_ui_motion_tests COMMAND ferrous_ui_motion_tests)
-    set_tests_properties(ferrous_ui_motion_tests PROPERTIES
-        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-        TIMEOUT 180
+    # Its tests run in shards, each in a process of its own and in parallel
+    # with the others: run alone, the binary takes minutes. FERROUS_TEST_SHARD
+    # picks a shard's tests; see testShardFromEnvironment().
+    set(ferrous_ui_motion_shards 4)
+    foreach(shard RANGE 1 ${ferrous_ui_motion_shards})
+        set(shard_test ferrous_ui_motion_tests_shard_${shard}_of_${ferrous_ui_motion_shards})
+        add_test(NAME ${shard_test} COMMAND ferrous_ui_motion_tests)
+        set_tests_properties(${shard_test} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;FERROUS_TEST_SHARD=${shard}/${ferrous_ui_motion_shards}"
+            TIMEOUT 180
+            # For ctest -j, as the costs at the end of this file: about each
+            # shard's seconds when run alone.
+            COST 42
+        )
+    endforeach()
+    add_test(NAME ferrous_ui_motion_tests_shards_run_every_test
+        COMMAND "${CMAKE_COMMAND}"
+            -DBINARY=$<TARGET_FILE:ferrous_ui_motion_tests>
+            -DSHARDS=${ferrous_ui_motion_shards}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_test_shards.cmake"
     )
+    set_tests_properties(ferrous_ui_motion_tests_shards_run_every_test PROPERTIES TIMEOUT 60)
     ferrous_add_default_platform_test(ferrous_ui_motion_tests drawsOffscreenUnlessAPlatformIsChosen)
 
     # The menus of #373, in a session of its own: no desktop's platform
@@ -1473,9 +1490,9 @@ if(BUILD_TESTING)
     # end waiting on a long test that started last. CTest takes the times of
     # the build directory's last run instead where it has them; these, about
     # each test's seconds when run alone, are for a first run, as in CI.
+    # The shards of ferrous_ui_motion_tests have theirs where they are added.
     foreach(test_and_cost IN ITEMS
             ferrous_qml_smoke_transport_input:80
-            ferrous_ui_motion_tests:60
             ferrous_qml_smoke_tag_editor:50
             ferrous_ui_dialogs_tests:40
             ferrous_qml_smoke_waveform:32
