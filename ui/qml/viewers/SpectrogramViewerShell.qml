@@ -30,10 +30,6 @@ Item {
     // title strip.
     property var uiBridge: null
     property string positionText: "00:00"
-    // The view's zoom, 1 at the default, and what resets it: the same as
-    // View › Reset Zoom.
-    property real zoomLevel: 1.0
-    property var resetView: null
     // How far the corner controls keep from the right edge, clear of the
     // level meter's column.
     property real cornerRightMargin: 4
@@ -270,8 +266,6 @@ Item {
                 controlsVisible: root.fullscreenControlsVisible
                 controlsLevel: root.fullscreenControlsLevel
                 pointerActivity: root.noteFullscreenPointerActivity
-                zoomLevel: root.zoomLevel
-                resetView: root.resetView
                 errorController: root.errorController
                 closeViewer: root.closeViewer
             }
@@ -390,8 +384,6 @@ Item {
                         controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
                         pointerActivity: root.noteFullscreenPointerActivity
-                        zoomLevel: root.zoomLevel
-                        resetView: root.resetView
                         errorController: root.errorController
                         closeViewer: root.closeViewer
                     }

@@ -6,15 +6,16 @@ import FerrousUi 1.0
 import "." as Components
 
 // The controls of the visualization viewer in the main window, which has
-// no title strip: one plate in the top right corner, in the plot's colours.
-// A zoom readout and Reset while the view is zoomed, the new issues while
-// there are any, and Close, the same controls the strip of the viewer over
-// the whole screen has: 24 px tool buttons, 2 px apart with 2 px around.
+// no title strip: one plate in the top right corner, in the plot's colours,
+// right of the plot's mode switch. The new issues while there are any, and
+// Close: 24 px tool buttons, 2 px apart with 2 px around. The zoom is on the
+// plot, left of the mode switch, as in the main pane and over the whole
+// screen: [Zoom ↺] [mode] [✕] everywhere.
 //
 // The items are placed by bindings rather than the plate's Row: a
 // positioner places an item that has just appeared only when the window
-// next draws, so the readout and Reset would show where they were last,
-// on a plate of the old width, until then.
+// next draws, so Close would show where it was last, on a plate of the old
+// width, until then.
 Item {
     id: root
 
@@ -26,17 +27,11 @@ Item {
     // once without one.
     property real controlsLevel: root.controlsVisible ? 1 : 0
     property var pointerActivity: null
-    property real zoomLevel: 1.0
-    property var resetView: null
-    property string resetToolTip: I18n.i18nc("@info:tooltip", "Reset Zoom")
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
 
-    readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
     readonly property real spacing: 2
-    readonly property bool readoutShown: root.zoomed
-    readonly property bool resetShown: root.zoomed && root.resetView !== null
     readonly property bool issuesShown: root.unseenIssueCount > 0
 
     implicitWidth: closeButton.x + closeButton.width + root.spacing
@@ -68,36 +63,10 @@ Item {
         Accessible.ignored: true
     }
 
-    Components.ZoomReadout {
-        id: readout
-        objectName: "viewerZoomReadout"
-        x: root.spacing
-        y: root.spacing
-        visible: root.readoutShown
-        uiPalette: root.uiPalette
-        plotColors: root.plotColors
-        zoomLevel: root.zoomLevel
-        leftPadding: 4
-        rightPadding: 2
-    }
-
-    Components.PlotToolButton {
-        id: resetButton
-        objectName: "viewerResetButton"
-        x: readout.x + (root.readoutShown ? readout.width + root.spacing : 0)
-        y: root.spacing
-        visible: root.resetShown
-        plotColors: root.plotColors
-        uiPalette: root.uiPalette
-        text: root.resetToolTip
-        icon.name: "zoom-original"
-        onClicked: root.resetView()
-    }
-
     Components.PlotToolButton {
         id: issuesButton
         objectName: "viewerIssuesButton"
-        x: resetButton.x + (root.resetShown ? resetButton.width + root.spacing : 0)
+        x: root.spacing
         y: root.spacing
         visible: root.issuesShown
         plotColors: root.plotColors

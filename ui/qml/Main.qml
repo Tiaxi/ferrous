@@ -1777,7 +1777,6 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
-            zoomReadoutAvailable: !viewerController.spectrogramViewerOpen
         }
     }
 
@@ -1798,8 +1797,6 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        zoomLevel: visualizationSurface.zoomLevel
-        resetView: visualizationSurface.resetZoom
         cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }

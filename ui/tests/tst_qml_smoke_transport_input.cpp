@@ -1861,6 +1861,16 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
     QVERIFY(QMetaObject::invokeMethod(resetAction, "trigger"));
     QTRY_COMPARE(spectrogramZoom(), 1.0);
 
+    // One plate order everywhere (#373 H5): [Zoom ↺] [mode] [✕], in both
+    // viewers as in the main pane. The zoom is the plot's own plate, left of
+    // the mode switch; the viewer's controls have Close and no zoom.
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(layer != nullptr);
+    QQuickItem *readout = itemNamed(layer, QStringLiteral("plotZoomReadout"));
+    QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
+    QQuickItem *zoomPlate = itemNamed(layer, QStringLiteral("plotZoomPlate"));
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(readout != nullptr && reset != nullptr && zoomPlate != nullptr && modeSwitch != nullptr);
     for (const int fullscreenMode : {1, 0}) {
         bridge->setProperty("viewerFullscreenMode", fullscreenMode);
         QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
@@ -1878,9 +1888,11 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
         }
         QVERIFY(controls != nullptr);
-        QQuickItem *readout = itemNamed(controls, QStringLiteral("viewerZoomReadout"));
-        QQuickItem *reset = itemNamed(controls, QStringLiteral("viewerResetButton"));
-        QVERIFY(readout != nullptr && reset != nullptr);
+        QCOMPARE(layer->window(), host);
+        QQuickItem *close = itemNamed(controls, fullscreenMode == 1
+                                                    ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                                    : QStringLiteral("spectrogramPopupCloseButton"));
+        QVERIFY(close != nullptr);
         // The window has its size: the controls end 4 px from its right.
         QTRY_COMPARE(sceneRectOf(controls).right(),
                      fullscreenMode == 1 ? double(host->width()) : host->width() - 4.0);
@@ -1897,20 +1909,29 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             } else {
                 waveform->setZoomLevel(4.0);
             }
-            // In place at once, inside the window, without waiting for the
-            // window to draw.
             QVERIFY(readout->isVisible() && reset->isVisible());
-            QVERIFY2(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
-                         && sceneRectOf(readout).right() <= sceneRectOf(reset).left(),
-                     qPrintable(QStringLiteral("%1 %2").arg(sceneRectOf(readout).left())
-                                    .arg(sceneRectOf(reset).right())));
-            QTRY_VERIFY(readout->isVisible());
             QCOMPARE(readout->property("text").toString(),
                      mode == 0 ? QStringLiteral("Zoom 200%") : QStringLiteral("Zoom 400%"));
-            QVERIFY(reset->isVisible());
-            // Laid out: the readout, then Reset beside it.
-            QTRY_VERIFY(clearOfTheOtherButtons(reset) && clearOfTheOtherButtons(readout)
-                        && sceneRectOf(readout).right() <= sceneRectOf(reset).left());
+            // None in the viewer's own controls.
+            const QList<QQuickItem *> ownReadouts = itemsNamed(controls, QStringLiteral("viewerZoomReadout"));
+            for (QQuickItem *own : ownReadouts) {
+                QVERIFY(!own->isVisible());
+            }
+            // Laid out: the readout, Reset, the mode switch 8 px right of
+            // them, and Close right of that on the plate in the corner, or
+            // over the whole screen on the strip above them.
+            QTRY_VERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left()
+                        && sceneRectOf(zoomPlate).right() + 8 == sceneRectOf(modeSwitch).left());
+            if (fullscreenMode == 1) {
+                QVERIFY(sceneRectOf(close).bottom() <= sceneRectOf(modeSwitch).top());
+                QVERIFY(sceneRectOf(close).right() >= sceneRectOf(modeSwitch).right());
+            } else {
+                QVERIFY2(sceneRectOf(modeSwitch).right() < sceneRectOf(close).left(),
+                         qPrintable(QStringLiteral("switch ends at %1, Close starts at %2")
+                                        .arg(sceneRectOf(modeSwitch).right()).arg(sceneRectOf(close).left())));
+                QCOMPARE(sceneRectOf(controls).top(), sceneRectOf(modeSwitch).top());
+            }
+            QVERIFY(sceneRectOf(zoomPlate).left() >= 0 && sceneRectOf(close).right() <= host->width());
             // A double-click on the readout leaves the viewer open.
             QTest::mouseDClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(readout));
             QCoreApplication::processEvents();
@@ -1937,7 +1958,7 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
 // with the scale off): the viewers' readout and Reset, on a plate 8 px left
 // of the mode switch, there also while the switch hides. The plot keeps its
 // place and size; its overlays keep clear of the plate. A viewer shows the
-// zoom in its own controls instead.
+// same plate (#373 H5: one plate order everywhere).
 void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2015,7 +2036,8 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
         QCOMPARE(surface->property("reservedCorner").toSizeF(), cornerBefore);
     }
 
-    // In a viewer, the zoom shows in the viewer's controls instead.
+    // In a viewer, the same plate shows, left of the mode switch, and none
+    // in the viewer's controls.
     viewer->setProperty("visualizationMode", 0);
     bridge->setProperty("viewerFullscreenMode", 0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
@@ -2023,8 +2045,9 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
     QQuickItem *controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
     QVERIFY(controls != nullptr);
-    QTRY_VERIFY(itemNamed(controls, QStringLiteral("viewerZoomReadout"))->isVisible());
-    QVERIFY(!plate->isVisible());
+    QTRY_VERIFY(plate->isVisible());
+    QVERIFY(itemsNamed(controls, QStringLiteral("viewerZoomReadout")).isEmpty());
+    QTRY_COMPARE(sceneRectOf(plate).right() + 8, sceneRectOf(modeSwitch).left());
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }
@@ -2120,10 +2143,11 @@ void TransportInputSmokeTest::resetZoomResetsOnlyTheShownPlotsZoom() {
     QVERIFY(QTest::qWaitForWindowActive(fullscreen));
     check(fullscreen, "viewer over the screen");
 
-    // The strip's Reset does the same zoom-only reset.
-    QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
-    QVERIFY(strip != nullptr);
-    QQuickItem *reset = itemNamed(strip, QStringLiteral("viewerResetButton"));
+    // The viewer's Reset, beside the mode switch, does the same zoom-only
+    // reset.
+    QQuickItem *layer = visibleItemNamed(fullscreen, QStringLiteral("plotLayer"));
+    QVERIFY(layer != nullptr);
+    QQuickItem *reset = itemNamed(layer, QStringLiteral("plotZoomResetButton"));
     QVERIFY(reset != nullptr);
     zoom(0, 2.0);
     QTRY_VERIFY(reset->isVisible());
