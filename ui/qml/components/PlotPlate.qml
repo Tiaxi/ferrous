@@ -9,6 +9,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // otherwise it holds the items declared inside it, such as PlotToolButtons,
 // 2 px apart with 2 px around them. A plate that is not `revealed` fades
 // out but keeps its place and its Tab stops, so the keyboard can reveal it.
+// A `compact` label, for a short lane, is 16 px tall with 11 px text, both
+// larger with a larger font, rather than 20 px with 12 px text.
 Item {
     id: root
 
@@ -16,7 +18,11 @@ Item {
     required property var uiPalette
     property string text: ""
     readonly property bool isLabel: root.text.length > 0
-    property real horizontalPadding: root.isLabel ? 6 : 2
+    property bool compact: false
+    // The smallest the plate is either way: a label's height, and the
+    // narrowest it is.
+    readonly property real minimumSize: root.compact ? 16 : 20
+    property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : 2
     property real verticalPadding: root.isLabel ? 0 : 2
     property real radius: root.isLabel ? 3 : 4
     // Whether presses, clicks and double-clicks on the plate, between its
@@ -30,8 +36,8 @@ Item {
     // How far the plate is revealed, from 0 to 1, as it fades in or out.
     property real revealLevel: root.revealed ? 1 : 0
 
-    implicitWidth: Math.max(20, content.implicitWidth + 2 * root.horizontalPadding)
-    implicitHeight: Math.max(20, content.implicitHeight + 2 * root.verticalPadding)
+    implicitWidth: Math.max(root.minimumSize, content.implicitWidth + 2 * root.horizontalPadding)
+    implicitHeight: Math.max(root.minimumSize, content.implicitHeight + 2 * root.verticalPadding)
 
     opacity: root.revealLevel * root.fadeLevel
 
@@ -94,12 +100,13 @@ Item {
             visible: root.isLabel
             text: root.text
             font.family: root.uiPalette.baseFont.family
-            font.pointSize: root.uiPalette.smallPointSize
+            font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize
             font.weight: Font.DemiBold
             color: root.plotColors.plotText
             // 20 px: its line and 1 or 2 px above and below it, more with
-            // a larger font.
-            height: Math.max(20, Math.ceil(implicitHeight) + Math.round(3 * root.uiPalette.fontScale))
+            // a larger font; compact, 16 px: its line and 1 px.
+            height: Math.max(root.minimumSize, Math.ceil(implicitHeight)
+                             + Math.round((root.compact ? 1 : 3) * root.uiPalette.fontScale))
             verticalAlignment: Text.AlignVCenter
             Accessible.ignored: true
         }

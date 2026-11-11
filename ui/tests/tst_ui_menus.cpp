@@ -1118,9 +1118,11 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
     QTRY_VERIFY(!meter->property("checked").toBool());
 }
 
-// The level meter as part of the plot (#373 H7 P11): its column keeps out
-// of the lane of the queue's scrollbar, whose right edge it shares, so it
-// no longer reads as a piece of it; on the spectrogram its fill takes the
+// The level meter as part of the plot (#373 H7 P11, H8): its column runs
+// out to the pane's edge, which is the window's and the right edge of the
+// queue's scrollbar above the pane, with no strip of the plot's floor
+// beside it; its bar is far wider than the scrollbar's thumb, and nothing
+// of either overlaps the other. On the spectrogram its fill takes the
 // colour map's colour of its level, in the plot's dB range, and its ticks
 // show with the plot's scale.
 void UiMenusTest::levelMeterIsPartOfThePlot() {
@@ -1131,25 +1133,46 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     QObject *bridge = bridgeOf(window);
     QObject *viewer = child(window, "viewerController");
     bridge->setProperty("showLevelMeter", true);
+    // A queue longer than its view, scrolled to its end: the thumb at the
+    // bottom of its lane, as near the meter as it comes.
+    bridge->setProperty("queueRows", sampleQueueRows(200));
+    bridge->setProperty("queueLength", 200);
     auto *meter = qobject_cast<LevelMeterItem *>(child(window, "levelMeter"));
     auto *scrollBar = qobject_cast<QQuickItem *>(child(window, "queueScrollBar"));
-    QVERIFY(viewer != nullptr && meter != nullptr && scrollBar != nullptr);
+    auto *queueView = qobject_cast<QQuickItem *>(child(window, "playlistView"));
+    QVERIFY(viewer != nullptr && meter != nullptr && scrollBar != nullptr && queueView != nullptr);
     QTRY_VERIFY(meter->isVisible() && meter->width() > 0);
+    QTRY_VERIFY(scrollBar->isVisible() && scrollBar->width() > 0);
+    QVERIFY(QMetaObject::invokeMethod(queueView, "positionViewAtEnd"));
+    QTRY_VERIFY(scrollBar->property("position").toReal() + scrollBar->property("size").toReal() > 0.999);
+    QQuickItem *thumb = nullptr;
+    QTRY_VERIFY((thumb = childNamed(scrollBar, "laneScrollBarThumb")) != nullptr
+                && thumb->isVisible());
+    const auto sceneRect = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
 
-    // The same right edge, the pane's and the queue's.
-    const double meterRight = meter->mapToScene(QPointF(meter->width(), 0)).x();
-    const double laneLeft = scrollBar->mapToScene(QPointF(0, 0)).x();
-    const double laneRight = scrollBar->mapToScene(QPointF(scrollBar->width(), 0)).x();
-    QVERIFY(scrollBar->width() > 0);
-    QVERIFY2(std::abs(meterRight - laneRight) < 1.0,
-             qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRight).arg(laneRight)));
-    // The track, all of what the meter draws, left of the lane, with the
-    // plot's floor between them.
-    const double trackRight = meter->mapToScene(
-        QPointF(LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth, 0)).x();
-    QVERIFY2(trackRight <= laneLeft,
-             qPrintable(QStringLiteral("track ends at %1, the lane starts at %2").arg(trackRight).arg(laneLeft)));
-    QCOMPARE(meter->implicitWidth(), LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth + meter->edgeGap());
+    // The pane's edge, the window's, and the scrollbar's lane's.
+    const QRectF meterRect = sceneRect(meter);
+    const QRectF laneRect = sceneRect(scrollBar);
+    const QRectF thumbRect = sceneRect(thumb);
+    QCOMPARE(meterRect.right(), double(window->width()));
+    QVERIFY2(std::abs(meterRect.right() - laneRect.right()) < 1.0,
+             qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRect.right()).arg(laneRect.right())));
+    QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
+    // The bar out to that edge: wider than the scrollbar's whole lane, and
+    // more than twice as wide as its thumb, even under the pointer, where
+    // the thumb is the lane's width less 2 px.
+    QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
+    QVERIFY(LevelMeterItem::kBarWidth > laneRect.width());
+    QVERIFY(LevelMeterItem::kBarWidth > 2 * (laneRect.width() - 2));
+    QVERIFY(LevelMeterItem::kBarWidth > 2 * thumbRect.width());
+    // Neither overlaps the other: the thumb ends above the pane.
+    QVERIFY2(!meterRect.intersects(laneRect) && !meterRect.intersects(thumbRect),
+             qPrintable(QStringLiteral("meter %1, %2 lane %3, %4, thumb to %5")
+                            .arg(meterRect.top()).arg(meterRect.left())
+                            .arg(laneRect.bottom()).arg(laneRect.left()).arg(thumbRect.bottom())));
+    QVERIFY(thumbRect.bottom() <= meterRect.top());
 
     // The spectrogram: the colour map's fill, in the plot's range; the
     // ticks with the scale.

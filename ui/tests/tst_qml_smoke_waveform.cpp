@@ -590,15 +590,14 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     const double originalHeight = spectrogram->height();
     bridge->setProperty("showLevelMeter", true);
     QTRY_VERIFY(meter->isVisible());
-    // A column at the right end of the lanes, as tall as the pane: the
-    // seam, the track and the plot's floor out of the queue scrollbar's
-    // lane.
-    const double column = LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth
-        + meter->edgeGap();
-    QVERIFY(column > LevelMeterItem::kColumnWidth);
+    // A column at the right end of the lanes, as tall as the pane, out to
+    // its edge, which is the window's (#373 H8: no strip of the plot's
+    // floor beside it).
+    const double column = LevelMeterItem::kColumnWidth;
     QCOMPARE(meter->width(), column);
     QCOMPARE(meter->height(), surface->height());
     QCOMPARE(meter->mapToItem(surface, QPointF()).x(), surface->width() - column);
+    QCOMPARE(meter->mapToScene(QPointF(meter->width(), 0)).x(), double(meter->window()->width()));
     QCOMPARE(spectrogram->height(), originalHeight);
     QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - column);
     QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - column);
@@ -716,6 +715,11 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
                 QTRY_COMPARE(spectrogram->property("plotWidth").toReal(),
                              surface->width() - (enabled ? column : 0.0));
                 QCOMPARE(meter->sourcePath().isEmpty(), !enabled);
+                if (enabled) {
+                    // Out to the viewer's edge, with no gap.
+                    QTRY_COMPARE(meter->mapToScene(QPointF(meter->width(), 0)).x(),
+                                 double(meter->window()->width()));
+                }
             }
             controller->setProperty("spectrogramViewerOpen", false);
             QTRY_COMPARE(surface->parentItem(), originalParent);
@@ -2638,11 +2642,11 @@ void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
     const QRect corner(width - 120, 0, 120, 40);
 
     // The readout leaves the corner, only while it would be under it, and
-    // keeps 6 px from its plates (#373 H5).
+    // keeps a group's gap from its plates (#373 H5, H8).
     const auto [topValue, topTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 5, 42, 48, 12, reserved);
     QVERIFY(!topValue.intersects(corner));
-    QCOMPARE(topValue.right(), corner.left() - 1 - ViewCorner::kLabelGap);
+    QCOMPARE(topValue.right(), corner.left() - 1 - CrosshairReadout::kCornerGap);
     const auto [lowValue, lowTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 100, 42, 48, 12, reserved);
     QCOMPARE(lowValue.right(), width - 3);

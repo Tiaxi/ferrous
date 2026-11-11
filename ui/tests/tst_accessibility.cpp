@@ -3701,7 +3701,7 @@ void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
     // On: its column at the end of each lane, also with nothing playing.
     QVERIFY(bridge->setProperty("showLevelMeter", true));
     QTRY_VERIFY(meter->isVisible());
-    const double column = LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth + meter->edgeGap();
+    const double column = LevelMeterItem::kColumnWidth;
     QCOMPARE(meter->width(), column);
     QCOMPARE(meter->laneCount(), 2);
     QVERIFY(!meter->active());
