@@ -309,6 +309,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // session of them will put the scale.
     Q_PROPERTY(int analysisFftSize READ analysisFftSize WRITE setAnalysisFftSize NOTIFY analysisFftSizeChanged)
     Q_PROPERTY(bool frequencyCap READ frequencyCap WRITE setFrequencyCap NOTIFY frequencyCapChanged)
+    // Whether the lane has shown its whole view since its columns came:
+    // every column of the view that the session has, up to the playhead
+    // in rolling mode and up to the view's end or the track's in centered
+    // mode. False again until a new session's columns fill it.
+    Q_PROPERTY(bool viewFilled READ viewFilled NOTIFY viewFilledChanged)
     Q_PROPERTY(bool showTimeLabels READ showTimeLabels WRITE setShowTimeLabels NOTIFY showTimeLabelsChanged)
     Q_PROPERTY(double crosshairSharedX READ crosshairSharedX WRITE setCrosshairSharedX NOTIFY crosshairSharedXChanged)
     Q_PROPERTY(bool channelMuted READ channelMuted WRITE setChannelMuted NOTIFY channelMutedChanged)
@@ -391,6 +396,7 @@ public:
     void setAnalysisFftSize(int value);
     bool frequencyCap() const;
     void setFrequencyCap(bool value);
+    bool viewFilled() const;
 
     bool showTimeLabels() const;
     void setShowTimeLabels(bool value);
@@ -485,6 +491,7 @@ signals:
     void gridEnabledChanged();
     void analysisFftSizeChanged();
     void frequencyCapChanged();
+    void viewFilledChanged();
     void showTimeLabelsChanged();
     void crosshairSharedXChanged();
     void crosshairHoverChanged(double x);
@@ -740,6 +747,12 @@ private:
     // where a session at the analysis's settings and the lane's rate will
     // put them.
     void updateRestGridOverlayLocked(int width, int height);
+    // Whether the frame shows every column of the view that there is.
+    bool viewShownWholeLocked(qint64 displayLeft, qint64 displayRight, bool rollingMode,
+        double canvasZoom, int cw, qint64 displaySeq, int visibleWindowCols) const;
+    // Sets whether the lane has shown its whole view since its columns
+    // came, from either thread, and tells the GUI thread when it changes.
+    void publishViewFilledLocked(bool filled);
     void updateTimeGridOverlayLocked(
         int width, int height, int padding,
         qint64 displayLeft,
@@ -1236,6 +1249,9 @@ private:
     SpectrogramOverlayLayout m_restGrid;
     int m_analysisFftSize{8192};
     bool m_frequencyCap{false};
+    // Whether the lane has shown its whole view since its columns came:
+    // set as the render thread lays a frame out, cleared with the columns.
+    bool m_viewFilled{false};
     int m_freqGridCachedSampleRateHz{0};
     int m_freqGridCachedBinsPerColumn{0};
 

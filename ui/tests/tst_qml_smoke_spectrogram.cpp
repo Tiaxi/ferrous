@@ -57,6 +57,7 @@ private slots:
     void spectrogramAtRestDrawsItsScaleFaintly();
     void spectrogramAtRestFollowsTheScaleSetting();
     void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
+    void spectrogramRollingViewFillsUpToThePlayhead();
     void spectrogramTimeScaleOfAStretchedShortTrackShowsTenths();
     void spectrogramOverlayDisabledProducesNullImage();
     void spectrogramOverlayDirtiedByGeometryChange();
@@ -2557,10 +2558,41 @@ void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     constexpr int columns = 1'000;
     item->feedPrecomputedChunk(QByteArray(bins * columns, '\0'), bins, 0, columns, 0, columns, 48'000,
                                1'024, false, true, 1, false);
+    QTRY_VERIFY(item->viewFilled());
     QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), black);
     // Its columns gone, the lane is at rest again.
     item->clearPrecomputed();
     QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+    QVERIFY(!item->viewFilled());
+}
+
+// Rolling, the view shows the columns up to the playhead: it is filled once
+// the ring reaches the playhead and either the view's left edge or the
+// track's first column, give or take the few columns that a history
+// reckoned in seconds, or the end of a file, leaves out.
+void SpectrogramSmokeTest::spectrogramRollingViewFillsUpToThePlayhead() {
+    SpectrogramItem item;
+    QMutexLocker lock(&item.m_stateMutex);
+    constexpr int cw = 1'000;
+    constexpr int view = 1'000;
+    const auto filled = [&item](qint64 left, qint64 right, qint64 playhead) {
+        return item.viewShownWholeLocked(left, right, true, 1.0, cw, playhead, view);
+    };
+    // A session from the track's start (its first column at the epoch),
+    // a second in.
+    item.m_rollingEpoch = 0;
+    item.m_ringOldestSeq = 0;
+    QVERIFY(filled(0, 47, 47));
+    // The ring short of the playhead, as its columns still come.
+    QVERIFY(!filled(0, 30, 47));
+    QVERIFY(filled(0, 44, 47));
+    // A session from mid-track, as when the spectrogram shows again: its
+    // history fills the view, or not yet.
+    item.m_rollingEpoch = -5'000;
+    QVERIFY(filled(0, 999, 999));
+    QVERIFY(filled(3, 999, 999));
+    QVERIFY(!filled(0, 499, 499));
+    QVERIFY(!filled(0, 999, 1'200));
 }
 
 void SpectrogramSmokeTest::spectrogramGridOverlayGeneratesWhenEnabled() {

@@ -3991,17 +3991,21 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         return found;
     };
     QTRY_COMPARE(panes().size(), channels);
-    const auto feedColumns = [&]() {
+    // The track's columns from `first` on, `count` of them, every lane's
+    // in one chunk, as a session sends them: the first chunk of a session
+    // resets it.
+    constexpr int trackColumns = 2'000;
+    const auto feedColumns = [&](int first, int count) {
         constexpr int bins = 4'097;
-        constexpr int columns = 200;
         const QList<SpectrogramItem *> lanes = panes();
+        const QByteArray columns(bins * count * static_cast<int>(lanes.size()), '\x80');
         for (qsizetype index = 0; index < lanes.size(); ++index) {
-            lanes.at(index)->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins,
-                                                  static_cast<int>(index), columns, 0, 2'000, 48'000, 1'024,
-                                                  false, true, 1, false);
+            lanes.at(index)->feedPrecomputedChunk(columns, bins,
+                                                  static_cast<int>(index), count, first, trackColumns,
+                                                  48'000, 1'024, false, first == 0, 1, false);
         }
     };
-    feedColumns();
+    feedColumns(0, trackColumns);
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
     QVERIFY(!waveform->property("awaitingData").toBool());
     QTRY_VERIFY(spectrogram->isVisible() && !waveform->isVisible());
@@ -4044,6 +4048,14 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
             }
             if (failure.isEmpty() && playheads() != 1) {
                 failure = QStringLiteral("%1 playheads at frame %2").arg(playheads()).arg(frames);
+            }
+            // A spectrogram that comes in over the waveform shows its whole
+            // view, never its black floor or part of its columns.
+            if (failure.isEmpty() && waveform->isVisible() && spectrogram->isVisible()
+                && spectrogram->opacity() > 0.0 && spectrogram->z() > waveform->z()
+                && !spectrogram->property("viewFilled").toBool()) {
+                failure = QStringLiteral("the spectrogram came in at %1 before it filled its view, at frame %2")
+                              .arg(spectrogram->opacity()).arg(frames);
             }
         });
     const auto check = [&](const char *where) {
@@ -4108,10 +4120,29 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     QVERIFY(whole(waveform));
     QCOMPARE(spectrogram->opacity(), 0.0);
 
-    // Its first columns: it comes in over the waveform.
-    feedColumns();
-    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
-    check("the spectrogram's data");
+    // Its first columns, short of its view (#373 H6: it came in black and
+    // filled in blocks): centered, the view reaches past the playhead, and
+    // the waveform stays whole under the spectrogram at 0 until the view's
+    // columns are all there. Rolling at the track's start, the view shows
+    // only up to the playhead, which they reach.
+    if (displayMode == 1) {
+        feedColumns(0, 16);
+        QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+        const int partialFrames = frames;
+        window->update();
+        QTRY_VERIFY(frames > partialFrames + 2);
+        QVERIFY(!spectrogram->property("viewFilled").toBool());
+        QCOMPARE(spectrogram->opacity(), 0.0);
+        QVERIFY(whole(waveform));
+        QVERIFY(!fade->property("running").toBool());
+        check("the spectrogram's first columns");
+        feedColumns(16, trackColumns - 16);
+    } else {
+        feedColumns(0, trackColumns);
+    }
+    // The view's columns drawn: it comes in over the waveform.
+    QTRY_VERIFY(spectrogram->property("viewFilled").toBool());
+    check("the spectrogram's view");
     if (animated) {
         QVERIFY(fade->property("running").toBool());
         QVERIFY(spectrogram->z() > waveform->z());

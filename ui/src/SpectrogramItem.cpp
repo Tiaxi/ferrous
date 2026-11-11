@@ -1898,6 +1898,10 @@ SpectrogramItem::SpectrogramItem(QQuickItem *parent)
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::RightButton | Qt::MiddleButton);
     setClip(true);
+    // The lane's columns going clear whether it has shown its whole view;
+    // the GUI thread hears it then, rather than once the queued notice of
+    // publishViewFilledLocked arrives.
+    connect(this, &SpectrogramItem::precomputedReadyChanged, this, &SpectrogramItem::viewFilledChanged);
     m_forceFpsOverlay = qEnvironmentVariableIsSet("FERROUS_UI_SHOW_FPS");
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     m_forceFpsOverlay = m_forceFpsOverlay
@@ -2595,6 +2599,21 @@ void SpectrogramItem::setFrequencyCap(bool value) {
     }
     emit frequencyCapChanged();
     update();
+}
+
+bool SpectrogramItem::viewFilled() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_viewFilled;
+}
+
+void SpectrogramItem::publishViewFilledLocked(bool filled) {
+    if (filled == m_viewFilled) {
+        return;
+    }
+    m_viewFilled = filled;
+    // Laid out on the render thread, or cleared with the mutex held: the
+    // view's bindings read it on the GUI thread, once the mutex is free.
+    QMetaObject::invokeMethod(this, [this] { emit viewFilledChanged(); }, Qt::QueuedConnection);
 }
 
 bool SpectrogramItem::showTimeLabels() const {
@@ -3474,7 +3493,8 @@ void SpectrogramItem::feedPrecomputedChunk(
             m_zoomFillActive = true;
         } else {
             m_precomputedReady = false;
-                    m_precomputedCanvasDisplayLeft = 0;
+            publishViewFilledLocked(false);
+            m_precomputedCanvasDisplayLeft = 0;
             m_precomputedCanvasDisplayRight = -1;
             invalidateCanvas();
         }
@@ -3512,7 +3532,8 @@ void SpectrogramItem::feedPrecomputedChunk(
         m_precomputedPendingResetGeneration = 0;
         m_precomputedPendingResetClearHistory = false;
         m_precomputedReady = false;
-            m_precomputedBinsPerColumn = bins;
+        publishViewFilledLocked(false);
+        m_precomputedBinsPerColumn = bins;
         m_precomputedFftSize = std::max(0, fftSize);
         if (totalEstimate > 0) {
             m_precomputedTotalColumnsEstimate = totalEstimate;
@@ -4229,6 +4250,7 @@ void SpectrogramItem::clearPrecomputed() {
     }
     const bool wasReady = m_precomputedReady;
     m_precomputedReady = false;
+    publishViewFilledLocked(false);
     invalidateCanvas();
     lock.unlock();
     if (wasReady) {
@@ -5281,6 +5303,18 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
                 }
                 m_idleView.valid = true;
                 m_idleView.changeSeconds = static_cast<double>(column) / columnsPerSecond;
+            }
+
+            // The lane has shown its whole view once this frame shows a
+            // canvas of this view with every column of it that there is:
+            // the visualization's mode switch brings it in only then.
+            if (hasCanvas && canvasIsView && !canvasFreeze && !zoomPreviewShown
+                && !m_rasterPending && !m_precomputedCanvasDirty
+                && m_precomputedCanvasDisplayLeft == displayLeft
+                && viewShownWholeLocked(displayLeft, displayRight, rollingMode, canvasZoom, cw,
+                    m_rollingEpoch + static_cast<qint64>(std::max(nowCol, 0)),
+                    static_cast<int>(std::ceil(static_cast<double>(cw) / canvasZoom)))) {
+                publishViewFilledLocked(true);
             }
 
             // Frequency grid — only depends on static parameters.
@@ -7377,6 +7411,29 @@ bool SpectrogramItem::canvasShowsWholeViewLocked(
     return first > last || ringHoldsColumnsLocked(first, last);
 }
 
+bool SpectrogramItem::viewShownWholeLocked(
+    qint64 displayLeft, qint64 displayRight, bool rollingMode, double canvasZoom, int cw,
+    qint64 displaySeq, int visibleWindowCols) const {
+    if (displayRight < displayLeft) {
+        return false;
+    }
+    if (!rollingMode) {
+        return canvasShowsWholeViewLocked(displayLeft, displayRight, false, canvasZoom, cw);
+    }
+    // Rolling, the ring's columns run without gaps from its oldest to its
+    // newest, and the view shows them up to the playhead. A few columns
+    // short of either end are what a session's history reckoned in
+    // seconds, or the decoder's last columns of a file, leave out.
+    constexpr qint64 kSlackColumns = 4;
+    const bool reachesPlayhead = displayRight + kSlackColumns >= displaySeq;
+    // As far left as the view goes, or to the track's first column, which
+    // is at the epoch.
+    const bool reachesLeft =
+        displayRight - displayLeft + 1 + kSlackColumns >= static_cast<qint64>(visibleWindowCols)
+        || displayLeft <= m_rollingEpoch;
+    return reachesPlayhead && reachesLeft;
+}
+
 void SpectrogramItem::cancelPendingRasterLocked() {
     if (!m_rasterPending) {
         return;
@@ -7925,6 +7982,7 @@ void SpectrogramItem::releaseStorageLocked() {
     m_zoomFillActive = false;
     m_seekFillActive = false;
     m_precomputedReady = false;
+    publishViewFilledLocked(false);
     m_idleView = {};
     invalidateCanvas();
     // Once shown, the columns come from a fresh session, which starts with
