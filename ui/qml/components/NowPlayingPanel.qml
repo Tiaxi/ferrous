@@ -115,29 +115,31 @@ Item {
     })
 
     // A track change fades (#373 Motion), line by line: a line that differs
-    // for the next track fades the one before out, in place, then the next
-    // track's in, so that no frame shows both texts at once (#373 H1); where
+    // for the next track cross-fades, in place, the one before going out as
+    // the next track's comes in, on one progress, so the line never drops
+    // below about 0.6 of its ink (#373 H6: out, then in, left each line
+    // under half for up to 50 ms; the overlap does not read at speed); where
     // only a word or a number of it changes, its fields, and the words of a
     // field in which only a number changes, that are the same for both and
     // do not move stay still (#537), and otherwise it fades whole (see
     // `_fadesWhole`, #373 H2); a line that is the same stays still. The next
     // track of the same album fades over shortDuration; a track of another
     // album, or with another cover, fades the cover and the lines together
-    // over longDuration: the cover cross-fades over all of it, the lines go
-    // out over its first linesOutSpan and come in over the rest. A line
+    // over longDuration, all of them cross-fading over all of it. A line
     // that comes to differ while the track change fades (the metadata
     // comes after the path) joins the fade from full opacity, and the
     // lines already fading go on from theirs. A cover that changes later
     // for the same track fades too: during a track change it joins it, and
     // every layer goes on from the opacity it has onto the long curve;
-    // after one, the cover fades alone and the lines change in place. Another track during a fade starts its fade from
-    // what shows: every layer still fading goes on from its opacity, and
-    // what the track before had faded in goes out from where it got to
-    // (#463). What shows is always the playing track's; what the panel
-    // showed before only fades out under or over it. Nothing fades into or
-    // out of "Nothing playing": the first track after it settles its cover
-    // and lines together, whatever order the bridge tells them in. With
-    // animations off every change is instant.
+    // after one, the cover fades alone and the lines change in place.
+    // Another track during a fade starts its fade from what shows: every
+    // layer still fading goes on from its opacity, and what the track
+    // before had faded in goes out from where it got to (#463). What shows
+    // is always the playing track's; what the panel showed before only
+    // fades out under or over it. Nothing fades into or out of "Nothing
+    // playing": the first track after it settles its cover and lines
+    // together, whatever order the bridge tells them in. With animations
+    // off every change is instant.
     readonly property string trackKey: root.hasTrack
         ? root._trimmed(root.uiBridge.currentTrackPath) : ""
     readonly property string coverPath: root.uiBridge.currentTrackCoverPath || ""
@@ -157,7 +159,7 @@ Item {
     // another cover or another album, even when the two look alike.
     property var outgoing: null
     // How far the fade has come in its time: 0 when it starts, 1 once the
-    // playing track alone shows. Each layer eases on its own part of it.
+    // playing track alone shows. Every layer eases on it, over all of it.
     property real handover: 1
     readonly property NumberAnimation handoverAnimation: NumberAnimation {
         objectName: "nowPlayingHandoverAnimation"
@@ -169,31 +171,21 @@ Item {
         onFinished: root.outgoing = null
     }
 
-    // The OutCubic curve of the motion, over a part of the fade's time.
+    // The OutCubic curve of the motion.
     function _eased(progress) {
         const rest = 1 - Math.min(1, Math.max(0, progress))
         return 1 - rest * rest * rest
     }
-    // The InQuad curve, which an exit takes: slow from the start, fast at
-    // the end.
-    function _accelerated(progress) {
-        const done = Math.min(1, Math.max(0, progress))
-        return done * done
-    }
-    // The part of the fade the lines before go out over; the playing
-    // track's come in over the rest. The lines before hold, then go fast,
-    // and the playing track's come fast, then settle, so the text block
-    // is never empty for long, yet no frame shows two texts in a line.
-    readonly property real linesOutSpan: 0.4
-    // At `at` of the fade, how much of their opacity the lines before keep,
-    // going out over linesOutSpan; how far the playing track's lines have
-    // come in, over the rest; and how much of their opacity the covers
-    // before keep, going out over all of it.
+    // At `at` of the fade, how much of their opacity the lines before keep
+    // and how far the playing track's lines have come in: one progress,
+    // over all of it, so that what goes out and what comes in add up to a
+    // whole line in every frame; and how much of their opacity the covers
+    // before keep, going out over all of it too.
     function _linesOutLevel(at) {
-        return 1 - root._accelerated(at / root.linesOutSpan)
+        return 1 - root._eased(at)
     }
     function _linesInLevel(at) {
-        return root._eased((at - root.linesOutSpan) / (1 - root.linesOutSpan))
+        return root._eased(at)
     }
     function _coversOutLevel(at) {
         return 1 - root._eased(at)
@@ -484,10 +476,11 @@ Item {
     // line once it fades out as many layers as it can. What stayed still
     // and `after` no longer has in its place fades out from full opacity,
     // as it showed, in the newest layer, and the playing track's text there
-    // fades in with the rest of it; so that no frame shows two texts in one
-    // place, the playing track's line, once it has begun to come in, then
-    // goes out as a layer of its own too, from where it had come in to,
-    // and comes in again after.
+    // fades in with the rest of it; so that the playing track's text there
+    // does not show at once at the opacity the rest of it has come in to,
+    // the playing track's line, once it has begun to come in, then goes out
+    // as a layer of its own too, from where it had come in to, and comes in
+    // again from nothing.
     // `newTrack`: the fade is another track's, whose lines are still the
     // track before's.
     function _nextLine(key, before, after, track, newTrack) {
@@ -509,8 +502,8 @@ Item {
         const own = !newTrack && line.own
         let incomingFrom = root._incomingLineRest(key)
         // What stayed still and goes out needs a layer to go out in, and
-        // must not show over the playing track's text where that has begun
-        // to come in.
+        // the playing track's text there must come in from nothing, not
+        // from where the rest of it has come in to.
         const givesUp = givenUp.length > 0 && (incomingFrom < 1 || layers.length === 0)
         if (changes && (!own || givesUp) && layers.length < root.maxOutgoingLayers) {
             layers.push(root._layer(before, [{ at: 0, from: 1 - incomingFrom }]))
