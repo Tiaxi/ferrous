@@ -38,6 +38,58 @@ Item {
     property bool stripEnabled: true
 
     property alias popupHost: spectrogramPopupHost
+    // The visualization, whose last frame the viewer in the main window
+    // keeps as it fades out after it closes (#373 H8: the visualization went
+    // back to the pane the moment the viewer closed, and the viewer's black
+    // floor faded out alone over the pane). The pane shows the visualization
+    // live under it meanwhile, as the pane's own last frame shows under the
+    // viewer as it opens. The frame is grabbed once, while the
+    // visualization is still in the viewer: until then `keepsVisualization`
+    // tells Main.qml to leave it there. It is a ShaderEffectSource of the
+    // visualization, made only while the viewer fades out, in the main
+    // window, and given up before the visualization may go into the
+    // whole-screen window: `holdsVisualization` tells Main.qml not to take
+    // it there until then (see SpectrogramPane).
+    property Item visualization: null
+    // Whether the viewer in the main window shows: while it is open, and
+    // while it fades out after it closes.
+    readonly property bool popupShown: spectrogramViewer.visible
+    readonly property bool keepsVisualization: spectrogramViewer.visible
+        && !(closingFrameLoader.item !== null && closingFrameLoader.item.grabbed)
+    readonly property bool holdsVisualization: closingFrameLoader.item !== null
+    // Whether it keeps a frame: closed, while it still shows in a window
+    // that draws.
+    readonly property bool keepsClosingFrame: !root.viewerOpen && spectrogramViewer.visible
+        && root.windowRoot !== null
+        && root.windowRoot.visibility !== Window.Hidden && root.windowRoot.visibility !== Window.Minimized
+    onKeepsClosingFrameChanged: root.updateClosingFrame()
+
+    Connections {
+        target: root.visualization
+        function onParentChanged() { root.updateClosingFrame() }
+    }
+
+    // Makes the frame once the viewer is to keep one and the visualization
+    // is in it to grab; lets the visualization go and destroys the frame as
+    // soon as it is not to.
+    function updateClosingFrame() {
+        if (!root.keepsClosingFrame) {
+            if (closingFrameLoader.item !== null) {
+                closingFrameLoader.item.sourceItem = null
+            }
+            closingFrameLoader.active = false
+            return
+        }
+        if (closingFrameLoader.active || root.visualization === null
+                || root.visualization.parent !== spectrogramPopupHost) {
+            return
+        }
+        closingFrameLoader.active = true
+        const frame = closingFrameLoader.item
+        frame.keptSize = Qt.size(spectrogramPopupHost.width, spectrogramPopupHost.height)
+        frame.sourceItem = root.visualization
+        frame.scheduleUpdate()
+    }
     // The window of the viewer over the whole screen, and the item in it
     // that holds the visualization; null until the viewer first opens there.
     readonly property Window fullscreenWindow: spectrogramFullscreenWindowLoader.item
@@ -237,6 +289,26 @@ Item {
                         if (mouse.button === Qt.LeftButton) {
                             root.closeViewer()
                         }
+                    }
+                }
+
+                // The visualization's last frame as the viewer fades out,
+                // under the host, where the visualization covers it until it
+                // goes back to the pane.
+                Loader {
+                    id: closingFrameLoader
+                    active: false
+                    sourceComponent: ShaderEffectSource {
+                        id: closingFrame
+                        objectName: "spectrogramViewerClosingFrame"
+                        property bool grabbed: false
+                        property size keptSize: Qt.size(0, 0)
+                        width: closingFrame.keptSize.width
+                        height: closingFrame.keptSize.height
+                        live: false
+                        hideSource: false
+                        sourceRect: Qt.rect(0, 0, closingFrame.keptSize.width, closingFrame.keptSize.height)
+                        onScheduledUpdateCompleted: closingFrame.grabbed = closingFrame.sourceItem !== null
                     }
                 }
 
