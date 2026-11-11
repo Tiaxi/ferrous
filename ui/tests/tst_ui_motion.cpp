@@ -3786,7 +3786,9 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
         }
     }
     QVERIFY(halfShown);
-    QCOMPARE(collapseMs, expandMs);
+    // As long, to the test's frame.
+    QVERIFY2(std::abs(collapseMs - expandMs) <= 16,
+             qPrintable(QStringLiteral("collapse %1 ms, expand %2 ms").arg(collapseMs).arg(expandMs)));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
 }

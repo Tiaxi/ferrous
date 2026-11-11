@@ -1966,7 +1966,8 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundHover"))));
     QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundTint"))));
     checkName(album, false);
-    const QList<QQuickItem *> children = album->childItems();
+    // The row's drawing, under the clip it has while it folds.
+    const QList<QQuickItem *> children = itemNamed(album, QStringLiteral("libraryRowContent"))->childItems();
     QVERIFY(children.indexOf(title(album))
             > children.indexOf(itemNamed(album, QStringLiteral("rowBackgroundTint"))->parentItem()));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));

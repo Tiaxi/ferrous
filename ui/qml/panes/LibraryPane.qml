@@ -500,6 +500,7 @@ Rectangle {
                         visible: libraryRow.shownHeight > 0
 
                         Item {
+                            objectName: "libraryRowContent"
                             width: libraryRow.width
                             height: libraryRow.height
 
