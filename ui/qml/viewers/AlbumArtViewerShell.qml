@@ -236,9 +236,10 @@ Item {
             }
         }
 
-        // The art on the view colour.
+        // The art on the media surface's black, in both themes.
         background: Rectangle {
-            color: root.uiPalette.view
+            objectName: "albumArtPopupBackground"
+            color: root.uiPalette.mediaPlot.plotBg
         }
 
         // The art, under the controls' plate.
@@ -281,7 +282,7 @@ Item {
 
             Components.PlotPlate {
                 anchors.fill: parent
-                plotColors: root.uiPalette.waveformPlot
+                plotColors: root.uiPalette.mediaPlot
                 uiPalette: root.uiPalette
                 takesPointer: true
                 Accessible.ignored: true
@@ -293,6 +294,7 @@ Item {
                 y: 2
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
+                plotColors: root.uiPalette.mediaPlot
                 zoomLevel: root.zoomLevel
                 resetView: root.resetView
                 resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Window")
@@ -301,6 +303,7 @@ Item {
 
                 InfoButton {
                     objectName: "albumArtPopupInfoButton"
+                    plotColors: popupControls.plotColors
                 }
             }
         }
@@ -326,7 +329,7 @@ Item {
                 visibility: root.viewerOpen && root.useWholeScreenViewerMode
                     ? Window.FullScreen
                     : Window.Hidden
-                color: root.uiPalette.view
+                color: root.uiPalette.mediaPlot.plotBg
                 title: root.titleText
 
                 onVisibilityChanged: function() {
@@ -423,8 +426,9 @@ Item {
                         anchors.top: parent.top
                         z: 1
                         uiPalette: root.uiPalette
-                        // The art is on the view colour, as the waveform is.
-                        plotColors: root.uiPalette.waveformPlot
+                        // The art is on the media surface's black, as the
+                        // spectrogram is, in both themes.
+                        plotColors: root.uiPalette.mediaPlot
                         uiBridge: root.uiBridge
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"

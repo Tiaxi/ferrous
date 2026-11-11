@@ -1900,6 +1900,7 @@ ApplicationWindow {
         comparisonModeAvailable: viewerController.comparisonModeAvailable
         switchComparisonImage: viewerController.switchComparisonImage
         uiPalette: root.uiPalette
+        fullscreen: root.useWholeScreenViewerMode
         fileInfo: viewerController.albumArtViewerFileInfo
         sourceKind: viewerController.albumArtSourceKind
         // Clear of the viewer's controls over the art, at any font: the plate

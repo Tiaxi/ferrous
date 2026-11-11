@@ -1158,7 +1158,7 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         {"openAlbumArtViewerForCurrentArt", "albumArtViewerOpen",
          QStringLiteral("albumArtFullscreenWindow"), QStringLiteral("albumArtFullscreenStrip"),
          QStringLiteral("albumArtFullscreenCloseButton"), QStringLiteral("albumArtSurface"),
-         QStringLiteral("Morning Tide Field — Ferrous Album Art"), "waveformPlot"},
+         QStringLiteral("Morning Tide Field — Ferrous Album Art"), "mediaPlot"},
     };
     for (const Viewer &shown : viewers) {
         const QByteArray name = shown.windowName.toUtf8();
