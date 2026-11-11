@@ -52,10 +52,13 @@ Components.DialogWindow {
     title: I18n.i18nc("@title:window", "Replace from iTunes")
     // The content's inset from the window's edges.
     readonly property real contentPadding: Kirigami.Units.gridUnit
-    // 920 by 680 px with the default font, and as much larger as a larger
-    // font makes the rows, within the screen; the user may resize it.
+    // 920 px wide with the default font, and as much wider as a larger font
+    // makes the text, within the screen; as tall as the current art and
+    // five results, which the list shows whole (#373 H9: a fixed 680 px
+    // left a framed empty band under them). The user may resize it.
     defaultWidth: root.uiPalette.scaledSize(920)
-    defaultHeight: root.uiPalette.scaledSize(680)
+    defaultHeight: Math.ceil(2 * root.contentPadding + root.rowHeight + root.headingHeight
+        + root.shownResultRows * root.rowHeight + 2 + itunesArtworkFooter.implicitHeight)
     // The current art's row whole, and a result under it.
     minimumWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 24, itunesArtworkFooter.implicitWidth))
     minimumHeight: Math.ceil(2 * root.contentPadding + 2 * currentArtworkRow.Layout.preferredHeight
@@ -329,6 +332,22 @@ Components.DialogWindow {
     readonly property real thumbnailSize: 64
     readonly property real rowPadding: 8
     readonly property real textX: root.sideInset + root.thumbnailSize + 12
+    // The actions' column: Preview and Apply 8 px apart, and the text at
+    // least 16 px clear of them, in the buttons' own sizes. They are flat
+    // push buttons, which the style draws in the general font, as the text
+    // and Close: it draws a ToolButton's caption in the toolbar font, which
+    // KDE sets apart, so at 24 pt they stayed at 10 pt (#373 H9).
+    readonly property real actionSpacing: Kirigami.Units.largeSpacing
+    readonly property real textActionsGap: 16
+    // A row, the current art's or a result's: the thumbnail, or the title
+    // and a line of details, or the buttons, whichever is tallest, with
+    // 8 px above and below; 80 px with the default font.
+    readonly property real rowHeight: Math.max(root.thumbnailSize, 2 * lineMetrics.implicitHeight + 2,
+        applyMetrics.implicitHeight) + 2 * root.rowPadding
+    // What the search found, on a line with 8 px above and below.
+    readonly property real headingHeight: lineMetrics.implicitHeight + 2 * Kirigami.Units.largeSpacing
+    // The results the dialog opens tall enough for; more scroll.
+    readonly property int shownResultRows: 5
     // The rows' secondary line: the details of an image, in plain words,
     // such as "1200 × 1200 · JPEG · 412 KiB".
     function imageDetailsText(info) {
@@ -436,13 +455,21 @@ Components.DialogWindow {
 
     // Measures Apply, so the current art's Preview lines up with the
     // results' Preview, which Apply follows.
-    ToolButton {
+    Button {
         id: applyMetrics
         visible: false
         flat: true
+        Kirigami.MnemonicData.enabled: false
         display: AbstractButton.TextBesideIcon
         icon.name: "dialog-ok-apply"
         text: I18n.i18nc("@action:button", "Apply")
+    }
+
+    // Measures a line of the rows' text, before there is a row.
+    Label {
+        id: lineMetrics
+        visible: false
+        text: "X"
     }
 
     ColumnLayout {
@@ -471,9 +498,7 @@ Components.DialogWindow {
             id: currentArtworkRow
             objectName: "itunesArtworkCurrentRow"
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.max(root.thumbnailSize,
-                currentArtworkText.implicitHeight, currentArtworkPreviewButton.implicitHeight)
-                + 2 * root.rowPadding
+            Layout.preferredHeight: root.rowHeight
 
             ArtworkThumbnail {
                 id: currentArtworkThumbnail
@@ -488,7 +513,7 @@ Components.DialogWindow {
                 id: currentArtworkText
                 x: 1 + root.textX
                 y: Math.round((parent.height - height) / 2)
-                width: Math.max(0, currentArtworkPreviewButton.x - 12 - x)
+                width: Math.max(0, currentArtworkPreviewButton.x - root.textActionsGap - x)
                 titleObjectName: "itunesArtworkCurrentTitle"
                 detailsObjectName: "itunesArtworkCurrentDetails"
                 title: I18n.i18nc("@label", "Current album art")
@@ -501,11 +526,15 @@ Components.DialogWindow {
 
             // Where the results' Preview is: before Apply, clear of the
             // scrollbar lane.
-            ToolButton {
+            Button {
                 id: currentArtworkPreviewButton
                 objectName: "itunesArtworkCurrentPreviewButton"
+                // No Alt shortcut: the rows repeat Preview and Apply, which would
+                // each take another letter, and a hidden button has none, so
+                // Apply's measure would differ from the rows' by the mnemonic.
+                Kirigami.MnemonicData.enabled: false
                 x: parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
-                    - applyMetrics.implicitWidth - Kirigami.Units.smallSpacing - width
+                    - applyMetrics.implicitWidth - root.actionSpacing - width
                 y: Math.round((parent.height - height) / 2)
                 flat: true
                 display: AbstractButton.TextBesideIcon
@@ -535,15 +564,20 @@ Components.DialogWindow {
         }
 
         // The results: a flat list on the view colour, in the view's frame,
-        // with a hairline between rows. Searching, or with nothing found,
-        // there is no frame, only a placeholder message on the dialog's own
-        // colour (#373 H8: an empty well framed the message).
+        // with a hairline between rows. The frame ends at the last row, and
+        // the window's room below the rows stays its own colour; with more
+        // rows than room, they scroll (#373 H9). Searching, or with nothing
+        // found, there is no frame, only a placeholder message on the
+        // dialog's own colour (#373 H8: an empty well framed the message).
         Rectangle {
             id: resultsFrame
             objectName: "itunesArtworkResultsFrame"
             readonly property bool framed: itunesArtworkResultsView.count > 0
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.preferredHeight: resultsFrame.framed ? resultsFrame.Layout.maximumHeight : 0
+            Layout.maximumHeight: resultsFrame.framed
+                ? itunesArtworkResultsView.count * root.rowHeight + 2 : Number.POSITIVE_INFINITY
             Layout.topMargin: resultsFrame.framed ? 0 : Kirigami.Units.smallSpacing
             color: resultsFrame.framed ? root.uiPalette.view : "transparent"
             border.width: resultsFrame.framed ? 1 : 0
@@ -579,8 +613,7 @@ Components.DialogWindow {
 
                     objectName: "itunesArtworkResultRow"
                     width: ListView.view.width
-                    height: Math.max(root.thumbnailSize, suggestionText.implicitHeight,
-                        suggestionApplyButton.implicitHeight) + 2 * root.rowPadding
+                    height: root.rowHeight
 
                     ArtworkThumbnail {
                         objectName: "itunesArtworkResultThumbnail"
@@ -596,7 +629,7 @@ Components.DialogWindow {
                         id: suggestionText
                         x: root.textX
                         y: Math.round((parent.height - height) / 2)
-                        width: Math.max(0, suggestionActions.x - 12 - x)
+                        width: Math.max(0, suggestionActions.x - root.textActionsGap - x)
                         titleObjectName: "itunesArtworkResultTitle"
                         detailsObjectName: "itunesArtworkResultDetails"
                         title: (suggestionRow.modelData && (suggestionRow.modelData.albumTitle || "")) || ""
@@ -616,11 +649,12 @@ Components.DialogWindow {
                         objectName: "itunesArtworkResultActions"
                         x: parent.width - itunesArtworkResultsView.scrollbarLane - root.sideInset - width
                         y: Math.round((parent.height - height) / 2)
-                        spacing: Kirigami.Units.smallSpacing
+                        spacing: root.actionSpacing
 
-                        ToolButton {
+                        Button {
                             id: suggestionPreviewButton
                             objectName: "itunesArtworkPreviewButton"
+                            Kirigami.MnemonicData.enabled: false
                             flat: true
                             display: AbstractButton.TextBesideIcon
                             icon.name: "view-preview"
@@ -629,9 +663,10 @@ Components.DialogWindow {
                             onClicked: root.requestSuggestionPreview(suggestionRow.index)
                         }
 
-                        ToolButton {
+                        Button {
                             id: suggestionApplyButton
                             objectName: "itunesArtworkApplyButton"
+                            Kirigami.MnemonicData.enabled: false
                             flat: true
                             display: AbstractButton.TextBesideIcon
                             icon.name: "dialog-ok-apply"
@@ -691,6 +726,14 @@ Components.DialogWindow {
                     wrapMode: Text.Wrap
                 }
             }
+        }
+
+        // The room under the results' frame, when they leave some.
+        Item {
+            objectName: "itunesArtworkResultsRoom"
+            visible: resultsFrame.framed
+            Layout.fillWidth: true
+            Layout.fillHeight: true
         }
     }
 
