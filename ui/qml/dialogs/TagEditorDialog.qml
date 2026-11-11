@@ -60,27 +60,30 @@ Components.DialogWindow {
     ]
     // The table's columns, each at its width with the default 10 pt font,
     // scaled with a larger one, or wider when its header or sample needs
-    // it. `sample` is the widest value a short column holds whole. Where
-    // the view is narrower than they are together, the columns that may
-    // `give` way do, before the table scrolls sideways: first the tags,
-    // down to their `least` widths, then File Name, Folder and Status, down
-    // to theirs, which keep a file name and an album folder readable; the
-    // numbers and Format keep their widths. In a table that scrolls anyway
-    // none gives way. Where the view is wider, File Name and Folder, which
-    // `stretch`, take the rest. Status takes no room until a row has a
-    // status (#373 H7: File Name and Folder give way last).
+    // it. `sample` is the widest value a short column holds whole: the
+    // numbers and Format are as narrow as that allows. Where the view is
+    // narrower than the columns together, the columns that may `give` way
+    // do, before the table scrolls sideways: first File Name, Folder and
+    // Status, down to their `least` widths, then the tags, down to theirs,
+    // which keep Title, Artist and Album at 160 px or more, scaled with the
+    // font; the numbers and Format keep their widths. In a table that
+    // scrolls anyway none gives way. Where the view is wider, File Name and
+    // Folder, which `stretch`, take the rest. Status takes no room until a
+    // row has a status. The window opens wide enough for every column, so
+    // none gives way on a large screen (#373 H8: with too little room for
+    // them all, either the tags or the paths were cut short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200, give: 1, least: 140 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160, give: 1, least: 110 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140, give: 1, least: 110 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110, give: 1, least: 80 },
-        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56, sample: "0000" },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 44, sample: "00" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 2, least: 190, stretch: true, path: true },
-        { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 2, least: 130, stretch: true, path: true },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 2, least: 0, sample: root.modifiedText, onlyWithStatus: true }
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 36, number: true, sample: "00" },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 160 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 160 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 100, give: 2, least: 70 },
+        { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 52, sample: "0000" },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 40, sample: "00" },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
+        { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, sample: root.modifiedText, onlyWithStatus: true }
     ]
     // Whether a row has a status: unsaved edits, or a save or rename that
     // failed for it.
@@ -96,6 +99,10 @@ Components.DialogWindow {
     // letter. The narrow columns, as Disc, take the Revert's room only
     // while they show it, as Status takes its own only with a status.
     function columnNeed(column) {
+        // The bindings that ask follow the fonts: advanceWidth() is a
+        // function, which they cannot follow.
+        columnHeaderMetrics.font
+        columnValueMetrics.font
         const header = columnHeaderMetrics.advanceWidth(column.label)
             + (root.fieldAt(column.key) !== null && root.summaryRevision >= 0
                 && root.tagEditorApi.fieldChanged(column.key) ? root.columnRevertRoom : 0)
@@ -272,12 +279,24 @@ Components.DialogWindow {
         return width
     }
     readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
-    // Wide enough for the fields and every column of the table through
-    // Format at its width, clear of its scroll bar, within the screen; the
-    // tags give way to make room for Folder, and for Status once a row has
-    // one, so File Name and Folder keep their widths.
+    // The fields' narrowest: 16 grid units, or what their labels and a
+    // field need.
+    readonly property real fieldsLeastWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+    // The fields' width as shown: narrower, down to their least, where
+    // that spares the table its sideways scroll bar with every column at
+    // its least width or wider, as on a 1400 px screen (#373 H8);
+    // otherwise their width.
+    readonly property real fieldsShownWidth: {
+        const tableLeast = 2 + 2 * root.tableInset
+            + root.tableColumnLeastWidths.reduce(function(sum, width) { return sum + width }, 0)
+        const spare = Math.floor(root.width - 2 * root.contentPadding - root.contentSpacing - tableLeast)
+        return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
+    }
+    // Wide enough for the fields and every column of the table at its
+    // width, clear of its scroll bar, within the screen: on a smaller one,
+    // File Name and Folder give way first, then the tags.
     defaultWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
-        + root.tableWidthThrough("formatKind") + Kirigami.Units.gridUnit)
+        + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
     // and no taller than 46 grid units: a few files leave no wide empty
     // table, and the user may make it taller.
@@ -286,7 +305,7 @@ Components.DialogWindow {
         + 2 * root.contentPadding + tagEditorFooter.implicitHeight)
     // The fields at their narrowest beside some of the table, and room for
     // a few of the fields above the buttons.
-    minimumWidth: Math.ceil(2 * root.contentPadding + Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+    minimumWidth: Math.ceil(2 * root.contentPadding + root.fieldsLeastWidth
         + root.contentSpacing + Kirigami.Units.gridUnit * 16)
     minimumHeight: Math.ceil(2 * root.contentPadding + Kirigami.Units.gridUnit * 12 + tagEditorFooter.implicitHeight)
 
@@ -1032,8 +1051,8 @@ Components.DialogWindow {
         ScrollView {
             id: tagEditorFieldsScroll
             objectName: "tagEditorFields"
-            Layout.preferredWidth: root.fieldsWidth
-            Layout.minimumWidth: Math.max(Kirigami.Units.gridUnit * 16, root.fieldsMinimumWidth)
+            Layout.preferredWidth: root.fieldsShownWidth
+            Layout.minimumWidth: root.fieldsLeastWidth
             Layout.fillHeight: true
             clip: true
             contentWidth: availableWidth

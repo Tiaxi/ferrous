@@ -174,16 +174,17 @@ Components.DialogWindow {
         font: root.uiPalette.baseFont
     }
 
-    // 49 by 35 grid units, or the page list and 39 of them for the pages
+    // 49 by 41 grid units, or the page list and 39 of them for the pages
     // when the list is wider, or wider for every page's wide layout; and
-    // the tallest page, Visualization, whole at the default font, or taller
-    // for the page it opens on: the pages are laid out only once the window
-    // shows. A larger font makes the window larger, within the
-    // screen; it lays its pages out for the room it has, and the user may
-    // make it larger.
+    // the tallest page, Visualization with its three subheadings, whole at
+    // the default font (665 px of 678 at 10 pt), or taller for the page it
+    // opens on: the pages are laid out only once the window shows (#585),
+    // so the height cannot follow the page it is not on. A larger font
+    // makes the window larger, within the screen; it lays its pages out
+    // for the room it has, and the user may make it larger.
     defaultWidth: Math.max(Kirigami.Units.gridUnit * 49, root.pageListWidth + 1
         + Math.max(Kirigami.Units.gridUnit * 39, pagesLoader.item ? pagesLoader.item.wideWidth : 0))
-    defaultHeight: Math.max(Kirigami.Units.gridUnit * 35,
+    defaultHeight: Math.max(Kirigami.Units.gridUnit * 41,
         preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
     // The page list, and a page with room for its widest control.
     minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,

@@ -8,8 +8,9 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
-// The Visualization page: how the plot is drawn, what it shows over the
-// plot, and how its zoom works, in three groups.
+// The Visualization page, in three groups under their subheadings: what
+// the plot analyses, what it shows, and how it answers the pointer. The
+// "Show:" check boxes stay together.
 Preferences.PreferencesPage {
     id: root
 
@@ -19,6 +20,13 @@ Preferences.PreferencesPage {
     readonly property real comboWidth: Kirigami.Units.gridUnit * 9
 
     title: I18n.i18nc("@title preferences page", "Visualization")
+
+    Components.FormGroupGap {
+        objectName: "visualizationAnalysisHeading"
+        uiPalette: root.uiPalette
+        first: true
+        heading: I18n.i18nc("@title:group visualization preferences", "Analysis")
+    }
 
     Components.DialogComboBox {
         objectName: "spectrogramViewComboBox"
@@ -30,18 +38,6 @@ Preferences.PreferencesPage {
         ]
         currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramViewMode")))
         onActivated: function(index) { root.settings.setValue("spectrogramViewMode", index) }
-    }
-
-    Components.DialogComboBox {
-        objectName: "spectrogramDisplayComboBox"
-        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
-        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
-        model: [
-            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
-            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
-        ]
-        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramDisplayMode")))
-        onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
     }
 
     Components.DialogComboBox {
@@ -121,9 +117,28 @@ Preferences.PreferencesPage {
         objectName: "frequencyCapHelp"
         uiPalette: root.uiPalette
         indent: frequencyCapCheckBox.contentItem.x
-        endsGroup: true
+        // The next group's subheading leaves the room to it.
+        trailingSpace: 0
         text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
             + "family and 24 kHz for others, instead of up to half their sample rate.")
+    }
+
+    Components.FormGroupGap {
+        objectName: "visualizationDisplayHeading"
+        uiPalette: root.uiPalette
+        heading: I18n.i18nc("@title:group visualization preferences", "Display")
+    }
+
+    Components.DialogComboBox {
+        objectName: "spectrogramDisplayComboBox"
+        Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Scrolling:")
+        Layout.preferredWidth: Math.max(root.comboWidth, implicitWidth)
+        model: [
+            I18n.i18nc("@item:inlistbox spectrogram display", "Rolling"),
+            I18n.i18nc("@item:inlistbox spectrogram display", "Centered")
+        ]
+        currentIndex: Math.max(0, Math.min(1, root.settings.value("spectrogramDisplayMode")))
+        onActivated: function(index) { root.settings.setValue("spectrogramDisplayMode", index) }
     }
 
     CheckBox {
@@ -165,6 +180,12 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("showLevelMeter", checked)
     }
 
+    Components.FormGroupGap {
+        objectName: "visualizationInteractionHeading"
+        uiPalette: root.uiPalette
+        heading: I18n.i18nc("@title:group visualization preferences", "Interaction")
+    }
+
     Components.DialogComboBox {
         objectName: "channelButtonsComboBox"
         Kirigami.FormData.label: I18n.i18nc("@label:listbox", "Mute and solo buttons:")
@@ -176,11 +197,6 @@ Preferences.PreferencesPage {
         ]
         currentIndex: Math.max(0, Math.min(2, root.settings.value("channelButtonsVisibility")))
         onActivated: function(index) { root.settings.setValue("channelButtonsVisibility", index) }
-    }
-
-    Components.FormGroupGap {
-        objectName: "visualizationNavigationGap"
-        uiPalette: root.uiPalette
     }
 
     CheckBox {
