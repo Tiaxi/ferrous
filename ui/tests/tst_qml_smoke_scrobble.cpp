@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <utility>
+
 // The Last.fm scrobble progress indicator and pausing scrobbling.
 class ScrobbleSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -250,6 +252,21 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     QVERIFY(indicator->isVisible());
     QCOMPARE(glyph->property("color").value<QColor>(), secondary);
     QCOMPARE(glyph->opacity(), 1.0);
+
+    // Listening has its bar from the start, as long as it is tall, so that
+    // it never looks like scrobbled, the glyph alone (#373 H9: at 0 % both
+    // were the bare glyph, and at 25 % the bar was a dot).
+    for (const auto &[listenedMs, width] : {std::pair{0, 3.0}, std::pair{15000, 3.0}, std::pair{30000, 4.0}}) {
+        bridge->setProperty("lastFmScrobbleListenedMs", listenedMs);
+        bridge->setProperty("lastFmScrobbleState", 1);
+        QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
+        QTRY_VERIFY(bar->isVisible());
+        QCOMPARE(bar->height(), 3.0);
+        QCOMPARE(bar->width(), width);
+        QCOMPARE(bar->x(), 0.0);
+        bridge->setProperty("lastFmScrobbleState", 3);
+        QTRY_VERIFY(!bar->isVisible());
+    }
 }
 
 // The bar and the tooltip move by whole seconds of listening: of the

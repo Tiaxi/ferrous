@@ -2115,11 +2115,12 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
     // Until the track's length is known, there is no scrobble point: the
-    // glyph alone.
+    // bar at its 3 px start, as listening always has (#373 H9).
     bridge->setProperty("lastFmScrobbleThresholdMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
     QCOMPARE(progress(), 0.0);
-    QVERIFY(!bar->isVisible());
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->width(), 3.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
@@ -2351,10 +2352,11 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough_data() {
 }
 
 // The bar under the glyph, as drawn at 1x (#373 H6): as many whole pixels
-// of the glyph's 16 as the listening done, from the left, and the chrome
-// everywhere else: no trough, so at 0 % there is the glyph alone, and
-// nothing between the glyph and the bar. Each step reads apart from the
-// last, the bar 3:1 on the chrome; being sent fills it at half strength,
+// of the glyph's 16 as the listening done, from the left, but never fewer
+// than its 3 px height, and the chrome everywhere else: no trough, and
+// nothing between the glyph and the bar. At 0 % a 3 px square, so that
+// listening never looks like scrobbled (#373 H9: both were the bare glyph).
+// The bar is 3:1 on the chrome; being sent fills it at half strength,
 // scrobbled leaves it out, failed fills it in the negative colour.
 void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     QFETCH(bool, dark);
@@ -2404,19 +2406,15 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     };
     const QColor text = harness.token("text");
     QVERIFY2(contrastRatio(text, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), text, chrome)));
-    int previous = -1;
-    for (const double done : {0.0, 0.25, 0.5, 0.9}) {
+    for (const auto &[done, columns] :
+         {std::pair{0.0, 3}, std::pair{0.1, 3}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
-        const int columns = int(std::floor(done * 16));
-        QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 16.0);
+        QTRY_COMPARE(slot->property("barProgress").toDouble(), std::floor(done * 16) / 16.0);
         Drawn now;
         QTRY_VERIFY2((now = drawn(text), now.lit == 3 * columns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.lit)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of trough or ink").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
-        // Apart from the last by a quarter of the bar or more.
-        QVERIFY2(columns - previous >= 4 || previous < 0, qPrintable(QString::number(columns - previous)));
-        previous = columns;
     }
 
     // Being sent: full, the text colour at half strength. Scrobbled: no bar

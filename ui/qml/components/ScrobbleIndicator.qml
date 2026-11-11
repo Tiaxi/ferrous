@@ -22,7 +22,9 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   the tooltip says how much is left. Both come from the scrobbler's
 //   listened time, which a seek doesn't move and a pause holds; a new play
 //   (a new track, a replay, Repeat One) starts it over. Before any of it,
-//   the glyph alone.
+//   the bar is as long as it is tall, a square under the glyph's left edge,
+//   so that listening always has a bar and scrobbled never does (#373 H9:
+//   at 0 % the two were the same bare glyph).
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
@@ -119,6 +121,9 @@ AbstractButton {
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
     readonly property bool barShown: root.look === "listening" || root.look === "failed"
         || (root.look === "scrobbled" && !root.scrobbleAccepted)
+    // The bar's length while listening: the listening done, but never
+    // shorter than the bar is tall.
+    readonly property real barMinimumLength: root.look === "listening" ? root.barHeight : 0
     // Half strength while the scrobble is being sent.
     readonly property real barOpacity: root.look === "scrobbled" ? 0.5 : 1
     // How much of the bar is drawn, 0 to 1: the listening done, by whole
@@ -361,7 +366,7 @@ AbstractButton {
                     objectName: "scrobbleIndicatorBar"
                     x: 0
                     y: root.glyphSize + root.barGap
-                    width: root.barWidth * root.barProgress
+                    width: Math.max(root.barMinimumLength, root.barWidth * root.barProgress)
                     height: root.barHeight
                     visible: root.barShown && width > 0
                     color: root.barColor
