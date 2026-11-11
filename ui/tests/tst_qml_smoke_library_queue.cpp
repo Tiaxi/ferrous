@@ -2206,26 +2206,47 @@ ApplicationWindow {
     QTRY_VERIFY(removeButton->isEnabled());
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
+    // A window of its own above the page's (#373 H5).
+    auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
+    QVERIFY(confirmWindow != nullptr);
+    QCOMPARE(confirmWindow->transientParent(), window);
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
     const QString message = confirm->property("message").toString();
-    QVERIFY2(message.contains(QStringLiteral("Jazz"))
-                 && message.contains(QStringLiteral("/fixture/Music/Jazz")),
-             qPrintable(message));
+    QVERIFY2(message.contains(QStringLiteral("Jazz")), qPrintable(message));
+    // The path on a line of its own, elided in the middle, whole in its
+    // tooltip.
+    QCOMPARE(confirm->property("path").toString(), QStringLiteral("/fixture/Music/Jazz"));
+    QQuickItem *path = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogPath"));
+    QVERIFY(path != nullptr);
+    QCOMPARE(path->property("text").toString(), QStringLiteral("/fixture/Music/Jazz"));
+    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideMiddle));
+    QCOMPARE(path->property("lineCount").toInt(), 1);
     const QString details = confirm->property("details").toString();
     // Counts are written as the locale writes numbers.
     QVERIFY2(details.contains(QLocale().toString(1234) + QStringLiteral(" tracks"))
                  && details.contains(QStringLiteral("stay on disk")),
              qPrintable(details));
 
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogCancelButton")));
+    QVERIFY(clickVisibleButton(confirmWindow, QStringLiteral("confirmDialogCancelButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
 
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    // A quick second click finds the window gone: the folder is removed
+    // once.
+    QQuickItem *confirmButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QVERIFY(confirmButton != nullptr);
+    const QPoint confirmCenter = centerInWindow(confirmButton);
+    QTest::mouseClick(confirmWindow, Qt::LeftButton, Qt::NoModifier, confirmCenter);
+    QVERIFY(!confirmWindow->isVisible());
+    QTest::mouseClick(confirmWindow, Qt::LeftButton, Qt::NoModifier, confirmCenter);
     QTRY_COMPARE(root->property("removed").toStringList(),
                  QStringList{QStringLiteral("/fixture/Music/Jazz")});
+    QCoreApplication::processEvents();
+    QCOMPARE(root->property("removed").toStringList(), QStringList{QStringLiteral("/fixture/Music/Jazz")});
 }
 
 namespace {

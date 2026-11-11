@@ -11,8 +11,9 @@ import "../logic/ErrorUtils.js" as ErrorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
 // Recent Issues: a popup above the status bar's issues button, newest
-// first. Each entry has a glyph, a title (semibold while new), its time, a
-// description and at most one action. The entries count as seen when it
+// first. Each entry has a glyph, its category and time on a small line, a
+// title that names the problem (semibold while new), the rest of the
+// message and at most one action. The entries count as seen when it
 // closes.
 Popup {
     id: root
@@ -312,6 +313,7 @@ Popup {
                         required property bool unseen
                         readonly property var entry: ({ category: historyRow.category, message: historyRow.message,
                                                         count: historyRow.count })
+                        readonly property string categoryText: ErrorUtils.categoryLabel(historyRow.category)
                         readonly property string title: ErrorUtils.issueTitle(historyRow.entry)
                         readonly property string description: ErrorUtils.issueDescription(historyRow.entry)
                         readonly property string timeText: ErrorUtils.issueTimeText(historyRow.lastSeenMs)
@@ -326,8 +328,11 @@ Popup {
                         width: historyColumn.width
                         implicitHeight: rowLayout.implicitHeight + Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing + 2
                         Accessible.role: Accessible.ListItem
-                        Accessible.name: I18n.i18nc("@info issue title, time, description", "%1, %2: %3",
-                            historyRow.title, historyRow.timeText, historyRow.description)
+                        Accessible.name: historyRow.description.length > 0
+                            ? I18n.i18nc("@info issue title, category, time, description", "%1 (%2, %3): %4",
+                                historyRow.title, historyRow.categoryText, historyRow.timeText, historyRow.description)
+                            : I18n.i18nc("@info issue title, category, time", "%1 (%2, %3)",
+                                historyRow.title, historyRow.categoryText, historyRow.timeText)
                         Accessible.description: historyRow.subject
 
                         RowLayout {
@@ -362,30 +367,44 @@ Popup {
                                 Layout.fillWidth: true
                                 spacing: 2
 
+                                // What the issue is about and when, as a
+                                // notification's header line: the quietest
+                                // text of the entry.
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: Kirigami.Units.largeSpacing
 
                                     Label {
-                                        objectName: "errorHistoryHeading"
+                                        objectName: "errorHistoryCategory"
                                         Layout.fillWidth: true
-                                        text: historyRow.title
+                                        text: historyRow.categoryText
                                         textFormat: Text.PlainText
-                                        wrapMode: Text.Wrap
-                                        font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
-                                        color: root.uiPalette.text
+                                        elide: Text.ElideRight
+                                        font.pointSize: root.uiPalette.smallPointSize
+                                        color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
                                     }
 
                                     Label {
                                         objectName: "errorHistoryTime"
-                                        Layout.alignment: Qt.AlignTop
                                         text: historyRow.timeText
                                         font.pointSize: root.uiPalette.smallPointSize
                                         font.features: root.uiPalette.tabularFigures
                                         color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
                                     }
+                                }
+
+                                // The problem itself.
+                                Label {
+                                    objectName: "errorHistoryHeading"
+                                    Layout.fillWidth: true
+                                    text: historyRow.title
+                                    textFormat: Text.PlainText
+                                    wrapMode: Text.Wrap
+                                    font.weight: historyRow.unseen ? Font.DemiBold : Font.Normal
+                                    color: root.uiPalette.text
+                                    Accessible.ignored: true
                                 }
 
                                 Label {

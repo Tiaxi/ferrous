@@ -44,9 +44,11 @@ Rectangle {
 
     // The columns, which the header and the rows share: the state glyph,
     // the number, then Title, Artist, Album and Length. Text that does not
-    // fit its column is elided, so it never runs into the next. The title
-    // takes the width the others leave, about 40% of the table by default,
-    // with Artist and Album about 25% each. Artist, Album and Length have
+    // fit its column is elided, so it never runs into the next. Length has
+    // its room first, as wide as its longest value and a little more; of
+    // the room left for the text, the title takes what the others leave,
+    // half by default, with Artist about a quarter and Album a little
+    // less, as album names run shorter. Artist, Album and Length have
     // the widths the user dragged their handles to, which the settings
     // keep, or those defaults. A column's width is that of its text; the
     // gaps between the columns come on top. Sizes are those of the design
@@ -58,11 +60,21 @@ Rectangle {
     // From the length's right end to the queue's: the scrollbar lane and
     // the inset.
     readonly property real rightPadding: Math.round(24 * root.sizeScale)
-    // The table's share each of Artist and Album has by default.
-    readonly property real defaultTextColumnShare: 0.25
-    readonly property real defaultArtistColumnWidth: root.defaultTextColumnWidth()
-    readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth()
-    readonly property real defaultLengthColumnWidth: root.minimumLengthColumnWidth
+    // The share of the text columns' room Artist and Album have by default;
+    // the title has the rest.
+    readonly property real defaultArtistColumnShare: 0.26
+    readonly property real defaultAlbumColumnShare: 0.24
+    readonly property real defaultTitleColumnShare: 1 - root.defaultArtistColumnShare - root.defaultAlbumColumnShare
+    // What Title, Artist and Album share: the table, less the columns that
+    // have their room first and the gaps before Artist and Album.
+    readonly property real defaultTextColumnsRoom: Math.max(0,
+        root.width - root.reservedColumnsWidth - 2 * root.columnGap)
+    readonly property real defaultArtistColumnWidth: root.defaultTextColumnWidth(root.defaultArtistColumnShare)
+    readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth(root.defaultAlbumColumnShare)
+    // Length: its longest value and two characters' room before it, apart
+    // from the album; about 56 px at the default font.
+    readonly property real defaultLengthColumnWidth: Math.max(root.minimumLengthColumnWidth,
+        Math.ceil(lengthValueMetrics.advanceWidth + 2 * columnFontMetrics.averageCharacterWidth))
     readonly property real artistColumnWidth: root.columnWidths.artist
     readonly property real albumColumnWidth: root.columnWidths.album
     readonly property real lengthColumnWidth: root.columnWidths.length
@@ -72,11 +84,12 @@ Rectangle {
     readonly property real reservedColumnsWidth: root.playlistIndicatorColumnWidth
         + root.playlistOrderColumnWidth + root.titleGap + root.columnGap
         + root.defaultLengthColumnWidth + root.rightPadding
-    // Album drops before the title would go under its minimum with the
-    // default widths, as in a narrow window.
+    // Album drops first, as in a narrow window: it shows only where half
+    // the table, less the columns that have their room first, would still
+    // hold the title at its minimum, so a narrow window gives the title
+    // the room rather than three cramped columns.
     readonly property bool albumColumnVisible: root.artistColumnVisible
-        && root.width * (1 - 2 * root.defaultTextColumnShare)
-            - root.reservedColumnsWidth >= root.minimumTitleColumnWidth
+        && root.width / 2 - root.reservedColumnsWidth >= root.minimumTitleColumnWidth
     // Artist drops next, when what the title leaves would show only a few
     // of its characters, as in a narrow window at a large font.
     readonly property bool artistColumnVisible: root.width - root.reservedColumnsWidth
@@ -95,11 +108,9 @@ Rectangle {
         lengthHeaderMetrics.advanceWidth,
         lengthValueMetrics.advanceWidth)))
 
-    // Artist's or Album's default: its share of the table, less the gap
-    // before the next column.
-    function defaultTextColumnWidth() {
-        return Math.max(root.minimumResizedColumnWidth,
-                        Math.round(root.width * root.defaultTextColumnShare) - root.columnGap)
+    // Artist's or Album's default: its share of the text columns' room.
+    function defaultTextColumnWidth(share) {
+        return Math.max(root.minimumResizedColumnWidth, Math.round(root.defaultTextColumnsRoom * share))
     }
     // How far Left or Right moves a focused handle.
     readonly property real keyboardResizeStep: Math.max(
@@ -313,7 +324,7 @@ Rectangle {
         + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
         + root.columnGap + root.defaultLengthColumnWidth + root.rightPadding
     readonly property real minimumContentWidth: Math.ceil(Math.min(
-        root.minimumTitleOnlyWidth / (1 - root.defaultTextColumnShare),
+        root.minimumTitleOnlyWidth / (1 - root.defaultArtistColumnShare),
         Math.max(root.minimumTitleOnlyWidth, root.minimumWidthLimit)))
 
     FontMetrics {

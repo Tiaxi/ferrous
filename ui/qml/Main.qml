@@ -1306,7 +1306,6 @@ ApplicationWindow {
     Dialogs.LibraryRootNameDialog {
         id: libraryRootNameDialog
         objectName: "libraryRootNameDialog"
-        parent: preferencesDialog.visible ? preferencesDialog.contentItem : root.contentItem
         uiBridge: root.uiBridge
         uiPalette: root.uiPalette
         windowRoot: preferencesDialog.visible ? preferencesDialog : root
@@ -1974,7 +1973,7 @@ ApplicationWindow {
         }
         root.forgetStateSaveBeforeClosing()
         if (saved) {
-            quitSaveFailedDialog.close()
+            quitSaveFailedDialog.dismiss()
             root.closeNow()
         } else {
             root.showQuitSaveFailedDialog(message)
@@ -1982,16 +1981,19 @@ ApplicationWindow {
     }
 
     function showQuitSaveFailedDialog(message) {
-        // It is drawn above this dialog, which would hide the choice.
+        // The choice blocks the window, which takes no answer to the popup
+        // meanwhile.
         recentErrorsDialog.close()
         quitSaveFailedDialog.message = message
-        quitSaveFailedDialog.open()
+        // The window first, then the dialog above it, which takes the
+        // keyboard.
         root.bringWindowForward()
+        quitSaveFailedDialog.open()
     }
 
     // A quit from outside the window, such as from the desktop's media
     // controls, can find it minimized or behind other windows. Dialogs that
-    // quitting opens are drawn in the window, so the window comes forward
+    // quitting opens are above the window, so the window comes forward
     // too; window managers raise the window they activate. A fullscreen
     // viewer is a modal window over the main one, and the dialog would open
     // behind it, so the viewers close first.

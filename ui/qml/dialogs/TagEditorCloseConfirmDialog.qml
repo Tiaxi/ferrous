@@ -3,18 +3,15 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
-import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
-Dialog {
+// Asks what becomes of unsaved tag edits, in a window of its own over the
+// tag editor.
+Components.CompactDialogWindow {
     id: root
 
     required property var tagEditorApi
-    required property var uiPalette
-    required property var windowRoot
     // What the edits would be dropped for: "close" the editor, "quit"
     // Ferrous, or "reload" the files.
     property string purpose: "close"
@@ -28,45 +25,21 @@ Dialog {
     signal keepEditingRequested()
 
     objectName: "tagEditorCloseConfirmDialog"
-    parent: Overlay.overlay
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(Kirigami.Units.gridUnit * 25, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Unsaved Changes")
-    // Escape keeps editing, except while a save is running.
-    closePolicy: root.tagEditorApi.saving ? Popup.NoAutoClose : Popup.CloseOnEscape
+    // Escape and the title bar's close button keep editing, except while a
+    // save is running.
+    asksBeforeClosing: true
+    onCloseRequested: {
+        if (!root.tagEditorApi.saving) {
+            root.reject()
+        }
+    }
 
     onRejected: root.keepEditingRequested()
-
-    // An answer closes it, and its buttons take no other as it fades out.
-    Components.PopupClosing {
-        id: closingState
-        popup: root
-    }
-
-    // The keyboard in the content, whose Enter presses the default button,
-    // from the moment the dialog shows.
-    Components.PopupInitialFocus {
-        popup: root
-        item: root.contentItem
-    }
-
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-        closeEnabled: !root.tagEditorApi.saving
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
 
     // Save, Discard, Cancel.
     footer: Components.DialogFooter {
         id: dialogButtons
-        enabled: !closingState.closing
         // Save; or, on the reload question, which has no Save, Cancel: the
         // default button never drops the edits.
         primary: root.forReload ? keepEditingButton : saveButton
@@ -92,7 +65,8 @@ Dialog {
             enabled: !root.tagEditorApi.saving
             DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
             onClicked: {
-                root.close()
+                // Hidden at once: a second click finds no button.
+                root.dismiss()
                 root.discardRequested()
             }
         }
@@ -109,34 +83,27 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    Label {
+        objectName: "tagEditorCloseConfirmMessage"
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        text: root.forQuit
+            ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
+            : (root.forReload
+                ? I18n.i18nc("@info", "Discard unsaved changes and reload the tags from the files?")
+                : I18n.i18nc("@info", "Save changes before closing the tag editor?"))
+    }
 
-        spacing: 12
-
-        Label {
-            objectName: "tagEditorCloseConfirmMessage"
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            text: root.forQuit
-                ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
-                : (root.forReload
-                    ? I18n.i18nc("@info", "Discard unsaved changes and reload the tags from the files?")
-                    : I18n.i18nc("@info", "Save changes before closing the tag editor?"))
-        }
-
-        Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            color: root.uiPalette.textSecondary
-            text: root.forQuit
-                ? I18n.i18nc("@info", "Save writes the current edits and quits. "
-                    + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
-                : (root.forReload
-                    ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
-                    : I18n.i18nc("@info",
-                        "Save writes the current edits. Discard closes the dialog and drops every unsaved change."))
-        }
+    Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        text: root.forQuit
+            ? I18n.i18nc("@info", "Save writes the current edits and quits. "
+                + "Discard drops every unsaved change and quits. Cancel keeps Ferrous open.")
+            : (root.forReload
+                ? I18n.i18nc("@info", "Reloading drops every unsaved change. Cancel keeps editing.")
+                : I18n.i18nc("@info",
+                    "Save writes the current edits. Discard closes the dialog and drops every unsaved change."))
     }
 }

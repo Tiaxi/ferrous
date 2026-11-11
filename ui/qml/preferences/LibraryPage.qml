@@ -36,9 +36,11 @@ Preferences.PreferencesPage {
     // first.
     function requestRemoveRoot(path, displayName, trackCount) {
         removeRootConfirmDialog.rootPath = path
+        // The path on a line of its own, elided in the middle.
         removeRootConfirmDialog.message = displayName === path
-            ? I18n.i18nc("@info", "Remove the library folder “%1”?", path)
-            : I18n.i18nc("@info folder name, path", "Remove the library folder “%1” (%2)?", displayName, path)
+            ? I18n.i18nc("@info", "Remove this library folder?")
+            : I18n.i18nc("@info folder name", "Remove the library folder “%1”?", displayName)
+        removeRootConfirmDialog.path = path
         removeRootConfirmDialog.details = I18n.i18ncp("@info",
             "This removes its %1 track from the library. "
                 + "The files themselves stay on disk, and adding the folder again brings them back.",
@@ -246,12 +248,11 @@ Preferences.PreferencesPage {
                                 Accessible.ignored: true
                             }
 
-                            Label {
+                            Components.PathLabel {
                                 objectName: "libraryRootPath"
                                 Layout.fillWidth: true
-                                text: rootRow.rootPath
+                                path: rootRow.rootPath
                                 color: rootRow.rootName.length > 0 ? root.uiPalette.textSecondary : root.uiPalette.text
-                                elide: Text.ElideMiddle
                                 Accessible.ignored: true
                             }
 
@@ -405,6 +406,8 @@ Preferences.PreferencesPage {
         windowRoot: root.windowRoot
         title: I18n.i18nc("@title:window", "Remove Library Folder")
         confirmText: I18n.i18nc("@action:button", "Remove Folder")
+        // As the page's Remove button.
+        confirmIcon: "list-remove"
         onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)
     }
 }

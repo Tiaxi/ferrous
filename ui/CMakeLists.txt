@@ -175,11 +175,10 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/AlbumArtTile.qml
         qml/components/AppMenu.qml
         qml/components/AppMenuBarItem.qml
+        qml/components/CompactDialogWindow.qml
         qml/components/DialogButtons.qml
         qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
-        qml/components/DialogHeader.qml
-        qml/components/DialogSurface.qml
         qml/components/DialogWindow.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
@@ -189,13 +188,13 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/MenuHeading.qml
         qml/components/NowFadeOut.qml
         qml/components/NowPlayingPanel.qml
+        qml/components/PathLabel.qml
         qml/components/PlotLaneHead.qml
         qml/components/PlotModeSwitch.qml
         qml/components/PlotPlate.qml
         qml/components/PlotToolButton.qml
         qml/components/PlotZoomPlate.qml
         qml/components/PopupClosing.qml
-        qml/components/PopupInitialFocus.qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml

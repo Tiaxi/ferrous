@@ -3,33 +3,29 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
-Dialog {
+// Adds a library folder, or renames one, by the name the library shows it
+// by. A window of its own, over Configure, whose Library page asks for it,
+// or over the main window.
+Components.CompactDialogWindow {
     id: root
 
     required property var uiBridge
-    required property var uiPalette
-    required property var windowRoot
     required property string dialogMode
     required property string pathValue
     required property string nameValue
     signal dismissed()
 
-    modal: true
     title: root.dialogMode === "rename"
         ? I18n.i18nc("@title:window", "Rename Library Folder")
         : I18n.i18nc("@title:window", "Add Library Folder")
-    width: Math.min(Kirigami.Units.gridUnit * 30, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 30, root.minimumWidth)
+    initialFocusItem: libraryRootNameField
 
-    onOpened: {
-        libraryRootNameField.forceActiveFocus()
-        libraryRootNameField.selectAll()
-    }
+    onAboutToShow: libraryRootNameField.selectAll()
 
     onAccepted: {
         const resolvedPath = root.pathValue || ""
@@ -46,18 +42,7 @@ Dialog {
 
     onRejected: root.dismissed()
 
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
     footer: Components.DialogButtons {
-
         id: dialogButtons
         primary: libraryRootNameAcceptButton
         Button {
@@ -68,27 +53,28 @@ Dialog {
                 : I18n.i18nc("@action:button", "Add Folder")
             icon.name: root.dialogMode === "rename" ? "edit-rename" : "folder-add"
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            onClicked: root.accept()
         }
         Button {
             objectName: "libraryRootNameCancelButton"
             text: I18n.i18nc("@action:button", "Cancel")
             icon.name: "dialog-cancel"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
         }
     }
 
-    contentItem: Kirigami.FormLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    Kirigami.FormLayout {
+        Layout.fillWidth: true
 
-        TextField {
+        // The folder is chosen already: its path to read, not to edit.
+        Components.PathLabel {
             objectName: "libraryRootPathField"
-            Kirigami.FormData.label: I18n.i18nc("@label:textbox", "Folder:")
+            Kirigami.FormData.label: I18n.i18nc("@label", "Folder:")
             Layout.fillWidth: true
-            Layout.minimumWidth: Kirigami.Units.gridUnit * 18
-            readOnly: true
-            text: root.pathValue || ""
-            selectByMouse: true
+            // Not as wide as a long path: the form keeps its two columns.
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+            path: root.pathValue || ""
         }
 
         TextField {
@@ -97,7 +83,7 @@ Dialog {
             Kirigami.FormData.label: I18n.i18nc("@label:textbox", "Name:")
             Layout.fillWidth: true
             text: root.nameValue || ""
-            placeholderText: I18n.i18nc("@info:placeholder", "The folder\u2019s path")
+            placeholderText: I18n.i18nc("@info:placeholder", "The folder’s path")
             selectByMouse: true
             onAccepted: root.accept()
         }

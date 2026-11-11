@@ -1447,6 +1447,21 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     }
 }
 
+// The Replace Album Art question: a window of its own (#373 H5), above the
+// window that asks it.
+QQuickWindow *replaceQuestion(QQuickWindow *window) {
+    return qobject_cast<QQuickWindow *>(window->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog")));
+}
+
+// The question's button `name`, while the question shows above `host`.
+QQuickItem *replaceQuestionButton(QQuickWindow *window, QQuickWindow *host, const QString &name) {
+    QQuickWindow *question = replaceQuestion(window);
+    return question != nullptr && question->isVisible() && question->transientParent() == host
+            && QTest::qWaitForWindowExposed(question)
+        ? visibleItemNamed(question, name)
+        : nullptr;
+}
+
 // Applies candidate `index` from its preview, past the question, and waits
 // until the dialog and the question have gone, faded out, and the viewer
 // shows `appliedUrl`.
@@ -1456,11 +1471,9 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     QVERIFY(QMetaObject::invokeMethod(dialog, "requestSuggestionPreview", Q_ARG(QVariant, index)));
     QTRY_VERIFY2(viewer->property("albumArtViewerOpen").toBool(), at.constData());
     QVERIFY2(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
-    QTRY_VERIFY2(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+    QTRY_VERIFY2(replaceQuestionButton(window, window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                  at.constData());
-    // Clicked once it has faded in, where the user sees it.
-    QTRY_VERIFY2(popupsSettled(), at.constData());
-    QVERIFY(clickVisibleButton(window, QStringLiteral("confirmDialogConfirmButton")));
+    QVERIFY(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogConfirmButton")));
     QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{index}));
     QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
     QVERIFY(viewer->property("albumArtViewerOpen").toBool());
@@ -2021,21 +2034,21 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
             preview();
             host = viewerHost();
             QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
-            QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+            QTRY_VERIFY2(replaceQuestionButton(window, host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QVERIFY(applied().isEmpty());
             // The question's buttons are clicked once it has faded in.
             QTRY_VERIFY2(popupsSettled(), at.constData());
-            QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogCancelButton")), at.constData());
-            QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
+            QVERIFY2(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogCancelButton")), at.constData());
+            QTRY_VERIFY2(replaceQuestionButton(window, host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
                          at.constData());
             QVERIFY(dialog->property("previewShown").toBool());
             QVERIFY(viewer->property("albumArtPreviewActive").toBool());
             QVERIFY2(clickPreviewButton(host, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
-            QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+            QTRY_VERIFY2(replaceQuestionButton(window, host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                          at.constData());
             QTRY_VERIFY2(popupsSettled(), at.constData());
-            QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogConfirmButton")), at.constData());
+            QVERIFY2(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogConfirmButton")), at.constData());
             QTRY_COMPARE(applied(), (QVariantList{previewed}));
             QVERIFY(!dialog->property("previewShown").toBool());
             QVERIFY(!dialog->property("visible").toBool());
@@ -2073,7 +2086,7 @@ void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {
     QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")));
     QTRY_COMPARE(applied(), (QVariantList{previewed}));
-    QVERIFY(visibleItemNamed(window, QStringLiteral("confirmDialogConfirmButton")) == nullptr);
+    QVERIFY(!replaceQuestion(window)->isVisible());
     QVERIFY(!dialog->property("visible").toBool());
     QVERIFY(viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(viewer->property("albumArtViewerShowsCurrentTrack").toBool());
@@ -2159,13 +2172,13 @@ void AlbumArtSmokeTest::itunesPreviewButtonsTakeSpaceFromThePlaybackShortcut() {
                          && apply->isEnabled(), at.constData());
         QVERIFY2(tabTo(host, apply), at.constData());
         QTest::keyClick(host, Qt::Key_Space);
-        QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
+        QTRY_VERIFY2(replaceQuestionButton(window, host, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                      at.constData());
         QCOMPARE(toggled.count(), 0);
         QCOMPARE(bridge->property("playbackState").toString(), playbackBefore);
         QTRY_VERIFY2(popupsSettled(), at.constData());
-        QVERIFY2(clickVisibleButton(host, QStringLiteral("confirmDialogCancelButton")), at.constData());
-        QTRY_VERIFY2(visibleItemNamed(host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
+        QVERIFY2(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogCancelButton")), at.constData());
+        QTRY_VERIFY2(replaceQuestionButton(window, host, QStringLiteral("confirmDialogConfirmButton")) == nullptr,
                      at.constData());
 
         // Away from the buttons, with the art's focus, Space still plays and

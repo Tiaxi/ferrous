@@ -482,18 +482,32 @@ bool clickVisibleButton(QQuickWindow *window, const QString &objectName);
 // transition ends.
 bool popupFadingOut(QObject *popup);
 
+// The window of a dialog that is a window of its own (DialogWindow), or
+// null for a popup.
+QQuickWindow *dialogWindowOf(QObject *dialog);
+
+// Whether `dialog` has been answered and is on its way out: a popup that
+// fades out, or a dialog window, which hides at once.
+bool dialogClosing(QObject *dialog);
+
 // Clicks the visible, enabled button `objectName` as a user would, and the
-// same place again as `popup`, which the first click closed, fades out: a
-// quick second click. Whether both clicks were made, the second in the fade.
-bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *popup);
+// same place again as `dialog`, which the first click closed, goes: a
+// quick second click. A popup fades out, and the second click lands in the
+// fade; a dialog window hides at once, and the second lands where it was.
+// `window` holds a popup; a dialog window holds its own buttons. Whether
+// both clicks were made, the second as the dialog closes.
+bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *dialog);
 
-// Whether the keyboard is in `popup`'s content itself, where a dialog's
-// Enter presses its default button, rather than in the popup or a control.
-bool keyboardInPopupContent(QObject *popup);
+// Whether the keyboard is in `dialog`'s content itself, where a dialog's
+// Enter presses its default button, rather than in the dialog or a
+// control: a popup's contentItem, or a dialog window's `body`, once the
+// window is active.
+bool keyboardInPopupContent(QObject *dialog);
 
-// Tabs in `window` until the keyboard is on a button of `popup`'s footer;
-// whether it got there without leaving the popup.
-bool tabToPopupFooter(QQuickWindow *window, QObject *popup);
+// Tabs in `window`, or in a dialog window itself, until the keyboard is on
+// a button of `dialog`'s footer; whether it got there without leaving the
+// dialog.
+bool tabToPopupFooter(QQuickWindow *window, QObject *dialog);
 
 // Whether no popup in any window is opening or closing. The app's style
 // fades popups in and out: in its enter or exit transition a popup is

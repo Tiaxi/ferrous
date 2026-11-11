@@ -2983,10 +2983,9 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
     QTRY_VERIFY2((defaults = alignedWidths()).size() == columns.size(), qPrintable(problem));
     auto *pane = window->findChild<QQuickItem *>(QStringLiteral("mainQueuePane"));
     QVERIFY(pane != nullptr);
-    // By default Artist and Album have a quarter of the table each, with the
-    // gap after them, and the title the rest: about 40% at the default
-    // font, where the glyph, number and length columns and the gaps take
-    // 130 px of a 1239 px table.
+    // By default Artist and Album have about a quarter and a little less
+    // of the room the text columns have, after the glyph, number and length
+    // columns and the gaps, and the title the rest: half of it.
     const auto checkShares = [&](const QList<qreal> &widths) {
         const qreal table = pane->width();
         const qreal gap = pane->property("columnGap").toReal();
@@ -2995,9 +2994,9 @@ void AccessibilityTest::queueHeaderAndRowsShareTheColumnWidths() {
             all << QString::number(width);
         }
         const QString described = QStringLiteral("%1 of %2").arg(all.join(QLatin1Char(' '))).arg(table);
-        for (int column : {3, 4}) {
-            QVERIFY2(std::abs(widths[column] + gap - table / 4) <= 1, qPrintable(described));
-        }
+        const qreal room = pane->property("defaultTextColumnsRoom").toReal();
+        QVERIFY2(std::abs(widths[3] - room * 0.26) <= 1, qPrintable(described));
+        QVERIFY2(std::abs(widths[4] - room * 0.24) <= 1, qPrintable(described));
         const qreal rest = table - widths[0] - widths[1] - pane->property("titleGap").toReal()
             - widths[3] - widths[4] - widths[5] - 3 * gap - pane->property("rightPadding").toReal();
         QVERIFY2(std::abs(widths[2] - rest) <= 1, qPrintable(described));

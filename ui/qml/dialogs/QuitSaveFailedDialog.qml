@@ -3,61 +3,25 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
-import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
 // Shown when the settings, the queue, or Last.fm's scrobbles could not be
 // saved before quitting.
-Dialog {
+Components.CompactDialogWindow {
     id: root
 
-    required property var uiPalette
-    required property var windowRoot
     property string message: ""
 
     signal retryRequested()
     signal quitRequested()
 
     objectName: "quitSaveFailedDialog"
-    parent: Overlay.overlay
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(Kirigami.Units.gridUnit * 25, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Couldn\u2019t Save Before Quitting")
-    // Escape keeps Ferrous open.
-    closePolicy: Popup.CloseOnEscape
-
-    // An answer closes it, and its buttons take no other as it fades out.
-    Components.PopupClosing {
-        id: closingState
-        popup: root
-    }
-
-    // The keyboard in the content, whose Enter presses the default button,
-    // from the moment the dialog shows.
-    Components.PopupInitialFocus {
-        popup: root
-        item: root.contentItem
-    }
-
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    // Escape and the title bar's close button keep Ferrous open.
 
     footer: Components.DialogFooter {
-
         id: dialogButtons
-        enabled: !closingState.closing
         primary: quitSaveFailedRetryButton
         Button {
             id: quitSaveFailedRetryButton
@@ -66,7 +30,8 @@ Dialog {
             icon.name: "view-refresh"
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             onClicked: {
-                root.close()
+                // Hidden at once: a second click finds no button.
+                root.dismiss()
                 root.retryRequested()
             }
         }
@@ -76,32 +41,25 @@ Dialog {
             icon.name: "application-exit"
             DialogButtonBox.buttonRole: DialogButtonBox.DestructiveRole
             onClicked: {
-                root.close()
+                root.dismiss()
                 root.quitRequested()
             }
         }
     }
 
-    contentItem: ColumnLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    Label {
+        objectName: "quitSaveFailedMessage"
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        text: root.message
+    }
 
-        spacing: 12
-
-        Label {
-            objectName: "quitSaveFailedMessage"
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            text: root.message
-        }
-
-        Label {
-            Layout.fillWidth: true
-            wrapMode: Text.WordWrap
-            color: root.uiPalette.textSecondary
-            text: I18n.i18nc("@info", "Retry saves again, for example after freeing disk space. Quit Anyway "
-                + "closes Ferrous, and the settings, queue changes, and Last.fm scrobbles "
-                + "that could not be saved are lost.")
-        }
+    Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        text: I18n.i18nc("@info", "Retry saves again, for example after freeing disk space. Quit Anyway "
+            + "closes Ferrous, and the settings, queue changes, and Last.fm scrobbles "
+            + "that could not be saved are lost.")
     }
 }
