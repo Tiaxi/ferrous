@@ -19,12 +19,13 @@ import "../logic/WheelUtils.js" as WheelUtils
 // spectrogram viewer is (UiPalette's mediaPlot): the art on the plot's
 // floor, the details on its strip colour, in the plot's text colours.
 // Over the whole screen, the details are a step larger, read from further
-// away. The details lie over the art and
-// take nothing from its view, so the art keeps its place, zoom and pan.
+// away. While they show, the art fits the space left of their seam, centred
+// there (#373 H8: it stayed centred in the whole view, off-centre in what
+// the details leave of it), and keeps its zoom and pan.
 // During a preview from Replace from iTunes, the details go on with what the
 // preview shows and its buttons, as a dialog's: Back to Results and, for a
-// candidate, Apply. The art then fits the space left of the details,
-// centred there, clear of their seam.
+// candidate, Apply. The art then keeps 24 px clear of the view's edge and
+// of the details' seam.
 Item {
     id: root
 
@@ -74,11 +75,12 @@ Item {
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
-    // The space the art fits in, across: the whole view, or during a
-    // preview the space left of the details' seam, less 24 px on each side.
+    // The space the art fits in, across: the whole view, or while the
+    // details show the space left of their seam, during a preview less 24 px
+    // on each side.
     readonly property real artMargin: root.previewActive && root.infoVisible ? 24 : 0
     readonly property real fitLeft: root.artMargin
-    readonly property real fitWidth: root.artMargin > 0
+    readonly property real fitWidth: root.infoVisible
         ? Math.max(1, infoColumn.x - 1 - 2 * root.artMargin)
         : albumArtViewport.width
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2

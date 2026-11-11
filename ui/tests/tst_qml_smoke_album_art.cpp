@@ -39,8 +39,8 @@ private slots:
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtInfoButtonIsTintedOnlyWhileChecked();
-    void albumArtStaysPutWhenTheDetailsOpen_data();
-    void albumArtStaysPutWhenTheDetailsOpen();
+    void albumArtFitsLeftOfTheDetails_data();
+    void albumArtFitsLeftOfTheDetails();
     void albumArtViewerIsBlackAroundTheArtInALightTheme_data();
     void albumArtViewerIsBlackAroundTheArtInALightTheme();
     void albumArtDetailsAreOnThePlotStripInEitherTheme_data();
@@ -638,9 +638,8 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
         {QStringLiteral("embeddedCover"), false},
     });
 
-    // The art on black, under a 280 px column on the plot's strip colour
-    // behind a 1 px seam that lies over the view's right edge: the art
-    // keeps the whole view.
+    // The art on black, beside a 280 px column on the plot's strip colour
+    // behind a 1 px seam over the view's right edge.
     QQuickItem *floor = itemNamed(surface, QStringLiteral("albumArtFloor"));
     QQuickItem *viewport = itemNamed(surface, QStringLiteral("albumArtViewport"));
     QQuickItem *column = itemNamed(surface, QStringLiteral("albumArtInfoColumn"));
@@ -658,8 +657,9 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(colorOf(backing, "color"), colorOf(plot, "plotStrip"));
     QCOMPARE(qAlpha(colorOf(backing, "color")), 255);
     QCOMPARE(sceneRectOf(viewport), QRectF(0, 0, 1000, 600));
-    // The square art fits the view's height, centred in the whole view,
-    // however the decode request is shaped.
+    // The square art fits the view's height, centred in what the details
+    // leave of the view, left of their seam (#373 H8: it was centred in the
+    // whole view), however the decode request is shaped.
     QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
     QVERIFY(image != nullptr);
     const auto paintedArt = [image]() {
@@ -669,13 +669,14 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
             QPointF((image->width() - painted.width()) / 2, (image->height() - painted.height()) / 2));
         return QRectF(topLeft, painted);
     };
-    QTRY_COMPARE(paintedArt(), QRectF(200, 0, 600, 600));
-    // The details draw over the art's right edge, which runs under them.
+    QTRY_COMPARE(paintedArt(), QRectF(60, 0, 600, 600));
+    QCOMPARE(paintedArt().center().x(), sceneRectOf(seam).left() / 2);
     const QImage shown = window->grabWindow().convertToFormat(QImage::Format_RGB32);
-    QCOMPARE(shown.pixel(700, 590), QColor(Qt::darkCyan).rgb());
+    QCOMPARE(shown.pixel(640, 590), QColor(Qt::darkCyan).rgb());
     QCOMPARE(shown.pixel(760, 590), QColor::fromRgba(colorOf(plot, "plotStrip")).rgb());
-    // Black around the art.
-    QCOMPARE(shown.pixel(100, 300), qRgb(0, 0, 0));
+    // Black around the art, on both sides of it.
+    QCOMPARE(shown.pixel(30, 300), qRgb(0, 0, 0));
+    QCOMPARE(shown.pixel(690, 300), qRgb(0, 0, 0));
 
     // The file's name in semibold, then the rows: label, then value.
     QQuickItem *title = itemNamed(column, QStringLiteral("albumArtInfoTitle"));
@@ -733,7 +734,7 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(title->property("text").toString(), QStringLiteral("Embedded Image"));
     QCOMPARE(visibleTextItems(column, QStringLiteral("Embedded in the track")).size(), 1);
 
-    // Without the details, the art is where it was, and shows whole.
+    // Without the details, the art is centred in the whole view.
     surface->setProperty("infoVisible", false);
     QTRY_VERIFY(!column->isVisible());
     QVERIFY(!seam->isVisible());
@@ -1068,20 +1069,22 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
-void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen_data() {
+void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails_data() {
     QTest::addColumn<int>("viewerMode");
     QTest::newRow("popup") << 0;
     QTest::newRow("whole screen") << 1;
 }
 
-void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
-    // The details lie over the art's right edge: opening or closing them
-    // moves, zooms and pans the art not at all, and the pointer on them
-    // works the details rather than the art beneath.
+void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
+    // While the details show, the art fits what they leave of the view and
+    // is centred there, left of their seam (#373 H8: it kept its place
+    // under them, centred in the whole view), windowed and over the whole
+    // screen; it keeps its zoom. The pointer on the details works them
+    // rather than the art beneath.
     QFETCH(int, viewerMode);
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
-    // Wider than the view, so that the art runs under the details.
+    // Wider than the view, so that it fits the space's width.
     const QString coverPath = savedCover(dir, 1600, 800);
     QVERIFY(!coverPath.isEmpty());
     LibraryTreeModel libraryModel;
@@ -1145,40 +1148,38 @@ void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
             .arg(v.zoom).arg(v.panX).arg(v.panY);
     };
     const QRectF viewRect = sceneRectOf(viewport);
+    QCOMPARE(paintedArt().center().x(), viewRect.center().x());
 
-    // Zoomed and panned by the pointer on the art.
-    const QPointF artPoint = viewRect.center() - QPointF(viewRect.width() / 4, 0);
-    QVERIFY(sendWheel(shownIn, artPoint, QPoint(), QPoint(0, 600)));
-    QVERIFY(surface->property("zoom").toDouble() > 1.0);
-    QTest::mousePress(shownIn, Qt::LeftButton, Qt::NoModifier, artPoint.toPoint());
-    QTest::mouseMove(shownIn, (artPoint + QPointF(40, 30)).toPoint());
-    QTest::mouseMove(shownIn, (artPoint + QPointF(80, 60)).toPoint());
-    QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, (artPoint + QPointF(80, 60)).toPoint());
-    QVERIFY(surface->property("panX").toDouble() != 0.0 || surface->property("panY").toDouble() != 0.0);
-    const View before = view();
-
-    // I shows the details over the view's right edge: the art stays put.
+    // I shows the details over the view's right edge: the art fits left of
+    // their seam, centred there.
     QTest::keyClick(shownIn, Qt::Key_I);
     QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
     QTRY_VERIFY(column->isVisible() && seam->isVisible());
-    QVERIFY2(sameView(view(), before), qPrintable(describe(view()) + QStringLiteral(" / ")
-                                                   + describe(before)));
     QCOMPARE(sceneRectOf(viewport), viewRect);
     const QRectF columnRect = sceneRectOf(column);
+    const QRectF seamRect = sceneRectOf(seam);
     QCOMPARE(columnRect.right(), viewRect.right());
     QCOMPARE(columnRect.top(), viewRect.top());
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
+    QCOMPARE(seamRect.right(), columnRect.left());
     // 280 px with its seam, 320 px over the whole screen.
     QCOMPARE(columnRect.width(), viewerMode == 1 ? 319.0 : 279.0);
-    QVERIFY(paintedArt().right() > columnRect.right());
-    // The column draws over the art, on its own backing, and the art beside
-    // it still shows.
+    const QRectF left(viewRect.left(), viewRect.top(), seamRect.left() - viewRect.left(), viewRect.height());
+    QTRY_VERIFY2(qAbs(paintedArt().center().x() - left.center().x()) < 0.5,
+                 qPrintable(describe(view()) + QStringLiteral(" / %1").arg(left.center().x())));
+    QVERIFY2(qAbs(paintedArt().center().y() - left.center().y()) < 0.5, qPrintable(describe(view())));
+    // The wide art fits the space's width, and runs under neither the seam
+    // nor the details.
+    QVERIFY2(qAbs(paintedArt().width() - left.width()) < 0.5, qPrintable(describe(view())));
+    QVERIFY(paintedArt().right() <= seamRect.left() + 0.5);
+    QCOMPARE(surface->property("zoom").toDouble(), 1.0);
+    // The column draws on its own backing, and the art beside it shows.
     const QImage shown = shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);
     const qreal dpr = shown.devicePixelRatio();
     const auto pixelAt = [&shown, dpr](QPointF point) {
         return shown.pixel(int(point.x() * dpr), int(point.y() * dpr));
     };
-    // Low in the art that shows, below the details' text.
+    // Low in the art, below the details' text.
     const QRectF artShown = paintedArt().intersected(viewRect);
     QVERIFY2(artShown.bottom() - 8 > columnRect.top() + columnRect.height() / 2,
              qPrintable(QStringLiteral("%1").arg(artShown.bottom())));
@@ -1187,7 +1188,19 @@ void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
     QVERIFY(plot != nullptr);
     QCOMPARE(pixelAt(QPointF(columnRect.center().x(), sampleY)),
              QColor::fromRgba(colorOf(plot, "plotStrip")).rgb());
-    QCOMPARE(pixelAt(QPointF(columnRect.left() - 40, sampleY)), QColor(Qt::darkCyan).rgb());
+    QCOMPARE(pixelAt(QPointF(seamRect.left() - 40, sampleY)), QColor(Qt::darkCyan).rgb());
+
+    // Zoomed and panned by the pointer on the art.
+    const QPointF artPoint = left.center() - QPointF(left.width() / 4, 0);
+    QVERIFY(sendWheel(shownIn, artPoint, QPoint(), QPoint(0, 600)));
+    const double zoom = surface->property("zoom").toDouble();
+    QVERIFY(zoom > 1.0);
+    QTest::mousePress(shownIn, Qt::LeftButton, Qt::NoModifier, artPoint.toPoint());
+    QTest::mouseMove(shownIn, (artPoint + QPointF(40, 30)).toPoint());
+    QTest::mouseMove(shownIn, (artPoint + QPointF(80, 60)).toPoint());
+    QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, (artPoint + QPointF(80, 60)).toPoint());
+    QVERIFY(surface->property("panX").toDouble() != 0.0 || surface->property("panY").toDouble() != 0.0);
+    const View before = view();
 
     // The wheel, a drag, a double-click and the context button on the
     // details neither zoom nor pan the art, nor close the viewer.
@@ -1201,7 +1214,7 @@ void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
     QTest::mouseRelease(shownIn, Qt::LeftButton, Qt::NoModifier, onColumn + QPoint(-120, -80));
     QTest::mouseDClick(shownIn, Qt::LeftButton, Qt::NoModifier, onColumn);
     // The seam is the details' too.
-    const QPoint onSeam = sceneRectOf(seam).center().toPoint();
+    const QPoint onSeam = seamRect.center().toPoint();
     QTest::mouseDClick(shownIn, Qt::LeftButton, Qt::NoModifier, onSeam);
     sendWheel(shownIn, onSeam, QPoint(), QPoint(0, 360));
     QTest::mouseClick(shownIn, Qt::RightButton, Qt::NoModifier, onColumn);
@@ -1212,13 +1225,15 @@ void AlbumArtSmokeTest::albumArtStaysPutWhenTheDetailsOpen() {
     QVERIFY(viewer->property("albumArtViewerOpen").toBool());
     QVERIFY(viewer->property("albumArtInfoVisible").toBool());
 
-    // Closing them again leaves the art as it was.
+    // Closing them again keeps the zoom, in the whole view again.
     QTest::keyClick(shownIn, Qt::Key_I);
     QTRY_VERIFY(!viewer->property("albumArtInfoVisible").toBool());
     QTRY_VERIFY(!column->isVisible());
-    QVERIFY2(sameView(view(), before), qPrintable(describe(view()) + QStringLiteral(" / ")
-                                                   + describe(before)));
+    QCOMPARE(surface->property("zoom").toDouble(), zoom);
     QCOMPARE(sceneRectOf(viewport), viewRect);
+    // Fitted again, it is centred in the whole view.
+    QVERIFY(QMetaObject::invokeMethod(surface, "resetView"));
+    QTRY_VERIFY2(qAbs(paintedArt().center().x() - viewRect.center().x()) < 0.5, qPrintable(describe(view())));
 
     QTest::keyClick(shownIn, Qt::Key_Escape);
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
