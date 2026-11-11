@@ -51,6 +51,8 @@ Rectangle {
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own buttons, before Close.
     default property alias viewerControls: controls.viewerControls
+    // Whether the pointer is on the strip, which counts as on the view.
+    readonly property bool hovered: stripHover.hovered
     // Whether keyboard focus is on one of the strip's buttons, which keeps
     // the viewer's controls shown.
     readonly property bool focusInside: {
@@ -107,6 +109,7 @@ Rectangle {
     }
 
     HoverHandler {
+        id: stripHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

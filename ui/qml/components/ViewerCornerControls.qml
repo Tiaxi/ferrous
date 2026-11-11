@@ -45,7 +45,11 @@ Item {
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Viewer")
 
+    // Whether the pointer is on the plate, which counts as on the view.
+    readonly property bool hovered: cornerHover.hovered
+
     HoverHandler {
+        id: cornerHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

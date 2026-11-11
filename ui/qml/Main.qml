@@ -1769,7 +1769,7 @@ ApplicationWindow {
                 ? spectrogramSurface.laneLabels : waveformSurface.laneLabels
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
-            paneHovered: visualizationHover.hovered
+            paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
             analysing: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown

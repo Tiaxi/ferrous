@@ -62,6 +62,12 @@ Item {
             && root.stripEnabled
         ? root.fullscreenWindow.strip.implicitHeight : 0
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    // Whether the pointer is on the viewer's own controls, the corner plate
+    // in the window or the title strip over the whole screen: that counts as
+    // on the view, so the plot's mode switch stays.
+    readonly property bool controlsHovered: root.wholeScreenOpen
+        ? (root.fullscreenWindow !== null && root.fullscreenWindow.strip.hovered)
+        : (root.viewerOpen && popupControls.hovered)
     // The controls as they fade: 1 shown, 0 hidden. Everything that hides
     // with them takes it, the strip, the corner controls, the mode switch,
     // the lanes' buttons and what the plot draws for the pointer.

@@ -26,6 +26,7 @@ private slots:
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenStripHidesWhatTheViewDrawsUnderIt();
+    void viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls();
     void fullscreenViewersGiveTheViewTheWholeScreen();
     void viewerStripHoldsItsTextAtALargeFont_data();
     void viewerStripHoldsItsTextAtALargeFont();
@@ -1827,6 +1828,71 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
         // Below it, the line shows.
         QCOMPARE(pixel(x, 33 + 20).name(), QStringLiteral("#ff00ff"));
         line.reset();
+        QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+        QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+    }
+}
+
+// The pointer on the viewer's own controls is on the view (#373 H5: in the
+// viewer in the window, the mode switch went as the pointer reached the
+// corner plate beside it): the switch stays, in the window on the corner
+// plate and its Close, and over the whole screen on the title strip.
+void TransportInputSmokeTest::viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && layer != nullptr);
+    QQuickItem *modeSwitch = itemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    setPlayingTrack(bridge);
+    for (const int fullscreenMode : {0, 1}) {
+        const QByteArray where = fullscreenMode == 1 ? "over the whole screen" : "in the window";
+        bridge->setProperty("viewerFullscreenMode", fullscreenMode);
+        QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+        QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+        QQuickWindow *host = window;
+        QQuickItem *controls = nullptr;
+        QList<QQuickItem *> spots;
+        if (fullscreenMode == 1) {
+            host = viewerWindowNamed(engine, QStringLiteral("spectrogramFullscreenWindow"));
+            QVERIFY(host != nullptr);
+            QVERIFY(QTest::qWaitForWindowActive(host));
+            controls = visibleItemNamed(host, QStringLiteral("spectrogramFullscreenStrip"));
+            QVERIFY(controls != nullptr);
+            spots = {controls, itemNamed(controls, QStringLiteral("spectrogramFullscreenCloseButton"))};
+        } else {
+            QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+            QTRY_VERIFY(popup->property("opened").toBool());
+            controls = visibleItemNamed(window, QStringLiteral("spectrogramPopupControls"));
+            QVERIFY(controls != nullptr);
+            spots = {itemNamed(controls, QStringLiteral("spectrogramPopupCloseButton"))};
+        }
+        QTRY_COMPARE(layer->window(), host);
+        // The pointer on the view reveals the switch.
+        QTest::mouseMove(host, QPoint(host->width() / 2, host->height() / 2));
+        QTRY_COMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
+        for (QQuickItem *spot : spots) {
+            QVERIFY2(spot != nullptr, where.constData());
+            const QPoint at = fullscreenMode == 1 && spot == controls
+                ? QPoint(host->width() / 2, int(controls->height() / 2))
+                : centerInWindow(spot);
+            QTest::mouseMove(host, at);
+            QTRY_VERIFY2(controls->property("hovered").toBool(), where.constData());
+            // Longer than the switch's fade: it stays revealed.
+            QTest::qWait(300);
+            QVERIFY2(modeSwitch->property("revealed").toBool(), where.constData());
+            QCOMPARE(modeSwitch->property("revealLevel").toDouble(), 1.0);
+            QVERIFY(modeSwitch->isVisible());
+        }
+        // Off the view and its controls, it goes.
+        QTest::mouseMove(host, QPoint(-20, -20));
+        QTRY_VERIFY2(!modeSwitch->property("revealed").toBool(), where.constData());
         QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
         QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
         window->requestActivate();
