@@ -15,7 +15,13 @@ import "../logic/ColorUtils.js" as ColorUtils
 // album row shows its thumbnail after the chevron and its year at the right
 // end; a track row shows its playing or warning glyph in its album's chevron
 // column, its number under the album's thumbnail and its title where the
-// album's name starts.
+// album's name starts. A library folder's row is a folder header: a folder
+// glyph where an album has its thumbnail, its name semibold, and its track
+// count at the right end.
+//
+// What is playing is amber: the playing track's row, its glyph and its
+// title; a collapsed row that holds it, its name alone, with no glyph, so
+// that nothing on it reads as a play button (#373 H5).
 Rectangle {
     id: root
 
@@ -46,14 +52,21 @@ Rectangle {
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
-    // The mark of a collapsed row that holds the playing track: the queue's
-    // amber state glyph, smaller and quieter, just after the row's name,
-    // so it reads as the name's and never as a second chevron. Rows that
-    // can hold the track keep its place after the name's room, so a long
-    // name elides the same whether it shows or not, and nothing moves as
-    // playback starts or stops.
-    readonly property int nowMarkSize: root.uiPalette.scaledSize(10)
-    readonly property int nowMarkGap: root.chevronGap
+    // A library folder's glyph, in the thumbnail's column.
+    readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
+
+    // Each library folder's track count, by its path.
+    readonly property var rootTrackCounts: {
+        const counts = {}
+        const entries = root.uiBridge.libraryRootEntries || []
+        for (let i = 0; i < entries.length; ++i) {
+            const path = String(entries[i].path || "")
+            if (path.length > 0) {
+                counts[path] = Number(entries[i].trackCount) || 0
+            }
+        }
+        return counts
+    }
 
     // The playing track, and what the playback is doing with it.
     readonly property string currentTrackPath: root.uiBridge.currentTrackPath || ""
@@ -282,6 +295,7 @@ Rectangle {
                     readonly property bool isAlbumRow: rowTypeResolved === "album"
                     readonly property bool isSectionRow: rowTypeResolved === "section"
                     readonly property bool isTrackRow: rowTypeResolved === "track"
+                    readonly property bool isRootRow: rowTypeResolved === "root"
                     readonly property bool hasChildren: !isTrackRow && (count || 0) > 0
                     readonly property bool isExpanded: !!expanded
                     readonly property string selectionKeyResolved: selectionKey || ""
@@ -303,6 +317,9 @@ Rectangle {
                         : (title || name || artist || "")
                     readonly property bool showsThumbnail: isAlbumRow
                         || (isSectionRow && (coverPath || "") !== "")
+                    // A library folder's tracks, which its header counts.
+                    readonly property int rootTrackCount: isRootRow
+                        ? (root.rootTrackCounts[openPathResolved] || 0) : 0
                     readonly property bool albumCoverInViewport: showsThumbnail
                         && (y + height >= libraryAlbumView.contentY - 48)
                         && (y <= libraryAlbumView.contentY + libraryAlbumView.height + 48)
@@ -336,7 +353,8 @@ Rectangle {
                     readonly property string unreadableReason: isTrackRow && root.errorController
                         ? (root.errorController.unreadablePaths[trackPathResolved] || "")
                         : ""
-                    // A collapsed row that holds the playing track.
+                    // A collapsed row that holds the playing track: its
+                    // name is amber, quieter while the playback is paused.
                     readonly property bool holdsNow: hasChildren && !isExpanded
                         && root.playbackState !== "Stopped"
                         && root.currentTrackTreeKeys.indexOf(key || "") >= 0
@@ -376,13 +394,10 @@ Rectangle {
                     // The right end of the row's text: clear of the
                     // scrollbar lane, and the inset.
                     readonly property real textEnd: width - Kirigami.Units.largeSpacing - root.rowInset
-                    // The room a row that can hold the playing track keeps
-                    // after its name for the mark.
-                    readonly property real markRoom: hasChildren ? root.nowMarkGap + root.nowMarkSize : 0
                     readonly property real titleX: isTrackRow
                         ? stateX + root.chevronSize + root.chevronGap + root.thumbnailSize + root.thumbnailGap
                         : chevronX + root.chevronSize + root.chevronGap
-                            + (showsThumbnail ? root.thumbnailSize + root.thumbnailGap : 0)
+                            + (showsThumbnail || isRootRow ? root.thumbnailSize + root.thumbnailGap : 0)
 
                     function actionRowMap() {
                         return {
@@ -496,30 +511,19 @@ Rectangle {
                         opacity: libraryRow.amberLeft
                     }
 
-                    // A collapsed row that holds the playing track, playing
-                    // or paused: the state glyph just after the name's
-                    // visible text, its elided text when it is long,
-                    // vertically centred, in the room the name keeps for
-                    // it. It fades out with the amber after a track change.
+                    // A library folder: the folder glyph in the thumbnail's
+                    // column, centred in it.
                     Kirigami.Icon {
-                        objectName: "libraryRowNowMark"
-                        readonly property real level: libraryRow.holdsNow
-                            ? 1 : (libraryRow.isTrackRow ? 0 : libraryRow.amberLeft)
-                        visible: level > 0
-                        x: Math.round(rowTitleText.x + Math.min(rowTitleText.contentWidth, rowTitleText.width)
-                            + root.nowMarkGap)
+                        objectName: "libraryRowFolderGlyph"
+                        visible: libraryRow.isRootRow
+                        x: Math.round(libraryRow.chevronX + root.chevronSize + root.chevronGap
+                            + (root.thumbnailSize - width) / 2)
                         y: Math.round((libraryRow.height - height) / 2)
-                        width: root.nowMarkSize
-                        height: root.nowMarkSize
-                        source: !visible
-                            ? ""
-                            : (libraryRow.holdsNow
-                                ? (root.playbackState === "Paused"
-                                    ? "media-playback-pause" : "media-playback-start")
-                                : treeNowFade.target.glyph)
+                        width: root.folderGlyphSize
+                        height: root.folderGlyphSize
+                        source: visible ? "folder" : ""
                         isMask: true
-                        color: root.uiPalette.now
-                        opacity: root.uiPalette.nowMarkOpacity * level
+                        color: root.uiPalette.textSecondary
                     }
 
                     Kirigami.ShadowedImage {
@@ -559,10 +563,9 @@ Rectangle {
                         id: rowTitleText
                         objectName: "libraryRowTitle"
                         x: libraryRow.titleX
-                        // Up to the year, or the text's end, less the
-                        // mark's room on a row that can hold it.
-                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0)
-                            - libraryRow.markRoom)
+                        // Up to the year or the track count, or the
+                        // text's end.
+                        width: Math.max(0, yearText.x - x - (yearText.shown ? root.thumbnailGap : 0))
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
                         elide: Text.ElideRight
@@ -575,23 +578,32 @@ Rectangle {
                         // The title's share of amber, which sets its weight
                         // and its colour together, so the two change in the
                         // same frame: semibold while it is mostly amber. A
-                        // collapsed row's title is never amber.
-                        readonly property real amber: libraryRow.isNow
-                            ? 1 : (libraryRow.isTrackRow ? libraryRow.amberLeft : 0)
-                        font.weight: amber >= 0.5 ? Font.DemiBold : Font.Normal
+                        // library folder's name is always semibold.
+                        readonly property real amber: libraryRow.isNow || libraryRow.holdsNow
+                            ? 1 : libraryRow.amberLeft
+                        // The amber of a collapsed row that holds the
+                        // playing track while it is paused: quieter, yet
+                        // still 4.5:1 on the row (UiPalette.nowPausedOpacity).
+                        readonly property color nowColor: libraryRow.holdsNow && root.playbackState === "Paused"
+                            ? ColorUtils.withAlpha(root.uiPalette.now, root.uiPalette.nowPausedOpacity)
+                            : root.uiPalette.now
+                        font.weight: amber >= 0.5 || libraryRow.isRootRow ? Font.DemiBold : Font.Normal
                         color: amber >= 1
-                            ? root.uiPalette.now
-                            : (amber > 0 ? ColorUtils.mixColor(plainColor, root.uiPalette.now, amber) : plainColor)
+                            ? nowColor
+                            : (amber > 0 ? ColorUtils.mixColor(plainColor, nowColor, amber) : plainColor)
                     }
 
+                    // An album's year, or a library folder's track count.
                     Text {
                         id: yearText
-                        objectName: "libraryRowYear"
+                        objectName: libraryRow.isRootRow ? "libraryRowCount" : "libraryRowYear"
                         // From the row's data, not from `visible`, which
                         // also follows the row's own visibility. A row
                         // without a year has no text, so its width is 0
                         // and the title reaches the right end.
-                        readonly property bool shown: libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
+                        readonly property bool shown: libraryRow.isRootRow
+                            ? libraryRow.rootTrackCount > 0
+                            : libraryRow.yearResolved > 0 && !libraryRow.isTrackRow
                         visible: shown
                         // At the text's right end. The width is the
                         // implicit one: binding it again relays out the
@@ -600,7 +612,12 @@ Rectangle {
                         x: libraryRow.textEnd - implicitWidth
                         height: libraryRow.height
                         verticalAlignment: Text.AlignVCenter
-                        text: shown ? String(libraryRow.yearResolved) : ""
+                        text: !shown
+                            ? ""
+                            : (libraryRow.isRootRow
+                                ? I18n.i18ncp("@info library folder's track count", "%1 track", "%1 tracks",
+                                              libraryRow.rootTrackCount)
+                                : String(libraryRow.yearResolved))
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
                         font.features: root.uiPalette.tabularFigures

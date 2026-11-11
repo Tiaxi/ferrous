@@ -486,16 +486,17 @@ void UiFoundationsTest::tokensMeetTheirContrast() {
                  qPrintable(describe(pair.what, pair.foreground, pair.background)));
     }
 
-    // The quiet amber mark of a collapsed tree row is at least 60% and
-    // 3:1 on every background a row can have.
-    const double markOpacity = tokens->property("nowMarkOpacity").toDouble();
-    QVERIFY2(markOpacity >= 0.6 && markOpacity <= 1.0, qPrintable(QString::number(markOpacity)));
+    // The paused amber name of a collapsed tree row that holds the playing
+    // track is at least 70% and 4.5:1 on every background a row can have,
+    // as the queue's amber title is (#373 H5).
+    const double pausedOpacity = tokens->property("nowPausedOpacity").toDouble();
+    QVERIFY2(pausedOpacity >= 0.7 && pausedOpacity <= 1.0, qPrintable(QString::number(pausedOpacity)));
     for (const QColor &background : {view, hovered, selection, selectionInactive}) {
-        QColor mark = colorOf(tokens, "now");
-        mark.setAlphaF(static_cast<float>(markOpacity));
-        const QColor drawn = drawnOver(mark, background);
-        QVERIFY2(contrastRatio(drawn, background) >= 3.0,
-                 qPrintable(describe(QStringLiteral("the tree's amber mark"), drawn, background)));
+        QColor name = colorOf(tokens, "now");
+        name.setAlphaF(static_cast<float>(pausedOpacity));
+        const QColor drawn = drawnOver(name, background);
+        QVERIFY2(contrastRatio(drawn, background) >= 4.5,
+                 qPrintable(describe(QStringLiteral("the tree's paused amber name"), drawn, background)));
     }
 
     // A hovered row stands out from the view at 1.3:1, yet is nearer to it

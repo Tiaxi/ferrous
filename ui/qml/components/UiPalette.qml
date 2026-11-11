@@ -83,21 +83,23 @@ QtObject {
     // The seek bar's waveform. #b9e1f5 / #2c566c.
     readonly property color wave: ColorUtils.mixColor(root.text, root.accent, 0.35)
     // Fixed: the spectrogram colour map's amber. It marks only what is
-    // playing: the playing row's glyph and title, the playing tree row and
-    // the seek playhead. The light one is darkened to be 4.5:1 on a hovered
-    // row as well. #f2b035 / #905200.
+    // playing: the playing row's glyph and title, the playing tree row, the
+    // name of a collapsed tree row that holds it, and the seek playhead.
+    // The light one is darkened to be 4.5:1 on a hovered row as well.
+    // #f2b035 / #905200.
     readonly property color now: root.themeIsDark
         ? "#f2b035"
         : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection], 4.5)
     readonly property color _nowLight: "#955500"
-    // The opacity of a quiet amber mark, as of a collapsed tree row that
-    // holds the playing track: 60%, or more where that is under 3:1 on a
-    // row's background, plain, hovered or selected.
-    readonly property real nowMarkOpacity: {
+    // The opacity of the amber name of a collapsed tree row that holds the
+    // playing track while it is paused: 70%, or more where that is under
+    // 4.5:1 on a row's background, plain, hovered or selected, so the name
+    // stays as readable as the queue's amber title.
+    readonly property real nowPausedOpacity: {
         const backgrounds = [root.view, root.hoveredRow, root.selection, root.selectionInactive]
-        let opacity = 0.6
+        let opacity = 0.7
         for (let i = 0; i < backgrounds.length; ++i) {
-            opacity = Math.max(opacity, ColorUtils.opacityForContrast(root.now, backgrounds[i], 0.6, 3))
+            opacity = Math.max(opacity, ColorUtils.opacityForContrast(root.now, backgrounds[i], 0.7, 4.5))
         }
         return opacity
     }

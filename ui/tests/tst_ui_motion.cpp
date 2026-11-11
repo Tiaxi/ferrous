@@ -1223,37 +1223,41 @@ void UiMotionTest::treeTrackChangeHandsTheAmberOver() {
     QVERIFY(colorOf(first.title) != nowHex(window));
     QCOMPARE(weightOf(first), QFont::Normal);
 
-    // Album B is collapsed and holds the next track; then Album A plays
-    // again, and Album B's mark fades out. A collapsed row shows no glyph
-    // in its chevron column.
+    // Album B is collapsed and holds the next track: its name is amber,
+    // with no glyph on the row (#373 H5). Then Album A plays again, and
+    // Album B's name fades back, its weight with its colour, as a track
+    // row's does.
     QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
     QVERIFY(albumB != nullptr);
     playTreeTrack(bridge, kTrackB1, kAlbumBKey);
     const RowLook album = libraryRowLook(albumB);
-    QQuickItem *albumMark = itemNamed(albumB, QStringLiteral("libraryRowNowMark"));
-    QVERIFY(albumMark != nullptr);
-    QVERIFY(albumMark->isVisible());
-    // The mark is quieter than the amber text; it fades from there.
-    const qreal markOpacity =
-        qvariant_cast<QObject *>(window->property("uiPalette"))->property("nowMarkOpacity").toReal();
-    QVERIFY(markOpacity >= 0.6 && markOpacity < 1.0);
-    QCOMPARE(albumMark->opacity(), markOpacity);
+    QVERIFY(itemNamed(albumB, QStringLiteral("libraryRowNowMark")) == nullptr);
+    QCOMPARE(colorOf(album.title), nowHex(window));
+    QCOMPARE(weightOf(album), QFont::DemiBold);
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
     playTreeTrack(bridge, kTrackA1, kAlbumAKey);
-    QVERIFY(albumMark->isVisible());
-    QCOMPARE(albumMark->opacity(), markOpacity);
-    QCOMPARE(colorOf(albumMark), nowHex(window));
+    QVERIFY(animationOf(fade)->property("running").toBool());
+    QCOMPARE(colorOf(album.title), nowHex(window));
     QVERIFY(!album.glyph->isVisible());
     QVERIFY(!album.fadingGlyph->isVisible());
-    // Its title is never amber.
-    QVERIFY(colorOf(album.title) != nowHex(window));
     QCOMPARE(colorOf(libraryRowLook(libraryRowWithPath(window, kTrackA1)).title), nowHex(window));
+    QQuickItem *albumTitle = album.title;
+    weightMismatches = 0;
+    bool faded = false;
     QVERIFY(QTest::qWaitFor([&]() {
-        return albumMark->opacity() < markOpacity || !albumMark->isVisible();
+        if (!animationOf(fade)->property("running").toBool()) {
+            return true;
+        }
+        const qreal amber = albumTitle->property("amber").toReal();
+        faded = faded || (amber > 0 && amber < 1);
+        weightMismatches += (weightOf(album) == QFont::DemiBold) == (amber >= 0.5) ? 0 : 1;
+        return false;
     }));
-    QVERIFY(QTest::qWaitFor([&]() { return !animationOf(fade)->property("running").toBool(); }));
-    QVERIFY(!albumMark->isVisible());
+    QVERIFY(faded);
+    QCOMPARE(weightMismatches, 0);
+    QVERIFY(colorOf(album.title) != nowHex(window));
+    QCOMPARE(weightOf(album), QFont::Normal);
 }
 
 // The tree reuses its rows: a row that comes back for another track never
