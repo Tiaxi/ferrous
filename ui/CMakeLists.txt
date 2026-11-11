@@ -199,6 +199,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/RegionHeader.qml
         qml/components/RowBackground.qml
         qml/components/ScrobbleIndicator.qml
+        qml/components/TextToolButton.qml
         qml/components/UiPalette.qml
         qml/components/ViewerControls.qml
         qml/components/ViewerCornerControls.qml
