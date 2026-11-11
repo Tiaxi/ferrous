@@ -353,6 +353,7 @@ private slots:
     void itunesArtworkUrlRequestsLargestRendition();
     void itunesArtworkUrlRejectsUnexpectedSources_data();
     void itunesArtworkUrlRejectsUnexpectedSources();
+    void itunesArtworkFoundTextIsPlainWords();
     void itunesRectangularArtworkRowUsesNormalizedFileDetails();
     void testMutedChannelsMaskDecoding();
     void currentTrackChannelsExposesDecodedMetadata();
@@ -5684,6 +5685,16 @@ void BridgeClientTest::itunesArtworkUrlRequestsLargestRendition() {
     QFETCH(QString, thumbnail);
     QFETCH(QString, expected);
     QCOMPARE(BridgeClient::itunesArtworkUrl(thumbnail), expected);
+}
+
+// The line over the iTunes suggestions says in plain words when the
+// full-size images come, not "loads on preview/apply" (#373 H6).
+void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
+    QCOMPARE(BridgeClient::itunesArtworkFoundText(1),
+             QStringLiteral("Found 1 suggestion. Its full-size image downloads when you preview or apply it."));
+    QCOMPARE(BridgeClient::itunesArtworkFoundText(5),
+             QStringLiteral("Found 5 suggestions. Each full-size image downloads when you preview or apply it."));
+    QVERIFY(!BridgeClient::itunesArtworkFoundText(5).contains(QLatin1Char('/')));
 }
 
 void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources_data() {

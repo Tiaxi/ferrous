@@ -402,6 +402,16 @@ QVariantMap readImageFileDetails(const QString &path) {
 
 } // namespace
 
+QString BridgeClient::itunesArtworkFoundText(int count) {
+    // Only the small previews are fetched with the results; a full-size
+    // image comes when the user previews or applies it (#373 H6: once
+    // "loads on preview/apply").
+    return i18ncp("@info:status",
+                  "Found %1 suggestion. Its full-size image downloads when you preview or apply it.",
+                  "Found %1 suggestions. Each full-size image downloads when you preview or apply it.",
+                  count);
+}
+
 QString BridgeClient::itunesArtworkUrl(const QString &artworkUrl100) {
     // Apple's image CDN no longer serves the original uploads
     // (a5.mzstatic.com/us/r1000/... answers 403) and rejects renditions over
@@ -3842,11 +3852,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
 
         m_itunesArtworkResults = rows;
         m_itunesArtworkLoading = false;
-        m_itunesArtworkStatusText =
-            i18ncp("@info:status",
-                   "Found %1 suggestion. High-resolution artwork loads on preview/apply.",
-                   "Found %1 suggestions. High-resolution artwork loads on preview/apply.",
-                   rows.size());
+        m_itunesArtworkStatusText = itunesArtworkFoundText(static_cast<int>(rows.size()));
         emit itunesArtworkChanged();
     };
 
