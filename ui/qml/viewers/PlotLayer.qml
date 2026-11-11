@@ -340,10 +340,8 @@ Item {
         colorMapFill: root.visualizationMode === 0
         dbRange: root.uiBridge.dbRange || 132
         scaleShown: root.visualizationMode === 0 && root.uiBridge.showSpectrogramScale === true
-        // Out of the lane the queue's scrollbar takes above the pane, in
-        // the main window, and in the viewers alike: the plot's floor
-        // right of the meter is that lane's width.
-        edgeGap: Kirigami.Units.largeSpacing
+        // Out to the pane's edge, in the main window and in the viewers
+        // alike: its bar is far wider than the queue's scrollbar above it.
     }
 
     // Each lane's column, for its tooltip and for assistive technology:

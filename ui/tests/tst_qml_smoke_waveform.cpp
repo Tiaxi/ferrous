@@ -590,15 +590,14 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
     const double originalHeight = spectrogram->height();
     bridge->setProperty("showLevelMeter", true);
     QTRY_VERIFY(meter->isVisible());
-    // A column at the right end of the lanes, as tall as the pane: the
-    // seam, the track and the plot's floor out of the queue scrollbar's
-    // lane.
-    const double column = LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth
-        + meter->edgeGap();
-    QVERIFY(column > LevelMeterItem::kColumnWidth);
+    // A column at the right end of the lanes, as tall as the pane, out to
+    // its edge, which is the window's (#373 H8: no strip of the plot's
+    // floor beside it).
+    const double column = LevelMeterItem::kColumnWidth;
     QCOMPARE(meter->width(), column);
     QCOMPARE(meter->height(), surface->height());
     QCOMPARE(meter->mapToItem(surface, QPointF()).x(), surface->width() - column);
+    QCOMPARE(meter->mapToScene(QPointF(meter->width(), 0)).x(), double(meter->window()->width()));
     QCOMPARE(spectrogram->height(), originalHeight);
     QCOMPARE(spectrogram->property("plotWidth").toReal(), surface->width() - column);
     QCOMPARE(waveform->property("plotWidth").toReal(), surface->width() - column);
@@ -716,6 +715,11 @@ void WaveformSmokeTest::levelMeterKeepsVisualizationHeightAndFollowsModes() {
                 QTRY_COMPARE(spectrogram->property("plotWidth").toReal(),
                              surface->width() - (enabled ? column : 0.0));
                 QCOMPARE(meter->sourcePath().isEmpty(), !enabled);
+                if (enabled) {
+                    // Out to the viewer's edge, with no gap.
+                    QTRY_COMPARE(meter->mapToScene(QPointF(meter->width(), 0)).x(),
+                                 double(meter->window()->width()));
+                }
             }
             controller->setProperty("spectrogramViewerOpen", false);
             QTRY_COMPARE(surface->parentItem(), originalParent);

@@ -294,14 +294,6 @@ void LevelMeterItem::setScaleShown(bool value) {
     update();
 }
 
-void LevelMeterItem::setEdgeGap(double value) {
-    value = std::isfinite(value) ? std::max(0.0, value) : kDefaultEdgeGap;
-    if (m_edgeGap == value) return;
-    m_edgeGap = value;
-    setImplicitWidth(kTrackLeft + kTrackWidth + m_edgeGap);
-    emit edgeGapChanged();
-    update();
-}
 
 void LevelMeterItem::setReadoutWanted(bool value) {
     if (m_readoutWanted == value) return;
