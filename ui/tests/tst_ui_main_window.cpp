@@ -415,6 +415,7 @@ private slots:
     void collapsedRowNameElidesBeforeTheYear();
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
+    void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
@@ -1807,10 +1808,12 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QQuickItem *tint = itemNamed(album, QStringLiteral("rowBackgroundTint"));
     QQuickItem *hover = itemNamed(album, QStringLiteral("rowBackgroundHover"));
     QVERIFY(tint && hover);
-    // The rows leave the 8 px scrollbar lane free; the scrollbar shows only
-    // when the tree is longer than the view.
-    QCOMPARE(tint->width(), album->width() - 8);
+    // The tints run to the pane's right edge (#373 H6: they stopped 8 px
+    // short of it); the scrollbar shows only when the tree is longer than
+    // the view.
+    QCOMPARE(tint->width(), album->width());
     QCOMPARE(tint->mapToItem(album, QPointF()).x(), 0.0);
+    QCOMPARE(sceneRect(album).right(), sceneRect(view).right());
     QQuickItem *scrollBar = named(window, "libraryScrollBar");
     QVERIFY(scrollBar != nullptr);
     QVERIFY(!scrollBar->isVisible());
@@ -1851,6 +1854,59 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// The queue's selection tint runs to the pane's right edge, with no
+// scrollbar and with one, whose thumb draws over it (#373 H6: the tints
+// stopped 8 px short of the edge).
+void UiMainWindowTest::queueRowTintsRunToThePaneEdgeUnderTheScrollBar() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView != nullptr && queue != nullptr);
+    QQuickItem *scrollBar = nullptr;
+    for (QQuickItem *child : queueView->childItems()) {
+        if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))) {
+            scrollBar = child;
+        }
+    }
+    QVERIFY(scrollBar != nullptr);
+    for (const int count : {3, 80}) {
+        bridge->setProperty("queueRows", sampleQueueRows(count));
+        bridge->setProperty("queueLength", count);
+        QTRY_COMPARE(queueView->property("count").toInt(), count);
+        QTRY_COMPARE(scrollBar->isVisible(), count > 3);
+        QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
+        QQuickItem *row = nullptr;
+        // The second row, beside the thumb, which starts a little below the
+        // first row's middle.
+        QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr && rowTinted(queueView, 1));
+        QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+        QCOMPARE(sceneRect(tint).right(), sceneRect(queueView).right());
+        const QColor tintColor = tint->property("color").value<QColor>();
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / qreal(window->width());
+        const QPointF middle(0, sceneRect(row).center().y());
+        const auto pixel = [&](qreal x) {
+            return image.pixelColor(int(std::floor(x * scale)), int(std::floor(middle.y() * scale)));
+        };
+        const qreal right = sceneRect(queueView).right();
+        const auto sameAsTint = [&](const QColor &color) {
+            return std::abs(color.red() - tintColor.red()) <= 2 && std::abs(color.green() - tintColor.green()) <= 2
+                && std::abs(color.blue() - tintColor.blue()) <= 2;
+        };
+        // The tint in the scrollbar's lane, at the edge.
+        QVERIFY2(sameAsTint(pixel(right - 0.5)),
+                 qPrintable(QStringLiteral("%1 at the edge, tint %2").arg(pixel(right - 0.5).name(), tintColor.name())));
+        QVERIFY2(sameAsTint(pixel(right - 16)), qPrintable(pixel(right - 16).name()));
+        // The thumb, 4 px wide, 2 px from the edge, over the tint.
+        QCOMPARE(!sameAsTint(pixel(right - 4)), count > 3);
+    }
 }
 
 // Tab into the library or the queue with no row selected: a row it shows

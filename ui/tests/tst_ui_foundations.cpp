@@ -719,10 +719,14 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
     QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
     QVERIFY(hoverTint != nullptr && tintRect != nullptr);
 
-    // The row leaves the 8 px scrollbar lane free.
+    // The row's tints run to its right edge, under an overlay scrollbar
+    // (#373 H6); a list whose scrollbar takes a lane leaves it free.
     QCOMPARE(background->x(), 0.0);
-    QCOMPARE(background->width(), row->width() - 8.0);
+    QCOMPARE(background->width(), row->width());
     QCOMPARE(background->height(), row->height());
+    background->setProperty("scrollbarLane", 8);
+    QCOMPARE(background->width(), row->width() - 8.0);
+    background->setProperty("scrollbarLane", 0);
 
     background->setProperty("hovered", hovered);
     background->setProperty("selected", selected);
@@ -747,7 +751,7 @@ void UiFoundationsTest::rowBackgroundShowsEachState() {
 }
 
 // The focused, selected row draws its 1 px ring on the edge of its tint,
-// and nothing in the scrollbar lane.
+// and nothing beyond the row.
 void UiFoundationsTest::rowBackgroundDrawsTheRingAndTintAsOneRectangle() {
     QQmlEngine engine;
     QString errorText;
@@ -786,7 +790,7 @@ void UiFoundationsTest::rowBackgroundDrawsTheRingAndTintAsOneRectangle() {
     expectPixel(QPointF(topLeft.x() + width - 0.5, middle), ring, "the ring's right edge");
     expectPixel(QPointF(topLeft.x() + width / 2, topLeft.y() + 0.5), ring, "the ring's top edge");
     expectPixel(QPointF(topLeft.x() + 1.5 * scale, middle), selection, "the tint inside the ring");
-    expectPixel(QPointF(topLeft.x() + width + 4 * scale, middle), view, "the scrollbar lane");
+    expectPixel(QPointF(topLeft.x() + width + 4 * scale, middle), view, "beyond the row");
 }
 
 void UiFoundationsTest::regionHeaderLaysOutNameTotalsAndHairline() {

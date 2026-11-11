@@ -4,8 +4,10 @@ import QtQuick 2.15
 import org.kde.kirigami 2.20 as Kirigami
 
 // The background of a list row, shared by the library tree and the queue.
-// Put it first in a row delegate, which it fills except for the scrollbar
-// lane on the right: rows never cover the scrollbar.
+// Put it first in a row delegate, which it fills to the list's right edge,
+// so a tint ends where the pane does, with a scrollbar or without; the
+// list's overlay scrollbar draws its thumb over it (#373 H6). A list whose
+// scrollbar is not an overlay leaves its lane with scrollbarLane.
 //
 // - hovered: the hover tint, which fades in and out;
 // - selected: the selection tint, or the inactive one while the list has
@@ -29,8 +31,9 @@ Item {
     property bool active: true
     property bool focused: false
     property bool opaque: false
-    // The scrollbar lane on the right, which the row leaves free.
-    property real scrollbarLane: Kirigami.Units.largeSpacing
+    // The room on the right the row leaves free, for a scrollbar that
+    // takes a lane of its own.
+    property real scrollbarLane: 0
 
     readonly property color tintColor: root.selected
         ? (root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive)
