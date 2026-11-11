@@ -3209,7 +3209,9 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
 
 // Expanding a row opens its children downward: the toggled row stays put,
 // the rows below slide down from where they were over shortDuration with
-// OutCubic. Collapsing slides them back up.
+// OutCubic, as the children fade in. Collapsing is the same played back,
+// on the same duration and curve (#373 H7: the expand was instant beside
+// the collapse's fade).
 void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey});
@@ -3224,8 +3226,9 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     auto *open = qvariant_cast<QObject *>(view->property("openAnimation"));
     auto *close = qvariant_cast<QObject *>(view->property("closeAnimation"));
     auto *closeFade = qvariant_cast<QObject *>(view->property("closeFadeAnimation"));
-    QVERIFY(open != nullptr && close != nullptr && closeFade != nullptr);
-    for (QObject *animation : {open, close, closeFade}) {
+    auto *openFade = qvariant_cast<QObject *>(view->property("openFadeAnimation"));
+    QVERIFY(open != nullptr && close != nullptr && closeFade != nullptr && openFade != nullptr);
+    for (QObject *animation : {open, close, closeFade, openFade}) {
         QCOMPARE(animation->property("duration").toInt(), units->shortDuration());
         QCOMPARE(easingOf(animation), QEasingCurve::OutCubic);
     }
@@ -3249,22 +3252,32 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
-    // Half-way, it is on its way down, still over the children.
+    QCOMPARE(firstChild->opacity(), 0.0);
+    // Half-way, it is on its way down, still over the children, which
+    // fade in.
     QVERIFY(driver.step(duration / 2));
     QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    QVERIFY2(firstChild->opacity() > 0.0 && firstChild->opacity() < 1.0,
+             qPrintable(QString::number(firstChild->opacity())));
     QVERIFY(albumB->z() > firstChild->z());
     QCOMPARE(albumA->y(), albumAY);
     QVERIFY(driver.step(duration));
     QCOMPARE(albumB->y(), 4 * rowHeight);
     QCOMPARE(albumB->z(), 1.0);
+    QCOMPARE(firstChild->opacity(), 1.0);
 
-    // Collapsing: Album B slides back up over the children as they fade.
+    // Collapsing: Album B slides back up over the children as they fade,
+    // the expand played back.
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
+    QCOMPARE(firstChild->opacity(), 1.0);
+    // Half-way, on its way up over the children, which fade out.
     QVERIFY(driver.step(duration / 2));
     QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
+    QVERIFY2(firstChild->opacity() > 0.0 && firstChild->opacity() < 1.0,
+             qPrintable(QString::number(firstChild->opacity())));
     QVERIFY(driver.step(duration));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
@@ -3432,6 +3445,14 @@ void UiMotionTest::animationsOffMakeEveryChangeInstant() {
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(rowsSettled(tree, tree->property("count").toInt()));
+    // And open again: the children whole at once, as the collapse left
+    // nothing to fade.
+    QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
+    QCOMPARE(albumB->y(), 4 * rowHeight);
+    QVERIFY(rowsSettled(tree, tree->property("count").toInt()));
+    QQuickItem *child = libraryRowWithPath(window, kTrackA1);
+    QVERIFY(child != nullptr);
+    QCOMPARE(child->opacity(), 1.0);
 }
 
 // Once a change is done, nothing runs: no animation, no frame.
@@ -3943,12 +3964,14 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen_data() {
 
 // The visualization mode switch (#373 Motion; H1: a black frame on the way
 // back to the spectrogram): in every frame, a plot that has its data shows
-// whole. The chosen plot comes in over the one before, which stays whole
-// under it until the chosen one can draw: the spectrogram, hidden, gives its
-// columns up, and shown again waits for a fresh session's. Then it fades in
-// over shortDuration on OutCubic, as one picture, and the plot before goes.
-// With animations off it shows at once once it can draw, with no blank
-// frame.
+// whole. The chosen plot fades in over the one before, which stays whole
+// under it, over shortDuration on OutCubic, as one picture, and the plot
+// before goes. The spectrogram stays live under the waveform, at 0 and
+// taking no input, so that switching back while playing comes in at the
+// click with its whole view drawn (#373 H7: it waited about 250 ms for a
+// fresh session's columns): the first frame after the click shows it, and
+// no frame is darker than both plots. With animations off the chosen plot
+// shows at once, with no blank frame.
 void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     QFETCH(int, displayMode);
     QFETCH(int, channels);
@@ -4064,139 +4087,161 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
         QVERIFY2(failure.isEmpty(), qPrintable(QString::fromLatin1(where) + QStringLiteral(": ") + failure));
     };
 
-    // To the waveform, which has its data: it comes in over the
-    // spectrogram at once, or with animations off replaces it.
-    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-    QVERIFY(waveform->isVisible());
-    QCOMPARE(spectrogram->isVisible(), animated);
-    check("to the waveform");
-    if (animated) {
-        QVERIFY(fade->property("running").toBool());
-        QVERIFY(waveform->z() > spectrogram->z());
-        QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
-        surface->setProperty("modeFade", 0.5);
-        QCOMPARE(waveform->opacity(), 0.5);
-        QCOMPARE(spectrogram->opacity(), 1.0);
-        // One playhead: the incoming waveform's; the spectrogram's went as
-        // the fade started.
-        QVERIFY(waveformItem->property("playheadVisible").toBool());
-        for (SpectrogramItem *pane : panes()) {
-            QVERIFY(!pane->playheadVisible());
-        }
-        // Its floor and its lanes as one picture.
-        QObject *layer = waveform->property("layer").value<QObject *>();
-        QVERIFY(layer != nullptr && layer->property("enabled").toBool());
-        QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
-        QTRY_VERIFY(!spectrogram->isVisible());
-    } else {
-        QVERIFY(!fade->property("running").toBool());
-        QVERIFY(!spectrogram->isVisible());
-    }
-    QCOMPARE(waveform->opacity(), 1.0);
-    check("on the waveform");
-
-    // The spectrogram, hidden, gives its columns up, as BridgeClient has it
-    // do when no pane shows.
-    for (SpectrogramItem *pane : panes()) {
-        pane->releaseStorage();
-    }
-    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
-
-    // Back to the spectrogram: it shows, so that its analysis runs, but at
-    // 0 under the waveform until its columns come.
-    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-    QVERIFY(spectrogram->isVisible());
-    QCOMPARE(spectrogram->opacity(), 0.0);
-    QVERIFY(whole(waveform));
-    QVERIFY(!fade->property("running").toBool());
-    for (SpectrogramItem *pane : panes()) {
-        pane->retainStorage();
-    }
-    const int framesBefore = frames;
-    window->update();
-    QTRY_VERIFY(frames > framesBefore);
-    QTest::qWait(100);
-    check("waiting for the spectrogram");
-    QVERIFY(whole(waveform));
-    QCOMPARE(spectrogram->opacity(), 0.0);
-
-    // Its first columns, short of its view (#373 H6: it came in black and
-    // filled in blocks): centered, the view reaches past the playhead, and
-    // the waveform stays whole under the spectrogram at 0 until the view's
-    // columns are all there. Rolling at the track's start, the view shows
-    // only up to the playhead, which they reach.
-    if (displayMode == 1) {
-        feedColumns(0, 16);
-        QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
-        const int partialFrames = frames;
+    // The time from the click to the first frame that showed the
+    // spectrogram, in ms, or -1.
+    QElapsedTimer sinceClick;
+    qint64 firstShownMs = -1;
+    const QMetaObject::Connection shownConnection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (sinceClick.isValid() && firstShownMs < 0 && spectrogram->isVisible()
+                && spectrogram->opacity() > 0.0) {
+                firstShownMs = sinceClick.elapsed();
+            }
+        });
+    // Waits for `count` more frames.
+    const auto waitFrames = [&](int count) {
+        const int before = frames;
         window->update();
-        QTRY_VERIFY(frames > partialFrames + 2);
-        QVERIFY(!spectrogram->property("viewFilled").toBool());
-        QCOMPARE(spectrogram->opacity(), 0.0);
-        QVERIFY(whole(waveform));
-        QVERIFY(!fade->property("running").toBool());
-        check("the spectrogram's first columns");
-        feedColumns(16, trackColumns - 16);
-    } else {
-        feedColumns(0, trackColumns);
-    }
-    // The view's columns drawn: it comes in over the waveform.
-    QTRY_VERIFY(spectrogram->property("viewFilled").toBool());
-    check("the spectrogram's view");
-    if (animated) {
-        QVERIFY(fade->property("running").toBool());
-        QVERIFY(spectrogram->z() > waveform->z());
-        QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
-        surface->setProperty("modeFade", 0.5);
-        QCOMPARE(spectrogram->opacity(), 0.5);
-        QVERIFY(whole(waveform));
-        QVERIFY(!waveformItem->property("playheadVisible").toBool());
+        return QTest::qWaitFor([&]() {
+            if (frames < before + count) window->update();
+            return frames >= before + count;
+        }, 5000);
+    };
+    // The spectrogram live under the waveform: shown, so that its
+    // analysis runs and each lane draws its view, at 0, and taking no
+    // input; assistive technology skips it.
+    const auto standing = [&]() {
+        bool lanesShown = true;
         for (SpectrogramItem *pane : panes()) {
-            QVERIFY(pane->playheadVisible());
+            lanesShown = lanesShown && pane->isVisible() && !pane->storageReleased();
         }
-        QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
-        QTRY_VERIFY(!waveform->isVisible());
-    } else {
-        QVERIFY(!fade->property("running").toBool());
-        QVERIFY(!waveform->isVisible());
-    }
-    QCOMPARE(spectrogram->opacity(), 1.0);
-    check("on the spectrogram");
-    // Settled, the plot under it draws its playhead again, for the next
-    // switch.
-    QVERIFY(waveformItem->property("playheadVisible").toBool());
+        return spectrogram->isVisible() && spectrogram->opacity() == 0.0 && !spectrogram->isEnabled()
+            && spectrogram->property("standby").toBool() && lanesShown;
+    };
 
-    // Back before the spectrogram can draw: the waveform, which never
-    // left, stays, and the spectrogram goes.
-    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-    if (animated) {
-        QTRY_VERIFY(!spectrogram->isVisible());
+    for (int round = 0; round < 2; ++round) {
+        // To the waveform, which has its data: it comes in over the
+        // spectrogram at once, or with animations off replaces it.
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+        QVERIFY(waveform->isVisible());
+        QVERIFY(spectrogram->isVisible());
+        check("to the waveform");
+        if (animated) {
+            QVERIFY(fade->property("running").toBool());
+            QVERIFY(waveform->z() > spectrogram->z());
+            if (round == 0) {
+                QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
+                surface->setProperty("modeFade", 0.5);
+                QCOMPARE(waveform->opacity(), 0.5);
+                QCOMPARE(spectrogram->opacity(), 1.0);
+                // One playhead: the incoming waveform's; the spectrogram's
+                // went as the fade started.
+                QVERIFY(waveformItem->property("playheadVisible").toBool());
+                for (SpectrogramItem *pane : panes()) {
+                    QVERIFY(!pane->playheadVisible());
+                }
+                // Its floor and its lanes as one picture.
+                QObject *layer = waveform->property("layer").value<QObject *>();
+                QVERIFY(layer != nullptr && layer->property("enabled").toBool());
+                QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+            }
+            QTRY_VERIFY(!fade->property("running").toBool());
+        } else {
+            QVERIFY(!fade->property("running").toBool());
+        }
+        QVERIFY(standing());
+        QCOMPARE(waveform->opacity(), 1.0);
+        check("on the waveform");
+
+        // Playing on, the spectrogram goes on drawing its view under the
+        // waveform: its view is whole when it is chosen.
+        QVERIFY(waitFrames(3));
+        QTRY_VERIFY(spectrogram->property("viewFilled").toBool());
+        QVERIFY(standing());
+        check("the spectrogram under the waveform");
+
+        // Back to the spectrogram: it comes in at the click, whole, with
+        // nothing to wait for: its view is drawn, and the fade starts with
+        // the click.
+        QVERIFY(spectrogram->property("viewFilled").toBool());
+        firstShownMs = -1;
+        sinceClick.start();
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+        QVERIFY(spectrogram->isEnabled());
+        if (animated) {
+            QVERIFY(fade->property("running").toBool());
+            QVERIFY(spectrogram->z() > waveform->z());
+        } else {
+            QVERIFY(!fade->property("running").toBool());
+            QVERIFY(!waveform->isVisible());
+            QCOMPARE(spectrogram->opacity(), 1.0);
+        }
+        window->update();
+        QVERIFY(QTest::qWaitFor([&]() { return firstShownMs >= 0; }, 2000));
+        // Frames, not a session's columns, away (H7: 251 ms): the bound
+        // leaves room for a loaded test machine's software rendering.
+        QVERIFY2(firstShownMs < 125, qPrintable(QStringLiteral("shown %1 ms after the click").arg(firstShownMs)));
+        sinceClick.invalidate();
+        check("the spectrogram's view");
+        if (animated) {
+            if (round == 0) {
+                QVERIFY(QMetaObject::invokeMethod(fade, "pause"));
+                surface->setProperty("modeFade", 0.5);
+                QCOMPARE(spectrogram->opacity(), 0.5);
+                QVERIFY(whole(waveform));
+                QVERIFY(!waveformItem->property("playheadVisible").toBool());
+                for (SpectrogramItem *pane : panes()) {
+                    QVERIFY(pane->playheadVisible());
+                }
+                QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
+            }
+            QTRY_VERIFY(!waveform->isVisible());
+        }
+        QCOMPARE(spectrogram->opacity(), 1.0);
+        QVERIFY(!spectrogram->property("standby").toBool());
+        check("on the spectrogram");
+        // Settled, the plot under it draws its playhead again, for the next
+        // switch.
+        QVERIFY(waveformItem->property("playheadVisible").toBool());
     }
-    for (SpectrogramItem *pane : panes()) {
-        pane->releaseStorage();
-    }
-    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
-    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-    QCOMPARE(spectrogram->opacity(), 0.0);
-    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-    QVERIFY(!spectrogram->isVisible());
-    QVERIFY(whole(waveform));
-    QVERIFY(!fade->property("running").toBool());
-    check("back to the waveform");
 
     QObject::disconnect(connection);
+    QObject::disconnect(shownConnection);
     QVERIFY(frames > 0);
 
-    // Stopped, nothing is waited for: the spectrogram, with no columns,
-    // shows at once.
-    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    // Cold, with no columns yet, as when the pane comes back with the
+    // window and its analysis starts afresh: the spectrogram still comes
+    // in at the click, with what it has, and its columns come in as they
+    // would were it shown.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY(!fade->property("running").toBool());
+    for (SpectrogramItem *pane : panes()) {
+        pane->releaseStorage();
+    }
+    QTRY_VERIFY(spectrogram->property("awaitingData").toBool());
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
-    QVERIFY(spectrogram->isVisible());
     if (animated) {
         QVERIFY(fade->property("running").toBool());
     }
     QTRY_VERIFY(!waveform->isVisible());
     QCOMPARE(spectrogram->opacity(), 1.0);
+    for (SpectrogramItem *pane : panes()) {
+        pane->retainStorage();
+    }
+    feedColumns(0, trackColumns);
+    QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
+
+    // Stopped, nothing is waited for: the waveform, with its overview,
+    // shows at once.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QVERIFY(waveform->isVisible());
+    if (animated) {
+        QVERIFY(fade->property("running").toBool());
+    }
+    QTRY_COMPARE(waveform->opacity(), 1.0);
+    QTRY_VERIFY(spectrogram->property("standby").toBool());
+    QCOMPARE(spectrogram->opacity(), 0.0);
 }
 
 void UiMotionTest::visualizationPaneFloorFollowsTheMode_data() {
@@ -4313,7 +4358,13 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
             QVERIFY(!fade->property("running").toBool());
         }
         QTRY_VERIFY(!surface->property("modeSwitching").toBool());
-        QTRY_VERIFY(!(mode == 1 ? spectrogram : waveform)->isVisible());
+        if (mode == 1) {
+            // The spectrogram stays live under the waveform, at 0.
+            QTRY_COMPARE(spectrogram->opacity(), 0.0);
+            QVERIFY(!spectrogram->isEnabled());
+        } else {
+            QTRY_VERIFY(!waveform->isVisible());
+        }
     };
 
     // Before any audio: the spectrogram's floor, with the mode switch on it.
