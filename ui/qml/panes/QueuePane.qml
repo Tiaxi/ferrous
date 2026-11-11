@@ -318,13 +318,21 @@ Rectangle {
         Math.max(240, columnFontMetrics.averageCharacterWidth * 12)))
     readonly property real minimumOrderColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 6.5)
     // Without Album, and the title at its minimum: with Artist at its
-    // default share of the width, or, where that is wider than
-    // minimumWidthLimit, without Artist, as wide as the limit allows.
+    // default share of the width and Length at its default, or, where that
+    // is wider than minimumWidthLimit, without Artist, as wide as the limit
+    // allows. Without Artist, Length counts at its least width, its heading
+    // or its longest value: in the narrowest queue it gives up the two
+    // characters' room before it, as the resized columns give up theirs,
+    // so that the narrow window at a large font, with the wider sidebar,
+    // keeps the title at its minimum (#373 H6).
     readonly property real minimumTitleOnlyWidth: root.playlistIndicatorColumnWidth
         + root.minimumOrderColumnWidth + root.titleGap + root.minimumTitleColumnWidth
-        + root.columnGap + root.defaultLengthColumnWidth + root.rightPadding
+        + root.columnGap + root.minimumLengthColumnWidth + root.rightPadding
+    readonly property real minimumWithArtistWidth: (root.minimumTitleOnlyWidth
+        - root.minimumLengthColumnWidth + root.defaultLengthColumnWidth)
+        / (1 - root.defaultArtistColumnShare)
     readonly property real minimumContentWidth: Math.ceil(Math.min(
-        root.minimumTitleOnlyWidth / (1 - root.defaultArtistColumnShare),
+        root.minimumWithArtistWidth,
         Math.max(root.minimumTitleOnlyWidth, root.minimumWidthLimit)))
 
     FontMetrics {
