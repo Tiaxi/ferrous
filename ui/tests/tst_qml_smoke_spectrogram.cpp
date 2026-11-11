@@ -24,6 +24,7 @@ private slots:
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramFpsOverlayToggleKeepsSceneNode();
     void spectrogramOverlaysKeepClearOfTheReservedCorner();
+    void crosshairReadoutKeepsItsGapFromTheCornerPlates();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
     void spectrogramPixelToFrequency();
     void spectrogramOverlayBenchmark();
@@ -891,6 +892,41 @@ void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {
         QCOMPARE(!overlay->rect().isEmpty(), shown);
     }
     delete node;
+}
+
+// The crosshair's value keeps 6 px from the plates in the corner (#373 H5:
+// in the first lane of 5.1, it butted against the mode switch), beside them
+// and just below them; further down it is back on the right edge.
+void SpectrogramSmokeTest::crosshairReadoutKeepsItsGapFromTheCornerPlates() {
+    QCOMPARE(ViewCorner::kLabelGap, 6);
+    // A lane 400 px wide and 120 tall; the corner's plates 60 px wide and
+    // 33 tall, with their edges.
+    const int width = 400;
+    const QSizeF corner(60, 33);
+    const int cornerLeft = width - 60;
+    const QSize plate(90, 20);
+    for (const int pointerY : {5, 20, 40, 48, 49, 60}) {
+        const auto [value, time] = CrosshairReadout::plateRects(width, 120, 200, pointerY, plate, QSize(), corner);
+        QVERIFY(!value.isNull());
+        QVERIFY(time.isNull());
+        const QByteArray where = QByteArray::number(pointerY);
+        if (value.top() < 33 + 6) {
+            // Beside the plates, or within 6 px below them: 6 px left of
+            // them.
+            QVERIFY2(value.left() + value.width() + 6 == cornerLeft, where.constData());
+        } else {
+            QVERIFY2(value.left() + value.width() == width - CrosshairReadout::kEdgeMargin, where.constData());
+        }
+    }
+    // On the edge as before where the corner has no plates.
+    const auto [bare, none] = CrosshairReadout::plateRects(width, 120, 200, 5, plate, QSize(), QSizeF());
+    QVERIFY(none.isNull());
+    QCOMPARE(bare.left() + bare.width(), width - CrosshairReadout::kEdgeMargin);
+    // A label already clear of the plates by 6 px stays where it is.
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 6 - 50, 0, 50, 20, width, corner), cornerLeft - 56);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 5 - 50, 0, 50, 20, width, corner), cornerLeft - 56);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 50, 39, 50, 20, width, corner), cornerLeft - 50);
+    QCOMPARE(ViewCorner::labelXClearOfCorner(cornerLeft - 50, 38, 50, 20, width, corner), cornerLeft - 56);
 }
 
 void SpectrogramSmokeTest::spectrogramOverlaysKeepClearOfTheReservedCorner() {

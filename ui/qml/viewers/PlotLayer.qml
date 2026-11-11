@@ -70,13 +70,14 @@ Item {
     readonly property real cutSeconds: root.uiBridge.waveformEndsEarly
         ? root.uiBridge.waveformCoverageSeconds : -1
     // What the mode switch takes of the top right corner, with the gap
-    // beside it and the zoom readout left of it while that shows, for the
-    // plot's own overlays to keep clear of.
+    // beside it and the zoom readout left of it while that shows, and the
+    // plates' 1 px edges outside them, for the plot's own overlays to keep
+    // clear of.
     readonly property size reservedCorner: Qt.size(
         modeSwitch.anchors.rightMargin + modeSwitch.width
-            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0),
+            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0) + 1,
         modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
-                                                zoomPlate.visible ? zoomPlate.height : 0))
+                                                zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }

@@ -50,7 +50,7 @@ Item {
     readonly property size reservedCorner: root.useWholeScreenViewerMode
         ? Qt.size(0, 0)
         : Qt.size(popupControls.width + 4,
-                  popupControls.anchors.topMargin + popupControls.height)
+                  popupControls.anchors.topMargin + popupControls.height + 1)
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole
     // screen, the title strip's height while it can show. They show only
