@@ -388,6 +388,7 @@ private slots:
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void narrowQueueDropsAlbumBeforeTitle();
+    void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
     void firstRunShowsOneMessage();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
@@ -1816,13 +1817,67 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
     QVERIFY(!albumHandle->isVisible());
     QVERIFY(!albumHandle->activeFocusOnTab());
     QVERIFY(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1);
-    // Artist keeps its quarter of the table.
+    // Artist keeps its share of the text columns' room.
     QQuickItem *artist = named(window, "queueHeader_artist");
-    QVERIFY(std::abs(artist->width() + queue->property("columnGap").toReal() - queue->width() / 4) <= 1);
+    QVERIFY(std::abs(artist->width() - queue->property("defaultTextColumnsRoom").toReal()
+                     * queue->property("defaultArtistColumnShare").toReal()) <= 1);
     // Wider, Album comes back.
     window->resize(1600, 1000);
     QTRY_VERIFY(album->isVisible());
     QVERIFY(albumHandle->isVisible());
+}
+
+// The queue's columns at 1600 and 1000 px (#373 H5): Length has a fixed
+// room from the font, about 56 px; of what is left for the text, the
+// title has half, Artist about a quarter and Album a little less, so long
+// titles have the slack rather than a gap after the album. In the 1000 px
+// window Album drops before Artist, and Length keeps its room.
+void UiMainWindowTest::queueColumnsGiveTheirSlackToTheTitle() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *title = named(window, "queueHeader_title");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QQuickItem *album = named(window, "queueHeader_album");
+    QQuickItem *length = named(window, "queueHeader_length");
+    QVERIFY(queue && title && artist && album && length);
+    QTRY_VERIFY(shown(album));
+    QTRY_COMPARE(window->width(), 1600);
+
+    const qreal lengthWidth = queue->property("defaultLengthColumnWidth").toReal();
+    QVERIFY2(lengthWidth >= 48 && lengthWidth <= 64, qPrintable(QString::number(lengthWidth)));
+    QCOMPARE(length->width(), lengthWidth);
+    QVERIFY(lengthWidth >= queue->property("minimumLengthColumnWidth").toReal());
+    const qreal gap = queue->property("columnGap").toReal();
+    const qreal room = queue->width() - queue->property("reservedColumnsWidth").toReal() - 2 * gap;
+    const QString widths = QStringLiteral("title %1, artist %2, album %3, length %4 of %5 (room %6)")
+        .arg(title->width()).arg(artist->width()).arg(album->width()).arg(length->width())
+        .arg(queue->width()).arg(room);
+    QVERIFY2(std::abs(artist->width() - 0.26 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(album->width() - 0.24 * room) <= 1, qPrintable(widths));
+    QVERIFY2(std::abs(title->width() - 0.5 * room) <= 2, qPrintable(widths));
+    QVERIFY2(title->width() > artist->width() + album->width() - 2, qPrintable(widths));
+    // Album ends a gap before Length, which ends at the queue's inset.
+    QVERIFY2(std::abs(sceneRect(length).left() - sceneRect(album).right() - gap) <= 1, qPrintable(widths));
+
+    // 1000 px: Album drops, Artist and Length stay, and the title has the
+    // rest: more than its minimum.
+    window->resize(1000, 720);
+    QTRY_COMPARE(window->width(), 1000);
+    QTRY_VERIFY2(!shown(album), qPrintable(QStringLiteral("queue %1, room %2, reserved %3, title %4, artist %5, album %6")
+        .arg(queue->width()).arg(queue->property("defaultTextColumnsRoom").toReal())
+        .arg(queue->property("reservedColumnsWidth").toReal()).arg(title->width()).arg(artist->width()).arg(album->width())));
+    QVERIFY(shown(artist) && shown(length));
+    QCOMPARE(length->width(), lengthWidth);
+    QVERIFY2(title->width() >= queue->property("minimumTitleColumnWidth").toReal() - 1,
+             qPrintable(QString::number(title->width())));
+    QVERIFY2(title->width() > artist->width(), qPrintable(QString::number(title->width())));
+    QVERIFY(sceneRect(length).right() <= sceneRect(queue).right() + 0.5);
 }
 
 // A narrow window at a large font, 1000 x 720 at 24 pt: the window's
