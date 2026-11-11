@@ -564,6 +564,8 @@ private slots:
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
+    void queueKeepsArtistAtALargeFont_data();
+    void queueKeepsArtistAtALargeFont();
     void visualizationTakesNearlyHalfTheRightColumn_data();
     void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
@@ -2506,11 +2508,13 @@ void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
                          / (1 - minimumShare)) < 0.01);
     // Artist has what the title's minimum leaves, about a quarter of the
     // text columns' room: the share the window's minimum width is counted
-    // with, under its default.
+    // with, under its default, or sixteen characters where the title gives
+    // them way (#373 H8).
     QQuickItem *artist = named(window, "queueHeader_artist");
     const qreal textRoom = queue->property("defaultTextColumnsRoom").toReal();
     QVERIFY2(artist->width() >= textRoom * queue->property("minimumArtistColumnShare").toReal() - 1
-                 && artist->width() <= textRoom * queue->property("defaultArtistColumnShare").toReal() + 1,
+                 && artist->width() <= std::max(textRoom * queue->property("defaultArtistColumnShare").toReal(),
+                                                queue->property("minimumArtistColumnWidth").toReal()) + 1,
              qPrintable(QStringLiteral("artist %1 of %2").arg(artist->width()).arg(textRoom)));
     // Wider, Album comes back.
     window->resize(1600, 1000);
@@ -2661,6 +2665,98 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     const qreal panesMinimum = named(window, "sidebarPane")->property("minimumWidth").toReal()
         + queue->property("minimumContentWidth").toReal() + 1;
     QCOMPARE(window->minimumWidth(), static_cast<int>(std::ceil(panesMinimum)));
+}
+
+void UiMainWindowTest::queueKeepsArtistAtALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font, 1600 by 1000") << 0.0 << 1600 << 1000;
+    QTest::newRow("default font, 1000 by 720") << 0.0 << 1000 << 720;
+    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000;
+    QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
+}
+
+// Artist has at least sixteen characters of the font by default where the
+// title, given way down to its minimum, leaves them (#373 H8: at 24 pt in
+// 1600 px it was cut to eleven beside a title column twice as wide as its
+// titles). With the default font Artist's share is wider, and stays.
+// In 1000 px at 24 pt the title at its minimum leaves Artist less than the
+// least it is shown at, so Artist drops there and the title keeps its
+// minimum.
+void UiMainWindowTest::queueKeepsArtistAtALargeFont() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal() >= 20, pointSize > 0);
+    QObject *bridge = bridgeOf(window);
+    QVariantList rows = sampleQueueRows(20);
+    const QString artistName = QStringLiteral("The Quiet Meridian");
+    for (QVariant &row : rows) {
+        QVariantMap map = row.toMap();
+        map.insert(QStringLiteral("artist"), artistName);
+        row = map;
+    }
+    bridge->setProperty("queueRows", rows);
+    bridge->setProperty("queueLength", rows.size());
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *title = named(window, "queueHeader_title");
+    QQuickItem *artist = named(window, "queueHeader_artist");
+    QVERIFY(queue && title && artist);
+    window->resize(windowWidth, windowHeight);
+    QTRY_COMPARE(window->width(), windowWidth);
+    QTRY_VERIFY(sceneRect(queue).right() <= windowWidth + 0.5 && sceneRect(queue).right() >= windowWidth - 1);
+    QTRY_VERIFY(sceneRect(named(window, "sidebarPane")).right() + 1 >= sceneRect(queue).left() - 0.5);
+    const QFont font = paletteOf(window)->property("baseFont").value<QFont>();
+    const qreal minimum = std::ceil(QFontMetricsF(font).averageCharWidth() * 16);
+    QTRY_COMPARE(queue->property("minimumArtistColumnWidth").toReal(), minimum);
+    const qreal titleMinimum = queue->property("minimumTitleColumnWidth").toReal();
+    const qreal gap = queue->property("columnGap").toReal();
+    const qreal reserved = queue->property("reservedColumnsWidth").toReal();
+    const QString widths = QStringLiteral("queue %1, title %2 (least %3), artist %4 (least %5)")
+        .arg(queue->width()).arg(title->width()).arg(titleMinimum).arg(artist->width()).arg(minimum);
+    const bool roomForArtist = queue->width() - reserved - titleMinimum - gap
+        >= queue->property("minimumShownTextColumnWidth").toReal();
+    if (pointSize > 0 && windowWidth == 1000) {
+        // 24 pt in 1000 px: no room beside the title's minimum.
+        QVERIFY2(!roomForArtist, qPrintable(widths));
+        QTRY_VERIFY2(!shown(artist), qPrintable(widths));
+        QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(widths));
+        return;
+    }
+    QVERIFY2(roomForArtist, qPrintable(widths));
+    QTRY_VERIFY2(shown(artist), qPrintable(widths));
+    QTRY_VERIFY2(artist->width() >= minimum - 1, qPrintable(widths));
+    QVERIFY2(title->width() >= titleMinimum - 1, qPrintable(widths));
+    if (pointSize > 0) {
+        // The title gave way, and the name shows whole.
+        QVERIFY2(artist->width() > queue->property("defaultTextColumnsRoom").toReal()
+                     * queue->property("defaultArtistColumnShare").toReal() + 1,
+                 qPrintable(widths));
+        QQuickItem *view = named(window, "playlistView");
+        QTRY_VERIFY(viewRowAt(view, 0) != nullptr);
+        QQuickItem *cell = itemNamed(viewRowAt(view, 0), QStringLiteral("queueCell_artist"));
+        QVERIFY(shown(cell));
+        QTRY_COMPARE(cell->property("text").toString(), artistName);
+        QVERIFY2(!cell->property("truncated").toBool(), qPrintable(widths));
+    } else {
+        // With the default font, its share, as before.
+        QVERIFY2(std::abs(artist->width() - queue->property("defaultTextColumnsRoom").toReal()
+                                                * queue->property("defaultArtistColumnShare").toReal())
+                     <= 1,
+                 qPrintable(widths));
+    }
 }
 
 void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn_data() {

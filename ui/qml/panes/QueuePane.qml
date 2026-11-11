@@ -72,7 +72,23 @@ Rectangle {
     // have their room first and the gaps before Artist and Album.
     readonly property real defaultTextColumnsRoom: Math.max(0,
         root.width - root.reservedColumnsWidth - 2 * root.columnGap)
-    readonly property real defaultArtistColumnWidth: root.defaultTextColumnWidth(root.defaultArtistColumnShare)
+    // Artist by default: its share, or, where that is narrower, as with a
+    // large font, minimumArtistColumnWidth, which the title gives way to
+    // as far as its own minimum (#373 H8: at 24 pt Artist showed eleven
+    // characters of a name beside a title column twice as wide as its
+    // titles).
+    readonly property real defaultArtistColumnWidth: Math.max(
+        root.defaultTextColumnWidth(root.defaultArtistColumnShare),
+        Math.min(root.minimumArtistColumnWidth, root.artistRoomAtTitleMinimum))
+    // The width Artist takes from the title before Artist's share: sixteen
+    // characters of the font, as many as most artists' names have; under
+    // its share with the default font but in the narrowest windows.
+    readonly property real minimumArtistColumnWidth: Math.ceil(columnFontMetrics.averageCharacterWidth * 16)
+    // What the title leaves Artist at the title's minimum, with Album and
+    // Length at their defaults.
+    readonly property real artistRoomAtTitleMinimum: Math.floor(root.width - root.reservedColumnsWidth
+        - root.minimumTitleColumnWidth - root.columnGap
+        - (root.albumColumnVisible ? root.columnGap + root.defaultAlbumColumnWidth : 0))
     readonly property real defaultAlbumColumnWidth: root.defaultTextColumnWidth(root.defaultAlbumColumnShare)
     // Length: its longest value and two characters' room before it, apart
     // from the album; about 56 px at the default font.
