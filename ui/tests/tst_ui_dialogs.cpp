@@ -10,6 +10,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
+#include <QFontInfo>
+#include <QFontMetricsF>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -498,6 +500,7 @@ private slots:
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
     void recentIssuesHeaderHoldsItsTitleAtLargeFonts();
+    void recentIssuesActionsAreInTheTextFont();
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
@@ -2114,15 +2117,90 @@ void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
         .arg(sceneRect(title).top()).arg(sceneRect(title).bottom())
         .arg(sceneRect(clear).top()).arg(sceneRect(clear).bottom()).arg(sceneRect(category).top());
     QVERIFY2(title->height() >= 40, qPrintable(where));
-    // The title and Clear All inside the header, 4 px clear of its edges,
-    // and the first issue below it.
-    for (QQuickItem *item : {title, clear}) {
-        QVERIFY2(sceneRect(item).top() >= sceneRect(header).top() + 4 - 0.5
-                     && sceneRect(item).bottom() <= sceneRect(header).bottom() - 4 + 0.5,
-                 qPrintable(where));
-    }
+    // The title inside the header, 4 px clear of its edges, Clear All,
+    // whose caption has its own 4 px, inside it, and the first issue below.
+    QVERIFY2(sceneRect(title).top() >= sceneRect(header).top() + 4 - 0.5
+                 && sceneRect(title).bottom() <= sceneRect(header).bottom() - 4 + 0.5,
+             qPrintable(where));
+    QVERIFY2(sceneRect(clear).top() >= sceneRect(header).top() - 0.5
+                 && sceneRect(clear).bottom() <= sceneRect(header).bottom() + 0.5,
+             qPrintable(where));
     QVERIFY2(sceneRect(title).bottom() <= sceneRect(category).top() + 0.5, qPrintable(where));
     QVERIFY2(!sceneRect(title).intersects(sceneRect(category)), qPrintable(where));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
+}
+
+// Clear All and Open Diagnostics… are drawn in the font of the text
+// around them. The style draws a ToolButton's caption in the application's
+// QToolButton font, KDE's toolbar font, whatever the button's own font:
+// at 24 pt they stayed at 10 pt beside the 24 pt title (#373 H10). A 10 pt
+// QToolButton font stands in for the toolbar font here. Their captions are
+// their own labels, in the text's font, and each button is as wide as its
+// icon and caption in that font need. The header stays 32 px with the
+// default font (recentIssuesIsAPopupAboveTheStatusBar).
+void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
+    const QFont applicationFont = QGuiApplication::font();
+    // QApplication's setFont() without a class drops the class fonts.
+    const auto restoreFont = qScopeGuard([&] { QApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    QFont toolbar = applicationFont;
+    toolbar.setPointSizeF(10);
+    QApplication::setFont(toolbar, "QToolButton");
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
+    QVERIFY(title != nullptr);
+    const int textPixels = QFontInfo(title->property("font").value<QFont>()).pixelSize();
+    QVERIFY2(textPixels >= 30, qPrintable(QString::number(textPixels)));
+    for (const QString &name : {QStringLiteral("errorHistoryClearButton"),
+                                QStringLiteral("errorHistoryDiagnosticsButton")}) {
+        QQuickItem *button = visibleNamed(window, name);
+        QVERIFY2(button != nullptr, qPrintable(name));
+        const QList<QQuickItem *> captions = itemsNamed(button, QStringLiteral("textToolButtonCaption"));
+        QVERIFY2(captions.size() == 1 && captions.first()->isVisible(), qPrintable(name));
+        QQuickItem *caption = captions.first();
+        const QFont captionFont = caption->property("font").value<QFont>();
+        const QString text = button->property("text").toString();
+        const qreal captionWidth = QFontMetricsF(captionFont).horizontalAdvance(text);
+        const QString where = QStringLiteral("%1: caption %2 px, text %3 px; button %4 wide (implicit %5), "
+                                             "caption %6 wide")
+            .arg(name).arg(QFontInfo(captionFont).pixelSize()).arg(textPixels).arg(button->width())
+            .arg(button->implicitWidth()).arg(captionWidth);
+        QCOMPARE(caption->property("text").toString(), text);
+        QVERIFY2(qAbs(QFontInfo(captionFont).pixelSize() - textPixels) <= 1, qPrintable(where));
+        QVERIFY2(button->implicitWidth() >= captionWidth, qPrintable(where));
+        QVERIFY2(!caption->property("truncated").toBool(), qPrintable(where));
+        QVERIFY2(sceneRect(button).contains(sceneRect(caption).adjusted(0.5, 0.5, -0.5, -0.5)), qPrintable(where));
+        // Still a flat tool button, with its caption and no other.
+        QVERIFY(button->property("flat").toBool());
+        QCOMPARE(button->property("display").toInt(), 1 /* AbstractButton.TextOnly */);
+    }
+    // The popup is wide enough for the header's line, Clear All inside it.
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    const qreal popupRight = popup->property("x").toReal() + popup->property("width").toReal();
+    QQuickItem *clearAll = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QVERIFY2(sceneRect(clearAll).right() <= popupRight - 6 + 0.5,
+             qPrintable(QStringLiteral("Clear All ends at %1, the popup at %2").arg(sceneRect(clearAll).right())
+                            .arg(popupRight)));
+    QVERIFY2(sceneRect(visibleNamed(window, QStringLiteral("errorHistoryNewCount"))).right()
+                 <= sceneRect(clearAll).left() + 0.5,
+             "the new count runs into Clear All");
+    // Open Diagnostics… keeps its icon, beside its caption.
+    QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
+    const QList<QQuickItem *> icons = itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon"));
+    QVERIFY(icons.size() == 1 && icons.first()->isVisible());
+    QCOMPARE(icons.first()->property("source").toString(), QStringLiteral("help-about"));
+    QVERIFY(sceneRect(icons.first()).right()
+            <= sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first()).left());
+    QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QVERIFY(!itemsNamed(clear, QStringLiteral("textToolButtonIcon")).first()->isVisible());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }

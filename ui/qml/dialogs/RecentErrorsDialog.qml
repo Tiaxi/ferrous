@@ -152,7 +152,11 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    width: Math.min(460, root.hostWidth - 2 * root.edgeMargin)
+    // 460 px, or as wide as the header needs at a larger font, which puts
+    // its title, how many are new and Clear All on one line (#373 H10).
+    width: Math.min(Math.max(460, Math.ceil(errorHistoryHeader.implicitWidth
+            + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
+        root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
     x: Math.round(root.hostWidth - root.width - root.edgeMargin)
     y: Math.round(root.hostHeight - root.height - root.statusBarClearance)
@@ -243,14 +247,15 @@ Popup {
         }
 
         RowLayout {
+            id: errorHistoryHeader
             objectName: "errorHistoryHeader"
             Layout.fillWidth: true
-            // 32 px with the default font, and as tall as the title and
-            // Clear All need with 4 px above and below at a larger one: at
-            // 24 pt, the title ran into the first issue (#373 H10).
+            // 32 px with the default font, and at a larger one as tall as
+            // the title with 4 px above and below, and Clear All: at 24 pt,
+            // the title ran into the first issue (#373 H10).
             Layout.preferredHeight: Math.max(Kirigami.Units.gridUnit + 2 * Kirigami.Units.smallSpacing + 6,
-                Math.ceil(Math.max(errorHistoryTitle.implicitHeight, errorHistoryClearButton.implicitHeight))
-                    + 2 * Kirigami.Units.smallSpacing)
+                Math.ceil(errorHistoryTitle.implicitHeight) + 2 * Kirigami.Units.smallSpacing,
+                Math.ceil(errorHistoryClearButton.implicitHeight))
             Layout.leftMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
             Layout.rightMargin: Kirigami.Units.smallSpacing + 2
             spacing: Kirigami.Units.largeSpacing
@@ -275,7 +280,7 @@ Popup {
 
             Item { Layout.fillWidth: true }
 
-            ToolButton {
+            Components.TextToolButton {
                 id: errorHistoryClearButton
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
@@ -505,7 +510,7 @@ Popup {
                 root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
         }
 
-        ToolButton {
+        Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
             Layout.leftMargin: Kirigami.Units.smallSpacing + 2
