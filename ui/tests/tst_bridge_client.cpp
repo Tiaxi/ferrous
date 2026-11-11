@@ -268,6 +268,7 @@ private slots:
     void tagEditorReportsFailuresAsAProperty();
     void tagEditorKeepsExtraValuesUntilTheirFieldIsSaved();
     void tagEditorSelectionIsAModelRole();
+    void tagEditorTellsWhetherARowHasAnError();
     void tagEditorEditsOfManyRowsAnnounceOnce();
     void tagEditorTellsMixedValuesApartFromText();
     void tagEditorRenameKeepsRowsInPlace();
@@ -1378,6 +1379,43 @@ void BridgeClientTest::tagEditorKeepsExtraValuesUntilTheirFieldIsSaved() {
     QVERIFY(editor.m_tableModel.rowAt(0)->extraValues.contains(QStringLiteral("genre")));
     editor.setCell(0, QStringLiteral("artist"), QStringLiteral("A"));
     QVERIFY(!extras().contains(QStringLiteral("artist")));
+}
+
+// The table's Status column takes room only while a row has a status, so
+// the editor tells whether a row holds an error of a failed save or rename,
+// and when that changes (#373 H7).
+void BridgeClientTest::tagEditorTellsWhetherARowHasAnError() {
+    TagEditorController editor(nullptr);
+    QVERIFY(loadTagEditorRows(editor, tagEditorRows(3, 3)));
+    TagEditorTableModel &model = editor.m_tableModel;
+    QSignalSpy changes(&editor, &TagEditorController::rowErrorsChanged);
+    QVERIFY(!editor.hasRowErrors());
+    const QString first = model.rowAt(0)->path;
+    const QString second = model.rowAt(1)->path;
+
+    model.applySaveResults({{first, QStringLiteral("refused")}, {second, QStringLiteral("refused")}}, {});
+    QVERIFY(editor.hasRowErrors());
+    QCOMPARE(changes.size(), 1);
+    // An edit clears its row's error; the other row still has one.
+    editor.setCell(0, QStringLiteral("title"), QStringLiteral("Edited"));
+    QVERIFY(editor.hasRowErrors());
+    QCOMPARE(changes.size(), 1);
+    editor.setCell(1, QStringLiteral("title"), QStringLiteral("Edited"));
+    QVERIFY(!editor.hasRowErrors());
+    QCOMPARE(changes.size(), 2);
+
+    model.applyRenameResults({}, {{second, QStringLiteral("exists")}});
+    QVERIFY(editor.hasRowErrors());
+    QCOMPARE(changes.size(), 3);
+    model.clearErrors();
+    QVERIFY(!editor.hasRowErrors());
+    QCOMPARE(changes.size(), 4);
+
+    model.applySaveResults({{first, QStringLiteral("refused")}}, {});
+    QCOMPARE(changes.size(), 5);
+    editor.close();
+    QVERIFY(!editor.hasRowErrors());
+    QCOMPARE(changes.size(), 6);
 }
 
 void BridgeClientTest::tagEditorSelectionIsAModelRole() {
@@ -5695,6 +5733,11 @@ void BridgeClientTest::itunesArtworkFoundTextIsPlainWords() {
     QCOMPARE(BridgeClient::itunesArtworkFoundText(5),
              QStringLiteral("Found 5 suggestions. Each full-size image downloads when you preview or apply it."));
     QVERIFY(!BridgeClient::itunesArtworkFoundText(5).contains(QLatin1Char('/')));
+    // So does each suggestion's line before its image has come (#373 H7),
+    // with a one-character ellipsis while it downloads.
+    QCOMPARE(BridgeClient::itunesArtworkPendingDetailsText(),
+             QStringLiteral("Its size and format show once you preview or apply it."));
+    QCOMPARE(BridgeClient::itunesArtworkLoadingDetailsText(), QStringLiteral("Loading high-resolution artwork\u2026"));
 }
 
 void BridgeClientTest::itunesArtworkUrlRejectsUnexpectedSources_data() {

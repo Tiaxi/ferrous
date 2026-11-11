@@ -653,8 +653,10 @@ Components.DialogWindow {
             }
 
             // Searching, or nothing found: what the search says, centred in
-            // the frame, as Kirigami's placeholder message shows it, with a
-            // busy indicator while it searches. Built from its parts:
+            // the frame, with a busy indicator while it searches, or a 32 px
+            // search glyph once it found nothing. Quieter than Kirigami's
+            // placeholder message, in the base font: finding nothing is a
+            // routine outcome (#373 H7). Built from its parts:
             // Kirigami.PlaceholderMessage's selectable text brings Copy and
             // Select All actions that would take Ctrl+C and Ctrl+A from the
             // Edit menu's.
@@ -662,7 +664,7 @@ Components.DialogWindow {
                 objectName: "itunesArtworkPlaceholder"
                 anchors.centerIn: parent
                 width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 24)
-                spacing: Kirigami.Units.largeSpacing
+                spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 visible: itunesArtworkResultsView.count === 0
                     && (root.uiBridge.itunesArtworkLoading || placeholderMessage.text.length > 0)
 
@@ -676,22 +678,20 @@ Components.DialogWindow {
                 Kirigami.Icon {
                     objectName: "itunesArtworkPlaceholderIcon"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Math.round(Kirigami.Units.iconSizes.huge * 1.5)
+                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
                     Layout.preferredHeight: Layout.preferredWidth
                     visible: !root.uiBridge.itunesArtworkLoading
                     source: "search"
-                    color: root.uiPalette.text
-                    opacity: 0.75
+                    color: root.uiPalette.textSecondary
                 }
 
-                Kirigami.Heading {
+                Label {
                     id: placeholderMessage
                     objectName: "itunesArtworkPlaceholderMessage"
                     Layout.fillWidth: true
                     visible: text.length > 0
                     text: root.uiBridge.itunesArtworkStatusText || ""
-                    type: Kirigami.Heading.Primary
-                    opacity: 0.75
+                    color: root.uiPalette.textSecondary
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
                 }

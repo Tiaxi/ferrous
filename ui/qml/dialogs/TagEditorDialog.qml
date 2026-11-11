@@ -62,48 +62,59 @@ Components.DialogWindow {
     // scaled with a larger one, or wider when its header or sample needs
     // it. `sample` is the widest value a short column holds whole. Where
     // the view is narrower than they are together, the columns that may
-    // `give` way do, before the table scrolls sideways: first File Name,
-    // Folder and Status, down to their `least` widths, then the tags, down
-    // to four fifths of theirs where that is enough; the numbers and
-    // Format keep theirs. Where
-    // the view is wider, File Name and Folder, which `stretch`, take the
-    // rest. File names and folders elide in the middle, with the whole
-    // name in a tooltip (#373 H6: no sideways scroll bar at 1400 px).
+    // `give` way do, before the table scrolls sideways: first the tags,
+    // down to their `least` widths, then File Name, Folder and Status, down
+    // to theirs, which keep a file name and an album folder readable; the
+    // numbers and Format keep their widths. In a table that scrolls anyway
+    // none gives way. Where the view is wider, File Name and Folder, which
+    // `stretch`, take the rest. Status takes no room until a row has a
+    // status (#373 H7: File Name and Folder give way last).
     readonly property var tableColumns: [
         { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
-        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200, give: 2 },
-        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160, give: 2 },
-        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140, give: 2 },
-        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110, give: 2 },
+        { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 200, give: 1, least: 140 },
+        { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 160, give: 1, least: 110 },
+        { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 140, give: 1, least: 110 },
+        { key: "genre", label: I18n.i18nc("@title:column", "Genre"), width: 110, give: 1, least: 80 },
         { key: "year", label: I18n.i18nc("@title:column", "Year"), width: 56, sample: "0000" },
-        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 48, sample: "00" },
-        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 96, stretch: true, path: true },
+        { key: "discNo", label: I18n.i18nc("@title:column", "Disc"), width: 44, sample: "00" },
+        { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 2, least: 190, stretch: true, path: true },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 64 },
-        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 72, stretch: true, path: true },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 72, sample: root.modifiedText }
+        { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 2, least: 130, stretch: true, path: true },
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 2, least: 0, sample: root.modifiedText, onlyWithStatus: true }
     ]
+    // Whether a row has a status: unsaved edits, or a save or rename that
+    // failed for it.
+    readonly property bool rowStatusShown: root.tagEditorApi.dirty === true
+        || root.tagEditorApi.hasRowErrors === true
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header takes beside its label for the column's
     // Revert, while it shows.
     readonly property real columnRevertRoom: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
     // What a column needs whatever the room: its header whole, semibold and
-    // with its Revert, or its sample value, with the cell's padding, rather
-    // than a header elided to a letter.
+    // with its Revert while a row's value in it is changed, or its sample
+    // value, with the cell's padding, rather than a header elided to a
+    // letter. The narrow columns, as Disc, take the Revert's room only
+    // while they show it, as Status takes its own only with a status.
     function columnNeed(column) {
         const header = columnHeaderMetrics.advanceWidth(column.label)
-            + (root.fieldAt(column.key) !== null ? root.columnRevertRoom : 0)
+            + (root.fieldAt(column.key) !== null && root.summaryRevision >= 0
+                && root.tagEditorApi.fieldChanged(column.key) ? root.columnRevertRoom : 0)
         const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
         return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
     }
-    // Each column's width with room enough.
+    // Each column's width with room enough, or none for Status while no
+    // row has one.
     readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
+        if (column.onlyWithStatus && !root.rowStatusShown) {
+            return 0
+        }
         return Math.max(root.uiPalette.scaledSize(column.width), root.columnNeed(column))
     })
-    // The narrowest each column gives way to.
+    // The narrowest each column gives way to: its least width, or what its
+    // header or sample needs.
     readonly property var tableColumnLeastWidths: root.tableColumns.map(function(column, index) {
         const preferred = root.tableColumnWidths[index]
-        const least = column.give === 1 ? root.uiPalette.scaledSize(column.least)
-            : (column.give === 2 ? Math.round(preferred * 0.8) : preferred)
+        const least = column.give ? root.uiPalette.scaledSize(column.least) : preferred
         return Math.min(preferred, Math.max(least, root.columnNeed(column)))
     })
     // The widths the columns are shown at in the table's width.
@@ -124,17 +135,24 @@ Components.DialogWindow {
             })
             over = 0
         }
-        for (const group of [1, 2]) {
+        const slackOf = function(group) {
             let slack = 0
             root.tableColumns.forEach(function(column, i) {
                 if (column.give === group) {
                     slack += widths[i] - least[i]
                 }
             })
-            // The tags give way only where that spares the scroll bar: in
-            // a table that scrolls anyway, as at a large font, they keep
-            // their widths.
-            if (slack <= 0 || over <= 0 || (group === 2 && slack < over)) {
+            return slack
+        }
+        // The columns give way only where that spares the scroll bar: in a
+        // table that scrolls anyway, as at a large font, they keep their
+        // widths.
+        if (slackOf(1) + slackOf(2) < over) {
+            over = 0
+        }
+        for (const group of [1, 2]) {
+            const slack = slackOf(group)
+            if (slack <= 0 || over <= 0) {
                 continue
             }
             const taken = Math.min(over, slack)
@@ -256,7 +274,8 @@ Components.DialogWindow {
     readonly property real fieldsWidth: Math.max(Kirigami.Units.gridUnit * 19, root.fieldsMinimumWidth)
     // Wide enough for the fields and every column of the table through
     // Format at its width, clear of its scroll bar, within the screen; the
-    // columns that give way make room for Folder and Status.
+    // tags give way to make room for Folder, and for Status once a row has
+    // one, so File Name and Folder keep their widths.
     defaultWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
         + root.tableWidthThrough("formatKind") + Kirigami.Units.gridUnit)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
@@ -1098,6 +1117,8 @@ Components.DialogWindow {
                                 objectName: "tagEditorColumn_" + headerCell.modelData.key
                                 width: root.columnWidth(headerCell.index)
                                 height: parent.height
+                                // Status, while no row has one.
+                                visible: width > 0
 
                                 Row {
                                     anchors.fill: parent
@@ -1212,6 +1233,7 @@ Components.DialogWindow {
                                 objectName: "tagEditorCell_" + modelData.key
                                 width: root.columnWidth(index)
                                 height: parent.height
+                                visible: width > 0
                                 leftPadding: Kirigami.Units.largeSpacing
                                 rightPadding: Kirigami.Units.largeSpacing
                                 text: root.cellText(modelData.key, tableRow)
@@ -1223,10 +1245,12 @@ Components.DialogWindow {
                                         : root.uiPalette.text)
                                 verticalAlignment: Text.AlignVCenter
                                 horizontalAlignment: modelData.number ? Text.AlignRight : Text.AlignLeft
-                                // A file name or folder keeps its start and
-                                // its end, as PathLabel does, with the whole
-                                // in a tooltip while it is cut short.
-                                elide: modelData.path ? Text.ElideMiddle : Text.ElideRight
+                                // A file name or folder keeps its start: the
+                                // track number and title, or the folder's
+                                // year and album, rather than an extension
+                                // that Format shows. The whole is in a
+                                // tooltip while it is cut short.
+                                elide: Text.ElideRight
                                 readonly property string toolTipText: modelData.path && tableCell.truncated
                                     ? (modelData.key === "directory" ? tableRow.directory : tableCell.text) : ""
 

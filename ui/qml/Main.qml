@@ -1156,6 +1156,9 @@ ApplicationWindow {
     Action {
         id: replaceFromItunesAction
         text: I18n.i18nc("@action:inmenu", "Replace from iTunes…")
+        // An icon, as every other menu's items have, so the cover's menu
+        // starts its text where they do.
+        icon.name: "download"
         enabled: viewerController.currentTrackItunesArtworkDisabledReason().length === 0
         onTriggered: root.openItunesArtworkDialog()
     }

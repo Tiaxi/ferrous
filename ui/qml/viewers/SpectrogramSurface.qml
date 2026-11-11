@@ -82,7 +82,7 @@ Item {
     property double _widgetZoomLevel: 0
     property double _viewerZoomLevel: 0
     // The default zoom: 1, or what stretches a track shorter than the view
-    // to the plot's width (Preferences › Appearance).
+    // to the plot's width (Preferences › Visualization).
     readonly property real defaultZoomLevel: {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
         return first && first.spectrogramItem ? first.spectrogramItem.defaultZoomLevel : 1.0

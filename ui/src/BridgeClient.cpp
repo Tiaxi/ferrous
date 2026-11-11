@@ -412,6 +412,15 @@ QString BridgeClient::itunesArtworkFoundText(int count) {
                   count);
 }
 
+QString BridgeClient::itunesArtworkPendingDetailsText() {
+    // Not "loads on preview or apply" (#373 H7).
+    return i18nc("@info:status", "Its size and format show once you preview or apply it.");
+}
+
+QString BridgeClient::itunesArtworkLoadingDetailsText() {
+    return i18nc("@info:status", "Loading high-resolution artwork…");
+}
+
 QString BridgeClient::itunesArtworkUrl(const QString &artworkUrl100) {
     // Apple's image CDN no longer serves the original uploads
     // (a5.mzstatic.com/us/r1000/... answers 403) and rejects renditions over
@@ -3696,7 +3705,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     }
 
     m_itunesArtworkLoading = true;
-    m_itunesArtworkStatusText = i18nc("@info:status", "Searching iTunes...");
+    m_itunesArtworkStatusText = i18nc("@info:status", "Searching iTunes…");
     emit itunesArtworkChanged();
 
     const quint64 generation = m_itunesArtworkGeneration;
@@ -3846,7 +3855,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             row.insert(QStringLiteral("assetError"), QString());
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info:status", "High-resolution file info loads on preview or apply."));
+                itunesArtworkPendingDetailsText());
             rows.push_back(row);
         }
 
@@ -4076,7 +4085,7 @@ void BridgeClient::prepareItunesArtworkSuggestion(int index) {
 
     row.insert(QStringLiteral("assetLoading"), true);
     row.insert(QStringLiteral("assetError"), QString());
-    row.insert(QStringLiteral("detailStatusText"), i18nc("@info:status", "Loading high-resolution artwork..."));
+    row.insert(QStringLiteral("detailStatusText"), itunesArtworkLoadingDetailsText());
     updateItunesArtworkResult(index, row);
     startItunesArtworkAssetDownload(index);
 }

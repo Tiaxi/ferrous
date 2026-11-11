@@ -26,14 +26,15 @@ Components.DialogWindow {
     property int pageIndex: 0
     readonly property var pages: [
         { title: I18n.i18nc("@title:tab preferences page", "Library"), icon: "folder" },
-        { title: I18n.i18nc("@title:tab preferences page", "Spectrogram"), icon: "office-chart-bar" },
-        { title: I18n.i18nc("@title:tab preferences page", "Appearance"), icon: "monitor" },
-        { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") },
-        { title: I18n.i18nc("@title:tab preferences page", "Media Controls"), icon: "multimedia-player" }
+        { title: I18n.i18nc("@title:tab preferences page", "Visualization"), icon: "view-media-visualization" },
+        { title: I18n.i18nc("@title:tab preferences page", "General"), icon: "configure" },
+        { title: I18n.i18nc("@title:tab preferences page", "Last.fm"), icon: Qt.resolvedUrl("../assets/lastfm.svg") }
     ]
     // Kept for the callers that name a page.
     readonly property var pageTitles: root.pages.map(function(page) { return page.title })
     readonly property int libraryPageIndex: 0
+    readonly property int visualizationPageIndex: 1
+    readonly property int generalPageIndex: 2
     readonly property int lastFmPageIndex: 3
 
     // What the user changed and has yet to apply.
@@ -173,15 +174,16 @@ Components.DialogWindow {
         font: root.uiPalette.baseFont
     }
 
-    // 49 by 32 grid units, or the page list and 39 of them for the pages
+    // 49 by 35 grid units, or the page list and 39 of them for the pages
     // when the list is wider, or wider for every page's wide layout; and
-    // the tallest page whole at the default font, or taller for the page
-    // it opens on. A larger font makes the window larger, within the
+    // the tallest page, Visualization, whole at the default font, or taller
+    // for the page it opens on: the pages are laid out only once the window
+    // shows. A larger font makes the window larger, within the
     // screen; it lays its pages out for the room it has, and the user may
     // make it larger.
     defaultWidth: Math.max(Kirigami.Units.gridUnit * 49, root.pageListWidth + 1
         + Math.max(Kirigami.Units.gridUnit * 39, pagesLoader.item ? pagesLoader.item.wideWidth : 0))
-    defaultHeight: Math.max(Kirigami.Units.gridUnit * 32,
+    defaultHeight: Math.max(Kirigami.Units.gridUnit * 35,
         preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
     // The page list, and a page with room for its widest control.
     minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,
@@ -420,17 +422,17 @@ Components.DialogWindow {
                         openLibraryRootNameDialog: root.openLibraryRootNameDialog
                     }
 
-                    Preferences.SpectrogramPage {
+                    Preferences.VisualizationPage {
                         sharedLabelWidth: pagesStack.labelWidth
-                        objectName: "preferencesSpectrogramPage"
+                        objectName: "preferencesVisualizationPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                         spectrogramFftChoices: root.spectrogramFftChoices
                     }
 
-                    Preferences.DisplayPage {
+                    Preferences.GeneralPage {
                         sharedLabelWidth: pagesStack.labelWidth
-                        objectName: "preferencesAppearancePage"
+                        objectName: "preferencesGeneralPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                     }
@@ -439,13 +441,6 @@ Components.DialogWindow {
                         sharedLabelWidth: pagesStack.labelWidth
                         objectName: "preferencesLastFmPage"
                         uiBridge: root.uiBridge
-                        uiPalette: root.uiPalette
-                        settings: settingsState
-                    }
-
-                    Preferences.SystemMediaPage {
-                        sharedLabelWidth: pagesStack.labelWidth
-                        objectName: "preferencesMediaControlsPage"
                         uiPalette: root.uiPalette
                         settings: settingsState
                     }

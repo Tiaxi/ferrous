@@ -87,6 +87,8 @@ public:
     QString originalFieldValue(int row, const QString &field) const;
     QStringList loadedPaths() const;
     bool hasDirtyRows() const;
+    // Whether a row holds the error of a save or rename that failed for it.
+    bool hasRowErrors() const;
     // Marks exactly `rows` selected, notifying only the rows that change.
     void setSelection(const QSet<int> &rows);
     // The extra values of `field` that a save would keep, which are those of
@@ -105,6 +107,7 @@ public:
 signals:
     void rowsChanged();
     void dirtyStateChanged();
+    void rowErrorsChanged();
 
 private:
     QVariant fieldData(const TagEditorRowState &row, int role) const;
@@ -114,7 +117,11 @@ private:
     bool refreshDirtyState(TagEditorRowState &row);
     void emitRowChanged(int row);
     void countDirtyRows();
+    // Counts the rows with errors again, and says when whether there are
+    // any changes.
+    void refreshRowErrors();
 
     QVector<TagEditorRowState> m_rows;
     int m_dirtyRowCount{0};
+    int m_errorRowCount{0};
 };

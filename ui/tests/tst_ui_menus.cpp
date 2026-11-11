@@ -542,6 +542,7 @@ private slots:
     void shortcutsTriggerTheirActions();
     void queueContextMenuShowsKeysItDoesNotTake();
     void libraryContextMenuNamesWhatItActsOn();
+    void coverMenusGiveReplaceFromItunesAnIcon();
     void menusHaveNoTransitionsOfTheirOwn();
     void settingsAndHelpOpenTheirPages();
     void aboutKdeLinksTakeTheKeyboard();
@@ -1311,6 +1312,29 @@ void UiMenusTest::queueContextMenuShowsKeysItDoesNotTake() {
     QVERIFY(menuItemWithText(menu, QStringLiteral("Move Down"))->isEnabled());
     QMetaObject::invokeMethod(menu, "close");
     QTRY_VERIFY(!menu->property("visible").toBool());
+}
+
+// The cover's menus, on the now playing cover and in the album art viewer,
+// give Replace from iTunes an icon, as the other menus give their items, so
+// its text starts where theirs does (#373 H7).
+void UiMenusTest::coverMenusGiveReplaceFromItunesAnIcon() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QStringList found;
+    for (const QString &name : {QStringLiteral("albumArtMenu"), QStringLiteral("albumArtViewerContextMenu")}) {
+        const QList<QObject *> menus = window->findChildren<QObject *>(name);
+        for (QObject *menu : menus) {
+            const QStringList rows = rowsOf(menu);
+            QVERIFY2(!rows.isEmpty(), qPrintable(name));
+            QCOMPARE(rows.first(), QStringLiteral("item|Replace from iTunes\u2026||download"));
+        }
+        if (!menus.isEmpty()) {
+            found << name;
+        }
+    }
+    QVERIFY2(found.contains(QStringLiteral("albumArtMenu")), qPrintable(found.join(QLatin1Char(' '))));
 }
 
 void UiMenusTest::libraryContextMenuNamesWhatItActsOn() {

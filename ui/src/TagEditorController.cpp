@@ -367,6 +367,7 @@ TagEditorController::TagEditorController(BridgeClient *bridge, QObject *parent)
     , m_bridge(bridge)
     , m_tableModel(this) {
     connect(&m_tableModel, &TagEditorTableModel::dirtyStateChanged, this, &TagEditorController::dirtyChanged);
+    connect(&m_tableModel, &TagEditorTableModel::rowErrorsChanged, this, &TagEditorController::rowErrorsChanged);
     connect(&m_tableModel, &TagEditorTableModel::rowsChanged, this, &TagEditorController::bulkSummaryChanged);
     m_workerPool = new QThreadPool();
 }
@@ -455,6 +456,10 @@ QString TagEditorController::statusText() const {
 
 QString TagEditorController::statusDetails() const {
     return m_statusDetails;
+}
+
+bool TagEditorController::hasRowErrors() const {
+    return m_tableModel.hasRowErrors();
 }
 
 bool TagEditorController::statusIsError() const {
