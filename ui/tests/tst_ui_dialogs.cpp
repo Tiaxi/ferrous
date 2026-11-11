@@ -450,6 +450,7 @@ private slots:
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void configureFitsItsPagesAtAnyWidth();
     void configureLabelsEndAtOnePlaceOnEveryPage();
+    void configureGroupsItsSettingsOnFourPages();
     void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
@@ -634,14 +635,14 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     // KConfigDialog's caption.
     QCOMPARE(dialog->property("title").toString(), QStringLiteral("Configure \u2014 Ferrous"));
 
-    // A 176 px list of the five pages on the view colour, the selected one
+    // A 176 px list of the four pages on the view colour, the selected one
     // a full-row tint.
     QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(list != nullptr);
     QCOMPARE(list->width(), 176.0);
     QCOMPARE(hex(list->parentItem()->property("color").value<QColor>()), hex(tokenOf(window, "view")));
-    const QStringList pages{QStringLiteral("Library"), QStringLiteral("Spectrogram"), QStringLiteral("Appearance"),
-                            QStringLiteral("Last.fm"), QStringLiteral("Media Controls")};
+    const QStringList pages{QStringLiteral("Library"), QStringLiteral("Visualization"), QStringLiteral("General"),
+                            QStringLiteral("Last.fm")};
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     for (int i = 0; i < pages.size(); ++i) {
@@ -718,18 +719,18 @@ void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
     QTest::keyClick(prefs, Qt::Key_PageUp, Qt::ControlModifier);
-    QTRY_COMPARE(stack->property("currentIndex").toInt(), 4);
+    QTRY_COMPARE(stack->property("currentIndex").toInt(), 3);
 
     // From the list, Tab reaches each page's controls, then the buttons, and
     // Space toggles a check box.
     const QList<QPair<int, QString>> controls{
         {0, QStringLiteral("libraryWatchCheckBox")}, {0, QStringLiteral("librarySortComboBox")},
         {1, QStringLiteral("spectrogramFftComboBox")}, {1, QStringLiteral("dbRangeSlider")},
-        {1, QStringLiteral("channelButtonsComboBox")},
-        {2, QStringLiteral("viewerFullscreenComboBox")}, {2, QStringLiteral("showLevelMeterCheckBox")},
-        {2, QStringLiteral("stretchShortTracksCheckBox")},
+        {1, QStringLiteral("channelButtonsComboBox")}, {1, QStringLiteral("showLevelMeterCheckBox")},
+        {1, QStringLiteral("stretchShortTracksCheckBox")},
+        {2, QStringLiteral("viewerFullscreenComboBox")},
         {3, QStringLiteral("lastFmScrobblingCheckBox")},
-        {4, QStringLiteral("systemMediaControlsCheckBox")},
+        {2, QStringLiteral("systemMediaControlsCheckBox")},
     };
     for (const auto &[page, name] : controls) {
         QVERIFY(dialog->setProperty("pageIndex", page));
@@ -1052,11 +1053,11 @@ void UiDialogsTest::everyConfigureSettingReachesTheBridge() {
         {1, "spectrogramZoomCheckBox", "spectrogramZoomEnabled"},
         {2, "showFullscreenTitleStripCheckBox", "showFullscreenTitleStrip"},
         {2, "preventDisplaySleepInFullscreenCheckBox", "preventDisplaySleepInFullscreen"},
-        {2, "showLevelMeterCheckBox", "showLevelMeter"},
-        {2, "stretchShortTracksCheckBox", "stretchShortTracks"},
+        {1, "showLevelMeterCheckBox", "showLevelMeter"},
+        {1, "stretchShortTracksCheckBox", "stretchShortTracks"},
         {3, "lastFmScrobblingCheckBox", "lastFmScrobblingEnabled"},
         {3, "lastFmShowScrobbleProgressCheckBox", "lastFmShowScrobbleProgress"},
-        {4, "systemMediaControlsCheckBox", "systemMediaControlsEnabled"},
+        {2, "systemMediaControlsCheckBox", "systemMediaControlsEnabled"},
     };
     QHash<QString, bool> expected;
     for (const Check &check : checks) {
@@ -1197,7 +1198,7 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
+    QCOMPARE(formModes(dialog, stack), QList<bool>(4, true));
     checkPreferencesPages(dialog, prefs, stack, QStringLiteral("default size"));
     QVERIFY(!QTest::currentTestFailed());
 
@@ -1206,6 +1207,142 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QTRY_VERIFY(formModes(dialog, stack).contains(false));
     checkPreferencesPages(dialog, prefs, stack, QStringLiteral("narrowest"));
     QVERIFY(!QTest::currentTestFailed());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+// Configure has four pages (#373 H7, P12): Library, Visualization,
+// General and Last.fm. Visualization holds every plot setting, in three
+// groups 16 px apart: how the plot is drawn, what shows over it, and its
+// zoom. General holds the fullscreen viewers and, under a plain
+// subheading, Plasma's media controls. A help text is 4 px under its
+// control, 12 px above the next row, and at most about 440 px wide.
+void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    QCOMPARE(dialog->property("pageTitles").toStringList(),
+             QStringList({QStringLiteral("Library"), QStringLiteral("Visualization"), QStringLiteral("General"),
+                          QStringLiteral("Last.fm")}));
+    QCOMPARE(dialog->property("libraryPageIndex").toInt(), 0);
+    QCOMPARE(dialog->property("visualizationPageIndex").toInt(), 1);
+    QCOMPARE(dialog->property("generalPageIndex").toInt(), 2);
+    QCOMPARE(dialog->property("lastFmPageIndex").toInt(), 3);
+    const QStringList pageNames{QStringLiteral("preferencesLibraryPage"), QStringLiteral("preferencesVisualizationPage"),
+                                QStringLiteral("preferencesGeneralPage"), QStringLiteral("preferencesLastFmPage")};
+    QCOMPARE(stack->childItems().size(), pageNames.size());
+    for (int page = 0; page < pageNames.size(); ++page) {
+        QCOMPARE(stack->childItems().at(page)->objectName(), pageNames[page]);
+    }
+
+    // Each setting on its page, in the order the page shows them.
+    const QList<QPair<int, QStringList>> placement{
+        {0, {QStringLiteral("libraryWatchCheckBox"), QStringLiteral("librarySortComboBox")}},
+        {1, {QStringLiteral("spectrogramViewComboBox"), QStringLiteral("spectrogramDisplayComboBox"),
+             QStringLiteral("spectrogramFftComboBox"), QStringLiteral("dbRangeSlider"),
+             QStringLiteral("spectrogramLogScaleCheckBox"), QStringLiteral("spectrogramFrequencyCapCheckBox"),
+             QStringLiteral("spectrogramScaleCheckBox"), QStringLiteral("spectrogramCrosshairCheckBox"),
+             QStringLiteral("spectrogramFpsCheckBox"), QStringLiteral("showLevelMeterCheckBox"),
+             QStringLiteral("channelButtonsComboBox"), QStringLiteral("spectrogramZoomCheckBox"),
+             QStringLiteral("stretchShortTracksCheckBox")}},
+        {2, {QStringLiteral("viewerFullscreenComboBox"), QStringLiteral("showFullscreenTitleStripCheckBox"),
+             QStringLiteral("preventDisplaySleepInFullscreenCheckBox"),
+             QStringLiteral("systemMediaControlsCheckBox")}},
+        {3, {QStringLiteral("lastFmScrobblingCheckBox")}},
+    };
+    for (const auto &[page, controls] : placement) {
+        dialog->setProperty("pageIndex", page);
+        QQuickItem *pageItem = stack->childItems().at(page);
+        QTRY_VERIFY(pageItem->isVisible() && !layoutPending(pageItem));
+        qreal lastTop = -1;
+        for (const QString &name : controls) {
+            const QList<QQuickItem *> found = itemsNamed(stack, name);
+            QVERIFY2(found.size() == 1, qPrintable(name));
+            QVERIFY2(itemsNamed(pageItem, name).size() == 1,
+                     qPrintable(QStringLiteral("%1 is not on %2").arg(name, pageNames[page])));
+            const qreal top = sceneRect(found.first()).top();
+            QVERIFY2(top > lastTop, qPrintable(name));
+            lastTop = top;
+        }
+    }
+
+    const auto gap = [](QQuickItem *above, QQuickItem *below) {
+        return sceneRect(below).top() - sceneRect(above).bottom();
+    };
+    // Within a pixel: a labelled row is as tall as its label's line, which
+    // may be a fraction taller than its control.
+    const auto gapIs = [&](QQuickItem *above, QQuickItem *below, qreal expected) {
+        const qreal actual = gap(above, below);
+        if (qAbs(actual - expected) < 1) {
+            return true;
+        }
+        qWarning().noquote() << QStringLiteral("%1 px, not %2, between %3 and %4")
+                                    .arg(actual).arg(expected).arg(describeItem(above), describeItem(below));
+        return false;
+    };
+    const auto helpLabel = [&](const char *help) {
+        QQuickItem *item = visibleNamed(prefs, QString::fromLatin1(help));
+        return item != nullptr ? itemsNamed(item, QStringLiteral("formHelpTextLabel")).value(0) : nullptr;
+    };
+    const auto named = [&](const char *name) { return visibleNamed(prefs, QString::fromLatin1(name)); };
+
+    // Visualization: rendering, then overlays, then navigation, 16 px apart.
+    dialog->setProperty("pageIndex", 1);
+    QTRY_VERIFY(named("spectrogramZoomCheckBox") != nullptr);
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(1)));
+    // The tallest page, whole in the window as it opens: the pages are laid
+    // out only once it shows, so its size cannot follow them.
+    QQuickItem *visualization = stack->childItems().at(1);
+    QVERIFY2(visualization->property("contentHeight").toReal() <= visualization->height() + 0.5,
+             qPrintable(QStringLiteral("%1 of %2").arg(visualization->property("contentHeight").toReal())
+                            .arg(visualization->height())));
+    QQuickItem *capHelp = helpLabel("frequencyCapHelp");
+    QQuickItem *crosshairHelp = helpLabel("crosshairHelp");
+    QQuickItem *zoomHelp = helpLabel("zoomHelp");
+    QVERIFY(capHelp != nullptr && crosshairHelp != nullptr && zoomHelp != nullptr);
+    QVERIFY(gapIs(capHelp, named("spectrogramScaleCheckBox"), 16));
+    QVERIFY(gapIs(named("channelButtonsComboBox"), named("spectrogramZoomCheckBox"), 16));
+    // Within a group, the rows are 4 px apart; a help text is 4 px under
+    // its control and 12 px above the next row.
+    QVERIFY(gapIs(named("spectrogramFpsCheckBox"), named("showLevelMeterCheckBox"), 4));
+    QVERIFY(gapIs(named("spectrogramFrequencyCapCheckBox"), capHelp, 4));
+    QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), crosshairHelp, 4));
+    QVERIFY(gapIs(crosshairHelp, named("spectrogramFpsCheckBox"), 12));
+    QVERIFY(gapIs(named("spectrogramZoomCheckBox"), zoomHelp, 4));
+    QVERIFY(gapIs(zoomHelp, named("stretchShortTracksCheckBox"), 12));
+    // A long help text wraps at about 440 px.
+    QVERIFY2(capHelp->property("lineCount").toInt() >= 2, qPrintable(describeItem(capHelp)));
+    QVERIFY2(capHelp->width() <= 440.5 && capHelp->width() >= 420, qPrintable(describeItem(capHelp)));
+
+    // General: the viewers, then Plasma's media controls under a plain
+    // subheading where the fields start, 16 px below the group above it and
+    // 8 px above its row.
+    dialog->setProperty("pageIndex", 2);
+    QQuickItem *media = nullptr;
+    QTRY_VERIFY((media = named("systemMediaControlsCheckBox")) != nullptr);
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
+    QQuickItem *headingRow = named("desktopIntegrationHeading");
+    QVERIFY(headingRow != nullptr);
+    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
+    QVERIFY(heading != nullptr && heading->isVisible());
+    QCOMPARE(heading->property("text").toString(), QStringLiteral("Desktop Integration"));
+    const QFont headingFont = heading->property("font").value<QFont>();
+    QCOMPARE(headingFont.weight(), QFont::DemiBold);
+    QCOMPARE(headingFont.pointSizeF(), paletteOf(window)->property("basePointSize").toReal());
+    QCOMPARE(hex(heading->property("color").value<QColor>()), hex(tokenOf(window, "text")));
+    QVERIFY(gapIs(named("preventDisplaySleepInFullscreenCheckBox"), heading, 16));
+    QVERIFY(gapIs(heading, media, 8));
+    QCOMPARE(sceneRect(heading).left(), sceneRect(media).left());
+    QQuickItem *mediaHelp = helpLabel("systemMediaControlsHelp");
+    QVERIFY(mediaHelp != nullptr);
+    QVERIFY(gapIs(media, mediaHelp, 4));
+    QVERIFY2(mediaHelp->width() <= 440.5, qPrintable(describeItem(mediaHelp)));
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }
@@ -1223,7 +1360,7 @@ void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
     QQuickWindow *prefs = windowOf(dialog);
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
-    QCOMPARE(formModes(dialog, stack), QList<bool>(5, true));
+    QCOMPARE(formModes(dialog, stack), QList<bool>(4, true));
     // The x of each labelled field, on page `page`.
     const auto fieldsOf = [&](int page) {
         QList<qreal> xs;
@@ -1241,7 +1378,7 @@ void UiDialogsTest::configureLabelsEndAtOnePlaceOnEveryPage() {
     };
     QList<qreal> all;
     QStringList described;
-    for (int page = 0; page < 5; ++page) {
+    for (int page = 0; page < 4; ++page) {
         dialog->setProperty("pageIndex", page);
         QList<qreal> xs;
         QTRY_VERIFY2(!(xs = fieldsOf(page)).isEmpty(), qPrintable(QString::number(page)));
@@ -2989,7 +3126,7 @@ QStringList itemsCrossingWindow(QQuickWindow *window, bool acrossOnly) {
 void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem *stack, const QString &size) {
     QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
     QVERIFY(list != nullptr);
-    for (int page = 0; page < 5; ++page) {
+    for (int page = 0; page < 4; ++page) {
         const QString at = QStringLiteral("%1, page %2").arg(size).arg(page);
         preferences->setProperty("pageIndex", page);
         QTRY_COMPARE(stack->property("currentIndex").toInt(), page);
@@ -3045,7 +3182,7 @@ void checkPreferencesPages(QObject *preferences, QQuickWindow *prefs, QQuickItem
 // Whether each page of Configure Ferrous has its labels beside its fields.
 QList<bool> formModes(QObject *preferences, QQuickItem *stack) {
     QList<bool> modes;
-    for (int page = 0; page < 5; ++page) {
+    for (int page = 0; page < 4; ++page) {
         preferences->setProperty("pageIndex", page);
         QQuickItem *pageItem = stack->childItems().at(page);
         for (QQuickItem *form : itemsNamed(pageItem, QStringLiteral("preferencesForm"))) {
@@ -3115,7 +3252,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     QQuickItem *stack = nullptr;
     QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
     // It opens wide enough for every page's labels beside its fields.
-    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
+    QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, default size"));
     QVERIFY(!QTest::currentTestFailed());
     // In a larger window too. (Narrower, Kirigami's narrow layout caps its
@@ -3123,7 +3260,7 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     // they do on the desktop; configureFitsItsPagesAtAnyWidth checks it.)
     prefs->resize(2200, prefs->height());
     QTRY_COMPARE(prefs->width(), 2200);
-    QCOMPARE(formModes(preferences, stack), QList<bool>(5, true));
+    QCOMPARE(formModes(preferences, stack), QList<bool>(4, true));
     checkPreferencesPages(preferences, prefs, stack, QStringLiteral("24 pt, wide"));
     QVERIFY(!QTest::currentTestFailed());
     QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));

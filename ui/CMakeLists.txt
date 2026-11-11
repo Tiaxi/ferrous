@@ -180,6 +180,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/components/DialogComboBox.qml
         qml/components/DialogFooter.qml
         qml/components/DialogWindow.qml
+        qml/components/FormGroupGap.qml
         qml/components/FormHelpText.qml
         qml/components/FullscreenControlsAutoHide.qml
         qml/components/KeyScrollView.qml
@@ -233,12 +234,11 @@ qt_add_qml_module(ferrous_ui_qml
         qml/panes/SpectrogramPane.qml
         qml/panes/StatusBar.qml
         qml/panes/TransportBar.qml
-        qml/preferences/DisplayPage.qml
+        qml/preferences/GeneralPage.qml
         qml/preferences/LastFmPage.qml
         qml/preferences/LibraryPage.qml
         qml/preferences/PreferencesPage.qml
-        qml/preferences/SpectrogramPage.qml
-        qml/preferences/SystemMediaPage.qml
+        qml/preferences/VisualizationPage.qml
         qml/viewers/AlbumArtSurface.qml
         qml/viewers/AlbumArtViewerShell.qml
         qml/viewers/PlotLayer.qml

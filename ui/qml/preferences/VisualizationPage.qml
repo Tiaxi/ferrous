@@ -8,6 +8,8 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
+// The Visualization page: how the plot is drawn, what it shows over the
+// plot, and how its zoom works, in three groups.
 Preferences.PreferencesPage {
     id: root
 
@@ -16,7 +18,7 @@ Preferences.PreferencesPage {
     // A combo box's width in the form, or what its longest option needs.
     readonly property real comboWidth: Kirigami.Units.gridUnit * 9
 
-    title: I18n.i18nc("@title preferences page", "Spectrogram")
+    title: I18n.i18nc("@title preferences page", "Visualization")
 
     Components.DialogComboBox {
         objectName: "spectrogramViewComboBox"
@@ -116,8 +118,10 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        objectName: "frequencyCapHelp"
         uiPalette: root.uiPalette
         indent: frequencyCapCheckBox.contentItem.x
+        endsGroup: true
         text: I18n.i18nc("@info", "High-resolution tracks show up to 22.05 kHz for rates of the 44.1 kHz "
             + "family and 24 kHz for others, instead of up to half their sample rate.")
     }
@@ -139,6 +143,7 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        objectName: "crosshairHelp"
         uiPalette: root.uiPalette
         indent: crosshairCheckBox.contentItem.x
         text: I18n.i18nc("@info", "With the crosshair, right-clicking the spectrogram in centered mode "
@@ -153,18 +158,11 @@ Preferences.PreferencesPage {
     }
 
     CheckBox {
-        id: zoomCheckBox
-        objectName: "spectrogramZoomCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
-        text: I18n.i18nc("@option:check", "Allow zooming")
-        checked: root.settings.value("spectrogramZoomEnabled")
-        onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
-    }
-
-    Components.FormHelpText {
-        uiPalette: root.uiPalette
-        indent: zoomCheckBox.contentItem.x
-        text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
+        objectName: "showLevelMeterCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
+        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
+        checked: root.settings.value("showLevelMeter")
+        onToggled: root.settings.setValue("showLevelMeter", checked)
     }
 
     Components.DialogComboBox {
@@ -178,5 +176,34 @@ Preferences.PreferencesPage {
         ]
         currentIndex: Math.max(0, Math.min(2, root.settings.value("channelButtonsVisibility")))
         onActivated: function(index) { root.settings.setValue("channelButtonsVisibility", index) }
+    }
+
+    Components.FormGroupGap {
+        objectName: "visualizationNavigationGap"
+        uiPalette: root.uiPalette
+    }
+
+    CheckBox {
+        id: zoomCheckBox
+        objectName: "spectrogramZoomCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Zoom:")
+        text: I18n.i18nc("@option:check", "Allow zooming")
+        checked: root.settings.value("spectrogramZoomEnabled")
+        onToggled: root.settings.setValue("spectrogramZoomEnabled", checked)
+    }
+
+    Components.FormHelpText {
+        objectName: "zoomHelp"
+        uiPalette: root.uiPalette
+        indent: zoomCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "Scroll to zoom in or out; middle-click to reset.")
+    }
+
+    CheckBox {
+        objectName: "stretchShortTracksCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
+        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
+        checked: root.settings.value("stretchShortTracks")
+        onToggled: root.settings.setValue("stretchShortTracks", checked)
     }
 }

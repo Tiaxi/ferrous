@@ -8,11 +8,12 @@ import FerrousUi 1.0
 import "../components" as Components
 import "." as Preferences
 
-// The Appearance page: the viewers, the level meter and the default zoom.
+// The General page: the fullscreen viewers, and Plasma's media controls
+// under their own subheading.
 Preferences.PreferencesPage {
     id: root
 
-    title: I18n.i18nc("@title preferences page", "Appearance")
+    title: I18n.i18nc("@title preferences page", "General")
 
     Components.DialogComboBox {
         objectName: "viewerFullscreenComboBox"
@@ -43,19 +44,27 @@ Preferences.PreferencesPage {
         onToggled: root.settings.setValue("preventDisplaySleepInFullscreen", checked)
     }
 
-    CheckBox {
-        objectName: "showLevelMeterCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Level meter:")
-        text: I18n.i18nc("@option:check", "Show a level meter at the end of each lane")
-        checked: root.settings.value("showLevelMeter")
-        onToggled: root.settings.setValue("showLevelMeter", checked)
+    Components.FormGroupGap {
+        objectName: "desktopIntegrationHeading"
+        uiPalette: root.uiPalette
+        heading: I18n.i18nc("@title:group preferences", "Desktop Integration")
     }
 
     CheckBox {
-        objectName: "stretchShortTracksCheckBox"
-        Kirigami.FormData.label: I18n.i18nc("@label", "Default zoom:")
-        text: I18n.i18nc("@option:check", "Stretch tracks shorter than the view to its full width")
-        checked: root.settings.value("stretchShortTracks")
-        onToggled: root.settings.setValue("stretchShortTracks", checked)
+        id: mediaCheckBox
+        objectName: "systemMediaControlsCheckBox"
+        Kirigami.FormData.label: I18n.i18nc("@label", "Plasma:")
+        text: I18n.i18nc("@option:check", "Show in the media controls and answer media keys")
+        checked: root.settings.value("systemMediaControlsEnabled")
+        onToggled: root.settings.setValue("systemMediaControlsEnabled", checked)
+    }
+
+    Components.FormHelpText {
+        objectName: "systemMediaControlsHelp"
+        uiPalette: root.uiPalette
+        indent: mediaCheckBox.contentItem.x
+        text: I18n.i18nc("@info", "Ferrous appears in Plasma’s media controls and answers the Play/Pause, "
+            + "Previous, Next and Stop keys. The volume keys always set the system volume, not "
+            + "Ferrous’s.")
     }
 }

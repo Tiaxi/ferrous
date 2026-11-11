@@ -64,14 +64,20 @@ Preferences.PreferencesPage {
     }
 
     Components.FormHelpText {
+        id: statusLabel
         objectName: "lastFmStatusLabel"
         uiPalette: root.uiPalette
+        // The waiting scrobbles' line goes on from it, as one status.
+        trailingSpace: pendingLabel.visible
+            ? 0
+            : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing - statusLabel.rowSpacing
         // The account line already says when the build has no Last.fm.
         visible: text.length > 0 && root.buildConfigured
         text: root.uiBridge.lastFmStatusText || ""
     }
 
     Components.FormHelpText {
+        id: pendingLabel
         objectName: "lastFmPendingLabel"
         uiPalette: root.uiPalette
         visible: (root.uiBridge.lastFmPendingScrobbleCount || 0) > 0
