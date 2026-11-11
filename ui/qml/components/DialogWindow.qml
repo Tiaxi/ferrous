@@ -14,8 +14,9 @@ import org.kde.kirigami 2.20 as Kirigami
 // accepted(), rejected() and closed() signals, and `opened`. Escape and the
 // title bar's close button reject it, or, in a dialog that asks first how
 // it closes, send closeRequested(); a combo box's open list, or a dialog
-// over this one, takes Escape first. It hides at once, so a button clicked
-// twice answers once.
+// over this one, takes Escape first. It hides at once, and what it holds
+// takes no click or key from then until it opens again, so a button
+// clicked twice, or Enter pressed twice, answers once.
 ApplicationWindow {
     id: root
 
@@ -32,6 +33,9 @@ ApplicationWindow {
     // than reject it: for a dialog that asks first, such as about unsaved
     // edits.
     property bool asksBeforeClosing: false
+    // Whether it opens at its default size each time, for a dialog whose
+    // default follows what it shows; otherwise it keeps the size it had.
+    property bool sizesOnEachOpen: false
 
     // As the window shows: the moment to set up what it shows.
     signal aboutToShow()
@@ -42,6 +46,9 @@ ApplicationWindow {
     signal closeRequested()
 
     property bool _sized: false
+    // Set from the moment it hides until it opens again: the window system
+    // may still deliver a click or a key that was on its way.
+    property bool _gone: false
     // The screen's room: its size, less the panels where the desktop says
     // so, and a margin.
     readonly property real _roomWidth: root.screen
@@ -53,8 +60,9 @@ ApplicationWindow {
 
     function open() {
         if (!root.visible) {
+            root._gone = false
             root.aboutToShow()
-            if (!root._sized) {
+            if (!root._sized || root.sizesOnEachOpen) {
                 root._sized = true
                 root.width = Math.ceil(Math.max(root.minimumWidth, Math.min(root.defaultWidth, root._roomWidth)))
                 root.height = Math.ceil(Math.max(root.minimumHeight, Math.min(root.defaultHeight, root._roomHeight)))
@@ -77,12 +85,20 @@ ApplicationWindow {
         }
     }
 
+    // Hides it with no answer, for a dialog whose buttons act through
+    // their own signals, or that the app takes away. Not close(), which
+    // Cancels, as the title bar's close button does.
+    function dismiss() {
+        root._hide()
+    }
+
     // Hides the window and gives the keyboard back to the window it is
     // for; whether it was shown.
     function _hide() {
         if (!root.visible) {
             return false
         }
+        root._gone = true
         root.visible = false
         if (root.windowRoot && root.windowRoot.visible) {
             root.windowRoot.requestActivate()
@@ -111,6 +127,21 @@ ApplicationWindow {
     onClosing: function(close) {
         close.accepted = false
         root._cancel()
+    }
+
+    // The window's own root item, which holds the content and the header
+    // and footer too: the content item's topmost ancestor.
+    function _rootItemOf(item) {
+        while (item && item.parent) {
+            item = item.parent
+        }
+        return item
+    }
+
+    Binding {
+        target: root._rootItemOf(root.contentItem)
+        property: "enabled"
+        value: !root._gone
     }
 
     Shortcut {

@@ -186,7 +186,7 @@ Components.DialogWindow {
     function clearAfterClose() {
         root.clearPendingActionState()
         // Its suggestion goes with the suggestions cleared here.
-        replaceCoverConfirmDialog.close()
+        replaceCoverConfirmDialog.dismiss()
         root.uiBridge.clearItunesArtworkSuggestions()
         root.previewIndex = -1
         root.previewRow = ({})
@@ -218,8 +218,8 @@ Components.DialogWindow {
         }
         replaceCoverConfirmDialog.suggestionIndex = index
         // Over the viewer during its preview, else over this dialog.
-        replaceCoverConfirmDialog.parent = root.previewShown && root.previewHost
-            ? root.previewHost : root.contentItem
+        replaceCoverConfirmDialog.windowRoot = root.previewShown && root.previewHost && root.previewHost.Window.window
+            ? root.previewHost.Window.window : root
         replaceCoverConfirmDialog.message = (target.album || "").length > 0
             ? ((target.artist || "").length > 0
                 ? I18n.i18nc("@info album, artist", "Replace the album art of \u201c%1\u201d by %2?",
@@ -703,16 +703,16 @@ Components.DialogWindow {
         id: replaceCoverConfirmDialog
         objectName: "replaceCoverConfirmDialog"
         property int suggestionIndex: -1
-        // Over this dialog, or over the viewer during its preview, which in
-        // the main window is a popup in its overlay too.
-        z: 1
+        // Over this dialog, or over the viewer during its preview: see
+        // applySuggestion().
         uiPalette: root.uiPalette
-        windowRoot: root.previewShown ? root.windowRoot : root
+        windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
         details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album's cover image, replacing a cover "
             + "image that is there, or embeds it in the album's tracks in place of their artwork. "
             + "It keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
+        confirmIcon: "document-replace"
         // The current album art is gone once replaced.
         destructive: true
         // The answer takes the suggestion it was asked for, at once.

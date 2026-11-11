@@ -7,56 +7,48 @@ import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 
-Dialog {
+// The whole of the tag editor's last status, such as each file a save
+// could not write, in a window of its own over the editor.
+Components.DialogWindow {
     id: root
 
     required property var tagEditorApi
-    required property var uiPalette
-    required property var windowRoot
 
-    parent: Overlay.overlay
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 36)
-    height: Math.min(root.windowRoot.height - 4 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 29)
+    objectName: "tagEditorStatusDetailsDialog"
     title: I18n.i18nc("@title:window", "Tag Editor Details")
-    closePolicy: Popup.CloseOnEscape
+    minimumWidth: Kirigami.Units.gridUnit * 20
+    minimumHeight: Kirigami.Units.gridUnit * 12
+    defaultWidth: Kirigami.Units.gridUnit * 36
+    defaultHeight: Kirigami.Units.gridUnit * 29
 
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    onAboutToShow: statusDetailsCloseButton.forceActiveFocus(Qt.PopupFocusReason)
 
     footer: Components.DialogButtons {
+        primary: statusDetailsCloseButton
         Button {
+            id: statusDetailsCloseButton
             objectName: "tagEditorStatusDetailsCloseButton"
             text: I18n.i18nc("@action:button", "Close")
             icon.name: "window-close"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
         }
     }
 
-    contentItem: ColumnLayout {
-        spacing: 10
+    ScrollView {
+        anchors.fill: parent
+        anchors.leftMargin: Kirigami.Units.gridUnit
+        anchors.rightMargin: Kirigami.Units.gridUnit
+        anchors.topMargin: Kirigami.Units.gridUnit
+        clip: true
 
-        ScrollView {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            clip: true
-
-            TextArea {
-                readOnly: true
-                wrapMode: TextEdit.Wrap
-                text: root.tagEditorApi.statusDetails
-                selectByMouse: true
-                background: null
-            }
+        TextArea {
+            objectName: "tagEditorStatusDetailsText"
+            readOnly: true
+            wrapMode: TextEdit.Wrap
+            text: root.tagEditorApi.statusDetails
+            selectByMouse: true
+            background: null
         }
     }
 }

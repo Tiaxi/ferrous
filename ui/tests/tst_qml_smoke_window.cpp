@@ -423,18 +423,17 @@ Item {
         openLibraryRootNameDialog: function(mode, path, name) {}
     }
 
+    // Windows of their own, for a window.
     Dialogs.DiagnosticsDialog {
-        parent: harness
         uiBridge: bridge
         uiPalette: palette
-        windowRoot: harness
+        windowRoot: viewerWindowRoot
     }
 
     Dialogs.LibraryRootNameDialog {
-        parent: harness
         uiBridge: bridge
         uiPalette: palette
-        windowRoot: harness
+        windowRoot: viewerWindowRoot
         dialogMode: "add"
         pathValue: "/music"
         nameValue: "Music"

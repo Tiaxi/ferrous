@@ -306,14 +306,14 @@ Components.DialogWindow {
 
     function saveAndClose() {
         if (!root.triggerSave(true)) {
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             root.continueQuit(!root.tagEditorApi.dirty)
             return
         }
         if (root.quitPending) {
             // Quitting waits for this save within the same bound as for any
             // other, so the confirmation gives way to the wait.
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             root.waitForOperationToQuit()
         }
     }
@@ -359,7 +359,7 @@ Components.DialogWindow {
     // The save or rename that quitting waited for has finished.
     function stopWaitingForOperation() {
         tagEditorQuitWaitTimeout.stop()
-        tagEditorQuitWaitDialog.close()
+        tagEditorQuitWaitDialog.dismiss()
         root.quitWithoutOperation = false
     }
 
@@ -511,7 +511,7 @@ Components.DialogWindow {
             root.operationInFlight = false
             root.operationText = ""
             // A failure shows in the editor, under the confirmation.
-            tagEditorCloseConfirmDialog.close()
+            tagEditorCloseConfirmDialog.dismiss()
             if (success && root.closeAfterSave) {
                 root.closeEditor()
             }
@@ -613,7 +613,7 @@ Components.DialogWindow {
         }
         onQuitAnywayRequested: {
             tagEditorQuitWaitTimeout.stop()
-            tagEditorQuitWaitDialog.close()
+            tagEditorQuitWaitDialog.dismiss()
             root.quitPending = false
             root.quitWithoutOperation = true
             root.quitMayProceed()

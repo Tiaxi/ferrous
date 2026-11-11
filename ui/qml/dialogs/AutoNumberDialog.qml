@@ -3,18 +3,15 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
-import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
-Dialog {
+// Numbers the tracks, in a window of its own over the tag editor.
+Components.CompactDialogWindow {
     id: root
 
     required property var tagEditorApi
-    required property var uiPalette
-    required property var windowRoot
 
     readonly property int maximumNumber: 9999
     readonly property bool startingTrackValid: startingTrackField.acceptableInput
@@ -37,33 +34,13 @@ Dialog {
             writeTotalsCheck.checked,
             resetOnFolderCheck.checked,
             resetOnDiscCheck.checked)
-        root.close()
+        root.accept()
         return true
     }
 
     objectName: "autoNumberDialog"
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(Kirigami.Units.gridUnit * 26, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
     title: I18n.i18nc("@title:window", "Auto Number")
-
-    // The keyboard in the content, whose Enter presses the default button,
-    // from the moment the dialog shows.
-    Components.PopupInitialFocus {
-        popup: root
-        item: root.contentItem
-    }
-
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26, root.minimumWidth)
 
     footer: Components.DialogFooter {
 
@@ -83,85 +60,78 @@ Dialog {
             text: I18n.i18nc("@action:button", "Cancel")
             icon.name: "dialog-cancel"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-            onClicked: root.close()
+            onClicked: root.reject()
         }
     }
 
-    contentItem: ColumnLayout {
-        // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+    Label {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        color: root.uiPalette.textSecondary
+        text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
+    }
 
-        spacing: 12
+    Kirigami.FormLayout {
+        Layout.fillWidth: true
 
+        TextField {
+            id: startingTrackField
+            Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First track:")
+            objectName: "autoNumberStartingTrackField"
+            Layout.fillWidth: true
+            text: "1"
+            inputMethodHints: Qt.ImhDigitsOnly
+            validator: IntValidator { bottom: 1; top: root.maximumNumber }
+        }
         Label {
+            objectName: "autoNumberStartingTrackError"
             Layout.fillWidth: true
+            visible: !root.startingTrackValid
             wrapMode: Text.WordWrap
-            color: root.uiPalette.textSecondary
-            text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
+            color: root.uiPalette.negative
+            text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
         }
 
-        Kirigami.FormLayout {
+        TextField {
+            id: startingDiscField
+            Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First disc:")
+            objectName: "autoNumberStartingDiscField"
             Layout.fillWidth: true
-
-            TextField {
-                id: startingTrackField
-                Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First track:")
-                objectName: "autoNumberStartingTrackField"
-                Layout.fillWidth: true
-                text: "1"
-                inputMethodHints: Qt.ImhDigitsOnly
-                validator: IntValidator { bottom: 1; top: root.maximumNumber }
-            }
-            Label {
-                objectName: "autoNumberStartingTrackError"
-                Layout.fillWidth: true
-                visible: !root.startingTrackValid
-                wrapMode: Text.WordWrap
-                color: root.uiPalette.negative
-                text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
-            }
-
-            TextField {
-                id: startingDiscField
-                Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First disc:")
-                objectName: "autoNumberStartingDiscField"
-                Layout.fillWidth: true
-                text: "1"
-                enabled: writeDiscCheck.checked
-                inputMethodHints: Qt.ImhDigitsOnly
-                validator: IntValidator { bottom: 1; top: root.maximumNumber }
-            }
-            Label {
-                objectName: "autoNumberStartingDiscError"
-                Layout.fillWidth: true
-                visible: !root.startingDiscValid
-                wrapMode: Text.WordWrap
-                color: root.uiPalette.negative
-                text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
-            }
-        }
-
-        CheckBox {
-            id: writeDiscCheck
-            objectName: "autoNumberWriteDiscCheck"
-            checked: false
-            text: I18n.i18nc("@option:check", "Write disc numbers")
-        }
-        CheckBox {
-            id: writeTotalsCheck
-            checked: false
-            text: I18n.i18nc("@option:check", "Write totals")
-        }
-        CheckBox {
-            id: resetOnFolderCheck
-            checked: false
-            text: I18n.i18nc("@option:check", "Reset track numbers on folder or section change")
-        }
-        CheckBox {
-            id: resetOnDiscCheck
-            checked: false
+            text: "1"
             enabled: writeDiscCheck.checked
-            text: I18n.i18nc("@option:check", "Reset track numbers when disc changes in current values")
+            inputMethodHints: Qt.ImhDigitsOnly
+            validator: IntValidator { bottom: 1; top: root.maximumNumber }
         }
+        Label {
+            objectName: "autoNumberStartingDiscError"
+            Layout.fillWidth: true
+            visible: !root.startingDiscValid
+            wrapMode: Text.WordWrap
+            color: root.uiPalette.negative
+            text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
+        }
+    }
+
+    CheckBox {
+        id: writeDiscCheck
+        objectName: "autoNumberWriteDiscCheck"
+        checked: false
+        text: I18n.i18nc("@option:check", "Write disc numbers")
+    }
+    CheckBox {
+        id: writeTotalsCheck
+        checked: false
+        text: I18n.i18nc("@option:check", "Write totals")
+    }
+    CheckBox {
+        id: resetOnFolderCheck
+        checked: false
+        text: I18n.i18nc("@option:check", "Reset track numbers on folder or section change")
+    }
+    CheckBox {
+        id: resetOnDiscCheck
+        checked: false
+        enabled: writeDiscCheck.checked
+        text: I18n.i18nc("@option:check", "Reset track numbers when disc changes in current values")
     }
 }

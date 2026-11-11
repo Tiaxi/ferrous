@@ -532,15 +532,20 @@ void ErrorsSmokeTest::retryTakesNoSecondAnswerAsTheDialogFades() {
     const int first = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("opened").toBool());
+    // A window of its own above the main window (#373 H5).
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
+    QCOMPARE(dialogWindow->transientParent(), window);
+    QVERIFY(QTest::qWaitForWindowExposed(dialogWindow));
 
-    // A quick second click on Retry, as the dialog fades out, saves no
-    // second time.
+    // A quick second click on Retry, as the dialog goes, saves no second
+    // time.
     QVERIFY(clickTwiceAsItCloses(window, QStringLiteral("quitSaveFailedRetryButton"), dialog));
     const int retry = bridge->property("lastStateSaveRequestId").toInt();
     QCOMPARE(retry, first + 1);
-    // Nor does Escape, as it still fades out, give up on the retry.
-    QVERIFY(popupFadingOut(dialog));
-    QTest::keyClick(window, Qt::Key_Escape);
+    // Nor does Escape, as it goes, give up on the retry.
+    QVERIFY(dialogClosing(dialog));
+    QTest::keyClick(dialogWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
 
@@ -568,13 +573,15 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
     const int first = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(answerStateSave(bridge, first, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("visible").toBool());
+    auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);
+    QVERIFY(dialogWindow != nullptr);
     QVERIFY(keyboardInPopupContent(dialog));
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(dialogWindow, Qt::Key_Return);
     const int retry = bridge->property("lastStateSaveRequestId").toInt();
     QCOMPARE(retry, first + 1);
-    // Enter again, as the dialog fades out, saves no second time.
-    QVERIFY(popupFadingOut(dialog));
-    QTest::keyClick(window, Qt::Key_Return);
+    // Enter again, as the dialog goes, saves no second time.
+    QVERIFY(dialogClosing(dialog));
+    QTest::keyClick(dialogWindow, Qt::Key_Return);
     QTRY_VERIFY(popupsSettled());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
 
@@ -582,7 +589,7 @@ void ErrorsSmokeTest::enterRetriesAsSoonAsTheSaveFailureShows() {
     QVERIFY(answerStateSave(bridge, retry, false, QStringLiteral("Settings could not be saved")));
     QTRY_VERIFY(dialog->property("visible").toBool());
     QVERIFY(keyboardInPopupContent(dialog));
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(dialogWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QVERIFY(!dialog->property("visible").toBool());
     QCOMPARE(bridge->property("lastStateSaveRequestId").toInt(), retry);
@@ -678,7 +685,7 @@ void ErrorsSmokeTest::escapeAfterASaveTimeoutKeepsTheWindowOpenWhenTheAnswerCome
     const int requestId = bridge->property("lastStateSaveRequestId").toInt();
     QVERIFY(timeOutStateSave(window));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTest::keyClick(window, Qt::Key_Escape);
+    QTest::keyClick(qobject_cast<QQuickWindow *>(dialog), Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
 
     QVERIFY(answerStateSave(bridge, requestId, true));

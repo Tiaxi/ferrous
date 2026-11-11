@@ -7,15 +7,12 @@ import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
-import "../logic/KeyUtils.js" as KeyUtils
 
 // The new name of each selected file, and why any cannot be renamed, before
 // anything is renamed. Cancel and Escape rename nothing.
-Dialog {
+Components.DialogWindow {
     id: root
 
-    required property var uiPalette
-    required property var windowRoot
     // TagEditorController::renamePreviewReady's rows and error.
     property var rows: []
     property string errorText: ""
@@ -49,33 +46,20 @@ Dialog {
     }
 
     objectName: "renamePreviewDialog"
-    parent: Overlay.overlay
-    modal: true
-    x: Math.round((root.windowRoot.width - width) / 2)
-    y: Math.round((root.windowRoot.height - height) / 2)
-    width: Math.min(root.windowRoot.width - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 42)
-    // As tall as the list, up to a limit.
-    height: Math.min(root.windowRoot.height - 2 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 29,
-        root.implicitHeight)
     title: I18n.i18nc("@title:window", "Rename Files")
-    closePolicy: Popup.CloseOnEscape
+    readonly property real contentPadding: Kirigami.Units.gridUnit
+    // The content, which has the keyboard as it opens.
+    readonly property Item body: renamePreviewContent
+    minimumWidth: Kirigami.Units.gridUnit * 24
+    minimumHeight: Kirigami.Units.gridUnit * 12
+    defaultWidth: Kirigami.Units.gridUnit * 42
+    // As tall as the list, up to a limit, each time it opens.
+    defaultHeight: Math.min(Kirigami.Units.gridUnit * 29,
+        renamePreviewContent.implicitHeight + 2 * root.contentPadding + dialogButtons.implicitHeight)
+    sizesOnEachOpen: true
 
-    // The keyboard in the content, whose Enter presses the default button,
-    // from the moment the dialog shows.
-    Components.PopupInitialFocus {
-        popup: root
-        item: root.contentItem
-    }
-
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
+    // The keyboard in the content, whose Enter presses the default button.
+    onAboutToShow: renamePreviewContent.forceActiveFocus(Qt.PopupFocusReason)
 
     footer: Components.DialogFooter {
 
@@ -89,7 +73,8 @@ Dialog {
             enabled: root.renameCount > 0 && root.errorText.length === 0
             DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             onClicked: {
-                root.close()
+                // Hidden at once: a second click finds no button.
+                root.dismiss()
                 root.renameRequested()
             }
         }
@@ -102,9 +87,16 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        id: renamePreviewContent
+        objectName: "renamePreviewContent"
+        anchors.fill: parent
+        anchors.leftMargin: root.contentPadding
+        anchors.rightMargin: root.contentPadding
+        anchors.topMargin: root.contentPadding
+        focus: true
         // Enter presses the default button, as in KDE's dialogs.
-        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, KeyUtils.popupTakesKeys(root)) }
+        Keys.onPressed: function(event) { dialogButtons.handleEnter(event, Window.activeFocusItem, root.visible) }
 
         spacing: 10
 

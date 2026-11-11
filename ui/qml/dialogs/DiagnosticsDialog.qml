@@ -3,52 +3,50 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "../components" as Components
 import "." as Dialogs
 
-Dialog {
+// Help › Diagnostics: the log of what went wrong, in a window of its own.
+Components.DialogWindow {
     id: root
 
     required property var uiBridge
-    required property var uiPalette
-    required property var windowRoot
 
     property string diagnosticsText: ""
 
-    modal: true
+    objectName: "diagnosticsDialog"
     title: I18n.i18nc("@title:window", "Diagnostics")
-    width: Math.min(Kirigami.Units.gridUnit * 54, root.windowRoot.width - 2 * Kirigami.Units.gridUnit)
-    height: Math.min(Kirigami.Units.gridUnit * 38, root.windowRoot.height - 2 * Kirigami.Units.gridUnit)
+    minimumWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 30, diagnosticsToolbar.implicitWidth
+        + 2 * Kirigami.Units.gridUnit))
+    minimumHeight: Kirigami.Units.gridUnit * 18
+    defaultWidth: Kirigami.Units.gridUnit * 54
+    defaultHeight: Kirigami.Units.gridUnit * 38
 
     function syncDiagnosticsText() {
         root.diagnosticsText = root.uiBridge.diagnosticsText || ""
     }
 
-    onOpened: {
+    onAboutToShow: {
         root.uiBridge.reloadDiagnosticsFromDisk()
         syncDiagnosticsText()
+        diagnosticsTextArea.forceActiveFocus(Qt.PopupFocusReason)
     }
 
     onClosed: diagnosticsText = ""
 
-    // The dialogs' one heading style, in place of the style's larger one.
-    header: Components.DialogHeader {
-        dialog: root
-        uiPalette: root.uiPalette
-    }
-
-    background: Components.DialogSurface {
-        uiPalette: root.uiPalette
-    }
-
     footer: Components.DialogButtons {
+        id: dialogButtons
+        primary: diagnosticsCloseButton
         Button {
+            id: diagnosticsCloseButton
             objectName: "diagnosticsCloseButton"
             text: I18n.i18nc("@action:button", "Close")
             icon.name: "window-close"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            onClicked: root.reject()
         }
     }
 
@@ -60,22 +58,27 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
-        spacing: 8
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.leftMargin: Kirigami.Units.gridUnit
+        anchors.rightMargin: Kirigami.Units.gridUnit
+        anchors.topMargin: Kirigami.Units.gridUnit
+        spacing: Kirigami.Units.largeSpacing
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing
 
             Label {
-                text: I18n.i18nc("@label:textbox", "Log file:")
+                text: I18n.i18nc("@label", "Log file:")
                 color: root.uiPalette.text
             }
 
-            TextField {
+            Components.PathLabel {
+                objectName: "diagnosticsLogPath"
                 Layout.fillWidth: true
-                readOnly: true
-                text: root.uiBridge.diagnosticsLogPath || ""
-                selectByMouse: true
+                path: root.uiBridge.diagnosticsLogPath || ""
+                color: root.uiPalette.textSecondary
             }
 
             Button {
@@ -87,6 +90,7 @@ Dialog {
         }
 
         RowLayout {
+            id: diagnosticsToolbar
             Layout.fillWidth: true
 
             Button {
@@ -213,12 +217,13 @@ Dialog {
         id: clearDiagnosticsConfirmDialog
         objectName: "clearDiagnosticsConfirmDialog"
         uiPalette: root.uiPalette
-        windowRoot: root.windowRoot
+        windowRoot: root
         title: I18n.i18nc("@title:window", "Clear Diagnostics")
         message: I18n.i18nc("@info", "Delete the diagnostics log?")
         details: I18n.i18nc("@info", "Ferrous deletes the log file and starts a new one. Use Copy All first to keep "
             + "what it holds, for example for a bug report.")
         confirmText: I18n.i18nc("@action:button", "Delete Log")
+        confirmIcon: "edit-delete"
         destructive: true
         onConfirmed: {
             root.uiBridge.clearDiagnostics()

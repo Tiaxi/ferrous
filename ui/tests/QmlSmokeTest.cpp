@@ -759,36 +759,66 @@ bool popupFadingOut(QObject *popup) {
     return popup->property("visible").toBool() && !popup->property("opened").toBool();
 }
 
-bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *popup) {
-    QQuickItem *button = visibleItemNamed(window, objectName);
+QQuickWindow *dialogWindowOf(QObject *dialog) {
+    return qobject_cast<QQuickWindow *>(dialog);
+}
+
+bool dialogClosing(QObject *dialog) {
+    return dialogWindowOf(dialog) != nullptr ? !dialog->property("visible").toBool() : popupFadingOut(dialog);
+}
+
+bool clickTwiceAsItCloses(QQuickWindow *window, const QString &objectName, QObject *dialog) {
+    QQuickWindow *host = dialogWindowOf(dialog) != nullptr ? dialogWindowOf(dialog) : window;
+    QQuickItem *button = visibleItemNamed(host, objectName);
     if (button == nullptr || !button->isEnabled()) {
         return false;
     }
     const QPoint center = centerInWindow(button);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, center);
-    if (!popupFadingOut(popup)) {
+    QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, center);
+    if (!dialogClosing(dialog)) {
         return false;
     }
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, center);
+    QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, center);
     return true;
 }
 
-bool keyboardInPopupContent(QObject *popup) {
-    auto *content = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("contentItem")));
-    return content != nullptr && content->hasActiveFocus();
+namespace {
+
+// What has the keyboard in a dialog as it opens: a popup's content, or a
+// dialog window's body.
+QQuickItem *dialogContent(QObject *dialog) {
+    const char *name = dialogWindowOf(dialog) != nullptr ? "body" : "contentItem";
+    return qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(dialog->property(name)));
 }
 
-bool tabToPopupFooter(QQuickWindow *window, QObject *popup) {
-    auto *content = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("contentItem")));
-    auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(popup->property("footer")));
-    QQuickItem *popupItem = content != nullptr ? content->parentItem() : nullptr;
-    if (popupItem == nullptr || footer == nullptr) {
+} // namespace
+
+bool keyboardInPopupContent(QObject *dialog) {
+    QQuickItem *content = dialogContent(dialog);
+    if (content == nullptr) {
+        return false;
+    }
+    // A window takes keys once the window system activates it.
+    if (QQuickWindow *own = dialogWindowOf(dialog)) {
+        return QTest::qWaitFor([&]() { return own->isActive() && own->activeFocusItem() == content; });
+    }
+    return content->hasActiveFocus();
+}
+
+bool tabToPopupFooter(QQuickWindow *window, QObject *dialog) {
+    QQuickWindow *own = dialogWindowOf(dialog);
+    QQuickWindow *host = own != nullptr ? own : window;
+    QQuickItem *content = dialogContent(dialog);
+    auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(dialog->property("footer")));
+    QQuickItem *dialogItem = own != nullptr ? own->contentItem()
+                                            : (content != nullptr ? content->parentItem() : nullptr);
+    if (dialogItem == nullptr || footer == nullptr) {
         return false;
     }
     for (int i = 0; i < 10; ++i) {
-        QTest::keyClick(window, Qt::Key_Tab);
-        QQuickItem *focused = window->activeFocusItem();
-        if (focused == nullptr || !popupItem->isAncestorOf(focused)) {
+        QTest::keyClick(host, Qt::Key_Tab);
+        QQuickItem *focused = host->activeFocusItem();
+        if (focused == nullptr || !dialogItem->isAncestorOf(focused)) {
             return false;
         }
         if (footer->isAncestorOf(focused)) {

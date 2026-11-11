@@ -421,6 +421,7 @@ private slots:
     void titleStripSettingIsOnlyForTheWholeScreen();
     void configureHelpTextIsSecondaryAndSettingsKeepTheirSliderRange();
     void configureFitsItsPagesAtAnyWidth();
+    void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void lastFmPageShowsOnlyTheButtonsThatApply();
@@ -978,12 +979,14 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QObject *nameDialog = object(window, QStringLiteral("libraryRootNameDialog"));
     QVERIFY(QMetaObject::invokeMethod(window, "openLibraryRootNameDialog", Q_ARG(QVariant, QStringLiteral("add")),
                                       Q_ARG(QVariant, QStringLiteral("/music/new")), Q_ARG(QVariant, QString())));
-    QTRY_VERIFY(nameDialog->property("opened").toBool());
-    QQuickItem *name = visibleNamed(window, QStringLiteral("libraryRootNameField"));
+    QVERIFY(waitForDialogWindow(nameDialog));
+    QQuickWindow *nameWindow = windowOf(nameDialog);
+    QCOMPARE(nameWindow->transientParent(), window);
+    QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
     QTRY_VERIFY(name->hasActiveFocus());
     QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
-    QTest::keyClick(window, Qt::Key_J);
-    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(nameWindow, Qt::Key_J);
+    QTest::keyClick(nameWindow, Qt::Key_Return);
     QTRY_VERIFY(!nameDialog->property("visible").toBool());
     QCoreApplication::processEvents();
     QCOMPARE(accepted.count(), 1);
@@ -1174,6 +1177,71 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
     QTRY_VERIFY(!prefs->isVisible());
 }
 
+// A path the dialogs show but do not edit is a label (#373 H5): one line,
+// elided in the middle, so its start and its name stay, with the whole
+// path in a tooltip; not a read-only text field, which looks editable.
+void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    const QString longPath = QStringLiteral("/fixture/a folder with a long enough name to run past the dialog/"
+                                            "and another level that is long as well/of music");
+    QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), longPath}, {QStringLiteral("name"), QStringLiteral("Music")},
+                    {QStringLiteral("displayName"), QStringLiteral("Music")}, {QStringLiteral("trackCount"), 12}},
+    }));
+    const auto checkPath = [&](QQuickItem *label, const QString &where) {
+        QVERIFY2(label != nullptr, qPrintable(where));
+        QVERIFY2(!label->property("cursorPosition").isValid(), qPrintable(where));
+        QCOMPARE(label->property("text").toString(), longPath);
+        QCOMPARE(label->property("elide").toInt(), int(Qt::ElideMiddle));
+        QCOMPARE(label->property("lineCount").toInt(), 1);
+        QTRY_VERIFY2(label->property("truncated").toBool(), qPrintable(where));
+        QCOMPARE(label->property("toolTipText").toString(), longPath);
+    };
+
+    // Configure's folder list.
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *rowPath = nullptr;
+    QTRY_VERIFY((rowPath = visibleNamed(prefs, QStringLiteral("libraryRootPath"))) != nullptr);
+    checkPath(rowPath, QStringLiteral("folder list"));
+    // Its tooltip shows on hover.
+    QTest::mouseMove(prefs, sceneRect(rowPath).center().toPoint());
+    QTRY_VERIFY(evaluate(rowPath, QStringLiteral("ToolTip.visible")).toBool());
+    QCOMPARE(evaluate(rowPath, QStringLiteral("ToolTip.text")).toString(), longPath);
+    QTest::mouseMove(prefs, sceneRect(visibleNamed(prefs, QStringLiteral("preferencesPageTitle"))).center().toPoint());
+    QTRY_VERIFY(!evaluate(rowPath, QStringLiteral("ToolTip.visible")).toBool());
+
+    // Remove Library Folder's question, over Configure.
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("libraryRootList"));
+    QVERIFY(list != nullptr);
+    click(prefs, itemsNamed(list, QStringLiteral("libraryRootRow")).at(0));
+    QTRY_COMPARE(list->property("currentIndex").toInt(), 0);
+    click(prefs, visibleNamed(prefs, QStringLiteral("libraryRootRemoveButton")));
+    QObject *confirm = object(window, QStringLiteral("removeLibraryRootConfirmDialog"));
+    QVERIFY(waitForDialogWindow(confirm));
+    QCOMPARE(confirm->property("message").toString(), QStringLiteral("Remove the library folder \u201cMusic\u201d?"));
+    checkPath(visibleNamed(windowOf(confirm), QStringLiteral("confirmDialogPath")), QStringLiteral("question"));
+    QTest::keyClick(windowOf(confirm), Qt::Key_Escape);
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+
+    // Rename Library Folder, over Configure.
+    QVERIFY(QMetaObject::invokeMethod(window, "openLibraryRootNameDialog", Q_ARG(QVariant, QStringLiteral("rename")),
+                                      Q_ARG(QVariant, longPath), Q_ARG(QVariant, QStringLiteral("Music"))));
+    QObject *nameDialog = object(window, QStringLiteral("libraryRootNameDialog"));
+    QVERIFY(waitForDialogWindow(nameDialog));
+    QCOMPARE(windowOf(nameDialog)->transientParent(), prefs);
+    checkPath(visibleNamed(windowOf(nameDialog), QStringLiteral("libraryRootPathField")), QStringLiteral("rename"));
+    QTest::keyClick(windowOf(nameDialog), Qt::Key_Escape);
+    QTRY_VERIFY(!nameDialog->property("visible").toBool());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
 void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1220,10 +1288,19 @@ void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
     click(prefs, visibleNamed(prefs, QStringLiteral("libraryRootRemoveButton")));
     QObject *confirm = object(window, QStringLiteral("removeLibraryRootConfirmDialog"));
     QVERIFY(confirm != nullptr);
-    QTRY_VERIFY(confirm->property("opened").toBool());
-    QVERIFY(confirm->property("message").toString().contains(QStringLiteral("/mnt/archive/flac")));
+    // A window of its own above Configure's (#373 H5), not a popup in it.
+    QVERIFY(waitForDialogWindow(confirm));
+    QQuickWindow *confirmWindow = windowOf(confirm);
+    QCOMPARE(confirmWindow->transientParent(), prefs);
+    QCOMPARE(confirm->property("message").toString(), QStringLiteral("Remove this library folder?"));
+    QCOMPARE(confirm->property("path").toString(), QStringLiteral("/mnt/archive/flac"));
     QVERIFY(confirm->property("details").toString().contains(QStringLiteral("38 tracks")));
-    QTest::keyClick(prefs, Qt::Key_Escape);
+    // Remove Folder has the page's Remove icon beside Cancel's.
+    QQuickItem *removeFolder = visibleNamed(confirmWindow, QStringLiteral("confirmDialogConfirmButton"));
+    QVERIFY(removeFolder != nullptr);
+    QCOMPARE(evaluate(removeFolder, QStringLiteral("icon.name")).toString(), QStringLiteral("list-remove"));
+    QCOMPARE(removeFolder->property("text").toString(), QStringLiteral("Remove Folder"));
+    QTest::keyClick(confirmWindow, Qt::Key_Escape);
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(dialog->property("opened").toBool());
     // Nothing waits for Apply.
@@ -1853,25 +1930,21 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QTRY_VERIFY((diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"))) != nullptr);
     click(window, diagnostics);
     QTRY_VERIFY(!popup->property("visible").toBool());
-    QObject *diagnosticsDialog = nullptr;
-    for (QObject *candidate : window->findChildren<QObject *>()) {
-        if (QString::fromLatin1(candidate->metaObject()->className()).startsWith(QStringLiteral("DiagnosticsDialog"))) {
-            diagnosticsDialog = candidate;
-        }
-    }
+    QObject *diagnosticsDialog = object(window, QStringLiteral("diagnosticsDialog"));
     QVERIFY(diagnosticsDialog != nullptr);
-    QTRY_VERIFY(diagnosticsDialog->property("opened").toBool());
+    QVERIFY(waitForDialogWindow(diagnosticsDialog));
+    QQuickWindow *diagnosticsWindow = windowOf(diagnosticsDialog);
 
     // Copy Log Without Paths asks the bridge for the copy once there is a log.
     QObject *bridge = bridgeOf(window);
-    QQuickItem *copyWithoutPaths = visibleNamed(window, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
+    QQuickItem *copyWithoutPaths = visibleNamed(diagnosticsWindow, QStringLiteral("diagnosticsCopyWithoutPathsButton"));
     QVERIFY(copyWithoutPaths != nullptr);
     QCOMPARE(copyWithoutPaths->property("text").toString(), QStringLiteral("Copy Log Without Paths"));
     QVERIFY(!copyWithoutPaths->isEnabled());
     bridge->setProperty("diagnosticsText", QStringLiteral("[app] info: Ferrous started."));
     QMetaObject::invokeMethod(bridge, "diagnosticsChanged");
     QTRY_VERIFY(copyWithoutPaths->isEnabled());
-    click(window, copyWithoutPaths);
+    click(diagnosticsWindow, copyWithoutPaths);
     QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
 }
 
@@ -2384,17 +2457,18 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     // With edits, the title bar's close button asks first, over the editor's
     // window; Keep Editing keeps it.
     tags->close();
-    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(waitForDialogWindow(confirm));
     QVERIFY(tags->isVisible());
-    QCOMPARE(qvariant_cast<QQuickItem *>(confirm->property("parent"))->window(), tags);
-    QVERIFY(emitClicked(object(window, QStringLiteral("tagEditorCloseConfirmKeepEditingButton"))));
+    QCOMPARE(windowOf(confirm)->transientParent(), tags);
+    click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmKeepEditingButton")));
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(tags->isVisible());
     QVERIFY(editor.dirty());
     // Escape asks too; Discard closes.
+    QVERIFY(QTest::qWaitForWindowActive(tags));
     QTest::keyClick(tags, Qt::Key_Escape);
-    QTRY_VERIFY(confirm->property("opened").toBool());
-    QVERIFY(emitClicked(object(window, QStringLiteral("tagEditorCloseConfirmDiscardButton"))));
+    QVERIFY(waitForDialogWindow(confirm));
+    click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
     QVERIFY(!editor.isOpen());
 
@@ -2533,10 +2607,9 @@ void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
     }
 }
 
-// The dialogs have one heading style (#373 H3): a dialog in a window of its
-// own has its title in KWin's title bar only, and one drawn in a window,
-// such as a question, has it in Configure's page titles' 15 px semibold,
-// not the style's larger regular heading. Its close button rejects it.
+// The dialogs have one heading style (#373 H3): every modal dialog is a
+// window of its own (#373 H5), with its title in KWin's title bar only,
+// whose close button Cancels.
 void UiDialogsTest::dialogsShareOneHeadingStyle() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
@@ -2568,35 +2641,47 @@ void UiDialogsTest::dialogsShareOneHeadingStyle() {
         QVERIFY2(textsHolding(dialogWindow->contentItem(), dialogWindow->title()).isEmpty(), name);
     }
 
-    // The dialogs drawn in a window: the title in Configure's style. The
-    // library page's question opens over Configure.
+    // Every other modal dialog is a window of its own too (#373 H5), above
+    // the window that opens it: the main window, Configure, Edit Tags, or
+    // Diagnostics. No heading of its own: KWin's title bar has the title,
+    // and its close button Cancels. Configure's library page asks over it.
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
     QVERIFY(openPreferences(window, 0) != nullptr);
     QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
     editor.selectAllRows();
     editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
-    for (const char *name : {"quitSaveFailedDialog", "tagEditorCloseConfirmDialog", "tagEditorQuitWaitDialog",
-                             "autoNumberDialog", "renamePreviewDialog", "libraryRootNameDialog",
-                             "removeLibraryRootConfirmDialog"}) {
+    QQuickWindow *tags = windowOf(object(window, QStringLiteral("tagEditorDialog")));
+    struct Case { const char *name; QWindow *over; };
+    for (const Case &test : {Case{"quitSaveFailedDialog", window}, Case{"libraryRootNameDialog", windowOf(preferences)},
+                             Case{"removeLibraryRootConfirmDialog", windowOf(preferences)},
+                             Case{"tagEditorCloseConfirmDialog", tags}, Case{"tagEditorQuitWaitDialog", tags},
+                             Case{"autoNumberDialog", tags}, Case{"renamePreviewDialog", tags},
+                             Case{"tagEditorStatusDetailsDialog", tags},
+                             Case{"clearDiagnosticsConfirmDialog", windowOf(diagnostics)}}) {
+        const char *name = test.name;
         QObject *dialog = object(window, QString::fromLatin1(name));
         QVERIFY2(dialog != nullptr, name);
+        QQuickWindow *dialogWindow = windowOf(dialog);
+        QVERIFY2(dialogWindow != nullptr, name);
         QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
-        QTRY_VERIFY2(dialog->property("opened").toBool(), name);
-        auto *header = qvariant_cast<QQuickItem *>(dialog->property("header"));
-        QVERIFY2(header != nullptr && header->isVisible(), name);
-        const QList<QQuickItem *> titles = itemsNamed(header, QStringLiteral("dialogHeaderTitle"));
-        QVERIFY2(titles.size() == 1, name);
-        QCOMPARE(titles.first()->property("text").toString(), dialog->property("title").toString());
-        const QFont font = titles.first()->property("font").value<QFont>();
-        QCOMPARE(font.pointSizeF(), titleFont.pointSizeF());
-        QCOMPARE(font.weight(), titleFont.weight());
-        QCOMPARE(hex(titles.first()->property("color").value<QColor>()), hex(tokenOf(window, "text")));
-        QQuickItem *close = itemsNamed(header, QStringLiteral("dialogHeaderCloseButton")).value(0);
-        QVERIFY2(close != nullptr && close->isVisible(), name);
+        QVERIFY2(waitForDialogWindow(dialog), name);
+        QVERIFY2(dialogWindow->isTopLevel(), name);
+        QVERIFY2(dialogWindow->transientParent() == test.over, name);
+        QCOMPARE(dialogWindow->modality(), Qt::ApplicationModal);
+        QCOMPARE(dialogWindow->flags() & Qt::WindowType_Mask, Qt::Dialog);
+        QVERIFY2(!dialogWindow->title().isEmpty(), name);
+        QVERIFY2(textsHolding(dialogWindow->contentItem(), dialogWindow->title()).isEmpty(), name);
+        QVERIFY2(itemsNamed(dialogWindow->contentItem(), QStringLiteral("dialogHeaderTitle")).isEmpty(), name);
+        // The title bar's close button: a Cancel.
         QSignalSpy rejected(dialog, SIGNAL(rejected()));
-        QVERIFY(emitClicked(close));
-        QCOMPARE(rejected.count(), 1);
-        QTRY_VERIFY2(!dialog->property("visible").toBool(), name);
+        dialogWindow->close();
+        QTRY_VERIFY2(!dialogWindow->isVisible(), name);
+        QVERIFY2(rejected.count() == 1, name);
     }
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
     QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
     editor.close();
 }
