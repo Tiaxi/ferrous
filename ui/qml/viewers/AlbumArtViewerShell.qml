@@ -65,15 +65,32 @@ Item {
     readonly property real popupControlsBottom: albumArtPopupControls.y + albumArtPopupControls.height
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     readonly property bool fullscreenControlsVisible: fullscreenControlsAutoHide.controlsVisible
+    // The controls as they fade: 1 shown, 0 hidden.
+    readonly property real fullscreenControlsLevel: fullscreenControlsAutoHide.level
 
-    // Over the whole screen, the title strip hides while the pointer rests,
-    // as the visualization viewer's does, and stays while one of its buttons
-    // has keyboard focus. In the main window, the controls stay.
+    // Whether `item` is inside `scope`.
+    function isInside(item, scope) {
+        for (let parentItem = item; parentItem; parentItem = parentItem.parent) {
+            if (parentItem === scope) {
+                return true
+            }
+        }
+        return false
+    }
+
+    // The viewer's controls hide while the pointer rests, as the
+    // visualization viewer's do: over the whole screen the title strip, in
+    // the main window the corner plate (#373 H8: it stayed while the
+    // visualization viewer's hid). They stay while one of them has keyboard
+    // focus.
     Components.FullscreenControlsAutoHide {
         id: fullscreenControlsAutoHide
         objectName: "albumArtFullscreenControlsAutoHide"
-        active: root.wholeScreenOpen
-        held: root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
+        active: root.viewerOpen
+        held: root.wholeScreenOpen
+            ? root.fullscreenWindow !== null && root.fullscreenWindow.strip.focusInside
+            : albumArtViewer.visible && root.windowRoot !== null
+                && root.isInside(root.windowRoot.activeFocusItem, albumArtPopupControls)
     }
 
     // Made the first time the viewer opens over the whole screen and kept,
@@ -176,11 +193,22 @@ Item {
         // was before, so the popup does not close for it.
         contentItem: FocusScope {
             focus: true
+            // Any key brings the controls back, so Tab reaches them.
+            Keys.onPressed: function(event) {
+                fullscreenControlsAutoHide.wake()
+                event.accepted = false
+            }
             Keys.onEscapePressed: function(event) {
                 event.accepted = root.previewActive
                 if (root.previewActive) {
                     root.closeViewer()
                 }
+            }
+
+            // The pointer anywhere in the viewer brings the controls back.
+            HoverHandler {
+                onPointChanged: fullscreenControlsAutoHide.pointerMoved(
+                    point.scenePosition.x, point.scenePosition.y)
             }
 
             // Takes focus from the viewer's buttons when the art is pressed,
@@ -272,7 +300,10 @@ Item {
         // its controls are on a plate in the top right corner, on the art.
         // The plate is sized from the controls, which place themselves at
         // once, rather than by the plate's Row, which would wait for the
-        // next frame.
+        // next frame. As the visualization viewer's corner plate, it shows
+        // at once, so the key that brings the controls back can move focus
+        // to them, fades out on the controls' level, and hidden it takes no
+        // pointer.
         Item {
             id: albumArtPopupControls
             objectName: "albumArtPopupControls"
@@ -282,6 +313,13 @@ Item {
             anchors.margins: 4
             implicitWidth: popupControls.implicitWidth + 4
             implicitHeight: popupControls.implicitHeight + 4
+            opacity: root.fullscreenControlsLevel
+            visible: root.fullscreenControlsVisible || root.fullscreenControlsLevel > 0
+
+            HoverHandler {
+                onPointChanged: fullscreenControlsAutoHide.pointerMoved(
+                    point.scenePosition.x, point.scenePosition.y)
+            }
 
             Components.PlotPlate {
                 anchors.fill: parent
@@ -436,7 +474,7 @@ Item {
                         positionText: root.positionText
                         closeButtonName: "albumArtFullscreenCloseButton"
                         controlsVisible: root.fullscreenControlsVisible
-                        controlsLevel: fullscreenControlsAutoHide.level
+                        controlsLevel: root.fullscreenControlsLevel
                         available: root.stripEnabled
                         pointerActivity: fullscreenControlsAutoHide.pointerMoved
                         zoomLevel: root.zoomLevel

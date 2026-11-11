@@ -996,6 +996,8 @@ private slots:
     void albumArtViewerFadesWithItsArt_data();
     void albumArtViewerFadesWithItsArt();
     void windowedViewerClosesOverItsLastFrame();
+    void albumArtViewerControlsFadeOnOneLevel_data();
+    void albumArtViewerControlsFadeOnOneLevel();
 };
 
 void UiMotionTest::initTestCase() {
@@ -5622,6 +5624,122 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     units->setLongDuration(0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(pane->isAncestorOf(surface));
+}
+
+void UiMotionTest::albumArtViewerControlsFadeOnOneLevel_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("whole screen") << true;
+    QTest::newRow("in the window") << false;
+}
+
+// The album art viewer's controls hide while the pointer rests and come
+// back as it moves, on the auto-hide's one level, as the visualization
+// viewer's do: over the whole screen the title strip with its buttons, in
+// the window the corner plate with its buttons (#373 H8: the corner plate
+// never hid). Each is drawn at the level in every frame of the fade.
+void UiMotionTest::albumArtViewerControlsFadeOnOneLevel() {
+    QFETCH(bool, wholeScreen);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    units->setLongDuration(0);
+    // Long enough for frames along the fade.
+    units->setShortDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QQuickItem *surface = named(window, "albumArtSurface");
+    QVERIFY(viewer && autoHide && popup && surface);
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    showTrack(bridge, QStringLiteral("/music/0.flac"), QStringLiteral("Track"), QStringLiteral("Album"),
+              covers.first);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QQuickWindow *host = window;
+    if (wholeScreen) {
+        QTRY_VERIFY(surface->window() != nullptr && surface->window() != window);
+        host = surface->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    } else {
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QVERIFY(autoHide->property("active").toBool());
+    QQuickItem *controls = nullptr;
+    QTRY_VERIFY((controls = itemNamed(host->contentItem(), wholeScreen ? QStringLiteral("albumArtFullscreenStrip")
+                                                                         : QStringLiteral("albumArtPopupControls")))
+                != nullptr);
+    QList<QPair<QString, QQuickItem *>> drawn{
+        {QStringLiteral("the controls"), controls},
+        {QStringLiteral("Image Details"),
+         itemNamed(controls, wholeScreen ? QStringLiteral("albumArtFullscreenInfoButton")
+                                         : QStringLiteral("albumArtPopupInfoButton"))},
+        {QStringLiteral("Close"),
+         itemNamed(controls, wholeScreen ? QStringLiteral("albumArtFullscreenCloseButton")
+                                         : QStringLiteral("albumArtPopupCloseButton"))},
+    };
+    if (!wholeScreen) {
+        drawn.append({QStringLiteral("the corner plate"), itemNamed(controls, QStringLiteral("plotPlateFill"))});
+    }
+    for (const auto &[what, item] : drawn) {
+        QVERIFY2(item != nullptr, qPrintable(what));
+    }
+    QQuickItem *container = wholeScreen ? host->contentItem() : popupItemOf(popup);
+    QVERIFY(container != nullptr);
+    // Where a control is not at the level, or "".
+    const auto apart = [&]() -> QString {
+        const double level = autoHide->property("level").toDouble() * drawnOpacity(container);
+        for (const auto &[what, item] : drawn) {
+            const double opacity = drawnOpacity(item);
+            if (std::abs(opacity - level) > 1e-9) {
+                return QStringLiteral("%1 at %2, the level at %3").arg(what).arg(opacity).arg(level);
+            }
+        }
+        return {};
+    };
+    const QPoint onArt(host->width() / 3, host->height() / 2);
+    QTest::mouseMove(host, onArt);
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+
+    QString failure;
+    int fadingFrames = 0;
+    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+        const double level = autoHide->property("level").toDouble();
+        fadingFrames += level > 0.0 && level < 1.0;
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+    // The pointer resting: they fade out together, and hide once out.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
+    QTRY_VERIFY(autoHide->property("level").toDouble() > 0.0 && autoHide->property("level").toDouble() < 1.0);
+    QVERIFY(controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_VERIFY(!controls->isVisible());
+    QCOMPARE(autoHide->property("level").toDouble(), 0.0);
+    QVERIFY2(failure.isEmpty(), qPrintable(QStringLiteral("hiding: ") + failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+
+    // The pointer moving brings them back, shown at once, fading in.
+    autoHide->setProperty("hideDelay", 600000);
+    fadingFrames = 0;
+    QTest::mouseMove(host, onArt + QPoint(5, 0));
+    QTRY_VERIFY(autoHide->property("controlsVisible").toBool());
+    QVERIFY(controls->isVisible());
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+    QObject::disconnect(connection);
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+    QVERIFY2(failure.isEmpty(), qPrintable(QStringLiteral("showing: ") + failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
 #include "tst_ui_motion.moc"

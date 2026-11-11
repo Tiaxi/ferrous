@@ -1598,7 +1598,9 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
         QVERIFY(QTest::qWaitForWindowActive(window));
     }
 
-    // In the main window, the album art viewer's controls never hide.
+    // In the main window, the album art viewer's corner plate hides while
+    // the pointer rests and comes back as it moves, as the visualization
+    // viewer's does (#373 H8: it never hid).
     QObject *albumArtAutoHide =
         window->findChild<QObject *>(QStringLiteral("albumArtFullscreenControlsAutoHide"));
     QVERIFY(albumArtAutoHide != nullptr);
@@ -1607,11 +1609,16 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
     QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
     QVERIFY(popup != nullptr);
     QTRY_VERIFY(popup->property("opened").toBool());
-    QVERIFY(!albumArtAutoHide->property("active").toBool());
-    albumArtAutoHide->setProperty("hideDelay", 1);
-    QTest::qWait(50);
+    QVERIFY(albumArtAutoHide->property("active").toBool());
     QQuickItem *popupClose = visibleItemNamed(window, QStringLiteral("albumArtPopupCloseButton"));
     QVERIFY(popupClose != nullptr);
+    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    albumArtAutoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!popupClose->isVisible());
+    albumArtAutoHide->setProperty("hideDelay", 600000);
+    QTest::mouseMove(window, QPoint(window->width() / 3, window->height() / 2));
+    QTest::mouseMove(window, QPoint(window->width() / 3 + 5, window->height() / 2));
+    QTRY_VERIFY(popupClose->isVisible());
     QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
