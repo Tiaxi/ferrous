@@ -707,8 +707,8 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
 
 // The meter as part of the plot (#373 H7 P11, H8): its bar out to the
 // column's right edge, with no strip of the plot's floor beside it; on the
-// spectrogram, the fill in the colour map's colour of its level, no
-// lighter than kFillLightness of the map's top; the scale's ticks only
+// spectrogram, the fill in the colour map's colour of its level, up to its
+// last colour under kFillLightness of the map's top; the scale's ticks only
 // while the plot shows its scale, fewer in a short lane; the peak tick a
 // mark of its own on any fill.
 void LevelMeterTest::meterIsPartOfThePlot() {
@@ -716,34 +716,47 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     // spectrogram's mapping: -60 dBFS is a dark magenta in its default
     // 132 dB range, and full scale white.
     const QColor quiet = LevelMeterItem::colorMapColor(-60, 132);
-    const QColor middle = LevelMeterItem::colorMapColor(-24, 132);
+    const QColor middle = LevelMeterItem::colorMapColor(-40, 132);
     const QColor loud = LevelMeterItem::colorMapColor(-3, 132);
-    QVERIFY(quiet.lightnessF() < middle.lightnessF() && middle.lightnessF() < loud.lightnessF());
+    const auto lightness = [](const QColor &color) { return LevelMeterItem::lightness(color); };
+    QVERIFY(lightness(quiet) < lightness(middle) && lightness(middle) < lightness(loud));
     QVERIFY2(quiet.red() > quiet.green() && quiet.blue() > quiet.green(), qPrintable(quiet.name()));
-    // Full scale, the map's white, at the cap: a light grey, not white.
+    // Over the cap, along the ramp (#373 H9 T2): full scale, and every
+    // level whose colour is over the cap, takes the map's own colour of the
+    // highest level still under it, an orange, not a darkened white or
+    // khaki yellow.
+    const double capPosition = LevelMeterItem::fillCapPosition();
+    const QColor capColor = QColor::fromRgb(SpectrogramColorMap::colorAt(capPosition));
+    QVERIFY(LevelMeterItem::lightness(capColor) <= LevelMeterItem::kFillLightness);
+    QVERIFY(LevelMeterItem::lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(capPosition + 1e-3)))
+            > LevelMeterItem::kFillLightness);
     const QColor top = LevelMeterItem::colorMapColor(0, 132);
-    QVERIFY2(top.red() == top.green() && top.green() == top.blue(), qPrintable(top.name()));
-    QVERIFY2(std::abs(LevelMeterItem::lightness(top) - LevelMeterItem::kFillLightness) <= 1.0 / 255,
-             qPrintable(top.name()));
-    // Over the cap, the map's colour darkened with its hue; under it, the
-    // map's own.
-    const QColor yellow = LevelMeterItem::colorMapColor(-8, 132);
-    QVERIFY2(yellow.red() > yellow.blue() && yellow.green() > yellow.blue(), qPrintable(yellow.name()));
+    QCOMPARE(top, capColor);
+    QVERIFY2(top.red() == 255 && top.green() > 0x80 && top.green() < 0xc0 && top.blue() == 0, qPrintable(top.name()));
+    QVERIFY2(LevelMeterItem::lightness(top) > LevelMeterItem::kFillLightness - 0.01, qPrintable(top.name()));
+    QCOMPARE(LevelMeterItem::colorMapColor(-8, 132), capColor);
     QCOMPARE(quiet, QColor::fromRgb(SpectrogramColorMap::colorOfLevel(-60, 132)));
+    // Every fill is a colour of the map: under the cap its level's own,
+    // over it the cap's, never a scaled one, whose hue or saturation the
+    // map's colour of the same lightness would not have.
     for (const double range : {50.0, 90.0, 132.0, 150.0}) {
         for (double db = -60; db <= 0; db += 0.5) {
             const QColor mapped = QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, range));
             const QColor fill = LevelMeterItem::colorMapColor(db, range);
-            QVERIFY2(LevelMeterItem::lightness(fill) <= LevelMeterItem::kFillLightness,
-                     qPrintable(QStringLiteral("%1 dB in %2: %3").arg(db).arg(range).arg(fill.name())));
+            const QString where = QStringLiteral("%1 dB in %2: %3").arg(db).arg(range).arg(fill.name());
+            QVERIFY2(LevelMeterItem::lightness(fill) <= LevelMeterItem::kFillLightness, qPrintable(where));
             if (LevelMeterItem::lightness(mapped) <= LevelMeterItem::kFillLightness) {
                 QCOMPARE(fill, mapped);
+            } else {
+                QCOMPARE(fill, capColor);
+                QCOMPARE(fill.hsvHue(), capColor.hsvHue());
+                QCOMPARE(fill.hsvSaturation(), 255);
             }
         }
     }
     // In a narrower range, whose floor is nearer, a level is lower on the
     // map, as the spectrogram draws it.
-    QVERIFY(LevelMeterItem::colorMapColor(-24, 60).lightnessF() < middle.lightnessF());
+    QVERIFY(lightness(LevelMeterItem::colorMapColor(-40, 60)) < lightness(middle));
     // The ticks: four in a full lane, two in a short one.
     QCOMPARE(LevelMeterItem::ticksDb(200), (std::vector<double>{0, -12, -24, -48}));
     QCOMPARE(LevelMeterItem::ticksDb(50), (std::vector<double>{-12, -24}));
@@ -905,6 +918,14 @@ void LevelMeterTest::loudFillIsCappedAndItsPeakIsFull() {
             }
             QVERIFY2(lightest > 0.5 && lightest <= LevelMeterItem::kFillLightness,
                      qPrintable(where + QStringLiteral(": %1").arg(lightest)));
+            // Loud, the fill is the map's colour at the cap, unscaled
+            // (#373 H9 T2): the same pixel at every row of it.
+            const QColor capColor = QColor::fromRgb(SpectrogramColorMap::colorAt(LevelMeterItem::fillCapPosition()));
+            for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); y += 7) {
+                const QColor pixel = image.pixelColor(int(8 * scale), y);
+                QVERIFY2(pixel == capColor, qPrintable(where + QStringLiteral(": y %1 is %2, the map %3")
+                                                           .arg(y).arg(pixel.name(), capColor.name())));
+            }
         }
     }
 }

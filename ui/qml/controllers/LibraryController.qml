@@ -357,9 +357,14 @@ QtObject {
         if (animates) {
             root.view.animatesToggle = true
         }
+        const countBefore = root.libraryModel.count
         root.libraryModel.toggleKey(key)
         if (animates) {
             root.view.forceLayout()
+            // The children fold with the rows below, from the same frame.
+            if (typeof root.view.startFold === "function") {
+                root.view.startFold(index, root.libraryModel.count - countBefore)
+            }
             root.view.animatesToggle = false
         }
         // Rows a collapse hides leave the selection.

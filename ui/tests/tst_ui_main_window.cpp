@@ -1966,7 +1966,8 @@ void UiMainWindowTest::libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors()
     QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundHover"))));
     QTRY_VERIFY(shown(itemNamed(album, QStringLiteral("rowBackgroundTint"))));
     checkName(album, false);
-    const QList<QQuickItem *> children = album->childItems();
+    // The row's drawing, under the clip it has while it folds.
+    const QList<QQuickItem *> children = itemNamed(album, QStringLiteral("libraryRowContent"))->childItems();
     QVERIFY(children.indexOf(title(album))
             > children.indexOf(itemNamed(album, QStringLiteral("rowBackgroundTint"))->parentItem()));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
@@ -2786,8 +2787,10 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn_data() {
 // default font. The queue keeps its header and six rows first, and each
 // pane its minimum, the queue's its header and four rows: at 24 pt in a
 // 720 px window the visualization has its minimum and the queue the rest,
-// and the window's least height still fits 720 px. A split the user
-// dragged wins.
+// and the window's least height still fits 720 px. The queue's list is a
+// whole number of its rows, the visualization taking the rest (#373 H9 T8:
+// a row cut at the seam). A split the user dragged wins, exactly where it
+// was put, on the grid or not.
 void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
@@ -2825,17 +2828,28 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
              queueMinimum);
     QVERIFY2(queue->height() >= queueMinimum - 0.5 && pane->height() >= 220 - 0.5, qPrintable(heights));
     const qreal share = pane->height() / split->height();
+    // The queue's list on the grid of its rows, as tall as a delegate is.
+    QQuickItem *list = named(window, "playlistView");
+    QQuickItem *row = named(window, "queueRow");
+    QVERIFY(list != nullptr && row != nullptr);
+    QCOMPARE(row->height(), rowHeight);
+    const qreal rows = list->height() / row->height();
+    QVERIFY2(list->height() > 0 && std::abs(rows - std::round(rows)) < 1e-6,
+             qPrintable(heights + QStringLiteral(", list %1").arg(list->height())));
     if (pointSize > 0 && windowHeight == 720) {
-        // The visualization at its minimum; the queue the rest.
-        QVERIFY2(std::abs(pane->height() - 220) <= 1, qPrintable(heights));
+        // The visualization at its minimum, and what the grid leaves over;
+        // the queue the rest.
+        QVERIFY2(pane->height() >= 220 - 0.5 && pane->height() < 220 + rowHeight, qPrintable(heights));
     } else {
-        QVERIFY2(std::abs(pane->height() - std::round(split->height() * 0.47)) <= 1.5 || share < 0.47,
+        // Its share, and what the grid leaves over.
+        const qreal wanted = std::round(split->height() * 0.47);
+        QVERIFY2((pane->height() >= wanted - 1.5 && pane->height() < wanted + rowHeight) || share < 0.47,
                  qPrintable(heights));
         // The queue's header and six rows at least.
         QVERIFY2(queue->height() >= 7 * rowHeight - 0.5, qPrintable(heights));
     }
     if (pointSize == 0 && windowHeight == 1000) {
-        QVERIFY2(share >= 0.45 && share <= 0.48, qPrintable(heights));
+        QVERIFY2(share >= 0.45 && share <= 0.50, qPrintable(heights));
         // 16 whole rows under the header, and more.
         QVERIFY2(std::floor((queue->height() - header->height()) / rowHeight) >= 16, qPrintable(heights));
     }
@@ -2850,6 +2864,14 @@ void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
     const auto expected = [&]() { return std::min(split->height() * 0.7, split->height() - 220 - 1); };
     QTRY_VERIFY2(std::abs(queue->height() - expected()) <= 1,
                  qPrintable(QStringLiteral("%1, not %2").arg(queue->height()).arg(expected())));
+
+    // One off the grid stays exactly there.
+    const qreal gridRows = std::ceil((queueMinimum - header->height()) / rowHeight);
+    const qreal offGrid = header->height() + gridRows * rowHeight + 7;
+    QVERIFY(QMetaObject::invokeMethod(layout, "noteQueueHeight", Q_ARG(QVariant, offGrid),
+                                      Q_ARG(QVariant, split->height())));
+    QTRY_COMPARE(queue->height(), offGrid);
+    QCOMPARE(list->height(), gridRows * rowHeight + 7);
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {

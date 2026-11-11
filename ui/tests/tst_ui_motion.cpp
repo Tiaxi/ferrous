@@ -988,6 +988,7 @@ private slots:
     void nowPlayingAnotherAlbumWithoutCoversFadesItsLinesLong();
     void nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt();
     void treeToggleOpensDownwardAndKeepsTheRowPut();
+    void treeToggleIsInstantWithAnimationsOff();
     void treeChangesOtherThanAToggleAreInstant();
     void queueRowsADragDisplacesSlide();
     void queueRowsTheKeyboardMovesMoveAtOnce();
@@ -3686,10 +3687,12 @@ void UiMotionTest::nowPlayingCoverOfAnotherShapeHidesWhatIsUnderIt() {
 }
 
 // Expanding a row opens its children downward: the toggled row stays put,
-// the rows below slide down from where they were over shortDuration with
-// OutCubic, as the children fade in. Collapsing is the same played back,
-// on the same duration and curve (#373 H7: the expand was instant beside
-// the collapse's fade).
+// the rows below slide down from where they were over longDuration with
+// OutCubic, uncovering the children. Collapsing is the same played back, on
+// the same duration and curve (#373 H7: the expand was instant beside the
+// collapse's fade). The children show only above the fold, the top of the
+// rows sliding, at full opacity: no child's text is ever under a sliding
+// row's, as it was while they faded under them (#373 H9 T5).
 void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     LibraryTreeModel libraryModel;
     showTree(libraryModel, {kArtistKey});
@@ -3703,11 +3706,10 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     QVERIFY(units != nullptr);
     auto *open = qvariant_cast<QObject *>(view->property("openAnimation"));
     auto *close = qvariant_cast<QObject *>(view->property("closeAnimation"));
-    auto *closeFade = qvariant_cast<QObject *>(view->property("closeFadeAnimation"));
-    auto *openFade = qvariant_cast<QObject *>(view->property("openFadeAnimation"));
-    QVERIFY(open != nullptr && close != nullptr && closeFade != nullptr && openFade != nullptr);
-    for (QObject *animation : {open, close, closeFade, openFade}) {
-        QCOMPARE(animation->property("duration").toInt(), units->shortDuration());
+    auto *fold = qvariant_cast<QObject *>(view->property("foldAnimation"));
+    QVERIFY(open != nullptr && close != nullptr && fold != nullptr);
+    for (QObject *animation : {open, close, fold}) {
+        QCOMPARE(animation->property("duration").toInt(), units->longDuration());
         QCOMPARE(easingOf(animation), QEasingCurve::OutCubic);
     }
 
@@ -3716,49 +3718,114 @@ void UiMotionTest::treeToggleOpensDownwardAndKeepsTheRowPut() {
     const double rowHeight = view->property("rowHeight").toDouble();
     const double albumAY = albumA->y();
     QCOMPARE(albumB->y(), 2 * rowHeight);
+    const auto shown = [](QQuickItem *row) {
+        auto *clip = row->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
+        return clip != nullptr && clip->isVisible() ? clip->height() : 0.0;
+    };
+    // The children's drawn part ends at the top of the row sliding, or
+    // above it, and they never fade.
+    const auto checkFold = [&](const QList<QQuickItem *> &children, const QString &where) {
+        for (QQuickItem *child : children) {
+            QVERIFY2(shown(child) == 0.0 || child->y() + shown(child) <= albumB->y() + 0.01,
+                     qPrintable(QStringLiteral("%1: a child to %2 under Album B at %3")
+                                    .arg(where).arg(child->y() + shown(child)).arg(albumB->y())));
+            QCOMPARE(child->opacity(), 1.0);
+        }
+        QCOMPARE(albumB->opacity(), 1.0);
+    };
 
-    // The slide's time, in the test's steps.
     SteppedAnimationDriver driver;
-    const int duration = units->shortDuration();
+    const int duration = units->longDuration();
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     // Laid out at once: the children are in place, Album A has not moved,
-    // and Album B starts where it was, over the children.
+    // and Album B starts where it was, over the children, which show none
+    // of themselves yet.
     QCOMPARE(view->property("count").toInt(), 5);
     QCOMPARE(albumA->y(), albumAY);
     QQuickItem *firstChild = libraryRowWithPath(window, kTrackA1);
-    QVERIFY(firstChild != nullptr);
+    QQuickItem *secondChild = libraryRowWithPath(window, kTrackA2);
+    QVERIFY(firstChild != nullptr && secondChild != nullptr);
     QCOMPARE(firstChild->y(), 2 * rowHeight);
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QVERIFY(albumB->z() > firstChild->z());
-    QCOMPARE(firstChild->opacity(), 0.0);
-    // Half-way, it is on its way down, still over the children, which
-    // fade in.
-    QVERIFY(driver.step(duration / 2));
-    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
-    QVERIFY2(firstChild->opacity() > 0.0 && firstChild->opacity() < 1.0,
-             qPrintable(QString::number(firstChild->opacity())));
-    QVERIFY(albumB->z() > firstChild->z());
-    QCOMPARE(albumA->y(), albumAY);
-    QVERIFY(driver.step(duration));
+    QCOMPARE(shown(firstChild), 0.0);
+    QCOMPARE(shown(secondChild), 0.0);
+    // Frame by frame, Album B on its way down uncovers the children.
+    int expandMs = 0;
+    bool halfShown = false;
+    while (albumB->y() < 4 * rowHeight || view->property("folding").toBool()) {
+        QVERIFY(driver.step(16));
+        expandMs += 16;
+        QVERIFY2(expandMs <= duration + 48, qPrintable(QString::number(albumB->y())));
+        checkFold({firstChild, secondChild}, QStringLiteral("expand at %1 ms").arg(expandMs));
+        QCOMPARE(albumA->y(), albumAY);
+        halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+    }
+    QVERIFY(halfShown);
     QCOMPARE(albumB->y(), 4 * rowHeight);
     QCOMPARE(albumB->z(), 1.0);
-    QCOMPARE(firstChild->opacity(), 1.0);
+    QCOMPARE(shown(firstChild), rowHeight);
+    QCOMPARE(shown(secondChild), rowHeight);
 
-    // Collapsing: Album B slides back up over the children as they fade,
-    // the expand played back.
+    // Collapsing: Album B slides back up over the children, the expand
+    // played back, over the same time.
     QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
     QCOMPARE(view->property("count").toInt(), 3);
     QCOMPARE(albumA->y(), albumAY);
     QCOMPARE(albumB->y(), 4 * rowHeight);
-    QCOMPARE(firstChild->opacity(), 1.0);
-    // Half-way, on its way up over the children, which fade out.
-    QVERIFY(driver.step(duration / 2));
-    QVERIFY2(albumB->y() > 2 * rowHeight && albumB->y() < 4 * rowHeight, qPrintable(QString::number(albumB->y())));
-    QVERIFY2(firstChild->opacity() > 0.0 && firstChild->opacity() < 1.0,
-             qPrintable(QString::number(firstChild->opacity())));
-    QVERIFY(driver.step(duration));
+    QCOMPARE(shown(firstChild), rowHeight);
+    int collapseMs = 0;
+    halfShown = false;
+    while (albumB->y() > 2 * rowHeight || view->property("folding").toBool()) {
+        QVERIFY(driver.step(16));
+        collapseMs += 16;
+        QVERIFY2(collapseMs <= duration + 48, qPrintable(QString::number(albumB->y())));
+        if (firstChild->isVisible() && secondChild->isVisible()) {
+            checkFold({firstChild, secondChild}, QStringLiteral("collapse at %1 ms").arg(collapseMs));
+            halfShown = halfShown || (shown(firstChild) > 0 && shown(secondChild) < rowHeight);
+        }
+    }
+    QVERIFY(halfShown);
+    // As long, to the test's frame.
+    QVERIFY2(std::abs(collapseMs - expandMs) <= 16,
+             qPrintable(QStringLiteral("collapse %1 ms, expand %2 ms").arg(collapseMs).arg(expandMs)));
     QCOMPARE(albumB->y(), 2 * rowHeight);
     QCOMPARE(albumA->y(), albumAY);
+}
+
+// With animations off, a toggle moves the rows at once, both ways, and the
+// children show whole (#373 H9 T5).
+void UiMotionTest::treeToggleIsInstantWithAnimationsOff() {
+    LibraryTreeModel libraryModel;
+    showTree(libraryModel, {kArtistKey});
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    units->setShortDuration(0);
+    units->setLongDuration(0);
+    QQuickItem *view = named(window, "libraryView");
+    QVERIFY(QTest::qWaitFor([&]() { return view->property("count").toInt() == 3; }));
+    QObject *controller = qvariant_cast<QObject *>(named(window, "libraryPane")->property("controller"));
+    QQuickItem *albumB = libraryRowWithKey(window, kAlbumBKey);
+    const double rowHeight = view->property("rowHeight").toDouble();
+
+    QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
+    QCOMPARE(view->property("count").toInt(), 5);
+    QCOMPARE(albumB->y(), 4 * rowHeight);
+    QVERIFY(!view->property("folding").toBool());
+    QQuickItem *firstChild = libraryRowWithPath(window, kTrackA1);
+    QVERIFY(firstChild != nullptr);
+    auto *clip = firstChild->findChild<QQuickItem *>(QStringLiteral("libraryRowClip"));
+    QVERIFY(clip != nullptr && clip->isVisible());
+    QCOMPARE(clip->height(), rowHeight);
+    QCOMPARE(firstChild->opacity(), 1.0);
+
+    QMetaObject::invokeMethod(controller, "toggleNode", Q_ARG(QVariant, kAlbumAKey));
+    QCOMPARE(view->property("count").toInt(), 3);
+    QCOMPARE(albumB->y(), 2 * rowHeight);
+    QVERIFY(!view->property("folding").toBool());
 }
 
 // Rows that change other than by a toggle, as when a scan or a restore

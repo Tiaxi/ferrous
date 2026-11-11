@@ -100,16 +100,34 @@ double LevelMeterItem::lightness(const QColor &color) {
     return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF();
 }
 
+double LevelMeterItem::fillCapPosition() {
+    // The map lightens monotonically from where it first reaches the cap
+    // (its quiet blues and purples stay far under it), so the cap is one
+    // place on the map: found by a sweep for the first colour over it, then
+    // bisection down to the last colour under it.
+    static const double position = [] {
+        const double cap = kFillLightness * lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(1.0)));
+        const auto over = [cap](double x) { return lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(x))) > cap; };
+        constexpr int kSteps = 1024;
+        int step = 0;
+        while (step < kSteps && !over(double(step + 1) / kSteps)) ++step;
+        if (step == kSteps) return 1.0;
+        double under = double(step) / kSteps;
+        double above = double(step + 1) / kSteps;
+        for (int i = 0; i < 40; ++i) {
+            const double middle = (under + above) / 2.0;
+            (over(middle) ? above : under) = middle;
+        }
+        return under;
+    }();
+    return position;
+}
+
 QColor LevelMeterItem::colorMapColor(double db, double dbRange) {
-    const QColor mapped = QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, dbRange));
-    static const double cap = kFillLightness * lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(1.0)));
-    const double shown = lightness(mapped);
-    if (shown <= cap) return mapped;
-    // Luma is linear in the components, so scaling them all darkens the
-    // colour to the cap and keeps its hue. Rounded down, it stays under.
-    const double factor = cap / shown;
-    const auto scaled = [factor](int component) { return int(std::floor(component * factor)); };
-    return QColor(scaled(mapped.red()), scaled(mapped.green()), scaled(mapped.blue()));
+    // Along the ramp: a level whose colour is over the cap takes the colour
+    // of the highest level still under it, the map's own, unscaled.
+    const double position = std::min(SpectrogramColorMap::position(db, dbRange), fillCapPosition());
+    return QColor::fromRgb(SpectrogramColorMap::colorAt(position));
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {

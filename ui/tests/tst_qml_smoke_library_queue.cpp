@@ -1850,7 +1850,12 @@ void LibraryQueueSmokeTest::libraryRowsLayOutTheirYearsWithoutWarnings() {
         for (QQuickItem *row : visibleItemsNamed(libraryView, QStringLiteral("libraryRow"))) {
             QQuickItem *year = nullptr;
             QQuickItem *title = nullptr;
-            for (QQuickItem *child : row->childItems()) {
+            // The row's drawing, under the clip it has while it folds.
+            auto *content = row->findChild<QQuickItem *>(QStringLiteral("libraryRowContent"));
+            if (content == nullptr) {
+                return QStringLiteral("a row without its content");
+            }
+            for (QQuickItem *child : content->childItems()) {
                 if (child->objectName() == QLatin1String("libraryRowYear")) {
                     year = child;
                 } else if (child->objectName() == QLatin1String("libraryRowTitle")) {
