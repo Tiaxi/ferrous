@@ -954,6 +954,8 @@ private slots:
     void visualizationPaneFloorFollowsTheMode_data();
     void viewerControlsFadeWithTheStrip();
     void viewerControlsFadeWithTheStrip_data();
+    void viewerPlatesAndGlyphsRevealOnOneLevel();
+    void viewerPlatesAndGlyphsRevealOnOneLevel_data();
 };
 
 void UiMotionTest::initTestCase() {
@@ -4398,6 +4400,167 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
     QObject::disconnect(connection);
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QVERIFY(frames > 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
+    QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
+}
+
+void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel_data() {
+    QTest::addColumn<bool>("wholeScreen");
+    QTest::newRow("whole screen") << true;
+    QTest::newRow("in the window") << false;
+}
+
+namespace {
+
+// How opaque `item` is drawn: its opacity and that of every item it is in,
+// or 0 while any of them is hidden.
+double drawnOpacity(const QQuickItem *item) {
+    double opacity = 1.0;
+    for (; item != nullptr; item = item->parentItem()) {
+        if (!item->isVisible()) {
+            return 0.0;
+        }
+        opacity *= item->opacity();
+    }
+    return opacity;
+}
+
+} // namespace
+
+// The viewer's controls come back as one (#373 H5: the plates' fill came in
+// about 130 ms before the lanes' M and S): with the pointer moving on a
+// lane, the title strip or the corner plate, the mode switch and the lane's
+// Mute and Solo, each plate's fill and each button's glyph, are at the
+// auto-hide's one level in every frame, from hidden to shown. The lanes'
+// buttons show on the pointer (the default), not always.
+void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
+    QFETCH(bool, wholeScreen);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for frames along the fade.
+    units->setShortDuration(400);
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *autoHide = window->findChild<QObject *>(QStringLiteral("spectrogramFullscreenControlsAutoHide"));
+    QQuickItem *spectrogram = named(window, "mainSpectrogramSurface");
+    QVERIFY(viewer && autoHide && spectrogram);
+    bridge->setProperty("viewerFullscreenMode", wholeScreen ? 1 : 0);
+    bridge->setProperty("spectrogramViewMode", 1);
+    bridge->setProperty("channelButtonsVisibility", 1);
+    bridge->setProperty("currentTrackChannels", 2);
+    playQueueRow(bridge, 0, QStringLiteral("Paused"));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady", Q_ARG(int, 2),
+                                      Q_ARG(bool, true)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
+    QTRY_VERIFY(viewer->property("spectrogramViewerOpen").toBool());
+    QQuickWindow *host = window;
+    if (wholeScreen) {
+        QTRY_VERIFY(spectrogram->window() != nullptr && spectrogram->window() != window);
+        host = spectrogram->window();
+        QVERIFY(QTest::qWaitForWindowExposed(host));
+    }
+    QQuickItem *controls = nullptr;
+    QTRY_VERIFY((controls = itemNamed(host->contentItem(), wholeScreen ? QStringLiteral("spectrogramFullscreenStrip")
+                                                                         : QStringLiteral("spectrogramPopupControls")))
+                != nullptr);
+    QTRY_VERIFY(spectrogram->window() == host);
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
+    if (!wholeScreen) {
+        QTRY_VERIFY(popup->property("opened").toBool());
+    }
+    QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
+    QQuickItem *laneButtons = itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).first();
+    // Each plate's fill and a glyph on it.
+    QList<QPair<QString, QQuickItem *>> drawn{
+        {QStringLiteral("the mode switch's plate"), itemNamed(modeSwitch, QStringLiteral("plotPlateFill"))},
+        {QStringLiteral("the mode switch's icon"), itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
+        {QStringLiteral("the lane's plate"), itemNamed(laneButtons, QStringLiteral("plotPlateFill"))},
+        {QStringLiteral("the lane's M"), itemNamed(laneButtons, QStringLiteral("plotToolButtonGlyph"))},
+        {QStringLiteral("the viewer's controls"), controls},
+        {QStringLiteral("the viewer's Close"),
+         itemNamed(itemNamed(controls, wholeScreen ? QStringLiteral("spectrogramFullscreenCloseButton")
+                                                   : QStringLiteral("spectrogramPopupCloseButton")),
+                   wholeScreen ? QStringLiteral("viewerToolButtonIcon") : QStringLiteral("plotToolButtonIcon"))},
+    };
+    if (!wholeScreen) {
+        drawn.append({QStringLiteral("the corner plate"), itemNamed(controls, QStringLiteral("plotPlateFill"))});
+    }
+    for (const auto &[what, item] : drawn) {
+        QVERIFY2(item != nullptr, qPrintable(what));
+    }
+    // The pointer resting on the first lane, away from every control.
+    const QPoint onLane(host->width() / 2, host->height() / 4);
+    QTest::mouseMove(host, onLane);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    QTRY_COMPARE(laneButtons->opacity(), 1.0);
+
+    QString failure;
+    int fadingFrames = 0;
+    double popupOpacity = 1.0;
+    // Where a plate or a glyph is not at the level, or "".
+    const auto apart = [&]() -> QString {
+        const double level = autoHide->property("level").toDouble() * popupOpacity;
+        for (const auto &[what, item] : drawn) {
+            const double opacity = drawnOpacity(item);
+            if (std::abs(opacity - level) > 1e-9) {
+                return QStringLiteral("%1 at %2, the level at %3").arg(what).arg(opacity).arg(level);
+            }
+        }
+        return {};
+    };
+    if (!wholeScreen) {
+        popupOpacity = drawnOpacity(qobject_cast<QQuickItem *>(controls->parentItem()));
+    }
+    QVERIFY2(apart().isEmpty(), qPrintable(apart()));
+
+    // Hidden, with the pointer resting.
+    autoHide->setProperty("hideDelay", 1);
+    QTRY_VERIFY(!controls->isVisible());
+    QTRY_COMPARE(autoHide->property("level").toDouble(), 0.0);
+    autoHide->setProperty("hideDelay", 600000);
+
+    const QMetaObject::Connection connection = QObject::connect(host, &QQuickWindow::frameSwapped, host, [&]() {
+        const double level = autoHide->property("level").toDouble();
+        if (level > 0.0 && level < 1.0) {
+            ++fadingFrames;
+        }
+        if (failure.isEmpty()) {
+            failure = apart();
+        }
+    });
+    // The pointer moving on the lane wakes them; then, hidden again, the
+    // pointer comes back onto the lane from outside the view, which also
+    // reveals the plates that show on the pointer.
+    for (const bool fromOutside : {false, true}) {
+        if (fromOutside) {
+            autoHide->setProperty("hideDelay", 1);
+            QTRY_VERIFY(!controls->isVisible());
+            QTest::mouseMove(host, QPoint(-20, -20));
+            QTRY_COMPARE(modeSwitch->property("revealLevel").toDouble(), 0.0);
+            QTRY_COMPARE(laneButtons->property("revealLevel").toDouble(), 0.0);
+            autoHide->setProperty("hideDelay", 600000);
+            fadingFrames = 0;
+        }
+        const QByteArray where = fromOutside ? "from outside" : "on the lane";
+        QTest::mouseMove(host, onLane + QPoint(fromOutside ? 0 : 3, 0));
+        QTRY_VERIFY2(autoHide->property("controlsVisible").toBool(), where.constData());
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QTRY_VERIFY(autoHide->property("level").toDouble() > 0.0 && autoHide->property("level").toDouble() < 1.0);
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QTRY_COMPARE(autoHide->property("level").toDouble(), 1.0);
+        QVERIFY2(apart().isEmpty(), qPrintable(where + ": " + apart()));
+        QVERIFY2(failure.isEmpty(), qPrintable(where + ": " + failure));
+        QVERIFY2(fadingFrames >= 3, qPrintable(where + ": " + QString::number(fadingFrames)));
+    }
+    QObject::disconnect(connection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    QVERIFY2(fadingFrames >= 3, qPrintable(QString::number(fadingFrames)));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
 }

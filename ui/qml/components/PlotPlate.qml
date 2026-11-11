@@ -35,9 +35,13 @@ Item {
 
     opacity: root.revealLevel * root.fadeLevel
 
-    // Kirigami's durations are 0 with animations turned off.
+    // Kirigami's durations are 0 with animations turned off. While the
+    // plate fades with `fadeLevel`, such as a viewer's controls coming back
+    // with the pointer on the view, its own reveal follows at once: the
+    // plate, its fill and its glyphs, come in on that one level rather than
+    // on two curves, one after the other (#373 H5).
     Behavior on revealLevel {
-        enabled: Kirigami.Units.shortDuration > 0
+        enabled: Kirigami.Units.shortDuration > 0 && root.fadeLevel >= 1
         NumberAnimation {
             duration: Kirigami.Units.shortDuration
             easing.type: Easing.OutCubic
