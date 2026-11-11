@@ -1440,6 +1440,7 @@ ApplicationWindow {
             stopAction: stopAction
             nextAction: nextAction
             volumeMuted: playbackController.volumeMuted
+            mutedVolume: playbackController.rememberedVolumeBeforeMute
             keyboardSeekStepSeconds: root.keyboardSeekStepSeconds
             displayedPositionSeconds: playbackController.positionSeconds
             currentPositionSeconds: playbackController.currentPositionSeconds

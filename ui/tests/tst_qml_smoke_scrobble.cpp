@@ -174,8 +174,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
          QStringLiteral("Last.fm: 2:00 to scrobble")},
         {"sending", 2, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", secondary,
          QStringLiteral("Last.fm: sending the scrobble")},
-        // Accepted: in the closed ring, unfilled, in the text colour.
-        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", text,
+        // Accepted: in the closed ring, unfilled, settled in the secondary
+        // colour.
+        {"accepted", 3, 0, false, 0, "scrobbled", QString(), "/lastfm-ring.svg", secondary,
          QStringLiteral("Last.fm: scrobbled")},
         {"failed", 4, 0, false, 0, "failed", QStringLiteral("Scrobble failed"), "/lastfm-ring.svg", negative,
          QStringLiteral("Last.fm didn't accept the scrobble: refused for testing")},
@@ -217,6 +218,21 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
         QCOMPARE(evaluateOn(indicator, QStringLiteral("ToolTip.text")).toString(), c.tooltip);
         QCOMPARE(QAccessible::queryAccessibleInterface(indicator)->text(QAccessible::Name), c.tooltip);
     }
+
+    // Being sent and scrobbled look apart (#373 H5): the closed ring in the
+    // text colour with the glyph at half strength while it is sent, then
+    // both settled in the secondary colour.
+    bridge->setProperty("lastFmScrobblingPaused", false);
+    bridge->setProperty("lastFmPendingScrobbleCount", 0);
+    bridge->setProperty("lastFmScrobbleIneligibility", 0);
+    bridge->setProperty("lastFmScrobbleState", 2);
+    QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
+    QCOMPARE(indicator->property("ringColor").value<QColor>(), text);
+    QCOMPARE(glyph->opacity(), 0.5);
+    bridge->setProperty("lastFmScrobbleState", 3);
+    QCOMPARE(indicator->property("ringColor").value<QColor>(), secondary);
+    QCOMPARE(glyph->property("color").value<QColor>(), secondary);
+    QCOMPARE(glyph->opacity(), 1.0);
 }
 
 // The ring and the tooltip move by whole seconds of listening: of the

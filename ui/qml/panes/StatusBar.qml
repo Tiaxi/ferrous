@@ -182,10 +182,23 @@ ToolBar {
             font.weight: Font.DemiBold
         }
 
+        // The playback engine, the app's backend, has not started, or has
+        // stopped without a failure to report: in the user's words, with
+        // what to do in the tooltip.
         StatusLabel {
+            objectName: "statusBarDisconnectedLabel"
             visible: root.isDisconnected
-            text: I18n.i18nc("@info:status", "Bridge disconnected")
+            text: I18n.i18nc("@info:status", "Playback engine not running")
             color: root.uiPalette.text
+
+            HoverHandler {
+                id: disconnectedHover
+            }
+            ToolTip.visible: disconnectedHover.hovered
+            ToolTip.delay: Kirigami.Units.toolTipDelay
+            ToolTip.text: I18n.i18nc("@info:tooltip",
+                "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.")
+            Accessible.description: ToolTip.text
         }
 
         // The neutral playback state: the play, pause or stop glyph and the
@@ -427,9 +440,10 @@ ToolBar {
             background: Rectangle {
                 objectName: "statusBarErrorsBackground"
                 radius: 3
-                // A text-10% tint while the issues are open or pressed.
-                color: root.issuesOpen || issuesButton.down
-                    ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                // The pressed tint while pressed, and a text-10% one while
+                // the issues are open.
+                color: issuesButton.down ? root.uiPalette.pressed
+                    : root.issuesOpen ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
                     : (issuesButton.hovered ? root.uiPalette.hover : "transparent")
                 border.width: issuesButton.visualFocus ? 2 : 0
                 border.color: root.uiPalette.focusRing

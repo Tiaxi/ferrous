@@ -1261,7 +1261,8 @@ std::optional<SeekPoint> pointBetweenSteps(QQuickItem *seek, qreal fraction) {
     return std::nullopt;
 }
 
-// The seek bar's time: a native tooltip under the bar.
+// The seek bar's time: a native tooltip beside the line it names, within
+// the bar's height.
 struct SeekTimeBox {
     QObject *box = nullptr;
 
@@ -1285,9 +1286,11 @@ struct SeekTimeBox {
     }
 };
 
-// Why `box` is not centred on `anchorX` under the bar, in the slider's
-// coordinates, to within the device pixel it is rounded to, as drawn; or an
-// empty text.
+// Why `box` is not beside `anchorX`, in the slider's coordinates, as drawn:
+// its right edge its left gap before it, or its left edge its right gap
+// after it, to within the device pixel it is rounded to, clear of the line
+// there, and centred on the bar's height rather than under the bar (#373
+// H5); or an empty text.
 QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal anchorX, qreal dpr) {
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
@@ -1296,17 +1299,29 @@ QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal an
     }
     const QRectF drawn = popup->mapRectToScene(QRectF(0, 0, popup->width(), popup->height()));
     const QRectF bar = seek->mapRectToScene(QRectF(0, 0, seek->width(), seek->height()));
-    const qreal centre = drawn.center().x() - bar.left();
+    const qreal left = drawn.left() - bar.left();
+    const qreal right = drawn.right() - bar.left();
+    const qreal leftGap = box.box->property("leftGap").toReal();
+    const qreal rightGap = box.box->property("rightGap").toReal();
     const qreal slack = 0.5 / dpr + 1e-6;
     QStringList errors;
-    if (std::abs(centre - anchorX) > slack) {
-        errors.push_back(QStringLiteral("centred on %1, not %2").arg(centre).arg(anchorX));
+    if (leftGap < 2 || rightGap < leftGap) {
+        errors.push_back(QStringLiteral("gaps of %1 and %2").arg(leftGap).arg(rightGap));
+    }
+    const bool beforeIt = std::abs(right - (anchorX - leftGap)) <= slack;
+    const bool afterIt = std::abs(left - (anchorX + rightGap)) <= slack;
+    if (!beforeIt && !afterIt) {
+        errors.push_back(QStringLiteral("from %1 to %2, not beside %3").arg(left).arg(right).arg(anchorX));
+    }
+    if (right > anchorX - 1 && left < anchorX + 1) {
+        errors.push_back(QStringLiteral("over the line at %1").arg(anchorX));
     }
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    if (drawn.top() < bar.bottom()) {
-        errors.push_back(QStringLiteral("over the bar"));
+    if (std::abs(drawn.center().y() - bar.center().y()) > slack) {
+        errors.push_back(QStringLiteral("centred at %1, not on the bar's %2")
+                             .arg(drawn.center().y()).arg(bar.center().y()));
     }
     return errors.join(QStringLiteral("; "));
 }
@@ -1753,7 +1768,7 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QVERIFY(between.has_value());
 
     // Across the bar and at either end, the tooltip shows the second under
-    // the pointer, centred under it.
+    // the pointer, beside it.
     struct Expected {
         qreal x;
         QString time;
@@ -1877,7 +1892,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
             } else if (x > width - 1) {
                 QCOMPARE(time, QStringLiteral("3:20"));
             }
-            // It is centred on the pointer; seekHoverShowsTheTimeUnderThePointer
+            // It is placed from the pointer; seekHoverShowsTheTimeUnderThePointer
             // checks where a window draws it.
             QVERIFY2(fuzzyEqual(timeBox.box->property("anchorX").toReal(), x),
                      qPrintable(QStringLiteral("at %1, %2: centred on %3")

@@ -22,13 +22,15 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   scrobbled", the empty ring and the glyph in the tertiary colour; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Being sent: the ring closed, from the moment the play reaches its
-//   scrobble point, and the glyph still secondary; the send goes on in
-//   the background.
+// - Being sent: the ring closed in the arc's text colour, from the moment
+//   the play reaches its scrobble point, and the glyph at half strength
+//   while the send goes on in the background.
 // - Scrobbled: once Last.fm has accepted it, the closed ring and the glyph
-//   in the text colour. A ring with no gap is the end of the listening
-//   ring, apart from one nearly full by its shape; no fill, as a routine
-//   success is no louder than the rest of the status bar.
+//   settle in the secondary colour, so that the routine success is no
+//   louder than the status bar's other words (#373 H5: in the text colour
+//   it was the brightest mark on the right, and looked like being sent).
+//   A ring with no gap is the end of the listening ring, apart from one
+//   nearly full by its shape; no fill.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
@@ -125,11 +127,15 @@ AbstractButton {
     }
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    // The arc, and the closed ring: the text colour, or the negative one
-    // when Last.fm refused the scrobble.
-    readonly property color ringColor: root.look === "failed"
-        ? root.uiPalette.negative
-        : root.uiPalette.text
+    // The arc, and the closed ring: the text colour while listening and
+    // sending, the secondary one once scrobbled, and the negative one when
+    // Last.fm refused the scrobble.
+    readonly property color ringColor: {
+        if (root.look === "failed") {
+            return root.uiPalette.negative
+        }
+        return root.scrobbleAccepted ? root.uiPalette.textSecondary : root.uiPalette.text
+    }
     // The ring's track, where the listening is still to come: opaque, the
     // least of the arc's colour over the status bar that is 3.5:1 on it,
     // so that the empty ring reads (WCAG 1.4.11) once the 1 px stroke is
@@ -207,9 +213,9 @@ AbstractButton {
                 : Qt.resolvedUrl("../assets/lastfm.svg")
         }
     }
-    // Inside the ring, a 10 px glyph with a heavier stroke, clear of the
-    // track, so that the arc carries the shape; the offline glyph is a
-    // 14 px one.
+    // Inside the ring, a 10 px glyph drawn for 1x with a 1.5 px stroke,
+    // whose ink stays within 5 px of the centre, 1 px clear of the
+    // track's inner edge; the offline glyph is a 14 px one.
     readonly property int glyphSize: {
         if (root.ringShown) {
             return root.ringSize - 6
@@ -219,9 +225,6 @@ AbstractButton {
             : Kirigami.Units.iconSizes.small
     }
     readonly property color glyphColor: {
-        if (root.scrobbleAccepted) {
-            return root.uiPalette.text
-        }
         switch (root.look) {
         case "failed":
             return root.uiPalette.negative
@@ -308,7 +311,7 @@ AbstractButton {
         objectName: "scrobbleIndicatorBackground"
         radius: 3
         color: root.down
-            ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+            ? root.uiPalette.pressed
             : (root.hovered ? root.uiPalette.hover : "transparent")
         border.width: root.visualFocus ? 2 : 0
         border.color: root.uiPalette.focusRing
@@ -400,6 +403,8 @@ AbstractButton {
                     height: width
                     source: root.glyphSource
                     color: root.glyphColor
+                    // Half strength while the scrobble is being sent.
+                    opacity: root.look === "scrobbled" && !root.scrobbleAccepted ? 0.5 : 1
                     isMask: true
                 }
             }
