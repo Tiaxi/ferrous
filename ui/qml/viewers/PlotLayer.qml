@@ -316,6 +316,7 @@ Item {
         readoutWanted: meterLanes.hoveredLane >= 0
         backgroundColor: root.plotColors.plotBg
         seamColor: root.plotColors.plotLaneSeam
+        gapColor: root.plotColors.meterSeam
         troughColor: root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
         peakColor: root.plotColors.meterPeak

@@ -542,8 +542,8 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#1a1a1a"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#1a1a1a")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#2a2a2a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2a2a2a")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#a3a3a3"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#a3a3a3")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#2b1f43"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#8f87a3"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#8f87a3")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterPeak"), fromHex(QStringLiteral("#f4f4f6"))), qPrintable(colorOf(spectrogram, "meterPeak").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#f4f4f6")).name(QColor::HexArgb)));
     // A checked button: the accent, its glyph the floor; focus: the dark
     // theme's focus ring.
@@ -557,17 +557,22 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(spectrogram, "plotTextSecondary").alphaF() - 0.72) < 0.002);
     QVERIFY(std::abs(colorOf(spectrogram, "plotTick").alphaF() - 0.75) < 0.002);
     QVERIFY(std::abs(colorOf(spectrogram, "meterClipOff").alphaF() - 0.2) < 0.002);
-    // On the colour map's black floor, what is drawn is neutral, not tinted.
-    for (const char *token : {"plotPlate", "plotText", "plotTextSecondary", "plotLaneSeam", "plotTick",
-                              "meterTrough", "meterFill"}) {
+    QVERIFY(sameColor(colorOf(spectrogram, "meterSeam"), fromHex(QStringLiteral("#0a0318"))));
+    // On the colour map's black floor, what is drawn is neutral, not tinted,
+    // except the level meter, which is in the colour map's violet (#373 H5).
+    for (const char *token : {"plotPlate", "plotText", "plotTextSecondary", "plotLaneSeam",
+                              "plotTick"}) {
         const QColor color = colorOf(spectrogram, token);
         QVERIFY2(color.red() == color.green() && color.green() == color.blue(),
                  qPrintable(QLatin1String(token) + QStringLiteral(" ") + color.name(QColor::HexArgb)));
     }
-    // The lane seam and the meter's trough stand out from the floor, which
-    // the meter's level gaps are drawn in.
+    // The lane seam and the meter's track stand out from the floor, and the
+    // meter's gaps from its track. Its fill is quieter than the plot's text.
     QVERIFY(contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg")) >= 1.15);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
+    QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
+    QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
+            < contrastRatio(colorOf(spectrogram, "plotText"), colorOf(spectrogram, "plotBg")));
 
     // The waveform's set is the view's.
     const QColor view = colorOf(tokens, "view");
@@ -579,6 +584,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(waveform, "plotLaneSeam"), colorOf(tokens, "hairline")), qPrintable(colorOf(waveform, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "hairline").name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(waveform, "plotLink"), colorOf(tokens, "link")), qPrintable(colorOf(waveform, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + colorOf(tokens, "link").name(QColor::HexArgb)));
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
+    QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
     QVERIFY(channelDistance(colorOf(waveform, "meterFill"),
                             fromHex(dark ? QStringLiteral("#7d8790") : QStringLiteral("#5b6670")))
             <= 3);
