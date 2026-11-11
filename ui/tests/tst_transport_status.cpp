@@ -450,6 +450,7 @@ private slots:
     void lastFmSlotSendingAndScrobbledLookApart();
     void lastFmSlotGlyphReadsAtOneX_data();
     void lastFmSlotGlyphReadsAtOneX();
+    void statusBarNamesAStoppedEngineInPlainWords();
     void issuesButtonShowsNewSeenAndOpen_data();
     void issuesButtonShowsNewSeenAndOpen();
     void statusBarHasNoDividers();
@@ -2031,6 +2032,32 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
     const QColor counter = pixelAt(image, glyphTopLeft + QPointF(2.5, 5.5), scale);
     QVERIFY2(channelDistance(counter, chrome) * 4 <= channelDistance(stroke, chrome),
              qPrintable(counter.name() + QStringLiteral(" beside ") + stroke.name()));
+}
+
+// "Bridge disconnected" was the developer's word for it (#373 H5): the
+// status bar says the playback engine isn't running, and its tooltip what
+// to do.
+void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarDisconnectedLabel"));
+    QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
+    QVERIFY(label && state);
+    QVERIFY(!label->isVisible());
+    harness.bridge->setProperty("connected", false);
+    QTRY_VERIFY(label->isVisible());
+    QVERIFY(!state->isVisible());
+    QCOMPARE(label->property("text").toString(), QStringLiteral("Playback engine not running"));
+    const QString tip = QStringLiteral(
+        "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.");
+    QCOMPARE(toolTipText(label), tip);
+    QCOMPARE(accessibleText(label, QAccessible::Description), tip);
+    QTest::mouseMove(harness.window, sceneCentre(label));
+    QTRY_VERIFY(toolTipShown(label));
+    // A failure the backend reported says so instead.
+    harness.bridge->setProperty("backendFailure", QStringLiteral("stopped for testing"));
+    QTRY_VERIFY(!label->isVisible());
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {
