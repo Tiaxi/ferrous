@@ -23,14 +23,19 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   second line rather than be cut off, and the lines are 4 px apart.
 //   A sidebar too short for the wide layout to leave the library about six
 //   rows, as with a large font or a short window, takes it too (#373 H6).
-// - Nothing loaded: the same layout, so nothing moves on the first Play
-//   (#373 H5): the cover's square, and "Nothing playing" in the title's
-//   line, in the secondary colour, with a line of space for each line
-//   under it.
-// - A track without a cover keeps the cover's square. The square of a
-//   track without a cover and of nothing playing is one placeholder (#373
-//   H6): the view colour, with no frame, and a quiet disc mark at its
-//   centre, so it reads as the cover's place rather than as a broken image.
+// - Nothing loaded, wide or narrow: one compact row of the list's row
+//   height, a 16 px disc mark at the 12 px inset and "Nothing playing"
+//   where a library row has its text, both in the secondary colour; the
+//   library gets the height (#373 H7: the empty square took 360 px). The
+//   first track grows the cover's place from the row to its full size
+//   over longDuration, OutCubic, the cover fading in as it grows and the
+//   lines and the library moving down with its foot, so nothing jumps
+//   (#373 H5); going back to nothing loaded, as when the queue is
+//   cleared, shrinks it back. With animations off, both are at once.
+// - A track without a cover keeps the cover's square, on the view colour,
+//   with no frame, and a disc mark at its centre, so it reads as the
+//   cover's place rather than as a broken image (#373 H6); the mark is
+//   48 px with the default font and 3:1 on the view (#373 H7).
 // - A line a track has no text for, as for a file without tags, takes no
 //   room (#373 H6): the lines under it move up.
 //
@@ -79,10 +84,68 @@ Item {
             && root._trimmed(root.uiBridge.currentTrackPath).length > 0
         return hasMetadata || hasActivePath
     }
-    // Nothing loaded: the layout stays, with the idle placeholder.
+    // Nothing loaded: the compact row.
     readonly property bool idle: !root.hasTrack
     readonly property string layoutMode: root.narrow || root.shortHeight ? "narrow" : "wide"
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
+
+    // The compact row of nothing loaded: a list row's height, with the
+    // library's glyph size and gap, so its text starts where a library
+    // row's does.
+    readonly property real idleRowHeight: root.uiPalette.rowHeight
+    readonly property int idleGlyphSize: root.uiPalette.toolIconSize
+    readonly property int idleGlyphGap: 6
+    // The panel's height with nothing loaded: the row and the seam.
+    readonly property real restHeight: root.idleRowHeight + root.seamHeight
+    // The side of the cover's square in the layout.
+    readonly property real coverSize: root.layoutMode === "narrow" ? root.narrowCoverSize : root.width
+    // How far the playing track's layout has grown from the compact row:
+    // 0 with nothing loaded, 1 with a track, between while it grows or
+    // shrinks. The cover's place, the panel's height and the cover's
+    // opacity follow it; the compact row fades out over its first half and
+    // in over the same half going back, so its text and the lines do not
+    // show in one place at once.
+    property real presence: 0
+    readonly property real idleRowOpacity: Math.max(0, 1 - 2 * root.presence)
+    // The full layout's height as it showed when the track went: the
+    // height the panel shrinks from, which its lines, gone with the
+    // track, no longer give.
+    property real heldLayoutHeight: 0
+    readonly property NumberAnimation presenceAnimation: NumberAnimation {
+        objectName: "nowPlayingPresenceAnimation"
+        target: root
+        property: "presence"
+        easing.type: Easing.OutCubic
+        // The curve's last step can fall a rounding error short of its end,
+        // which would leave the layout a hair from whole.
+        onFinished: root.presence = root.presenceAnimation.to
+    }
+    readonly property bool growing: root.presence > 0 && root.presence < 1
+    // `size` on whole pixels while the layout grows or shrinks, so the
+    // library under the panel and the lines move by whole pixels, crisp.
+    function _whileGrowing(size) {
+        return root.growing ? Math.round(size) : size
+    }
+
+    function followIdle() {
+        const to = root.idle ? 0 : 1
+        if (root.idle && root.presence > 0) {
+            // The panel's height is still what the last frame laid out:
+            // the sidebar lays it out again only before the next.
+            root.heldLayoutHeight = root.restHeight
+                + Math.max(0, root.height - root.restHeight) / root.presence
+        }
+        root.presenceAnimation.stop()
+        if (Kirigami.Units.longDuration <= 0 || root.presence === to) {
+            root.presence = to
+            return
+        }
+        root.presenceAnimation.from = root.presence
+        root.presenceAnimation.to = to
+        root.presenceAnimation.duration = Kirigami.Units.longDuration
+        root.presenceAnimation.start()
+    }
+    onIdleChanged: root.followIdle()
 
     readonly property string titleText: {
         const title = root._trimmed(root.uiBridge.currentTrackTitle)
@@ -678,7 +741,12 @@ Item {
     onTrackLinesChanged: root.followTrack()
     onTrackKeyChanged: root.followTrack()
     onCoverPathChanged: root.followTrack()
-    Component.onCompleted: root.followTrack()
+    Component.onCompleted: {
+        // What shows at the start is the start: nothing grows into it.
+        root.presenceAnimation.stop()
+        root.presence = root.idle ? 0 : 1
+        root.followTrack()
+    }
 
     // The title, a step over the text under it: 12 pt with the default
     // 10 pt font, as a level 2 Kirigami.Heading is. It follows the font.
@@ -762,31 +830,38 @@ Item {
         && artistAlbumMetrics.advanceWidth(root.artistAlbumText) > wideColumn.width
     readonly property int wideArtistAlbumGap: 4
 
-    // The mark of a track without a cover, and with nothing playing, from
-    // the font: 64 px with the default font in the wide tile and 32 px in
-    // the narrow one, larger with a larger font, and never over a third of
-    // the tile. Even, so that it sits on whole pixels at the centre of the
-    // tile.
+    // The mark of a track without a cover, from the font: 48 px with the
+    // default font in the wide tile and 32 px in the narrow one, larger
+    // with a larger font, and never over a third of the tile. Even, so that
+    // it sits on whole pixels at the centre of the tile.
     readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
         root.uiPalette.scaledSize(root.layoutMode === "narrow"
-            ? Kirigami.Units.iconSizes.medium : Kirigami.Units.iconSizes.huge)) / 2)
-    // The tile of a track without a cover and of nothing playing: the
-    // sidebar's view colour, as one surface with it (#373 H6: a lighter
-    // tile read as a broken image), and its mark, the tertiary text colour
-    // at 38% on it, quiet.
+            ? Kirigami.Units.iconSizes.medium : Kirigami.Units.iconSizes.large)) / 2)
+    // The tile of a track without a cover: the sidebar's view colour, as
+    // one surface with it (#373 H6: a lighter tile read as a broken image),
+    // and its mark, the tertiary text colour mixed into the view, neutral,
+    // at 3:1 on it, the least for a graphic to read (#373 H7: at 38% it was
+    // 2:1 and faint), with a margin rendering cannot round away.
     readonly property color placeholderColor: root.uiPalette.view
-    readonly property color placeholderMarkColor: ColorUtils.mixColor(root.uiPalette.view,
-                                                                      root.uiPalette.textTertiary, 0.38)
+    readonly property color placeholderMarkColor: root.uiPalette.readableOn(
+        ColorUtils.mixColor(root.uiPalette.view, root.uiPalette.textTertiary, 0.38),
+        [root.uiPalette.view], 3.1)
 
-    // The block follows its text: in narrow, at least the cover's height,
-    // and more when the lines need it.
-    implicitHeight: (root.layoutMode === "narrow"
+    // The playing track's block follows its text: in narrow, at least the
+    // cover's height, and more when the lines need it.
+    readonly property real layoutHeight: (root.layoutMode === "narrow"
             ? (root.narrowStacked
                 ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
                 : Math.max(root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
                 + root.textInset
             : root.width + root.textInset + liveText.wideHeight + root.regionGap)
         + root.seamHeight
+    // The compact row with nothing loaded, the block with a track, and
+    // between them while one grows into the other.
+    implicitHeight: root._whileGrowing(root.restHeight
+        + ((root.idle ? root.heldLayoutHeight : root.layoutHeight) - root.restHeight) * root.presence)
+    // While it grows or shrinks, what is past its foot does not show.
+    clip: root.presence < 1
 
     Accessible.role: Accessible.Grouping
     Accessible.name: I18n.i18nc("@label", "Now playing")
@@ -845,7 +920,7 @@ Item {
         // Whether the layout shows the line, which then takes no room when
         // a track has no text for it.
         property bool shownLine: true
-        readonly property bool collapsed: !root.idle && line.text.length === 0
+        readonly property bool collapsed: line.text.length === 0
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
@@ -967,10 +1042,8 @@ Item {
         }
 
         Layout.fillWidth: true
-        // A line of the font's height. While nothing plays, the empty lines
-        // keep their place, so the first Play moves nothing (#373 H5); a
-        // track's empty line takes none, rather than leave a blank line in
-        // the block (#373 H6).
+        // A line of the font's height; a track's empty line takes none,
+        // rather than leave a blank line in the block (#373 H6).
         implicitHeight: stillText.implicitHeight
         visible: line.shownLine && !line.collapsed
 
@@ -1096,30 +1169,85 @@ Item {
         }
     }
 
-    Components.AlbumArtTile {
-        id: cover
-        objectName: "nowPlayingCover"
+    // The cover's place: the square, or, while the track's layout grows
+    // from the compact row or shrinks back into it, a band of it from the
+    // row's height up, with the middle of the cover in it.
+    Item {
+        id: coverArea
+        objectName: "nowPlayingCoverArea"
         x: 0
         y: 0
-        width: root.layoutMode === "narrow" ? root.narrowCoverSize : root.width
-        height: width
-        uiBridge: root.uiBridge
-        idle: root.idle
-        // Nothing playing and no cover: one placeholder, on the sidebar.
-        placeholderColor: root.placeholderColor
-        placeholderGlyphColor: root.placeholderMarkColor
-        placeholderGlyphSize: root.coverMarkSize
-        hoverVeilColor: root.uiPalette.hover
-        focusRingColor: root.uiPalette.focusRing
-        // The sidebar's, which shows around the cover.
-        backdropColor: root.uiPalette.view
-        replaceFromItunesAction: root.replaceFromItunesAction
-        currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
-        openAlbumArtViewer: root.openAlbumArtViewer
-        // The covers before, over this one while they fade out.
-        outgoingSlots: root.maxOutgoingLayers
-        outgoingCovers: root.outgoing !== null ? root.outgoing.covers : []
-        outgoingLevel: root.coversOutLevel
+        width: root.coverSize
+        height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
+            + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
+        visible: root.presence > 0
+        clip: coverArea.height < root.coverSize
+
+        Components.AlbumArtTile {
+            id: cover
+            objectName: "nowPlayingCover"
+            x: 0
+            y: Math.round((coverArea.height - cover.height) / 2)
+            width: root.coverSize
+            height: width
+            opacity: root.presence
+            uiBridge: root.uiBridge
+            idle: root.idle
+            // No cover: the placeholder, on the sidebar.
+            placeholderColor: root.placeholderColor
+            placeholderGlyphColor: root.placeholderMarkColor
+            placeholderGlyphSize: root.coverMarkSize
+            hoverVeilColor: root.uiPalette.hover
+            focusRingColor: root.uiPalette.focusRing
+            // The sidebar's, which shows around the cover.
+            backdropColor: root.uiPalette.view
+            replaceFromItunesAction: root.replaceFromItunesAction
+            currentTrackItunesArtworkDisabledReason: root.currentTrackItunesArtworkDisabledReason
+            openAlbumArtViewer: root.openAlbumArtViewer
+            // The covers before, over this one while they fade out.
+            outgoingSlots: root.maxOutgoingLayers
+            outgoingCovers: root.outgoing !== null ? root.outgoing.covers : []
+            outgoingLevel: root.coversOutLevel
+        }
+    }
+
+    // Nothing loaded: the disc mark and "Nothing playing", in one row.
+    Item {
+        id: idleRow
+        objectName: "nowPlayingIdleRow"
+        z: 1
+        x: 0
+        y: 0
+        width: root.width
+        height: root.idleRowHeight
+        opacity: root.idleRowOpacity
+        visible: idleRow.opacity > 0
+
+        Kirigami.Icon {
+            objectName: "nowPlayingIdleGlyph"
+            x: root.textInset
+            anchors.verticalCenter: parent.verticalCenter
+            width: root.idleGlyphSize
+            height: width
+            source: "media-optical-audio-symbolic"
+            roundToIconSize: false
+            isMask: true
+            color: root.uiPalette.textSecondary
+        }
+
+        Text {
+            objectName: "nowPlayingIdleLabel"
+            x: root.textInset + root.idleGlyphSize + root.idleGlyphGap
+            width: Math.max(0, root.width - x - root.textInset)
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.idleText
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            font: root.uiPalette.baseFont
+            color: root.uiPalette.textSecondary
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+        }
     }
 
     // The playing track's lines, each of which fades on its own over a
@@ -1149,9 +1277,10 @@ Item {
         ColumnLayout {
             id: wideColumn
             objectName: "nowPlayingWideText"
-            visible: root.layoutMode === "wide"
+            visible: root.layoutMode === "wide" && !root.idle
             x: root.textInset
-            y: cover.height + root.textInset
+            // Under the cover's place, with which it moves while that grows.
+            y: coverArea.height + root.textInset
             width: Math.max(0, root.width - 2 * root.textInset)
             spacing: 2
 
@@ -1163,10 +1292,9 @@ Item {
                 id: wideTitle
                 lineKey: "title"
                 name: "Title"
-                text: root.idle ? root.idleText : root.trackLines.title
+                text: root.trackLines.title
                 pointSize: root.titlePointSize
-                weight: root.idle ? Font.Normal : Font.DemiBold
-                color: root.idle ? root.uiPalette.textSecondary : root.uiPalette.text
+                weight: Font.DemiBold
             }
             FadingLine {
                 id: wideArtistAlbum
@@ -1208,9 +1336,14 @@ Item {
         Column {
             id: narrowColumn
             objectName: "nowPlayingNarrowText"
-            visible: root.layoutMode === "narrow"
+            visible: root.layoutMode === "narrow" && !root.idle
             x: root.narrowStacked ? root.textInset : root.narrowCoverSize + root.textInset
-            y: root.narrowStacked ? root.narrowCoverSize + root.textInset : root.narrowTextTop
+            // Under the cover's place, with which it moves while that grows;
+            // beside it, from under the compact row up into place, so its
+            // text does not show where the row's does.
+            y: root.narrowStacked
+                ? coverArea.height + root.textInset
+                : root.narrowTextTop + Math.round((1 - root.presence) * root.idleRowHeight)
             width: Math.max(0, root.width - x - root.textInset)
             spacing: root.narrowStacked ? root.stackedLineGap : 0
 
@@ -1222,10 +1355,9 @@ Item {
                 id: narrowTitle
                 lineKey: "title"
                 name: "NarrowTitle"
-                text: root.idle ? root.idleText : root.trackLines.title
+                text: root.trackLines.title
                 pointSize: root.titlePointSize
-                weight: root.idle ? Font.Normal : Font.DemiBold
-                color: root.idle ? root.uiPalette.textSecondary : root.uiPalette.text
+                weight: Font.DemiBold
                 maximumLineCount: root.wrappingLines.title === true ? 2 : 1
                 width: narrowColumn.width
             }
@@ -1281,9 +1413,7 @@ Item {
         parent: root.layoutMode === "wide" ? liveText.wideItem : liveText.narrowItem
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
-        text: root.idle
-            ? root.idleText
-            : root.layoutMode === "wide"
+        text: root.layoutMode === "wide"
             ? root._joined([root.titleText, root.artistAlbumText, root.detailsText], "\n")
             : root._joined([root.titleText, root.artistText, root.narrowAlbumText,
                             root.narrowDetailsText], "\n")
