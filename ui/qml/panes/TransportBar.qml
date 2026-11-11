@@ -689,8 +689,10 @@ ToolBar {
                 restoreMode: Binding.RestoreNone
             }
 
-            // The time in a native tooltip under the bar: at the playhead
-            // while a gesture moves it, otherwise at the hovering pointer.
+            // The time in a native tooltip within the bar's height, beside
+            // the line it names: the playhead while a gesture moves it,
+            // otherwise the hovering pointer's line (#373 H5: under the bar
+            // it hung over the queue's header).
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -724,11 +726,56 @@ ToolBar {
                         : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
+                // Its edge nearest the line: on the left, clear of the
+                // playhead's casing; on the right, clear of the pointer's
+                // arrow as well, which hangs right of the line.
+                readonly property real leftGap: Kirigami.Units.smallSpacing
+                    + seekSlider.playheadLineWidth / 2 + seekSlider.playheadOutlineWidth
+                readonly property real rightGap: Kirigami.Units.gridUnit
+                readonly property real leftX: anchorX - leftGap - width
+                readonly property real rightX: anchorX + rightGap
+                // Left of the line, where the pointer is not, unless there
+                // the hover's tooltip would cover the playhead, or the bar
+                // has no room for it; then right, if it has room there.
+                function fitsLeft() {
+                    if (leftX < 0) {
+                        return false
+                    }
+                    if (seekSlider.gestureHeld()) {
+                        return true
+                    }
+                    const headLeft = seekSlider.playheadX - seekSlider.playheadOutlineWidth
+                    const headRight = seekSlider.playheadX + seekSlider.playheadLineWidth
+                        + seekSlider.playheadOutlineWidth
+                    const coversHead = seekSlider.trackLoaded && headRight > leftX && headLeft < anchorX
+                    return !coversHead || rightX + width > seekSlider.width
+                }
+                // Chosen while it shows, and kept while hidden, as the anchor
+                // is, so it fades out where it was.
+                property bool placedLeft: true
+                Binding on placedLeft {
+                    value: seekSlider.gestureHeld() || seekHover.hovered
+                        ? seekTimeBox.fitsLeft()
+                        : seekTimeBox.placedLeft
+                    restoreMode: Binding.RestoreNone
+                }
                 // On whole device pixels, so a pointer's move within one
                 // moves the tooltip by none and draws no frame.
-                readonly property real placedX: root.snapped(anchorX - width / 2)
+                readonly property real placedX: root.snapped(placedLeft ? leftX : rightX)
                 x: placedX
-                y: seekSlider.height + Kirigami.Units.smallSpacing
+                // Centred on the bar, whose band of the transport holds it.
+                y: root.snapped((seekSlider.height - height) / 2)
+                // It comes in over the short duration of the window's other
+                // hovers, and goes as the style's tooltips do.
+                enter: Transition {
+                    NumberAnimation {
+                        property: "opacity"
+                        from: 0.0
+                        to: 1.0
+                        duration: Kirigami.Units.shortDuration
+                        easing.type: Easing.OutCubic
+                    }
+                }
                 // The time while shown, and nothing while hidden, so that
                 // playback's seconds change no hidden text, which would draw
                 // frames. The text keeps the last time while it fades out.

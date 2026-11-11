@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
 #include <QLocale>
@@ -452,6 +453,7 @@ private slots:
     void transportButtonsDrawTheAppsFocusRing();
     void transportPressedReadsApartFromHover_data();
     void transportPressedReadsApartFromHover();
+    void seekToolTipFadesInAtTheShortDuration();
     void seekWithoutATrackIsALineAndNoTime();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
@@ -874,12 +876,41 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
                                  .arg(static_cast<int>(seconds) % 60, 2, 10, QLatin1Char('0'));
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
-    // Under the bar, centred on the pointer.
-    const qreal tipX = tip->property("x").toReal();
-    const qreal tipWidth = tip->property("width").toReal();
-    QVERIFY2(std::abs(tipX + tipWidth / 2 - (at.x() - bar.left())) <= 1.0,
-             qPrintable(QStringLiteral("%1 + %2 / 2").arg(tipX).arg(tipWidth)));
-    QVERIFY(tip->property("y").toReal() >= seek->height());
+    // Within the bar's height, in the transport's band, so it covers
+    // nothing under it such as the queue's header (#373 H5); left of the
+    // line, where the pointer is not, 6 px clear of it.
+    auto *tipBox = tip->property("background").value<QQuickItem *>();
+    QVERIFY(tipBox != nullptr);
+    const QRectF band = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QRectF tipRect = sceneRect(tipBox);
+    QVERIFY2(std::abs(tipRect.center().y() - bar.center().y()) <= 1.0, qPrintable(describeRect(tipRect)));
+    QVERIFY2(tipRect.top() >= band.top() && tipRect.bottom() <= band.bottom(), qPrintable(describeRect(tipRect)));
+    QCOMPARE(tipRect.right(), at.x() - 6.0);
+    QVERIFY(!tipRect.intersects(sceneRect(hoverLine)));
+
+    // Just right of the playhead, where on the left it would cover it: on
+    // the right, clear of the pointer's arrow. It covers neither the hover
+    // line nor the playhead.
+    QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
+    QVERIFY(playhead != nullptr);
+    const QRectF head = sceneRect(playhead);
+    const QPointF nearHead(std::round(head.right() + 20), bar.center().y());
+    QTest::mouseMove(harness.window, nearHead.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), std::floor(nearHead.x()));
+    QTRY_VERIFY(!tip->property("placedLeft").toBool());
+    tipRect = sceneRect(tipBox);
+    QCOMPARE(tipRect.left(), nearHead.x() + evaluateOn(seek, QStringLiteral("Kirigami.Units.gridUnit")).toReal());
+    QVERIFY(!tipRect.intersects(sceneRect(hoverLine)));
+    QVERIFY(!tipRect.intersects(head));
+    QVERIFY2(std::abs(tipRect.center().y() - bar.center().y()) <= 1.0, qPrintable(describeRect(tipRect)));
+
+    // At the bar's start, where the left has no room: on the right.
+    const QPointF atStart(bar.left() + 3, bar.center().y());
+    QTest::mouseMove(harness.window, atStart.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), atStart.x());
+    QTRY_VERIFY(!tip->property("placedLeft").toBool());
+    QVERIFY(sceneRect(tipBox).left() >= atStart.x() + 1);
 
     // Away from the bar, both go.
     QTest::mouseMove(harness.window, QPoint(static_cast<int>(at.x()), static_cast<int>(bar.bottom() + 60)));
@@ -1051,6 +1082,38 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
         // An invalid value resets it, to follow the press again.
         statusButton->setProperty("down", QVariant());
     }
+}
+
+// The seek bar's tooltip comes in over the window's short duration, as its
+// other hovers do, not the style's long one (#373 H5: 200 ms against 100 ms
+// elsewhere); it goes as the style's tooltips do.
+void TransportStatusTest::seekToolTipFadesInAtTheShortDuration() {
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("seekTimeBox"));
+    QVERIFY(seek && tip);
+    Kirigami::Platform::Units *units = unitsOf(seek);
+    QVERIFY(units != nullptr);
+    // Far apart, so which one the fade takes shows in its time.
+    units->setShortDuration(100);
+    units->setLongDuration(3000);
+    const QRectF bar = sceneRect(seek);
+    QElapsedTimer timer;
+    QTest::mouseMove(harness.window, QPoint(static_cast<int>(bar.left() + bar.width() * 0.62),
+                                            static_cast<int>(bar.center().y())));
+    timer.start();
+    QTRY_VERIFY(tip->property("visible").toBool());
+    QTRY_VERIFY_WITH_TIMEOUT(tip->property("opacity").toReal() == 1.0, 1500);
+    QVERIFY2(timer.elapsed() < 1500, qPrintable(QString::number(timer.elapsed())));
+    // The fade out is the style's: the long duration, here still under way
+    // after a frame or two.
+    QTest::mouseMove(harness.window, QPoint(static_cast<int>(bar.left() + bar.width() * 0.62),
+                                            static_cast<int>(bar.bottom() + 60)));
+    QTRY_VERIFY(tip->property("opacity").toReal() < 1.0);
+    QTest::qWait(100);
+    QVERIFY(tip->property("opacity").toReal() > 0.0);
 }
 
 void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
