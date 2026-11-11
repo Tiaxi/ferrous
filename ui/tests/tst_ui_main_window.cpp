@@ -2207,6 +2207,12 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     handle->forceActiveFocus(Qt::TabFocusReason);
     QTRY_VERIFY(line->isVisible());
     QCOMPARE(colorOf(line), tokenHex(window, "focusRing"));
+    // With focus, a 2 px line the header's full height, not a short tick
+    // (#373 H6).
+    QCOMPARE(line->width(), 2.0);
+    QCOMPARE(sceneRect(line).top(), sceneRect(queueHeader).top());
+    QCOMPARE(sceneRect(line).height(), sceneRect(queueHeader).height());
+    QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {

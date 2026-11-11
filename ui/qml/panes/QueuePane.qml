@@ -1317,13 +1317,16 @@ Rectangle {
                 Accessible.description: I18n.i18nc("@info", "Left or Right to resize, Home for the default width")
                 Accessible.focusable: true
 
+                // A 1 px seam under the pointer; with keyboard focus, a
+                // 2 px line in the focus colour the header's full height,
+                // which reads as focus where a short tick did not (#373 H6).
                 Rectangle {
                     objectName: "queueColumnHandleLine"
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.topMargin: Kirigami.Units.smallSpacing
-                    anchors.bottomMargin: Kirigami.Units.smallSpacing
+                    anchors.topMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
+                    anchors.bottomMargin: resizeHandle.activeFocus ? 0 : Kirigami.Units.smallSpacing
                     width: resizeHandle.activeFocus ? 2 : 1
                     visible: resizeHandle.highlighted
                     color: resizeHandle.activeFocus || resizeMouseArea.pressed
