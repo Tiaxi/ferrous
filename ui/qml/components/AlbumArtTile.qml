@@ -10,8 +10,8 @@ import FerrousUi 1.0
 // track without a cover keeps the tile's place, on the placeholder colour,
 // with Breeze's audio disc mark at its centre: the cover is missing, and
 // nothing more is said about it (#373 H1, H3). With nothing playing
-// (`idle`) the tile keeps its place too, the same placeholder, so nothing
-// moves when playback starts (#373 H5, H6).
+// (`idle`) it shows no cover, only the placeholder: the now-playing panel
+// shows its compact row then, and the tile only as it shrinks into it.
 //
 // The tile is a keyboard stop while a track plays: a 1 px ring shows its
 // focus while the keyboard is in use, and the Menu key or Shift+F10 opens
