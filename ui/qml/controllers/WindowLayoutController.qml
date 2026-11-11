@@ -129,6 +129,24 @@ QtObject {
         return Math.round(root.clamp(preferred, minimum, Math.max(minimum, splitWidth - otherMinimum)))
     }
 
+    // The share of the right column the visualization takes before the
+    // user drags the split: a little under half, so the window reads as an
+    // instrument with a queue rather than a playlist with a footer (#373
+    // H8: at 0.42 the pane was a 320 px band at 1600 by 1000). It is 423 px
+    // there, and the queue keeps 17 rows with the default font.
+    readonly property real visualizationDefaultShare: 0.47
+    // The rows, its header among them, the queue keeps by default before
+    // the visualization has its share, as with a large font in a short
+    // window, where the visualization then has its minimum.
+    readonly property int queueDefaultRows: 7
+
+    // The queue's height in a split `splitHeight` high before the user drags
+    // it, for rows `rowHeight` high.
+    function queueDefaultHeight(splitHeight, rowHeight) {
+        return Math.max(splitHeight * (1 - root.visualizationDefaultShare),
+                        root.queueDefaultRows * rowHeight)
+    }
+
     // The queue's height in a split `splitHeight` high, leaving the
     // visualization `otherMinimum`.
     function queueHeight(splitHeight, minimum, otherMinimum, defaultHeight) {

@@ -1529,7 +1529,8 @@ ApplicationWindow {
                         rightSplit.height,
                         queuePane.SplitView.minimumHeight,
                         spectrogramPane.SplitView.minimumHeight + root.splitHandleAllowance,
-                        Math.max(220, root.height * 0.58))
+                        windowLayoutController.queueDefaultHeight(
+                            rightSplit.height, root.uiPalette.rowHeight))
                     playlistIndicatorColumnWidth: root.playlistIndicatorColumnWidth
                     playlistOrderColumnWidth: root.playlistOrderColumnWidth
                     playlistOrderText: FormatUtils.playlistOrderText

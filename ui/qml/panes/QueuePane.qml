@@ -417,7 +417,10 @@ Rectangle {
     color: root.uiPalette.view
     SplitView.fillWidth: true
     SplitView.preferredHeight: root.preferredHeight
-    SplitView.minimumHeight: 220
+    // Its header and four rows, and never under 220 px: about eight rows
+    // with the default font, and five at 24 pt, where the window's least
+    // height, 720 px, still has room for the visualization's minimum.
+    SplitView.minimumHeight: Math.max(220, 5 * root.uiPalette.rowHeight)
 
     ColumnLayout {
         anchors.fill: parent

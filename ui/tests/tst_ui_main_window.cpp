@@ -564,6 +564,8 @@ private slots:
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
+    void visualizationTakesNearlyHalfTheRightColumn_data();
+    void visualizationTakesNearlyHalfTheRightColumn();
     void firstRunShowsOneMessage();
     void tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles();
     void transportStartsAndEndsAtTheContentInset();
@@ -2659,6 +2661,88 @@ void UiMainWindowTest::narrowWindowAtALargeFontFitsTheQueue() {
     const qreal panesMinimum = named(window, "sidebarPane")->property("minimumWidth").toReal()
         + queue->property("minimumContentWidth").toReal() + 1;
     QCOMPARE(window->minimumWidth(), static_cast<int>(std::ceil(panesMinimum)));
+}
+
+void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font, 1600 by 1000") << 0.0 << 1600 << 1000;
+    QTest::newRow("default font, 1000 by 720") << 0.0 << 1000 << 720;
+    QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000;
+    QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
+}
+
+// Before the user drags the split, the visualization takes 47% of the right
+// column (#373 H8: at 42% the pane read as a footer under a playlist): 423
+// px at 1600 by 1000, where the queue keeps 16 rows and more with the
+// default font. The queue keeps its header and six rows first, and each
+// pane its minimum, the queue's its header and four rows: at 24 pt in a
+// 720 px window the visualization has its minimum and the queue the rest,
+// and the window's least height still fits 720 px. A split the user
+// dragged wins.
+void UiMainWindowTest::visualizationTakesNearlyHalfTheRightColumn() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(windowWidth, windowHeight);
+    QTRY_COMPARE(window->height(), windowHeight);
+    QVERIFY2(window->minimumHeight() <= 720, qPrintable(QString::number(window->minimumHeight())));
+    QObject *bridge = bridgeOf(window);
+    bridge->setProperty("queueRows", sampleQueueRows(50));
+    bridge->setProperty("queueLength", 50);
+    QQuickItem *split = named(window, "rightSplit");
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *pane = named(window, "spectrogramPane");
+    QQuickItem *header = named(window, "queueHeader");
+    QVERIFY(split && queue && pane && header);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    // Laid out for the window's height: the split down to the status bar.
+    QTRY_VERIFY(sceneRect(split).bottom() <= windowHeight - 10 && sceneRect(split).bottom() >= windowHeight - 80
+                && std::abs(queue->height() + pane->height() + 1 - split->height()) <= 1);
+    const qreal queueMinimum = std::max<qreal>(220, 5 * rowHeight);
+    const QString heights = QStringLiteral("split %1, queue %2, visualization %3, row %4")
+        .arg(split->height()).arg(queue->height()).arg(pane->height()).arg(rowHeight);
+    QCOMPARE(QQmlProperty(queue, QStringLiteral("SplitView.minimumHeight"), qmlContext(queue)).read().toReal(),
+             queueMinimum);
+    QVERIFY2(queue->height() >= queueMinimum - 0.5 && pane->height() >= 220 - 0.5, qPrintable(heights));
+    const qreal share = pane->height() / split->height();
+    if (pointSize > 0 && windowHeight == 720) {
+        // The visualization at its minimum; the queue the rest.
+        QVERIFY2(std::abs(pane->height() - 220) <= 1, qPrintable(heights));
+    } else {
+        QVERIFY2(std::abs(pane->height() - std::round(split->height() * 0.47)) <= 1.5 || share < 0.47,
+                 qPrintable(heights));
+        // The queue's header and six rows at least.
+        QVERIFY2(queue->height() >= 7 * rowHeight - 0.5, qPrintable(heights));
+    }
+    if (pointSize == 0 && windowHeight == 1000) {
+        QVERIFY2(share >= 0.45 && share <= 0.48, qPrintable(heights));
+        // 16 whole rows under the header, and more.
+        QVERIFY2(std::floor((queue->height() - header->height()) / rowHeight) >= 16, qPrintable(heights));
+    }
+
+    // A split the user dragged, as the settings keep it, wins.
+    QObject *layout = window->findChild<QObject *>(QStringLiteral("windowLayoutController"));
+    QVERIFY(layout != nullptr);
+    const qreal dragged = std::round(split->height() * 0.7);
+    QVERIFY(QMetaObject::invokeMethod(layout, "noteQueueHeight", Q_ARG(QVariant, dragged),
+                                      Q_ARG(QVariant, split->height())));
+    // As a share of the split.
+    const auto expected = [&]() { return std::min(split->height() * 0.7, split->height() - 220 - 1); };
+    QTRY_VERIFY2(std::abs(queue->height() - expected()) <= 1,
+                 qPrintable(QStringLiteral("%1, not %2").arg(queue->height()).arg(expected())));
 }
 
 void UiMainWindowTest::firstRunShowsOneMessage() {
