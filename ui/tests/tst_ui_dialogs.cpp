@@ -104,6 +104,9 @@ QQuickWindow *loadMainWindow(QQmlApplicationEngine &engine, LibraryTreeModel &li
         || !QTest::qWaitFor([&]() { return window->width() == width && window->height() == height; })) {
         return nullptr;
     }
+    // The window reads its new size at once, but tells its bindings with
+    // the window system's geometry event, which comes after.
+    QCoreApplication::processEvents();
     return window;
 }
 
@@ -494,6 +497,7 @@ private slots:
     void aboutPagesNeverRunUnderTheButtons_data();
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
+    void recentIssuesHeaderHoldsItsTitleAtLargeFonts();
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
@@ -508,6 +512,8 @@ private slots:
     void editTagsToolsMenuHoldsTheToolsAndCaseChanges();
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
+    void editTagsOpensNoWiderThanTheMainWindow();
+    void autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts();
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
@@ -2081,6 +2087,46 @@ void UiDialogsTest::recentIssuesIsAPopupAboveTheStatusBar() {
     QTRY_VERIFY(!popup->property("visible").toBool());
 }
 
+// The header is as tall as its title needs: at 24 pt, its fixed 32 px left
+// the title over the first issue's category line (#373 H10).
+void UiDialogsTest::recentIssuesHeaderHoldsItsTitleAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *header = visibleNamed(window, QStringLiteral("errorHistoryHeader"));
+    QQuickItem *title = visibleNamed(window, QStringLiteral("errorHistoryTitle"));
+    QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
+    QQuickItem *category = itemsNamed(rows.first(), QStringLiteral("errorHistoryCategory")).at(0);
+    QVERIFY(header != nullptr && title != nullptr && clear != nullptr && category != nullptr);
+    QTRY_VERIFY(!layoutPending(header));
+    const QString where = QStringLiteral("header %1..%2, title %3..%4, Clear All %5..%6, category from %7")
+        .arg(sceneRect(header).top()).arg(sceneRect(header).bottom())
+        .arg(sceneRect(title).top()).arg(sceneRect(title).bottom())
+        .arg(sceneRect(clear).top()).arg(sceneRect(clear).bottom()).arg(sceneRect(category).top());
+    QVERIFY2(title->height() >= 40, qPrintable(where));
+    // The title and Clear All inside the header, 4 px clear of its edges,
+    // and the first issue below it.
+    for (QQuickItem *item : {title, clear}) {
+        QVERIFY2(sceneRect(item).top() >= sceneRect(header).top() + 4 - 0.5
+                     && sceneRect(item).bottom() <= sceneRect(header).bottom() - 4 + 0.5,
+                 qPrintable(where));
+    }
+    QVERIFY2(sceneRect(title).bottom() <= sceneRect(category).top() + 0.5, qPrintable(where));
+    QVERIFY2(!sceneRect(title).intersects(sceneRect(category)), qPrintable(where));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
+}
+
 void UiDialogsTest::recentIssuesRowsSplitTheMessageAndOfferOneAction() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2835,10 +2881,10 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
 // The table's columns at the default font, or a smaller one (#373 H8): the
 // window opens wide enough for every column at its width beside the
 // fields, the numbers and Format as narrow as their headers and values
-// allow: # about 36 px, Year 52, Disc 40 and Format 56. In a 1600 px
-// screen, File Name and Folder give way first, and Title, Artist and
-// Album keep 160 px or more. Status takes no room while no row has a
-// status.
+// allow: # about 36 px, Year 52, Disc 40 and Format 56, from a main
+// window wide enough. In a 1600 px screen, File Name and Folder give way
+// first, and Title, Artist and Album keep 160 px or more. Status takes no
+// room while no row has a status.
 void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // The default 10 pt font, which the reviews see.
     const QFont applicationFont = QGuiApplication::font();
@@ -2852,7 +2898,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
-    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    // The editor opens no wider than the main window (#373 H9), which is
+    // as wide as a large screen here.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1920, 1200);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QCOMPARE(paletteOf(window)->property("basePointSize").toReal(), 10.0);
     QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
@@ -2944,6 +2992,135 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
+}
+
+// The editor opens no wider than the main window it opens from, frames
+// and all (#373 H9: 1624 px from a 1600 px main window). From a 1600 by
+// 1000 px window, File Name and Folder give way first, Title, Artist and
+// Album keep 160 px or more, and the table does not scroll sideways; from
+// a 1000 by 720 px one, it is as wide as the main window.
+void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont standard = applicationFont;
+    standard.setPointSizeF(10);
+    QGuiApplication::setFont(standard);
+    for (const QSize mainSize : {QSize(1600, 1000), QSize(1000, 720)}) {
+        const QString at = QStringLiteral("%1x%2").arg(mainSize.width()).arg(mainSize.height());
+        TagEditorController editor(nullptr);
+        editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                       const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+        QQuickWindow *window = loadMainWindow(engine, libraryModel, mainSize.width(), mainSize.height());
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+        QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+        QTRY_VERIFY(!editor.loading());
+        QVERIFY(waitForDialogWindow(dialog));
+        QQuickWindow *tags = windowOf(dialog);
+        QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+        QVERIFY(table != nullptr);
+        QTRY_VERIFY(!layoutPending(table));
+        const QString where = QStringLiteral("%1: editor %2 (frame %3), main window %4 (frame %5)")
+            .arg(at).arg(tags->width()).arg(tags->frameGeometry().width()).arg(window->width())
+            .arg(window->frameGeometry().width());
+        // It needs more than either main window gives it.
+        QVERIFY2(dialog->property("defaultWidth").toReal() <= mainSize.width(), qPrintable(where));
+        QVERIFY2(tags->width() <= window->width(), qPrintable(where));
+        QVERIFY2(tags->frameGeometry().width() <= window->frameGeometry().width(), qPrintable(where));
+        if (mainSize.width() == 1000) {
+            QCOMPARE(tags->width(), window->width());
+            continue;
+        }
+        QCOMPARE(tags->width(), window->width());
+        const auto columnWidth = [tags](const QString &key) {
+            QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
+            return column != nullptr ? column->width() : -1.0;
+        };
+        const QString columns = QStringLiteral("%1; title %2, artist %3, album %4, file name %5, folder %6, "
+                                               "content %7 in %8")
+            .arg(where).arg(columnWidth(QStringLiteral("title"))).arg(columnWidth(QStringLiteral("artist")))
+            .arg(columnWidth(QStringLiteral("album"))).arg(columnWidth(QStringLiteral("fileName")))
+            .arg(columnWidth(QStringLiteral("directory"))).arg(table->property("contentWidth").toReal())
+            .arg(table->width());
+        QVERIFY2(columnWidth(QStringLiteral("fileName")) < 220 || columnWidth(QStringLiteral("directory")) < 156,
+                 qPrintable(columns));
+        for (const QString &key : {QStringLiteral("title"), QStringLiteral("artist"), QStringLiteral("album")}) {
+            QVERIFY2(columnWidth(key) >= 160, qPrintable(key + QStringLiteral(": ") + columns));
+        }
+        QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(columns));
+        editor.close();
+        QTRY_VERIFY(!tags->isVisible());
+    }
+}
+
+// Auto Number opens wide enough for its form and its check boxes, which do
+// not wrap, in the font they are in: at 24 pt, its fixed 26 grid units
+// left them running up to 435 px past the window (#373 H10). Its
+// description wraps within that width.
+void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    const qreal padding = dialog->property("contentPadding").toReal();
+    const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
+    int checked = 0;
+    for (const QString &name : {QStringLiteral("autoNumberForm"), QStringLiteral("autoNumberStartingTrackField"),
+                                QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                                QStringLiteral("autoNumberResetOnFolderCheck"),
+                                QStringLiteral("autoNumberResetOnDiscCheck")}) {
+        QQuickItem *item = visibleNamed(numbers, name);
+        QVERIFY2(item != nullptr, qPrintable(name));
+        const QRectF rect = sceneRect(item);
+        const QString where = QStringLiteral("%1 at %2..%3 (implicit %4), window %5 wide")
+            .arg(name).arg(rect.left()).arg(rect.right()).arg(item->implicitWidth()).arg(numbers->width());
+        QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
+        QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
+        ++checked;
+    }
+    QCOMPARE(checked, 6);
+    // A start that is not valid says so under its field, wrapped within
+    // the window.
+    QQuickItem *trackField = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
+    trackField->setProperty("text", QStringLiteral("0"));
+    QQuickItem *trackError = nullptr;
+    QTRY_VERIFY((trackError = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackError"))) != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    const QRectF errorRect = sceneRect(trackError);
+    QVERIFY2(errorRect.left() >= inside.left() - 0.5 && errorRect.right() <= inside.right() + 0.5,
+             qPrintable(QStringLiteral("error at %1..%2, window %3 wide")
+                            .arg(errorRect.left()).arg(errorRect.right()).arg(numbers->width())));
+    QVERIFY(!trackError->property("truncated").toBool());
+    trackField->setProperty("text", QStringLiteral("1"));
+    // The window is no wider than its widest line needs, and the screen.
+    QVERIFY2(numbers->width() <= qMax(qCeil(dialog->property("defaultWidth").toReal()), numbers->minimumWidth()),
+             qPrintable(QString::number(numbers->width())));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    editor.close();
 }
 
 // A field whose files hold different values says so with its placeholder,

@@ -35,6 +35,8 @@ private slots:
     void itunesAppliedCoverGivesWayWhenTheSameTrackPlaysAgain();
     void itunesArtworkResultsAreAFlatList();
     void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
+    void itunesArtworkActionsFollowTheTextFont();
+    void itunesArtworkListIsAsTallAsItsRows();
     void albumArtDetailsLieOverTheArt();
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
@@ -1928,6 +1930,190 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
     checkState(false, QStringLiteral("No iTunes artwork suggestions found."));
+}
+
+namespace {
+
+// Replace from iTunes, open with `count` suggestions that are ready.
+struct OpenItunesArtworkDialog {
+    QScopedPointer<QObject> root;
+    QObject *dialog = nullptr;
+    QQuickWindow *dialogWindow = nullptr;
+    QQuickItem *content = nullptr;
+};
+
+bool openItunesArtworkDialog(QQmlApplicationEngine &engine, const QTemporaryDir &dir, int count,
+                             const QFont *windowFont, OpenItunesArtworkDialog &out) {
+    QString errorText;
+    out.root.reset(createItunesArtworkDialogWindow(engine, QUrl::fromLocalFile(savedCover(dir)).toString(),
+                                                   &errorText));
+    if (out.root == nullptr) {
+        qWarning() << errorText;
+        return false;
+    }
+    auto *window = qobject_cast<QQuickWindow *>(out.root.get());
+    if (window == nullptr || !QTest::qWaitForWindowExposed(window)) {
+        return false;
+    }
+    out.dialog = qvariant_cast<QObject *>(out.root->property("dialog"));
+    QObject *bridge = qvariant_cast<QObject *>(out.root->property("bridge"));
+    if (out.dialog == nullptr || bridge == nullptr) {
+        return false;
+    }
+    if (windowFont != nullptr) {
+        out.dialog->setProperty("font", *windowFont);
+    }
+    bridge->setProperty("itunesArtworkResults", itunesArtworkFixture(dir, count));
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("Found %1 suggestions.").arg(count));
+    if (!QMetaObject::invokeMethod(out.dialog, "open")) {
+        return false;
+    }
+    out.dialogWindow = qobject_cast<QQuickWindow *>(out.dialog);
+    if (out.dialogWindow == nullptr || !QTest::qWaitForWindowExposed(out.dialogWindow)) {
+        return false;
+    }
+    out.content = itemNamed(out.dialogWindow->contentItem(), QStringLiteral("itunesArtworkContent"));
+    return out.content != nullptr
+        && QTest::qWaitFor([&]() {
+               return visibleItemsNamed(out.content, QStringLiteral("itunesArtworkResultRow")).size()
+                   >= qMin(count, 5);
+           });
+}
+
+QString describeRect(const QRectF &rect) {
+    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
+int fontPixelSize(QQuickItem *item) {
+    return QFontInfo(qvariant_cast<QFont>(item->property("font"))).pixelSize();
+}
+
+} // namespace
+
+void AlbumArtSmokeTest::itunesArtworkActionsFollowTheTextFont() {
+    // At 24 pt, a row's Preview and Apply, and the current art's Preview,
+    // are drawn in the font of the titles beside them. They were
+    // ToolButtons, whose caption the style draws in the application's
+    // QToolButton font, the toolbar font that KDE sets apart, whatever the
+    // control's own font: at 24 pt they stayed at 10 pt beside 24 pt titles
+    // (#373 H9). A 10 pt QToolButton font stands in for KDE's toolbar font
+    // here. As drawn captions cannot be read back, each action must be as
+    // wide as its icon and caption in the labels' font need, which the
+    // style measures in the font it draws with. Their column is built from
+    // the buttons' own sizes: 8 px between them, and the text at least
+    // 16 px clear of them.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    QFont toolbar = applicationFont;
+    toolbar.setPointSizeF(10);
+    QApplication::setFont(toolbar, "QToolButton");
+    // QApplication's setFont() without a class drops the class fonts.
+    const auto restoreToolbarFont = qScopeGuard([&] { QApplication::setFont(applicationFont); });
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QQmlApplicationEngine engine;
+    OpenItunesArtworkDialog opened;
+    QVERIFY(openItunesArtworkDialog(engine, dir, 2, nullptr, opened));
+    QTRY_VERIFY(popupsSettled());
+    // Wide enough for its icon and its caption in the labels' font.
+    const auto fitsCaption = [](QQuickItem *button, QQuickItem *label) {
+        const QFontMetricsF metrics(qvariant_cast<QFont>(label->property("font")));
+        return button->implicitWidth() >= metrics.horizontalAdvance(button->property("text").toString()) + 16;
+    };
+    QQuickItem *currentRow = itemNamed(opened.content, QStringLiteral("itunesArtworkCurrentRow"));
+    QQuickItem *currentTitle = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentTitle"));
+    QQuickItem *currentPreview = itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"));
+    QVERIFY(currentTitle != nullptr && currentPreview != nullptr);
+    QVERIFY2(fitsCaption(currentPreview, currentTitle), qPrintable(QString::number(currentPreview->implicitWidth())));
+    const int textPixels = fontPixelSize(currentTitle);
+    QVERIFY2(textPixels >= 30, qPrintable(QString::number(textPixels)));
+    QVERIFY2(qAbs(fontPixelSize(currentPreview) - textPixels) <= 1,
+             qPrintable(QStringLiteral("Preview %1 px, text %2 px").arg(fontPixelSize(currentPreview)).arg(textPixels)));
+
+    // Each row's text ends at least 16 px before its actions, which are as
+    // wide as their text needs and 8 px apart, at the row's end.
+    const QList<QQuickItem *> rows = visibleItemsNamed(opened.content, QStringLiteral("itunesArtworkResultRow"));
+    QCOMPARE(rows.size(), 2);
+    for (QQuickItem *row : rows) {
+        QQuickItem *title = itemNamed(row, QStringLiteral("itunesArtworkResultTitle"));
+        QQuickItem *details = itemNamed(row, QStringLiteral("itunesArtworkResultDetails"));
+        QQuickItem *preview = itemNamed(row, QStringLiteral("itunesArtworkPreviewButton"));
+        QQuickItem *apply = itemNamed(row, QStringLiteral("itunesArtworkApplyButton"));
+        QVERIFY(title != nullptr && details != nullptr && preview != nullptr && apply != nullptr);
+        const QString at = QStringLiteral("title %1 px, Preview %2 px, Apply %3 px; "
+                                          "title %4, details %5, Preview %6, Apply %7")
+            .arg(fontPixelSize(title)).arg(fontPixelSize(preview)).arg(fontPixelSize(apply))
+            .arg(describeRect(sceneRectOf(title)), describeRect(sceneRectOf(details)),
+                 describeRect(sceneRectOf(preview)), describeRect(sceneRectOf(apply)));
+        QVERIFY2(fitsCaption(preview, title) && fitsCaption(apply, title),
+                 qPrintable(at + QStringLiteral("; implicit widths %1, %2")
+                                     .arg(preview->implicitWidth()).arg(apply->implicitWidth())));
+        QCOMPARE(fontPixelSize(title), textPixels);
+        QVERIFY2(qAbs(fontPixelSize(preview) - textPixels) <= 1, qPrintable(at));
+        QVERIFY2(qAbs(fontPixelSize(apply) - textPixels) <= 1, qPrintable(at));
+        QVERIFY2(qFuzzyCompare(preview->width(), preview->implicitWidth())
+                     && qFuzzyCompare(apply->width(), apply->implicitWidth()), qPrintable(at));
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(at));
+        QVERIFY2(sceneRectOf(title).right() + 16 <= sceneRectOf(preview).left() + 0.5, qPrintable(at));
+        QVERIFY2(sceneRectOf(details).right() + 16 <= sceneRectOf(preview).left() + 0.5, qPrintable(at));
+        QCOMPARE(sceneRectOf(apply).left() - sceneRectOf(preview).right(), 8.0);
+        QVERIFY2(sceneRectOf(row).right() - sceneRectOf(apply).right() <= 16.5, qPrintable(at));
+        // The row is as tall as the buttons need, and the current art's
+        // row the same, its Preview over the results'.
+        QVERIFY2(row->height() >= apply->height() + 16, qPrintable(at));
+        QCOMPARE(currentRow->height(), row->height());
+        QCOMPARE(sceneRectOf(currentPreview).left(), sceneRectOf(preview).left());
+    }
+    QVERIFY2(sceneRectOf(currentTitle).right() + 16 <= sceneRectOf(currentPreview).left() + 0.5,
+             qPrintable(describeRect(sceneRectOf(currentTitle))));
+}
+
+void AlbumArtSmokeTest::itunesArtworkListIsAsTallAsItsRows() {
+    // The results' frame ends at the last row, with no empty framed band
+    // under a few results (#373 H9: about 110 px), and the dialog opens
+    // tall enough for the current art and five results whole; more scroll.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont standard = applicationFont;
+    standard.setPointSizeF(10);
+    QGuiApplication::setFont(standard);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    for (const int count : {2, 5, 7}) {
+        const QByteArray at = QByteArray::number(count) + " results";
+        QQmlApplicationEngine engine;
+        OpenItunesArtworkDialog opened;
+        QVERIFY2(openItunesArtworkDialog(engine, dir, count, nullptr, opened), at.constData());
+        QQuickItem *frame = itemNamed(opened.content, QStringLiteral("itunesArtworkResultsFrame"));
+        QQuickItem *view = itemNamed(opened.content, QStringLiteral("itunesArtworkResultsView"));
+        QVERIFY2(frame != nullptr && view != nullptr, at.constData());
+        const qreal rowHeight = opened.dialog->property("rowHeight").toReal();
+        QCOMPARE(rowHeight, 80.0);
+        for (QQuickItem *row : visibleItemsNamed(opened.content, QStringLiteral("itunesArtworkResultRow"))) {
+            QCOMPARE(row->height(), rowHeight);
+        }
+        const int shown = qMin(count, 5);
+        const QString where = QStringLiteral("%1: frame %2, view %3, content %4, window %5")
+            .arg(QString::fromLatin1(at), describeRect(sceneRectOf(frame)), describeRect(sceneRectOf(view)),
+                 describeRect(sceneRectOf(opened.content))).arg(opened.dialogWindow->height());
+        // The rows inside the frame's 1 px edge, and the frame no taller.
+        QTRY_VERIFY2(qFuzzyCompare(view->height(), shown * rowHeight), qPrintable(where));
+        QCOMPARE(frame->height(), shown * rowHeight + 2);
+        // Five rows fill the dialog's height to its content's end; two
+        // leave the dialog's own colour under the frame; more scroll.
+        if (count == 5) {
+            QVERIFY2(qAbs(sceneRectOf(frame).bottom() - sceneRectOf(opened.content).bottom()) <= 1.0,
+                     qPrintable(where));
+        } else if (count == 2) {
+            QVERIFY2(sceneRectOf(opened.content).bottom() - sceneRectOf(frame).bottom() >= 3 * rowHeight - 1,
+                     qPrintable(where));
+        }
+        QTRY_COMPARE(view->property("contentHeight").toReal() > view->height() + 0.5, count > 5);
+        QTRY_COMPARE(view->property("scrollbarLane").toReal() > 0, count > 5);
+    }
 }
 
 void AlbumArtSmokeTest::itunesPreviewAppliesOrGoesBackToTheResults() {

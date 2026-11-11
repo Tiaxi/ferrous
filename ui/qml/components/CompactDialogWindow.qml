@@ -25,6 +25,10 @@ DialogWindow {
     readonly property real contentSpacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
     // Where the keyboard goes as it opens.
     property Item initialFocusItem: body
+    // The width the content needs whole, leaving out text that wraps:
+    // a form's or a check box's, which do not wrap and would run past a
+    // narrower window, as they did at large fonts (#373 H10).
+    property real contentWidth: 0
 
     readonly property real _footerHeight: root.footer && root.footer.visible ? root.footer.implicitHeight : 0
     readonly property real _footerWidth: root.footer ? root.footer.implicitWidth : 0
@@ -33,9 +37,12 @@ DialogWindow {
     readonly property int fittedHeight: Math.ceil(2 * root.contentPadding + body.implicitHeight + root._footerHeight)
 
     // Its minimum stays put: the window system takes a new one as a new
-    // window. Its width is the buttons' at least, as it opens.
+    // window. Its width is the buttons' and the content's at least, as it
+    // opens.
     minimumWidth: Kirigami.Units.gridUnit * 18
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 25, Math.ceil(root._footerWidth))
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 25, root._neededWidth)
+    readonly property int _neededWidth: Math.ceil(Math.max(root._footerWidth,
+        root.contentWidth > 0 ? root.contentWidth + 2 * root.contentPadding : 0))
     defaultHeight: root.fittedHeight
 
     // The window's height follows the content's rather than its minimum
@@ -50,8 +57,9 @@ DialogWindow {
     Connections {
         target: root
         function onAboutToShow() {
-            // The width it had, or the buttons', which may have changed.
-            root.width = Math.max(root.width, Math.ceil(root._footerWidth))
+            // The width it had, or the buttons' and the content's, which
+            // may have changed, within the screen.
+            root.width = Math.max(root.width, Math.min(root._neededWidth, root._roomWidth))
             root.height = root.fittedHeight
             if (root.initialFocusItem) {
                 root.initialFocusItem.forceActiveFocus(Qt.PopupFocusReason)
