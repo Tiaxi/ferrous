@@ -31,6 +31,11 @@ constexpr int kPadding = 3;
 constexpr int kEdgeMargin = 2;
 // Between the value's plate and the time's, and a scale along the right edge.
 constexpr int kGap = 4;
+// Between the value's plate and the corner's controls beside it: a gap
+// between groups, so that where a lane is too short for the value to go
+// under the corner, it doesn't read as one more plate in the corner's row,
+// as it did ViewCorner::kLabelGap from it (#373 H8).
+constexpr int kCornerGap = 16;
 constexpr int kRadius = 3;
 
 // A plate's colours. A plate with an edge has it 1 px wide around its fill,
@@ -140,7 +145,7 @@ inline Rows rowsClearOf(const Rows &rows, const QRect &head, int plateHeight) {
 // out. Each follows its own line and nothing else, so neither jumps:
 // - The value's plate is centred on the horizontal line at the right edge,
 //   or left of the scale along it, and keeps out from under the corner's
-//   controls (see ViewCorner). Where the lane is tall enough, it stays
+//   controls, kCornerGap from them (see ViewCorner). Where the lane is tall enough, it stays
 //   above the time's.
 // - The time's plate is centred on the vertical line at the bottom edge. It
 //   stops left of the scale where one of its labels is beside it, right of
@@ -190,7 +195,7 @@ inline std::pair<QRect, QRect> plateRects(
         // that doesn't move as the pointer moves.
         const int widestHome = right - valueRoom;
         const int leftmost = ViewCorner::labelXClearOfCorner(
-            widestHome, kEdgeMargin, valueRoom, valuePlate.height(), width, reservedCorner);
+            widestHome, kEdgeMargin, valueRoom, valuePlate.height(), width, reservedCorner, kCornerGap);
         const bool besideHead = laneHead.isValid() && leftmost < laneHead.right() + 1 + kGap;
         const auto clearOfHead = [&](const Rows &rows) {
             return besideHead ? rowsClearOf(rows, laneHead, valuePlate.height()) : rows;
@@ -210,7 +215,8 @@ inline std::pair<QRect, QRect> plateRects(
             const int top = std::clamp(y - valuePlate.height() / 2, rows.first, rows.last);
             value = QRect(
                 std::max(0, ViewCorner::labelXClearOfCorner(
-                    home, top, valuePlate.width(), valuePlate.height(), width, reservedCorner)),
+                    home, top, valuePlate.width(), valuePlate.height(), width, reservedCorner,
+                    kCornerGap)),
                 top, valuePlate.width(), valuePlate.height());
             if (hasTime && beside) {
                 timeRight = std::min(timeRight, leftmost - kGap);

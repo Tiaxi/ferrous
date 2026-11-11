@@ -2642,11 +2642,11 @@ void WaveformSmokeTest::waveformOverlaysKeepClearOfTheReservedCorner() {
     const QRect corner(width - 120, 0, 120, 40);
 
     // The readout leaves the corner, only while it would be under it, and
-    // keeps 6 px from its plates (#373 H5).
+    // keeps a group's gap from its plates (#373 H5, H8).
     const auto [topValue, topTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 5, 42, 48, 12, reserved);
     QVERIFY(!topValue.intersects(corner));
-    QCOMPARE(topValue.right(), corner.left() - 1 - ViewCorner::kLabelGap);
+    QCOMPARE(topValue.right(), corner.left() - 1 - CrosshairReadout::kCornerGap);
     const auto [lowValue, lowTime] = WaveformEditorItem::crosshairLabelRects(
         width, height, 100, 100, 42, 48, 12, reserved);
     QCOMPARE(lowValue.right(), width - 3);

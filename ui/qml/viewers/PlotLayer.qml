@@ -85,6 +85,11 @@ Item {
         modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
                                                 zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
+    // Lanes shorter than this, such as each of 5.1's in the main window,
+    // have compact heads (#373 H8): 72 px with the default font, where a
+    // 20 px label and its 28 px buttons would take most of the lane.
+    readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
+
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
 
@@ -176,6 +181,7 @@ Item {
             uiPalette: root.uiPalette
             label: root.laneLabels[index] || ""
             channelIndex: index
+            compact: root.laneHeight(index) < root.compactLaneHeight
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
             buttonsVisibility: root.uiBridge.channelButtonsVisibility

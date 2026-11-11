@@ -18,6 +18,8 @@ ToolButton {
     required property var uiPalette
     // The text drawn instead of an icon, such as "M"; `text` stays the name.
     property string glyphText: ""
+    // Its glyph text's size; a short lane's buttons take the compact one.
+    property real glyphPointSize: root.uiPalette.smallPointSize
     readonly property color glyphColor: root.checked
         ? root.plotColors.checkedGlyph
         : root.plotColors.plotText
@@ -66,7 +68,7 @@ ToolButton {
             visible: root.glyphText.length > 0
             text: root.glyphText
             font.family: root.uiPalette.baseFont.family
-            font.pointSize: root.uiPalette.smallPointSize
+            font.pointSize: root.glyphPointSize
             font.weight: Font.DemiBold
             color: root.glyphColor
             Accessible.ignored: true

@@ -37,6 +37,7 @@ private slots:
     void crosshairReadoutPlatesFollowThePointerSmoothly_data();
     void crosshairReadoutPlatesFollowThePointerSmoothly();
     void spectrogramCrosshairTimeKeepsClearOfTheLaneHead();
+    void shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots_data();
     void crosshairReadoutLeavesAPlateOutInNarrowPlots();
     void spectrogramCrosshairReadoutStaysReadableInNarrowLanes_data();
@@ -910,15 +911,19 @@ void SpectrogramSmokeTest::crosshairReadoutKeepsItsGapFromTheCornerPlates() {
     const QSizeF corner(60, 33);
     const int cornerLeft = width - 60;
     const QSize plate(90, 20);
-    for (const int pointerY : {5, 20, 40, 48, 49, 60}) {
+    // The readout's plate keeps a group's gap from them (#373 H8): 6 px
+    // read as one more plate in their row.
+    constexpr int gap = CrosshairReadout::kCornerGap;
+    QVERIFY(gap >= 2 * ViewCorner::kLabelGap);
+    for (const int pointerY : {5, 20, 40, 48, 49, 58, 59, 60, 70}) {
         const auto [value, time] = CrosshairReadout::plateRects(width, 120, 200, pointerY, plate, QSize(), corner);
         QVERIFY(!value.isNull());
         QVERIFY(time.isNull());
         const QByteArray where = QByteArray::number(pointerY);
-        if (value.top() < 33 + 6) {
-            // Beside the plates, or within 6 px below them: 6 px left of
-            // them.
-            QVERIFY2(value.left() + value.width() + 6 == cornerLeft, where.constData());
+        if (value.top() < 33 + gap) {
+            // Beside the plates, or within the gap below them: the gap
+            // left of them.
+            QVERIFY2(value.left() + value.width() + gap == cornerLeft, where.constData());
         } else {
             QVERIFY2(value.left() + value.width() == width - CrosshairReadout::kEdgeMargin, where.constData());
         }
@@ -2132,6 +2137,193 @@ Window {
         QVERIFY2(QRectF(0.0, 0.0, pane->width(), pane->height()).contains(plates[1].rect),
                  where.constData());
     }
+}
+
+// 5.1 in the main window at 1600 x 1000, six short lanes (#373 H8): each
+// lane's head is compact, a 16 px label with 11 px text and smaller Mute
+// and Solo buttons, which show only on the pointer; taller lanes keep the
+// full heads. The crosshair's readout in the top lane keeps a group's gap
+// from the mode switch, wherever the pointer is.
+void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    window->resize(1600, 1000);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *layer = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("plotLayer")));
+    auto *surface = qobject_cast<QQuickItem *>(window->findChild<QObject *>(QStringLiteral("mainSpectrogramSurface")));
+    QVERIFY(bridge != nullptr && layer != nullptr && surface != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(layer->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("channelButtonsVisibility", 1);
+    // A lane per channel, each with its label.
+    bridge->setProperty("spectrogramViewMode", 1);
+    setPlayingTrack(bridge);
+
+    const auto showChannels = [&](int channels, const QStringList &labels) {
+        bridge->setProperty("currentTrackChannels", channels);
+        QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
+                                          Q_ARG(int, channels), Q_ARG(bool, true)));
+        bridge->setProperty("currentTrackChannelLabels", labels);
+        QTRY_COMPARE(layer->property("laneCount").toInt(), channels);
+        QTRY_COMPARE(visibleItemsNamed(layer, QStringLiteral("plotLaneHead")).size(), channels);
+    };
+    struct Head {
+        QQuickItem *head;
+        QQuickItem *label;
+        QQuickItem *text;
+        QQuickItem *buttons;
+        QQuickItem *mute;
+    };
+    const auto heads = [&]() {
+        QList<Head> found;
+        for (QQuickItem *head : visibleItemsNamed(layer, QStringLiteral("plotLaneHead"))) {
+            found.push_back({head, firstVisibleItemNamed(head, QStringLiteral("plotLaneLabel")),
+                             firstVisibleItemNamed(head, QStringLiteral("plotPlateLabel")),
+                             itemsNamed(head, QStringLiteral("plotLaneButtons")).value(0),
+                             itemsNamed(head, QStringLiteral("plotLaneMuteButton")).value(0)});
+        }
+        return found;
+    };
+    const double compactPoints = palette->property("compactPointSize").toReal();
+    const double smallPoints = palette->property("smallPointSize").toReal();
+    QVERIFY(compactPoints > 0 && compactPoints < smallPoints);
+
+    // Stereo: two tall lanes, full heads.
+    showChannels(2, {QStringLiteral("L"), QStringLiteral("R")});
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QVERIFY(layer->property("compactLaneHeight").toReal() >= 64.0);
+    QTRY_VERIFY(layer->property("height").toReal() / 2 > layer->property("compactLaneHeight").toReal());
+    double fullLabelHeight = 0;
+    for (const Head &head : heads()) {
+        QVERIFY(head.label && head.text && head.buttons && head.mute);
+        QVERIFY(!head.head->property("compact").toBool());
+        QCOMPARE(head.text->property("font").value<QFont>().pointSizeF(), smallPoints);
+        QVERIFY(head.label->height() >= 20.0);
+        QCOMPARE(head.mute->height(), palette->property("toolButtonSize").toReal());
+        fullLabelHeight = head.label->height();
+    }
+
+    // 5.1: six short lanes, compact heads.
+    const QStringList positions{QStringLiteral("L"), QStringLiteral("R"), QStringLiteral("C"),
+                                QStringLiteral("LFE"), QStringLiteral("RL"), QStringLiteral("RR")};
+    showChannels(6, positions);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    const double laneHeight = layer->height() / 6;
+    QVERIFY2(laneHeight < layer->property("compactLaneHeight").toReal(), qPrintable(QString::number(laneHeight)));
+    QTRY_VERIFY(heads().value(0).head->property("compact").toBool());
+    for (const Head &head : heads()) {
+        QVERIFY(head.label && head.text && head.buttons && head.mute);
+        QVERIFY(head.head->property("compact").toBool());
+        QCOMPARE(head.text->property("font").value<QFont>().pointSizeF(), compactPoints);
+        QVERIFY2(head.label->height() >= 16.0 && head.label->height() < fullLabelHeight,
+                 qPrintable(QString::number(head.label->height())));
+        QCOMPARE(head.mute->height(), head.label->height() + 4);
+        // Mute and Solo hidden until the pointer is on the lane.
+        QVERIFY(!head.buttons->property("revealed").toBool());
+    }
+    // Back to stereo: the full heads again.
+    showChannels(2, {QStringLiteral("L"), QStringLiteral("R")});
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QTRY_VERIFY(!heads().value(0).head->property("compact").toBool());
+    QCOMPARE(heads().value(0).label->height(), fullLabelHeight);
+    showChannels(6, positions);
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+    QTRY_VERIFY(heads().value(0).head->property("compact").toBool());
+
+    // The lanes and their panes, top to bottom.
+    QList<SpectrogramItem *> panes;
+    QTRY_VERIFY([&]() {
+        panes.clear();
+        collectQuickItems(surface, &panes);
+        return panes.size() == 6;
+    }());
+    std::sort(panes.begin(), panes.end(), [](SpectrogramItem *a, SpectrogramItem *b) {
+        return a->mapToScene(QPointF()).y() < b->mapToScene(QPointF()).y();
+    });
+    // Each head's plates inside its lane, buttons included while hidden.
+    const QList<Head> found = heads();
+    for (int lane = 0; lane < 6; ++lane) {
+        const QRectF laneRect = panes[lane]->mapRectToScene(
+            QRectF(0, 0, panes[lane]->width(), panes[lane]->height()));
+        for (const Head &head : found) {
+            const QRectF label = head.label->mapRectToScene(QRectF(0, 0, head.label->width(), head.label->height()));
+            if (!laneRect.contains(label.center())) {
+                continue;
+            }
+            const QRectF buttons = head.buttons->mapRectToScene(
+                QRectF(-1, -1, head.buttons->width() + 2, head.buttons->height() + 2));
+            QVERIFY2(laneRect.contains(label) && laneRect.contains(buttons),
+                     qPrintable(QStringLiteral("lane %1: %2 in %3").arg(lane).arg(buttons.top()).arg(laneRect.top())));
+        }
+    }
+    // The pointer on the third lane reveals its buttons, and only its.
+    const QPointF onThird = panes[2]->mapToScene(QPointF(panes[2]->width() / 2, panes[2]->height() / 2));
+    QTest::mouseMove(window, onThird.toPoint());
+    QTRY_COMPARE(layer->property("hoveredLane").toInt(), 2);
+    for (const Head &head : heads()) {
+        const double labelY = head.label->mapToScene(QPointF()).y();
+        const bool onIt = labelY >= panes[2]->mapToScene(QPointF()).y()
+            && labelY < panes[3]->mapToScene(QPointF()).y();
+        QTRY_COMPARE(head.buttons->property("revealed").toBool(), onIt);
+    }
+
+    // The readout in the top lane, as the pointer sweeps its right end.
+    SpectrogramItem *top = panes.first();
+    constexpr int bins = 4'097;
+    constexpr int columns = 2'000;
+    top->feedPrecomputedChunk(QByteArray(bins * columns, '\x80'), bins, 0, columns, 0, columns,
+                              48'000, 1'024, true, true, 1, false);
+    QTRY_VERIFY(top->precomputedReady());
+    QQuickItem *modeSwitch = firstVisibleItemNamed(layer, QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    // With its plate's 1 px edge.
+    const QRectF switchRect = modeSwitch->mapRectToScene(
+        QRectF(-1, -1, modeSwitch->width() + 2, modeSwitch->height() + 2));
+    const QPointF origin = top->mapToScene(QPointF());
+    int checked = 0;
+    for (double x = top->width() - 2; x > top->width() - 400; x -= 37) {
+        for (double y = 1; y < top->height() - 1; y += 4) {
+            const QPointF at = origin + QPointF(x, y);
+            // Not on the switch, which takes the pointer from the plot.
+            if (switchRect.adjusted(-2, -2, 2, 2).contains(at)) {
+                continue;
+            }
+            QTest::mouseMove(window, at.toPoint());
+            SpectrogramOverlayImage value;
+            const bool laidOut = QTest::qWaitFor([&]() {
+                QMutexLocker lock(&top->m_stateMutex);
+                const QVector<SpectrogramOverlayImage> plates = readoutPlatesOf(top->m_crosshair);
+                value = plates.value(0);
+                return plates.size() == 1 && !top->m_crosshairDirty
+                    && std::abs(top->m_hoverPosition.x() - x) < 1.0 && std::abs(top->m_hoverPosition.y() - y) < 1.0;
+            }, 5'000);
+            QVERIFY2(laidOut, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
+            const QRectF plate = value.rect.translated(origin);
+            const auto edges = [](const QRectF &rect) {
+                return QStringLiteral("%1,%2 to %3,%4").arg(rect.left()).arg(rect.top())
+                    .arg(rect.right()).arg(rect.bottom());
+            };
+            const QByteArray where = QStringLiteral("at %1,%2: plate %3, switch %4")
+                .arg(at.x()).arg(at.y()).arg(edges(plate), edges(switchRect)).toUtf8();
+            QVERIFY2(!plate.intersects(switchRect), where.constData());
+            if (plate.top() < switchRect.bottom() + CrosshairReadout::kCornerGap) {
+                QVERIFY2(switchRect.left() - plate.right() >= CrosshairReadout::kCornerGap - 1, where.constData());
+            }
+            ++checked;
+        }
+    }
+    QVERIFY(checked > 20);
 }
 
 void SpectrogramSmokeTest::spectrogramCrosshairReadoutReadsEachView_data() {

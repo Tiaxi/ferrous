@@ -372,6 +372,9 @@ QtObject {
     // labels: 12 px with the default 10 pt font. Set it as font.pointSize:
     // Qt.font() would round it to whole points.
     readonly property real smallPointSize: root.basePointSize * 0.9
+    // The smallest text of the design, for the labels of the plot's short
+    // lanes: 11 px with the default 10 pt font.
+    readonly property real compactPointSize: root.basePointSize * 0.825
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 

@@ -8,6 +8,11 @@ import "." as Components
 // plate. The buttons show while the pointer is on the lane or the plate, and
 // while keyboard focus is on either of them, and in a viewer with its
 // controls; hidden, they stay Tab stops, so the keyboard reveals them.
+// A `compact` head, in a short lane, such as each of 5.1's in the main
+// window (#373 H8), has a 16 px label with 11 px text and 20 px buttons,
+// larger with a larger font, and its buttons show only on the pointer or
+// keyboard focus, not with a viewer's controls: there, every lane's would
+// show at once and crowd the lanes.
 Item {
     id: root
 
@@ -28,6 +33,7 @@ Item {
     // In a viewer, buttons that show on the pointer show with the viewer's
     // controls, which the pointer's activity shows, on their level alone.
     property bool revealedWithControls: false
+    property bool compact: false
     property bool laneHovered: false
     property var toggleMute: function() {}
     property var toggleSolo: function() {}
@@ -37,8 +43,16 @@ Item {
     // hiding fades them through `controlsLevel` instead, on its curve.
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
         || (root.buttonsVisibility === 1
-            && (root.revealedWithControls || root.laneHovered || buttonsHover.hovered
-                || root.focusInside))
+            && ((root.revealedWithControls && !root.compact) || root.laneHovered
+                || buttonsHover.hovered || root.focusInside))
+    // The buttons' size: the label's height and 2 px above and below it,
+    // compact; otherwise the design's small tool button.
+    readonly property real buttonSize: root.compact
+        ? labelPlate.height + 4
+        : root.uiPalette.toolButtonSize
+    readonly property real glyphPointSize: root.compact
+        ? root.uiPalette.compactPointSize
+        : root.uiPalette.smallPointSize
 
     // The label's box: the buttons' plate, taller, is centred on it and
     // overhangs it above and below.
@@ -63,6 +77,7 @@ Item {
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         text: root.label
+        compact: root.compact
     }
 
     Components.PlotPlate {
@@ -91,6 +106,9 @@ Item {
             objectName: "plotLaneMuteButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette
+            implicitWidth: root.buttonSize
+            implicitHeight: root.buttonSize
+            glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
             text: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.label)
             checked: root.muted
@@ -106,6 +124,9 @@ Item {
             objectName: "plotLaneSoloButton"
             plotColors: root.plotColors
             uiPalette: root.uiPalette
+            implicitWidth: root.buttonSize
+            implicitHeight: root.buttonSize
+            glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
             text: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.label)
             checked: root.soloed
