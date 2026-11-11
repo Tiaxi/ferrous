@@ -119,7 +119,8 @@ ToolBar {
     function scaled(size) {
         return Math.max(size, Math.round(size * root.fontScale))
     }
-    // The tool buttons: 32 px, or the Play/Pause glyph and 6 px around it.
+    // The tool buttons: 32 px, or a 20 px glyph and 6 px around it, which
+    // holds the 22 px Play/Pause glyph too.
     readonly property real buttonSize: Math.max(32, root.scaled(20) + 12)
 
     // A text of the transport's tooltips: the action and its shortcut.
@@ -241,7 +242,7 @@ ToolBar {
         id: transportButton
 
         required property string name
-        // The glyph's size: 16 px, 20 px for Play/Pause, 14 px for Stop,
+        // The glyph's size: 16 px, 22 px for Play/Pause, 14 px for Stop,
         // larger with a larger font.
         property int glyphSize: root.scaled(Kirigami.Units.iconSizes.small)
         // The action's text without its mnemonic, and its shortcut.
@@ -317,7 +318,8 @@ ToolBar {
             TransportButton {
                 id: playPauseButton
                 name: "playPause"
-                glyphSize: root.scaled(20)
+                // A step above its neighbours, within the same button.
+                glyphSize: root.scaled(22)
                 action: root.playing ? root.pauseAction : root.playAction
 
                 contentItem: Item {

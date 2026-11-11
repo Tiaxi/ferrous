@@ -419,6 +419,16 @@ qreal playheadLeftAt(QQuickItem *seek, double fraction) {
     return bar.left() + std::round(fraction * (std::floor(bar.width() + 1e-6) - 2.0));
 }
 
+// Whether `inner` lies within `outer`, give or take half a pixel.
+bool within(const QRectF &inner, const QRectF &outer) {
+    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
+        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
+}
+
+QString describeRect(const QRectF &rect) {
+    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
+}
+
 } // namespace
 
 class TransportStatusTest : public QObject {
@@ -512,7 +522,8 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
 
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
-    const QList<int> glyphs{16, 20, 14, 16};
+    // Play/Pause a step above its neighbours, in the same 32 px button.
+    const QList<int> glyphs{16, 22, 14, 16};
     for (int i = 0; i < names.size(); ++i) {
         QQuickItem *button = harness.item(QStringLiteral("transportButton_") + names[i]);
         QVERIFY2(button != nullptr, qPrintable(names[i]));
@@ -522,6 +533,16 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
         QCOMPARE(rect.top() - top, 8.0);
         QVERIFY(button->property("flat").toBool());
         QCOMPARE(button->property("glyphSize").toInt(), glyphs[i]);
+    }
+    // Both Play/Pause glyphs are drawn at 22 px, centred in the button.
+    const QRectF playPauseRect = sceneRect(harness.item(QStringLiteral("transportButton_playPause")));
+    for (const QString &name : {QStringLiteral("transportPlayPauseGlyph_play"),
+                                QStringLiteral("transportPlayPauseGlyph_pause")}) {
+        QQuickItem *glyph = harness.item(name);
+        QVERIFY2(glyph != nullptr, qPrintable(name));
+        QCOMPARE(glyph->size(), QSizeF(22, 22));
+        QCOMPARE(sceneRect(glyph).center(), playPauseRect.center());
+        QVERIFY2(within(sceneRect(glyph), playPauseRect), qPrintable(name));
     }
     // One Play/Pause button: no Play and Pause buttons of their own.
     QVERIFY(harness.item(QStringLiteral("transportButton_play")) == nullptr);
@@ -2399,21 +2420,6 @@ void TransportStatusTest::statusBarHasNoDividers() {
         QVERIFY2(!rule, qPrintable(item->objectName() + QStringLiteral(" %1×%2").arg(item->width()).arg(item->height())));
     }
 }
-
-namespace {
-
-// Whether `inner` lies within `outer`, give or take half a pixel.
-bool within(const QRectF &inner, const QRectF &outer) {
-    return inner.left() >= outer.left() - 0.5 && inner.right() <= outer.right() + 0.5
-        && inner.top() >= outer.top() - 0.5 && inner.bottom() <= outer.bottom() + 0.5;
-}
-
-QString describeRect(const QRectF &rect) {
-    return QStringLiteral("%1,%2 %3x%4").arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height());
-}
-
-} // namespace
-
 // At 24 pt, nothing in the transport or the status bar clips or overlaps:
 // the glyphs and buttons grow with the font, the band with them, and the
 // status bar is as tall as its text and 4 px above and below it.
@@ -2435,7 +2441,7 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
     const QRectF band = sceneRect(transport);
     const QStringList names{QStringLiteral("previous"), QStringLiteral("playPause"), QStringLiteral("stop"),
                             QStringLiteral("next")};
-    const QList<int> glyphs{38, 48, 34, 38};
+    const QList<int> glyphs{38, 53, 34, 38};
     qreal previousRight = band.left();
     qreal buttonSize = 0;
     for (int i = 0; i < names.size(); ++i) {
