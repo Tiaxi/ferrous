@@ -1740,7 +1740,9 @@ ApplicationWindow {
             enabled: !spectrogramSurface.standby
             Accessible.ignored: spectrogramSurface.standby
             playheadVisible: visualizationSurface.playheadShown(0)
-            z: visualizationSurface.settledMode === 0 ? 0 : 1
+            // Under the waveform while it stands by, so that the waveform
+            // has the pointer and its hover.
+            z: spectrogramSurface.standby ? -1 : (visualizationSurface.settledMode === 0 ? 0 : 1)
             // Its lanes, floors and seams fade in as one picture.
             layer.enabled: opacity > 0 && opacity < 1
             viewerMode: visualizationSurface.inViewer
