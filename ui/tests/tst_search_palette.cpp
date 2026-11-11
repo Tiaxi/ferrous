@@ -1146,6 +1146,19 @@ void SearchPaletteTest::mouseSelectsAndActs() {
     QQmlExpression menuOpened(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.opened"));
     QTRY_VERIFY2(menuOpened.evaluate().toBool(), qPrintable(menuOpened.error().toString() + QStringLiteral(" visible=")
         + QQmlExpression(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.visible")).evaluate().toString()));
+    // It opens where the click was, not at the window's corner (#373 H6).
+    QQmlExpression menuItem(qmlContext(harness.field()), harness.field(), QStringLiteral("resultMenu.contentItem"));
+    auto *menuContent = qvariant_cast<QQuickItem *>(menuItem.evaluate());
+    QVERIFY(menuContent != nullptr);
+    const QPointF clicked = harness.window->mapToGlobal(sceneCentre(harness.row(track)));
+    const QPointF menuAt = menuContent->mapToGlobal(QPointF(0, 0));
+    QVERIFY2(std::abs(menuAt.x() - clicked.x()) <= 16 && std::abs(menuAt.y() - clicked.y()) <= 16,
+             qPrintable(QStringLiteral("menu at %1,%2, clicked at %3,%4")
+                            .arg(menuAt.x()).arg(menuAt.y()).arg(clicked.x()).arg(clicked.y())));
+    // Show in Library has the queue menu's icon.
+    QQmlExpression showInLibraryIcon(qmlContext(harness.field()), harness.field(),
+                                     QStringLiteral("resultMenu.itemAt(2).text + '|' + resultMenu.itemAt(2).icon.name"));
+    QCOMPARE(showInLibraryIcon.evaluate().toString(), QStringLiteral("Show in Library|go-jump"));
     QTest::keyClick(harness.window, Qt::Key_Escape);
     QTRY_VERIFY(!menuOpened.evaluate().toBool());
     // The palette stays open behind its menu.
