@@ -1555,9 +1555,12 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     QVERIFY2(harness.load(kBreezeDark, 1600, &errorText), qPrintable(errorText));
     QQuickItem *group = harness.item(QStringLiteral("statusBarRepeatShuffle"));
     QQuickItem *repeat = harness.item(QStringLiteral("statusBarRepeatLabel"));
-    QQuickItem *shuffle = harness.item(QStringLiteral("statusBarShuffleGlyph"));
+    QQuickItem *shuffle = harness.item(QStringLiteral("statusBarShuffle"));
+    QQuickItem *shuffleGlyph = harness.item(QStringLiteral("statusBarShuffleGlyph"));
+    QQuickItem *shuffleLabel = harness.item(QStringLiteral("statusBarShuffleLabel"));
+    QQuickItem *repeatGlyph = nullptr;
     QQuickItem *state = harness.item(QStringLiteral("statusBarPlaybackState"));
-    QVERIFY(group && repeat && shuffle && state);
+    QVERIFY(group && repeat && shuffle && shuffleGlyph && shuffleLabel && state);
     // Off: nothing.
     QVERIFY(!group->isVisible());
     harness.bridge->setProperty("repeatMode", 1);
@@ -1568,12 +1571,34 @@ void TransportStatusTest::statusBarShowsRepeatAndShuffleInWords() {
     QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
     harness.bridge->setProperty("repeatMode", 2);
     QCOMPARE(repeat->property("text").toString(), QStringLiteral("Repeat Whole Queue"));
+    // Shuffle as repeat is (#373 H6: a glyph alone, named only in its
+    // tooltip): its glyph and the words of its menu item, "Shuffle", in
+    // the secondary colour, 16 px after repeat.
     harness.bridge->setProperty("shuffleEnabled", true);
-    QTRY_VERIFY(shuffle->isVisible());
-    QCOMPARE(accessibleText(shuffle, QAccessible::Name), QStringLiteral("Shuffle On"));
+    QTRY_VERIFY(shuffle->isVisible() && shuffleLabel->isVisible() && shuffleGlyph->isVisible());
+    QCOMPARE(shuffleLabel->property("text").toString(), QStringLiteral("Shuffle"));
+    QCOMPARE(accessibleText(shuffleLabel, QAccessible::Name), QStringLiteral("Shuffle"));
+    QCOMPARE(shuffleGlyph->property("source").toString(), QStringLiteral("media-playlist-shuffle"));
+    QVERIFY(sameColor(shuffleLabel->property("color").value<QColor>(),
+                      repeat->property("color").value<QColor>()));
+    QVERIFY(sameColor(shuffleLabel->property("color").value<QColor>(), harness.token("textSecondary")));
+    QTRY_COMPARE(sceneRect(shuffle).left(), sceneRect(repeat).right() + 16.0);
+    // The glyph and its words as repeat's: the same size, 6 px apart.
+    for (QQuickItem *child : repeat->parentItem()->childItems()) {
+        if (child != repeat && child->property("source").isValid()) {
+            repeatGlyph = child;
+        }
+    }
+    QVERIFY(repeatGlyph != nullptr);
+    QCOMPARE(shuffleGlyph->size(), repeatGlyph->size());
+    QCOMPARE(sceneRect(shuffleLabel).left() - sceneRect(shuffleGlyph).right(),
+             sceneRect(repeat).left() - sceneRect(repeatGlyph).right());
+    QCOMPARE(sceneRect(shuffleLabel).left() - sceneRect(shuffleGlyph).right(), 6.0);
     harness.bridge->setProperty("repeatMode", 0);
     QTRY_VERIFY(!repeat->isVisible());
     QVERIFY(group->isVisible() && shuffle->isVisible());
+    QTRY_COMPARE(sceneRect(group).left(), sceneRect(state).right() + 16.0);
+    QTRY_COMPARE(sceneRect(shuffle).left(), sceneRect(group).left());
 }
 
 void TransportStatusTest::statusBarShowsTheFormatGroupWithoutThePosition() {
@@ -2349,9 +2374,16 @@ void TransportStatusTest::statusBarNamesAStoppedEngineInPlainWords() {
     QCOMPARE(accessibleText(label, QAccessible::Description), tip);
     QTest::mouseMove(harness.window, sceneCentre(label));
     QTRY_VERIFY(toolTipShown(label));
-    // A failure the backend reported says so instead.
+    // A failure the backend reported says so instead, in the same words
+    // (#373 H6: "Backend stopped").
+    QQuickItem *stopped = harness.item(QStringLiteral("statusBarBackendStoppedLabel"));
+    QVERIFY(stopped != nullptr);
+    QVERIFY(!stopped->isVisible());
     harness.bridge->setProperty("backendFailure", QStringLiteral("stopped for testing"));
     QTRY_VERIFY(!label->isVisible());
+    QTRY_VERIFY(stopped->isVisible());
+    QCOMPARE(stopped->property("text").toString(), QStringLiteral("Playback engine stopped"));
+    QVERIFY(sameColor(stopped->property("color").value<QColor>(), harness.token("negative")));
 }
 
 void TransportStatusTest::lastFmSlotToolTipShowsOnKeyboardFocus() {

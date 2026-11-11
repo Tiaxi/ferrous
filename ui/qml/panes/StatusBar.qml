@@ -177,7 +177,7 @@ ToolBar {
         StatusLabel {
             objectName: "statusBarBackendStoppedLabel"
             visible: root.backendStopped
-            text: I18n.i18nc("@info:status", "Backend stopped")
+            text: I18n.i18nc("@info:status", "Playback engine stopped")
             color: root.uiPalette.negative
             font.weight: Font.DemiBold
         }
@@ -225,7 +225,8 @@ ToolBar {
             }
         }
 
-        // Repeat, in words, and shuffle; nothing when both are off.
+        // Repeat and shuffle, each a glyph and its menu item's words;
+        // nothing when both are off.
         Row {
             objectName: "statusBarRepeatShuffle"
             visible: root.showTrackSections && (root.uiBridge.repeatMode === 1
@@ -252,20 +253,23 @@ ToolBar {
                 }
             }
 
-            StatusGlyph {
-                objectName: "statusBarShuffleGlyph"
-                anchors.verticalCenter: parent.verticalCenter
+            Row {
+                objectName: "statusBarShuffle"
                 visible: root.uiBridge.shuffleEnabled === true
-                source: "media-playlist-shuffle"
-                Accessible.role: Accessible.StaticText
-                Accessible.name: I18n.i18nc("@info:status", "Shuffle On")
+                spacing: 6
+                anchors.verticalCenter: parent.verticalCenter
 
-                HoverHandler {
-                    id: shuffleHover
+                StatusGlyph {
+                    objectName: "statusBarShuffleGlyph"
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: "media-playlist-shuffle"
                 }
-                ToolTip.visible: shuffleHover.hovered
-                ToolTip.delay: Kirigami.Units.toolTipDelay
-                ToolTip.text: I18n.i18nc("@info:tooltip", "Shuffle On")
+
+                StatusLabel {
+                    objectName: "statusBarShuffleLabel"
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: I18n.i18nc("@info:status", "Shuffle")
+                }
             }
         }
 
