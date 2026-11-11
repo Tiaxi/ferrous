@@ -476,7 +476,7 @@ private slots:
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsMultipleValuesPlaceholderReads();
-    void editTagsFileColumnsGiveWayRatherThanScrollSideways();
+    void editTagsTagColumnsGiveWayBeforeTheFileColumns();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
@@ -2568,9 +2568,10 @@ void UiDialogsTest::editTagsTableHeaderUsesTheQueuesHeaderStyle() {
     }
     QCOMPARE(labels.at(0)->property("text").toString(), QStringLiteral("#"));
     QCOMPARE(labels.at(1)->property("text").toString(), QStringLiteral("Title"));
-    // The last column takes the room that is left, so nothing is cut off.
+    // The last column shown takes the room that is left, so nothing is cut
+    // off: Folder, while no row has a status for Status to show.
     QQuickItem *table = named(tags, QStringLiteral("tagEditorTable"));
-    QQuickItem *last = named(tags, QStringLiteral("tagEditorColumn_status"));
+    QQuickItem *last = named(tags, QStringLiteral("tagEditorColumn_directory"));
     QVERIFY(sceneRect(last).right() >= sceneRect(table).right() - 8.5 - 0.5
             || table->property("contentWidth").toReal() > table->width());
     editor.close();
@@ -2719,9 +2720,10 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
 
 // The table's columns at the default font, or a smaller one: the window
 // wide enough, in a 1600 px screen, for every column through Format at its
-// width beside the fields; Folder and Status fit as File Name, Folder and
-// Status, then the tags, give way, Title, Artist and Album to no less than
-// four fifths of their widths.
+// width beside the fields; Folder fits as the tags give way, to no less
+// than their least widths, while File Name and Folder keep theirs (#373 H7:
+// they had given way first, to "01 - L…l.flac"). Status takes no room while
+// no row has a status, and Disc is about 44 px.
 void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
@@ -2743,17 +2745,28 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
     QVERIFY(table != nullptr);
     QTRY_VERIFY(!layoutPending(table));
-    const QList<std::pair<QString, qreal>> widths{{QStringLiteral("title"), 200}, {QStringLiteral("artist"), 160},
-                                                  {QStringLiteral("album"), 140}, {QStringLiteral("fileName"), 220}};
-    for (const auto &[key, width] : widths) {
+    const auto columnWidth = [tags](const QString &key) {
         QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
-        QVERIFY2(column != nullptr, qPrintable(key));
-        // File Name gives way to no less than 96 px, the tags to four
-        // fifths of their widths.
-        QVERIFY2(column->width() <= width
-                     && column->width() >= (key == QStringLiteral("fileName") ? 96 : std::round(width * 0.8)),
-                 qPrintable(describeItem(column)));
+        return column != nullptr ? column->width() : -1.0;
+    };
+    // The tags give way, to no less than their least widths.
+    const QList<std::tuple<QString, qreal, qreal>> tagWidths{
+        {QStringLiteral("title"), 200, 140}, {QStringLiteral("artist"), 160, 110},
+        {QStringLiteral("album"), 140, 110}, {QStringLiteral("genre"), 110, 80}};
+    for (const auto &[key, width, least] : tagWidths) {
+        QVERIFY2(columnWidth(key) <= width && columnWidth(key) >= least,
+                 qPrintable(QStringLiteral("%1: %2").arg(key).arg(columnWidth(key))));
     }
+    // File Name and Folder keep their widths, and Disc has 44 px.
+    QCOMPARE(columnWidth(QStringLiteral("fileName")), 220.0);
+    QVERIFY2(columnWidth(QStringLiteral("directory")) >= 156.0,
+             qPrintable(QString::number(columnWidth(QStringLiteral("directory")))));
+    QCOMPARE(columnWidth(QStringLiteral("discNo")), 44.0);
+    // Status takes no room, and shows no header, while no row has a status.
+    QQuickItem *status = named(tags, QStringLiteral("tagEditorColumn_status"));
+    QVERIFY(status != nullptr);
+    QCOMPARE(status->width(), 0.0);
+    QVERIFY(!status->isVisible());
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeItem(table)));
     // Format whole in view, clear of the scroll bar's lane, with its cells.
     QQuickItem *format = named(tags, QStringLiteral("tagEditorColumn_formatKind"));
@@ -2809,12 +2822,14 @@ void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
     QTRY_VERIFY(!tags->isVisible());
 }
 
-// At 1400 px and wider, the table has no sideways scroll bar: File Name,
-// Folder and Status give way first, then the tags a little, and long file
-// names and folders elide in the middle with the whole in a tooltip. In a
-// wide window the tags have their widths and File Name and Folder stretch
-// (#373 H6).
-void UiDialogsTest::editTagsFileColumnsGiveWayRatherThanScrollSideways() {
+// At 1400 px and wider, the table has no sideways scroll bar (#373 H6): the
+// tags give way first, and File Name, Folder and Status only once the tags
+// are at their least, File Name to no less than 190 px and Folder 130 px
+// (#373 H7). Status takes no room until a row has a status. Long file names
+// and folders elide at the end, keeping the track number and title, with
+// the whole in a tooltip. In a wide window the tags have their widths and
+// File Name and Folder stretch.
+void UiDialogsTest::editTagsTagColumnsGiveWayBeforeTheFileColumns() {
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
                                    const TagEditorController::RenameGate &) { return tagRowsWithLongPaths(4); };
@@ -2852,49 +2867,78 @@ void UiDialogsTest::editTagsFileColumnsGiveWayRatherThanScrollSideways() {
         return cells.isEmpty() ? nullptr : cells.first();
     };
 
-    for (const int width : {1400, 1600}) {
+    const QList<std::tuple<QString, qreal, qreal>> giving{
+        {QStringLiteral("title"), 200, 140}, {QStringLiteral("artist"), 160, 110},
+        {QStringLiteral("album"), 140, 110}, {QStringLiteral("genre"), 110, 80},
+        {QStringLiteral("fileName"), 220, 190}, {QStringLiteral("directory"), 156, 130}};
+    // `statuses`: whether a row has a status, and Status its column.
+    // `scrolls`: whether the columns at their least are wider than the
+    // view, which then scrolls sideways with every column at its width
+    // rather than File Name and Folder cut to less than theirs.
+    const auto checkColumns = [&](int width, bool statuses, bool scrolls) {
+        const QString at = QStringLiteral("%1 px%2: ").arg(width).arg(statuses ? QStringLiteral(", statuses") : QString());
         tags->resize(width, tags->height());
         QTRY_COMPARE(tags->contentItem()->width(), qreal(width));
         QTRY_VERIFY(!layoutPending(table));
         QVERIFY2(sceneRect(table).right() <= width, qPrintable(describeItem(table)));
+        if (scrolls) {
+            QTRY_VERIFY2(table->property("contentWidth").toReal() > table->width(), qPrintable(at + describeColumns()));
+            for (const auto &[key, preferred, least] : giving) {
+                QVERIFY2(columnWidth(key) == preferred, qPrintable(at + describeColumns()));
+            }
+            return;
+        }
         // No sideways scrolling: every column in the view, its header whole.
-        QTRY_VERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
-        QQuickItem *status = named(tags, QStringLiteral("tagEditorColumn_status"));
-        QVERIFY2(sceneRect(status).right() <= sceneRect(table).right() + 0.5, qPrintable(describeColumns()));
+        QTRY_VERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5,
+                     qPrintable(at + describeColumns()));
         // Its sideways scroll bar has nothing to scroll.
         for (QQuickItem *child : table->childItems()) {
             if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
                 && child->property("orientation").toInt() == Qt::Horizontal) {
-                QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6, qPrintable(describeColumns()));
+                QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6, qPrintable(at + describeColumns()));
             }
         }
         for (const QString &key : keys) {
             QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
+            if (key == QStringLiteral("status") && !statuses) {
+                QCOMPARE(column->width(), 0.0);
+                QVERIFY(!column->isVisible());
+                continue;
+            }
+            QVERIFY2(sceneRect(column).right() <= sceneRect(table).right() + 0.5, qPrintable(at + describeColumns()));
             QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
-            QVERIFY2(!label->property("truncated").toBool(), qPrintable(key + QStringLiteral(": ") + describeColumns()));
+            QVERIFY2(!label->property("truncated").toBool(), qPrintable(at + key + QStringLiteral(": ") + describeColumns()));
         }
-        // The numbers and Format keep their widths; File Name, Folder and
-        // Status make most of the room, and the tags give no more than a
-        // fifth of theirs.
+        // The numbers and Format keep their widths; every column that gives
+        // way keeps its least width, and File Name and Folder give way only
+        // once every tag is at its least.
         QCOMPARE(columnWidth(QStringLiteral("formatKind")), 64.0);
-        for (const auto &[key, preferred] : QList<std::pair<QString, qreal>>{
-                 {QStringLiteral("title"), 200}, {QStringLiteral("artist"), 160}, {QStringLiteral("album"), 140},
-                 {QStringLiteral("genre"), 110}}) {
-            QVERIFY2(columnWidth(key) >= std::round(preferred * 0.8), qPrintable(describeColumns()));
+        QCOMPARE(columnWidth(QStringLiteral("discNo")), 44.0);
+        bool tagsAtLeast = true;
+        for (const auto &[key, preferred, least] : giving) {
+            QVERIFY2(columnWidth(key) >= least, qPrintable(at + describeColumns()));
+            const bool tag = key != QStringLiteral("fileName") && key != QStringLiteral("directory");
+            if (tag) {
+                tagsAtLeast = tagsAtLeast && columnWidth(key) <= least + 1;
+            } else if (columnWidth(key) < preferred) {
+                QVERIFY2(tagsAtLeast, qPrintable(at + describeColumns()));
+            }
         }
-        // Status holds "Modified" whole.
-        QVERIFY2(columnWidth(QStringLiteral("status")) - 16
-                     >= QFontMetricsF(cellOf(QStringLiteral("title"))->property("font").value<QFont>())
-                            .horizontalAdvance(QStringLiteral("Modified")),
-                 qPrintable(describeColumns()));
-        // The long file name and folder elide in the middle, keeping their
-        // ends, with the whole in a tooltip.
+        if (statuses) {
+            // Status holds "Modified" whole.
+            QVERIFY2(columnWidth(QStringLiteral("status")) - 16
+                         >= QFontMetricsF(cellOf(QStringLiteral("title"))->property("font").value<QFont>())
+                                .horizontalAdvance(QStringLiteral("Modified")),
+                     qPrintable(at + describeColumns()));
+        }
+        // The long file name and folder elide at the end, keeping the track
+        // number and the title, with the whole in a tooltip.
         QQuickItem *fileName = cellOf(QStringLiteral("fileName"));
         QQuickItem *folder = cellOf(QStringLiteral("directory"));
         QVERIFY(fileName != nullptr && folder != nullptr);
-        QCOMPARE(fileName->property("elide").toInt(), int(Qt::ElideMiddle));
-        QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideMiddle));
-        QTRY_VERIFY2(fileName->property("truncated").toBool(), qPrintable(describeColumns()));
+        QCOMPARE(fileName->property("elide").toInt(), int(Qt::ElideRight));
+        QCOMPARE(folder->property("elide").toInt(), int(Qt::ElideRight));
+        QTRY_VERIFY2(fileName->property("truncated").toBool(), qPrintable(at + describeColumns()));
         QCOMPARE(fileName->property("toolTipText").toString(),
                  QStringLiteral("01 - A Track Title Long Enough To Be Cut Short Somewhere.flac"));
         if (folder->property("truncated").toBool()) {
@@ -2902,7 +2946,23 @@ void UiDialogsTest::editTagsFileColumnsGiveWayRatherThanScrollSideways() {
         }
         // The title cells, short, have no tooltip.
         QCOMPARE(cellOf(QStringLiteral("title"))->property("toolTipText").toString(), QString());
+    };
+    for (const int width : {1400, 1600}) {
+        checkColumns(width, false, false);
+        QVERIFY(!QTest::currentTestFailed());
     }
+    // An edit gives its row a status, and Status its room: at 1600 px still
+    // without a sideways scroll bar; at 1400 px, File Name and Folder keep
+    // their widths, and the table scrolls.
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    QVERIFY(editor.dirty());
+    checkColumns(1600, true, false);
+    QVERIFY(!QTest::currentTestFailed());
+    checkColumns(1400, true, true);
+    QVERIFY(!QTest::currentTestFailed());
+    editor.revertField(QStringLiteral("genre"));
+    QVERIFY(!editor.dirty());
+    QTRY_COMPARE(columnWidth(QStringLiteral("status")), 0.0);
 
     // Wide: the tags at their widths, and File Name and Folder take the rest.
     tags->resize(2000, tags->height());
@@ -2912,7 +2972,9 @@ void UiDialogsTest::editTagsFileColumnsGiveWayRatherThanScrollSideways() {
                  qPrintable(describeColumns()));
     QCOMPARE(columnWidth(QStringLiteral("title")), 200.0);
     QCOMPARE(columnWidth(QStringLiteral("artist")), 160.0);
-    QCOMPARE(columnWidth(QStringLiteral("status")), 120.0);
+    QCOMPARE(columnWidth(QStringLiteral("status")), 0.0);
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
     editor.close();
     QTRY_VERIFY(!tags->isVisible());

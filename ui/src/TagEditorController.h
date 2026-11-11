@@ -23,6 +23,8 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(bool saving READ saving NOTIFY savingChanged)
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
+    // Whether a row holds the error of a save or rename that failed for it.
+    Q_PROPERTY(bool hasRowErrors READ hasRowErrors NOTIFY rowErrorsChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
     // Whether the status reports something that failed.
@@ -40,6 +42,7 @@ public:
     bool loading() const;
     bool saving() const;
     bool dirty() const;
+    bool hasRowErrors() const;
     QString statusText() const;
     QString statusDetails() const;
     bool statusIsError() const;
@@ -108,6 +111,7 @@ signals:
     void loadingChanged();
     void savingChanged();
     void dirtyChanged();
+    void rowErrorsChanged();
     void statusChanged();
     void selectionChanged();
     void bulkSummaryChanged();
