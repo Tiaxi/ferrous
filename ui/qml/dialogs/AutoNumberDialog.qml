@@ -40,7 +40,11 @@ Components.CompactDialogWindow {
 
     objectName: "autoNumberDialog"
     title: I18n.i18nc("@title:window", "Auto Number")
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26, root.minimumWidth)
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26, root.minimumWidth, root._neededWidth)
+    // The form and the check boxes whole, in the font they are in; the
+    // description above them wraps.
+    contentWidth: Math.max(autoNumberForm.implicitWidth, writeDiscCheck.implicitWidth,
+        writeTotalsCheck.implicitWidth, resetOnFolderCheck.implicitWidth, resetOnDiscCheck.implicitWidth)
 
     footer: Components.DialogFooter {
 
@@ -72,6 +76,8 @@ Components.CompactDialogWindow {
     }
 
     Kirigami.FormLayout {
+        id: autoNumberForm
+        objectName: "autoNumberForm"
         Layout.fillWidth: true
 
         TextField {
@@ -86,6 +92,10 @@ Components.CompactDialogWindow {
         Label {
             objectName: "autoNumberStartingTrackError"
             Layout.fillWidth: true
+            // It wraps under its field, as wide: its whole sentence, which
+            // the form counts even while it is hidden, would widen the
+            // fields' column past the window at large fonts (#373 H10).
+            Layout.maximumWidth: startingTrackField.implicitWidth
             visible: !root.startingTrackValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
@@ -105,6 +115,10 @@ Components.CompactDialogWindow {
         Label {
             objectName: "autoNumberStartingDiscError"
             Layout.fillWidth: true
+            // It wraps under its field, as wide: its whole sentence, which
+            // the form counts even while it is hidden, would widen the
+            // fields' column past the window at large fonts (#373 H10).
+            Layout.maximumWidth: startingDiscField.implicitWidth
             visible: !root.startingDiscValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
@@ -120,16 +134,19 @@ Components.CompactDialogWindow {
     }
     CheckBox {
         id: writeTotalsCheck
+        objectName: "autoNumberWriteTotalsCheck"
         checked: false
         text: I18n.i18nc("@option:check", "Write totals")
     }
     CheckBox {
         id: resetOnFolderCheck
+        objectName: "autoNumberResetOnFolderCheck"
         checked: false
         text: I18n.i18nc("@option:check", "Reset track numbers on folder or section change")
     }
     CheckBox {
         id: resetOnDiscCheck
+        objectName: "autoNumberResetOnDiscCheck"
         checked: false
         enabled: writeDiscCheck.checked
         text: I18n.i18nc("@option:check", "Reset track numbers when disc changes in current values")

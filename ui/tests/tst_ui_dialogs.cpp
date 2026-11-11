@@ -512,6 +512,7 @@ private slots:
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsOpensNoWiderThanTheMainWindow();
+    void autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts();
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
@@ -3012,6 +3013,73 @@ void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
         editor.close();
         QTRY_VERIFY(!tags->isVisible());
     }
+}
+
+// Auto Number opens wide enough for its form and its check boxes, which do
+// not wrap, in the font they are in: at 24 pt, its fixed 26 grid units
+// left them running up to 435 px past the window (#373 H10). Its
+// description wraps within that width.
+void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont large = applicationFont;
+    large.setPointSizeF(24);
+    QGuiApplication::setFont(large);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    const qreal padding = dialog->property("contentPadding").toReal();
+    const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
+    int checked = 0;
+    for (const QString &name : {QStringLiteral("autoNumberForm"), QStringLiteral("autoNumberStartingTrackField"),
+                                QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                                QStringLiteral("autoNumberResetOnFolderCheck"),
+                                QStringLiteral("autoNumberResetOnDiscCheck")}) {
+        QQuickItem *item = visibleNamed(numbers, name);
+        QVERIFY2(item != nullptr, qPrintable(name));
+        const QRectF rect = sceneRect(item);
+        const QString where = QStringLiteral("%1 at %2..%3 (implicit %4), window %5 wide")
+            .arg(name).arg(rect.left()).arg(rect.right()).arg(item->implicitWidth()).arg(numbers->width());
+        QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
+        QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
+        ++checked;
+    }
+    QCOMPARE(checked, 6);
+    // A start that is not valid says so under its field, wrapped within
+    // the window.
+    QQuickItem *trackField = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
+    trackField->setProperty("text", QStringLiteral("0"));
+    QQuickItem *trackError = nullptr;
+    QTRY_VERIFY((trackError = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackError"))) != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    const QRectF errorRect = sceneRect(trackError);
+    QVERIFY2(errorRect.left() >= inside.left() - 0.5 && errorRect.right() <= inside.right() + 0.5,
+             qPrintable(QStringLiteral("error at %1..%2, window %3 wide")
+                            .arg(errorRect.left()).arg(errorRect.right()).arg(numbers->width())));
+    QVERIFY(!trackError->property("truncated").toBool());
+    trackField->setProperty("text", QStringLiteral("1"));
+    // The window is no wider than its widest line needs, and the screen.
+    QVERIFY2(numbers->width() <= qMax(qCeil(dialog->property("defaultWidth").toReal()), numbers->minimumWidth()),
+             qPrintable(QString::number(numbers->width())));
+    QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+    QTRY_VERIFY(!dialog->property("visible").toBool());
+    editor.close();
 }
 
 // A field whose files hold different values says so with its placeholder,
