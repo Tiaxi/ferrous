@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "SpectrogramItem.h"
+#include "SpectrogramColorMap.h"
 #include "FerrousBridgeFfi.h"
 
 #include "SpectrogramSeekTrace.h"
@@ -6353,50 +6354,12 @@ void SpectrogramItem::updateTimeGridOverlayLocked(
 }
 
 void SpectrogramItem::rebuildPalette() {
-    // SoX spectrogram default palette (from spectrogram.c, perm=0).
-    // Procedural sin/cos curves produce:
-    //   Black → Dark Blue → Purple → Magenta → Red → Orange → Yellow → White
-    // This matches Adobe Audition 3.0's spectral display gradient.
-    //
-    // Our palette array: index 0 = brightest (x=1), index N-1 = darkest (x=0).
-
+    // SpectrogramColorMap's colours. Our palette array: index 0 = brightest
+    // (x=1), index N-1 = darkest (x=0).
     for (int i = 0; i < kGradientTableSize; ++i) {
-        // x: 1.0 at index 0 (loud/bright), 0.0 at last index (quiet/dark).
         const double x = 1.0
             - static_cast<double>(i) / static_cast<double>(kGradientTableSize - 1);
-
-        // c0 (red): sin ramp from x=0.13 to x=0.73, then saturated.
-        double c0;
-        if (x < 0.13)
-            c0 = 0.0;
-        else if (x < 0.73)
-            c0 = std::sin((x - 0.13) / 0.60 * M_PI / 2.0);
-        else
-            c0 = 1.0;
-
-        // c1 (green): sin ramp from x=0.60 to x=0.91, then saturated.
-        double c1;
-        if (x < 0.60)
-            c1 = 0.0;
-        else if (x < 0.91)
-            c1 = std::sin((x - 0.60) / 0.31 * M_PI / 2.0);
-        else
-            c1 = 1.0;
-
-        // c2 (blue): half-sine from 0 to 0.60, gap, linear ramp 0.78-1.0.
-        double c2;
-        if (x < 0.60)
-            c2 = 0.5 * std::sin(x / 0.60 * M_PI);
-        else if (x < 0.78)
-            c2 = 0.0;
-        else
-            c2 = (x - 0.78) / 0.22;
-
-        // perm=0: R=c[0], G=c[1], B=c[2] (no channel swapping).
-        m_palette32[static_cast<size_t>(i)] = qRgb(
-            std::clamp(static_cast<int>(0.5 + 255.0 * c0), 0, 255),
-            std::clamp(static_cast<int>(0.5 + 255.0 * c1), 0, 255),
-            std::clamp(static_cast<int>(0.5 + 255.0 * c2), 0, 255));
+        m_palette32[static_cast<size_t>(i)] = SpectrogramColorMap::colorAt(x);
     }
 
     // Build matching grayscale palette using luminance weights.
@@ -6752,13 +6715,7 @@ std::array<quint8, 256> SpectrogramItem::buildPrecomputedDbRemapLocked() const {
     for (int i = 1; i < 256; ++i) {
         const double db = (static_cast<double>(i - 1) / 254.0)
             * kBakedDbRange - kBakedDbRange;
-        const double xdb = std::clamp(db + userDbRange, 0.0, userDbRange);
-        const double normalized = xdb / userDbRange;
-        static constexpr double kB = 1.3;
-        const double gamma = (normalized > 0.0)
-            ? std::pow(normalized, 2.0 - kB * normalized)
-            : 0.0;
-        const double remapped = gamma * 255.0;
+        const double remapped = SpectrogramColorMap::position(db, userDbRange) * 255.0;
         dbRemap[static_cast<size_t>(i)] = static_cast<quint8>(std::clamp(
             static_cast<int>(std::lround(remapped)),
             0,

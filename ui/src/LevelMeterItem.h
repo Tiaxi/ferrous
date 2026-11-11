@@ -18,15 +18,19 @@
 #include "PlaybackClock.h"
 #include "WaveformReaderLease.h"
 
-// The level meter of the visualization: a 10 px column at the right end of
-// each lane, with a 1 px seam on its left. Each column is a vertical meter
-// from -60 to 0 dBFS, with its listed levels evenly spaced (-6, -12, -24 and
-// -48 dB at 4/5 to 1/5 of the height): an 8 px track the lane's height, and
-// on it, centred in the column, a 6 px bar, so that it reads as a meter
-// rather than a scrollbar: the fill from the bottom and a 3 px clip lamp at
-// the top. Across the track, 1 px gaps at -6, -12 and -24 dB (only -6 and
-// -24 in a lane under 64 px) and a 2 px peak tick. Without a track,
-// stopped, it is an empty track.
+// The level meter of the visualization: a column at the right end of each
+// lane, with a 1 px seam on its left and the plot's floor on its right,
+// `edgeGap` wide, which keeps it out of the lane of the queue's scrollbar
+// above the pane (#373 H7 P11: it read as a piece of that scrollbar). Each
+// column is a vertical meter from -60 to 0 dBFS, with its listed levels
+// evenly spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an
+// 8 px track the lane's height, and on it, centred in the track, a 6 px
+// bar: the fill from the bottom and a 3 px clip lamp at the top. The fill
+// takes the spectrogram's colour of its level while `colorMapFill` is set,
+// so that the meter reads as part of the plot. While `scaleShown`, 1 px
+// ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24 in a
+// lane under 64 px), and a 2 px peak tick, with a 1 px gap under it where
+// it is on the fill. Without a track, stopped, it is an empty track.
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
@@ -46,6 +50,17 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor peakColor MEMBER m_peakColor WRITE setPeakColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipOffColor MEMBER m_clipOffColor WRITE setClipOffColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
+    // The scale's ticks across the track.
+    Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
+    // Whether the fill takes the spectrogram's colour of its level, in a
+    // view of `dbRange` dB, rather than fillColor.
+    Q_PROPERTY(bool colorMapFill READ colorMapFill WRITE setColorMapFill NOTIFY colorsChanged)
+    Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY colorsChanged)
+    // Whether the plot shows its scale: the meter then shows its ticks.
+    Q_PROPERTY(bool scaleShown READ scaleShown WRITE setScaleShown NOTIFY scaleShownChanged)
+    // The plot's floor right of the track, in logical pixels: part of the
+    // column's implicit width.
+    Q_PROPERTY(double edgeGap READ edgeGap WRITE setEdgeGap NOTIFY edgeGapChanged)
     // Whether something reads the levels, such as a tooltip: then
     // readoutChanged() tells it of new ones, a few times a second. It also
     // does while an assistive technology is active.
@@ -68,10 +83,12 @@ public:
     static constexpr double kClipHoldSeconds = 2.0;
     // A bin at full scale clips; its level is rounded to 0.001 of a dB.
     static constexpr double kClipDb = -0.001;
-    // The column: a 1 px seam, the 8 px track and 1 px of the plot's floor.
+    // The column: a 1 px seam, the 8 px track and the plot's floor, 1 px
+    // unless edgeGap says otherwise.
     static constexpr double kColumnWidth = 10.0;
     static constexpr double kTrackLeft = 1.0;
     static constexpr double kTrackWidth = 8.0;
+    static constexpr double kDefaultEdgeGap = kColumnWidth - kTrackLeft - kTrackWidth;
     // The bar on the track, centred in the column: the fill and the lamp.
     static constexpr double kBarLeft = 2.0;
     static constexpr double kBarWidth = 6.0;
@@ -79,8 +96,13 @@ public:
     // are the clip lamp, with a 1 px gap under it.
     static constexpr double kInset = 3.0;
     static constexpr double kLampHeight = 3.0;
-    // Lanes under this height have only the -6 and -24 dB gaps.
+    // Lanes under this height have only the -12 and -24 dB ticks.
     static constexpr double kFullScaleLaneHeight = 64.0;
+    // The ticks of the scale, in dB, as a lane of `laneHeight` shows them.
+    static std::vector<double> ticksDb(double laneHeight);
+    // The fill's colour of a level of `db` dBFS on the spectrogram's map in
+    // a view of `dbRange` dB.
+    static QColor colorMapColor(double db, double dbRange);
 
     explicit LevelMeterItem(QQuickItem *parent = nullptr);
     ~LevelMeterItem() override;
@@ -110,6 +132,15 @@ public:
     void setPeakColor(const QColor &value) { setColor(m_peakColor, value); }
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
+    void setTickColor(const QColor &value) { setColor(m_tickColor, value); }
+    bool colorMapFill() const { return m_colorMapFill; }
+    void setColorMapFill(bool value);
+    double dbRange() const { return m_dbRange; }
+    void setDbRange(double value);
+    bool scaleShown() const { return m_scaleShown; }
+    void setScaleShown(bool value);
+    double edgeGap() const { return m_edgeGap; }
+    void setEdgeGap(double value);
 
     QString sourcePath() const { return m_sourcePath; }
     PlaybackClock *clock() const { return m_clock; }
@@ -132,6 +163,8 @@ signals:
     void activeChanged();
     void colorsChanged();
     void readoutWantedChanged();
+    void scaleShownChanged();
+    void edgeGapChanged();
     // The levels laneReadout() gives changed.
     void readoutChanged();
 
@@ -232,6 +265,11 @@ private:
     QColor m_peakColor{QStringLiteral("#f4f4f6")};
     QColor m_clipOffColor{QColor::fromRgbF(1, 1, 1, 0.2)};
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
+    QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
+    bool m_colorMapFill{false};
+    double m_dbRange{132.0};
+    bool m_scaleShown{false};
+    double m_edgeGap{kDefaultEdgeGap};
     // Tells readers of the levels of new ones, at most every 250 ms.
     QTimer m_readoutTimer;
     // Wakes the meter when the drawn levels next change, while no frame is due.

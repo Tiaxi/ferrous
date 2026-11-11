@@ -63,8 +63,9 @@ Item {
     // then too (#373 H4 P5), so the first data never changes it.
     readonly property var plotColors: root.uiPalette.plotColors(root.visualizationMode)
     readonly property bool meterShown: root.uiBridge.showLevelMeter
-    // The meter takes 10 px of the plot's width while it is shown, also
-    // when nothing plays: the plot narrows only when the option changes.
+    // The meter takes its column of the plot's width while it is shown,
+    // also when nothing plays: the plot narrows only when the option
+    // changes.
     readonly property real meterWidth: root.meterShown ? levelMeter.implicitWidth : 0
     readonly property real plotWidth: Math.max(0, root.width - root.meterWidth)
     readonly property bool trackLoaded: (root.uiBridge.currentTrackPath || "").length > 0
@@ -332,6 +333,17 @@ Item {
         peakColor: root.plotColors.meterPeak
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
+        tickColor: root.plotColors.meterTick
+        // Part of the instrument (#373 H7 P11): on the spectrogram, the
+        // fill takes the colour map's colour of its level, and the scale's
+        // ticks show with the plot's own.
+        colorMapFill: root.visualizationMode === 0
+        dbRange: root.uiBridge.dbRange || 132
+        scaleShown: root.visualizationMode === 0 && root.uiBridge.showSpectrogramScale === true
+        // Out of the lane the queue's scrollbar takes above the pane, in
+        // the main window, and in the viewers alike: the plot's floor
+        // right of the meter is that lane's width.
+        edgeGap: Kirigami.Units.largeSpacing
     }
 
     // Each lane's column, for its tooltip and for assistive technology:

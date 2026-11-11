@@ -536,6 +536,7 @@ private slots:
     void repeatRadiosFollowTheBackendAndSetIt();
     void visualizationRadiosFollowThePlotSwitch();
     void scaleItemIsOffInWaveformMode();
+    void levelMeterIsPartOfThePlot();
     void editMenuNamesItsUndoAndClearsTheQueue();
     void findOpensSearchOnCtrlF();
     void shortcutsAreTakenOnceEach();
@@ -1114,6 +1115,55 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
     QVERIFY(meter->property("checked").toBool());
     bridge->setProperty("showLevelMeter", false);
     QTRY_VERIFY(!meter->property("checked").toBool());
+}
+
+// The level meter as part of the plot (#373 H7 P11): its column keeps out
+// of the lane of the queue's scrollbar, whose right edge it shares, so it
+// no longer reads as a piece of it; on the spectrogram its fill takes the
+// colour map's colour of its level, in the plot's dB range, and its ticks
+// show with the plot's scale.
+void UiMenusTest::levelMeterIsPartOfThePlot() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = child(window, "viewerController");
+    bridge->setProperty("showLevelMeter", true);
+    auto *meter = qobject_cast<LevelMeterItem *>(child(window, "levelMeter"));
+    auto *scrollBar = qobject_cast<QQuickItem *>(child(window, "queueScrollBar"));
+    QVERIFY(viewer != nullptr && meter != nullptr && scrollBar != nullptr);
+    QTRY_VERIFY(meter->isVisible() && meter->width() > 0);
+
+    // The same right edge, the pane's and the queue's.
+    const double meterRight = meter->mapToScene(QPointF(meter->width(), 0)).x();
+    const double laneLeft = scrollBar->mapToScene(QPointF(0, 0)).x();
+    const double laneRight = scrollBar->mapToScene(QPointF(scrollBar->width(), 0)).x();
+    QVERIFY(scrollBar->width() > 0);
+    QVERIFY2(std::abs(meterRight - laneRight) < 1.0,
+             qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRight).arg(laneRight)));
+    // The track, all of what the meter draws, left of the lane, with the
+    // plot's floor between them.
+    const double trackRight = meter->mapToScene(
+        QPointF(LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth, 0)).x();
+    QVERIFY2(trackRight <= laneLeft,
+             qPrintable(QStringLiteral("track ends at %1, the lane starts at %2").arg(trackRight).arg(laneLeft)));
+    QCOMPARE(meter->implicitWidth(), LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth + meter->edgeGap());
+
+    // The spectrogram: the colour map's fill, in the plot's range; the
+    // ticks with the scale.
+    QVERIFY(meter->colorMapFill());
+    QVERIFY(!meter->scaleShown());
+    bridge->setProperty("showSpectrogramScale", true);
+    QTRY_VERIFY(meter->scaleShown());
+    bridge->setProperty("dbRange", 90.0);
+    QTRY_COMPARE(meter->dbRange(), 90.0);
+    // The waveform has no colour map and no scale.
+    QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1));
+    QTRY_VERIFY(!meter->colorMapFill());
+    QVERIFY(!meter->scaleShown());
+    QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0));
+    QTRY_VERIFY(meter->colorMapFill() && meter->scaleShown());
 }
 
 void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {
