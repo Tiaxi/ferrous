@@ -2355,7 +2355,9 @@ void TransportInputSmokeTest::viewerKeysWorkFromEveryControl() {
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
-    QVERIFY(bridge != nullptr && viewer != nullptr);
+    QQuickItem *pane = itemNamed(window->contentItem(), QStringLiteral("spectrogramPane"));
+    QQuickItem *surface = itemNamed(window->contentItem(), QStringLiteral("visualizationSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && pane != nullptr && surface != nullptr);
     setPlayingTrack(bridge);
     bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
     const QVariantMap candidate{
@@ -2411,6 +2413,12 @@ void TransportInputSmokeTest::viewerKeysWorkFromEveryControl() {
                 QQuickWindow *host = hostWindow();
                 if (host == nullptr || !QTest::qWaitForWindowActive(host)
                     || !QTest::qWaitFor([host]() { return host->activeFocusItem() != nullptr; })) {
+                    return static_cast<QQuickWindow *>(nullptr);
+                }
+                // The viewer in the window takes the visualization once the
+                // pane has kept its last frame, a frame after it opens.
+                if (shown == Shown::Visualization
+                    && !QTest::qWaitFor([&]() { return !pane->isAncestorOf(surface); })) {
                     return static_cast<QQuickWindow *>(nullptr);
                 }
                 return host;
