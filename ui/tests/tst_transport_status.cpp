@@ -496,6 +496,8 @@ private slots:
     void lastFmSlotToolTipShowsOnKeyboardFocus();
     void lastFmSlotSendingAndScrobbledLookApart_data();
     void lastFmSlotSendingAndScrobbledLookApart();
+    void lastFmGlyphIsCentredOnItsBlock_data();
+    void lastFmGlyphIsCentredOnItsBlock();
     void lastFmSlotGlyphReadsAtOneX_data();
     void lastFmSlotGlyphReadsAtOneX();
     void lastFmBarReadsApartFromTheScanBar_data();
@@ -2095,19 +2097,20 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     // A 16 px glyph (#373 H6: 10 px inside a ring was a smudge at 1x), and
-    // a 3 px bar 2 px under it, as wide as it (#373 H8: 2 px was too faint
-    // for its states to differ by shape).
-    QCOMPARE(box->size(), QSizeF(16, 21));
+    // a 2 px bar 2 px under its ink, as wide as the ink (#373 H10: the bar
+    // under the glyph's cell pushed the glyph 2.5 px above the middle).
+    // The bar starts 6 px long and grows over the ink's other 8 px.
+    QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QVERIFY(bar->isVisible());
-    QCOMPARE(bar->y(), 18.0);
-    QCOMPARE(bar->x(), 0.0);
-    QCOMPARE(bar->height(), 3.0);
+    QCOMPARE(bar->y(), 15.0);
+    QCOMPARE(bar->x(), 1.0);
+    QCOMPARE(bar->height(), 2.0);
     QCOMPARE(bar->opacity(), 1.0);
-    QCOMPARE(slot->property("barWidth").toInt(), 16);
-    QCOMPARE(progress(), std::floor(77.0 / 115.0 * 16) / 16);
-    QCOMPARE(bar->width(), std::floor(77.0 / 115.0 * 16));
+    QCOMPARE(slot->property("barWidth").toInt(), 14);
+    QCOMPARE(progress(), std::floor(77.0 / 115.0 * 8) / 8);
+    QCOMPARE(bar->width(), 6.0 + std::floor(77.0 / 115.0 * 8));
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("text")));
@@ -2115,12 +2118,12 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
     // Until the track's length is known, there is no scrobble point: the
-    // bar at its 3 px start, as listening always has (#373 H9).
+    // bar at its 6 px start, as listening always has (#373 H9).
     bridge->setProperty("lastFmScrobbleThresholdMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
     QCOMPARE(progress(), 0.0);
     QVERIFY(bar->isVisible());
-    QCOMPARE(bar->width(), 3.0);
+    QCOMPARE(bar->width(), 6.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
@@ -2149,15 +2152,15 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     }
 
     // Being sent and scrobbled differ by shape (#373 H8): while it is sent,
-    // the full 3 px bar in the text colour at half strength; once accepted,
+    // the full 2 px bar in the text colour at half strength; once accepted,
     // no bar, and the glyph in the secondary colour. The glyph is the same
     // in both, at full strength.
     bridge->setProperty("lastFmScrobbleState", 2);
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(bar->isVisible());
     QCOMPARE(progress(), 1.0);
-    QCOMPARE(bar->width(), 16.0);
-    QCOMPARE(bar->height(), 3.0);
+    QCOMPARE(bar->width(), 14.0);
+    QCOMPARE(bar->height(), 2.0);
     QCOMPARE(bar->opacity(), 0.5);
     QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("text")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
@@ -2171,7 +2174,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(glyph->opacity(), 1.0);
     QVERIFY(!label->isVisible());
     // The glyph keeps its place.
-    QCOMPARE(box->size(), QSizeF(16, 21));
+    QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: scrobbled"));
     bridge->setProperty("lastFmScrobbleState", 2);
@@ -2219,7 +2222,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(glyph->property("source").toString().endsWith(QStringLiteral("/lastfm-paused.svg")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textTertiary")));
     QVERIFY(!bar->isVisible());
-    QCOMPARE(box->size(), QSizeF(16, 21));
+    QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(slot));
     QTRY_VERIFY(!bridge->property("lastFmScrobblingPaused").toBool());
@@ -2271,9 +2274,10 @@ void TransportStatusTest::lastFmSlotCountsTheTimeLeftFromTheListenedTime() {
     QCOMPARE(textChanged.count(), 0);
     bridge->setProperty("lastFmScrobbleListenedMs", 31000);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: 1:24 to scrobble"));
-    // The bar moves by whole device pixels: with the second, if it crosses
-    // one.
-    const double barPixels = std::round(slot->property("barWidth").toDouble()
+    // The bar moves by whole device pixels of the length it grows by past
+    // its minimum: with the second, if it crosses one.
+    const double barPixels = std::round((slot->property("barWidth").toDouble()
+                                         - slot->property("barMinimumLength").toDouble())
                                         * std::max(1.0, harness.window->devicePixelRatio()));
     const bool crossesAPixel = std::floor(31.0 / 115.0 * barPixels) != std::floor(30.0 / 115.0 * barPixels);
     QCOMPARE(progressMoved.count(), crossesAPixel ? 1 : 0);
@@ -2351,11 +2355,13 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The bar under the glyph, as drawn at 1x (#373 H6): as many whole pixels
-// of the glyph's 16 as the listening done, from the left, but never fewer
-// than its 3 px height, and the chrome everywhere else: no trough, and
-// nothing between the glyph and the bar. At 0 % a 3 px square, so that
-// listening never looks like scrobbled (#373 H9: both were the bare glyph).
+// The bar under the glyph, as drawn at 1x (#373 H6): 2 px tall under the
+// ink's 14 columns, from the left, 6 px at the start and the listening done
+// of the other 8, and the chrome everywhere else: no trough, and nothing
+// between the glyph and the bar. At 0 % a 6 by 2 px dash, so that
+// listening never looks like scrobbled (#373 H9: both were the bare glyph)
+// and a little listening reads as a bar, not a speck (#373 H10: at 25 % it
+// was a 4 by 3 px dot).
 // The bar is 3:1 on the chrome; being sent fills it at half strength,
 // scrobbled leaves it out, failed fills it in the negative colour.
 void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
@@ -2374,9 +2380,9 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible());
 
-    // The 2 px gap under the glyph and the bar's 3 px rows across the
+    // The 2 px gap under the glyph's ink and the bar's 2 px rows across the
     // glyph's width: the pixels drawn in `colour`, which must start at the
-    // left and run on, and those drawn in neither it nor the chrome.
+    // ink's left and run on, and those drawn in neither it nor the chrome.
     struct Drawn {
         int lit = 0;
         int stray = 0;
@@ -2387,12 +2393,16 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
         const QImage image = grabbed(harness.window, &scale);
         const QPointF topLeft = sceneRect(box).topLeft();
         Drawn result;
-        for (int y = 16; y < 21; ++y) {
+        for (int y = 13; y < 17; ++y) {
             bool ended = false;
             for (int x = 0; x < 16; ++x) {
                 const QColor pixel = pixelAt(image, topLeft + QPointF(x + 0.5, y + 0.5), scale);
                 const bool isChrome = channelDistance(pixel, chrome) <= 2;
-                const bool isLit = y >= 18 && channelDistance(pixel, colour) <= 2;
+                if (x == 0 || x == 15) {
+                    result.stray += isChrome ? 0 : 1;
+                    continue;
+                }
+                const bool isLit = y >= 15 && channelDistance(pixel, colour) <= 2;
                 if (isLit) {
                     result.lit += 1;
                     result.fromTheLeft = result.fromTheLeft && !ended;
@@ -2407,11 +2417,11 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     const QColor text = harness.token("text");
     QVERIFY2(contrastRatio(text, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), text, chrome)));
     for (const auto &[done, columns] :
-         {std::pair{0.0, 3}, std::pair{0.1, 3}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
+         {std::pair{0.0, 6}, std::pair{0.1, 6}, std::pair{0.25, 8}, std::pair{0.5, 10}, std::pair{0.9, 13}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
-        QTRY_COMPARE(slot->property("barProgress").toDouble(), std::floor(done * 16) / 16.0);
+        QTRY_COMPARE(slot->property("barProgress").toDouble(), std::floor(done * 8) / 8.0);
         Drawn now;
-        QTRY_VERIFY2((now = drawn(text), now.lit == 3 * columns),
+        QTRY_VERIFY2((now = drawn(text), now.lit == 2 * columns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.lit)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of trough or ink").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
@@ -2421,7 +2431,7 @@ void TransportStatusTest::lastFmSlotBarFillsWithoutATrough() {
     // at all. Failed: full, in the negative colour.
     const QColor sending = drawnOver(withAlpha(text, 0.5), chrome);
     for (const auto &[state, colour, lit] :
-         {std::tuple{2, sending, 48}, std::tuple{3, text, 0}, std::tuple{4, harness.token("negative"), 48}}) {
+         {std::tuple{2, sending, 28}, std::tuple{3, text, 0}, std::tuple{4, harness.token("negative"), 28}}) {
         bridge->setProperty("lastFmScrobbleState", state);
         if (lit > 0) {
             QVERIFY2(contrastRatio(colour, chrome) >= 1.5,
@@ -2472,10 +2482,11 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
         Drawn result;
         const QPointF boxTopLeft = sceneRect(box).topLeft();
         for (int x = 0; x < 16; ++x) {
-            result.bar.append(pixelAt(image, boxTopLeft + QPointF(x + 0.5, 19.5), scale));
+            result.bar.append(pixelAt(image, boxTopLeft + QPointF(x + 0.5, 15.5), scale));
         }
         result.glyph = chrome;
-        for (int y = 0; y < int(glyph->height()); ++y) {
+        // The glyph's rows above the bar, which hangs in its cell.
+        for (int y = 0; y < slot->property("barY").toInt(); ++y) {
             for (int x = 0; x < int(glyph->width()); ++x) {
                 const QColor pixel = pixelAt(image, glyph->mapToScene(QPointF(x + 0.5, y + 0.5)), scale);
                 if (channelDistance(pixel, chrome) > channelDistance(result.glyph, chrome)) {
@@ -2496,8 +2507,8 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     harness.bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_VERIFY(slot->isVisible() && bar->isVisible());
     Drawn listening;
-    QTRY_VERIFY((listening = drawn(), count(listening.bar, text) == 14));
-    QCOMPARE(count(listening.bar, chrome), 2);
+    QTRY_VERIFY((listening = drawn(), count(listening.bar, text) == 13));
+    QCOMPARE(count(listening.bar, chrome), 3);
 
     // Being sent: the full bar, every pixel of it half the text colour on
     // the chrome, and none of it the listening bar's colour.
@@ -2505,7 +2516,7 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     harness.bridge->setProperty("lastFmScrobbleState", 2);
     const QColor half = drawnOver(withAlpha(text, 0.5), chrome);
     Drawn sending;
-    QTRY_VERIFY((sending = drawn(), count(sending.bar, half) == 16));
+    QTRY_VERIFY((sending = drawn(), count(sending.bar, half) == 14));
     QVERIFY2(channelDistance(half, text) >= 48 && channelDistance(half, chrome) >= 48,
              qPrintable(half.name() + QStringLiteral(" between ") + text.name() + QStringLiteral(" and ")
                         + chrome.name()));
@@ -2526,6 +2537,115 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
                  && channelDistance(sending.glyph, scrobbled.glyph) <= 2,
              qPrintable(listening.glyph.name() + QStringLiteral(" / ") + sending.glyph.name()
                         + QStringLiteral(" / ") + scrobbled.glyph.name()));
+}
+
+void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("breeze dark") << true << 10.0;
+    QTest::newRow("breeze light") << false << 10.0;
+    QTest::newRow("breeze dark, 24 pt") << true << 24.0;
+    QTest::newRow("breeze light, 24 pt") << false << 24.0;
+}
+
+// The Last.fm glyph's ink, as drawn, is centred on its block, the slot,
+// both ways and on whole pixels, and the slot on the status bar under its
+// seam (#373 H10: the glyph sat 2.5 px above the middle, over the bar's
+// place). The bar under it is 2 px thick at the default font, a little more
+// at a larger one, and at a tiny value a dash three times as long as it is
+// thick, from the ink's left edge (#373 H10: at 25 % it was a speck).
+void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.window->effectiveDevicePixelRatio(), 1.0);
+    QQuickItem *status = harness.item(QStringLiteral("statusBar"));
+    QQuickItem *slot = harness.item(QStringLiteral("scrobbleIndicator"));
+    QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
+    QQuickItem *bar = harness.item(QStringLiteral("scrobbleIndicatorBar"));
+    QVERIFY(status && slot && glyph && bar);
+    harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
+    harness.bridge->setProperty("lastFmScrobbleListenedMs", 1000);
+    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    QTRY_VERIFY(slot->isVisible() && bar->isVisible());
+    const QRectF statusBar = sceneRect(status).adjusted(0, 1, 0, 0);
+    QTRY_VERIFY(std::abs(sceneRect(slot).center().y() - statusBar.center().y()) <= 0.5);
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    const QColor chrome = harness.token("chrome");
+    const QRectF slotRect = sceneRect(slot);
+    const QRectF glyphRect = sceneRect(glyph);
+    QCOMPARE(glyphRect.topLeft(), QPointF(std::round(glyphRect.left()), std::round(glyphRect.top())));
+    QCOMPARE(slotRect.topLeft(), QPointF(std::round(slotRect.left()), std::round(slotRect.top())));
+
+    // The glyph's ink: the pixels of its cell above the bar at least half
+    // as far from the chrome as its strongest. Offscreen, Kirigami draws a
+    // mask file uncoloured, so this is its ink, not its colour.
+    const int side = int(glyphRect.width());
+    const int barY = int(sceneRect(bar).top() - glyphRect.top());
+    QList<int> distance(side * barY);
+    int strongest = 0;
+    for (int y = 0; y < barY; ++y) {
+        for (int x = 0; x < side; ++x) {
+            distance[y * side + x] =
+                channelDistance(pixelAt(image, glyphRect.topLeft() + QPointF(x + 0.5, y + 0.5), scale), chrome);
+            strongest = std::max(strongest, distance[y * side + x]);
+        }
+    }
+    QVERIFY2(strongest > 24, qPrintable(QString::number(strongest)));
+    QRect ink;
+    for (int y = 0; y < barY; ++y) {
+        for (int x = 0; x < side; ++x) {
+            if (distance[y * side + x] * 2 >= strongest) {
+                ink = ink.united(QRect(x, y, 1, 1));
+            }
+        }
+    }
+    const QRectF inkRect = QRectF(ink).translated(glyphRect.topLeft());
+    const QString where = describeRect(inkRect) + QStringLiteral(" in ") + describeRect(slotRect)
+        + QStringLiteral(" in ") + describeRect(statusBar);
+    QVERIFY2(std::abs(inkRect.center().y() - slotRect.center().y()) <= 0.5, qPrintable(where));
+    QVERIFY2(std::abs(inkRect.center().x() - slotRect.center().x()) <= 0.5, qPrintable(where));
+    QVERIFY2(std::abs(inkRect.center().y() - statusBar.center().y()) <= 0.5, qPrintable(where));
+    if (pointSize == 10.0) {
+        // At the default font, exactly: 6 px above and below 10 px of ink.
+        QCOMPARE(inkRect.top() - slotRect.top(), 6.0);
+        QCOMPARE(slotRect.bottom() - inkRect.bottom(), 6.0);
+    }
+
+    // The bar as drawn: its rows and columns in the text colour under the
+    // ink, a gap of chrome between.
+    const QColor text = harness.token("text");
+    const QRectF barArea(glyphRect.left(), inkRect.bottom(), glyphRect.width(), slotRect.bottom() - inkRect.bottom());
+    QRect drawnBar;
+    for (int y = 0; y < int(barArea.height()); ++y) {
+        for (int x = 0; x < int(barArea.width()); ++x) {
+            if (channelDistance(pixelAt(image, barArea.topLeft() + QPointF(x + 0.5, y + 0.5), scale), text) <= 2) {
+                drawnBar = drawnBar.united(QRect(x, y, 1, 1));
+            }
+        }
+    }
+    QVERIFY2(!drawnBar.isEmpty(), qPrintable(where));
+    const QRectF barRect = QRectF(drawnBar).translated(barArea.topLeft());
+    const int thickness = slot->property("barHeight").toInt();
+    if (pointSize == 10.0) {
+        QCOMPARE(thickness, 2);
+    }
+    QVERIFY(thickness >= 2);
+    QCOMPARE(barRect.height(), qreal(thickness));
+    QVERIFY2(barRect.top() - inkRect.bottom() >= 2.0, qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
+    QVERIFY2(barRect.bottom() <= slotRect.bottom(), qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
+    QCOMPARE(barRect.left(), glyphRect.left() + slot->property("inkInset").toInt());
+    // A second into a 2 min scrobble point: a dash, three times as long as
+    // it is thick.
+    QCOMPARE(barRect.width(), qreal(3 * thickness));
 }
 
 void TransportStatusTest::lastFmSlotGlyphReadsAtOneX_data() {
@@ -2550,8 +2670,9 @@ void TransportStatusTest::lastFmSlotGlyphReadsAtOneX() {
     QQuickItem *glyph = harness.item(QStringLiteral("scrobbleIndicatorGlyph"));
     QVERIFY(slot && glyph);
     const QColor chrome = harness.token("chrome");
+    // Scrobbled: the glyph alone, without the bar that hangs in its cell.
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
-    harness.bridge->setProperty("lastFmScrobbleState", 1);
+    harness.bridge->setProperty("lastFmScrobbleState", 3);
     QTRY_VERIFY(slot->isVisible());
     qreal scale = 1;
     // Once the status bar has laid the slot out.
@@ -2689,17 +2810,18 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     qreal scale = 1;
     grabbed(harness.window, &scale);
 
-    // Its place and size: under the glyph, 2 px below it, at most its width.
+    // Its place and size: under the glyph's ink (rows 3 to 12, columns 1
+    // to 14 of the 16 px glyph), 2 px below it, at most its width.
     const QRectF glyphRect = sceneRect(glyph);
     const QRectF barRect = sceneRect(bar);
-    QCOMPARE(barRect.left(), glyphRect.left());
-    QCOMPARE(barRect.top() - glyphRect.bottom(), 2.0);
-    QCOMPARE(slot->property("barWidth").toReal(), glyphRect.width());
-    QVERIFY(barRect.width() <= glyphRect.width());
+    QCOMPARE(barRect.left(), glyphRect.left() + 1);
+    QCOMPARE(barRect.top() - (glyphRect.top() + 13), 2.0);
+    QCOMPARE(slot->property("barWidth").toReal(), glyphRect.width() - 2);
+    QVERIFY(barRect.width() <= glyphRect.width() - 2);
     QVERIFY2(glyphRect.width() * 4 < scanBar->width(), qPrintable(QString::number(scanBar->width())));
-    // 3 px to the scan bar's 4 (#373 H8: 2 px was too faint to carry its
-    // states by shape).
-    QCOMPARE(bar->height(), 3.0);
+    // 2 px to the scan bar's 4: its states differ by length and strength,
+    // so it can be as thin as the glyph's strokes (#373 H10).
+    QCOMPARE(bar->height(), 2.0);
     QVERIFY2(bar->height() < scanBar->height(), qPrintable(QString::number(scanBar->height())));
     QCOMPARE(bar->property("radius").toReal(), 0.0);
     QVERIFY(scanBar->property("radius").toReal() > 0.0);
