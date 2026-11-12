@@ -18,17 +18,19 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   font, the artist and the album take a line each, so the album is not
 //   lost to the ellipsis.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
-//   lines beside it, or under it when there is no room beside it, then
-//   12 px before the seam. Under it, the title and the artist wrap onto a
-//   second line rather than be cut off, and the lines are 4 px apart.
-//   A sidebar too short for the wide layout to leave the library about six
-//   rows, as with a large font or a short window, takes it too (#373 H6).
+//   lines beside it, or under it when there is no room beside it or they
+//   would run well past it, then 12 px before the seam. Under it, the
+//   title and the artist wrap onto a second line rather than be cut off,
+//   and the lines are 4 px apart. A sidebar too short for the wide layout
+//   to leave the library about six rows, as with a large font or a short
+//   window, takes it too (#373 H6), with the lines beside the cover
+//   however far past it they run, as its room beside it is wide (#373 H10).
 // - Nothing loaded, wide or narrow: one compact row of the list's row
 //   height, a 16 px disc mark at the 12 px inset and "Nothing playing"
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (#373 H7: the empty square took 360 px). The
 //   first track grows the cover's place from the row to its full size
-//   over longDuration, OutCubic, the cover fading in as it grows and the
+//   over moveDuration, OutCubic, the cover fading in as it grows and the
 //   lines and the library moving down with its foot, so nothing jumps
 //   (#373 H5); going back to nothing loaded, as when the queue is
 //   cleared, shrinks it back. With animations off, both are at once.
@@ -40,15 +42,22 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   with Kirigami's large spacing above and below them. The lines are
 //   those of the sidebar's layout, wide or narrow, so a cover that comes
 //   or goes changes only where they are.
-// - Between a track with a cover and one without, one change over
-//   longDuration (#373 H9: the two layouts cross-faded over the moving
-//   cover, the mark drew over it, and the text overlapped): the lines
-//   before fade out over its first half; from geometryStart the cover's
-//   place grows or shrinks at its top left, OutCubic, the lines and the
-//   library moving with it; the cover fades over the first half of that,
-//   and the mark comes in, or goes, only while no cover shows, so the two
-//   never show at once; everything ends with the change. The lines of the
-//   playing track come in over all of it. With animations off, at once.
+// - Between a track with a cover and one without, one move over
+//   moveDuration (#373 H9: the two layouts cross-faded over the moving
+//   cover, the mark drew over it, and the text overlapped; #373 H10: the
+//   cover's place held still for 40 % of it, then moved the library some
+//   350 px in the last 120 ms, and the title slid 22 px once it was all
+//   but opaque): the cover's place grows or shrinks at its top left from
+//   the first frame to the last, OutCubic, the lines and the library
+//   moving with it. The lines before fade out over its first half, and
+//   the lines' sideways shift runs in that half too, while the playing
+//   track's are still coming in, so no text slides at full opacity;
+//   beside the narrow cover they keep to its edge instead. The cover
+//   going fades over the first half and the mark comes in over the
+//   second; the mark going fades over the first fifth and the cover comes
+//   in over the half after it, so the two never show at once. The lines
+//   of the playing track come in over all of it. With animations off, at
+//   once.
 // - A line a track has no text for, as for a file without tags, takes no
 //   room (#373 H6): the lines under it move up.
 //
@@ -111,37 +120,42 @@ Item {
     // The change between a track with a cover and one without (see the
     // top): `layoutStep`, its time, 0 to 1, linear, from which every part
     // of it eases; each part goes on from where it was when the change
-    // started (`growthFrom`, `coverFadeFrom`, `bareMarkFrom`), so a change
-    // that turns back mid-way jumps nothing.
+    // started (`growthFrom`, `lineShiftFrom`, `coverFadeFrom`,
+    // `bareMarkFrom`), so a change that turns back mid-way jumps nothing.
     property real layoutStep: 1
     property real growthFrom: 1
+    property real lineShiftFrom: 1
     property real growthTo: 1
     property real coverFadeFrom: 1
     property real bareMarkFrom: 0
     // The lines before fade out over the change's first half
-    // (`stagedLinesOut`); the cover's place starts to move at
-    // `geometryStart`, once they are nearly gone; the cover fades over
-    // the first half of its move, until `coverFadeEnd`, and the mark of a
-    // track without one comes in after that, so the two never show at once.
+    // (`stagedLinesOut`), as the lines shift sideways; the cover's place
+    // moves over all of it. A cover that goes fades out by `coverOutEnd`,
+    // and the mark comes in after; a mark that goes fades out by
+    // `markOutEnd`, and the cover comes in after, by `coverInEnd`; so the
+    // two never show at once.
     readonly property real stagedLinesOut: 0.5
-    readonly property real geometryStart: 0.4
-    readonly property real coverFadeEnd: 0.7
-    readonly property real _geometryLevel: root._eased(
-        (root.layoutStep - root.geometryStart) / (1 - root.geometryStart))
-    readonly property real _coverFadeLevel: root._eased(
-        (root.layoutStep - root.geometryStart) / (root.coverFadeEnd - root.geometryStart))
+    readonly property real coverOutEnd: 0.5
+    readonly property real markOutEnd: 0.2
+    readonly property real coverInEnd: 0.7
+    readonly property real _geometryLevel: root._eased(root.layoutStep)
+    readonly property real _lineShiftLevel: root._eased(root.layoutStep / root.stagedLinesOut)
     // How far the layout is from the one without a cover towards the
     // cover's: 0 or 1, between while the cover's place grows or shrinks.
     readonly property real coverGrowth: root.growthFrom
         + (root.growthTo - root.growthFrom) * root._geometryLevel
+    // The same for the lines' sideways place, which gets there sooner.
+    readonly property real lineShift: root.lineShiftFrom
+        + (root.growthTo - root.lineShiftFrom) * root._lineShiftLevel
     // The cover's opacity in the change, and the mark's.
     readonly property real coverLevel: root.growthTo > 0
-        ? root.coverFadeFrom + (1 - root.coverFadeFrom) * root._coverFadeLevel
-        : root.coverFadeFrom * (1 - root._coverFadeLevel)
+        ? root.coverFadeFrom + (1 - root.coverFadeFrom) * root._eased(
+            (root.layoutStep - root.markOutEnd) / (root.coverInEnd - root.markOutEnd))
+        : root.coverFadeFrom * (1 - root._eased(root.layoutStep / root.coverOutEnd))
     readonly property real bareMarkLevel: root.growthTo > 0
-        ? root.bareMarkFrom * (1 - root._eased(root.layoutStep / root.geometryStart))
+        ? root.bareMarkFrom * (1 - root._eased(root.layoutStep / root.markOutEnd))
         : root.bareMarkFrom + (1 - root.bareMarkFrom)
-            * root._eased((root.layoutStep - root.coverFadeEnd) / (1 - root.coverFadeEnd))
+            * root._eased((root.layoutStep - root.coverOutEnd) / (1 - root.coverOutEnd))
     readonly property NumberAnimation coverGrowthAnimation: NumberAnimation {
         objectName: "nowPlayingCoverGrowthAnimation"
         target: root
@@ -152,6 +166,16 @@ Item {
         onFinished: root.layoutStep = 1
     }
     readonly property bool coverGrowing: root.coverGrowth > 0 && root.coverGrowth < 1
+    // The time of a move that carries the library under the panel: the
+    // track's layout growing from the compact row or shrinking into it,
+    // and the change between a track with a cover and one without. Under
+    // the wide cover the library moves 350 to 420 px: over longDuration,
+    // OutCubic, its first frames jumped some 100 px, four of its rows, and
+    // read as a cross-fade rather than a slide (#373 H10); over
+    // veryLongDuration, under two rows a frame. The narrow cover's 100 px
+    // or so take longDuration. None with animations off.
+    readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
+        : (root.wideRoom ? Kirigami.Units.veryLongDuration : Kirigami.Units.longDuration)
 
     // A track with a cover after one without, or the other way round: the
     // change above. While "Nothing playing" shows, nothing changes; the
@@ -164,11 +188,13 @@ Item {
         if (root.growthTo === to)
             return
         const growth = root.coverGrowth
+        const shift = root.lineShift
         const cover = root.coverLevel
         const mark = root.bareMarkLevel
         root.coverGrowthAnimation.stop()
-        if (instant === true || Kirigami.Units.longDuration <= 0 || root.presence <= 0) {
+        if (instant === true || root.moveDuration <= 0 || root.presence <= 0) {
             root.growthFrom = to
+            root.lineShiftFrom = to
             root.growthTo = to
             root.coverFadeFrom = to
             root.bareMarkFrom = 1 - to
@@ -177,10 +203,11 @@ Item {
         }
         root.layoutStep = 0
         root.growthFrom = growth
+        root.lineShiftFrom = shift
         root.growthTo = to
         root.coverFadeFrom = cover
         root.bareMarkFrom = mark
-        root.coverGrowthAnimation.duration = Kirigami.Units.longDuration
+        root.coverGrowthAnimation.duration = root.moveDuration
         root.coverGrowthAnimation.start()
     }
     onHasCoverChanged: root.followCover()
@@ -236,13 +263,13 @@ Item {
                 + Math.max(0, root.height - root.restHeight) / root.presence
         }
         root.presenceAnimation.stop()
-        if (Kirigami.Units.longDuration <= 0 || root.presence === to) {
+        if (root.moveDuration <= 0 || root.presence === to) {
             root.presence = to
             return
         }
         root.presenceAnimation.from = root.presence
         root.presenceAnimation.to = to
-        root.presenceAnimation.duration = Kirigami.Units.longDuration
+        root.presenceAnimation.duration = root.moveDuration
         root.presenceAnimation.start()
     }
     onIdleChanged: {
@@ -841,7 +868,9 @@ Item {
             long: staged || covers.length > 0 || was.album !== next.album
                 || (root.outgoing !== null && root.outgoing.long)
         }
-        const duration = out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
+        // A change with the cover's place runs with its move.
+        const duration = staged ? root.moveDuration
+            : (out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration)
         const fades = out.track || covers.length > 0 || Object.keys(out.lines).length > 0
             || (out.long && !staged)
         if (!fades || duration <= 0) {
@@ -899,6 +928,13 @@ Item {
     function _towardsCover(bare, art) {
         return bare + (art - bare) * root.coverGrowth
     }
+    // The same for where the lines start across, which they reach by the
+    // end of the lines before's fade (`lineShift`): beside the narrow
+    // cover they go with its edge (`_towardsCover`), so they never run
+    // into it.
+    function _shiftedTowardsCover(bare, art) {
+        return bare + (art - bare) * root.lineShift
+    }
     // Where the line under the cover, or with none, starts down: under the
     // cover's place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
@@ -912,13 +948,18 @@ Item {
     readonly property real narrowLinesHeight: root.narrowTextTop + narrowTitleMetrics.height + 2
         + 3 * narrowLineMetrics.height
     // The lines go under the cover, on the whole width, where the room
-    // beside it is under narrowLineMinimum, or where they would run well
-    // past the cover, as with a large font: there the room beside it, which
-    // grows with the sidebar, would still show only a dozen characters of
-    // each, under the cover they show twice that, and the title and the
-    // artist wrap rather than be cut off (#373 H5).
+    // beside it is under narrowLineMinimum, or where, in a narrow sidebar,
+    // they would run well past the cover, as with a large font: there the
+    // room beside it would still show only a dozen characters of each,
+    // under the cover they show more, and the title and the artist wrap
+    // rather than be cut off (#373 H5). A sidebar wide enough for the wide
+    // layout that takes this one for its height alone, as with a large
+    // font in a 1000 px high window, keeps the lines beside the cover,
+    // past its foot if they need it: the room beside it is wide enough
+    // there, and under it the cover stood alone on a row, with its width
+    // empty beside it (#373 H10).
     readonly property bool narrowStacked: root.width - root.narrowCoverSize - 2 * root.textInset < root.narrowLineMinimum
-        || root.narrowLinesHeight > 1.25 * root.narrowCoverSize
+        || (root.narrow && root.narrowLinesHeight > 1.25 * root.narrowCoverSize)
 
     FontMetrics {
         id: narrowTitleMetrics
@@ -1504,7 +1545,7 @@ Item {
             id: wideColumn
             objectName: "nowPlayingWideText"
             visible: root.wideRoom && !root.idle
-            x: root._whileGrowing(root._towardsCover(root.bareTextX, root.textInset))
+            x: root._whileGrowing(root._shiftedTowardsCover(root.bareTextX, root.textInset))
             // Under the cover's place, with which it moves while that grows.
             y: root._whileGrowing(root.footTop + root._towardsCover(root.bareInset, root.textInset))
             width: Math.max(0, root.width - root.textInset
@@ -1569,7 +1610,9 @@ Item {
             // the one it goes to.
             readonly property real artX: root.narrowStacked
                 ? root.textInset : root.narrowCoverSize + root.textInset
-            x: root._whileGrowing(root._towardsCover(root.bareTextX, narrowColumn.artX))
+            x: root._whileGrowing(root.narrowStacked
+                ? root._shiftedTowardsCover(root.bareTextX, narrowColumn.artX)
+                : root._towardsCover(root.bareTextX, narrowColumn.artX))
             // Under the cover's place, with which it moves while that grows;
             // beside it, from under the compact row up into place, so its
             // text does not show where the row's does.
