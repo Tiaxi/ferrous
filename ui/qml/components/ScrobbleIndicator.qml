@@ -11,10 +11,12 @@ import "../logic/KeyUtils.js" as KeyUtils
 // short bar beneath it, and a few words before it when something needs
 // saying (#373 H6: a 10 px glyph inside a ring was a smudge at 1x, and
 // its states looked alike).
-// The bar is the glyph's: as wide as it, 3 px tall and 2 px under it, with
-// no trough, no rounded ends and none of the scan bar's colours, so that
-// it reads as part of the glyph and not as a second scan or a download
-// (the scan bar is 72 by 4 px). Listening, being sent and scrobbled differ
+// The glyph's ink is centred on the slot, on whole pixels (#373 H10: with
+// the bar's place under it, the glyph sat 2.5 px above the status bar's
+// middle). The bar is the glyph's: as wide as its ink, 2 px tall and 2 px
+// under it, with no trough, no rounded ends and none of the scan bar's
+// colours, so that it reads as part of the glyph and not as a second scan
+// or a download (the scan bar is 72 by 4 px). Listening, being sent and scrobbled differ
 // by shape, not by shade (#373 H8): a bar growing, a full bar at half
 // strength, and no bar.
 // - Listening: the glyph in the secondary colour, and the bar in the text
@@ -22,9 +24,11 @@ import "../logic/KeyUtils.js" as KeyUtils
 //   the tooltip says how much is left. Both come from the scrobbler's
 //   listened time, which a seek doesn't move and a pause holds; a new play
 //   (a new track, a replay, Repeat One) starts it over. Before any of it,
-//   the bar is as long as it is tall, a square under the glyph's left edge,
-//   so that listening always has a bar and scrobbled never does (#373 H9:
-//   at 0 % the two were the same bare glyph).
+//   the bar is three times as long as it is tall, a dash under the glyph's
+//   left edge, and it grows from there to the ink's width, so that
+//   listening always has a bar and scrobbled never does (#373 H9: at 0 %
+//   the two were the same bare glyph), and a little listening reads as a
+//   bar, not a speck (#373 H10).
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
@@ -110,25 +114,37 @@ AbstractButton {
     // The glyph: 16 px, drawn for 1x on whole pixels, and larger with a
     // larger font, as the status bar's other glyphs are.
     readonly property int glyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
-    // The bar under it: the glyph's width, 3 px tall and 2 px below it at
-    // the default font, a little more with a larger one, within the status
-    // bar's height: the status bar grows with the small font's line, which
-    // grows more slowly than the glyph.
-    readonly property int barWidth: root.glyphSize
-    readonly property int barHeight: Math.max(3, Math.round(root.glyphSize / 10))
-    readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 16))
+    // The glyph's ink, in its 16 px drawing: columns 1 to 14 and rows 3 to
+    // 12, centred in it.
+    readonly property int inkInset: Math.round(root.glyphSize / 16)
+    readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
+    // The bar under it: the ink's width, 2 px tall and 2 px below the ink
+    // at the default font, a little more with a larger one, within the
+    // status bar's height: the status bar grows with the small font's
+    // line, which grows more slowly than the glyph.
+    readonly property int barWidth: root.glyphSize - 2 * root.inkInset
+    readonly property int barHeight: Math.max(2, Math.round(root.glyphSize / 10))
+    readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 10))
+    // The bar's top, from the glyph's.
+    readonly property int barY: root.inkBottom + root.barGap
+    // The slot's height when nothing in it needs more: the status bar sets
+    // it to its controls' height, so the slot is centred in the bar on whole
+    // pixels and the glyph on the slot.
+    property int blockHeight: 22
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
     readonly property bool barShown: root.look === "listening" || root.look === "failed"
         || (root.look === "scrobbled" && !root.scrobbleAccepted)
-    // The bar's length while listening: the listening done, but never
-    // shorter than the bar is tall.
-    readonly property real barMinimumLength: root.look === "listening" ? root.barHeight : 0
+    // The bar's length while listening: three times its height before any
+    // listening, and the rest of its width with the listening done.
+    readonly property int barMinimumLength: root.look === "listening"
+        ? Math.min(root.barWidth, 3 * root.barHeight) : 0
     // Half strength while the scrobble is being sent.
     readonly property real barOpacity: root.look === "scrobbled" ? 0.5 : 1
-    // How much of the bar is drawn, 0 to 1: the listening done, by whole
-    // device pixels of the bar, so a long scrobble point redraws it more
-    // rarely still; full once the play has reached its scrobble point.
+    // How much of the bar past its minimum length is drawn, 0 to 1: the
+    // listening done, by whole device pixels of the bar, so a long scrobble
+    // point redraws it more rarely still; full once the play has reached
+    // its scrobble point.
     readonly property real barProgress: {
         if (root.look === "scrobbled" || root.look === "failed") {
             return root.barShown ? 1 : 0
@@ -136,13 +152,16 @@ AbstractButton {
         if (root.look !== "listening" || root.thresholdSeconds <= 0) {
             return 0
         }
-        const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
+        const steps = Math.max(1, Math.round((root.barWidth - root.barMinimumLength)
+            * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // The bar: the text colour while listening and sending, and the
     // negative colour when Last.fm refused the scrobble. Never the scan
     // bar's colours.
     readonly property color barColor: root.look === "failed" ? root.uiPalette.negative : root.uiPalette.text
+    readonly property real barLength: root.barMinimumLength
+        + (root.barWidth - root.barMinimumLength) * root.barProgress
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -237,10 +256,10 @@ AbstractButton {
     // with no fade.
     visible: root.occupied
     implicitWidth: leftPadding + slotRow.implicitWidth + rightPadding
-    // 22 px, or a little more than its words or its glyph and bar at a
-    // larger font.
-    implicitHeight: Math.max(22, Math.round(slotLabel.implicitHeight) + 4,
-        root.glyphSize + root.barGap + root.barHeight)
+    // The block's height, or a little more than its words, or than the
+    // glyph centred with the bar under it, at a larger font.
+    implicitHeight: Math.max(root.blockHeight, Math.round(slotLabel.implicitHeight) + 4,
+        2 * (root.barY + root.barHeight) - root.glyphSize)
     leftPadding: root.labelText.length > 0 ? 6 : 3
     rightPadding: 3
     topPadding: 0
@@ -321,7 +340,7 @@ AbstractButton {
 
         Row {
             id: slotRow
-            anchors.verticalCenter: parent.verticalCenter
+            height: parent.height
             spacing: root.labelText.length > 0 ? Kirigami.Units.largeSpacing : 0
 
             Label {
@@ -338,13 +357,13 @@ AbstractButton {
                 Accessible.ignored: true
             }
 
-            // The glyph, and the bar's place under it, which is kept
-            // when there is no bar, so that the glyph never moves.
+            // The glyph's cell, centred on the slot on whole pixels, with
+            // the bar hanging under its ink.
             Item {
                 objectName: "scrobbleIndicatorBox"
-                anchors.verticalCenter: parent.verticalCenter
+                y: Math.round((parent.height - height) / 2)
                 width: root.glyphSize
-                height: root.glyphSize + root.barGap + root.barHeight
+                height: root.glyphSize
 
                 Kirigami.Icon {
                     objectName: "scrobbleIndicatorGlyph"
@@ -364,9 +383,9 @@ AbstractButton {
                 // is still to come.
                 Rectangle {
                     objectName: "scrobbleIndicatorBar"
-                    x: 0
-                    y: root.glyphSize + root.barGap
-                    width: Math.max(root.barMinimumLength, root.barWidth * root.barProgress)
+                    x: root.inkInset
+                    y: root.barY
+                    width: root.barLength
                     height: root.barHeight
                     visible: root.barShown && width > 0
                     color: root.barColor

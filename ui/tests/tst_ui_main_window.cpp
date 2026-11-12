@@ -640,6 +640,7 @@ private slots:
     void libraryFoldersAreFolderHeaders();
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
+    void libraryAlbumWithoutACoverShowsAPlaceholderTile();
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
@@ -1836,6 +1837,79 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     window->resize(1000, 720);
     QTRY_COMPARE(libraryTotals->property("text").toString(), QStringLiteral("176 tracks"));
     QVERIFY(!libraryTitle->property("truncated").toBool());
+}
+
+// An album row without a cover shows a neutral 20 px tile, the hover tint
+// over the row, where a cover's thumbnail is, the same size and in the same
+// place, so its name lines up with its neighbours' (#373 H10: it left an
+// empty 20 px hole). Once a cover has loaded, the cover alone. The tile is
+// the hover tint, which tst_ui_foundations holds to 1.3:1 on the view in
+// Breeze Light and Breeze Dark; here, with Main.qml's own palette (a dark
+// palette here would keep Kirigami's dark text, so its tint proves nothing).
+void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    showTree(libraryModel, kAllExpanded);
+    QQuickItem *album = nullptr;
+    QTRY_VERIFY((album = libraryRow(window, QStringLiteral("album"))) != nullptr);
+    QQuickItem *thumbnail = itemNamed(album, QStringLiteral("libraryRowThumbnail"));
+    QQuickItem *title = itemNamed(album, QStringLiteral("libraryRowTitle"));
+    QVERIFY(thumbnail && title);
+    QVERIFY(album->property("coverPath").toString().isEmpty());
+    const QColor hover = tokenOf(window, "hover");
+    QVERIFY(hover.alphaF() > 0.0);
+
+    // The tile and the row around it, as drawn: the tile's middle, and the
+    // row just right of it.
+    const auto drawn = [&](QColor *tile, QColor *row) {
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QRectF rect = sceneRect(thumbnail);
+        const auto at = [&](QPointF point) {
+            return image.pixelColor(int(std::floor(point.x() * scale)), int(std::floor(point.y() * scale)));
+        };
+        *tile = at(rect.center());
+        *row = at(QPointF(rect.right() + 3.5, rect.center().y()));
+    };
+    const auto distance = [](const QColor &a, const QColor &b) {
+        return std::max({std::abs(a.red() - b.red()), std::abs(a.green() - b.green()),
+                         std::abs(a.blue() - b.blue())});
+    };
+    // The thumbnail's place and size, and the name after it, with a cover
+    // or without.
+    const auto checkPlace = [&]() {
+        QVERIFY(shown(thumbnail));
+        QCOMPARE(thumbnail->mapToItem(album, QPointF()).x(), 50.0);
+        QCOMPARE(thumbnail->size(), QSizeF(20, 20));
+        QCOMPARE(thumbnail->mapToItem(album, QPointF()).y(), std::round((album->height() - 20) / 2));
+        QCOMPARE(thumbnail->property("radius").toReal(), 2.0);
+        QCOMPARE(title->mapToItem(album, QPointF()).x(), 78.0);
+    };
+
+    // Without a cover: the tile, neutral, not the accent.
+    checkPlace();
+    QCOMPARE(hex(thumbnail->property("color").value<QColor>()), hex(hover));
+    QColor tile;
+    QColor row;
+    QTRY_VERIFY((drawn(&tile, &row), distance(tile, drawnOver(hover, row)) <= 2));
+    QVERIFY2(distance(tile, row) >= 8, qPrintable(tile.name() + QLatin1Char(' ') + row.name()));
+    QVERIFY(tile.hslSaturation() <= 40);
+
+    // With a cover loaded: the cover, nothing under it, in the same place.
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QImage coverImage(40, 40, QImage::Format_RGB32);
+    coverImage.fill(QColor(200, 120, 40));
+    const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
+    QVERIFY(coverImage.save(coverPath));
+    thumbnail->setProperty("source", QUrl::fromLocalFile(coverPath));
+    QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
+    QCOMPARE(thumbnail->property("color").value<QColor>().alpha(), 0);
+    checkPlace();
+    QTRY_VERIFY((drawn(&tile, &row), distance(tile, QColor(200, 120, 40)) <= 2));
 }
 
 void UiMainWindowTest::libraryTreeHasOneIndentStep() {
