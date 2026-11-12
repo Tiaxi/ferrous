@@ -6,7 +6,10 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QQuickItem>
+#include <QQuickRenderControl>
+#include <QQuickRenderTarget>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QSemaphore>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -227,6 +230,57 @@ struct ReferenceMeter {
     std::size_t bins{0};
 };
 
+// The level `pixels` device pixels up a scale `scalePixels` tall: the
+// inverse of LevelMeterItem::meterPosition, by bisection.
+double levelAtPixels(double pixels, double scalePixels) {
+    double low = LevelMeterItem::kFloorDb;
+    double high = 0.0;
+    for (int i = 0; i < 60; ++i) {
+        const double middle = (low + high) / 2.0;
+        (LevelMeterItem::meterPosition(middle, scalePixels) < pixels ? low : high) = middle;
+    }
+    return (low + high) / 2.0;
+}
+
+// The colour-map fill's colour of the row `row` device pixels up a scale
+// `scalePixels` tall: the map's colour of the level at the row's middle.
+QColor rampColor(int row, double scalePixels, double dbRange) {
+    return LevelMeterItem::colorMapColor(levelAtPixels(row + 0.5, scalePixels), dbRange);
+}
+
+// A meter drawn offscreen at `dpr` device pixels to a logical one, through
+// the software renderer, as a 2x screen draws it.
+struct ScaledMeter {
+    ScaledMeter(QSize size, double dpr)
+        : canvas(size * dpr, QImage::Format_ARGB32_Premultiplied) {
+        canvas.setDevicePixelRatio(dpr);
+        QQuickRenderTarget target = QQuickRenderTarget::fromPaintDevice(&canvas);
+        target.setDevicePixelRatio(dpr);
+        view.setRenderTarget(target);
+        view.resize(size);
+        view.contentItem()->setSize(size);
+        item.setParentItem(view.contentItem());
+        item.setSize(size);
+        // The software renderer draws to the paint device as it is; only
+        // a renderer on a graphics API needs QQuickRenderControl::initialize.
+        initialized = view.rendererInterface()->graphicsApi() == QSGRendererInterface::Software;
+    }
+    QImage render() {
+        control.polishItems();
+        control.sync();
+        control.render();
+        QImage image = canvas.convertToFormat(QImage::Format_RGB32);
+        image.setDevicePixelRatio(1.0);
+        return image;
+    }
+
+    QQuickRenderControl control;
+    QQuickWindow view{&control};
+    QImage canvas;
+    LevelMeterItem item;
+    bool initialized{false};
+};
+
 // Device pixels of `db` on the 400 px scale.
 int pixels(double db) { return qRound(LevelMeterItem::meterPosition(db, 400)); }
 constexpr double kRelease = LevelMeterItem::kReleaseDbPerSecond;
@@ -250,6 +304,8 @@ private slots:
     void scaleAndLanesAreLaidOutLikeThePlot();
     void sceneGraphDrawsAColumnPerLane();
     void meterIsPartOfThePlot();
+    void colorMapFillIsARamp_data();
+    void colorMapFillIsARamp();
     void loudFillIsCappedAndItsPeakIsFull();
     void stoppedMeterIsAnEmptyTrough();
     void oneLaneShowsTheLoudestChannel();
@@ -816,12 +872,20 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                                      qPrintable(where + QStringLiteral(": x %1").arg(x)));
                         }
                     }
-                    // The fill, in the map's colour of its level.
-                    const QColor fill = color(5, meterBottom - 1.5);
-                    const QColor wanted = LevelMeterItem::colorMapColor(level, 132);
-                    QVERIFY2(std::abs(fill.red() - wanted.red()) <= 8 && std::abs(fill.green() - wanted.green()) <= 8
-                                 && std::abs(fill.blue() - wanted.blue()) <= 8,
-                             qPrintable(where + QStringLiteral(": fill %1, the map %2").arg(fill.name(), wanted.name())));
+                    // The fill, a ramp of the map's colours: at its bottom
+                    // the colour of the floor's level, at its top that of
+                    // its own (#373 H10 V2).
+                    const double fillTop = at(level);
+                    const double scalePixels = scaleHeight * scale;
+                    const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
+                    for (const auto &[y, row] : {std::pair{meterBottom - 0.5, 0}, std::pair{fillTop + 0.5, rows - 1}}) {
+                        const QColor fill = color(5, y);
+                        const QColor wanted = rampColor(row, scalePixels, 132);
+                        QVERIFY2(std::abs(fill.red() - wanted.red()) <= 8 && std::abs(fill.green() - wanted.green()) <= 8
+                                     && std::abs(fill.blue() - wanted.blue()) <= 8,
+                                 qPrintable(where + QStringLiteral(": fill %1 at y %2, the map %3")
+                                                        .arg(fill.name()).arg(y).arg(wanted.name())));
+                    }
                     // The ticks only with the scale, where they are; the
                     // trough or the fill without.
                     const std::vector<double> ticks = LevelMeterItem::ticksDb(height);
@@ -918,16 +982,111 @@ void LevelMeterTest::loudFillIsCappedAndItsPeakIsFull() {
             }
             QVERIFY2(lightest > 0.5 && lightest <= LevelMeterItem::kFillLightness,
                      qPrintable(where + QStringLiteral(": %1").arg(lightest)));
-            // Loud, the fill is the map's colour at the cap, unscaled
-            // (#373 H9 T2): the same pixel at every row of it.
+            // Each row of the fill is the map's colour of its level, and
+            // loud, over the cap, the map's colour at the cap, unscaled
+            // (#373 H9 T2, H10 V2).
             const QColor capColor = QColor::fromRgb(SpectrogramColorMap::colorAt(LevelMeterItem::fillCapPosition()));
+            const double scalePixels = scaleHeight * scale;
             for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); y += 7) {
                 const QColor pixel = image.pixelColor(int(8 * scale), y);
-                QVERIFY2(pixel == capColor, qPrintable(where + QStringLiteral(": y %1 is %2, the map %3")
-                                                           .arg(y).arg(pixel.name(), capColor.name())));
+                const QColor wanted = rampColor(int(meterBottom * scale) - 1 - y, scalePixels, range);
+                QVERIFY2(pixel == wanted, qPrintable(where + QStringLiteral(": y %1 is %2, the map %3")
+                                                         .arg(y).arg(pixel.name(), wanted.name())));
+            }
+            const QColor topmost = image.pixelColor(int(8 * scale), int((tickY + 3) * scale));
+            if (LevelMeterItem::lightness(QColor::fromRgb(SpectrogramColorMap::colorOfLevel(level - 1.0, range)))
+                > LevelMeterItem::kFillLightness) {
+                QVERIFY2(topmost == capColor, qPrintable(where + QStringLiteral(": top %1, the cap %2")
+                                                             .arg(topmost.name(), capColor.name())));
             }
         }
     }
+}
+
+void LevelMeterTest::colorMapFillIsARamp_data() {
+    QTest::addColumn<double>("dpr");
+    QTest::addColumn<double>("level");
+    for (const double dpr : {1.0, 2.0}) {
+        for (const double level : {-40.0, -20.0, -4.0}) {
+            QTest::addRow("%gx, %g dB", dpr, level) << dpr << level;
+        }
+    }
+}
+
+// On the spectrogram, the fill is a ramp of the plot's colour map (#373 H10
+// V2): each of its rows, from the bottom up to the level, takes the map's
+// colour of the level at that row, up to the cap; above the level, only
+// the trough and the peak tick.
+void LevelMeterTest::colorMapFillIsARamp() {
+    QFETCH(double, dpr);
+    QFETCH(double, level);
+    constexpr double width = LevelMeterItem::kColumnWidth;
+    constexpr int height = 300;
+    ScaledMeter meter(QSize(int(width), height), dpr);
+    QVERIFY(meter.initialized);
+    LevelMeterItem &item = meter.item;
+    const QColor background(0x10, 0x00, 0x00);
+    const QColor trough(0x30, 0x00, 0x00);
+    const QColor peak(0x50, 0x00, 0x00);
+    const QColor gap(0x80, 0x00, 0x00);
+    item.setActive(true);
+    item.setBackgroundColor(background);
+    item.setSeamColor(QColor(0x20, 0x00, 0x00));
+    item.setTroughColor(trough);
+    item.setFillColor(QColor(0x40, 0x00, 0x00));
+    item.setPeakColor(peak);
+    item.setClipOffColor(QColor(0x60, 0x00, 0x00));
+    item.setGapColor(gap);
+    item.setTickColor(QColor(0x90, 0x00, 0x00));
+    item.setColorMapFill(true);
+    item.setDbRange(132);
+    item.setLaneCount(1);
+    item.setChannelCountHint(1);
+    item.m_channels.assign(1, {});
+    item.m_channels[0].observe(level, 0);
+    // The peak held 6 dB over the level, apart from the fill.
+    item.m_channels[0].peak = std::min(0.0, level + 6.0);
+    item.m_channels[0].hold = 1.0;
+    item.m_shown = item.m_channels;
+    item.update();
+    const QImage image = meter.render();
+    QCOMPARE(image.size(), QSize(int(width * dpr), int(height * dpr)));
+
+    // In device pixels: the scale under the lamp and its gap, and the fill.
+    const int meterBottom = int((height - LevelMeterItem::kInset) * dpr);
+    const int scaleTop = int((LevelMeterItem::kInset + LevelMeterItem::kLampHeight + 1.0) * dpr);
+    const double scalePixels = meterBottom - scaleTop;
+    const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
+    QVERIFY(rows > 10);
+    const auto pixel = [&](int x, int row) { return image.pixelColor(x, meterBottom - 1 - row); };
+    const int barLeft = int(LevelMeterItem::kBarLeft * dpr);
+    // The bottom, the middle and the top of the fill, across the bar.
+    for (const int row : {0, 1, rows / 2, rows - 2, rows - 1}) {
+        const QColor wanted = rampColor(row, scalePixels, 132);
+        for (int x = barLeft; x < image.width(); ++x) {
+            QVERIFY2(pixel(x, row) == wanted, qPrintable(QStringLiteral("row %1, x %2: %3, the map %4")
+                .arg(row).arg(x).arg(pixel(x, row).name(), wanted.name())));
+        }
+    }
+    // A ramp: lighter towards the level, and never over the cap.
+    const auto lightness = [&](int row) { return LevelMeterItem::lightness(pixel(barLeft, row)); };
+    QVERIFY(lightness(0) < lightness(rows / 2) && lightness(rows / 2) <= lightness(rows - 1));
+    for (int row = 0; row < rows; ++row) {
+        QVERIFY2(lightness(row) <= LevelMeterItem::kFillLightness, qPrintable(QString::number(row)));
+    }
+    // Above the level, the trough and the peak tick only.
+    int peakRows = 0;
+    for (int row = rows; row < scalePixels; ++row) {
+        for (int x = barLeft; x < image.width(); ++x) {
+            const QColor shown = pixel(x, row);
+            QVERIFY2(shown == trough || shown == peak, qPrintable(QStringLiteral("row %1, x %2: %3")
+                .arg(row).arg(x).arg(shown.name())));
+        }
+        peakRows += pixel(barLeft, row) == peak ? 1 : 0;
+    }
+    QCOMPARE(peakRows, int(2 * dpr));
+    // The column's floor under the meter.
+    QCOMPARE(image.pixelColor(barLeft, image.height() - 1), background);
 }
 
 void LevelMeterTest::stoppedMeterIsAnEmptyTrough() {
@@ -1256,6 +1415,9 @@ int main(int argc, char **argv) {
     qputenv("XDG_CACHE_HOME", QFile::encodeName(testStorage.filePath("cache")));
     // No desktop session's platform theme; TestSessionIsolation.h.
     isolateFromDesktopSession();
+    // The software renderer, whose pixels the tests compare, whatever the
+    // environment asks for; ScaledMeter draws through it.
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     QGuiApplication app(argc, argv);
     LevelMeterTest test;
     return QTest::qExec(&test, argc, argv);

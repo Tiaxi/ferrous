@@ -3856,7 +3856,13 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
             return meterImage.pixelColor(int(x * meterScale), int(y * meterScale));
         };
         const auto [top, bottom] = LevelMeterItem::laneRows(0, 2, meter->height());
-        const QColor meterFill = meterPixel(5.5, bottom - 5);
+        // The fill just under its top, where it meets the trough and shows
+        // the level: on the spectrogram, a ramp of the colour map, whose
+        // floor is darker (#373 H10 V2). A few dB under the level, as the
+        // level decays while the test runs.
+        const double meterBottom = bottom - LevelMeterItem::kInset;
+        const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1.0;
+        const QColor meterFill = meterPixel(5.5, meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight));
         const QColor trough = meterPixel(5.5, top + 9);
         QVERIFY2(contrastRatio(meterFill, trough) >= 3.0,
                  qPrintable(QStringLiteral("%1 meter: %2 on %3: %4").arg(what, meterFill.name(), trough.name())

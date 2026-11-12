@@ -27,11 +27,12 @@
 // and a 3 px clip lamp at the top. A bar that wide reads as an instrument,
 // not as the 6 px thumb of the queue's scrollbar above the pane, whose
 // right edge it shares, so it needs no strip of the plot's floor beside it
-// (#373 H8; H7's 8 px strip read as a black edge on the window). The fill
-// takes the spectrogram's colour of its level while `colorMapFill` is set,
-// along the map up to its last colour under kFillLightness of the map's
-// top, so that the meter reads as part of the plot rather than as its
-// brightest highlight. While `scaleShown`,
+// (#373 H8; H7's 8 px strip read as a black edge on the window). While
+// `colorMapFill` is set, the fill is a ramp of the spectrogram's colours:
+// each of its rows takes the map's colour of its own level, along the map
+// up to its last colour under kFillLightness of the map's top, so that the
+// meter reads as the plot's own scale rather than as its brightest
+// highlight (#373 H10 V2). While `scaleShown`,
 // 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
 // in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
 // 1 px gap under it where it is on the fill. Without a track, stopped, it
@@ -57,8 +58,8 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
     // The scale's ticks across the track.
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
-    // Whether the fill takes the spectrogram's colour of its level, in a
-    // view of `dbRange` dB, rather than fillColor.
+    // Whether the fill is a ramp of the spectrogram's colours, each row in
+    // that of its level in a view of `dbRange` dB, rather than fillColor.
     Q_PROPERTY(bool colorMapFill READ colorMapFill WRITE setColorMapFill NOTIFY colorsChanged)
     Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY colorsChanged)
     // Whether the plot shows its scale: the meter then shows its ticks.
@@ -110,7 +111,7 @@ public:
     // The highest place on the spectrogram's map, from 0 to 1, whose colour
     // is at most kFillLightness of the lightness of the map's top.
     static double fillCapPosition();
-    // The fill's colour of a level of `db` dBFS on the spectrogram's map in
+    // The ramp's colour of a level of `db` dBFS on the spectrogram's map in
     // a view of `dbRange` dB: the map's colour, up to that of
     // fillCapPosition(), so that loud levels top out in the map's own
     // orange rather than in a darkened yellow or white (#373 H9 T2).
