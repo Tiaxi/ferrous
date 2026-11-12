@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 48 px, in Breeze's 4 px margin: the fundamental of a linear chirp on a log-frequency axis and its 2nd and 3rd harmonics, the same curve shifted up by log(2) and log(3), so that they close up towards the top as a harmonic series does, in strokes tapering 1 : 0.8 : 0.65 from the fundamental up, with round caps (#373 hill climb, H10) -->
+<!-- Ferrous, 48 px, in Breeze's 4 px margin, inside a 1 px rim lighter than the tile (a 32nd of the icon, in whole pixels): the fundamental of a linear chirp on a log-frequency axis and its 2nd and 3rd harmonics, the same curve shifted up by log(2) and log(3), so that they close up towards the top as a harmonic series does, in strokes tapering 1 : 0.8 : 0.65 from the fundamental up, with round caps (#373 hill climb, H10, H11) -->
 <svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
-  <rect id="tile" fill="#3a1490" x="4" y="4" width="40" height="40" rx="4"/>
+  <rect id="rim" fill="#6a4ad0" x="4" y="4" width="40" height="40" rx="4"/>
+  <rect id="tile" fill="#3a1490" x="5" y="5" width="38" height="38" rx="3"/>
   <path id="h3" fill="none" stroke="#e055b4" stroke-width="1.82" stroke-linecap="round" d="M10.5 23.64 C11.01 22.93 11.52 22.32 12.04 21.76 C13.08 20.63 14.12 19.72 15.16 18.92 C16.57 17.83 17.99 16.94 19.41 16.16 C21.14 15.21 22.88 14.41 24.61 13.7 C26.63 12.88 28.65 12.17 30.67 11.54 C32.95 10.83 35.22 10.2 37.5 9.64"/>
   <path id="h2" fill="none" stroke="#f25a7e" stroke-width="2.24" stroke-linecap="round" d="M10.5 28.9 C11.01 28.2 11.52 27.59 12.04 27.03 C13.08 25.9 14.12 24.98 15.16 24.18 C16.57 23.09 17.99 22.21 19.41 21.43 C21.14 20.47 22.88 19.67 24.61 18.97 C26.63 18.14 28.65 17.44 30.67 16.8 C32.95 16.09 35.22 15.47 37.5 14.9"/>
   <path id="fundamental" fill="none" stroke="#f2b035" stroke-width="2.8" stroke-linecap="round" d="M10.5 37.9 C11.01 37.2 11.52 36.59 12.04 36.03 C13.08 34.9 14.12 33.98 15.16 33.18 C16.57 32.09 17.99 31.21 19.41 30.43 C21.14 29.47 22.88 28.67 24.61 27.97 C26.63 27.14 28.65 26.44 30.67 25.8 C32.95 25.09 35.22 24.47 37.5 23.9"/>

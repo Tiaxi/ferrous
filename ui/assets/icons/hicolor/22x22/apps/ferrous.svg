@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 22 px, drawn on the pixel grid in Breeze's 2 px margin, inside a 1 px rim lighter than the tile: the fundamental and its 3rd harmonic of a chirp on a log-frequency axis, 3/2 px stairs, the harmonics 5 rows above the fundamental. Each rises a row a column at first and bends over; they start and end in one column, with clear rows between them in every column and no corner contact (#373 hill climb, H8, H9, H10) -->
+<!-- Ferrous, 22 px, drawn on the pixel grid in Breeze's 2 px margin, inside a 1 px rim lighter than the tile (a 32nd of the icon, in whole pixels, at least one): the fundamental and its 3rd harmonic of a chirp on a log-frequency axis, 3/2 px stairs, the harmonics 5 rows above the fundamental. Each rises a row a column at first and bends over; they start and end in one column, with clear rows between them in every column and no corner contact (#373 hill climb, H8, H9, H10, H11) -->
 <svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
   <rect id="rim" fill="#6a4ad0" x="2" y="2" width="18" height="18" rx="2"/>
   <rect id="tile" fill="#3a1490" x="3" y="3" width="16" height="16" rx="1"/>
