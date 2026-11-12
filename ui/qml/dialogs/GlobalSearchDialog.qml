@@ -63,7 +63,17 @@ Dialog {
     // The line under the no-results title.
     readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
     readonly property real sideInset: 16
-    readonly property real leadSize: 24
+    // The glyphs, the lead and the field's buttons are sized for the
+    // default font and grow with a larger one, as the transport's do
+    // (UiPalette.scaledSize): the glyphs 16 px, the playing glyph 12 px,
+    // the lead (a cover or a glyph's room) 24 px, and the clear and help
+    // buttons 28 px. The lead keeps 4 px clear of its row's edges, and the
+    // buttons 8 px of the field's. All are even, so a glyph centres on
+    // whole pixels in its button and over a cover.
+    readonly property int glyphSize: 2 * Math.round(root.uiPalette.toolIconSize / 2)
+    readonly property int nowGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(12) / 2)
+    readonly property int leadSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(24), root.resultHeight - 8) / 2)
+    readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
     readonly property real titleX: root.sideInset + root.leadSize + 12
     // A track's length at the right: 44 px, or as wide as "00:00" in its
     // font, and 12 px clear of the context. The title takes up to 300 px
@@ -356,8 +366,8 @@ Dialog {
                 objectName: "globalSearchFieldIcon"
                 x: root.sideInset
                 y: Math.round((parent.height - height) / 2)
-                width: 16
-                height: 16
+                width: root.glyphSize
+                height: root.glyphSize
                 source: "search"
                 isMask: true
                 color: root.uiPalette.textSecondary
@@ -393,13 +403,13 @@ Dialog {
                 objectName: "globalSearchClearButton"
                 x: helpButton.x - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 visible: queryField.text.length > 0
                 display: AbstractButton.IconOnly
                 icon.name: "edit-clear"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
@@ -416,12 +426,12 @@ Dialog {
                 objectName: "globalSearchHelpButton"
                 x: parent.width - 8 - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 display: AbstractButton.IconOnly
                 icon.name: "question"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button", "Search Syntax and Keys")
                 Accessible.name: text
@@ -590,14 +600,14 @@ Dialog {
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
                             && (model.coverUrl || "").length === 0 && !resultRow.isNow
                         sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
@@ -629,13 +639,13 @@ Dialog {
                         color: Qt.rgba(0, 0, 0, 0.55)
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 12) / 2
-                        y: Math.round((parent.height - 12) / 2)
+                        x: root.sideInset + (root.leadSize - root.nowGlyphSize) / 2
+                        y: Math.round((parent.height - root.nowGlyphSize) / 2)
                         active: resultRow.isNow
                         sourceComponent: Kirigami.Icon {
                             objectName: "globalSearchNowGlyph"
-                            width: 12
-                            height: 12
+                            width: root.nowGlyphSize
+                            height: root.nowGlyphSize
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
@@ -876,8 +886,8 @@ Dialog {
                         Kirigami.Icon {
                             x: root.sideInset + (root.leadSize - width) / 2
                             y: Math.round((parent.height - height) / 2)
-                            width: 16
-                            height: 16
+                            width: root.glyphSize
+                            height: root.glyphSize
                             source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
                             color: root.uiPalette.textSecondary
@@ -1023,8 +1033,8 @@ Dialog {
         id: artistGlyph
         Kirigami.Icon {
             objectName: "globalSearchArtistGlyph"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "view-media-artist"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -1034,8 +1044,8 @@ Dialog {
         id: albumPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "media-optical-audio"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -1045,8 +1055,8 @@ Dialog {
         id: trackPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "audio-x-generic"
             isMask: true
             color: root.uiPalette.textSecondary

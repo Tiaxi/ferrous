@@ -476,6 +476,8 @@ private slots:
     void textMeetsItsContrastAsDrawn_data();
     void textMeetsItsContrastAsDrawn();
     void largeFontRowsAndFooterHoldTheirText();
+    void glyphsTargetsAndThumbnailsFollowTheFont_data();
+    void glyphsTargetsAndThumbnailsFollowTheFont();
     void rowColumnsNeverMeet_data();
     void rowColumnsNeverMeet();
 };
@@ -1498,6 +1500,117 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
     QCOMPARE(sceneRect(hairline).bottom(), footerRect.top());
     QVERIFY(frame.bottom() <= harness.window->height() - 32.0);
+}
+
+void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The field's search glyph, its clear and help buttons and their glyphs,
+// and the results' covers and glyphs are sized for the default font and
+// grow with a larger one, as the transport's do (#373 H10: at 24 pt they
+// stayed at their 1× sizes beside 32 px text). The covers keep 4 px clear
+// of their row's edges and the buttons 8 px of the field's; the query and
+// the titles start 12 px after the lead.
+void SearchPaletteTest::glyphsTargetsAndThumbnailsFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY(harness.open());
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    QTRY_VERIFY(harness.view()->isVisible());
+    const bool large = pointSize > 0;
+    const qreal scale = large ? pointSize / 10.0 : 1.0;
+    // The sizes UiPalette.scaledSize gives.
+    // Even, so the glyphs centre on whole pixels.
+    const auto scaled = [scale](qreal size) { return 2 * std::round(std::max(size, std::round(size * scale)) / 2); };
+    const auto evenBelow = [](qreal size) { return 2 * std::floor(size / 2); };
+    const qreal glyph = scaled(16);
+    const qreal fieldHeight = harness.field()->height();
+    const qreal rowHeight = harness.dialog->property("resultHeight").toReal();
+    const qreal lead = evenBelow(std::min(std::max(24.0, std::round(24 * scale)), rowHeight - 8));
+    const qreal button = evenBelow(std::min(std::max(28.0, std::round(28 * scale)), fieldHeight - 16));
+    if (large) {
+        // 38 px glyphs, 46 px covers and 48 px buttons beside 32 px text.
+        QCOMPARE(glyph, 38.0);
+        QVERIFY2(lead >= 24 * 1.8 && button >= 28 * 1.6, qPrintable(QStringLiteral("%1 %2").arg(lead).arg(button)));
+    } else {
+        QCOMPARE(glyph, 16.0);
+        QCOMPARE(lead, 24.0);
+        QCOMPARE(button, 28.0);
+    }
+    const QRectF frame = sceneRect(harness.palette());
+    QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
+    QCOMPARE(icon->width(), glyph);
+    QCOMPARE(icon->height(), glyph);
+    QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
+    QVERIFY(std::abs(sceneRect(icon).center().y() - sceneRect(harness.field()).center().y()) <= 0.5);
+    QCOMPARE(sceneRect(harness.field()).left() - frame.left(), 16.0 + lead + 12.0);
+    QQuickItem *clear = harness.item(QStringLiteral("globalSearchClearButton"));
+    QQuickItem *help = harness.item(QStringLiteral("globalSearchHelpButton"));
+    QVERIFY(clear != nullptr && help != nullptr && clear->isVisible());
+    for (QQuickItem *target : {clear, help}) {
+        QCOMPARE(target->width(), button);
+        QCOMPARE(target->height(), button);
+        QVERIFY(sceneRect(target).top() - sceneRect(harness.field()).top() >= 8.0 - 0.5);
+        QQmlExpression iconWidth(qmlContext(target), target, QStringLiteral("icon.width"));
+        QQmlExpression iconHeight(qmlContext(target), target, QStringLiteral("icon.height"));
+        QCOMPARE(iconWidth.evaluate().toReal(), glyph);
+        QCOMPARE(iconHeight.evaluate().toReal(), glyph);
+        QVERIFY(button >= glyph + 8);
+    }
+    QCOMPARE(frame.right() - sceneRect(help).right(), 8.0);
+    QCOMPARE(sceneRect(clear).right(), sceneRect(help).left());
+
+    int thumbnails = 0;
+    int glyphs = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("kind")) != QStringLiteral("item")) continue;
+        QQuickItem *row = harness.row(i);
+        if (row == nullptr || !row->isVisible()) continue;
+        QCOMPARE(sceneRect(visibleNamed(row, QStringLiteral("globalSearchResultTitle")).first()).left() - frame.left(),
+                 16.0 + lead + 12.0);
+        if (QQuickItem *thumbnail = visibleChildNamed(row, QStringLiteral("globalSearchThumbnail"))) {
+            ++thumbnails;
+            QCOMPARE(thumbnail->width(), lead);
+            QCOMPARE(thumbnail->height(), lead);
+            QCOMPARE(sceneRect(thumbnail).left() - frame.left(), 16.0);
+            QVERIFY(sceneRect(thumbnail).top() - sceneRect(row).top() >= 4.0 - 0.5);
+            QVERIFY(sceneRect(row).bottom() - sceneRect(thumbnail).bottom() >= 4.0 - 0.5);
+        }
+        for (const QString &name : {QStringLiteral("globalSearchArtistGlyph"), QStringLiteral("globalSearchCoverPlaceholder")}) {
+            if (QQuickItem *leadGlyph = visibleChildNamed(row, name)) {
+                ++glyphs;
+                QCOMPARE(leadGlyph->width(), glyph);
+                QCOMPARE(sceneRect(leadGlyph).center().x() - frame.left(), 16.0 + lead / 2);
+            }
+        }
+    }
+    QVERIFY(thumbnails >= 2);
+    QVERIFY(glyphs >= 1);
+
+    // The playing glyph over its cover, 12 px at the default font.
+    harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/line.flac"));
+    harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        if (harness.model.rowDataAt(i).value(QStringLiteral("label")) != QStringLiteral("Meridian Line")) continue;
+        QQuickItem *row = harness.row(i);
+        QVERIFY(row != nullptr);
+        QQuickItem *now = visibleChildNamed(row, QStringLiteral("globalSearchNowGlyph"));
+        QVERIFY(now != nullptr);
+        QCOMPARE(now->width(), scaled(12));
+        QCOMPARE(sceneRect(now).center(), sceneRect(visibleChildNamed(row, QStringLiteral("globalSearchThumbnail"))).center());
+    }
 }
 
 void SearchPaletteTest::rowColumnsNeverMeet_data() {
