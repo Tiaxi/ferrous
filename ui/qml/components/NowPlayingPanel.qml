@@ -18,11 +18,13 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   font, the artist and the album take a line each, so the album is not
 //   lost to the ellipsis.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
-//   lines beside it, or under it when there is no room beside it, then
-//   12 px before the seam. Under it, the title and the artist wrap onto a
-//   second line rather than be cut off, and the lines are 4 px apart.
-//   A sidebar too short for the wide layout to leave the library about six
-//   rows, as with a large font or a short window, takes it too (#373 H6).
+//   lines beside it, or under it when there is no room beside it or they
+//   would run well past it, then 12 px before the seam. Under it, the
+//   title and the artist wrap onto a second line rather than be cut off,
+//   and the lines are 4 px apart. A sidebar too short for the wide layout
+//   to leave the library about six rows, as with a large font or a short
+//   window, takes it too (#373 H6), with the lines beside the cover
+//   however far past it they run, as its room beside it is wide (#373 H10).
 // - Nothing loaded, wide or narrow: one compact row of the list's row
 //   height, a 16 px disc mark at the 12 px inset and "Nothing playing"
 //   where a library row has its text, both in the secondary colour; the
@@ -934,13 +936,18 @@ Item {
     readonly property real narrowLinesHeight: root.narrowTextTop + narrowTitleMetrics.height + 2
         + 3 * narrowLineMetrics.height
     // The lines go under the cover, on the whole width, where the room
-    // beside it is under narrowLineMinimum, or where they would run well
-    // past the cover, as with a large font: there the room beside it, which
-    // grows with the sidebar, would still show only a dozen characters of
-    // each, under the cover they show twice that, and the title and the
-    // artist wrap rather than be cut off (#373 H5).
+    // beside it is under narrowLineMinimum, or where, in a narrow sidebar,
+    // they would run well past the cover, as with a large font: there the
+    // room beside it would still show only a dozen characters of each,
+    // under the cover they show more, and the title and the artist wrap
+    // rather than be cut off (#373 H5). A sidebar wide enough for the wide
+    // layout that takes this one for its height alone, as with a large
+    // font in a 1000 px high window, keeps the lines beside the cover,
+    // past its foot if they need it: the room beside it is wide enough
+    // there, and under it the cover stood alone on a row, with its width
+    // empty beside it (#373 H10).
     readonly property bool narrowStacked: root.width - root.narrowCoverSize - 2 * root.textInset < root.narrowLineMinimum
-        || root.narrowLinesHeight > 1.25 * root.narrowCoverSize
+        || (root.narrow && root.narrowLinesHeight > 1.25 * root.narrowCoverSize)
 
     FontMetrics {
         id: narrowTitleMetrics

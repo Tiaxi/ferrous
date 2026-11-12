@@ -1512,12 +1512,14 @@ void UiMainWindowTest::nothingPlayingIsACompactRow() {
 
 void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data() {
     QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("shortHeight");
     QTest::addColumn<int>("tallHeight");
     // The default font: wide in 1000 px of height, narrow in 700.
-    QTest::newRow("default font") << 0.0 << 700 << 1000;
+    QTest::newRow("default font") << 0.0 << 1600 << 700 << 1000;
     // 24 pt: narrow in 1000 px of height (#373 H6), wide in 1400.
-    QTest::newRow("24 pt") << 24.0 << 1000 << 1400;
+    QTest::newRow("24 pt") << 24.0 << 1600 << 1000 << 1400;
+    QTest::newRow("24 pt, 1920 px") << 24.0 << 1920 << 1000 << 1400;
 }
 
 // Where the wide layout would leave the library fewer than six rows under
@@ -1526,9 +1528,13 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
 // 1600 by 1000 the library showed three rows). It is decided by the font,
 // the sidebar's width and height, not by the layout it chooses nor by the
 // track, so it does not switch back and forth: once as the window gets
-// short, once as it gets tall again, never for a track.
+// short, once as it gets tall again, never for a track. The sidebar being
+// wide, the cover sits beside the lines, however far past its foot they
+// run, not on a row of its own above them (#373 H10: at 24 pt it stood
+// alone, with its width empty beside it).
 void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort() {
     QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
     QFETCH(int, shortHeight);
     QFETCH(int, tallHeight);
     const QFont applicationFont = QGuiApplication::font();
@@ -1540,7 +1546,7 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     }
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, tallHeight);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, tallHeight);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *palette = paletteOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -1574,7 +1580,7 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QVERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
 
     // Short: narrow, the 96 px cover, and at least six rows of the library.
-    window->resize(1600, shortHeight);
+    window->resize(windowWidth, shortHeight);
     QTRY_COMPARE(window->height(), shortHeight);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QVERIFY(panel->property("shortHeight").toBool());
@@ -1583,6 +1589,31 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QTRY_VERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
     QTest::qWait(100);
     QCOMPARE(switches.count(), 1);
+    // The lines beside the cover, the title at its top, 12 px after it,
+    // and the seam 12 px under the lowest of them or the cover.
+    QVERIFY(!panel->property("narrow").toBool());
+    QVERIFY(!panel->property("narrowStacked").toBool());
+    QVERIFY(grown(window));
+    const QRectF tile = sceneRect(cover);
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QVERIFY(seam != nullptr);
+    qreal lowest = tile.bottom();
+    for (const char *name : {"nowPlayingNarrowTitle", "nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
+                             "nowPlayingNarrowDetails"}) {
+        QQuickItem *line = named(window, name);
+        QVERIFY2(line != nullptr && shown(line), name);
+        QTRY_COMPARE(sceneRect(line).left(), tile.right() + 12);
+        QVERIFY2(sceneRect(line).right() <= sceneRect(panel).right() - 12, name);
+        lowest = std::max(lowest, sceneRect(line).bottom());
+    }
+    QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
+    QCOMPARE(sceneRect(narrowTitle).top(), tile.top() + panel->property("narrowTextTop").toReal());
+    QVERIFY(sceneRect(narrowTitle).bottom() < tile.bottom());
+    if (pointSize > 0) {
+        // The lines run past the cover's foot at 24 pt.
+        QVERIFY2(lowest > tile.bottom(), qPrintable(QString::number(lowest - tile.bottom())));
+    }
+    QTRY_COMPARE(sceneRect(seam).top() - lowest, 12.0);
 
     // A track, with tags and then without, switches nothing; nor does
     // nothing playing, which is the compact row in it too.
@@ -1598,7 +1629,7 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QCOMPARE(switches.count(), 1);
 
     // Tall again: wide again, once.
-    window->resize(1600, tallHeight);
+    window->resize(windowWidth, tallHeight);
     QTRY_COMPARE(window->height(), tallHeight);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
     QTRY_COMPARE(cover->width(), panel->width());
