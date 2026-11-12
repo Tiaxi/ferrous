@@ -237,21 +237,45 @@ Dialog {
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
-        let segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
+        const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
             ? [{ text: text, match: allEmphasized }]
             : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
-        if (segments.length > root.maxTitleRuns) {
-            // Matches past the fourth run stay regular.
-            const tail = segments.slice(root.maxTitleRuns - 1).map(function(segment) { return segment.text }).join("")
-            segments = segments.slice(0, root.maxTitleRuns - 1).concat([{ text: tail, match: false }])
+        return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
+    }
+    // A result emphasises its match in one place (#373 H10): in its title,
+    // or, when the title has none, such as an album found by its artist,
+    // in its context, there only the first match, so the context does not
+    // outweigh the title. The context's runs: before the match, the match
+    // semibold, and the rest; none when nothing in it matches.
+    function contextRuns(context, room) {
+        if (!root.controller.globalSearchModelApi.highlightSegments || context.length === 0) {
+            return []
+        }
+        const segments = root.controller.globalSearchModelApi.highlightSegments(context, queryField.text)
+        const first = segments.findIndex(function(segment) { return segment.match })
+        if (first < 0) {
+            return []
+        }
+        const before = segments.slice(0, first).map(function(segment) { return segment.text }).join("")
+        const after = segments.slice(first + 1).map(function(segment) { return segment.text }).join("")
+        return root.layOutRuns([{ text: before, match: false }, { text: segments[first].text, match: true },
+                                { text: after, match: false }].filter(function(segment) { return segment.text.length > 0 }),
+                               3, room, smallMetrics, smallSemiboldMetrics)
+    }
+    // `segments` as at most `maxRuns` runs side by side in `room`: matches
+    // past the last run but one stay regular in the last.
+    function layOutRuns(segments, maxRuns, room, regular, semibold) {
+        if (segments.length > maxRuns) {
+            const tail = segments.slice(maxRuns - 1).map(function(segment) { return segment.text }).join("")
+            segments = segments.slice(0, maxRuns - 1).concat([{ text: tail, match: false }])
         }
         let runs = []
         let x = 0
         for (let i = 0; i < segments.length; ++i) {
-            const metrics = segments[i].match ? semiboldMetrics : regularMetrics
+            const metrics = segments[i].match ? semibold : regular
             const advance = metrics.advanceWidth(segments[i].text)
-            const room = Math.max(0, root.titleWidth - x)
-            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x), width: Math.min(advance, room) })
+            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x),
+                        width: Math.min(advance, Math.max(0, room - x)) })
             x += advance
         }
         return runs
@@ -259,6 +283,7 @@ Dialog {
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
     FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
+    FontMetrics { id: smallSemiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize; font.weight: Font.DemiBold }
     TextMetrics {
         id: lengthMetrics
         text: "00:00"
@@ -529,6 +554,15 @@ Dialog {
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
+                    // The context's room: up to the length's column, or the
+                    // row's end.
+                    readonly property real contextWidth: Math.max(0, (lengthText.visible
+                        ? lengthText.x - root.columnGap
+                        : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
+                    // The context's match, emphasised only when the title
+                    // has none (root.contextRuns).
+                    readonly property var contextRuns: isResult && !titleRuns.some(function(run) { return run.match })
+                        ? root.contextRuns(context, contextWidth) : []
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return model.label + "\n" + root.rowContext(model, true)
@@ -741,11 +775,13 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
+                    // The context, whole; or, with its match emphasised, in
+                    // runs as the title is.
                     Text {
                         objectName: "globalSearchResultContext"
-                        visible: resultRow.isResult
+                        visible: resultRow.isResult && resultRow.contextRuns.length === 0
                         x: root.contextX
-                        width: Math.max(0, (lengthText.visible ? lengthText.x - root.columnGap : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
+                        width: resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         text: resultRow.context
@@ -753,6 +789,54 @@ Dialog {
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 0 ? resultRow.contextRuns[0] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 1 ? resultRow.contextRuns[1] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 2 ? resultRow.contextRuns[2] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: root.uiPalette.textSecondary
                     }
                     Text {
