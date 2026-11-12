@@ -19,6 +19,10 @@ class WaveformItem : public QQuickPaintedItem {
     Q_PROPERTY(double durationSeconds READ durationSeconds WRITE setDurationSeconds NOTIFY durationSecondsChanged)
     Q_PROPERTY(QColor barColor READ barColor WRITE setBarColor NOTIFY barColorChanged)
     Q_PROPERTY(QColor bgColor READ bgColor WRITE setBgColor NOTIFY bgColorChanged)
+    // The line through the middle where there is no waveform to draw yet:
+    // past a partial or early-ending waveform's end, or across the item
+    // before any peaks. Transparent draws none.
+    Q_PROPERTY(QColor emptyLineColor READ emptyLineColor WRITE setEmptyLineColor NOTIFY emptyLineColorChanged)
 
 public:
     explicit WaveformItem(QQuickItem *parent = nullptr);
@@ -44,6 +48,9 @@ public:
     QColor bgColor() const;
     void setBgColor(const QColor &color);
 
+    QColor emptyLineColor() const;
+    void setEmptyLineColor(const QColor &color);
+
     void paint(QPainter *painter) override;
 
 protected:
@@ -57,6 +64,7 @@ signals:
     void durationSecondsChanged();
     void barColorChanged();
     void bgColorChanged();
+    void emptyLineColorChanged();
 
 private:
     int currentWidthLocked() const;
@@ -80,6 +88,7 @@ private:
     QRect m_dirtyRect;
     QColor m_barColor{0x0f, 0x2e, 0x5d};
     QColor m_bgColor{Qt::white};
+    QColor m_emptyLineColor{Qt::transparent};
     bool m_cacheDirty{true};
     bool m_profileEnabled{false};
     std::chrono::steady_clock::time_point m_profileLast{};

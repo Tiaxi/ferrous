@@ -573,7 +573,9 @@ ToolBar {
                     color: root.uiPalette.chrome
                 }
 
-                // Without a waveform: a 1 px line through the middle.
+                // Without a track: a 1 px line through the middle. With
+                // one, the waveform draws the line where it has nothing to
+                // draw yet.
                 Rectangle {
                     objectName: "seekEmptyLine"
                     visible: !root.hasWaveform
@@ -603,6 +605,8 @@ ToolBar {
                     durationSeconds: root.uiBridge.durationSeconds
                     barColor: root.seekPlayedColor
                     bgColor: root.uiPalette.chrome
+                    // Past the waveform's end, as without one.
+                    emptyLineColor: root.seekEmptyLineColor
                 }
 
                 // The unplayed part: the chrome over the waveform after the

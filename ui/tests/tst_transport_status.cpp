@@ -469,6 +469,8 @@ private slots:
     void transportPressedReadsApartFromHover();
     void seekToolTipFadesInAtTheShortDuration();
     void seekWithoutATrackIsALineAndNoTime();
+    void seekEmptyLineRunsPastAnEarlyEndingWaveform_data();
+    void seekEmptyLineRunsPastAnEarlyEndingWaveform();
     void seekPlayheadMovesAcrossAShortTrack_data();
     void seekPlayheadMovesAcrossAShortTrack();
     void seekPlayheadWaitsAtTheStartWithoutALength_data();
@@ -1379,6 +1381,87 @@ void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
     QCOMPARE(time->property("text").toString(), QStringLiteral("–:––"));
     QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(!seek->isEnabled());
+}
+
+void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A waveform that ends before the track does, as a file that ends early or
+// one not yet analysed to the end, leaves the rest of the bar its empty
+// line, 1 px through the middle as without a track, to the bar's last
+// pixel (#373 H10: nothing was drawn past the waveform's end). So does a
+// track playing before its first peaks.
+void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform() {
+    QFETCH(bool, dark);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *emptyLine = harness.item(QStringLiteral("seekEmptyLine"));
+    QVERIFY(waveform && seek && emptyLine);
+    QCOMPARE(waveform->property("emptyLineColor").value<QColor>(),
+             harness.item(QStringLiteral("transportBar"))->property("seekEmptyLineColor").value<QColor>());
+    harness.root->setProperty("positionSeconds", 0.0);
+    const QColor chrome = harness.token("chrome");
+    const QRectF bar = sceneRect(seek);
+    const QRectF wave = sceneRect(waveform);
+    QCOMPARE(wave.left(), bar.left());
+    QCOMPARE(wave.right(), bar.right());
+    // The line's row, where the line drawn without a track is.
+    const qreal lineY = std::round(bar.center().y() - 0.5) + 0.5;
+
+    // The pixels of the line's row and the rows either side of it, from
+    // `from` to the bar's end: each in the row must be `colour` (the first
+    // found when it is invalid), and the rows either side the chrome.
+    qreal scale = 1;
+    const auto lineRunsTo = [&](qreal from, QColor *colour, QString *why) {
+        const QImage image = grabbed(harness.window, &scale);
+        for (qreal x = from + 0.5; x < bar.right(); x += 1.0) {
+            const QColor pixel = pixelAt(image, QPointF(x, lineY), scale);
+            if (!colour->isValid()) {
+                *colour = pixel;
+            }
+            if (channelDistance(pixel, *colour) > 2 || channelDistance(pixel, chrome) < 8) {
+                *why = QStringLiteral("%1 at %2").arg(pixel.name()).arg(x);
+                return false;
+            }
+            for (const qreal y : {lineY - 1, lineY + 1}) {
+                const QColor beside = pixelAt(image, QPointF(x, y), scale);
+                if (channelDistance(beside, chrome) > 2) {
+                    *why = QStringLiteral("%1 beside the line at %2,%3").arg(beside.name()).arg(x).arg(y);
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    // Quiet peaks analysed to 60 % of the track: the waveform's thinnest
+    // bars to there, and the empty line from there to the end.
+    harness.bridge->setProperty("waveformPeaksPacked", QByteArray(600, '\0'));
+    harness.bridge->setProperty("waveformComplete", false);
+    harness.bridge->setProperty("waveformCoverageSeconds", 229.0 * 0.6);
+    QTRY_VERIFY(!emptyLine->isVisible());
+    const qreal waveEnd = wave.left() + std::floor(0.6 * wave.width());
+    QColor line;
+    QString why;
+    QTRY_VERIFY2(lineRunsTo(waveEnd, &line, &why), qPrintable(why));
+    // Before its end, the waveform's 2 px bars, not the line.
+    const QImage image = grabbed(harness.window, &scale);
+    const QPointF inWave(waveEnd - 20.5, lineY - 1);
+    QVERIFY2(channelDistance(pixelAt(image, inWave, scale), chrome) > 8, qPrintable(pixelAt(image, inWave, scale).name()));
+
+    // Playing before the first peaks: the line across the whole bar, past
+    // the playhead at its start.
+    harness.bridge->setProperty("waveformPeaksPacked", QByteArray());
+    harness.bridge->setProperty("waveformCoverageSeconds", 0.0);
+    QColor wholeLine;
+    QTRY_VERIFY2(lineRunsTo(bar.left() + 4, &wholeLine, &why), qPrintable(why));
+    QVERIFY2(channelDistance(wholeLine, line) <= 2, qPrintable(wholeLine.name() + QLatin1Char(' ') + line.name()));
 }
 
 // #541: a clip of a second or less has a length, so the playhead is drawn
