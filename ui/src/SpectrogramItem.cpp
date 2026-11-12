@@ -141,8 +141,9 @@ const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
-// The lane at rest, before it has columns: a line across it at each of the
-// scale's ticks in white 8%, and the scale's text in plotTextSecondary.
+// The lane at rest, before it has columns, while the scale shows: a line
+// across it at each of the scale's ticks in white 8%, and the scale's text
+// in plotTextSecondary.
 const QColor kRestGridLineColor(255, 255, 255, 20);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
@@ -5432,7 +5433,8 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
         // At rest, without columns to show (before any audio, with nothing
         // playing, or waiting for a session's first columns), the lane keeps
-        // its black floor and shows its scale faintly (#373 H6 P6).
+        // its black floor and, while the scale shows, shows it faintly
+        // (#373 H6 P6, H10 P18).
         if (!usePrecomputed && !hasCanvas) {
             updateRestGridOverlayLocked(cw, ch);
             placeOverlay(m_restGrid, 0, restGridFrame);
@@ -6247,6 +6249,12 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     if (width <= 0 || height <= 0 || m_analysisFftSize <= 1 || m_sampleRateHz <= 0) {
         return;
     }
+    m_restGrid.valid = true;
+    // With the scale hidden, the floor is plain: lines without the labels
+    // that say what they are read as noise (#373 H10 P18).
+    if (!m_gridEnabled) {
+        return;
+    }
     // The bins and rows a session at the analysis's settings will have at
     // the lane's rate, for the ticks the scale will then show (#373 H6 P6).
     const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
@@ -6254,16 +6262,13 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
-    m_restGrid.valid = true;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, frequencyScaleTopClearanceLocked())) {
-        // Across the lane, where the scale's tick is; the label over it
-        // where the scale's goes, while the scale shows.
+        // Across the lane, where the scale's tick is, and the label over it
+        // where the scale's goes.
         m_restGrid.lines.push_back(QRect(0, tick.pixelY, width, lineWidth));
-        if (m_gridEnabled) {
-            m_restGrid.images.push_back(
-                {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
-        }
+        m_restGrid.images.push_back(
+            {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
     }
     nameOverlayImagesLocked(m_restGrid);
 }

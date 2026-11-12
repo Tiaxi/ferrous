@@ -742,10 +742,10 @@ private:
     // How far below the lane's top the frequency scale's labels start, in
     // logical pixels.
     int frequencyScaleTopClearanceLocked() const;
-    // The lane at rest, without columns: a faint line across it at each
-    // tick of the frequency scale, and with the scale shown, its labels,
-    // where a session at the analysis's settings and the lane's rate will
-    // put them.
+    // The lane at rest, without columns: with the scale shown, a faint line
+    // across it at each tick of the frequency scale, and its labels, where a
+    // session at the analysis's settings and the lane's rate will put them;
+    // with the scale hidden, the plain floor.
     void updateRestGridOverlayLocked(int width, int height);
     // Whether the frame shows every column of the view that there is.
     bool viewShownWholeLocked(qint64 displayLeft, qint64 displayRight, bool rollingMode,

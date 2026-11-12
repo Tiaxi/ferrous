@@ -6124,6 +6124,10 @@ void UiMotionTest::windowedViewerClosesOverItsLastFrame() {
     // to move, the window draws as it did before the viewer closed. The
     // viewer's controls stay while it is open, however slowly the test runs.
     QVERIFY(shell->setProperty("fullscreenControlsHideDelay", 600000));
+    // With its scale, lanes at rest draw their lines and labels too, so the
+    // frame has enough to compare (#373 H10 P18: without the scale, the
+    // floor at rest is plain).
+    bridge->setProperty("showSpectrogramScale", true);
     openInWindow();
     if (QTest::currentTestFailed()) {
         return;
