@@ -32,8 +32,8 @@
 namespace {
 
 constexpr QRgb kTile = 0x3a1490;
-// The tile's 1 px rim, lighter than the tile, so that the tile holds its
-// edge on a dark panel (#373 hill climb, H9), at 16 to 32 px only (H10). Within
+// The tile's rim, lighter than the tile, so that the tile holds its edge on a
+// dark panel (#373 hill climb, H9), the same rim at every size (H11). Within
 // a trace's distance of the tile: no trace is that close to it.
 constexpr QRgb kRim = 0x6a4ad0;
 // Breeze Dark's window.
@@ -167,16 +167,19 @@ int capColumns(int size) {
     return onPixelGrid(size) ? 1 : (size * 2 + 63) / 64;
 }
 
-// The tile has a 1 px rim lighter than itself at 16 to 32 px, where it holds
-// the tile's edge on Breeze Dark; from 48 px the tile is plain, as Breeze's
-// app icons are (#373 hill climb, H9, H10).
-bool hasRim(int size) {
-    return size <= 32;
+// The tile's rim, lighter than itself, so that it holds the tile's edge on
+// Breeze Dark: one rule at every size, a 32nd of the icon in whole pixels and
+// at least one, so 1 px from 16 to 48 px, 2 px at 64 and in the scalable
+// drawing's 64 units, and 4 and 8 px at 128 and 256 (#373 hill climb, H9, H11:
+// at H10 only 16 to 32 px had it).
+int rimWidth(int size) {
+    return std::max(1, size / 32);
 }
 
-// The tile inside its rim, or the whole tile at the sizes without one.
+// The tile inside its rim.
 QRect insideRim(const QRect &tile, int size) {
-    return hasRim(size) ? tile.adjusted(1, 1, -1, -1) : tile;
+    const int rim = rimWidth(size);
+    return tile.adjusted(rim, rim, -rim, -rim);
 }
 
 // How much of a pixel a trace of a colour covers over the tile, 0 to 1, from
@@ -325,8 +328,9 @@ class AppIconTest : public QObject {
 private slots:
     void everySizeIsBuiltIn_data() { addSizeRows(); }
     void everySizeIsBuiltIn();
-    void tileHasALighterRimAtSmallSizes_data() { addSizeRows(); }
-    void tileHasALighterRimAtSmallSizes();
+    void tileHasTheSameLighterRimAtEverySize_data() { addSizeRows(); }
+    void tileHasTheSameLighterRimAtEverySize();
+    void scalableDrawingHasTheRimInProportion();
     void tracesStandOnThePlainTile_data() { addSizeRows(); }
     void tracesStandOnThePlainTile();
     void harmonicsAreOneSweepOnALogAxis_data() { addSizeRows(); }
@@ -373,29 +377,42 @@ void AppIconTest::everySizeIsBuiltIn() {
     QCOMPARE(FerrousAppIcon::resourcePath(24), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
 }
 
-// The tile has a 1 px rim lighter than itself just inside its edge at 16 to
-// 32 px, so that it holds its edge on a dark panel (#373 hill climb, H9: on
-// Breeze Dark the indigo tile was 1.3:1 on the window); the tile's own
-// colour is inside it. From 48 px the tile is large enough to hold its edge
-// and plain, as Breeze's app icons have no outline (H10).
-void AppIconTest::tileHasALighterRimAtSmallSizes() {
+// The tile has a rim lighter than itself just inside its edge, so that it
+// holds its edge on a dark panel (#373 hill climb, H9: on Breeze Dark the
+// indigo tile was 1.3:1 on the window); the tile's own colour is inside it.
+// It is the same rim at every size, scaled (H11: from 48 px the tile was
+// plain at H10, and the sizes differed).
+void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
     const QRect tile = tileOf(image);
     const QPoint middle = tile.center();
-    for (const QPoint &edge : {QPoint(middle.x(), tile.top()), QPoint(middle.x(), tile.bottom()),
-                               QPoint(tile.left(), middle.y()), QPoint(tile.right(), middle.y())}) {
-        QVERIFY2(near(image.pixel(edge), hasRim(size) ? kRim : kTile, 2),
-                 qPrintable(QStringLiteral("#%1 at %2, %3")
-                                .arg(image.pixel(edge) & 0xffffff, 6, 16, QLatin1Char('0'))
-                                .arg(edge.x())
-                                .arg(edge.y())));
+    const int rim = rimWidth(size);
+    // Across each edge's middle, inwards: the rim's colour for its width,
+    // then no longer (the tile's, or at 16 px a trace's end on the right).
+    const QPoint inwards[] = {QPoint(0, 1), QPoint(0, -1), QPoint(1, 0), QPoint(-1, 0)};
+    const QPoint edges[] = {QPoint(middle.x(), tile.top()), QPoint(middle.x(), tile.bottom()),
+                            QPoint(tile.left(), middle.y()), QPoint(tile.right(), middle.y())};
+    for (int side = 0; side < 4; ++side) {
+        for (int step = 0; step <= rim; ++step) {
+            const QPoint p = edges[side] + inwards[side] * step;
+            const bool inRim = near(image.pixel(p), kRim, step < rim ? 2 : 24);
+            QVERIFY2(inRim == (step < rim),
+                     qPrintable(QStringLiteral("#%1 at %2, %3, %4 px in")
+                                    .arg(image.pixel(p) & 0xffffff, 6, 16, QLatin1Char('0'))
+                                    .arg(p.x())
+                                    .arg(p.y())
+                                    .arg(step)));
+        }
     }
-    // One pixel: inside it, at the bottom's middle, the tile.
-    QVERIFY(near(image.pixel(middle.x(), tile.bottom() - 1), kTile, 2));
-    // No rim colour anywhere from 48 px.
-    if (!hasRim(size)) {
-        QCOMPARE(countWhere(image, image.rect(), [](QRgb p) { return near(p, kRim, 24); }), 0);
+    // Inside it, at the bottom's middle, the tile.
+    QVERIFY(near(image.pixel(middle.x(), tile.bottom() - rim), kTile, 2));
+    // Nothing inside the rim has its colour, away from its rounded inner
+    // corners: no trace or mark on the tile.
+    const QRect inside = insideRim(tile, size);
+    const int corner = size / 16 + 1;
+    for (const QRect &band : {inside.adjusted(corner, 0, -corner, 0), inside.adjusted(0, corner, 0, -corner)}) {
+        QCOMPARE(countWhere(image, band, [](QRgb p) { return near(p, kRim, 24); }), 0);
     }
     // Lighter than the tile, and it holds the edge on Breeze Dark where the
     // tile alone doesn't; no trace.
@@ -404,6 +421,21 @@ void AppIconTest::tileHasALighterRimAtSmallSizes() {
              qPrintable(QString::number(contrastRatio(kRim, kBreezeDarkWindow))));
     QVERIFY(contrastRatio(kRim, kBreezeDarkWindow) > contrastRatio(kTile, kBreezeDarkWindow));
     QVERIFY(!traceInk(qRgba(qRed(kRim), qGreen(kRim), qBlue(kRim), 255)));
+}
+
+// The scalable drawing, which serves every size without a drawing of its
+// own, has the rim at the same 32nd of the icon: at 96 px a 3 px rim.
+void AppIconTest::scalableDrawingHasTheRimInProportion() {
+    constexpr int size = 96;
+    const QString path = FerrousAppIcon::resourcePath(size);
+    QCOMPARE(path, QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
+    const QImage image = render(path, size);
+    const QRect tile = tileOf(image);
+    const QPoint middle = tile.center();
+    for (int step = 0; step < size / 32; ++step) {
+        QVERIFY2(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2), qPrintable(QString::number(step)));
+    }
+    QVERIFY(near(image.pixel(middle.x(), tile.bottom() - size / 32), kTile, 2));
 }
 
 // The traces stand on the plain tile: H1 to H5 drew the spectrogram's floor
