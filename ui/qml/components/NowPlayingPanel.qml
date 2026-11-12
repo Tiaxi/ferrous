@@ -30,7 +30,7 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (#373 H7: the empty square took 360 px). The
 //   first track grows the cover's place from the row to its full size
-//   over longDuration, OutCubic, the cover fading in as it grows and the
+//   over moveDuration, OutCubic, the cover fading in as it grows and the
 //   lines and the library moving down with its foot, so nothing jumps
 //   (#373 H5); going back to nothing loaded, as when the queue is
 //   cleared, shrinks it back. With animations off, both are at once.
@@ -43,7 +43,7 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   those of the sidebar's layout, wide or narrow, so a cover that comes
 //   or goes changes only where they are.
 // - Between a track with a cover and one without, one move over
-//   longDuration (#373 H9: the two layouts cross-faded over the moving
+//   moveDuration (#373 H9: the two layouts cross-faded over the moving
 //   cover, the mark drew over it, and the text overlapped; #373 H10: the
 //   cover's place held still for 40 % of it, then moved the library some
 //   350 px in the last 120 ms, and the title slid 22 px once it was all
@@ -166,6 +166,16 @@ Item {
         onFinished: root.layoutStep = 1
     }
     readonly property bool coverGrowing: root.coverGrowth > 0 && root.coverGrowth < 1
+    // The time of a move that carries the library under the panel: the
+    // track's layout growing from the compact row or shrinking into it,
+    // and the change between a track with a cover and one without. Under
+    // the wide cover the library moves 350 to 420 px: over longDuration,
+    // OutCubic, its first frames jumped some 100 px, four of its rows, and
+    // read as a cross-fade rather than a slide (#373 H10); over
+    // veryLongDuration, under two rows a frame. The narrow cover's 100 px
+    // or so take longDuration. None with animations off.
+    readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
+        : (root.wideRoom ? Kirigami.Units.veryLongDuration : Kirigami.Units.longDuration)
 
     // A track with a cover after one without, or the other way round: the
     // change above. While "Nothing playing" shows, nothing changes; the
@@ -182,7 +192,7 @@ Item {
         const cover = root.coverLevel
         const mark = root.bareMarkLevel
         root.coverGrowthAnimation.stop()
-        if (instant === true || Kirigami.Units.longDuration <= 0 || root.presence <= 0) {
+        if (instant === true || root.moveDuration <= 0 || root.presence <= 0) {
             root.growthFrom = to
             root.lineShiftFrom = to
             root.growthTo = to
@@ -197,7 +207,7 @@ Item {
         root.growthTo = to
         root.coverFadeFrom = cover
         root.bareMarkFrom = mark
-        root.coverGrowthAnimation.duration = Kirigami.Units.longDuration
+        root.coverGrowthAnimation.duration = root.moveDuration
         root.coverGrowthAnimation.start()
     }
     onHasCoverChanged: root.followCover()
@@ -253,13 +263,13 @@ Item {
                 + Math.max(0, root.height - root.restHeight) / root.presence
         }
         root.presenceAnimation.stop()
-        if (Kirigami.Units.longDuration <= 0 || root.presence === to) {
+        if (root.moveDuration <= 0 || root.presence === to) {
             root.presence = to
             return
         }
         root.presenceAnimation.from = root.presence
         root.presenceAnimation.to = to
-        root.presenceAnimation.duration = Kirigami.Units.longDuration
+        root.presenceAnimation.duration = root.moveDuration
         root.presenceAnimation.start()
     }
     onIdleChanged: {
@@ -858,7 +868,9 @@ Item {
             long: staged || covers.length > 0 || was.album !== next.album
                 || (root.outgoing !== null && root.outgoing.long)
         }
-        const duration = out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration
+        // A change with the cover's place runs with its move.
+        const duration = staged ? root.moveDuration
+            : (out.long ? Kirigami.Units.longDuration : Kirigami.Units.shortDuration)
         const fades = out.track || covers.length > 0 || Object.keys(out.lines).length > 0
             || (out.long && !staged)
         if (!fades || duration <= 0) {
