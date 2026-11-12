@@ -23,9 +23,9 @@ import "../logic/WheelUtils.js" as WheelUtils
 // there (#373 H8: it stayed centred in the whole view, off-centre in what
 // the details leave of it), and keeps its zoom and pan.
 // During a preview from Replace from iTunes, the details go on with what the
-// preview shows and its buttons, as a dialog's: Back to Results and, for a
-// candidate, Apply. The art then keeps 24 px clear of the view's edge and
-// of the details' seam.
+// preview shows, and a footer at their bottom holds its buttons, as a
+// dialog's: Back to Results and, for a candidate, Apply. The art then keeps
+// 24 px clear of the view's edge and of the details' seam.
 Item {
     id: root
 
@@ -42,13 +42,28 @@ Item {
     required property bool comparisonModeAvailable
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
-    // then 1.2 times the body size, 16 px with the default 10 pt font, the
-    // file's name 18 px, and their column 320 px with its seam.
+    // then a step larger, 1.2 times the window's, the file's name 18 px,
+    // and their column 320 px with its seam.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
     readonly property real infoScale: root.fullscreen ? 1.2 : 1
+    // The details on the app's type scale (#373 H10: they were all at the
+    // body size, crammed): the values at the body size and the labels at
+    // the small size, 13 px and 12 px with the default 10 pt font; each
+    // row a list row's height, 26 px with it (UiPalette.rowHeight): a line
+    // of the values' text and a small spacing above and below it; and
+    // 16 px in from the column's edges, more with a larger font.
     readonly property real infoPointSize: root.uiPalette.basePointSize * root.infoScale
+    readonly property real infoLabelPointSize: root.uiPalette.smallPointSize * root.infoScale
+    readonly property real infoRowInset: Math.round(Kirigami.Units.smallSpacing * root.infoScale)
+    readonly property real infoRowHeight: Math.round(infoValueMetrics.height) + 2 * root.infoRowInset
+    // A line of text is as tall as its line height rounded up: the space
+    // above and below a row's line makes up the rest of its height.
+    readonly property real infoRowTopMargin: Math.floor((root.infoRowHeight - Math.ceil(infoValueMetrics.height)) / 2)
+    readonly property real infoRowBottomMargin: root.infoRowHeight - Math.ceil(infoValueMetrics.height)
+        - root.infoRowTopMargin
+    readonly property real infoPadding: root.uiPalette.scaledSize(16)
     // The glyph of a button in the details: 16 px, a step larger with
     // the larger text over the whole screen.
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
@@ -86,24 +101,18 @@ Item {
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
     onFitWidthChanged: root.clampPan()
 
-    // A push button of the details, reached with Tab, with its tooltip.
+    // A flat button of the details, reached with Tab, with its tooltip.
     // Space presses it rather than playing or pausing, which the viewer's
     // shortcuts would take; keys with modifiers stay the shortcuts'.
     // It is drawn in the plot's colours, as the strip's buttons are: the
-    // style's button, and the theme's icons, would be a light theme's on
-    // the dark details. Raised, it is a lift of the plate with its edge;
-    // flat, only the hover tint; the default one, `isDefault`, is filled
-    // with the plot's checked fill. Keyboard focus is the plot's 2 px ring
-    // 1 px outside it, with a 1 px gap in the details' colour.
+    // theme's icons would be a light theme's on the dark details. It shows
+    // only the hover tint; keyboard focus is the plot's 2 px ring 1 px
+    // outside it, with a 1 px gap in the details' colour.
     component DetailsButton: Button {
         id: detailsButton
 
         property string toolTipText: ""
-        property bool isDefault: false
-        readonly property bool filled: detailsButton.isDefault && detailsButton.enabled
-        readonly property color contentColor: detailsButton.filled
-            ? root.plot.checkedGlyph
-            : root.plot.plotText
+        readonly property color contentColor: root.plot.plotText
 
         focusPolicy: Qt.TabFocus
         hoverEnabled: true
@@ -117,7 +126,6 @@ Item {
         icon.height: root.detailsIconSize
         // The focus ring reaches past the button, over the next one's gap.
         z: detailsButton.visualFocus ? 1 : 0
-        Accessible.defaultButton: detailsButton.isDefault
         Keys.onShortcutOverride: function(event) {
             event.accepted = KeyUtils.isPlainSpace(event)
         }
@@ -169,18 +177,6 @@ Item {
 
         background: Item {
             Rectangle {
-                objectName: "albumArtDetailsButtonFill"
-                anchors.fill: parent
-                radius: 3
-                opacity: detailsButton.enabled ? 1 : 0.5
-                color: detailsButton.isDefault
-                    ? root.plot.checkedFill
-                    : (detailsButton.flat ? "transparent" : ColorUtils.withAlpha(root.plot.plotText, 0.10))
-                border.width: detailsButton.isDefault || detailsButton.flat ? 0 : 1
-                border.color: root.plot.plotPlateEdge
-            }
-
-            Rectangle {
                 objectName: "albumArtDetailsButtonHover"
                 anchors.fill: parent
                 radius: 3
@@ -221,6 +217,35 @@ Item {
                 border.color: root.plot.plotFocusRing
             }
         }
+    }
+
+    // A button of the preview's footer: the style's own, as a dialog's
+    // button row has, so Apply, the default, is Breeze's default button
+    // (#373 H10: it was a solid accent fill, unlike any other default
+    // button). The details are dark in both themes, so the buttons take
+    // the complementary colours, Breeze's dark set in either. Space and
+    // the tooltip as the details' other buttons.
+    component FooterButton: Button {
+        property string toolTipText: ""
+
+        Kirigami.Theme.inherit: false
+        Kirigami.Theme.colorSet: Kirigami.Theme.Complementary
+        focusPolicy: Qt.TabFocus
+        font.pointSize: root.infoPointSize
+        icon.width: root.detailsIconSize
+        icon.height: root.detailsIconSize
+        Keys.onShortcutOverride: function(event) {
+            event.accepted = KeyUtils.isPlainSpace(event)
+        }
+        ToolTip.text: toolTipText
+        ToolTip.visible: (hovered || visualFocus) && toolTipText.length > 0
+        ToolTip.delay: Kirigami.Units.toolTipDelay
+    }
+
+    FontMetrics {
+        id: infoValueMetrics
+        font.family: root.uiPalette.baseFont.family
+        font.pointSize: root.infoPointSize
     }
 
     property real zoom: 1.0
@@ -512,9 +537,8 @@ Item {
         color: Qt.tint(root.plot.plotBg, root.plot.plotPlateEdge)
     }
 
-    // The details: the file's name, then label and value rows at the body
-    // size; the folder on its own line, then its path, elided in the
-    // middle, with Copy Path. The rows' labels share a column as wide as the
+    // The details: the file's name, then label and value rows; the folder
+    // on its own line, then its path, elided in the middle, with Copy Path. The rows' labels share a column as wide as the
     // widest of them, up to two fifths of the row, so every value starts at
     // the same x and keeps the rest; a label wider than that wraps between
     // its words, and the column is never narrower than its widest word.
@@ -541,7 +565,7 @@ Item {
         width: root.previewActive
             ? Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width / 2), Math.max(infoColumn.fortyCharacters,
                 Math.ceil(Math.max(previewBackButton.implicitWidth,
-                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 32)))
+                    previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding)))
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
         FontMetrics {
@@ -570,205 +594,227 @@ Item {
             onWheel: function(wheel) { wheel.accepted = true }
         }
 
-        ColumnLayout {
-            id: infoLayout
+        // The details above the footer, cut short there if a large font
+        // in a small view makes them taller than the room they have.
+        Item {
+            id: infoBody
+            objectName: "albumArtInfoBody"
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
-            anchors.topMargin: 12 + root.infoTopInset
-            spacing: 0
+            anchors.bottom: previewFooter.visible ? previewFooter.top : parent.bottom
+            clip: true
 
-            // During a preview, what it shows, such as "iTunes Candidate",
-            // over the file's name.
-            Label {
-                objectName: "albumArtPreviewLabel"
-                Layout.fillWidth: true
-                Layout.bottomMargin: 2
-                visible: root.previewActive && text.length > 0
-                text: root.previewLabel
-                font.pointSize: root.infoPointSize
-                color: root.plot.plotTextSecondary
-                elide: Text.ElideRight
-            }
+            ColumnLayout {
+                id: infoLayout
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.leftMargin: root.infoPadding
+                anchors.rightMargin: root.infoPadding
+                anchors.topMargin: 12 + root.infoTopInset
+                spacing: 0
 
-            readonly property real labelColumnWidth: Math.max(Math.ceil(infoRows.widestWord),
-                Math.min(Math.ceil(infoRows.widestLabel), Math.floor(infoLayout.width * 0.4)))
-
-            Label {
-                objectName: "albumArtInfoTitle"
-                Layout.fillWidth: true
-                Layout.bottomMargin: Math.round(8 * root.infoScale)
-                text: root.sourceKind === "embedded"
-                    ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
-                    : ((root.fileInfo && root.fileInfo.fileName)
-                        || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
-                font.pointSize: root.infoTitlePointSize
-                font.weight: Font.DemiBold
-                color: root.plot.plotText
-                elide: Text.ElideMiddle
-            }
-
-            Repeater {
-                id: infoRows
-                // Of every row, shown or not, so the values stay where they
-                // are when a row hides for another image.
-                readonly property real widestLabel: {
-                    let widest = 0
-                    for (let i = 0; i < infoRows.count; ++i) {
-                        const row = infoRows.itemAt(i)
-                        if (row) {
-                            widest = Math.max(widest, row.labelImplicitWidth)
-                        }
-                    }
-                    return widest
+                // During a preview, what it shows, such as "iTunes Candidate",
+                // over the file's name.
+                Label {
+                    objectName: "albumArtPreviewLabel"
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 2
+                    visible: root.previewActive && text.length > 0
+                    text: root.previewLabel
+                    font.pointSize: root.infoLabelPointSize
+                    color: root.plot.plotTextSecondary
+                    elide: Text.ElideRight
                 }
-                // The widest single word of any label: a label wraps only
-                // between its words.
-                readonly property real widestWord: {
-                    let widest = 0
-                    for (let i = 0; i < infoRows.count; ++i) {
-                        const row = infoRows.itemAt(i)
-                        if (row) {
-                            widest = Math.max(widest, row.labelWidestWord)
-                        }
-                    }
-                    return widest
-                }
-                model: [
-                    { name: I18n.i18nc("@label image width and height", "Dimensions"),
-                      value: root.fileInfo && root.fileInfo.width > 0 && root.fileInfo.height > 0
-                          ? I18n.i18nc("@info image size, width × height", "%1 × %2 px",
-                              Number(root.fileInfo.width).toLocaleString(Qt.locale(), "f", 0),
-                              Number(root.fileInfo.height).toLocaleString(Qt.locale(), "f", 0))
-                          : "" },
-                    { name: I18n.i18nc("@label", "File size"),
-                      value: (root.fileInfo && root.fileInfo.fileSizeText) || "" },
-                    { name: I18n.i18nc("@label image file format", "Format"),
-                      value: (root.fileInfo && (root.fileInfo.format || root.fileInfo.extension)) || "" },
-                    { name: I18n.i18nc("@label where the album art is from", "Source"),
-                      value: root.sourceKind === "embedded"
-                          ? I18n.i18nc("@info album art source", "Embedded in the track")
-                          : (root.sourceKind === "itunes"
-                              ? I18n.i18nc("@info album art source", "iTunes")
-                              : I18n.i18nc("@info album art source", "Folder image")) }
-                ]
 
-                delegate: RowLayout {
-                    required property var modelData
-                    readonly property real labelImplicitWidth: infoLabel.implicitWidth
-                    readonly property real labelWidestWord: {
+                readonly property real labelColumnWidth: Math.max(Math.ceil(infoRows.widestWord),
+                    Math.min(Math.ceil(infoRows.widestLabel), Math.floor(infoLayout.width * 0.4)))
+
+                Label {
+                    objectName: "albumArtInfoTitle"
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: Math.round(8 * root.infoScale)
+                    text: root.sourceKind === "embedded"
+                        ? I18n.i18nc("@info:title album art stored in the track's file", "Embedded Image")
+                        : ((root.fileInfo && root.fileInfo.fileName)
+                            || PathUtils.pathFromAnyUrl(root.viewerSource).replace(/^.*\//, ""))
+                    font.pointSize: root.infoTitlePointSize
+                    font.weight: Font.DemiBold
+                    color: root.plot.plotText
+                    elide: Text.ElideMiddle
+                }
+
+                Repeater {
+                    id: infoRows
+                    // Of every row, shown or not, so the values stay where they
+                    // are when a row hides for another image.
+                    readonly property real widestLabel: {
                         let widest = 0
-                        for (const word of infoLabel.text.split(/\s+/)) {
-                            widest = Math.max(widest, labelMetrics.advanceWidth(word))
+                        for (let i = 0; i < infoRows.count; ++i) {
+                            const row = infoRows.itemAt(i)
+                            if (row) {
+                                widest = Math.max(widest, row.labelImplicitWidth)
+                            }
                         }
                         return widest
                     }
-                    objectName: "albumArtInfoRow"
+                    // The widest single word of any label: a label wraps only
+                    // between its words.
+                    readonly property real widestWord: {
+                        let widest = 0
+                        for (let i = 0; i < infoRows.count; ++i) {
+                            const row = infoRows.itemAt(i)
+                            if (row) {
+                                widest = Math.max(widest, row.labelWidestWord)
+                            }
+                        }
+                        return widest
+                    }
+                    model: [
+                        { name: I18n.i18nc("@label image width and height", "Dimensions"),
+                          value: root.fileInfo && root.fileInfo.width > 0 && root.fileInfo.height > 0
+                              ? I18n.i18nc("@info image size, width × height", "%1 × %2 px",
+                                  Number(root.fileInfo.width).toLocaleString(Qt.locale(), "f", 0),
+                                  Number(root.fileInfo.height).toLocaleString(Qt.locale(), "f", 0))
+                              : "" },
+                        { name: I18n.i18nc("@label", "File size"),
+                          value: (root.fileInfo && root.fileInfo.fileSizeText) || "" },
+                        { name: I18n.i18nc("@label image file format", "Format"),
+                          value: (root.fileInfo && (root.fileInfo.format || root.fileInfo.extension)) || "" },
+                        { name: I18n.i18nc("@label where the album art is from", "Source"),
+                          value: root.sourceKind === "embedded"
+                              ? I18n.i18nc("@info album art source", "Embedded in the track")
+                              : (root.sourceKind === "itunes"
+                                  ? I18n.i18nc("@info album art source", "iTunes")
+                                  : I18n.i18nc("@info album art source", "Folder image")) }
+                    ]
+
+                    delegate: RowLayout {
+                        required property var modelData
+                        readonly property real labelImplicitWidth: infoLabel.implicitWidth
+                        readonly property real labelWidestWord: {
+                            let widest = 0
+                            for (const word of infoLabel.text.split(/\s+/)) {
+                                widest = Math.max(widest, labelMetrics.advanceWidth(word))
+                            }
+                            return widest
+                        }
+                        objectName: "albumArtInfoRow"
+                        Layout.fillWidth: true
+                        // A row's height: a line of the value and the inset
+                        // above and below it; more if the value or the label
+                        // wraps. The label stands on the value's baseline.
+                        Layout.topMargin: root.infoRowTopMargin
+                        Layout.bottomMargin: root.infoRowBottomMargin
+                        // The value's lines, or the label's, standing on the
+                        // value's baseline, if they reach further down;
+                        // whole pixels, so the rows keep their rhythm.
+                        Layout.preferredHeight: Math.round(Math.max(infoValue.implicitHeight,
+                            infoLabel.implicitHeight + infoValue.baselineOffset - infoLabel.baselineOffset))
+                        visible: modelData.value.length > 0
+                        spacing: 12
+
+                        Label {
+                            id: infoLabel
+                            objectName: "albumArtInfoLabel"
+                            // Exactly the column's width, however long the value.
+                            Layout.minimumWidth: infoLayout.labelColumnWidth
+                            Layout.preferredWidth: infoLayout.labelColumnWidth
+                            Layout.maximumWidth: infoLayout.labelColumnWidth
+                            Layout.alignment: Qt.AlignBaseline
+                            text: modelData.name
+                            font.pointSize: root.infoLabelPointSize
+                            color: root.plot.plotTextSecondary
+                            wrapMode: Text.WordWrap
+
+                            FontMetrics {
+                                id: labelMetrics
+                                font: infoLabel.font
+                            }
+                        }
+
+                        Label {
+                            id: infoValue
+                            objectName: "albumArtInfoValue"
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignBaseline
+                            text: modelData.value
+                            font.pointSize: root.infoPointSize
+                            font.features: root.uiPalette.tabularFigures
+                            color: root.plot.plotText
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+
+                Label {
+                    objectName: "albumArtFolderLabel"
+                    visible: root.folderPath.length > 0
+                    Layout.topMargin: root.infoRowInset
+                    text: I18n.i18nc("@label the folder the image is in", "Folder")
+                    font.pointSize: root.infoLabelPointSize
+                    color: root.plot.plotTextSecondary
+                }
+
+                RowLayout {
+                    visible: root.folderPath.length > 0
                     Layout.fillWidth: true
-                    Layout.topMargin: Math.round(5 * root.infoScale)
-                    Layout.bottomMargin: Math.round(5 * root.infoScale)
-                    visible: modelData.value.length > 0
-                    spacing: 12
+                    Layout.preferredHeight: Math.max(root.uiPalette.toolButtonSize, folderPathLabel.implicitHeight)
+                    spacing: 4
 
                     Label {
-                        id: infoLabel
-                        objectName: "albumArtInfoLabel"
-                        // Exactly the column's width, however long the value.
-                        Layout.minimumWidth: infoLayout.labelColumnWidth
-                        Layout.preferredWidth: infoLayout.labelColumnWidth
-                        Layout.maximumWidth: infoLayout.labelColumnWidth
-                        Layout.alignment: Qt.AlignTop
-                        text: modelData.name
+                        id: folderPathLabel
+                        objectName: "albumArtFolderPath"
+                        Layout.fillWidth: true
+                        text: root.displayPath(root.folderPath)
                         font.pointSize: root.infoPointSize
-                        color: root.plot.plotTextSecondary
-                        wrapMode: Text.WordWrap
+                        color: root.plot.plotText
+                        elide: Text.ElideMiddle
+                        // The whole path, however it is elided.
+                        ToolTip.text: root.folderPath
+                        ToolTip.visible: folderPathHover.hovered
+                        ToolTip.delay: Kirigami.Units.toolTipDelay
 
-                        FontMetrics {
-                            id: labelMetrics
-                            font: infoLabel.font
+                        HoverHandler {
+                            id: folderPathHover
                         }
                     }
 
-                    Label {
-                        objectName: "albumArtInfoValue"
-                        Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignTop
-                        text: modelData.value
-                        font.pointSize: root.infoPointSize
-                        font.features: root.uiPalette.tabularFigures
-                        color: root.plot.plotText
-                        wrapMode: Text.Wrap
-                    }
-                }
-            }
-
-            Label {
-                objectName: "albumArtFolderLabel"
-                visible: root.folderPath.length > 0
-                Layout.topMargin: Math.round(5 * root.infoScale)
-                text: I18n.i18nc("@label the folder the image is in", "Folder")
-                font.pointSize: root.infoPointSize
-                color: root.plot.plotTextSecondary
-            }
-
-            RowLayout {
-                visible: root.folderPath.length > 0
-                Layout.fillWidth: true
-                Layout.preferredHeight: Math.max(root.uiPalette.toolButtonSize, folderPathLabel.implicitHeight)
-                spacing: 4
-
-                Label {
-                    id: folderPathLabel
-                    objectName: "albumArtFolderPath"
-                    Layout.fillWidth: true
-                    text: root.displayPath(root.folderPath)
-                    font.pointSize: root.infoPointSize
-                    color: root.plot.plotText
-                    elide: Text.ElideMiddle
-                    // The whole path, however it is elided.
-                    ToolTip.text: root.folderPath
-                    ToolTip.visible: folderPathHover.hovered
-                    ToolTip.delay: Kirigami.Units.toolTipDelay
-
-                    HoverHandler {
-                        id: folderPathHover
+                    Components.ViewerToolButton {
+                        objectName: "albumArtCopyPathButton"
+                        uiPalette: root.uiPalette
+                        plotColors: root.plot
+                        text: I18n.i18nc("@action:button", "Copy Path")
+                        icon.name: "edit-copy"
+                        glyphColor: root.plot.plotTextSecondary
+                        Accessible.description: root.folderPath
+                        onClicked: root.copyText(root.folderPath)
                     }
                 }
 
-                Components.ViewerToolButton {
-                    objectName: "albumArtCopyPathButton"
-                    uiPalette: root.uiPalette
-                    plotColors: root.plot
-                    text: I18n.i18nc("@action:button", "Copy Path")
-                    icon.name: "edit-copy"
-                    glyphColor: root.plot.plotTextSecondary
-                    Accessible.description: root.folderPath
-                    onClicked: root.copyText(root.folderPath)
+                // From the iTunes artwork dialog: the other image to compare.
+                DetailsButton {
+                    objectName: "albumArtCompareButton"
+                    visible: root.comparisonModeAvailable
+                    Layout.topMargin: Math.round(12 * root.infoScale)
+                    flat: true
+                    icon.name: "view-refresh"
+                    text: root.sourceKind === "itunes"
+                        ? I18n.i18nc("@action:button", "Show Current Album Art")
+                        : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
+                    toolTipText: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
+                    onClicked: root.switchComparisonImage()
                 }
-            }
-
-            // From the iTunes artwork dialog: the other image to compare.
-            DetailsButton {
-                objectName: "albumArtCompareButton"
-                visible: root.comparisonModeAvailable
-                Layout.topMargin: Math.round(12 * root.infoScale)
-                flat: true
-                icon.name: "view-refresh"
-                text: root.sourceKind === "itunes"
-                    ? I18n.i18nc("@action:button", "Show Current Album Art")
-                    : I18n.i18nc("@action:button artwork found on iTunes", "Show iTunes Candidate")
-                toolTipText: I18n.i18nc("@info:tooltip", "Left or Right switches between the two images")
-                onClicked: root.switchComparisonImage()
             }
         }
 
-        // The preview's buttons, as a dialog's, 12 px under the details: at
-        // the end of a row, the default one, Apply, last, tinted as the
-        // default button. When they do not
-        // fit side by side, with a larger font or a longer translation, they
-        // stack, each the column's width, Back to Results first.
+        // The preview's footer, as a dialog's button row, at the bottom of
+        // the details under a seam (#373 H10: the buttons followed the
+        // details, crammed under them): at the end of a row, the default
+        // one, Apply, last. When they do not fit side by side, with a larger
+        // font or a longer translation, they stack, each the column's width,
+        // Back to Results first.
         // Anchors and bindings place them, so they are in place the moment
         // Apply shows or hides: a layout would place them only at its next
         // polish, leaving Apply where it was laid out before, past the
@@ -779,9 +825,18 @@ Item {
             visible: root.previewActive
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: infoLayout.bottom
-            anchors.topMargin: 12
-            height: previewButtons.y + previewButtons.height
+            anchors.bottom: parent.bottom
+            height: previewButtons.height + 2 * root.infoPadding + 1
+
+            Rectangle {
+                objectName: "albumArtPreviewFooterSeam"
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: 1
+                // The details' seam, on their strip colour.
+                color: Qt.tint(root.plot.plotStrip, root.plot.plotPlateEdge)
+            }
 
             Item {
                 id: previewButtons
@@ -792,16 +847,17 @@ Item {
                         ? spacing + previewApplyButton.implicitWidth : 0) <= width
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: root.infoPadding
+                anchors.rightMargin: root.infoPadding
+                anchors.bottomMargin: root.infoPadding
                 height: oneRow
                     ? Math.max(previewBackButton.height,
                         previewApplyButton.visible ? previewApplyButton.height : 0)
                     : previewBackButton.height + (previewApplyButton.visible
                         ? spacing + previewApplyButton.height : 0)
 
-                DetailsButton {
+                FooterButton {
                     id: previewBackButton
                     objectName: "albumArtPreviewBackButton"
                     x: previewButtons.oneRow
@@ -817,7 +873,7 @@ Item {
                     onClicked: root.closeViewer()
                 }
 
-                DetailsButton {
+                FooterButton {
                     id: previewApplyButton
                     objectName: "albumArtPreviewApplyButton"
                     x: previewButtons.oneRow ? previewButtons.width - width : 0
@@ -827,7 +883,8 @@ Item {
                     width: previewButtons.oneRow ? implicitWidth : previewButtons.width
                     visible: root.previewHasCandidate
                     enabled: root.previewCanApply
-                    isDefault: true
+                    // Breeze draws the button marked default as such.
+                    Accessible.defaultButton: true
                     icon.name: "dialog-ok-apply"
                     text: I18n.i18nc("@action:button", "Apply")
                     toolTipText: I18n.i18nc("@info:tooltip", "Replace the album art with this candidate")
