@@ -51,6 +51,10 @@ Rectangle {
     readonly property int chevronGap: 6
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
+    // An album without a cover, or whose cover hasn't loaded: a neutral
+    // tile in the thumbnail's place, the hover tint over the row, so its
+    // name lines up with its neighbours' and no hole is left (#373 H10).
+    readonly property color thumbnailPlaceholderColor: root.uiPalette.hover
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
     // A library folder's glyph, in the thumbnail's column.
     readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
@@ -592,7 +596,7 @@ Rectangle {
                                 width: root.thumbnailSize
                                 height: root.thumbnailSize
                                 radius: 2
-                                color: "transparent"
+                                color: status === Image.Ready ? "transparent" : root.thumbnailPlaceholderColor
                                 source: libraryRow.albumCoverInViewport
                                     ? root.uiBridge.libraryThumbnailSource(coverPath || "", coverStamp || "")
                                     : ""
