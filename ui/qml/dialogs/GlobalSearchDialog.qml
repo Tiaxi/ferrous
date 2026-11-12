@@ -122,9 +122,10 @@ Dialog {
         objectName: "globalSearchBackground"
         color: root.uiPalette.view
         radius: 6
+        // The seam where two regions meet, all round: it parts the palette
+        // from the dimmed window, which on dark is nearly its colour.
         border.width: 1
-        border.color: Kirigami.ColorUtils.linearInterpolation(root.uiPalette.view, root.uiPalette.text,
-                                                              Kirigami.Theme.frameContrast)
+        border.color: root.uiPalette.seam
         shadow.xOffset: 0
         shadow.yOffset: 4
         shadow.size: 8

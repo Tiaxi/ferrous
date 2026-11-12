@@ -532,6 +532,11 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QCOMPARE(hex(colorOf(background)), hex(harness.token("view")));
     QCOMPARE(background->property("radius").toReal(), 6.0);
     QCOMPARE(background->property("border").value<QObject *>()->property("width").toReal(), 1.0);
+    // Its 1 px outline is the seam, which stands out from both the palette
+    // and the dimmed window around it (#373 H10: on dark, the palette all
+    // but merged into the window).
+    const QColor outline = background->property("border").value<QObject *>()->property("color").value<QColor>();
+    QCOMPARE(hex(outline), hex(harness.token("seam")));
 
     QQuickItem *icon = harness.item(QStringLiteral("globalSearchFieldIcon"));
     QCOMPARE(sceneRect(icon).left() - frame.left(), 16.0);
@@ -559,7 +564,24 @@ void SearchPaletteTest::paletteSitsUnderTheTransportOverADim() {
     QTRY_COMPARE(dim->opacity(), 1.0);
     QCOMPARE(sceneRect(dim), QRectF(0, 0, width, height));
     QCOMPARE(hex(colorOf(dim)), hex(harness.token("dim")));
-    QCOMPARE(qRound(colorOf(dim).alphaF() * 100), dark ? 50 : 25);
+    // Stronger on dark, where the window behind is nearly the palette's
+    // colour.
+    QCOMPARE(qRound(colorOf(dim).alphaF() * 100), dark ? 65 : 25);
+    // On dark, the outline parts the palette from the dimmed window, its
+    // chrome and its views; on light, the white palette stands well clear
+    // of the dimmed window by itself.
+    for (const QColor &window : {harness.token("chrome"), harness.token("view")}) {
+        const QColor dimmed = drawnOver(colorOf(dim), window);
+        if (dark) {
+            QVERIFY2(contrastRatio(outline, dimmed) >= 1.5,
+                     qPrintable(describe(QStringLiteral("outline"), outline, dimmed)));
+            QVERIFY2(contrastRatio(outline, harness.token("view")) >= 1.5,
+                     qPrintable(describe(QStringLiteral("outline"), outline, harness.token("view"))));
+        } else {
+            QVERIFY2(contrastRatio(harness.token("view"), dimmed) >= 1.5,
+                     qPrintable(describe(QStringLiteral("palette"), harness.token("view"), dimmed)));
+        }
+    }
 }
 
 // Each type's results under its heading, in the order of the best match of

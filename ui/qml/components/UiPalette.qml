@@ -113,8 +113,10 @@ QtObject {
         }
         return opacity
     }
-    // The scrim behind the search palette.
-    readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.5 : 0.25)
+    // The scrim behind the search palette: black, 65% on dark, where less
+    // left the window behind it nearly as bright as the palette (#373 H10),
+    // and 25% on light, where black reads much sooner.
+    readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.65 : 0.25)
 
     // The link on `background`, such as a hover tint drawn over the window
     // colour: the link, darker or lighter where it falls short of 4.5:1 on it.
