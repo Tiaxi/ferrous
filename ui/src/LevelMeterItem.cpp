@@ -7,9 +7,11 @@
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QAccessible>
 #include <QQuickWindow>
 #include <QSGSimpleRectNode>
+#include <QSGSimpleTextureNode>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtEndian>
 #include <algorithm>
@@ -30,14 +32,27 @@ constexpr int kReadoutIntervalMs = 250;
 constexpr double kTicksDb[] = {0.0, -12.0, -24.0, -48.0};
 constexpr double kShortLaneTicksDb[] = {-12.0, -24.0};
 // Per lane: the column's floor, the track, the lamp, the gap under it, the
-// fill, the four ticks of the scale, the gap under the peak tick and the
-// peak tick.
-constexpr int kNodesPerLane = 11;
+// fill in one colour, the fill along the colour map, the four ticks of the
+// scale, the gap under the peak tick and the peak tick.
+constexpr int kNodesPerLane = 12;
+// Which of a lane's nodes is the fill along the colour map; the others are
+// rectangles of one colour.
+constexpr int kRampNode = 5;
 
 using Self = LevelMeterItem;
 
 struct MeterNode : QSGNode {
     int lanes{-1};
+};
+
+// The fill along the colour map: a column of texels, one per device pixel
+// of the lane's scale, each the map's colour of its level, of which the
+// fill shows the rows from the bottom up to its level.
+struct RampNode : QSGSimpleTextureNode {
+    std::unique_ptr<QSGTexture> ramp;
+    // What the ramp is drawn for: the scale's device pixels and the range.
+    double scalePixels{-1.0};
+    double dbRange{0.0};
 };
 
 int fillPixels(double level, double scalePixels) {
@@ -87,6 +102,25 @@ void setRect(QSGNode *node, const QRectF &rect, const QColor &color) {
     auto *rectNode = static_cast<QSGSimpleRectNode *>(node);
     if (rectNode->rect() != rect) rectNode->setRect(rect);
     if (rectNode->color() != color) rectNode->setColor(color);
+}
+
+// The ramp of a scale `scalePixels` device pixels tall in a view of
+// `dbRange` dB, from its top row down; drawn again only when either changes.
+void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double dbRange) {
+    if (node->ramp && node->scalePixels == scalePixels && node->dbRange == dbRange) return;
+    const int rows = std::max(1, static_cast<int>(std::ceil(scalePixels)));
+    QImage image(1, rows, QImage::Format_RGB32);
+    for (int row = 0; row < rows; ++row) {
+        // The colour of the level at the middle of the row's pixel.
+        const double level = levelAt(rows - row - 0.5, scalePixels);
+        image.setPixel(0, row, Self::colorMapColor(level, dbRange).rgb());
+    }
+    // The old texture goes once the node no longer draws it.
+    std::unique_ptr<QSGTexture> texture(window->createTextureFromImage(image));
+    node->setTexture(texture.get());
+    node->ramp = std::move(texture);
+    node->scalePixels = scalePixels;
+    node->dbRange = dbRange;
 }
 }
 
@@ -680,7 +714,18 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         }
         // The seam: the column's left edge and the rows between lanes.
         node->appendChildNode(new QSGSimpleRectNode);
-        for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) node->appendChildNode(new QSGSimpleRectNode);
+        for (int i = 0; i < m_laneCount * kNodesPerLane; ++i) {
+            if (i % kNodesPerLane == kRampNode) {
+                auto *ramp = new RampNode;
+                ramp->setFiltering(QSGTexture::Nearest);
+                // In the tree, a texture node has a texture to draw: the
+                // software renderer looks at it as soon as it is added.
+                updateRamp(ramp, window(), scalePixels(i / kNodesPerLane), m_dbRange);
+                node->appendChildNode(ramp);
+            } else {
+                node->appendChildNode(new QSGSimpleRectNode);
+            }
+        }
         node->lanes = m_laneCount;
     }
     setRect(node->firstChild(), boundingRect(), m_seamColor);
@@ -690,6 +735,17 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     QSGNode *child = node->firstChild()->nextSibling();
     const auto next = [&child](const QRectF &rect, const QColor &color) {
         setRect(child, rect, color);
+        child = child->nextSibling();
+    };
+    // The fill along the map, showing `rows` device pixels of its ramp.
+    const auto nextRamp = [&child, this](const QRectF &rect, double scalePixels, int rows) {
+        auto *ramp = static_cast<RampNode *>(child);
+        updateRamp(ramp, window(), scalePixels, m_dbRange);
+        const int height = ramp->ramp->textureSize().height();
+        rows = std::clamp(rows, 0, height);
+        const QRectF source(0, height - rows, 1, rows);
+        if (ramp->sourceRect() != source) ramp->setSourceRect(source);
+        if (ramp->rect() != rect) ramp->setRect(rect);
         child = child->nextSibling();
     };
     // Across the track, and along the bar on it.
@@ -705,18 +761,22 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
         if (!m_active || scaleHeight <= 0.0) {
-            for (int i = 2; i < kNodesPerLane; ++i) next(QRectF(), m_backgroundColor);
+            for (int i = 2; i < kNodesPerLane; ++i) {
+                if (i == kRampNode) nextRamp(QRectF(), scaleHeight * dpr, 0);
+                else next(QRectF(), m_backgroundColor);
+            }
             continue;
         }
         next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
         next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
-        // when these change. The map's colour is that of the level at the
-        // fill's top, which changes with it.
+        // when these change. On the colour map, each row of the fill takes
+        // the map's colour of its own level, a ramp from the floor up to the
+        // level (#373 H10 V2); otherwise the fill is of one colour.
         const double fill = shown.fill / dpr;
-        const QColor fillColor = m_colorMapFill
-            ? colorMapColor(levelAt(shown.fill, scaleHeight * dpr), m_dbRange) : m_fillColor;
-        next(bar(meterBottom - fill, fill), fillColor);
+        const QRectF fillRect = bar(meterBottom - fill, fill);
+        next(m_colorMapFill ? QRectF() : fillRect, m_fillColor);
+        nextRamp(m_colorMapFill ? fillRect : QRectF(), scaleHeight * dpr, m_colorMapFill ? shown.fill : 0);
         // The scale's ticks, while the plot shows its scale.
         const std::vector<double> ticks = m_scaleShown ? ticksDb(bottom - top) : std::vector<double>{};
         for (std::size_t i = 0; i < std::size(kTicksDb); ++i) {
