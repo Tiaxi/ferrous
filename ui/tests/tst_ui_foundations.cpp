@@ -385,7 +385,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.20 : 0.16)) <= 1);
     const QColor dim = colorOf(tokens, "dim");
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
-    QVERIFY(std::abs(dim.alphaF() - (dark ? 0.5 : 0.25)) < 0.002);
+    QVERIFY(std::abs(dim.alphaF() - (dark ? 0.65 : 0.25)) < 0.002);
 
     // Tertiary text steps up to secondary on a selected row.
     QVariant stepped;

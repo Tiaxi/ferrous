@@ -63,7 +63,17 @@ Dialog {
     // The line under the no-results title.
     readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
     readonly property real sideInset: 16
-    readonly property real leadSize: 24
+    // The glyphs, the lead and the field's buttons are sized for the
+    // default font and grow with a larger one, as the transport's do
+    // (UiPalette.scaledSize): the glyphs 16 px, the playing glyph 12 px,
+    // the lead (a cover or a glyph's room) 24 px, and the clear and help
+    // buttons 28 px. The lead keeps 4 px clear of its row's edges, and the
+    // buttons 8 px of the field's. All are even, so a glyph centres on
+    // whole pixels in its button and over a cover.
+    readonly property int glyphSize: 2 * Math.round(root.uiPalette.toolIconSize / 2)
+    readonly property int nowGlyphSize: 2 * Math.round(root.uiPalette.scaledSize(12) / 2)
+    readonly property int leadSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(24), root.resultHeight - 8) / 2)
+    readonly property int fieldButtonSize: 2 * Math.floor(Math.min(root.uiPalette.scaledSize(28), root.fieldHeight - 16) / 2)
     readonly property real titleX: root.sideInset + root.leadSize + 12
     // A track's length at the right: 44 px, or as wide as "00:00" in its
     // font, and 12 px clear of the context. The title takes up to 300 px
@@ -122,9 +132,10 @@ Dialog {
         objectName: "globalSearchBackground"
         color: root.uiPalette.view
         radius: 6
+        // The seam where two regions meet, all round: it parts the palette
+        // from the dimmed window, which on dark is nearly its colour.
         border.width: 1
-        border.color: Kirigami.ColorUtils.linearInterpolation(root.uiPalette.view, root.uiPalette.text,
-                                                              Kirigami.Theme.frameContrast)
+        border.color: root.uiPalette.seam
         shadow.xOffset: 0
         shadow.yOffset: 4
         shadow.size: 8
@@ -226,21 +237,45 @@ Dialog {
     readonly property int maxTitleRuns: 5
     function titleRuns(label, allEmphasized) {
         const text = String(label || "")
-        let segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
+        const segments = allEmphasized || !root.controller.globalSearchModelApi.highlightSegments
             ? [{ text: text, match: allEmphasized }]
             : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
-        if (segments.length > root.maxTitleRuns) {
-            // Matches past the fourth run stay regular.
-            const tail = segments.slice(root.maxTitleRuns - 1).map(function(segment) { return segment.text }).join("")
-            segments = segments.slice(0, root.maxTitleRuns - 1).concat([{ text: tail, match: false }])
+        return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
+    }
+    // A result emphasises its match in one place (#373 H10): in its title,
+    // or, when the title has none, such as an album found by its artist,
+    // in its context, there only the first match, so the context does not
+    // outweigh the title. The context's runs: before the match, the match
+    // semibold, and the rest; none when nothing in it matches.
+    function contextRuns(context, room) {
+        if (!root.controller.globalSearchModelApi.highlightSegments || context.length === 0) {
+            return []
+        }
+        const segments = root.controller.globalSearchModelApi.highlightSegments(context, queryField.text)
+        const first = segments.findIndex(function(segment) { return segment.match })
+        if (first < 0) {
+            return []
+        }
+        const before = segments.slice(0, first).map(function(segment) { return segment.text }).join("")
+        const after = segments.slice(first + 1).map(function(segment) { return segment.text }).join("")
+        return root.layOutRuns([{ text: before, match: false }, { text: segments[first].text, match: true },
+                                { text: after, match: false }].filter(function(segment) { return segment.text.length > 0 }),
+                               3, room, smallMetrics, smallSemiboldMetrics)
+    }
+    // `segments` as at most `maxRuns` runs side by side in `room`: matches
+    // past the last run but one stay regular in the last.
+    function layOutRuns(segments, maxRuns, room, regular, semibold) {
+        if (segments.length > maxRuns) {
+            const tail = segments.slice(maxRuns - 1).map(function(segment) { return segment.text }).join("")
+            segments = segments.slice(0, maxRuns - 1).concat([{ text: tail, match: false }])
         }
         let runs = []
         let x = 0
         for (let i = 0; i < segments.length; ++i) {
-            const metrics = segments[i].match ? semiboldMetrics : regularMetrics
+            const metrics = segments[i].match ? semibold : regular
             const advance = metrics.advanceWidth(segments[i].text)
-            const room = Math.max(0, root.titleWidth - x)
-            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x), width: Math.min(advance, room) })
+            runs.push({ text: segments[i].text, match: !!segments[i].match, x: Math.round(x),
+                        width: Math.min(advance, Math.max(0, room - x)) })
             x += advance
         }
         return runs
@@ -248,6 +283,7 @@ Dialog {
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
     FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
+    FontMetrics { id: smallSemiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize; font.weight: Font.DemiBold }
     TextMetrics {
         id: lengthMetrics
         text: "00:00"
@@ -355,8 +391,8 @@ Dialog {
                 objectName: "globalSearchFieldIcon"
                 x: root.sideInset
                 y: Math.round((parent.height - height) / 2)
-                width: 16
-                height: 16
+                width: root.glyphSize
+                height: root.glyphSize
                 source: "search"
                 isMask: true
                 color: root.uiPalette.textSecondary
@@ -392,13 +428,13 @@ Dialog {
                 objectName: "globalSearchClearButton"
                 x: helpButton.x - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 visible: queryField.text.length > 0
                 display: AbstractButton.IconOnly
                 icon.name: "edit-clear"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button clear the search field", "Clear")
                 Accessible.name: text
@@ -415,12 +451,12 @@ Dialog {
                 objectName: "globalSearchHelpButton"
                 x: parent.width - 8 - width
                 y: Math.round((parent.height - height) / 2)
-                width: 28
-                height: 28
+                width: root.fieldButtonSize
+                height: root.fieldButtonSize
                 display: AbstractButton.IconOnly
                 icon.name: "question"
-                icon.width: 16
-                icon.height: 16
+                icon.width: root.glyphSize
+                icon.height: root.glyphSize
                 icon.color: root.uiPalette.textSecondary
                 text: I18n.i18nc("@action:button", "Search Syntax and Keys")
                 Accessible.name: text
@@ -518,6 +554,15 @@ Dialog {
                         && (root.controller.uiBridge.playbackState || "Stopped") !== "Stopped"
                     readonly property var titleRuns: isResult ? root.titleRuns(model.label, isNow) : []
                     readonly property string context: isResult ? root.rowContext(model, false) : ""
+                    // The context's room: up to the length's column, or the
+                    // row's end.
+                    readonly property real contextWidth: Math.max(0, (lengthText.visible
+                        ? lengthText.x - root.columnGap
+                        : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
+                    // The context's match, emphasised only when the title
+                    // has none (root.contextRuns).
+                    readonly property var contextRuns: isResult && !titleRuns.some(function(run) { return run.match })
+                        ? root.contextRuns(context, contextWidth) : []
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return model.label + "\n" + root.rowContext(model, true)
@@ -589,14 +634,14 @@ Dialog {
                     // file up again on the GUI thread whenever its source
                     // changes, which recycled rows would do on every query.
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType === "artist"
                         sourceComponent: artistGlyph
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 16) / 2
-                        y: Math.round((parent.height - 16) / 2)
+                        x: root.sideInset + (root.leadSize - root.glyphSize) / 2
+                        y: Math.round((parent.height - root.glyphSize) / 2)
                         active: resultRow.isResult && resultRow.rowType !== "artist"
                             && (model.coverUrl || "").length === 0 && !resultRow.isNow
                         sourceComponent: resultRow.rowType === "album" ? albumPlaceholder : trackPlaceholder
@@ -628,13 +673,13 @@ Dialog {
                         color: Qt.rgba(0, 0, 0, 0.55)
                     }
                     Loader {
-                        x: root.sideInset + (root.leadSize - 12) / 2
-                        y: Math.round((parent.height - 12) / 2)
+                        x: root.sideInset + (root.leadSize - root.nowGlyphSize) / 2
+                        y: Math.round((parent.height - root.nowGlyphSize) / 2)
                         active: resultRow.isNow
                         sourceComponent: Kirigami.Icon {
                             objectName: "globalSearchNowGlyph"
-                            width: 12
-                            height: 12
+                            width: root.nowGlyphSize
+                            height: root.nowGlyphSize
                             source: (root.controller.uiBridge.playbackState || "") === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                             isMask: true
@@ -730,11 +775,13 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
+                    // The context, whole; or, with its match emphasised, in
+                    // runs as the title is.
                     Text {
                         objectName: "globalSearchResultContext"
-                        visible: resultRow.isResult
+                        visible: resultRow.isResult && resultRow.contextRuns.length === 0
                         x: root.contextX
-                        width: Math.max(0, (lengthText.visible ? lengthText.x - root.columnGap : parent.width - root.sideInset - resultsView.scrollbarLane) - x)
+                        width: resultRow.contextWidth
                         height: parent.height
                         verticalAlignment: Text.AlignVCenter
                         text: resultRow.context
@@ -742,6 +789,54 @@ Dialog {
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 0 ? resultRow.contextRuns[0] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 1 ? resultRow.contextRuns[1] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
+                        color: root.uiPalette.textSecondary
+                    }
+                    Text {
+                        readonly property var run: resultRow.contextRuns.length > 2 ? resultRow.contextRuns[2] : null
+                        objectName: "globalSearchResultContextRun"
+                        visible: !!run && run.width > 0
+                        x: root.contextX + (run ? run.x : 0)
+                        width: run ? run.width : 0
+                        height: resultRow.height
+                        verticalAlignment: Text.AlignVCenter
+                        text: run ? run.text : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        font.family: root.uiPalette.baseFont.family
+                        font.pointSize: root.uiPalette.smallPointSize
+                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: root.uiPalette.textSecondary
                     }
                     Text {
@@ -875,8 +970,8 @@ Dialog {
                         Kirigami.Icon {
                             x: root.sideInset + (root.leadSize - width) / 2
                             y: Math.round((parent.height - height) / 2)
-                            width: 16
-                            height: 16
+                            width: root.glyphSize
+                            height: root.glyphSize
                             source: auxRow.modelData.kind === "recent" ? "view-history" : "search"
                             isMask: true
                             color: root.uiPalette.textSecondary
@@ -1022,8 +1117,8 @@ Dialog {
         id: artistGlyph
         Kirigami.Icon {
             objectName: "globalSearchArtistGlyph"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "view-media-artist"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -1033,8 +1128,8 @@ Dialog {
         id: albumPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "media-optical-audio"
             isMask: true
             color: root.uiPalette.textSecondary
@@ -1044,8 +1139,8 @@ Dialog {
         id: trackPlaceholder
         Kirigami.Icon {
             objectName: "globalSearchCoverPlaceholder"
-            width: 16
-            height: 16
+            width: root.glyphSize
+            height: root.glyphSize
             source: "audio-x-generic"
             isMask: true
             color: root.uiPalette.textSecondary
