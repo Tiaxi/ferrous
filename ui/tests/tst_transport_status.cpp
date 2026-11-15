@@ -2203,8 +2203,9 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     const auto progress = [slot]() { return slot->property("barProgress").toDouble(); };
 
     // Listening: the glyph in the secondary colour, and under it the bar in
-    // the same colour, the listening done of its trough, which is the text
-    // colour at 20% (#373 H11); the time left in the tooltip.
+    // the same colour, the listening done of its trough, which is opaque and
+    // 3:1 on the status bar (#373 H12: the text at 20% was 1.9:1); the time
+    // left in the tooltip.
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
     bridge->setProperty("lastFmScrobbleListenedMs", 77000);
     bridge->setProperty("lastFmScrobbleState", 1);
@@ -2220,7 +2221,10 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(trough->isVisible());
     QCOMPARE(trough->position(), QPointF(0, 15));
     QCOMPARE(trough->size(), QSizeF(16, 2));
-    QVERIFY(sameColor(trough->property("color").value<QColor>(), withAlpha(harness.token("text"), 0.2)));
+    const QColor troughColor = trough->property("color").value<QColor>();
+    QCOMPARE(troughColor.alphaF(), 1.0F);
+    QVERIFY2(contrastRatio(troughColor, harness.token("chrome")) >= 3.0,
+             qPrintable(describe(QStringLiteral("trough"), troughColor, harness.token("chrome"))));
     QVERIFY(bar->isVisible());
     QCOMPARE(bar->position(), QPointF(0, 0));
     QCOMPARE(bar->height(), 2.0);
@@ -2235,13 +2239,13 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QCOMPARE(accessibleText(slot, QAccessible::Name), QStringLiteral("Last.fm: 0:38 to scrobble"));
     QCOMPARE(accessibleText(slot, QAccessible::Description), QStringLiteral("Press to pause scrobbling."));
     // Until the track's length is known, there is no scrobble point: the
-    // trough alone, which listening always has (#373 H9).
+    // trough and the 3 px mark that listening always has (#373 H9, H12).
     bridge->setProperty("lastFmScrobbleThresholdMs", 0);
     QCOMPARE(toolTipText(slot), QStringLiteral("Last.fm: listening"));
     QCOMPARE(progress(), 0.0);
     QVERIFY(trough->isVisible());
-    QVERIFY(!bar->isVisible());
-    QCOMPARE(bar->width(), 0.0);
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->width(), 3.0);
     bridge->setProperty("lastFmScrobbleThresholdMs", 115000);
 
     // Once playback has stopped after a play that ended before its
@@ -2473,14 +2477,16 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough_data() {
 }
 
 // The bar under the glyph, as drawn at 1x (#373 H11): a trough 16 by 2 px,
-// the glyph's width, 2 px under its ink, in the text colour at 20%, and in
+// the glyph's width, 2 px under its ink, opaque and 3:1 or more on the
+// chrome (#373 H12: the text at 20% was 1.9:1 dark and 1.5:1 light), and in
 // it from the left the listening done, in the secondary text colour: 3:1
-// or more on the chrome and on its trough, so that it reads as a share of
-// a whole (H10's bar had no trough, started 6 px long and was brighter than
-// its glyph: it did not read as progress). Nothing between the glyph and
-// the trough. At 0% the trough alone, so that listening never looks like
-// scrobbled (#373 H9: both were the bare glyph). Being sent fills it;
-// scrobbled and failed have neither bar nor trough.
+// or more on the chrome and well apart from its trough, so that it reads as
+// a share of a whole (H10's bar had no trough, started 6 px long and was
+// brighter than its glyph: it did not read as progress). Nothing between
+// the glyph and the trough. At 0% a 3 px mark in the trough, so that
+// listening that has just started never looks like scrobbled (#373 H9:
+// both were the bare glyph; H12: the trough alone did). Being sent fills
+// it; scrobbled and failed have neither bar nor trough.
 void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     QFETCH(bool, dark);
     Harness harness;
@@ -2498,10 +2504,14 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     QTRY_VERIFY(slot->isVisible());
 
     const QColor fill = harness.token("textSecondary");
-    const QColor trough = drawnOver(withAlpha(harness.token("text"), 0.2), chrome);
+    const QColor trough = slot->property("troughColor").value<QColor>();
+    QCOMPARE(trough.alphaF(), 1.0F);
     QVERIFY2(contrastRatio(fill, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), fill, chrome)));
-    QVERIFY2(contrastRatio(fill, trough) >= 3.0, qPrintable(describe(QStringLiteral("bar on trough"), fill, trough)));
-    QVERIFY2(contrastRatio(trough, chrome) >= 1.3, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+    QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+    // The bar stands out from the trough as clearly as the trough from the
+    // chrome, and is further from the chrome.
+    QVERIFY2(contrastRatio(fill, trough) >= 1.9, qPrintable(describe(QStringLiteral("bar on trough"), fill, trough)));
+    QVERIFY(contrastRatio(fill, chrome) > contrastRatio(trough, chrome) * 1.9);
 
     // The 2 px gap under the glyph's ink and the trough's 2 px rows across
     // the glyph's width: the pixels drawn as the bar, which must start at
@@ -2541,10 +2551,12 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
          {std::pair{0.0, 0}, std::pair{0.1, 1}, std::pair{0.25, 4}, std::pair{0.5, 8}, std::pair{0.9, 14}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", int(done * 120000));
         QTRY_COMPARE(slot->property("barProgress").toDouble(), columns / 16.0);
+        // Never less than the 3 px mark.
+        const int drawnColumns = std::max(3, columns);
         Drawn now;
-        QTRY_VERIFY2((now = drawn(true), now.bar == 2 * columns),
+        QTRY_VERIFY2((now = drawn(true), now.bar == 2 * drawnColumns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.bar)));
-        QVERIFY2(now.trough == 2 * (16 - columns),
+        QVERIFY2(now.trough == 2 * (16 - drawnColumns),
                  qPrintable(QStringLiteral("%1 done drew %2 px of the trough").arg(done).arg(now.trough)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of something else").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
@@ -2587,7 +2599,7 @@ void TransportStatusTest::lastFmSlotSendingAndScrobbledLookApart() {
     QVERIFY(slot && box && bar && glyph);
     const QColor chrome = harness.token("chrome");
     const QColor fill = harness.token("textSecondary");
-    const QColor trough = drawnOver(withAlpha(harness.token("text"), 0.2), chrome);
+    const QColor trough = slot->property("troughColor").value<QColor>();
     harness.bridge->setProperty("lastFmScrobbleThresholdMs", 120000);
 
     qreal scale = 1;

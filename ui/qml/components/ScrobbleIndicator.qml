@@ -21,18 +21,18 @@ import "../logic/KeyUtils.js" as KeyUtils
 // The bar is the glyph's: as wide as the glyph, 2 px tall and 2 px under
 // its ink, with square ends. It is the listening done towards the
 // scrobble, in the glyph's colour, the secondary text colour (at least 3:1
-// on the status bar), over a trough of the text colour at 20%, so that it
-// reads as a share of a whole (#373 H11: a bar alone, 6 to 14 px long and
+// on the status bar), over an opaque trough at 3:1 on the status bar, so
+// that it reads as a share of a whole (#373 H11: a bar alone, 6 to 14 px long and
 // brighter than its glyph, did not read as progress). It is a fifth of the
 // scan bar's length and half its height (the scan bar is 72 by 4 px, with
 // round ends), so that it does not read as a second scan or a download.
 // - Listening: the glyph in the secondary colour, and the bar filling its
-//   trough with the listening done towards the scrobble, from nothing; the
-//   tooltip says how much is left. Both come from the scrobbler's listened
+//   trough with the listening done towards the scrobble, from a short mark
+//   at the left; the tooltip says how much is left. Both come from the scrobbler's listened
 //   time, which a seek doesn't move and a pause holds; a new play (a new
 //   track, a replay, Repeat One) starts it over. Listening always has the
-//   trough and scrobbled never does, so the two differ before any
-//   listening too (#373 H9: at 0% they were the same bare glyph).
+//   trough and the mark and scrobbled has neither, so the two differ
+//   before any listening too (#373 H9, H12).
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
@@ -153,10 +153,20 @@ AbstractButton {
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // The bar: the secondary text colour, the glyph's. Its trough: the text
-    // colour at 20%.
+    // mixed into the status bar, opaque and at least 3:1 on it, so that the
+    // whole reads as a whole (#373 H12: the text at 20% was 1.9:1 / 1.5:1),
+    // and still well short of the bar: #6e7173 / #86888b in Breeze.
     readonly property color barColor: root.uiPalette.textSecondary
-    readonly property color troughColor: ColorUtils.withAlpha(root.uiPalette.text, 0.2)
-    readonly property real barLength: root.barWidth * root.barProgress
+    readonly property color troughColor: root.uiPalette.readableOn(
+        ColorUtils.mixColor(root.uiPalette.chrome, root.uiPalette.text, 0.3),
+        [root.uiPalette.chrome], 3.1)
+    // While listening, the bar is never less than a short mark from the
+    // left, so that listening that has just started reads apart from a
+    // scrobble, which has no bar (#373 H12: at 0% the trough alone).
+    readonly property int minimumBarLength: Math.max(3, Math.round(root.glyphSize * 3 / 16))
+    readonly property real barLength: root.look === "listening"
+        ? Math.max(root.minimumBarLength, root.barWidth * root.barProgress)
+        : root.barWidth * root.barProgress
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
