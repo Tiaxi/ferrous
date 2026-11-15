@@ -2027,6 +2027,7 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
         m_cacheDirty = false;
         // Staged from the detail.
         m_cacheShowsWaveform = true;
+        m_cacheWaveformProvisional = false;
         if (commitsDeferredZoom) {
             m_presentedZoomLevel = m_zoomLevel;
             m_zoomOutHandoffPending = false;
@@ -2412,11 +2413,18 @@ void WaveformEditorItem::paint(QPainter *painter) {
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
         // The source's picture (pictureReady): this frame, and whether it
-        // draws the waveform rather than the bare floor.
+        // draws the waveform rather than the bare floor, at the picture's
+        // scale. A frame of the overview at another scale is not the
+        // picture while the detail is on its way: each such frame has the
+        // GUI thread look again (updatePictureReady), so that it is the
+        // picture once no detail comes for it.
+        const bool provisional = !directDetail && !tiledPlayback && m_cacheShowsWaveform
+            && m_cacheWaveformProvisional;
         const bool drawsWaveform = directDetail
             || (tiledPlayback ? !playbackTilePaints.empty() || !playbackTileGaps.empty()
-                              : m_cacheShowsWaveform);
-        pictureChanged = !m_framePainted || (drawsWaveform && !m_waveformPainted);
+                              : m_cacheShowsWaveform && !m_cacheWaveformProvisional);
+        pictureChanged = !m_framePainted || (drawsWaveform && !m_waveformPainted)
+            || (provisional && !m_waveformPainted);
         m_framePainted = true;
         m_waveformPainted = m_waveformPainted || drawsWaveform;
     }
@@ -3130,6 +3138,7 @@ void WaveformEditorItem::rebuildCacheLocked(
     const double scale = renderScaleLocked();
     m_cacheShowsWaveform = detailReady
         || (useOverview ? overviewDrawableLocked(channels) : detailOverlapsViewport);
+    m_cacheWaveformProvisional = !detailReady && useOverview && overviewProvisionalLocked();
     if (detailReady) {
         drawDetailLocked(
             painter, grid.width, height,
@@ -3317,6 +3326,11 @@ bool WaveformEditorItem::overviewDrawableLocked(int channels) const {
     return !m_overviewData.isEmpty() && m_durationSeconds > 0.0
         && !(m_viewMode == 1 && channels > 1)
         && (m_overviewComplete || m_overviewCoverageSeconds > 0.0);
+}
+
+bool WaveformEditorItem::overviewProvisionalLocked() const {
+    const int sourceChannels = m_channelCount > 0 ? m_channelCount : m_channelCountHint;
+    return m_viewMode == 0 && sourceChannels > 1;
 }
 
 void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int height,

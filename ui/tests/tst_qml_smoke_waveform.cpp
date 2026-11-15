@@ -3288,14 +3288,24 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QTest::addColumn<int>("viewMode");
     QTest::addColumn<bool>("decodes");
     QTest::addColumn<bool>("animated");
+    QTest::addColumn<int>("channels");
     // Per channel, the overview has no lanes to draw: the detail is the
     // first picture.
-    QTest::newRow("per channel") << 1 << true << true;
-    QTest::newRow("per channel, animations off") << 1 << true << false;
+    QTest::newRow("per channel") << 1 << true << true << 2;
+    QTest::newRow("per channel, animations off") << 1 << true << false << 2;
     // A file whose detail cannot be read has no more to wait for.
-    QTest::newRow("per channel, unreadable") << 1 << false << true;
-    // Mixed, the overview is the first picture, whatever the detail does.
-    QTest::newRow("mixed") << 0 << true << true;
+    QTest::newRow("per channel, unreadable") << 1 << false << true << 2;
+    // Mixed, the overview of more than one channel is the peak of them
+    // all, not the downmix the detail draws (#373 H12 Z6: a 5.1 track's
+    // was a near solid envelope for some 300 ms, then the downmix): the
+    // detail is the first picture; without one, the overview.
+    QTest::newRow("mixed, stereo") << 0 << true << true << 2;
+    QTest::newRow("mixed, 5.1") << 0 << true << true << 6;
+    QTest::newRow("mixed, 5.1, animations off") << 0 << true << false << 6;
+    QTest::newRow("mixed, 5.1, unreadable") << 0 << false << true << 6;
+    // A mono track's overview is to its detail's scale: the first picture,
+    // whatever the detail does.
+    QTest::newRow("mixed, mono") << 0 << true << true << 1;
 }
 
 // The mode switch to the waveform never shows an empty plot (#373 H11: the
@@ -3308,6 +3318,9 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QFETCH(int, viewMode);
     QFETCH(bool, decodes);
     QFETCH(bool, animated);
+    QFETCH(int, channels);
+    // Whether its first picture is the detail's.
+    const bool waitsForDetail = viewMode == 1 || channels > 1;
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
@@ -3361,16 +3374,16 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     // Open on the way out, so that no decode outlives the test by long.
     const auto openGate = qScopeGuard([gate]() { gate->release(64); });
 
-    // A stereo track playing, with its overview and its spectrogram.
+    // A track playing, with its overview and its spectrogram.
     bridge->setProperty("spectrogramViewMode", viewMode);
     bridge->setProperty("durationSeconds", 60.0);
-    bridge->setProperty("currentTrackChannels", 2);
+    bridge->setProperty("currentTrackChannels", channels);
     bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/stereo.flac"));
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
     bridge->setProperty("waveformPeaksPacked", QByteArray(512, '\x40'));
     bridge->setProperty("waveformCoverageSeconds", 60.0);
     bridge->setProperty("waveformComplete", true);
-    const int lanes = viewMode == 1 ? 2 : 1;
+    const int lanes = viewMode == 1 ? channels : 1;
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
                                       Q_ARG(int, lanes), Q_ARG(bool, true)));
     const auto panes = [&]() {
@@ -3432,13 +3445,19 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QVERIFY(surface->property("modeSwitching").toBool());
     QCOMPARE(waveform->sourcePath(), QStringLiteral("/fixture/stereo.flac"));
 
-    if (viewMode == 1) {
-        // Its frames draw the bare floor while the detail is on its way:
-        // however many, the spectrogram stays.
+    if (waitsForDetail) {
+        // Its frames draw the bare floor, or the overview at another
+        // scale, while the detail is on its way: however many, the
+        // spectrogram stays.
         QTRY_COMPARE(started->load(), 1);
         QVERIFY(waitFrames(4));
         QVERIFY2(failure.isEmpty(), qPrintable(failure));
         QVERIFY(!waveform->pictureReady());
+        if (viewMode == 0) {
+            // Mixed, it has drawn the overview, which is not the picture.
+            QMutexLocker lock(&waveform->m_stateMutex);
+            QVERIFY(waveform->m_cacheShowsWaveform && waveform->m_cacheWaveformProvisional);
+        }
         QCOMPARE(waveformSurface->opacity(), 0.0);
         QCOMPARE(spectrogramSurface->opacity(), 1.0);
         QVERIFY(!fade->property("running").toBool());
@@ -3456,7 +3475,7 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QTRY_COMPARE(spectrogramSurface->opacity(), 0.0);
     QVERIFY(waitFrames(2));
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
-    QCOMPARE(viewMode == 1 && decodes, waveform->m_detail.pointCount > 0);
+    QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
 
     // Hidden again, it gives the track up, and its picture with it: the
     // next switch waits for a frame of its own.
