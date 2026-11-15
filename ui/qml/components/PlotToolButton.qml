@@ -8,9 +8,19 @@ import "../logic/KeyUtils.js" as KeyUtils
 // A 24 px tool button on a PlotPlate, larger with a larger font: a theme
 // icon (`icon.name`), or short text such as the M and S of a lane. Its `text` is the tooltip and the
 // accessible name. Checked is a solid fill with the glyph in the plot's
-// checked glyph colour. Keyboard focus is a separate 2 px ring 1 px
-// outside the button, with a 1 px gap in the plate's colour, so it reads
-// on the plate and around a checked fill alike; both show together.
+// checked glyph colour: a state that is on, as a lane's Mute.
+//
+// A `segment`, one of a plate's choices of which one is always checked,
+// as the visualization's mode switch, shows the chosen one as a neutral
+// plate instead (#373 H11: the accent's solid blue read as keyboard focus,
+// and as the loudest thing on the plot): the plot's text colour at 20 %
+// over the plate, with its glyph in the text colour whole; the others'
+// glyphs are at 60 %, whole again under the pointer or the keyboard. The
+// accent is left to the focus ring.
+//
+// Keyboard focus is a separate 2 px ring 1 px outside the button, with a
+// 1 px gap in the plate's colour, so it reads on the plate and around a
+// checked fill alike; both show together.
 ToolButton {
     id: root
 
@@ -20,9 +30,21 @@ ToolButton {
     property string glyphText: ""
     // Its glyph text's size; a short lane's buttons take the compact one.
     property real glyphPointSize: root.uiPalette.smallPointSize
-    readonly property color glyphColor: root.checked
-        ? root.plotColors.checkedGlyph
-        : root.plotColors.plotText
+    // One of a plate's choices rather than a state that is on or off.
+    property bool segment: false
+    readonly property real segmentFillOpacity: 0.20
+    readonly property real segmentRestOpacity: 0.60
+    readonly property color glyphColor: root.segment
+        ? root.plotColors.plotText
+        : (root.checked ? root.plotColors.checkedGlyph : root.plotColors.plotText)
+    // A segment that is not the chosen one is quieter, at rest.
+    readonly property real glyphOpacity: root.segment && !root.checked
+            && !root.hovered && !root.visualFocus
+        ? root.segmentRestOpacity : 1
+    readonly property color checkedColor: root.segment
+        ? Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
+                  root.plotColors.plotText.b, root.segmentFillOpacity)
+        : root.plotColors.checkedFill
 
     implicitWidth: root.uiPalette.toolButtonSize
     implicitHeight: root.uiPalette.toolButtonSize
@@ -59,6 +81,7 @@ ToolButton {
             visible: root.glyphText.length === 0
             source: root.icon.name
             color: root.glyphColor
+            opacity: root.glyphOpacity
             isMask: true
         }
 
@@ -71,6 +94,7 @@ ToolButton {
             font.pointSize: root.glyphPointSize
             font.weight: Font.DemiBold
             color: root.glyphColor
+            opacity: root.glyphOpacity
             Accessible.ignored: true
         }
     }
@@ -99,7 +123,7 @@ ToolButton {
             anchors.fill: parent
             radius: 3
             visible: root.checked
-            color: root.plotColors.checkedFill
+            color: root.checkedColor
         }
 
         // The gap between the button and its focus ring: the plate, opaque.

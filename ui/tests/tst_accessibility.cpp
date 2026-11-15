@@ -3542,6 +3542,11 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     QVERIFY(sameRgb(status->property("color").value<QColor>(), paletteColor("textSecondary")));
 }
 
+namespace {
+// Defined with the plot's contrast tests, below.
+QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item, QPointF point);
+} // namespace
+
 void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3562,19 +3567,86 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         QCOMPARE(button->property("text").toString(), name);
         QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
     }
-    // The checked one is the mode: a solid fill, not a tint.
+    // The checked one is the mode: a neutral plate, the plot's text colour
+    // at 20 % over the switch's plate, with its glyph in the text colour
+    // whole; the other's glyph is at 60 % (#373 H11: the accent's solid
+    // fill read as keyboard focus). Nothing of the switch is in the
+    // accent, or in the plot's checked fill, without the keyboard's focus.
     const auto checkedFill = [](QQuickItem *button) {
         return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonChecked"));
     };
+    const auto glyph = [](QQuickItem *button) {
+        return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+    };
+    QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tokens != nullptr);
+    const QColor accent = tokens->property("accent").value<QColor>();
+    const auto neutralPlate = [&](QQuickItem *chosen, QQuickItem *other, int mode) -> QString {
+        QVariant set;
+        QMetaObject::invokeMethod(tokens, "plotColors", Q_RETURN_ARG(QVariant, set), Q_ARG(QVariant, mode));
+        QObject *plot = set.value<QObject *>();
+        const QColor text = plot->property("plotText").value<QColor>();
+        const QColor fill = checkedFill(chosen)->property("color").value<QColor>();
+        if (!chosen->property("segment").toBool() || !other->property("segment").toBool()) {
+            return QStringLiteral("not segments");
+        }
+        if (!checkedFill(chosen)->isVisible() || checkedFill(other)->isVisible()) {
+            return QStringLiteral("the chosen one's plate does not show, or the other's does");
+        }
+        if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
+            || std::abs(fill.alphaF() - 0.20f) > 0.005f) {
+            return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
+        }
+        if (fill == accent || fill == plot->property("checkedFill").value<QColor>()) {
+            return QStringLiteral("the plate is the accent");
+        }
+        for (QQuickItem *button : {chosen, other}) {
+            if (glyph(button)->property("color").value<QColor>() != text) {
+                return QStringLiteral("a glyph in %1").arg(glyph(button)->property("color").value<QColor>().name());
+            }
+        }
+        if (glyph(chosen)->opacity() != 1.0) {
+            return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
+        }
+        // At rest: under the pointer or with the keyboard's focus it is whole.
+        if (!other->property("hovered").toBool() && !other->property("visualFocus").toBool()
+            && std::abs(glyph(other)->opacity() - 0.60) > 0.005) {
+            return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
+        }
+        // The focus ring, the plot's, shows only with the keyboard's focus.
+        for (QQuickItem *button : {chosen, other}) {
+            QQuickItem *ring = button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
+            if (ring->isVisible() != button->property("visualFocus").toBool()) {
+                return QStringLiteral("a focus ring without the keyboard's focus");
+            }
+        }
+        return {};
+    };
     QVERIFY(spectrogramButton->property("checked").toBool());
-    QVERIFY(checkedFill(spectrogramButton)->isVisible());
-    QVERIFY(!checkedFill(waveformButton)->isVisible());
+    QVERIFY2(neutralPlate(spectrogramButton, waveformButton, 0).isEmpty(),
+             qPrintable(neutralPlate(spectrogramButton, waveformButton, 0)));
+    {
+        // As drawn, on the spectrogram's plate: neutral, with nothing of
+        // the accent's blue in it.
+        QTest::mouseMove(window, QPoint(20, 20));
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const QColor drawn = drawnAt(image, window, spectrogramButton, QPointF(2.5, 2.5));
+        QVERIFY2(std::abs(drawn.blue() - drawn.red()) <= 12 && std::abs(drawn.green() - drawn.red()) <= 12,
+                 qPrintable(drawn.name()));
+        const QColor plate = drawnAt(image, window, waveformButton, QPointF(waveformButton->width() - 2.5, 2.5));
+        QVERIFY2(contrastRatio(drawn, plate) >= 1.4,
+                 qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
+    }
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                       waveformButton->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
     QTRY_VERIFY(waveformButton->property("checked").toBool());
     QVERIFY(!spectrogramButton->property("checked").toBool());
     QVERIFY(checkedFill(waveformButton)->isVisible());
+    QTest::mouseMove(window, QPoint(20, 20));
+    QTRY_VERIFY2(neutralPlate(waveformButton, spectrogramButton, 1).isEmpty(),
+                 qPrintable(neutralPlate(waveformButton, spectrogramButton, 1)));
     // Space on the focused button sets the mode rather than playing.
     QVERIFY(tabTo(window, spectrogramButton));
     QTest::keyClick(window, Qt::Key_Space);
@@ -3835,11 +3907,26 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
                                             QRectF(0, 0, labelText->width(), labelText->height()), plate);
         QVERIFY2(contrastRatio(text, plate) >= 4.5,
                  qPrintable(QStringLiteral("%1 label: %2").arg(what).arg(contrastRatio(text, plate))));
-        // The checked fill on the switch's plate, and the focus ring.
+        // The chosen mode's plate on the switch's, a neutral step from it
+        // (#373 H11: the plot's text colour at 20 %, not the accent's solid
+        // fill), its glyph whole on it and the other's on the switch's
+        // plate; and the focus ring.
         const QColor switchFill = drawnAt(image, window, switchPlate, QPointF(1.0, switchPlate->height() / 2));
         const QColor fill = drawnAt(image, window, checked, QPointF(2.5, 2.5));
-        QVERIFY2(contrastRatio(fill, switchFill) >= 3.0,
+        QVERIFY2(contrastRatio(fill, switchFill) >= 1.4,
                  qPrintable(QStringLiteral("%1 checked: %2").arg(what).arg(contrastRatio(fill, switchFill))));
+        QQuickItem *checkedGlyph = checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QQuickItem *uncheckedGlyph = unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(checkedGlyph != nullptr && uncheckedGlyph != nullptr);
+        const QColor checkedInk = mostContrasting(
+            image, window, checkedGlyph, QRectF(0, 0, checkedGlyph->width(), checkedGlyph->height()), fill);
+        QVERIFY2(contrastRatio(checkedInk, fill) >= 4.5,
+                 qPrintable(QStringLiteral("%1 chosen glyph: %2").arg(what).arg(contrastRatio(checkedInk, fill))));
+        const QColor uncheckedInk = mostContrasting(
+            image, window, uncheckedGlyph, QRectF(0, 0, uncheckedGlyph->width(), uncheckedGlyph->height()),
+            switchFill);
+        QVERIFY2(contrastRatio(uncheckedInk, switchFill) >= 3.0,
+                 qPrintable(QStringLiteral("%1 other glyph: %2").arg(what).arg(contrastRatio(uncheckedInk, switchFill))));
         const QColor ring = drawnAt(image, window, unchecked, QPointF(unchecked->width() / 2, -2.5));
         QVERIFY2(contrastRatio(ring, switchFill) >= 3.0,
                  qPrintable(QStringLiteral("%1 ring: %2").arg(what).arg(contrastRatio(ring, switchFill))));
