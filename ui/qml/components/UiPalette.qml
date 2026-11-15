@@ -412,6 +412,13 @@ QtObject {
     // The smallest text of the design, for the labels of the plot's short
     // lanes: 11 px with the default 10 pt font.
     readonly property real compactPointSize: root.basePointSize * 0.825
+    // The size of a Kirigami.Heading of `level` on the window's font, for
+    // plain text that is to be one: 1.35, 1.2, 1.15, 1.1 and 1.05 times it
+    // for levels 1 to 5.
+    function headingPointSize(level) {
+        const factors = [1.35, 1.20, 1.15, 1.10, 1.05]
+        return root.basePointSize * (factors[level - 1] || 1)
+    }
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 

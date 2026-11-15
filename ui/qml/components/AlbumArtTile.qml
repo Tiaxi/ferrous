@@ -6,16 +6,25 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 
-// The playing track's cover, edge to edge: no inset, radius or frame. With
-// no cover the tile shows the placeholder colour, with Breeze's audio disc
-// mark at its centre (#373 H1, H3); the now-playing panel shows no tile for
-// a track without a cover (#373 H9). With nothing playing
-// (`idle`) it shows no cover, only the placeholder: the now-playing panel
-// shows its compact row then, and the tile only as it shrinks into it.
+// The playing track's cover, edge to edge: no inset, radius or frame. A
+// track without a cover has a stand-in in its place (#373 H11: the panel
+// showed no tile for it, so a track change between one with a cover and
+// one without moved the whole sidebar by the cover's height): the plot's
+// floor colour, with `standInTitle` and, under it, `standInSubtitle` in
+// the plot's text colours at its bottom left, the album and the artist,
+// wrapping onto up to three and two lines; a tile too small for about
+// eight characters of the title a line, as the narrow one with a large
+// font, is the plain colour, as the lines beside it say the same. With
+// nothing playing (`idle`) it shows neither, only the placeholder colour
+// with Breeze's audio disc mark at its centre (#373 H1, H3): the
+// now-playing panel shows its compact row then, and the tile only as it
+// shrinks into it.
 //
 // The tile is a keyboard stop while a track plays: a 1 px ring shows its
 // focus while the keyboard is in use, and the Menu key or Shift+F10 opens
-// its context menu. The pointer over it lays a faint veil on it.
+// its context menu. The pointer over a cover lays a faint veil on it, and
+// a double-click opens it in the viewer; the stand-in has neither, as
+// there is nothing to open.
 Rectangle {
     id: root
 
@@ -28,6 +37,26 @@ Rectangle {
     property color placeholderColor: "transparent"
     // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
+    // The stand-in for a track without a cover: its colour, the plot's
+    // floor, its two texts and their colours, the plot's, and the font its
+    // texts are sized from.
+    property color standInColor: "transparent"
+    property color standInTextColor: Kirigami.Theme.textColor
+    property color standInSecondaryTextColor: Kirigami.Theme.textColor
+    property string standInTitle: ""
+    property string standInSubtitle: ""
+    property font standInFont: Kirigami.Theme.defaultFont
+    // The title's size in a tile with room for it, a level 1
+    // Kirigami.Heading's on that font; in a small tile, the font's own.
+    property real standInTitlePointSize: root.standInFont.pointSize * 1.35
+    property real standInSmallPointSize: root.standInFont.pointSize * 0.9
+    readonly property bool standInShown: !root.idle && root.coverPath.length === 0
+    // A tile under ten grid units, such as the narrow layout's 96 px, has
+    // its texts a step smaller, half the inset, and where even that leaves
+    // under about eight characters a line, none.
+    readonly property bool standInCompact: Math.min(root.width, root.height) < 10 * Kirigami.Units.gridUnit
+    readonly property real standInInset: root.standInCompact
+        ? Kirigami.Units.largeSpacing : 2 * Kirigami.Units.largeSpacing
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
@@ -54,10 +83,11 @@ Rectangle {
     readonly property bool focusRingShown: focusTarget.activeFocus && InputModality.keyboard
     // What takes the keyboard's focus, the pointer and the keys.
     readonly property Item focusItem: focusTarget
-    // The covers before, or their placeholder for none, over this one
-    // while they fade out: the now-playing panel's album change. Oldest
-    // first, each {coverPath, from}, showing at `from` times
-    // `outgoingLevel`, and over the ones after it.
+    // The covers before, or their stand-in for none, over this one while
+    // they fade out: the now-playing panel's album change. Oldest first,
+    // each {coverPath, from, title, subtitle}, showing at `from` times
+    // `outgoingLevel`, and over the ones after it; `title` and `subtitle`
+    // are a stand-in's texts.
     property var outgoingCovers: []
     property real outgoingLevel: 0
     // The most covers before that fade out at once.
@@ -71,18 +101,13 @@ Rectangle {
     Layout.fillWidth: true
     Layout.preferredHeight: width
 
-    color: root.hasCover ? root.backdropColor : root.placeholderColor
+    color: root.hasCover ? root.backdropColor
+        : (root.standInShown ? root.standInColor : root.placeholderColor)
     // The keyboard stop over it speaks for it.
     Accessible.ignored: true
 
     function openContextMenu(x, y) {
         albumArtMenu.popup(root, x, y)
-    }
-
-    // The menu, at `x`, `y` of `item`: the now-playing panel's for a track
-    // without a cover, which shows no tile.
-    function popupMenu(item, x, y) {
-        albumArtMenu.popup(item, x, y)
     }
 
     Image {
@@ -107,7 +132,88 @@ Rectangle {
         roundToIconSize: false
         isMask: true
         color: root.placeholderGlyphColor
-        visible: !root.hasCover
+        visible: root.idle
+    }
+
+    // The texts of a stand-in, at its bottom left: the title, up to three
+    // lines, and the subtitle under it, up to two, fewer where the tile is
+    // short, each cut off with an ellipsis past that. Assistive technology
+    // reads them from the panel's lines.
+    component StandInText: Item {
+        id: standIn
+
+        property string title: ""
+        property string subtitle: ""
+        readonly property real room: Math.max(0, standIn.height - 2 * root.standInInset)
+        readonly property real lineWidth: Math.max(0, standIn.width - 2 * root.standInInset)
+        // No texts where a line has no room for about eight characters.
+        readonly property bool fits: standIn.lineWidth >= 8 * titleMetrics.averageCharacterWidth
+        readonly property int subtitleLines: standIn.subtitle.length === 0 ? 0
+            : (standIn.room >= 3 * titleMetrics.lineSpacing + 2 * subtitleMetrics.lineSpacing ? 2 : 1)
+        readonly property int titleLines: Math.max(1, Math.min(3, Math.floor(
+            (standIn.room - standIn.subtitleLines * subtitleMetrics.lineSpacing
+                - (standIn.subtitleLines > 0 ? texts.spacing : 0)) / titleMetrics.lineSpacing)))
+
+        FontMetrics {
+            id: titleMetrics
+            font: titleText.font
+        }
+        FontMetrics {
+            id: subtitleMetrics
+            font: subtitleText.font
+        }
+
+        Column {
+            id: texts
+            x: root.standInInset
+            y: standIn.height - root.standInInset - texts.height
+            width: standIn.lineWidth
+            spacing: Kirigami.Units.smallSpacing
+            visible: standIn.fits
+
+            Text {
+                id: titleText
+                objectName: "albumArtStandInTitle"
+                width: parent.width
+                visible: text.length > 0
+                text: standIn.title
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                maximumLineCount: standIn.titleLines
+                elide: Text.ElideRight
+                font.family: root.standInFont.family
+                font.pointSize: root.standInCompact
+                    ? root.standInFont.pointSize : root.standInTitlePointSize
+                font.weight: Font.DemiBold
+                color: root.standInTextColor
+                Accessible.ignored: true
+            }
+
+            Text {
+                id: subtitleText
+                objectName: "albumArtStandInSubtitle"
+                width: parent.width
+                visible: text.length > 0
+                text: standIn.subtitle
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                maximumLineCount: Math.max(1, standIn.subtitleLines)
+                elide: Text.ElideRight
+                font.family: root.standInFont.family
+                font.pointSize: root.standInCompact
+                    ? root.standInSmallPointSize : root.standInFont.pointSize
+                color: root.standInSecondaryTextColor
+                Accessible.ignored: true
+            }
+        }
+    }
+
+    StandInText {
+        objectName: "albumArtStandIn"
+        anchors.fill: parent
+        visible: root.standInShown
+        title: root.standInTitle
+        subtitle: root.standInSubtitle
     }
 
     // The covers before fade out over this one, which shows whole all
@@ -132,11 +238,11 @@ Rectangle {
                 anchors.fill: parent
                 visible: outgoing.cover !== null && outgoing.opacity > 0
                 opacity: outgoing.cover !== null ? outgoing.cover.from * root.outgoingLevel : 0
-                color: outgoing.coverPath.length > 0 ? root.backdropColor : root.placeholderColor
-                // A cover fades out as one, on its backdrop: without a layer
-                // the opacity would take the backdrop and the image apart,
-                // and the backdrop would show through the image.
-                layer.enabled: outgoing.visible && outgoing.coverPath.length > 0
+                color: outgoing.coverPath.length > 0 ? root.backdropColor : root.standInColor
+                // A cover fades out as one, on its backdrop, and a stand-in
+                // with its texts: without a layer the opacity would take
+                // them apart, and the backdrop would show through the image.
+                layer.enabled: outgoing.visible
 
                 // The same size as the cover had, so the image cache still has it.
                 Image {
@@ -150,15 +256,12 @@ Rectangle {
                     sourceSize.height: root.coverSourceSize
                 }
 
-                Kirigami.Icon {
-                    anchors.centerIn: parent
-                    width: root.placeholderGlyphSize
-                    height: width
-                    source: root.placeholderGlyphSource
-                    roundToIconSize: false
-                    isMask: true
-                    color: root.placeholderGlyphColor
-                    visible: outgoing.coverPath.length === 0
+                StandInText {
+                    objectName: "albumArtOutgoingStandIn"
+                    anchors.fill: parent
+                    visible: outgoing.cover !== null && outgoing.coverPath.length === 0
+                    title: outgoing.cover !== null ? (outgoing.cover.title || "") : ""
+                    subtitle: outgoing.cover !== null ? (outgoing.cover.subtitle || "") : ""
                 }
             }
         }
@@ -194,7 +297,7 @@ Rectangle {
             objectName: "albumArtHoverVeil"
             anchors.fill: parent
             color: root.hoverVeilColor
-            opacity: root.hovered ? 1 : 0
+            opacity: root.hovered && root.hasCover ? 1 : 0
             visible: opacity > 0
 
             Behavior on opacity {
@@ -230,7 +333,7 @@ Rectangle {
             }
 
             onDoubleClicked: function(mouse) {
-                if (mouse.button === Qt.LeftButton) {
+                if (mouse.button === Qt.LeftButton && root.hasCover) {
                     root.openAlbumArtViewer()
                 }
             }
