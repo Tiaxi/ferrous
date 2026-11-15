@@ -352,6 +352,7 @@ private slots:
     void queueColumnTextStaysInsideItsColumnAtTheMinimum();
     void lightPaletteLeavesNoFixedColours();
     void modeSwitchIconFollowsTheMode();
+    void modeSwitchSegmentsAreCheckableRadioButtons();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
     void levelMeterReservesItsColumnAndReadsOut();
@@ -3547,6 +3548,68 @@ namespace {
 QColor drawnAt(const QImage &image, const QQuickWindow *window, QQuickItem *item, QPointF point);
 } // namespace
 
+// The mode switch's segments tell assistive technology what they are:
+// radio buttons, checkable, the chosen one checked (#373 H12: they told of
+// their checked state changing but never that they could be checked, and
+// read as plain buttons). A click, Space and the press action choose a
+// mode; choosing the chosen one again leaves it chosen.
+void AccessibilityTest::modeSwitchSegmentsAreCheckableRadioButtons() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
+    QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
+    QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
+    const auto states = [&](QQuickItem *button) {
+        QAccessibleInterface *iface = inAccessibleTree(window, button);
+        return iface != nullptr ? iface->state() : QAccessible::State();
+    };
+    // Why the switch does not say `mode` is chosen, or "".
+    const auto problem = [&](int mode) -> QString {
+        for (QQuickItem *button : {spectrogramButton, waveformButton}) {
+            const bool chosen = button == (mode == 0 ? spectrogramButton : waveformButton);
+            const QAccessible::State state = states(button);
+            if (accessibleRole(button) != QAccessible::RadioButton) {
+                return QStringLiteral("%1 is not a radio button").arg(button->objectName());
+            }
+            if (!state.checkable) {
+                return QStringLiteral("%1 is not checkable").arg(button->objectName());
+            }
+            if (bool(state.checked) != chosen || button->property("checked").toBool() != chosen) {
+                return QStringLiteral("%1 checked %2").arg(button->objectName()).arg(bool(state.checked));
+            }
+        }
+        return {};
+    };
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
+
+    // A click on the other one chooses it.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      waveformButton->mapToScene(QPointF(12, 12)).toPoint());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QTRY_VERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    // A click on the chosen one leaves it chosen.
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      waveformButton->mapToScene(QPointF(12, 12)).toPoint());
+    QTest::qWait(50);
+    QCOMPARE(viewer->property("visualizationMode").toInt(), 1);
+    QVERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    // The press action, as a screen reader's, chooses the other.
+    QAccessibleInterface *iface = inAccessibleTree(window, spectrogramButton);
+    QVERIFY(iface != nullptr && iface->actionInterface() != nullptr);
+    iface->actionInterface()->doAction(QAccessibleActionInterface::pressAction());
+    QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
+    // The mode set elsewhere, as from the menu: the switch follows.
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    QTRY_VERIFY2(problem(1).isEmpty(), qPrintable(problem(1)));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY2(problem(0).isEmpty(), qPrintable(problem(0)));
+}
+
 void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -3568,9 +3631,10 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
-    // at 20 % over the switch's plate, with its glyph in the text colour
-    // whole; the other's glyph is at 60 % (#373 H11: the accent's solid
-    // fill read as keyboard focus). Nothing of the switch is in the
+    // at 18 % over the switch's plate, with its glyph in the text colour
+    // whole; the other's glyph is at 60 % but while pressed (#373 H11: the
+    // accent's solid fill read as keyboard focus; H12 Z4: whole under the
+    // pointer, it rivalled the chosen one). Nothing of the switch is in the
     // accent, or in the plot's checked fill, without the keyboard's focus.
     const auto checkedFill = [](QQuickItem *button) {
         return button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonChecked"));
@@ -3594,7 +3658,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             return QStringLiteral("the chosen one's plate does not show, or the other's does");
         }
         if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
-            || std::abs(fill.alphaF() - 0.20f) > 0.005f) {
+            || std::abs(fill.alphaF() - 0.18f) > 0.005f) {
             return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
         }
         if (fill == accent || fill == plot->property("checkedFill").value<QColor>()) {
@@ -3608,9 +3672,9 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         if (glyph(chosen)->opacity() != 1.0) {
             return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
         }
-        // At rest: under the pointer or with the keyboard's focus it is whole.
-        if (!other->property("hovered").toBool() && !other->property("visualFocus").toBool()
-            && std::abs(glyph(other)->opacity() - 0.60) > 0.005) {
+        // Quiet under the pointer and with the keyboard's focus too: whole
+        // only while pressed.
+        if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - 0.60) > 0.005) {
             return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
         }
         // The focus ring, the plot's, shows only with the keyboard's focus.

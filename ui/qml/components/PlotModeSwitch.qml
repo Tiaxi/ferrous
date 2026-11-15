@@ -57,9 +57,6 @@ Components.PlotPlate {
             icon.name: modelData.icon
             segment: true
             checked: root.selectedMode === index
-            Accessible.role: Accessible.RadioButton
-            Accessible.checkable: true
-            Accessible.checked: checked
             Accessible.onPressAction: root.setMode(index)
             onClicked: root.setMode(index)
         }
