@@ -47,8 +47,12 @@ import "../logic/FormatUtils.js" as FormatUtils
 // - A line a track has no text for, as for a file without tags, takes no
 //   room (#373 H6): the lines under it move up.
 //
-// The title is a step over the rest: DemiBold, larger; the artist and the
-// album are in the text colour, and the details in the tertiary one.
+// The title is over the rest: DemiBold, and a Kirigami heading's size,
+// level 1 under the wide cover and level 2 beside the narrow one; the
+// artist and the album are in the text colour, and the details, one line
+// in one colour, in the tertiary one. Details that do not fit leave out
+// what matters least rather than be cut off: the track total, then the
+// genre, then the year.
 //
 // Lines that do not fit are elided, with the whole text in a tooltip.
 Item {
@@ -200,6 +204,12 @@ Item {
                          "Track %1 of %2", number, total)
             : I18n.i18nc("@info the playing track's number on its album", "Track %1", number)
     }
+    // The same without the total, for a line with no room for it.
+    readonly property string trackNumberShortText: {
+        const number = root.uiBridge.currentTrackNumber
+        return number > 0
+            ? I18n.i18nc("@info the playing track's number on its album", "Track %1", number) : ""
+    }
     // The separator between the fields of a line, for the lines that have
     // more than one.
     readonly property var lineSeparators: ({ artistAlbum: " — ", details: " · ", narrowDetails: " · " })
@@ -214,16 +224,59 @@ Item {
         : (root.albumText.length > 0 ? root.albumText : root.yearText)
     readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
                                                              root.lineSeparators.narrowDetails)
+    // The details as the lines show them: all of them where the line has
+    // room, and otherwise without what matters least, rather than cut off
+    // (#373 H11: at 24 pt, "Classical · Track 2 o…"): first the album's
+    // track total, then the genre, then the year. The whole of them is in
+    // the tooltip.
+    function _fittingDetails(year, separator, width) {
+        const candidates = [
+            [year, root.genreText, root.trackNumberText],
+            [year, root.genreText, root.trackNumberShortText],
+            [year, root.trackNumberText],
+            [year, root.trackNumberShortText],
+            [root.trackNumberShortText]
+        ]
+        let last = ""
+        for (const fields of candidates) {
+            const text = root._joined(fields, separator)
+            if (text.length === 0)
+                continue
+            if (root._tabularWidth(text) <= width)
+                return text
+            last = text
+        }
+        // Nothing fits: the shortest, cut off; or a line without a track
+        // number, as it is.
+        return last.length > 0 ? last : root._joined([year, root.genreText], separator)
+    }
+    // The width of `text` in the details' font with tabular figures, in
+    // which every digit is as wide as the widest.
+    function _tabularWidth(text) {
+        return Math.ceil(narrowLineMetrics.advanceWidth(text.replace(/[0-9]/g, root.widestDigit)))
+    }
+    readonly property string widestDigit: {
+        let widest = "0"
+        for (let digit = 1; digit <= 9; ++digit) {
+            if (narrowLineMetrics.advanceWidth(String(digit)) > narrowLineMetrics.advanceWidth(widest))
+                widest = String(digit)
+        }
+        return widest
+    }
+    readonly property string shownDetailsText: root._fittingDetails(
+        root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset))
+    readonly property string shownNarrowDetailsText: root._fittingDetails(
+        "", root.lineSeparators.narrowDetails, narrowColumn.width)
 
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({
         title: root.titleText,
         artistAlbum: root.artistAlbumText,
-        details: root.detailsText,
+        details: root.shownDetailsText,
         artist: root.artistText,
         album: root.albumText,
         narrowAlbum: root.narrowAlbumText,
-        narrowDetails: root.narrowDetailsText
+        narrowDetails: root.shownNarrowDetailsText
     })
 
     // A track change fades (#373 Motion), line by line: a line that differs
@@ -475,10 +528,11 @@ Item {
         return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
     }
 
-    // The lines that wrap onto a second line rather than be cut off, under
-    // the narrow cover: the title and the artist.
-    readonly property var wrappingLines: !root.wideRoom && root.narrowStacked
-        ? ({ title: true, artist: true }) : ({})
+    // The lines that wrap onto a second line rather than be cut off: in
+    // the narrow layout the title (#373 H11: beside the cover at 24 pt a
+    // long title was cut off), and under the narrow cover the artist too.
+    readonly property var wrappingLines: root.wideRoom ? ({})
+        : (root.narrowStacked ? ({ title: true, artist: true }) : ({ title: true }))
     readonly property int stackedLineGap: 4
 
     // Whether the line of `key` fades whole, as one, going from `before` to
@@ -799,9 +853,12 @@ Item {
         root.followTrack()
     }
 
-    // The title, a step over the text under it: 12 pt with the default
-    // 10 pt font, as a level 2 Kirigami.Heading is. It follows the font.
-    readonly property real titlePointSize: root.uiPalette.basePointSize * 1.2
+    // The title, over the text under it: under the wide cover a level 1
+    // Kirigami.Heading's size, 13.5 pt with the default 10 pt font (#373
+    // H11: a step up from level 2, to stand to the 360 px cover), and in
+    // the narrow layout a level 2's, 12 pt. It follows the font.
+    readonly property real wideTitlePointSize: root.uiPalette.headingPointSize(1)
+    readonly property real titlePointSize: root.uiPalette.headingPointSize(2)
 
     // The space under the wide text block before the seam into the library,
     // which sets the two apart as regions of one sheet: with the details'
@@ -812,6 +869,17 @@ Item {
     readonly property int seamHeight: 1
     // The top of the lines beside the narrow cover.
     readonly property int narrowTextTop: 10
+    // In a sidebar wide enough for the wide layout that takes the narrow
+    // one for its height alone, as with a large font, the cover is not at
+    // the panel's corner, where it stood apart from lines far larger than
+    // it (#373 H11): it starts at the text inset, as the library's rows
+    // under it do, and at the top of the title's capitals.
+    readonly property bool insetCover: !root.wideRoom && !root.narrow
+    readonly property real coverX: root.insetCover ? root.textInset : 0
+    readonly property real coverY: root.insetCover
+        ? root.narrowTextTop + Math.round(narrowTitleMetrics.ascent
+            + narrowTitleMetrics.tightBoundingRect("H").y)
+        : 0
     // Where the line under the cover starts down: under the cover's
     // place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
@@ -867,7 +935,7 @@ Item {
     }
     LineProbe {
         id: wideTitleProbe
-        font.pointSize: root.titlePointSize
+        font.pointSize: root.wideTitlePointSize
         font.weight: Font.DemiBold
     }
     LineProbe {
@@ -911,7 +979,7 @@ Item {
     // cover's height, and more when the lines need it.
     readonly property real narrowLayoutHeight: (root.narrowStacked
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
-            : Math.max(root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
+            : Math.max(root.coverY + root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
     readonly property real wideLayoutHeight: root.width + root.textInset + liveText.wideHeight
         + root.regionGap + root.seamHeight
@@ -1235,8 +1303,9 @@ Item {
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
-        x: 0
-        y: 0
+        x: root.coverX
+        // From the compact row's top down into place, as the layout grows.
+        y: root._whileGrowing(root.coverY * root.presence)
         width: root.coverSize
         height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
             + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
@@ -1368,7 +1437,7 @@ Item {
                 lineKey: "title"
                 name: "Title"
                 text: root.trackLines.title
-                pointSize: root.titlePointSize
+                pointSize: root.wideTitlePointSize
                 weight: Font.DemiBold
             }
             FadingLine {
@@ -1413,7 +1482,8 @@ Item {
             objectName: "nowPlayingNarrowText"
             visible: !root.wideRoom && !root.idle
             // Beside the cover or under it.
-            x: root.narrowStacked ? root.textInset : root.narrowCoverSize + root.textInset
+            x: root.narrowStacked ? root.textInset
+                : root.coverX + root.narrowCoverSize + root.textInset
             // Under the cover's place, with which it moves while that grows;
             // beside it, from under the compact row up into place, so its
             // text does not show where the row's does.
@@ -1434,7 +1504,7 @@ Item {
                 text: root.trackLines.title
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
-                maximumLineCount: root.narrowStacked ? 2 : 1
+                maximumLineCount: 2
                 width: narrowColumn.width
             }
             // Beside the cover, 2 px between the title and the artist; under
@@ -1483,8 +1553,11 @@ Item {
         color: root.uiPalette.seam
     }
 
-    // The whole text of the lines, when one of them is cut off.
+    // The whole text of the lines, when one of them is cut off, or the
+    // details are without a part of them.
     readonly property bool textTruncated: liveText.truncated
+        || (root.wideRoom ? root.shownDetailsText !== root.detailsText
+                          : root.shownNarrowDetailsText !== root.narrowDetailsText)
 
     ToolTip {
         parent: root.wideRoom ? liveText.wideItem : liveText.narrowItem

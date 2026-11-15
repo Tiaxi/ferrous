@@ -1963,31 +1963,37 @@ void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
 }
 
-// A line cut off within the fields the two share looks the same for both
-// tracks: it stays still.
+// A line cut off within what the two share looks the same for both
+// tracks: it stays still. The album's line beside the narrow cover, whose
+// year differs past where a long album is cut off; the details leave out
+// what does not fit rather than be cut off (#373 H11).
 void UiMotionTest::nowPlayingLineCutOffWithinWhatItSharesStaysStill() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY(window != nullptr);
+    window->resize(1000, 720);
+    QTRY_COMPARE(window->width(), 1000);
     QObject *bridge = bridgeOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
-    const QString genre = QStringLiteral(
-        "A Genre Named At Such Length That No Sidebar Will Ever Show All Of It, Not Even The Widest One");
-    bridge->setProperty("currentTrackGenre", genre);
+    const QString album = QStringLiteral(
+        "An Album Named At Such Length That No Sidebar Will Ever Show All Of It, Not Even The Widest One");
+    bridge->setProperty("currentTrackYear", 2005);
     bridge->setProperty("currentTrackNumber", 1);
-    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"));
-    const PanelLine details = panelLine(panel, QStringLiteral("Details"));
-    QTRY_VERIFY(details.stillText()->property("truncated").toBool());
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), album);
+    QVERIFY(grown(panel));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    const PanelLine line = panelLine(panel, QStringLiteral("NarrowAlbum"));
+    QTRY_VERIFY(line.stillText()->property("truncated").toBool());
 
     bridge->setProperty("currentTrackPath", kTrackA2);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
-    bridge->setProperty("currentTrackNumber", 2);
+    bridge->setProperty("currentTrackYear", 2006);
     QVERIFY(handover->property("running").toBool());
-    QVERIFY(panelLine(panel, QStringLiteral("Title")).fades());
-    QCOMPARE(details.outgoingText(), genre + QStringLiteral(" · Track 1"));
-    QVERIFY(lineStill(panel, QStringLiteral("Details")));
+    QVERIFY(panelLine(panel, QStringLiteral("NarrowTitle")).fades());
+    QCOMPARE(line.outgoingText(), album + QStringLiteral(" (2005)"));
+    QVERIFY(lineStill(panel, QStringLiteral("NarrowAlbum")));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(allLinesStill(panel));
 }
