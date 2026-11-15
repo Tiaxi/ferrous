@@ -569,11 +569,10 @@ QString wideBlockProblem(QQuickWindow *window) {
     if (std::abs(sceneRect(title).top() - sceneRect(cover).bottom() - 8.0) > 0.01) {
         return QStringLiteral("the title %1 px under the cover").arg(sceneRect(title).top() - sceneRect(cover).bottom());
     }
-    QQuickItem *last = shown(details) ? details : title;
-    for (const char *name : {"nowPlayingArtistAlbum", "nowPlayingWideAlbum"}) {
-        if (!shown(details) && shown(named(window, name))) {
-            last = named(window, name);
-        }
+    // The details' row, kept empty for a track without them.
+    QQuickItem *last = details;
+    if (!shown(details)) {
+        return QStringLiteral("the details' row is not kept");
     }
     const qreal under = sceneRect(seam).top() - sceneRect(last).bottom();
     if (under < 8.0 - 0.01 || under >= 8.0 + rowHeight) {
@@ -590,9 +589,8 @@ QString wideBlockProblem(QQuickWindow *window) {
 // narrow, that have text.
 QList<QQuickItem *> shownLines(QQuickWindow *window) {
     QList<QQuickItem *> lines;
-    for (const char *name : {"nowPlayingTitle", "nowPlayingArtistAlbum", "nowPlayingWideArtist", "nowPlayingWideAlbum",
-                             "nowPlayingDetails", "nowPlayingNarrowTitle", "nowPlayingNarrowArtist",
-                             "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}) {
+    for (const char *name : {"nowPlayingTitle", "nowPlayingArtistAlbum", "nowPlayingDetails", "nowPlayingNarrowTitle",
+                             "nowPlayingNarrowArtist", "nowPlayingNarrowAlbum", "nowPlayingNarrowDetails"}) {
         QQuickItem *line = named(window, name);
         if (shown(line) && !line->property("text").toString().isEmpty()) {
             lines.push_back(line);
@@ -756,6 +754,8 @@ private slots:
     void nowPlayingDetailsAreOneColourAndNeverCutOff_data();
     void nowPlayingDetailsAreOneColourAndNeverCutOff();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
+    void nowPlayingWideBlockIsOneHeightForEveryTrack_data();
+    void nowPlayingWideBlockIsOneHeightForEveryTrack();
     void nowPlayingMarksFollowTheFont();
     void nowPlayingMarksFollowTheFont_data();
     void nowPlayingShowsTheFileNameOfATrackWithoutTitleOrArtist();
@@ -1180,14 +1180,11 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
     QVERIFY(QFontMetricsF(titleFont).capHeight() >= 1.3 * QFontMetricsF(lineFont).capHeight());
     // Each line takes the height of its font: none overlaps the next.
     QTRY_VERIFY(title->height() >= QFontMetricsF(titleFont).height() - 1);
-    // "Artist — Album", or, where that would be cut off, a line each.
-    QQuickItem *firstLine = shown(artistAlbum) ? artistAlbum : named(window, "nowPlayingWideArtist");
-    QQuickItem *lastLine = shown(artistAlbum) ? artistAlbum : named(window, "nowPlayingWideAlbum");
-    QVERIFY(shown(firstLine) && shown(lastLine));
-    QCOMPARE(colorOf(firstLine), tokenHex(window, "text"));
-    QCOMPARE(colorOf(lastLine), tokenHex(window, "text"));
-    QTRY_VERIFY(sceneRect(firstLine).top() >= sceneRect(title).bottom());
-    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
+    // "Artist — Album", one line, elided where it does not fit.
+    QVERIFY(shown(artistAlbum));
+    QCOMPARE(colorOf(artistAlbum), tokenHex(window, "text"));
+    QTRY_VERIFY(sceneRect(artistAlbum).top() >= sceneRect(title).bottom());
+    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(artistAlbum).bottom());
 
     QQuickItem *seam = named(window, "nowPlayingSeam");
     QQuickItem *header = named(window, "libraryHeader");
@@ -1359,8 +1356,8 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
 // goes or comes changes nothing
 // of the panel's geometry: its height, the library's place under it, and
 // where its lines are. A track without tags shows its file name for a
-// title, and its lines with no text take no room: a file name alone is one
-// line (#373 H6).
+// title, and its lines with no text take no room beside the narrow cover
+// (#373 H6) and keep their rows, empty, under the wide one (#373 H14 G1).
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QFETCH(bool, narrow);
     QFETCH(bool, dark);
@@ -1433,8 +1430,7 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         QCOMPARE(standInMarkInk(window), ink);
     }
 
-    // No tags: the file name, alone, for a title, one line, the lines
-    // without text taking no room; the same mark.
+    // No tags: the file name, alone, for a title, one line; the same mark.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QCOMPARE(panel->property("detailsText").toString(), QString());
@@ -1447,8 +1443,16 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QTRY_COMPARE(lines.first()->property("text").toString(), fileName);
     QCOMPARE(sceneRect(cover), withCover.at(2));
     if (artLayout == QStringLiteral("wide")) {
-        // Under the cover, the block is as tall as its one line needs.
-        QTRY_VERIFY(panel->height() < withCover.at(0).height());
+        // Under the cover, the block keeps its height, the empty lines
+        // their rows (#373 H14 G1).
+        const auto sameBlock = [&]() {
+            return sceneRect(panel) == withCover.at(0) && sceneRect(header) == withCover.at(1);
+        };
+        QTRY_VERIFY2(sameBlock(),
+                     qPrintable(QStringLiteral("panel %1 px high (with the cover %2), layout %3, block %4, header at %5")
+                                    .arg(panel->height()).arg(withCover.at(0).height())
+                                    .arg(panel->property("layoutHeight").toReal())
+                                    .arg(panel->property("wideBlockHeight").toReal()).arg(sceneRect(header).top())));
     } else {
         // Beside it, never shorter than the cover and the space under it.
         QVERIFY(panel->height() <= withCover.at(0).height());
@@ -1621,9 +1625,8 @@ void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid_data() {
 // library's header are on lines of the queue's rows. With the default
 // font and the 360 px sidebar the block is 82 px, three lines and their
 // spacing, and in the default window the library header's hairline
-// continues the seam between the queue and the visualization. The block
-// follows its lines, a whole row at a time: a file without tags, with the
-// one line, has a shorter one.
+// continues the seam between the queue and the visualization. A file
+// without tags has the same block.
 void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowHeight);
@@ -1675,14 +1678,13 @@ void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid() {
         QCOMPARE(sceneRect(queueSeam).bottom(), sceneRect(header).bottom());
     }
 
-    // A file without tags: its one line, and a block a whole number of
-    // rows shorter, on the grid still.
+    // A file without tags: its one line, and the same block, its empty
+    // rows kept (#373 H14 G1: it was a whole row or two shorter).
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
     const qreal bare = sceneRect(seam).top() - sceneRect(cover).bottom();
-    QVERIFY2(bare < block, qPrintable(QStringLiteral("%1 and %2").arg(bare).arg(block)));
-    QCOMPARE(std::fmod(block - bare, rowHeight), 0.0);
+    QCOMPARE(bare, block);
 }
 
 void UiMainWindowTest::nowPlayingDetailsAreOneColourAndNeverCutOff_data() {
@@ -1813,12 +1815,11 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data() {
     }
 }
 
-// The artist and the album both show at any font size (#373 H3: at 24 pt
-// "Artist — Album" was cut off before the album, with room under it): wide,
-// on one line where it fits, and otherwise on a line each, 4 px apart, 12 px
-// in from both sides, each whole where it fits on the width; narrow, on
-// lines of their own as always. Nothing else moves: the details under them,
-// then 14 px to the seam.
+// The artist and the album at any font size: wide, "Artist — Album" on one
+// line, whole where it fits and elided where it does not, with the whole in
+// the tooltip, 12 px in from both sides (#373 H14 G1: H3's line each for the
+// two made the block taller for some tracks); narrow, on lines of their own
+// as always.
 void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     QFETCH(qreal, pointSize);
     QFETCH(bool, narrow);
@@ -1876,11 +1877,14 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
 
     QQuickItem *title = named(window, "nowPlayingTitle");
     QQuickItem *combined = named(window, "nowPlayingArtistAlbum");
-    QQuickItem *artistLine = named(window, "nowPlayingWideArtist");
-    QQuickItem *albumLine = named(window, "nowPlayingWideAlbum");
     QQuickItem *details = named(window, "nowPlayingDetails");
-    QQuickItem *seam = named(window, "nowPlayingSeam");
-    QVERIFY(title && combined && artistLine && albumLine && details && seam);
+    QVERIFY(title && combined && details);
+    // One line for both, always (#373 H14 G1: split onto two lines where
+    // it did not fit, it made the block a row taller for some tracks).
+    for (const char *gone : {"nowPlayingWideArtist", "nowPlayingWideAlbum"}) {
+        QVERIFY2(named(window, gone) == nullptr, gone);
+    }
+    QVERIFY(!panel->property("wideArtistAlbumSplit").isValid());
     const QString both = artist + QStringLiteral(" — ") + album;
     const QFontMetricsF metrics(combined->property("font").value<QFont>());
     const qreal width = block.width() - 24;
@@ -1892,38 +1896,102 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     if (pointSize == 24.0) {
         QVERIFY(!fits);
     }
-    QCOMPARE(panel->property("wideArtistAlbumSplit").toBool(), !fits);
-    QQuickItem *lastLine = nullptr;
+    QTRY_VERIFY(shown(combined));
+    QCOMPARE(combined->property("text").toString(), both);
+    QCOMPARE(combined->property("maximumLineCount").toInt(), 1);
+    QCOMPARE(combined->property("wrapMode").toInt(), 0 /* Text.NoWrap */);
     if (fits) {
         QTRY_VERIFY2(notWhole(combined, both).isEmpty(), qPrintable(notWhole(combined, both)));
-        QVERIFY(!artistLine->isVisible() && !albumLine->isVisible());
-        lastLine = combined;
     } else {
-        QVERIFY(!combined->isVisible());
-        QTRY_VERIFY(shown(artistLine) && shown(albumLine));
-        QCOMPARE(artistLine->property("text").toString(), artist);
-        QCOMPARE(albumLine->property("text").toString(), album);
-        // Each whole, as both fit the width on their own.
-        QTRY_VERIFY2(notWhole(artistLine, artist).isEmpty(), qPrintable(notWhole(artistLine, artist)));
-        QVERIFY2(notWhole(albumLine, album).isEmpty(), qPrintable(notWhole(albumLine, album)));
-        QCOMPARE(sceneRect(artistLine).left(), block.left() + 12);
-        QCOMPARE(sceneRect(albumLine).left(), block.left() + 12);
-        QVERIFY(sceneRect(artistLine).top() >= sceneRect(title).bottom());
-        QTRY_COMPARE(sceneRect(albumLine).top() - sceneRect(artistLine).bottom(), 4.0);
-        QCOMPARE(colorOf(artistLine), tokenHex(window, "text"));
-        QCOMPARE(colorOf(albumLine), tokenHex(window, "text"));
-        lastLine = albumLine;
+        // Elided, within the inset, with the whole of it in the tooltip.
+        QTRY_VERIFY(combined->property("truncated").toBool());
+        QVERIFY(sceneRect(combined).left() >= block.left() + 12);
+        QVERIFY(sceneRect(combined).right() <= block.right() - 12);
+        QVERIFY(panel->property("textTruncated").toBool());
     }
-    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
+    QCOMPARE(colorOf(combined), tokenHex(window, "text"));
+    QTRY_VERIFY(sceneRect(combined).top() >= sceneRect(title).bottom());
+    QTRY_VERIFY(sceneRect(details).top() >= sceneRect(combined).bottom());
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
+}
+
+void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The wide text block is one height for every track (#373 H14 G1: an
+// untagged track's was 56 px, a tagged one's 82 and one with a long
+// album's 108, so the library's header under it moved by up to 26 px on a
+// track change): with the default font 82 px, on the queue's row grid; a
+// line the track has no text for keeps its row, empty, and "Artist —
+// Album" is one line, elided where it is long. The block, the library's
+// header and the lines that show stay where they are.
+void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack() {
+    QFETCH(qreal, pointSize);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    // Tall enough for the wide layout at 24 pt.
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1400);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QFont font = window->property("font").value<QFont>();
+    font.setPointSizeF(pointSize);
+    QVERIFY(window->setProperty("font", font));
+    QTRY_COMPARE(paletteOf(window)->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *block = named(window, "nowPlayingWideText");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    QQuickItem *title = named(window, "nowPlayingTitle");
+    QQuickItem *artistAlbum = named(window, "nowPlayingArtistAlbum");
+    QQuickItem *details = named(window, "nowPlayingDetails");
+    QVERIFY(panel && block && cover && seam && header && title && artistAlbum && details);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+
+    // The block from the cover's foot to the seam, the library's header,
+    // and each line's row.
+    const auto geometry = [&]() {
+        return QList<QRectF>{QRectF(0, sceneRect(cover).bottom(), 1, sceneRect(seam).top() - sceneRect(cover).bottom()),
+                             sceneRect(header), sceneRect(title), sceneRect(artistAlbum), sceneRect(details)};
+    };
+    QTRY_VERIFY(!handover->property("running").toBool());
+    const QList<QRectF> tagged = geometry();
+    if (pointSize == 10.0) {
+        QCOMPARE(tagged.first().height(), 82.0);
+    }
     QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
 
-    // A track whose artist and album fit on one line goes back to it.
-    bridge->setProperty("currentTrackArtist", QStringLiteral("Ash"));
-    bridge->setProperty("currentTrackAlbum", QStringLiteral("Dusk"));
-    QTRY_VERIFY(!panel->property("wideArtistAlbumSplit").toBool());
-    QTRY_VERIFY2(notWhole(combined, QStringLiteral("Ash — Dusk")).isEmpty(),
-                 qPrintable(notWhole(combined, QStringLiteral("Ash — Dusk"))));
-    QVERIFY(!artistLine->isVisible() && !albumLine->isVisible());
+    // Untagged: the file name for a title, the other rows empty, kept.
+    clearTrackTags(bridge);
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_COMPARE(panel->property("detailsText").toString(), QString());
+    QTRY_VERIFY(!handover->property("running").toBool());
+    QVERIFY(shown(artistAlbum) && shown(details));
+    QCOMPARE(artistAlbum->property("text").toString(), QString());
+    QCOMPARE(geometry(), tagged);
+
+    // A long album: one line, elided, with the whole in the tooltip.
+    playTrack(bridge);
+    bridge->setProperty("currentTrackAlbum",
+                        QStringLiteral("A Remarkably Long Album Title That Runs On Past The Cover"));
+    QTRY_VERIFY(artistAlbum->property("truncated").toBool());
+    QTRY_VERIFY(!handover->property("running").toBool());
+    QCOMPARE(geometry(), tagged);
+    QVERIFY(panel->property("textTruncated").toBool());
+
+    // A title alone, no artist or album: the same.
+    bridge->setProperty("currentTrackArtist", QString());
+    bridge->setProperty("currentTrackAlbum", QString());
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_VERIFY(!handover->property("running").toBool());
+    QCOMPARE(geometry(), tagged);
 }
 
 void UiMainWindowTest::nowPlayingMarksFollowTheFont_data() {

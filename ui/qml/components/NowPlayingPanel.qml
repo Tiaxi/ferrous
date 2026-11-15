@@ -13,12 +13,14 @@ import "../logic/FormatUtils.js" as FormatUtils
 // card, and a seam at its foot, where the library starts.
 //
 // - Wide: the cover edge to edge, then the title, "Artist — Album" and
-//   "Year · Genre · Track n" under it, inset 12 px, in a block that with
-//   the cover is a whole number of the list's rows high (see
-//   wideTextTop), then the seam. Where "Artist — Album" would be cut off,
-//   as with a large
-//   font, the artist and the album take a line each, so the album is not
-//   lost to the ellipsis.
+//   "Year · Genre · Track n" under it, inset 12 px, a line each, in a
+//   block that with the cover is a whole number of the list's rows high
+//   (see wideTextTop), then the seam. The block is one height for every
+//   track (#373 H14 G1: an untagged track's, a tagged one's and one with a
+//   long album's were 56, 82 and 108 px, so a track change moved the
+//   library by up to 26 px): each line is elided where it does not fit,
+//   with the whole text in the tooltip, and a line the track has no text
+//   for keeps its row, empty.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
 //   lines beside it, or under it when there is no room beside it or they
 //   would run well past it, then 12 px before the seam. Under it, the
@@ -51,8 +53,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   and the other moved the library some 360 to 400 px). Between a track
 //   with a cover and one without, the cover and the stand-in cross-fade
 //   in place, as two covers do; the lines and the library stay put.
-// - A line a track has no text for, as for a file without tags, takes no
-//   room (#373 H6): the lines under it move up.
+// - Narrow, a line a track has no text for, as for a file without tags,
+//   takes no room (#373 H6): the lines under it move up, within the block.
 //
 // The title is over the rest: DemiBold, and a Kirigami heading's size,
 // level 1 under the wide cover and level 2 beside the narrow one; the
@@ -87,9 +89,7 @@ Item {
     // a track does not switch it.
     property real availableHeight: 0
     property real libraryReserve: 0
-    readonly property real wideReservedHeight: root.width + root._wideBlockHeight(
-        wideTitleProbe.implicitHeight + 2 + wideLineProbe.implicitHeight + 2
-        + wideDetailsProbe.implicitHeight) + root.seamHeight
+    readonly property real wideReservedHeight: root.wideLayoutHeight
     readonly property bool shortHeight: root.availableHeight > 0
         && root.availableHeight - root.wideReservedHeight < root.libraryReserve
     readonly property int textInset: 12
@@ -303,7 +303,6 @@ Item {
         artistAlbum: root.artistAlbumText,
         details: root.shownDetailsText,
         artist: root.artistText,
-        album: root.albumText,
         narrowAlbum: root.narrowAlbumText,
         narrowDetails: root.shownNarrowDetailsText
     })
@@ -968,7 +967,7 @@ Item {
 
     // A line of the wide layout's title, of its artist and album, and of
     // its details, as tall as their text lays them out, whatever the track:
-    // the wide layout's height, which wideReservedHeight counts.
+    // the wide layout's height.
     component LineProbe: Text {
         visible: false
         text: "X"
@@ -989,18 +988,6 @@ Item {
         id: wideDetailsProbe
         font.pointSize: root.uiPalette.smallPointSize
     }
-
-    // Wide: the artist and the album on a line each where "Artist — Album"
-    // would be cut off on one, 4 px apart, so the album shows (#373 H3).
-    // With only one of them there is nothing to split.
-    FontMetrics {
-        id: artistAlbumMetrics
-        font.family: root.uiPalette.baseFont.family
-        font.pointSize: root.uiPalette.basePointSize
-    }
-    readonly property bool wideArtistAlbumSplit: root.artistText.length > 0 && root.albumText.length > 0
-        && artistAlbumMetrics.advanceWidth(root.artistAlbumText) > wideColumn.width
-    readonly property int wideArtistAlbumGap: 4
 
     // The tile's own mark, which shows only while the tile grows from the
     // compact row before the cover is known, or shrinks into it: a third
@@ -1024,7 +1011,11 @@ Item {
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
             : Math.max(root.coverY + root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
-    readonly property real wideBlockHeight: root._wideBlockHeight(liveText.wideHeight)
+    // The wide block's height: its three lines', whatever the track has
+    // text for (#373 H14 G1), from the font alone.
+    readonly property real wideLinesHeight: wideTitleProbe.implicitHeight + wideColumn.spacing
+        + wideLineProbe.implicitHeight + wideColumn.spacing + wideDetailsProbe.implicitHeight
+    readonly property real wideBlockHeight: root._wideBlockHeight(root.wideLinesHeight)
     readonly property real wideLayoutHeight: root.width + root.wideBlockHeight + root.seamHeight
     readonly property real layoutHeight: root.wideRoom ? root.wideLayoutHeight : root.narrowLayoutHeight
     // The compact row with nothing loaded, the block with a track, and
@@ -1088,9 +1079,9 @@ Item {
         readonly property var features: root.tabularLines[line.lineKey] === true
             ? root.uiPalette.tabularFigures : ({})
         property color color: root.uiPalette.text
-        // Whether the layout shows the line, which then takes no room when
-        // a track has no text for it.
-        property bool shownLine: true
+        // Whether the line keeps its row when a track has no text for it,
+        // as under the wide cover; otherwise it then takes no room.
+        property bool keepsRow: false
         readonly property bool collapsed: line.text.length === 0
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
@@ -1214,9 +1205,21 @@ Item {
 
         Layout.fillWidth: true
         // A line of the font's height; a track's empty line takes none,
-        // rather than leave a blank line in the block (#373 H6).
-        implicitHeight: stillText.implicitHeight
-        visible: line.shownLine && !line.collapsed
+        // rather than leave a blank line in the block (#373 H6), unless it
+        // keeps its row.
+        implicitHeight: line.collapsed ? (line.keepsRow ? rowProbe.implicitHeight : 0)
+                                       : stillText.implicitHeight
+        visible: !line.collapsed || line.keepsRow
+
+        // A line of the font, for a row kept empty.
+        Text {
+            id: rowProbe
+            visible: false
+            text: "X"
+            textFormat: Text.PlainText
+            font: stillText.font
+            Accessible.ignored: true
+        }
 
         FontMetrics {
             id: metrics
@@ -1444,13 +1447,9 @@ Item {
         id: liveText
         objectName: "nowPlayingLines"
 
-        readonly property real wideHeight: wideColumn.implicitHeight
         readonly property real narrowHeight: narrowColumn.implicitHeight
         readonly property bool truncated: root.wideRoom
-            ? (wideTitle.truncated || wideDetails.truncated
-                || (root.wideArtistAlbumSplit
-                    ? wideArtist.truncated || wideAlbum.truncated
-                    : wideArtistAlbum.truncated))
+            ? (wideTitle.truncated || wideArtistAlbum.truncated || wideDetails.truncated)
             : (narrowTitle.truncated || narrowArtist.truncated
                 || narrowAlbum.truncated || narrowDetails.truncated)
         readonly property bool hovered: wideHover.hovered || narrowHover.hovered
@@ -1486,29 +1485,14 @@ Item {
                 text: root.trackLines.title
                 pointSize: root.wideTitlePointSize
                 weight: Font.DemiBold
+                keepsRow: true
             }
             FadingLine {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
-                shownLine: !root.wideArtistAlbumSplit
                 text: root.trackLines.artistAlbum
-            }
-            FadingLine {
-                id: wideArtist
-                lineKey: "artist"
-                name: "WideArtist"
-                shownLine: root.wideArtistAlbumSplit
-                text: root.trackLines.artist
-            }
-            FadingLine {
-                id: wideAlbum
-                lineKey: "album"
-                name: "WideAlbum"
-                shownLine: root.wideArtistAlbumSplit
-                text: root.trackLines.album
-                // With the column's 2 px spacing, 4 px under the artist.
-                Layout.topMargin: root.wideArtistAlbumGap - wideColumn.spacing
+                keepsRow: true
             }
             FadingLine {
                 id: wideDetails
@@ -1517,6 +1501,7 @@ Item {
                 text: root.trackLines.details
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
+                keepsRow: true
             }
         }
 
