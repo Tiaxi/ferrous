@@ -23,6 +23,7 @@ private slots:
     void testMutedChannelRendersGrayscale();
     void spectrogramForceFpsOverlayDoesNotOverrideQmlBinding();
     void spectrogramFpsOverlayToggleKeepsSceneNode();
+    void timeAfterTheCutIsTheFloor();
     void spectrogramOverlaysKeepClearOfTheReservedCorner();
     void crosshairReadoutKeepsItsGapFromTheCornerPlates();
     void spectrogramCrosshairAndGridPropertiesAndHoverTracking();
@@ -883,6 +884,50 @@ void SpectrogramSmokeTest::spectrogramForceFpsOverlayDoesNotOverrideQmlBinding()
     QCOMPARE(item.showFpsOverlay(), true);
     item.setShowFpsOverlay(false);
     QCOMPARE(item.showFpsOverlay(), false);
+}
+
+// The time after where a file is cut off (markerSeconds), which the
+// analysis fills with silence to the length the file claims, is the plot's
+// floor, not black (#373 H12 Z10): one floor for everything that is not
+// the track. Silence within the track stays the colour map's black, data.
+void SpectrogramSmokeTest::timeAfterTheCutIsTheFloor() {
+    QQuickWindow window;
+    window.resize(200, 100);
+    window.setColor(Qt::white);
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    SpectrogramItem &item = *new SpectrogramItem(window.contentItem());
+    const QColor floor(QStringLiteral("#14062e"));
+    item.setFloorColor(floor);
+    item.setWidth(200);
+    item.setHeight(100);
+    item.setDisplayMode(1);
+    item.setPlaying(false);
+    constexpr int bins = 8;
+    // Silence, all of it: 150 columns of 1024 frames at 48 kHz.
+    item.feedPrecomputedChunk(QByteArray(bins * 150, '\0'), bins, 0, 150, 0, 150, 48000, 1024, true, true, 1,
+                              false, 1);
+    const auto drawn = [&](double x) {
+        const QImage image = window.grabWindow();
+        const double scale = double(image.width()) / window.width();
+        return image.pixelColor(int(x * scale), int(50 * scale));
+    };
+    // No cut: silence is black wherever the track has it.
+    QTRY_COMPARE(drawn(100.5), QColor(Qt::black));
+    QVERIFY(std::isnan(item.markerX()));
+
+    // Cut off at its 80th column: past it the floor, before it silence.
+    item.setMarkerSeconds(80 * 1024 / 48000.0);
+    QTRY_VERIFY(!std::isnan(item.markerX()));
+    const double cut = item.markerX();
+    QVERIFY2(cut > 20 && cut < 180, qPrintable(QString::number(cut)));
+    QTRY_COMPARE(drawn(cut + 2.5), floor);
+    QCOMPARE(drawn(199.5), floor);
+    QCOMPARE(drawn(cut - 3.5), QColor(Qt::black));
+
+    // The cut gone: black again.
+    item.setMarkerSeconds(-1);
+    QTRY_COMPARE(drawn(cut + 2.5), QColor(Qt::black));
 }
 
 void SpectrogramSmokeTest::spectrogramFpsOverlayToggleKeepsSceneNode() {

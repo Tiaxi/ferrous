@@ -726,6 +726,8 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
                 node->appendChildNode(new QSGSimpleRectNode);
             }
         }
+        // The line across the column's top, over the lanes.
+        node->appendChildNode(new QSGSimpleRectNode);
         node->lanes = m_laneCount;
     }
     setRect(node->firstChild(), boundingRect(), m_seamColor);
@@ -792,6 +794,8 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         next(onFill ? track(tickY + 2.0, 1.0) : QRectF(), m_gapColor);
         next(shown.peak >= 0 ? track(tickY, 2.0) : QRectF(), m_peakColor);
     }
+    setRect(node->lastChild(), m_topSeamColor.alpha() > 0 ? QRectF(0.0, 0.0, width(), 1.0) : QRectF(),
+            m_topSeamColor);
     return node;
 }
 

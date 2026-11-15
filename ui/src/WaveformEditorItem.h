@@ -103,7 +103,10 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // something else, such as the visualization's mode switch over the
     // spectrogram, waits for it rather than show the bare floor (#373 H11:
     // the per-channel view, which the overview has no lanes for, was empty
-    // for 80 to 170 ms, until its detail was decoded).
+    // for 80 to 170 ms, until its detail was decoded). A frame of the
+    // overview where it is not to the detail's scale, as in the mixed view
+    // of a source of more than one channel, is not the picture while the
+    // detail is on its way (see overviewProvisionalLocked).
     Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
 
 public:
@@ -398,6 +401,13 @@ private:
     bool startDetailRequest();
     // Whether the overview has a waveform for `channels` lanes.
     bool overviewDrawableLocked(int channels) const;
+    // Whether the overview, drawn, is not to the scale of the picture the
+    // detail gives: in the mixed view of a source of more than one
+    // channel, the overview is the peak of every channel and the detail
+    // their average, the downmix, far lower for channels that differ, as a
+    // 5.1 track's (#373 H12 Z6: a switch to the waveform showed a near
+    // solid envelope for some 300 ms, then the downmix).
+    bool overviewProvisionalLocked() const;
     // Follows pictureReady, on the GUI thread: after a frame is painted,
     // and when a detail request ends without one.
     void updatePictureReady();
@@ -710,8 +720,11 @@ private:
     // pixels.
     QImage m_cache;
     bool m_cacheDirty{true};
-    // Whether the cache holds a waveform, rather than the bare floor.
+    // Whether the cache holds a waveform, rather than the bare floor, and
+    // whether that is the overview at a scale that is not the picture's
+    // (overviewProvisionalLocked).
     bool m_cacheShowsWaveform{false};
+    bool m_cacheWaveformProvisional{false};
     // Whether a frame has been painted for the source, and whether one of
     // them drew its waveform (see pictureReady).
     bool m_framePainted{false};

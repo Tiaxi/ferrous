@@ -291,6 +291,8 @@ private slots:
     void plotPlateLabelHasAnEdgeOutside();
     void smallControlsScaleWithALargeFont_data();
     void smallControlsScaleWithALargeFont();
+    void plotSegmentHoverStaysUnderTheChosenPlate_data();
+    void plotSegmentHoverStaysUnderTheChosenPlate();
     void plotToolButtonDrawsCheckedAndFocusApart_data();
     void plotToolButtonDrawsCheckedAndFocusApart();
     void plotToolButtonIsAnAccessibleCheckableButton();
@@ -609,9 +611,20 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
-    QVERIFY(channelDistance(colorOf(waveform, "meterFill"),
-                            fromHex(dark ? QStringLiteral("#7d8790") : QStringLiteral("#5b6670")))
-            <= 3);
+    // The waveform's meter in the waveform's colour (#373 H12 Z5): 35 %
+    // toward the view, 30 % in the light theme, where 35 % is under 3:1 on
+    // the trough; the trough faint, the text at 6 %; a seam across its top
+    // in the seam colour. The spectrogram's meter has no such seam.
+    {
+        const QColor wave = colorOf(tokens, "wave");
+        const double amount = dark ? 0.35 : 0.30;
+        QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
+                 qPrintable(colorOf(waveform, "meterFill").name()));
+        QVERIFY(std::abs(colorOf(waveform, "meterTrough").alphaF() - 0.06) < 0.003);
+        QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
+        QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);
+        QCOMPARE(colorOf(media, "meterTopSeam").alpha(), 0);
+    }
     // A checked button: the accent in dark, the focus ring's darker blue in
     // light; its glyph the view in dark, white in light.
     QVERIFY(channelDistance(colorOf(waveform, "checkedFill"),
@@ -1178,6 +1191,98 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
         QVERIFY2(label->height() >= text->implicitHeight() + 6,
                  qPrintable(QStringLiteral("%1 for %2").arg(label->height()).arg(text->implicitHeight())));
     }
+}
+
+void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("plotMode");
+    QTest::newRow("spectrogram, dark") << true << 0;
+    QTest::newRow("spectrogram, light") << false << 0;
+    QTest::newRow("waveform, dark") << true << 1;
+    QTest::newRow("waveform, light") << false << 1;
+}
+
+// A segment of a plate's choices, as the visualization's mode switch,
+// under the pointer while another is the chosen one (#373 H12 Z4: the
+// 12 % hover with its glyph whole came to the chosen plate's brightness):
+// a wash of the plot's text colour at 8 %, against the chosen plate's
+// 18 %, with its glyph at the quiet 60 %, whole only while pressed. As
+// drawn, in both themes and on both plots, the hovered one stands off the
+// plate less than the chosen one does, by a clear margin.
+void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
+    QFETCH(bool, dark);
+    QFETCH(int, plotMode);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, kPlotItems), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr);
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *plot = itemNamed(root.get(), QStringLiteral("plot"));
+    QVERIFY(plot != nullptr);
+    plot->setProperty("plotMode", plotMode);
+    QObject *plotColors = plot->property("plotColors").value<QObject *>();
+    QVERIFY(plotColors != nullptr);
+    QQuickItem *chosen = itemNamed(root.get(), QStringLiteral("firstButton"));
+    QQuickItem *other = itemNamed(root.get(), QStringLiteral("secondButton"));
+    QVERIFY(chosen != nullptr && other != nullptr);
+    for (QQuickItem *button : {chosen, other}) {
+        QVERIFY(button->setProperty("segment", true));
+    }
+    QVERIFY(chosen->property("checked").toBool());
+    QVERIFY(!other->property("checked").toBool());
+    QQuickItem *hover = childNamed(other, QStringLiteral("plotToolButtonHover"));
+    QQuickItem *fill = childNamed(chosen, QStringLiteral("plotToolButtonChecked"));
+    QQuickItem *letter = childNamed(other, QStringLiteral("plotToolButtonGlyph"));
+    QVERIFY(hover != nullptr && fill != nullptr && letter != nullptr);
+
+    // The pointer over the other one, until its wash has faded in: from
+    // off the plate, as QTest leaves a move to where it already is out.
+    QTest::mouseMove(window, QPoint(2, 2));
+    QTest::mouseMove(window, other->mapToScene(QPointF(12, 12)).toPoint());
+    QTRY_VERIFY(other->property("hovered").toBool());
+    QTRY_COMPARE(hover->opacity(), 1.0);
+    const QColor text = colorOf(plotColors, "plotText");
+    const QColor wash = colorOf(hover, "color");
+    const QColor plateFill = colorOf(fill, "color");
+    QCOMPARE(wash.rgb(), text.rgb());
+    QVERIFY2(std::abs(wash.alphaF() - 0.08) < 0.005, qPrintable(QString::number(wash.alphaF())));
+    QCOMPARE(plateFill.rgb(), text.rgb());
+    QVERIFY2(std::abs(plateFill.alphaF() - 0.18) < 0.005, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(std::abs(letter->opacity() - 0.60) < 0.005, qPrintable(QString::number(letter->opacity())));
+
+    // As drawn: the plate around the buttons, the chosen one's plate and
+    // the hovered one's wash, clear of their glyphs.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const qreal scale = grabScale(image, window);
+    const auto at = [&](QQuickItem *item, QPointF point) {
+        return pixelAt(image, item->mapToScene(point) * scale);
+    };
+    const QColor plate = drawnOver(colorOf(plotColors, "plotPlate"), colorOf(plotColors, "plotBg"));
+    const QColor drawnChosen = at(chosen, QPointF(2.5, 2.5));
+    const QColor drawnHover = at(other, QPointF(2.5, 2.5));
+    QVERIFY2(channelDistance(drawnChosen, drawnOver(plateFill, plate)) <= 3,
+             qPrintable(describe(QStringLiteral("the chosen plate"), drawnChosen, plate)));
+    QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
+             qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, plate)));
+    // Toward the text colour, both: lighter on a dark plate, darker on a
+    // light one, the hovered one less by far.
+    const qreal chosenStep = contrastRatio(drawnChosen, plate);
+    const qreal hoverStep = contrastRatio(drawnHover, plate);
+    QVERIFY2(hoverStep > 1.0 && chosenStep - 1.0 >= 1.8 * (hoverStep - 1.0),
+             qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
+    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.05,
+             qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
+
+    // Pressed, its glyph is whole.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
+    QTRY_VERIFY(other->property("down").toBool());
+    QCOMPARE(letter->opacity(), 1.0);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
 }
 
 void UiFoundationsTest::plotToolButtonDrawsCheckedAndFocusApart_data() {

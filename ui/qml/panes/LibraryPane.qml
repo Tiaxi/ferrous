@@ -51,15 +51,23 @@ Rectangle {
     readonly property int chevronGap: 6
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
-    // An album without a cover: a swatch in the thumbnail's place, so its
-    // name lines up with its neighbours' and no hole is left (#373 H10),
-    // in the plot's floor colour, with no border, as the now-playing
-    // panel's stand-in for a cover is (#373 H11: a filled grey box, the
-    // hover tint, read as a control). A cover that has not loaded yet
-    // keeps the hover tint for the moment it takes, so that rows coming
-    // into view do not flash the swatch before their covers.
-    readonly property color thumbnailPlaceholderColor: root.uiPalette.plotFloor
+    // An album without a cover, or whose cover failed to load: the glyph
+    // the search's results show for one, Breeze's audio disc, 16 px, in the
+    // tertiary text colour, centred in the thumbnail's place, so its name
+    // lines up with its neighbours' and no hole is left (#373 H10), and the
+    // lists have one way to say "no cover" (#373 H12 Z2: the plot floor's
+    // indigo swatch, at about 1:1 on the view, read as a cover that failed
+    // to load; a grey box, before, as a control). A cover that has not
+    // loaded yet has the hover tint for the moment it takes, so that rows
+    // coming into view do not flash the glyph before their covers.
+    readonly property string thumbnailPlaceholderGlyph: "media-optical-audio"
+    readonly property int thumbnailPlaceholderGlyphSize: Kirigami.Units.iconSizes.small
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
+    // No fill under the glyph: the loading tint, wholly transparent, so
+    // that the fill changes as a cover loads, which the thumbnail repaints
+    // on (Kirigami's ShadowedTexture does not for its image alone under
+    // the software renderer).
+    readonly property color thumbnailMissingColor: ColorUtils.withAlpha(root.thumbnailLoadingColor, 0)
     // The year, and a library folder's track count, 4 px in from the
     // text's right end (#373 H11), clear of the scrollbar.
     readonly property int yearInset: Kirigami.Units.smallSpacing
@@ -302,6 +310,7 @@ Rectangle {
                 }
 
                 ScrollBar.vertical: Components.LaneScrollBar {
+                    id: libraryScrollBar
                     objectName: "libraryScrollBar"
                     uiPalette: root.uiPalette
                 }
@@ -523,6 +532,9 @@ Rectangle {
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
+                                // The ring stops at the scrollbar's lane
+                                // while it shows, clear of its thumb.
+                                focusRingLane: libraryScrollBar.visible ? libraryScrollBar.lane : 0
                             }
 
                             Kirigami.Icon {
@@ -597,7 +609,11 @@ Rectangle {
                             }
 
                             Kirigami.ShadowedImage {
+                                id: rowThumbnail
                                 objectName: "libraryRowThumbnail"
+                                // No cover to show: none, or one that failed.
+                                readonly property bool missing: status !== Image.Ready
+                                    && ((coverPath || "") === "" || status === Image.Error)
                                 visible: libraryRow.showsThumbnail
                                 x: libraryRow.chevronX + root.chevronSize + root.chevronGap
                                 y: Math.round((libraryRow.height - height) / 2)
@@ -605,8 +621,8 @@ Rectangle {
                                 height: root.thumbnailSize
                                 radius: 2
                                 color: status === Image.Ready ? "transparent"
-                                    : ((coverPath || "") === "" ? root.thumbnailPlaceholderColor
-                                                                : root.thumbnailLoadingColor)
+                                    : (rowThumbnail.missing ? root.thumbnailMissingColor
+                                                            : root.thumbnailLoadingColor)
                                 source: libraryRow.albumCoverInViewport
                                     ? root.uiBridge.libraryThumbnailSource(coverPath || "", coverStamp || "")
                                     : ""
@@ -614,6 +630,22 @@ Rectangle {
                                 asynchronous: true
                                 sourceSize.width: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
                                 sourceSize.height: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
+                            }
+
+                            // An album without a cover: the disc glyph,
+                            // centred in the thumbnail's place. Its source
+                            // never changes, as a recycled row's would on
+                            // every scroll, which looks the icon up again.
+                            Kirigami.Icon {
+                                objectName: "libraryRowCoverPlaceholder"
+                                visible: libraryRow.showsThumbnail && rowThumbnail.missing
+                                x: rowThumbnail.x + (root.thumbnailSize - width) / 2
+                                y: rowThumbnail.y + (root.thumbnailSize - height) / 2
+                                width: root.thumbnailPlaceholderGlyphSize
+                                height: root.thumbnailPlaceholderGlyphSize
+                                source: root.thumbnailPlaceholderGlyph
+                                isMask: true
+                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
                             }
 
                             Text {

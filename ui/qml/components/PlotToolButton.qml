@@ -13,10 +13,17 @@ import "../logic/KeyUtils.js" as KeyUtils
 // A `segment`, one of a plate's choices of which one is always checked,
 // as the visualization's mode switch, shows the chosen one as a neutral
 // plate instead (#373 H11: the accent's solid blue read as keyboard focus,
-// and as the loudest thing on the plot): the plot's text colour at 20 %
+// and as the loudest thing on the plot): the plot's text colour at 18 %
 // over the plate, with its glyph in the text colour whole; the others'
-// glyphs are at 60 %, whole again under the pointer or the keyboard. The
-// accent is left to the focus ring.
+// glyphs are at 60 %, whole only while pressed. Under the pointer one of
+// the others has a wash of the text colour at 8 %, well under the chosen
+// one's plate, so a hovered choice never reads as the chosen one (#373
+// H12 Z4: the 12 % hover with a whole glyph came to the plate's
+// brightness). The accent is left to the focus ring. A segment is a
+// checkable, auto-exclusive button, so it is a radio button to assistive
+// technology, checkable and checked as chosen (#373 H12: as a plain button
+// it told of its checked state changing but not that it could be checked),
+// and choosing the chosen one again leaves it chosen.
 //
 // Keyboard focus is a separate 2 px ring 1 px outside the button, with a
 // 1 px gap in the plate's colour, so it reads on the plate and around a
@@ -32,14 +39,21 @@ ToolButton {
     property real glyphPointSize: root.uiPalette.smallPointSize
     // One of a plate's choices rather than a state that is on or off.
     property bool segment: false
-    readonly property real segmentFillOpacity: 0.20
+    readonly property real segmentFillOpacity: 0.18
     readonly property real segmentRestOpacity: 0.60
+    // The pointer's wash: a segment's, under its chosen plate, and a
+    // button's, which checked turns into a solid fill.
+    readonly property real segmentHoverOpacity: 0.08
+    readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
+    readonly property color hoverColor: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
+                                                root.plotColors.plotText.b, root.hoverOpacity)
     readonly property color glyphColor: root.segment
         ? root.plotColors.plotText
         : (root.checked ? root.plotColors.checkedGlyph : root.plotColors.plotText)
-    // A segment that is not the chosen one is quieter, at rest.
-    readonly property real glyphOpacity: root.segment && !root.checked
-            && !root.hovered && !root.visualFocus
+    // A segment that is not the chosen one is quieter, under the pointer
+    // and with the keyboard's focus too, which its wash and the focus ring
+    // show; whole only while pressed.
+    readonly property real glyphOpacity: root.segment && !root.checked && !root.down
         ? root.segmentRestOpacity : 1
     readonly property color checkedColor: root.segment
         ? Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
@@ -60,7 +74,16 @@ ToolButton {
     // The focus ring reaches over the plate's 2 px gap to the next button.
     z: root.visualFocus ? 1 : 0
 
+    // A segment checks as a radio button does; its owner binds `checked`
+    // to what is chosen and chooses on a click.
+    checkable: root.segment
+    autoExclusive: root.segment
     Accessible.name: root.text
+    // Qt's own roles otherwise: a toggle is a check box.
+    Accessible.role: root.segment ? Accessible.RadioButton
+        : (root.checkable ? Accessible.CheckBox : Accessible.Button)
+    Accessible.checkable: root.checkable
+    Accessible.checked: root.checked
 
     // Space presses the focused button rather than playing or pausing; keys
     // with modifiers stay the shortcuts'.
@@ -104,8 +127,7 @@ ToolButton {
             objectName: "plotToolButtonHover"
             anchors.fill: parent
             radius: 3
-            color: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
-                           root.plotColors.plotText.b, 0.12)
+            color: root.hoverColor
             opacity: root.hovered && !root.checked ? 1 : 0
             visible: opacity > 0
 
