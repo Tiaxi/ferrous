@@ -640,10 +640,9 @@ QString standInProblem(QQuickWindow *window) {
     }
     const bool wide = panel->property("layoutMode").toString() == QStringLiteral("wide");
     const qreal side = wide ? panel->width() : 96.0;
-    // At the panel's corner, or, in the wide sidebar's narrow layout, in
-    // from it (nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort).
-    const QPointF corner = sceneRect(panel).topLeft()
-        + QPointF(panel->property("coverX").toReal(), panel->property("coverY").toReal());
+    // At the panel's corner, wide or narrow, at any font size (#373 H14
+    // G9).
+    const QPointF corner = sceneRect(panel).topLeft();
     if (!shown(area) || !shown(cover) || cover->opacity() != 1.0 || cover->width() != side
         || cover->height() != side || sceneRect(cover).topLeft() != corner) {
         return QStringLiteral("the cover's place %1 by %2 at %3").arg(cover->width()).arg(cover->height())
@@ -2228,9 +2227,10 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QTest::qWait(100);
     QCOMPARE(switches.count(), 1);
     // The lines beside the cover, 12 px after it, and the seam 12 px under
-    // the lowest of them or the cover. The cover is not at the panel's
-    // corner here (#373 H11): it starts at the 12 px text inset, as the
-    // library's rows under it do, and at the top of the title's capitals.
+    // the lowest of them or the cover. The cover is at the panel's corner,
+    // as in a narrow sidebar and as the wide one is (#373 H14 G9: here it
+    // was in 12 px, at the top of the title's capitals; one rule now at
+    // every font size).
     QVERIFY(!panel->property("narrow").toBool());
     QVERIFY(!panel->property("narrowStacked").toBool());
     QVERIFY(grown(window));
@@ -2249,17 +2249,10 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
     QCOMPARE(sceneRect(narrowTitle).top(),
              sceneRect(panel).top() + panel->property("narrowTextTop").toReal());
-    QVERIFY(sceneRect(narrowTitle).bottom() < tile.bottom());
-    QCOMPARE(tile.left(), sceneRect(panel).left() + 12);
-    QCOMPARE(tile.left(), sceneRect(named(window, "libraryHeader")).left()
-                              + named(window, "libraryHeader")->property("leftInset").toReal());
-    {
-        const QFontMetricsF metrics(narrowTitle->property("font").value<QFont>());
-        const qreal capitalsTop = sceneRect(narrowTitle).top() + metrics.ascent()
-            - metrics.tightBoundingRect(QStringLiteral("H")).height();
-        QVERIFY2(std::abs(tile.top() - capitalsTop) <= 1.0,
-                 qPrintable(QStringLiteral("cover at %1, capitals at %2").arg(tile.top()).arg(capitalsTop)));
-    }
+    QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
+    QCOMPARE(tile.topLeft(), sceneRect(panel).topLeft());
+    QVERIFY(!panel->property("insetCover").isValid());
+    QCOMPARE(sceneRect(narrowTitle).left(), sceneRect(panel).left() + 96 + 12);
     if (pointSize > 0) {
         // The lines run past the cover's foot at 24 pt.
         QVERIFY2(lowest > tile.bottom(), qPrintable(QString::number(lowest - tile.bottom())));

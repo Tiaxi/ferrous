@@ -21,9 +21,12 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   library by up to 26 px): each line is elided where it does not fit,
 //   with the whole text in the tooltip, and a line the track has no text
 //   for keeps its row, empty.
-// - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
-//   lines beside it, or under it when there is no room beside it or they
-//   would run well past it, then 12 px before the seam. Under it, the
+// - Narrow (a sidebar under narrowWidth): a 96 px cover at the panel's top
+//   left corner, as the wide one is, at every font size (#373 H14 G9: in
+//   a wide sidebar it was in 12 px, at the top of the title's capitals),
+//   with four short lines beside it, 12 px after it and 10 px down, or
+//   under it when there is no room beside it or they would run well past
+//   it, then 12 px before the seam. Under it, the
 //   title and the artist wrap onto a second line rather than be cut off,
 //   and the lines are 4 px apart. A sidebar too short for the wide layout
 //   to leave the library about six rows, as with a large font or a short
@@ -906,17 +909,6 @@ Item {
     readonly property int seamHeight: 1
     // The top of the lines beside the narrow cover.
     readonly property int narrowTextTop: 10
-    // In a sidebar wide enough for the wide layout that takes the narrow
-    // one for its height alone, as with a large font, the cover is not at
-    // the panel's corner, where it stood apart from lines far larger than
-    // it (#373 H11): it starts at the text inset, as the library's rows
-    // under it do, and at the top of the title's capitals.
-    readonly property bool insetCover: !root.wideRoom && !root.narrow
-    readonly property real coverX: root.insetCover ? root.textInset : 0
-    readonly property real coverY: root.insetCover
-        ? root.narrowTextTop + Math.round(narrowTitleMetrics.ascent
-            + narrowTitleMetrics.tightBoundingRect("H").y)
-        : 0
     // Where the line under the cover starts down: under the cover's
     // place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
@@ -1009,7 +1001,7 @@ Item {
     // cover's height, and more when the lines need it.
     readonly property real narrowLayoutHeight: (root.narrowStacked
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
-            : Math.max(root.coverY + root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
+            : Math.max(root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
     // The wide block's height: its three lines', whatever the track has
     // text for (#373 H14 G1), from the font alone.
@@ -1351,9 +1343,8 @@ Item {
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
-        x: root.coverX
-        // From the compact row's top down into place, as the layout grows.
-        y: root._whileGrowing(root.coverY * root.presence)
+        x: 0
+        y: 0
         width: root.coverSize
         height: root._whileGrowing(Math.min(root.coverSize, root.idleRowHeight)
             + Math.max(0, root.coverSize - root.idleRowHeight) * root.presence)
@@ -1514,8 +1505,7 @@ Item {
             objectName: "nowPlayingNarrowText"
             visible: !root.wideRoom && !root.idle
             // Beside the cover or under it.
-            x: root.narrowStacked ? root.textInset
-                : root.coverX + root.narrowCoverSize + root.textInset
+            x: root.narrowStacked ? root.textInset : root.narrowCoverSize + root.textInset
             // Under the cover's place, with which it moves while that grows;
             // beside it, from under the compact row up into place, so its
             // text does not show where the row's does.
