@@ -699,6 +699,8 @@ private slots:
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
+    void showInLibraryBringsThePlayingRowIntoView_data();
+    void showInLibraryBringsThePlayingRowIntoView();
     void nowPlayingBlockIsOnTheQueuesRowGrid_data();
     void nowPlayingBlockIsOnTheQueuesRowGrid();
     void nowPlayingDetailsAreOneColourAndNeverCutOff_data();
@@ -1373,6 +1375,146 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QTRY_VERIFY(cover->property("hasCover").toBool());
     QVERIFY(!shown(itemNamed(cover, QStringLiteral("albumArtStandIn"))));
     QCOMPARE(geometry(), withCover);
+}
+
+void UiMainWindowTest::showInLibraryBringsThePlayingRowIntoView_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("default font, 1600 by 1000") << 0.0 << 1600 << 1000;
+    QTest::newRow("24 pt, 1920 by 1200") << 24.0 << 1920 << 1200;
+}
+
+// Show in Library brings the playing track's row into the library's view
+// (#373 H11: at 24 pt in a 1920 by 1200 window the tree opened but the row
+// stayed out of sight, as the view held fewer rows than the tree had above
+// it). The backend sends the rows of a collapsed artist only once it is
+// told to open it, so the reveal ends as that tree is applied: the row is
+// centred then, and the view's place from before the tree, which a tree
+// otherwise keeps, must not be put back over it.
+void UiMainWindowTest::showInLibraryBringsThePlayingRowIntoView() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *view = named(window, "libraryView");
+    QVERIFY(view != nullptr);
+
+    // Sixty artists of one album each, collapsed, as the backend sends
+    // them: an artist's album and its track only once `open` says so.
+    constexpr int artists = 60;
+    constexpr int playing = 47;
+    const auto artistKey = [](int index) { return QStringLiteral("artist|Artist %1").arg(index, 2, 10, QLatin1Char('0')); };
+    const QString albumKey = QStringLiteral("album|Artist %1|Album").arg(playing);
+    const QString trackPath = QStringLiteral("/music/Artist %1/Album/01.flac").arg(playing);
+    const QString trackKey = QStringLiteral("track|") + trackPath;
+    const auto tree = [&](bool open) {
+        struct Row {
+            quint8 rowType;
+            quint16 depth;
+            quint32 trackNumber;
+            quint32 childCount;
+            QString title;
+            QString key;
+            QString path;
+            QString trackPath;
+        };
+        QList<Row> rows;
+        for (int index = 0; index < artists; ++index) {
+            const QString folder = QStringLiteral("/music/Artist %1").arg(index);
+            rows.push_back({1, 0, 0, 1, QStringLiteral("Artist %1 (1)").arg(index), artistKey(index), folder, {}});
+            if (open && index == playing) {
+                rows.push_back({2, 1, 0, 1, QStringLiteral("Album"), albumKey, folder + QStringLiteral("/Album"), {}});
+                rows.push_back({4, 2, 1, 0, QStringLiteral("First"), trackKey, trackPath, trackPath});
+            }
+        }
+        QByteArray out;
+        appendLe<quint32>(out, static_cast<quint32>(rows.size()));
+        for (const Row &row : rows) {
+            out.append(static_cast<char>(row.rowType));
+            appendLe<quint16>(out, row.depth);
+            appendLe<qint32>(out, -1);
+            appendLe<quint32>(out, row.trackNumber);
+            appendLe<quint32>(out, row.childCount);
+            appendLe<qint32>(out, 0);
+            appendUtf8(out, row.title);
+            appendUtf8(out, row.key);
+            appendUtf8(out, QStringLiteral("Artist"));
+            appendUtf8(out, row.path);
+            appendUtf8(out, QString());
+            appendLe<quint64>(out, 0);
+            appendUtf8(out, row.trackPath);
+            appendLe<quint32>(out, row.trackPath.isEmpty() ? 0 : 1);
+            if (!row.trackPath.isEmpty()) {
+                appendUtf8(out, row.trackPath);
+            }
+        }
+        return out;
+    };
+    const auto frame = [&](int version, bool open) {
+        return QMetaObject::invokeMethod(bridge, "libraryTreeFrameReceived", Q_ARG(int, version),
+                                         Q_ARG(QVariant, QVariant(tree(open))));
+    };
+    bridge->setProperty("libraryRoots", QStringList{QStringLiteral("/music")});
+    // The track plays, and the now-playing panel has its place.
+    bridge->setProperty("currentTrackPath", trackPath);
+    bridge->setProperty("currentTrackTitle", QStringLiteral("First"));
+    bridge->setProperty("currentTrackTreeKeys", QStringList{artistKey(playing), albumKey});
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QVERIFY(grown(window));
+    QVERIFY(frame(1, false));
+    QTRY_COMPARE(view->property("count").toInt(), artists);
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    // The view shows the tree's start, and far fewer rows than are above
+    // the playing artist's.
+    QCOMPARE(view->property("contentY").toReal(), 0.0);
+    QVERIFY2(view->height() < (playing - 4) * rowHeight, qPrintable(QString::number(view->height())));
+
+    // Show in Library asks for the playing track's row: its artist and
+    // album open, which the model does not have the rows of yet.
+    QVERIFY(QMetaObject::invokeMethod(bridge, "libraryRevealRequested",
+                                      Q_ARG(QVariant, QVariant(QStringList{artistKey(playing), albumKey})),
+                                      Q_ARG(QString, trackKey)));
+    QCOMPARE(libraryModel.indexForSelectionKey(trackKey), -1);
+    QVERIFY(libraryModel.property("revealPending").toBool());
+    // The backend's answer: the tree with them.
+    QVERIFY(frame(2, true));
+    QTRY_VERIFY(libraryModel.indexForSelectionKey(trackKey) >= 0);
+    QTRY_VERIFY(!libraryModel.property("parsing").toBool());
+    const int row = libraryModel.indexForSelectionKey(trackKey);
+    QCOMPARE(row, playing + 2);
+
+    // The row is in the view, whole, now and once the tree has settled.
+    const auto inView = [&]() {
+        const qreal top = row * rowHeight - view->property("contentY").toReal();
+        return top >= 0 && top + rowHeight <= view->height() + 0.5;
+    };
+    QTRY_VERIFY2(inView(), qPrintable(QStringLiteral("contentY %1, the row at %2, the view %3 high")
+                                          .arg(view->property("contentY").toReal()).arg(row * rowHeight)
+                                          .arg(view->height())));
+    QTest::qWait(200);
+    QVERIFY2(inView(), qPrintable(QStringLiteral("contentY %1 after the tree settled")
+                                      .arg(view->property("contentY").toReal())));
+    // As drawn: the row's item is the playing track's, amber.
+    QQuickItem *item = nullptr;
+    QVERIFY(QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item), Q_ARG(int, row)));
+    QVERIFY(item != nullptr);
+    QTRY_VERIFY(item->property("isNow").toBool());
+    QVERIFY(sceneRect(item).top() >= sceneRect(view).top() - 0.5);
+    QVERIFY(sceneRect(item).bottom() <= sceneRect(view).bottom() + 0.5);
+    // And selected, as Show in Library leaves it.
+    QVERIFY(item->property("rowSelected").toBool());
 }
 
 void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid_data() {
