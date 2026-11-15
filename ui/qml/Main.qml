@@ -1494,7 +1494,9 @@ ApplicationWindow {
                     mainSplit.width,
                     sidebarPane.SplitView.minimumWidth,
                     rightSplit.SplitView.minimumWidth + root.splitHandleAllowance,
-                    windowLayoutController.sidebarDefaultWidth(mainSplit.width, root.uiPalette.fontScale))
+                    windowLayoutController.sidebarDefaultWidth(
+                        mainSplit.width, root.uiPalette.fontScale, root.uiPalette.gridUnit,
+                        queuePane.widthWithAllColumns + root.splitHandleAllowance))
                 minimumWidth: windowLayoutController.sidebarMinimumWidth(root.uiPalette.fontScale)
                 replaceFromItunesAction: replaceFromItunesAction
                 currentTrackItunesArtworkDisabledReason: viewerController.currentTrackItunesArtworkDisabledReason

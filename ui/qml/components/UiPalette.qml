@@ -401,6 +401,10 @@ QtObject {
     // count in rows all use it, so they follow the font size.
     readonly property real rowHeight: Math.round(root._baseFontMetrics.height)
         + 2 * Kirigami.Units.smallSpacing
+    // Kirigami's grid unit on the window's font: the height of a line of
+    // it, made even, as Kirigami.Units.gridUnit is of the platform's font;
+    // 18 px with the default 10 pt font, 44 px at 24 pt.
+    readonly property real gridUnit: 2 * Math.ceil(root._baseFontMetrics.height / 2)
     // The base font's size in points, for text sized relative to it.
     readonly property real basePointSize: root.baseFont.pointSize > 0
         ? root.baseFont.pointSize

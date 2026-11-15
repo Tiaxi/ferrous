@@ -839,6 +839,12 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont_data() {
     QTest::newRow("24 pt, 1600 by 1000") << 24.0 << 1600 << 1000 << 408.0 << 360.0 << true;
     QTest::newRow("24 pt, 1600 by 1400") << 24.0 << 1600 << 1400 << 408.0 << 360.0 << false;
     QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720 << 360.0 << 360.0 << true;
+    // Wider windows allow the pane more at a large font (#373 H11): what
+    // the queue does not need for its columns, up to 22 grid units of the
+    // font, 968 px at 24 pt; 0 here for that, worked out in the test. The
+    // wide layout's cover would be as wide: the panel is narrow.
+    QTest::newRow("24 pt, 1920 by 1200") << 24.0 << 1920 << 1200 << 0.0 << 360.0 << true;
+    QTest::newRow("24 pt, 2560 by 1400") << 24.0 << 2560 << 1400 << 968.0 << 360.0 << true;
 }
 
 // The sidebar is 360 px wide in a 1600 px window and 260 px in a 1000 px one
@@ -869,7 +875,23 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont() {
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *queue = named(window, "mainQueuePane");
     QVERIFY(sidebar && panel && queue);
+    if (expectedWidth == 0.0) {
+        // What the window leaves once the queue has all its columns, and
+        // the 1 px seam: more than the 408 px of its share, less than the
+        // 22 grid units.
+        const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+        QCOMPARE(gridUnit, 44.0);
+        expectedWidth = std::floor(windowWidth - queue->property("widthWithAllColumns").toReal() - 1);
+        QVERIFY2(expectedWidth > 408.0 && expectedWidth < 22 * gridUnit, qPrintable(QString::number(expectedWidth)));
+    }
     QTRY_COMPARE(sidebar->width(), expectedWidth);
+    if (pointSize > 10.0) {
+        // The queue keeps every column where the pane is wider than its
+        // share, and the pane is never more than 22 grid units of the font.
+        QVERIFY(sidebar->width() <= std::max(360.0, 22 * paletteOf(window)->property("gridUnit").toReal()));
+        QVERIFY(sidebar->width() == 408.0 || sidebar->width() == 360.0
+                || queue->property("albumColumnVisible").toBool());
+    }
     QCOMPARE(QQmlProperty(sidebar, QStringLiteral("SplitView.minimumWidth"), qmlContext(sidebar)).read().toReal(),
              expectedMinimum);
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
@@ -886,7 +908,7 @@ void UiMainWindowTest::sidebarWidthFollowsTheWindowAndTheFont() {
     QObject *layout = window->findChild<QObject *>(QStringLiteral("windowLayoutController"));
     QVERIFY(layout != nullptr);
     const qreal splitWidth = named(window, "mainSplit")->width();
-    const qreal dragged = expectedWidth + 40;
+    const qreal dragged = expectedWidth > 500 ? expectedWidth - 40 : expectedWidth + 40;
     QVERIFY(QMetaObject::invokeMethod(layout, "noteSidebarWidth", Q_ARG(QVariant, dragged),
                                       Q_ARG(QVariant, splitWidth)));
     QTRY_COMPARE(sidebar->width(), dragged);
@@ -1752,6 +1774,8 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QTRY_COMPARE(panel->property("layoutMode").toString(),
                  narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    // The sidebar at the width the font gives it, which a larger one widens.
+    QTRY_COMPARE(panel->width(), named(window, "sidebarPane")->property("splitPreferredWidth").toReal());
     const QRectF block = sceneRect(panel);
     const QString artist = QStringLiteral("The Quiet Meridian");
     const QString album = QStringLiteral("Small Hours");
