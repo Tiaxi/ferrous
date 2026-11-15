@@ -5342,9 +5342,10 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode_data() {
 
 // The empty pane's floor follows the mode (#373 H4, P5; H2's P1 made the
 // light theme's bare pane the view colour): before any audio and while the
-// first track is analysed, the spectrogram's pane is its colour map's
-// floor, black, as silence draws it, and the waveform's the view colour,
-// in both themes. Switching modes on the empty pane switches the floor with
+// first track is analysed, the spectrogram's pane is the plot's floor,
+// its indigo (#373 H11 P19: not black, which silence within a track still
+// is), also where a rolling view is not yet filled, and the waveform's the
+// view colour, in both themes. Switching modes on the empty pane switches the floor with
 // the mode's cross-fade, and the first data never changes it. What is drawn
 // on it, the mode switch, takes the mode's plot colours.
 void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
@@ -5386,8 +5387,10 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     QVERIFY(fade != nullptr);
     auto *spectrogramSet = qvariant_cast<QObject *>(tokens->property("spectrogramPlot"));
     auto *waveformSet = qvariant_cast<QObject *>(tokens->property("waveformPlot"));
-    const QColor black(QStringLiteral("#000000"));
-    QCOMPARE(spectrogramSet->property("plotBg").value<QColor>(), black);
+    // The plot's floor (#373 H11 P19), the same in both themes.
+    const QColor floor(QStringLiteral("#14062e"));
+    QCOMPARE(tokens->property("plotFloor").value<QColor>(), floor);
+    QCOMPARE(spectrogramSet->property("plotBg").value<QColor>(), floor);
     QCOMPARE(waveformSet->property("plotBg").value<QColor>(), view);
     QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
     QVERIFY(viewer != nullptr);
@@ -5405,7 +5408,7 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
     // The mode's floor, as the pane says it, as the layer's colours say it,
     // and as drawn.
     const auto expectFloor = [&](int mode, const char *when) -> bool {
-        const QColor wanted = mode == 1 ? view : black;
+        const QColor wanted = mode == 1 ? view : floor;
         QObject *set = mode == 1 ? waveformSet : spectrogramSet;
         if (pane->property("color").value<QColor>() != wanted) {
             qWarning() << when << "pane" << pane->property("color").value<QColor>() << "wanted" << wanted;
@@ -5433,12 +5436,14 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
             surface->setProperty("modeFade", 0.5);
             // Halfway between the two floors.
             const QColor drawn = drawnInPane();
-            const QColor from = mode == 1 ? black : view;
-            const QColor to = mode == 1 ? view : black;
+            const QColor from = mode == 1 ? floor : view;
+            const QColor to = mode == 1 ? view : floor;
             const auto between = [](int value, int a, int b) {
                 return value > std::min(a, b) && value < std::max(a, b);
             };
-            QVERIFY2(between(drawn.red(), from.red(), to.red()) && between(drawn.blue(), from.blue(), to.blue()),
+            // In green and blue: the dark view's red is the floor's.
+            QVERIFY2(between(drawn.green(), from.green(), to.green())
+                         && between(drawn.blue(), from.blue(), to.blue()),
                      qPrintable(drawn.name()));
             QVERIFY(QMetaObject::invokeMethod(fade, "resume"));
         } else {
@@ -5493,10 +5498,14 @@ void UiMotionTest::visualizationPaneFloorFollowsTheMode() {
                                               columns, 0, 2'000, 48'000, 1'024, false, true, 1, false);
     }
     QTRY_VERIFY(!spectrogram->property("awaitingData").toBool());
-    QCOMPARE(pane->property("color").value<QColor>(), black);
+    QCOMPARE(pane->property("color").value<QColor>(), floor);
     QCOMPARE(layer->property("plotColors").value<QObject *>(), spectrogramSet);
     QTest::qWait(animated ? 450 : 50);
-    QCOMPARE(pane->property("color").value<QColor>(), black);
+    QCOMPARE(pane->property("color").value<QColor>(), floor);
+    // The rolling view at the track's start has its newest columns at its
+    // right edge: the part not yet filled is the floor, not black.
+    QCOMPARE(bridge->property("spectrogramDisplayMode").toInt(), 0);
+    QVERIFY(expectFloor(0, "rolling, not yet filled"));
 
     // Stopped, with the track's data gone: the mode's floor still, in each
     // mode.

@@ -48,8 +48,8 @@ Rectangle {
         && root.visualization !== null
         && root.Window.visibility !== Window.Hidden && root.Window.visibility !== Window.Minimized
 
-    // The mode's floor, with or without data: the spectrogram's is its
-    // colour map's silence, black; the waveform's the view colour.
+    // The mode's floor, with or without data: the spectrogram's is the
+    // plot's indigo floor; the waveform's the view colour.
     color: root.uiPalette.plotColors(root.visualizationMode).plotBg
 
     onKeepsLastFrameChanged: root.updateLastFrame()

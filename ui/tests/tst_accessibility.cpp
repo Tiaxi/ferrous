@@ -3883,14 +3883,14 @@ void AccessibilityTest::plotLayerShowsThePaneStates() {
     QQuickItem *endsEarly = layer->findChild<QQuickItem *>(QStringLiteral("plotEndsEarly"));
     QVERIFY(analysing != nullptr && endsEarly != nullptr);
     // Before any audio: no message; the switch shows. The bare pane is the
-    // spectrogram's floor, its colour map's black, in the light theme the
-    // tests run in too (#373 H4).
+    // spectrogram's floor, the plot's indigo, in the light theme the tests
+    // run in too (#373 H4, H11 P19).
     QVERIFY(!analysing->isVisible());
     QVERIFY(!endsEarly->isVisible());
     QVERIFY(visibleItemNamed(window, QStringLiteral("visualizationModeSwitch")) != nullptr);
     QQuickItem *pane = window->findChild<QQuickItem *>(QStringLiteral("spectrogramPane"));
     QVERIFY(pane != nullptr);
-    QCOMPARE(pane->property("color").value<QColor>(), QColor(Qt::black));
+    QCOMPARE(pane->property("color").value<QColor>(), QColor(QStringLiteral("#14062e")));
     // A track without its analysis yet: Analysing…, after a moment.
     QVERIFY(bridge->setProperty("currentTrackPath", QStringLiteral("/music/a.flac")));
     QVERIFY(bridge->setProperty("playbackState", QStringLiteral("Playing")));

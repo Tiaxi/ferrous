@@ -126,10 +126,8 @@ constexpr qint64 kSmoothnessWindowMs = 2000;
 constexpr qint64 kSmoothnessIdleMs = 450;
 #endif
 // The spectrogram's plot set (UiPalette.spectrogramPlot), the same in both
-// themes: plotBg, the floor of its colour map, and what is drawn on it.
-// The floor is black, the lowest entry of both the colour and the greyscale
-// map (rebuildPalette), so where no column is drawn looks like silence.
-const QColor kBackgroundColor(0, 0, 0);
+// themes: what is drawn on the plot. Its floor, plotBg, is the item's
+// floorColor.
 // Where the canvas has no column, it is transparent: the backdrop, or the
 // floor under it, shows there (see SpectrogramBackdrop).
 constexpr QRgb kNoColumn = 0;
@@ -2509,6 +2507,23 @@ void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
     update();
 }
 
+QColor SpectrogramItem::floorColor() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_floorColor;
+}
+
+void SpectrogramItem::setFloorColor(const QColor &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_floorColor == value) {
+            return;
+        }
+        m_floorColor = value;
+    }
+    emit floorColorChanged();
+    update();
+}
+
 QColor SpectrogramItem::readoutPlateColor() const {
     QMutexLocker lock(&m_stateMutex);
     return m_readoutColors.fill;
@@ -4647,7 +4662,10 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
-    node->background->setColor(kBackgroundColor);
+    {
+        QMutexLocker lock(&m_stateMutex);
+        node->background->setColor(m_floorColor);
+    }
 
     // The canvas and the overlays are in device pixels, `scale` to a
     // logical one: cw x ch for the item.
@@ -5433,7 +5451,7 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
 
         // At rest, without columns to show (before any audio, with nothing
         // playing, or waiting for a session's first columns), the lane keeps
-        // its black floor and, while the scale shows, shows it faintly
+        // its floor and, while the scale shows, shows it faintly
         // (#373 H6 P6, H10 P18).
         if (!usePrecomputed && !hasCanvas) {
             updateRestGridOverlayLocked(cw, ch);
