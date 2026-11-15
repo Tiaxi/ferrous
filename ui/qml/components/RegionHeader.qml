@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/FormatUtils.js" as FormatUtils
 
 // The header row of a region, such as the library and the queue: its name,
 // its totals ("12 artists · 28 albums · 176 tracks") and a hairline under
@@ -33,10 +34,10 @@ Item {
     // As many of the totals, from the first, as fit whole in their room;
     // none when even the first, "12 artists", doesn't.
     readonly property string shownTotals: {
-        const parts = root.totals.length > 0 ? root.totals.split(" · ") : []
+        const parts = root.totals.length > 0 ? root.totals.split(FormatUtils.fieldSeparator) : []
         let shown = ""
         for (let i = 0; i < parts.length; ++i) {
-            const candidate = i === 0 ? parts[0] : shown + " · " + parts[i]
+            const candidate = i === 0 ? parts[0] : shown + FormatUtils.fieldSeparator + parts[i]
             if (Math.ceil(totalsMetrics.advanceWidth(candidate)) > root.totalsRoom) {
                 break
             }

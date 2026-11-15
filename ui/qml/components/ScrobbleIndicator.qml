@@ -4,6 +4,7 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
+import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
@@ -13,40 +14,41 @@ import "../logic/KeyUtils.js" as KeyUtils
 // its states looked alike).
 // The glyph's ink is centred on the slot, on whole pixels (#373 H10: with
 // the bar's place under it, the glyph sat 2.5 px above the status bar's
-// middle). The bar is the glyph's: as wide as its ink, 2 px tall and 2 px
-// under it, with no trough, no rounded ends and none of the scan bar's
-// colours, so that it reads as part of the glyph and not as a second scan
-// or a download (the scan bar is 72 by 4 px). Listening, being sent and scrobbled differ
-// by shape, not by shade (#373 H8): a bar growing, a full bar at half
-// strength, and no bar.
-// - Listening: the glyph in the secondary colour, and the bar in the text
-//   colour growing under it with the listening done towards the scrobble;
-//   the tooltip says how much is left. Both come from the scrobbler's
-//   listened time, which a seek doesn't move and a pause holds; a new play
-//   (a new track, a replay, Repeat One) starts it over. Before any of it,
-//   the bar is three times as long as it is tall, a dash under the glyph's
-//   left edge, and it grows from there to the ink's width, so that
-//   listening always has a bar and scrobbled never does (#373 H9: at 0 %
-//   the two were the same bare glyph), and a little listening reads as a
-//   bar, not a speck (#373 H10).
+// middle). Its glyphs are one family (#373 H11: a grid of squares for the
+// "as", a staircase for its strike and thin antialiased strokes for
+// offline read as three hands): outlines drawn for 16 px with their
+// straight edges on whole pixels and their corners as arcs, all 16 px.
+// The bar is the glyph's: as wide as the glyph, 2 px tall and 2 px under
+// its ink, with square ends. It is the listening done towards the
+// scrobble, in the glyph's colour, the secondary text colour (at least 3:1
+// on the status bar), over a trough of the text colour at 20%, so that it
+// reads as a share of a whole (#373 H11: a bar alone, 6 to 14 px long and
+// brighter than its glyph, did not read as progress). It is a fifth of the
+// scan bar's length and half its height (the scan bar is 72 by 4 px, with
+// round ends), so that it does not read as a second scan or a download.
+// - Listening: the glyph in the secondary colour, and the bar filling its
+//   trough with the listening done towards the scrobble, from nothing; the
+//   tooltip says how much is left. Both come from the scrobbler's listened
+//   time, which a seek doesn't move and a pause holds; a new play (a new
+//   track, a replay, Repeat One) starts it over. Listening always has the
+//   trough and scrobbled never does, so the two differ before any
+//   listening too (#373 H9: at 0% they were the same bare glyph).
 // - Not scrobbled: once playback has stopped, by the end of the queue or
 //   a stop, after a play that ended before its scrobble point. "Not
 //   scrobbled" and the glyph in the tertiary colour, without the bar; the
 //   tooltip says how far the play got. A seek never decides it: the
 //   countdown goes on while the track plays.
-// - Being sent: the bar full length in the text colour at half strength,
-//   from the moment the play reaches its scrobble point, while the send
-//   goes on in the background. Full length and not half length, so that it
-//   can't be taken for a play halfway to its scrobble point; half strength,
-//   so that it can't be taken for a listening bar a moment from full.
+// - Being sent: the bar full, from the moment the play reaches its
+//   scrobble point, while the send goes on in the background.
 // - Scrobbled: once Last.fm has accepted it, the glyph alone in the
 //   secondary colour, so that the routine success is no louder than the
 //   status bar's other words.
 // - Queued: "3 scrobbles waiting" and the offline glyph, only while
 //   scrobbles stay queued: after a send failed, or while Last.fm holds
 //   them back.
-// - Failed: "Scrobble failed", and the glyph and the full bar in the
-//   negative colour: the slot's only colour.
+// - Failed: "Scrobble failed" in the text colour and the glyph in the
+//   negative colour, without the bar: the status bar's one treatment of an
+//   error, as its new issues (#373 H11).
 // - Paused by the user: the glyph struck through, in the tertiary colour,
 //   without the bar.
 // - Otherwise (not eligible, skipped, signed out): nothing.
@@ -116,13 +118,12 @@ AbstractButton {
     readonly property int glyphSize: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small)
     // The glyph's ink, in its 16 px drawing: columns 1 to 14 and rows 3 to
     // 12, centred in it.
-    readonly property int inkInset: Math.round(root.glyphSize / 16)
     readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
-    // The bar under it: the ink's width, 2 px tall and 2 px below the ink
-    // at the default font, a little more with a larger one, within the
-    // status bar's height: the status bar grows with the small font's
-    // line, which grows more slowly than the glyph.
-    readonly property int barWidth: root.glyphSize - 2 * root.inkInset
+    // The bar's trough under it: the glyph's width, 2 px tall and 2 px
+    // below the ink at the default font, a little more with a larger one,
+    // within the status bar's height: the status bar grows with the small
+    // font's line, which grows more slowly than the glyph.
+    readonly property int barWidth: root.glyphSize
     readonly property int barHeight: Math.max(2, Math.round(root.glyphSize / 10))
     readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 10))
     // The bar's top, from the glyph's.
@@ -133,35 +134,29 @@ AbstractButton {
     property int blockHeight: 22
     // Last.fm accepted the scrobble.
     readonly property bool scrobbleAccepted: root.look === "scrobbled" && root.scrobbleState === 3
-    readonly property bool barShown: root.look === "listening" || root.look === "failed"
+    // The trough and the bar in it: while listening, and while the scrobble
+    // is being sent.
+    readonly property bool barShown: root.look === "listening"
         || (root.look === "scrobbled" && !root.scrobbleAccepted)
-    // The bar's length while listening: three times its height before any
-    // listening, and the rest of its width with the listening done.
-    readonly property int barMinimumLength: root.look === "listening"
-        ? Math.min(root.barWidth, 3 * root.barHeight) : 0
-    // Half strength while the scrobble is being sent.
-    readonly property real barOpacity: root.look === "scrobbled" ? 0.5 : 1
-    // How much of the bar past its minimum length is drawn, 0 to 1: the
-    // listening done, by whole device pixels of the bar, so a long scrobble
-    // point redraws it more rarely still; full once the play has reached
-    // its scrobble point.
+    // How much of the trough the bar fills, 0 to 1: the listening done, by
+    // whole device pixels of the trough, so a long scrobble point redraws
+    // it more rarely still; full once the play has reached its scrobble
+    // point.
     readonly property real barProgress: {
-        if (root.look === "scrobbled" || root.look === "failed") {
+        if (root.look === "scrobbled") {
             return root.barShown ? 1 : 0
         }
         if (root.look !== "listening" || root.thresholdSeconds <= 0) {
             return 0
         }
-        const steps = Math.max(1, Math.round((root.barWidth - root.barMinimumLength)
-            * Math.max(1, Screen.devicePixelRatio)))
+        const steps = Math.max(1, Math.round(root.barWidth * Math.max(1, Screen.devicePixelRatio)))
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
-    // The bar: the text colour while listening and sending, and the
-    // negative colour when Last.fm refused the scrobble. Never the scan
-    // bar's colours.
-    readonly property color barColor: root.look === "failed" ? root.uiPalette.negative : root.uiPalette.text
-    readonly property real barLength: root.barMinimumLength
-        + (root.barWidth - root.barMinimumLength) * root.barProgress
+    // The bar: the secondary text colour, the glyph's. Its trough: the text
+    // colour at 20%.
+    readonly property color barColor: root.uiPalette.textSecondary
+    readonly property color troughColor: ColorUtils.withAlpha(root.uiPalette.text, 0.2)
+    readonly property real barLength: root.barWidth * root.barProgress
 
     // The slot's words, before the glyph.
     readonly property string labelText: {
@@ -227,10 +222,6 @@ AbstractButton {
             return Qt.resolvedUrl("../assets/lastfm.svg")
         }
     }
-    // The offline glyph is a 14 px one, centred where the Last.fm glyph is.
-    readonly property int drawnGlyphSize: root.look === "queued"
-        ? root.uiPalette.scaledSize(Kirigami.Units.iconSizes.small - 2)
-        : root.glyphSize
     readonly property color glyphColor: {
         switch (root.look) {
         case "failed":
@@ -367,9 +358,7 @@ AbstractButton {
 
                 Kirigami.Icon {
                     objectName: "scrobbleIndicatorGlyph"
-                    x: Math.round((root.glyphSize - width) / 2)
-                    y: Math.round((root.glyphSize - height) / 2)
-                    width: root.drawnGlyphSize
+                    width: root.glyphSize
                     height: width
                     // At its size, as wide as the bar under it at a large
                     // font, not rounded down to a theme icon size.
@@ -379,17 +368,23 @@ AbstractButton {
                     isMask: true
                 }
 
-                // The listening done, from the left; nothing drawn where it
-                // is still to come.
+                // The whole the listening is a share of.
                 Rectangle {
-                    objectName: "scrobbleIndicatorBar"
-                    x: root.inkInset
+                    objectName: "scrobbleIndicatorTrough"
                     y: root.barY
-                    width: root.barLength
+                    width: root.barWidth
                     height: root.barHeight
-                    visible: root.barShown && width > 0
-                    color: root.barColor
-                    opacity: root.barOpacity
+                    visible: root.barShown
+                    color: root.troughColor
+
+                    // The listening done, from the left.
+                    Rectangle {
+                        objectName: "scrobbleIndicatorBar"
+                        width: root.barLength
+                        height: parent.height
+                        visible: width > 0
+                        color: root.barColor
+                    }
                 }
             }
         }

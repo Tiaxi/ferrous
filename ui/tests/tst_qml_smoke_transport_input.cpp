@@ -1195,6 +1195,10 @@ void TransportInputSmokeTest::viewersShowTheTrackInATitleStripOverTheWholeScreen
         QVERIFY(title != nullptr && context != nullptr && time != nullptr);
         QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
         QCOMPARE(qvariant_cast<QFont>(title->property("font")).weight(), QFont::DemiBold);
+        // 16 px in from the view's edge (#373 H11: 12 px), and 12 px to
+        // "Artist — Album".
+        QTRY_COMPARE(title->mapToScene(QPointF(0, 0)).x(), 16.0);
+        QCOMPARE(context->mapToScene(QPointF(0, 0)).x() - title->mapToScene(QPointF(title->width(), 0)).x(), 12.0);
         QCOMPARE(colorOf(title, "color"), colorOf(plotColors, "plotText"));
         QCOMPARE(context->property("text").toString(),
                  QStringLiteral("The Quiet Meridian — Small Hours"));
@@ -1811,14 +1815,18 @@ void TransportInputSmokeTest::fullscreenStripHidesWhatTheViewDrawsUnderIt() {
         QCOMPARE(stripColor.alphaF(), 1.0f);
 
         // A line in the view, as the playhead, from its top to its bottom,
-        // in the middle, clear of the strip's text and buttons.
+        // between the strip's text and its buttons, clear of both.
+        QQuickItem *stripTrack = itemNamed(strip, QStringLiteral("viewerStripTrack"));
+        QQuickItem *stripControls = itemNamed(strip, QStringLiteral("viewerStripControls"));
+        QVERIFY(stripTrack != nullptr && stripControls != nullptr);
+        QTRY_VERIFY(sceneRectOf(stripControls).left() - sceneRectOf(stripTrack).right() > 8);
         QQmlComponent component(&engine);
         component.setData("import QtQuick\nRectangle { width: 1; color: \"#ff00ff\" }", QUrl());
         std::unique_ptr<QQuickItem> line(qobject_cast<QQuickItem *>(component.create()));
         QVERIFY2(line != nullptr, qPrintable(component.errorString()));
         line->setParentItem(host);
         line->setZ(100);
-        line->setX(std::round(host->width() / 2));
+        line->setX(std::round((sceneRectOf(stripTrack).right() + sceneRectOf(stripControls).left()) / 2));
         line->setHeight(host->height());
         QTRY_VERIFY(fullscreen->isExposed());
         const QImage image = fullscreen->grabWindow();

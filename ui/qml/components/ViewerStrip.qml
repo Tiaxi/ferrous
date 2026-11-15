@@ -127,7 +127,9 @@ Rectangle {
         readonly property real textRoom: Math.max(0, track.room - (timeLabel.visible
             ? timeLabel.implicitWidth + track.spacing : 0) - (contextLabel.visible ? track.spacing : 0))
         readonly property real contextNeed: contextLabel.visible ? contextLabel.implicitWidth : 0
-        x: 12
+        // 16 px in from the edge (#373 H11: at 12 px, the gap between its
+        // own texts, the title sat too near the edge).
+        x: 2 * Kirigami.Units.largeSpacing
         height: root.bandHeight
         spacing: 12
 

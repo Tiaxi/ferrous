@@ -131,3 +131,38 @@ function droppedExternalPaths(drop) {
     }
     return paths
 }
+
+// `path` on at most two lines of `width`, as `metrics` (a FontMetrics)
+// measures it: whole on one line where it fits; otherwise broken after the
+// last "/" that fits the first line, or, where that would leave the line
+// under half full, at the last space that does, or after the last
+// character that does. The rest is the second line, elided in its middle
+// where it is still too long, so that the path's start and its last
+// folder's name stay.
+function pathOnTwoLines(path, width, metrics) {
+    if (path.length === 0 || width <= 0 || metrics.advanceWidth(path) <= width) {
+        return path
+    }
+    // The longest start of the path that fits, in characters.
+    let fits = 0
+    while (fits < path.length && metrics.advanceWidth(path.substring(0, fits + 1)) <= width) {
+        ++fits
+    }
+    fits = Math.max(1, fits)
+    const lastBefore = function(character) {
+        // A "/" stays on the first line, a space ends it.
+        const at = path.lastIndexOf(character, character === "/" ? fits - 1 : fits)
+        return at > 0 ? at + 1 : 0
+    }
+    const halfFull = function(cut) {
+        return cut > 0 && metrics.advanceWidth(path.substring(0, cut)) >= width / 2
+    }
+    let cut = lastBefore("/")
+    if (!halfFull(cut)) {
+        cut = lastBefore(" ")
+    }
+    if (!halfFull(cut)) {
+        cut = fits
+    }
+    return path.substring(0, cut) + "\n" + metrics.elidedText(path.substring(cut), Qt.ElideMiddle, width)
+}

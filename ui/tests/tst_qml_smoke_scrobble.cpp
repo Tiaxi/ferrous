@@ -222,11 +222,12 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     }
 
     // Listening, being sent and scrobbled look apart by shape (#373 H8): a
-    // 2 px bar growing in the text colour, the full bar at half strength,
-    // and no bar under the glyph in the secondary colour. The glyph is the
-    // same in all three.
+    // 2 px bar filling its trough, the trough full, and neither under the
+    // glyph. The bar is the secondary colour, the glyph's, over a trough of
+    // the text colour at 20% (#373 H11). The glyph is the same in all three.
     QQuickItem *bar = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorBar"));
-    QVERIFY(bar != nullptr);
+    QQuickItem *trough = findQuickItemByObjectName(indicator, QStringLiteral("scrobbleIndicatorTrough"));
+    QVERIFY(bar != nullptr && trough != nullptr);
     bridge->setProperty("lastFmScrobblingPaused", false);
     bridge->setProperty("lastFmPendingScrobbleCount", 0);
     bridge->setProperty("lastFmScrobbleIneligibility", 0);
@@ -234,40 +235,47 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     bridge->setProperty("lastFmScrobbleState", 1);
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
     QTRY_VERIFY(bar->isVisible());
-    // Under the ink's 14 px: 6 px from the start, and half the other 8.
+    // Half of the glyph's 16 px.
+    QCOMPARE(trough->size(), QSizeF(16, 2));
+    QCOMPARE(trough->property("color").value<QColor>(), QColor::fromRgbF(text.redF(), text.greenF(), text.blueF(), 0.2F));
     QCOMPARE(bar->height(), 2.0);
-    QCOMPARE(bar->width(), 10.0);
+    QCOMPARE(bar->width(), 8.0);
     QCOMPARE(bar->opacity(), 1.0);
-    QCOMPARE(bar->property("color").value<QColor>(), text);
+    QCOMPARE(bar->property("color").value<QColor>(), secondary);
     bridge->setProperty("lastFmScrobbleState", 2);
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
-    QVERIFY(bar->isVisible());
+    QVERIFY(bar->isVisible() && trough->isVisible());
     QCOMPARE(bar->height(), 2.0);
-    QCOMPARE(bar->width(), 14.0);
-    QCOMPARE(bar->opacity(), 0.5);
-    QCOMPARE(bar->property("color").value<QColor>(), text);
+    QCOMPARE(bar->width(), 16.0);
+    QCOMPARE(bar->opacity(), 1.0);
+    QCOMPARE(bar->property("color").value<QColor>(), secondary);
     QCOMPARE(glyph->property("color").value<QColor>(), secondary);
     QCOMPARE(glyph->opacity(), 1.0);
     bridge->setProperty("lastFmScrobbleState", 3);
-    QTRY_VERIFY(!bar->isVisible());
+    QTRY_VERIFY(!bar->isVisible() && !trough->isVisible());
     QVERIFY(indicator->isVisible());
     QCOMPARE(glyph->property("color").value<QColor>(), secondary);
     QCOMPARE(glyph->opacity(), 1.0);
+    // A failed scrobble has neither: its words and its glyph say it.
+    bridge->setProperty("lastFmScrobbleState", 4);
+    QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("failed"));
+    QVERIFY(!bar->isVisible() && !trough->isVisible());
 
-    // Listening has its bar from the start, three times as long as it is
-    // tall, so that it never looks like scrobbled, the glyph alone (#373
-    // H9: at 0 % both were the bare glyph), and a little listening reads
-    // as a bar (#373 H10: at 25 % the bar was a speck).
-    for (const auto &[listenedMs, width] : {std::pair{0, 6.0}, std::pair{15000, 7.0}, std::pair{30000, 8.0}}) {
+    // Listening has its trough from the start, so that it never looks like
+    // scrobbled, the glyph alone (#373 H9: at 0 % both were the bare
+    // glyph), and the bar in it is the listening done, from nothing.
+    for (const auto &[listenedMs, width] : {std::pair{0, 0.0}, std::pair{15000, 2.0}, std::pair{30000, 4.0}}) {
         bridge->setProperty("lastFmScrobbleListenedMs", listenedMs);
         bridge->setProperty("lastFmScrobbleState", 1);
         QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
-        QTRY_VERIFY(bar->isVisible());
+        QTRY_VERIFY(trough->isVisible());
+        QCOMPARE(trough->size(), QSizeF(16, 2));
+        QCOMPARE(bar->isVisible(), width > 0);
         QCOMPARE(bar->height(), 2.0);
         QCOMPARE(bar->width(), width);
-        QCOMPARE(bar->x(), 1.0);
+        QCOMPARE(bar->position(), QPointF(0, 0));
         bridge->setProperty("lastFmScrobbleState", 3);
-        QTRY_VERIFY(!bar->isVisible());
+        QTRY_VERIFY(!trough->isVisible());
     }
 }
 
@@ -360,12 +368,12 @@ void ScrobbleSmokeTest::scrobbleIndicatorGlyphIsCentredOnItsBlock() {
     // And the slot's middle is the status bar's, under its 1 px seam.
     const QRectF bar = QRectF(statusBar->mapToScene(QPointF(0, 1)), QSizeF(statusBar->width(), statusBar->height() - 1));
     QCOMPARE(slotRect.center().y(), bar.center().y());
-    // The bar: 2 px thick, 2 px under the ink, from its left edge, and 6 px
-    // long a second into the listening.
+    // The bar's trough: 2 px thick, 2 px under the ink, and the glyph's
+    // 16 px wide, 1 px past its ink on either side.
     QVERIFY2(barBottom - barTop + 1 == int(std::round(2 * scale)), qPrintable(where));
     QVERIFY2(barTop - glyphBottom - 1 == int(std::round(2 * scale)), qPrintable(where));
-    QVERIFY2(barLeft == glyphLeft, qPrintable(where));
-    QVERIFY2(barRight - barLeft + 1 == int(std::round(6 * scale)), qPrintable(where));
+    QVERIFY2(barLeft == glyphLeft - int(std::round(scale)), qPrintable(where));
+    QVERIFY2(barRight - barLeft + 1 == int(std::round(16 * scale)), qPrintable(where));
 }
 
 // The bar and the tooltip move by whole seconds of listening: of the
@@ -403,8 +411,8 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     QSignalSpy textChanged(indicator, SIGNAL(stateTextChanged()));
 
     // Ten seconds of 40 ms snapshots towards a 60 s scrobble point: the
-    // bar's 8 px past its start cross a device pixel every 7.5 s at 1x,
-    // every 3.75 s at 2x.
+    // bar crosses a device pixel of its 16 px trough every 3.75 s at 1x,
+    // every 1.875 s at 2x.
     frames = 0;
     for (int listened = 40; listened <= 10000; listened += 40) {
         const int movesBefore = progressMoved.count();
@@ -419,7 +427,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorBarMovesBySecondsWhileListening() {
     // It moves, forward, at most once in each second of listening.
     QVERIFY(!movedTo.isEmpty());
     for (const double moved : movedTo) {
-        const double devicePixels = moved * 8.0 * std::max(1.0, harness.window->devicePixelRatio());
+        const double devicePixels = moved * 16.0 * std::max(1.0, harness.window->devicePixelRatio());
         QVERIFY2(std::abs(devicePixels - std::round(devicePixels)) < 1e-9, qPrintable(QString::number(moved)));
     }
     QVERIFY2(movedTo.size() <= 10, qPrintable(QString::number(movedTo.size())));

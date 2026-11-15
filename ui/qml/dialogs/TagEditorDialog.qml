@@ -36,9 +36,10 @@ Components.DialogWindow {
     // without it, as quitting does for the settings and queue.
     readonly property int quitWaitBoundMs: 5000
     readonly property real tableRowHeight: root.uiPalette.rowHeight
-    // Shown in a field whose rows hold different values, which saving keeps.
-    // The status of a row with unsaved edits, which its column holds whole.
+    // The status of a row with unsaved edits: its mark's tooltip and
+    // description, and its Status cell while that column shows.
     readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
+    // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
@@ -69,11 +70,15 @@ Components.DialogWindow {
     // font; the numbers and Format keep their widths. In a table that
     // scrolls anyway none gives way. Where the view is wider, File Name and
     // Folder, which `stretch`, take the rest. Status takes no room until a
-    // row has a status. The window opens wide enough for every column, so
-    // none gives way on a large screen (#373 H8: with too little room for
-    // them all, either the tags or the paths were cut short).
+    // save or a rename failed for a row; a row with unsaved edits has a
+    // mark in the # column instead, whose room is always there, so that an
+    // edit moves no column (#373 H11: Status came with the first edit and
+    // took its width from File Name and Folder). The window opens wide
+    // enough for every column, so none gives way on a large screen (#373
+    // H8: with too little room for them all, either the tags or the paths
+    // were cut short).
     readonly property var tableColumns: [
-        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 36, number: true, sample: "00" },
+        { key: "trackNo", label: I18n.i18nc("@title:column track number", "#"), width: 40, number: true, sample: "00" },
         { key: "title", label: I18n.i18nc("@title:column", "Title"), width: 190, give: 2, least: 160 },
         { key: "artist", label: I18n.i18nc("@title:column", "Artist"), width: 170, give: 2, least: 160 },
         { key: "album", label: I18n.i18nc("@title:column", "Album"), width: 170, give: 2, least: 160 },
@@ -85,10 +90,12 @@ Components.DialogWindow {
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
         { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, sample: root.modifiedText, onlyWithStatus: true }
     ]
-    // Whether a row has a status: unsaved edits, or a save or rename that
-    // failed for it.
-    readonly property bool rowStatusShown: root.tagEditorApi.dirty === true
-        || root.tagEditorApi.hasRowErrors === true
+    // Whether a row has a status to read: a save or rename that failed for
+    // it.
+    readonly property bool rowStatusShown: root.tagEditorApi.hasRowErrors === true
+    // The mark of a row with unsaved edits, in the # column's left padding:
+    // a 6 px dot at the default font, clear of a three-digit number.
+    readonly property int modifiedMarkSize: 2 * Math.round(root.uiPalette.scaledSize(6) / 2)
     readonly property real tableInset: Kirigami.Units.largeSpacing
     // The room a column's header takes beside its label for the column's
     // Revert, while it shows.
@@ -97,7 +104,7 @@ Components.DialogWindow {
     // with its Revert while a row's value in it is changed, or its sample
     // value, with the cell's padding, rather than a header elided to a
     // letter. The narrow columns, as Disc, take the Revert's room only
-    // while they show it, as Status takes its own only with a status.
+    // while they show it, as Status takes its own only with a failure.
     function columnNeed(column) {
         // The bindings that ask follow the fonts: advanceWidth() is a
         // function, which they cannot follow.
@@ -110,7 +117,7 @@ Components.DialogWindow {
         return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
     }
     // Each column's width with room enough, or none for Status while no
-    // row has one.
+    // row has a failure.
     readonly property var tableColumnWidths: root.tableColumns.map(function(column) {
         if (column.onlyWithStatus && !root.rowStatusShown) {
             return 0
@@ -292,13 +299,15 @@ Components.DialogWindow {
         const spare = Math.floor(root.width - 2 * root.contentPadding - root.contentSpacing - tableLeast)
         return spare < root.fieldsWidth && spare >= root.fieldsLeastWidth ? spare : root.fieldsWidth
     }
-    // Wide enough for the fields and every column of the table at its
-    // width, clear of its scroll bar, within the screen and no wider than
-    // the window it opens from, frame and all, as the two have the same
-    // frame (#373 H9: 1624 px from a 1600 px main window): with less room,
-    // File Name and Folder give way first, then the tags.
-    defaultWidth: Math.min(Math.ceil(2 * root.contentPadding + root.fieldsWidth + root.contentSpacing
-            + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit),
+    // What the window holds, across: the fields and every column of the
+    // table at its width, clear of its scroll bar.
+    readonly property real fittedWidth: Math.ceil(2 * root.contentPadding + root.fieldsWidth
+        + root.contentSpacing + root.tableWidthThrough("directory") + Kirigami.Units.gridUnit)
+    // As wide as what it holds and no wider (#373 H11), within the screen
+    // and no wider than the window it opens from, frame and all, as the two
+    // have the same frame (#373 H9: 1624 px from a 1600 px main window):
+    // with less room, File Name and Folder give way first, then the tags.
+    defaultWidth: Math.min(root.fittedWidth,
         root.windowRoot && root.windowRoot.width > 0 ? root.windowRoot.width : Number.POSITIVE_INFINITY)
     // As tall as the fields, or a table of 12 rows, whichever is taller,
     // and no taller than 46 grid units: a few files leave no wide empty
@@ -574,6 +583,10 @@ Components.DialogWindow {
         }
         case "status":
             return row.errorText.length > 0 ? row.errorText : (row.dirty ? root.modifiedText : "")
+        case "trackNo":
+        case "discNo":
+            // As the queue shows a number: "1", whatever the tag pads it to.
+            return String(row[columnKey] || "").replace(/^0+(?=\d)/, "")
         default:
             return row[columnKey] || ""
         }
@@ -1219,6 +1232,7 @@ Components.DialogWindow {
                     height: root.tableRowHeight
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
+                    Accessible.description: tableRow.dirty ? root.modifiedText : ""
                     Accessible.selected: tableRow.selected
 
                     Components.RowBackground {
@@ -1273,8 +1287,11 @@ Components.DialogWindow {
                                 // that Format shows. The whole is in a
                                 // tooltip while it is cut short.
                                 elide: Text.ElideRight
+                                // The # cell of a row with unsaved edits
+                                // says what its mark means.
                                 readonly property string toolTipText: modelData.path && tableCell.truncated
-                                    ? (modelData.key === "directory" ? tableRow.directory : tableCell.text) : ""
+                                    ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
+                                    : (modelData.key === "trackNo" && tableRow.dirty ? root.modifiedText : "")
 
                                 HoverHandler {
                                     id: cellHover
@@ -1286,6 +1303,20 @@ Components.DialogWindow {
                                 ToolTip.text: tableCell.toolTipText
                             }
                         }
+                    }
+
+                    // Unsaved edits: a dot in the # column's left padding,
+                    // which is there in every row, so the edit that brings
+                    // it moves nothing.
+                    Rectangle {
+                        objectName: "tagEditorRowModifiedMark"
+                        visible: tableRow.dirty
+                        x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
+                        y: Math.round((parent.height - height) / 2)
+                        width: root.modifiedMarkSize
+                        height: width
+                        radius: width / 2
+                        color: root.uiPalette.text
                     }
                 }
             }
@@ -1349,15 +1380,20 @@ Components.DialogWindow {
         }
     }
 
-    // Track and Disc: the number, "of", and the total.
+    // Track and Disc: the number, "of", and the total. "of" is 4 px from
+    // the field on either side of it, so the three read as one value
+    // (#373 H11: at the form's 12 px it stood apart from both).
     component NumberPair: RowLayout {
         id: pair
         required property var first
         required property var second
         Layout.fillWidth: true
-        spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
+        spacing: Kirigami.Units.smallSpacing
 
-        FieldLabel { field: pair.first }
+        FieldLabel {
+            field: pair.first
+            Layout.rightMargin: Kirigami.Units.largeSpacing
+        }
 
         TagField {
             field: pair.first
@@ -1366,6 +1402,7 @@ Components.DialogWindow {
         }
 
         Label {
+            objectName: "tagEditorOf_" + pair.first.key
             text: I18n.i18nc("@label track or disc number of the total", "of")
             color: root.uiPalette.textSecondary
             Accessible.ignored: true

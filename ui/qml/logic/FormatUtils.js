@@ -1,6 +1,11 @@
 .pragma library
 .import FerrousUi 1.0 as FerrousUi
 
+// What stands between the fields of a line: the headers' totals and the
+// status bar's format ("FLAC · 16-bit / 44.1 kHz"). A var: a const is not
+// visible to the files that import this one.
+var fieldSeparator = " \u00b7 "
+
 function basenameFromPath(pathValue) {
     const normalized = (pathValue || "").trim().replace(/\\/g, "/")
     if (normalized.length === 0) {

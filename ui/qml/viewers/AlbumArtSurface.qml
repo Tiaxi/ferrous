@@ -64,6 +64,8 @@ Item {
     readonly property real infoRowBottomMargin: root.infoRowHeight - Math.ceil(infoValueMetrics.height)
         - root.infoRowTopMargin
     readonly property real infoPadding: root.uiPalette.scaledSize(16)
+    // The labels' column at its narrowest: 80 px at the default font.
+    readonly property real infoLabelColumnMinimum: Math.round(root.uiPalette.scaledSize(80) * root.infoScale)
     // The glyph of a button in the details: 16 px, a step larger with
     // the larger text over the whole screen.
     readonly property int detailsIconSize: root.uiPalette.scaledSize(
@@ -628,8 +630,16 @@ Item {
                     elide: Text.ElideRight
                 }
 
-                readonly property real labelColumnWidth: Math.max(Math.ceil(infoRows.widestWord),
-                    Math.min(Math.ceil(infoRows.widestLabel), Math.floor(infoLayout.width * 0.4)))
+                // The labels' column: as wide as the widest label, Folder's
+                // too, and 80 px or more at the default font (#373 H11: 76,
+                // the width of "Dimensions"); never so wide that it leaves
+                // the values under 60% of the row, or narrower than a
+                // label's widest word.
+                readonly property real labelColumnWidth: Math.max(
+                    Math.ceil(Math.max(infoRows.widestWord, folderLabel.implicitWidth)),
+                    Math.min(Math.max(Math.ceil(Math.max(infoRows.widestLabel, folderLabel.implicitWidth)),
+                                      root.infoLabelColumnMinimum),
+                             Math.floor(infoLayout.width * 0.4)))
 
                 Label {
                     objectName: "albumArtInfoTitle"
@@ -748,29 +758,60 @@ Item {
                     }
                 }
 
-                Label {
-                    objectName: "albumArtFolderLabel"
-                    visible: root.folderPath.length > 0
-                    Layout.topMargin: root.infoRowInset
-                    text: I18n.i18nc("@label the folder the image is in", "Folder")
-                    font.pointSize: root.infoLabelPointSize
-                    color: root.plot.plotTextSecondary
-                }
-
+                // The folder: a row of the grid, as the others (#373 H11:
+                // its label stood on a line of its own, over the path from
+                // the column's edge). The path wraps to a second line
+                // before it is cut short, in the middle of that line, so
+                // its start and the folder's name stay; Copy Path sits at
+                // the row's end, centred on the first line.
                 RowLayout {
+                    id: folderRow
+                    objectName: "albumArtFolderRow"
                     visible: root.folderPath.length > 0
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.max(root.uiPalette.toolButtonSize, folderPathLabel.implicitHeight)
-                    spacing: 4
+                    Layout.topMargin: root.infoRowTopMargin
+                    Layout.bottomMargin: root.infoRowBottomMargin
+                    Layout.preferredHeight: Math.round(Math.max(folderPathLabel.implicitHeight,
+                        folderLabel.implicitHeight + folderPathLabel.baselineOffset - folderLabel.baselineOffset))
+                    spacing: 0
+
+                    Label {
+                        id: folderLabel
+                        objectName: "albumArtFolderLabel"
+                        Layout.minimumWidth: infoLayout.labelColumnWidth
+                        Layout.preferredWidth: infoLayout.labelColumnWidth
+                        Layout.maximumWidth: infoLayout.labelColumnWidth
+                        Layout.rightMargin: 12
+                        Layout.alignment: Qt.AlignBaseline
+                        text: I18n.i18nc("@label the folder the image is in", "Folder")
+                        font.pointSize: root.infoLabelPointSize
+                        color: root.plot.plotTextSecondary
+                        wrapMode: Text.WordWrap
+                    }
 
                     Label {
                         id: folderPathLabel
                         objectName: "albumArtFolderPath"
+                        // The path as shown whole, and whether its second
+                        // line is cut short.
+                        readonly property string path: root.displayPath(root.folderPath)
+                        readonly property bool elided: text.replace("\n", "") !== path
+                        // The room the row leaves it: from the row's parts,
+                        // not from its own width, which follows its text.
+                        readonly property real room: Math.max(0, infoLayout.width - infoLayout.labelColumnWidth
+                            - folderLabel.Layout.rightMargin - copyPathHolder.Layout.leftMargin - copyPathButton.width)
                         Layout.fillWidth: true
-                        text: root.displayPath(root.folderPath)
+                        Layout.alignment: Qt.AlignBaseline
+                        text: {
+                            // The binding follows the font: advanceWidth()
+                            // is a function, which it cannot follow.
+                            infoValueMetrics.font
+                            return PathUtils.pathOnTwoLines(path, room, infoValueMetrics)
+                        }
+                        textFormat: Text.PlainText
                         font.pointSize: root.infoPointSize
                         color: root.plot.plotText
-                        elide: Text.ElideMiddle
+                        Accessible.name: path
                         // The whole path, however it is elided.
                         ToolTip.text: root.folderPath
                         ToolTip.visible: folderPathHover.hovered
@@ -781,15 +822,26 @@ Item {
                         }
                     }
 
-                    Components.ViewerToolButton {
-                        objectName: "albumArtCopyPathButton"
-                        uiPalette: root.uiPalette
-                        plotColors: root.plot
-                        text: I18n.i18nc("@action:button", "Copy Path")
-                        icon.name: "edit-copy"
-                        glyphColor: root.plot.plotTextSecondary
-                        Accessible.description: root.folderPath
-                        onClicked: root.copyText(root.folderPath)
+                    Item {
+                        id: copyPathHolder
+                        Layout.alignment: Qt.AlignTop
+                        Layout.leftMargin: 4
+                        Layout.preferredWidth: copyPathButton.width
+                        Layout.preferredHeight: 1
+
+                        Components.ViewerToolButton {
+                            id: copyPathButton
+                            objectName: "albumArtCopyPathButton"
+                            // On the path's first line.
+                            y: Math.round((Math.ceil(infoValueMetrics.height) - height) / 2)
+                            uiPalette: root.uiPalette
+                            plotColors: root.plot
+                            text: I18n.i18nc("@action:button", "Copy Path")
+                            icon.name: "edit-copy"
+                            glyphColor: root.plot.plotTextSecondary
+                            Accessible.description: root.folderPath
+                            onClicked: root.copyText(root.folderPath)
+                        }
                     }
                 }
 
