@@ -32,10 +32,12 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (#373 H7: the empty square took 360 px). The
 //   first track grows the cover's place from the row to its full size
-//   over moveDuration, OutCubic, the cover fading in as it grows and the
+//   over moveDuration, InOutQuad, the cover fading in as it grows and the
 //   lines and the library moving down with its foot, so nothing jumps
-//   (#373 H5); going back to nothing loaded, as when the queue is
-//   cleared, shrinks it back. With animations off, both are at once.
+//   (#373 H5); the lines fade in once the move is most of the way, so no
+//   text slides over the moving rows (#373 H12 Z7). Going back to nothing
+//   loaded, as when the queue is cleared, shrinks it back. With
+//   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
 //   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour,
 //   with the album at its top left, at the lines' inset, as a display
@@ -110,14 +112,41 @@ Item {
     readonly property string layoutMode: root.wideRoom ? "wide" : "narrow"
 
     // The time of a move that carries the library under the panel: the
-    // track's layout growing from the compact row or shrinking into it.
-    // Under the wide cover the library moves 350 to 420 px: over
-    // longDuration, OutCubic, its first frames jumped some 100 px, four of
-    // its rows, and read as a cross-fade rather than a slide (#373 H10);
-    // over veryLongDuration, under two rows a frame. The narrow cover's
-    // 100 px or so take longDuration. None with animations off.
+    // track's layout growing from the compact row or shrinking into it, on
+    // InOutQuad, which eases in rather than leaping off. Under the wide
+    // cover the library moves 350 to 420 px: over longDuration, OutCubic,
+    // its first frames jumped some 100 px, four of its rows, and read as a
+    // cross-fade rather than a slide (#373 H10); over veryLongDuration,
+    // OutCubic, it still started at some 3,100 px/s (#373 H12 Z7); over
+    // wideMoveDuration, InOutQuad, it peaks at some 1,850 px/s, mid-way.
+    // The narrow cover's 100 px or so take longDuration. None with
+    // animations off.
+    readonly property int wideMoveDuration: Math.round(Kirigami.Units.veryLongDuration * 9 / 8)
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
-        : (root.wideRoom ? Kirigami.Units.veryLongDuration : Kirigami.Units.longDuration)
+        : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
+    readonly property int moveEasing: Easing.InOutQuad
+    // The lines come in after the move, not with it (#373 H12 Z7: they
+    // slid over the moving rows for some 190 ms): at 0 until the move is
+    // linesFromPresence of the way, then fading in over shortDuration,
+    // or what is left of the move where that is shorter, so they are
+    // whole when it ends. Read from the move's progress, so a move that
+    // turns back, or none, as with animations off, takes them with it.
+    readonly property real linesFromPresence: 0.8
+    readonly property real linesOpacity: {
+        if (root.presence >= 1)
+            return 1
+        if (root.presence <= 0 || root.moveDuration <= 0)
+            return 0
+        const start = root._moveTime(root.linesFromPresence) * root.moveDuration
+        const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
+        return Math.min(1, Math.max(0, (root._moveTime(root.presence) * root.moveDuration - start) / length))
+    }
+    // How far into the move, from 0 to 1, it is `presence` of the way:
+    // InOutQuad's inverse.
+    function _moveTime(presence) {
+        const p = Math.min(1, Math.max(0, presence))
+        return p < 0.5 ? Math.sqrt(p / 2) : 1 - Math.sqrt((1 - p) / 2)
+    }
     readonly property string idleText: I18n.i18nc("@info", "Nothing playing")
 
     // The compact row of nothing loaded: a list row's height, with the
@@ -148,7 +177,7 @@ Item {
         objectName: "nowPlayingPresenceAnimation"
         target: root
         property: "presence"
-        easing.type: Easing.OutCubic
+        easing.type: root.moveEasing
         // The curve's last step can fall a rounding error short of its end,
         // which would leave the layout a hair from whole.
         onFinished: root.presence = root.presenceAnimation.to
@@ -1419,6 +1448,7 @@ Item {
     // track change.
     Item {
         id: liveText
+        objectName: "nowPlayingLines"
 
         readonly property real wideHeight: wideColumn.implicitHeight
         readonly property real narrowHeight: narrowColumn.implicitHeight
@@ -1437,6 +1467,8 @@ Item {
         y: 0
         width: root.width
         height: root.height
+        // After the move from the compact row, not with it.
+        opacity: root.linesOpacity
 
         // Wide: the text block under the cover.
         ColumnLayout {
