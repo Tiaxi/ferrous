@@ -676,11 +676,15 @@ Components.DialogWindow {
                         }
                     }
 
-                    // The hairline to the next row.
+                    // The hairline to the next row, from the text's left edge
+                    // to the row's end, so the thumbnails stand in a column
+                    // of their own (#373 H11: it ran under them, from the
+                    // frame's edge).
                     Rectangle {
                         objectName: "itunesArtworkResultHairline"
                         visible: suggestionRow.index < itunesArtworkResultsView.count - 1
                         anchors.left: parent.left
+                        anchors.leftMargin: root.textX
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
                         height: 1

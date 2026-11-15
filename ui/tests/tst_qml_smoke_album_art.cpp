@@ -2015,7 +2015,14 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
         for (QQuickItem *rect : rectanglesIn(row)) {
             QCOMPARE(rect->objectName(), QStringLiteral("itunesArtworkResultHairline"));
             QCOMPARE(rect->height(), 1.0);
-            QCOMPARE(rect->width(), row->width());
+            // From the text's left edge to the row's end (#373 H11: from
+            // the frame's edge, under the thumbnail).
+            QQuickItem *rowTitle = itemNamed(row, QStringLiteral("itunesArtworkResultTitle"));
+            QQuickItem *rowThumbnail = itemNamed(row, QStringLiteral("itunesArtworkResultThumbnail"));
+            QVERIFY(rowTitle != nullptr && rowThumbnail != nullptr);
+            QCOMPARE(sceneRectOf(rect).left(), rowTitle->mapToScene(QPointF(0, 0)).x());
+            QCOMPARE(sceneRectOf(rect).left(), sceneRectOf(rowThumbnail).right() + 12);
+            QCOMPARE(sceneRectOf(rect).right(), sceneRectOf(row).right());
             QCOMPARE(sceneRectOf(rect).bottom(), sceneRectOf(row).bottom());
             ++hairlines;
         }
