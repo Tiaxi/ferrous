@@ -1160,13 +1160,14 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     QVERIFY2(std::abs(meterRect.right() - laneRect.right()) < 1.0,
              qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRect.right()).arg(laneRect.right())));
     QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
-    // The bar out to that edge: wider than the scrollbar's whole lane, and
-    // more than twice as wide as its thumb, even under the pointer, where
-    // the thumb is the lane's width less 2 px.
+    // The bar out to that edge, 10 px: a ladder of 2 px rungs on a 3 px
+    // pitch rather than a solid bar, which tells it from the scrollbar's
+    // solid thumb (#373 H14 G3: a 15 px solid bar was louder than the
+    // plot, and in the view's colours still read as a thumb).
     QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
-    QVERIFY(LevelMeterItem::kBarWidth > laneRect.width());
-    QVERIFY(LevelMeterItem::kBarWidth > 2 * (laneRect.width() - 2));
-    QVERIFY(LevelMeterItem::kBarWidth > 2 * thumbRect.width());
+    QCOMPARE(LevelMeterItem::kBarWidth, 10.0);
+    QCOMPARE(LevelMeterItem::kRungHeight, 2.0);
+    QCOMPARE(LevelMeterItem::kRungPitch, 3.0);
     // Neither overlaps the other: the thumb ends above the pane.
     QVERIFY2(!meterRect.intersects(laneRect) && !meterRect.intersects(thumbRect),
              qPrintable(QStringLiteral("meter %1, %2 lane %3, %4, thumb to %5")

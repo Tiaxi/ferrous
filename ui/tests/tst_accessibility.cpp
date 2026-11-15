@@ -4273,14 +4273,32 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // The fill just under its top, where it meets the trough and shows
         // the level: on the spectrogram, a ramp of the colour map, whose
         // floor is darker (#373 H10 V2). A few dB under the level, as the
-        // level decays while the test runs.
+        // level decays while the test runs; a rung of its ladder there,
+        // the trough showing between them (#373 H14 G3).
         const double meterBottom = bottom - LevelMeterItem::kInset;
         const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1.0;
-        const QColor meterFill = meterPixel(5.5, meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight));
         const QColor trough = meterPixel(5.5, top + 9);
-        QVERIFY2(contrastRatio(meterFill, trough) >= 3.0,
-                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4").arg(what, meterFill.name(), trough.name())
-                                .arg(contrastRatio(meterFill, trough))));
+        QColor meterFill = trough;
+        for (double offset = 0.5; offset < 3.0; offset += 1.0) {
+            const QColor shown =
+                meterPixel(5.5, std::floor(meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight)) + offset);
+            if (contrastRatio(shown, trough) > contrastRatio(meterFill, trough)) {
+                meterFill = shown;
+            }
+        }
+        // On the waveform, 3:1 on the trough. On the spectrogram the fill
+        // stops at the map's magenta, as its orange and yellow were
+        // louder than the plot (#373 H14 G3): 3:1 on the plot's floor
+        // around the column and 2:1 on the trough, the track, which is
+        // 1.3:1 on the floor to show; the peak tick marks the level at
+        // full contrast (meterPeak, near white).
+        const double onTrough = contrastRatio(meterFill, trough);
+        const QColor floor = layer->property("plotColors").value<QObject *>()->property("plotBg").value<QColor>();
+        const double onFloor = contrastRatio(meterFill, floor);
+        QVERIFY2(mode == 0 ? onTrough >= 2.0 && onFloor >= 3.0 : onTrough >= 3.0,
+                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4, on the floor %5: %6")
+                                .arg(what, meterFill.name(), trough.name()).arg(onTrough)
+                                .arg(floor.name()).arg(onFloor)));
     }
 }
 
