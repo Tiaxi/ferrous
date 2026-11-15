@@ -37,6 +37,7 @@ private slots:
     void enterRenamesAsSoonAsThePreviewShows();
     void autoNumberRejectsStartsThatAreNotNumbers();
     void tagEditorRowsFollowTheKeyboard();
+    void tagEditorCurrentRowFollowsTheSelection();
     void tagEditorShowsEveryValueOfMultiValueFields();
     void tagEditorLibrarySupportGateMatchesSupportedRows();
     void renameFilesShowsTheNewNamesAndCancelRenamesNothing();
@@ -1200,6 +1201,62 @@ void TagEditorSmokeTest::tagEditorRowsFollowTheKeyboard() {
     QVERIFY(!second->property("selected").toBool());
     QTest::keyClick(fixture.tags(), Qt::Key_Down);
     QVERIFY(second->property("selected").toBool());
+}
+
+// The current row, with the focus ring, follows the selection however it
+// changes, so the ring and the selection's tint are on one row and the
+// keyboard goes on from the selected row (#373 H12: with the selection set
+// elsewhere, the ring stayed on row 1 while row 2 was selected).
+void TagEditorSmokeTest::tagEditorCurrentRowFollowsTheSelection() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(5, false));
+    QObject *table = fixture.window->findChild<QObject *>(QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QTRY_VERIFY(table->property("activeFocus").toBool());
+    QCOMPARE(table->property("currentIndex").toInt(), 0);
+    const auto ringOn = [&fixture](int row) {
+        QQuickItem *item = tagEditorRowItem(fixture.tags(), row);
+        return item != nullptr && item->property("current").toBool();
+    };
+
+    // Set from outside the table: the ring moves to the selected row.
+    fixture.editor.setSelectedRows(QVariantList{2});
+    QCOMPARE(table->property("currentIndex").toInt(), 2);
+    QTRY_VERIFY(ringOn(2));
+    QVERIFY(!ringOn(0));
+    QVERIFY(tagEditorRowItem(fixture.tags(), 2)->property("selected").toBool());
+    // The keyboard goes on from there.
+    QTest::keyClick(fixture.tags(), Qt::Key_Down);
+    QCOMPARE(selectedTagEditorRows(fixture.editor), QList<int>{3});
+    QCOMPARE(table->property("currentIndex").toInt(), 3);
+    QTest::keyClick(fixture.tags(), Qt::Key_Up, Qt::ShiftModifier);
+    QCOMPARE(selectedTagEditorRows(fixture.editor), (QList<int>{2, 3}));
+
+    // A click selects the row it makes current.
+    QQuickItem *second = tagEditorRowItem(fixture.tags(), 1);
+    QVERIFY(second != nullptr);
+    QTest::mouseClick(fixture.tags(), Qt::LeftButton, Qt::NoModifier,
+                      second->mapToScene(QPointF(24, second->height() / 2)).toPoint());
+    QCOMPARE(selectedTagEditorRows(fixture.editor), QList<int>{1});
+    QCOMPARE(table->property("currentIndex").toInt(), 1);
+    QTRY_VERIFY(ringOn(1));
+
+    // Select All keeps the current row, which is among them; a selection of
+    // several rows set elsewhere makes its first row current.
+    fixture.editor.selectAllRows();
+    QCOMPARE(table->property("currentIndex").toInt(), 1);
+    fixture.editor.setSelectedRows(QVariantList{4, 3});
+    QCOMPARE(table->property("currentIndex").toInt(), 3);
+    QTest::keyClick(fixture.tags(), Qt::Key_Down, Qt::ShiftModifier);
+    QCOMPARE(selectedTagEditorRows(fixture.editor), (QList<int>{3, 4}));
+
+    // A row Ctrl deselects stays current, as in any list.
+    QQuickItem *fourth = tagEditorRowItem(fixture.tags(), 3);
+    QVERIFY(fourth != nullptr);
+    QTest::mouseClick(fixture.tags(), Qt::LeftButton, Qt::ControlModifier,
+                      fourth->mapToScene(QPointF(24, fourth->height() / 2)).toPoint());
+    QCOMPARE(selectedTagEditorRows(fixture.editor), QList<int>{4});
+    QCOMPARE(table->property("currentIndex").toInt(), 3);
 }
 
 void TagEditorSmokeTest::tagEditorShowsEveryValueOfMultiValueFields() {
