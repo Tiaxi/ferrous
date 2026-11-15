@@ -2734,13 +2734,17 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 
 // The first track after nothing loaded grows the cover's place from the
 // compact row to its full size, InOutQuad (#373 H7; H12 Z7: OutCubic left
-// at some 3,100 px/s): the panel's height, the cover's band and its
-// opacity follow one progress, the lines and the library's header move
-// down with it, and the compact row fades out over the first half. The
-// lines come in after the move rather than with it (#373 H12 Z7): at 0
-// until it is 80 % of the way, then fading in over shortDuration, or what
-// is left of the move, whole as it ends. Nothing jumps: the header goes
-// down frame by frame, one way, to where the full layout puts it.
+// at some 3,100 px/s): the panel's height and the cover's band follow one
+// progress, the lines and the library's header move down with it, and the
+// compact row fades out over the first half. The band uncovers the cover,
+// which lies at its full size at the band's top left in every frame, and
+// fades in over the first half: a reveal, not a zoom (#373 H14 G5: a
+// square growing in the middle of the band, with empty flanks). The lines
+// come in after the move rather than with it (#373 H12 Z7, H14 G5): at 0
+// until it is 90 % of the way, then fading in over shortDuration,
+// OutCubic, or what is left of the move, whole as it ends. Nothing jumps:
+// the header goes down frame by frame, one way, to where the full layout
+// puts it.
 void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QFETCH(bool, narrow);
     Covers covers;
@@ -2787,10 +2791,11 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QCOMPARE(growth->property("to").toDouble(), 1.0);
 
     // Frame by frame: down, one way, from near where it was, to the end;
-    // the cover square in every frame, as high as its band and in the
-    // middle of it (#373 H14 F5: the whole cover cut to the band read as
-    // squashed).
+    // the cover at its full size at the band's top left in every frame,
+    // only the band's height changing (#373 H14 G5).
+    const double side = narrow ? 96.0 : panel->width();
     QList<double> tops;
+    QList<double> bands;
     QString unsquare;
     const QMetaObject::Connection squareConnection =
         QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
@@ -2799,10 +2804,12 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
             }
             const QRectF band = sceneRectOf(area);
             const QRectF tile = sceneRectOf(cover);
-            if (cover->width() != cover->height() || std::abs(tile.height() - band.height()) > 0.5
-                || std::abs(tile.center().x() - band.center().x()) > 0.5 || tile.top() < band.top() - 0.5) {
-                unsquare = QStringLiteral("%1x%2 in a %3x%4 band").arg(tile.width()).arg(tile.height())
-                               .arg(band.width()).arg(band.height());
+            bands.push_back(band.height());
+            if (cover->width() != side || cover->height() != side || tile.topLeft() != band.topLeft()
+                || band.width() != side || (band.height() < side && !area->clip())) {
+                unsquare = QStringLiteral("%1x%2 at %3,%4 in a %5x%6 band at %7,%8").arg(tile.width())
+                               .arg(tile.height()).arg(tile.left()).arg(tile.top()).arg(band.width())
+                               .arg(band.height()).arg(band.left()).arg(band.top());
             }
         });
     while (growth->property("running").toBool()) {
@@ -2813,6 +2820,8 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     }
     QObject::disconnect(squareConnection);
     QVERIFY2(unsquare.isEmpty(), qPrintable(unsquare));
+    // The band grew over several frames, from about the row's height.
+    QVERIFY2(bands.size() >= 5 && bands.first() < side / 2, qPrintable(QString::number(bands.size())));
     QVERIFY(panel->property("presence").toDouble() == 1.0);
     QTRY_VERIFY(libraryFollows(panel, header));
     const double full = panel->property("layoutHeight").toDouble();
@@ -2825,7 +2834,6 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     for (qsizetype index = 1; index < tops.size(); ++index) {
         QVERIFY(tops.at(index) >= tops.at(index - 1));
     }
-    const double side = narrow ? 96.0 : panel->width();
     QCOMPARE(area->height(), side);
     QCOMPARE(cover->height(), side);
     QCOMPARE(sceneRectOf(cover), sceneRectOf(area));
@@ -2843,19 +2851,20 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     const QStringList lines = narrow ? kNarrowLines : kWideLines;
     QQuickItem *linesItem = named(window, "nowPlayingLines");
     QVERIFY(linesItem != nullptr);
-    // The lines' opacity at `at` of the move: from where InOutQuad is 80 %
-    // of the way, over shortDuration or the rest of the move.
+    // The lines' opacity at `at` of the move: from where InOutQuad is 90 %
+    // of the way, over shortDuration or the rest of the move, OutCubic.
     const double duration = growth->property("duration").toDouble();
     const auto timeAt = [](double presence) {
         return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
     };
-    const double fadeStart = timeAt(0.8) * duration;
+    const double fadeStart = timeAt(0.9) * duration;
     const double fadeLength = std::min<double>(units->shortDuration(), duration - fadeStart);
     QVERIFY(fadeLength > 0);
     const auto linesOpacityAt = [&](double presence) {
-        return std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
+        const double rest = 1.0 - std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
+        return 1.0 - rest * rest * rest;
     };
-    for (const double at : {0.1, 0.25, 0.5, 0.75, 0.8, 0.9, 0.97}) {
+    for (const double at : {0.1, 0.25, 0.5, 0.75, 0.8, 0.9, 0.93, 0.97}) {
         panel->setProperty("presence", at);
         const QString where = QString::number(at);
         QTRY_VERIFY2(libraryFollows(panel, header), qPrintable(where));
@@ -2863,12 +2872,11 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
         QCOMPARE(panel->height(), std::round(panel->height()));
         QVERIFY2(std::abs(area->height() - (rowHeight + (side - rowHeight) * at)) <= 0.5, qPrintable(where));
-        QVERIFY2(qFuzzyCompare(cover->opacity(), at), qPrintable(where));
-        // The cover square, as high as its band, in the middle of it.
-        QVERIFY2(cover->width() == cover->height()
-                     && std::abs(cover->height() - area->height()) <= 0.5
-                     && std::abs(sceneRectOf(cover).center().x() - sceneRectOf(area).center().x()) <= 0.5
-                     && std::abs(sceneRectOf(cover).center().y() - sceneRectOf(area).center().y()) <= 0.5,
+        QVERIFY2(qFuzzyCompare(cover->opacity(), std::min(1.0, at / 0.5)), qPrintable(where));
+        // The cover whole, at its full size, at the band's top left: the
+        // band uncovers it.
+        QVERIFY2(cover->width() == side && cover->height() == side
+                     && sceneRectOf(cover).topLeft() == sceneRectOf(area).topLeft(),
                  qPrintable(where));
         // Its stand-in's mark is drawn for the place's size all the way.
         QCOMPARE(cover->property("layoutSize").toDouble(), side);
@@ -2877,10 +2885,10 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         QCOMPARE(row->isVisible(), at < 0.5);
         // The lines unfaded, the title under the cover's band or, beside
         // the narrow cover, under the compact row while that shows; in, as
-        // one, only once the move is 80 % of the way.
+        // one, only once the move is 90 % of the way.
         QVERIFY2(std::abs(linesItem->opacity() - linesOpacityAt(at)) < 1e-6,
                  qPrintable(QStringLiteral("%1 at %2").arg(linesItem->opacity()).arg(where)));
-        if (at <= 0.8) {
+        if (at <= 0.9) {
             QCOMPARE(linesItem->opacity(), 0.0);
         }
         for (const QString &name : lines) {

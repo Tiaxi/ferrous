@@ -37,10 +37,13 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (#373 H7: the empty square took 360 px). The
 //   first track grows the cover's place from the row to its full size
-//   over moveDuration, InOutQuad, the cover fading in as it grows and the
-//   lines and the library moving down with its foot, so nothing jumps
-//   (#373 H5); the lines fade in once the move is most of the way, so no
-//   text slides over the moving rows (#373 H12 Z7). Going back to nothing
+//   over moveDuration, InOutQuad, uncovering the cover, which lies at its
+//   full size in place all along (#373 H14 G5: a cover scaled up from a
+//   square in the middle of the band read as a zoom, with empty flanks),
+//   fading in over the first half, the lines and the library moving down
+//   with its foot, so nothing jumps (#373 H5); the lines fade in once the
+//   move is nearly done, so no text slides over the moving rows (#373 H12
+//   Z7). Going back to nothing
 //   loaded, as when the queue is cleared, shrinks it back. With
 //   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
@@ -130,11 +133,12 @@ Item {
     readonly property int moveEasing: Easing.InOutQuad
     // The lines come in after the move, not with it (#373 H12 Z7: they
     // slid over the moving rows for some 190 ms): at 0 until the move is
-    // linesFromPresence of the way, then fading in over shortDuration,
+    // linesFromPresence of the way (#373 H14 G5: from 80 % they still
+    // arrived with the move), then fading in over shortDuration, OutCubic,
     // or what is left of the move where that is shorter, so they are
     // whole when it ends. Read from the move's progress, so a move that
     // turns back, or none, as with animations off, takes them with it.
-    readonly property real linesFromPresence: 0.8
+    readonly property real linesFromPresence: 0.9
     readonly property real linesOpacity: {
         if (root.presence >= 1)
             return 1
@@ -142,8 +146,11 @@ Item {
             return 0
         const start = root._moveTime(root.linesFromPresence) * root.moveDuration
         const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
-        return Math.min(1, Math.max(0, (root._moveTime(root.presence) * root.moveDuration - start) / length))
+        return root._eased((root._moveTime(root.presence) * root.moveDuration - start) / length)
     }
+    // The cover's opacity as the layout grows: in over the first half of
+    // the move, whole for the rest of it.
+    readonly property real coverOpacity: Math.min(1, root.presence / 0.5)
     // How far into the move, from 0 to 1, it is `presence` of the way:
     // InOutQuad's inverse.
     function _moveTime(presence) {
@@ -1454,9 +1461,10 @@ Item {
 
     // The cover's place: the square, or, while the track's layout grows
     // from the compact row or shrinks back into it, a band of it from the
-    // row's height up, with the cover in the middle of it, square, as high
-    // as the band (#373 H14 F5: the middle of the whole cover, cut to the
-    // band, read as the cover squashed).
+    // row's height up, which uncovers the cover from its top: the cover
+    // lies whole, at its full size, at the place's top left all along, so
+    // the move reveals it rather than scale it (#373 H14 G5: H14 F5's
+    // square in the middle of the band, growing, read as a zoom).
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
@@ -1471,21 +1479,16 @@ Item {
         Components.AlbumArtTile {
             id: cover
             objectName: "nowPlayingCover"
-            // Square at every point of the move, whole at its end.
-            readonly property real side: Math.min(root.coverSize, coverArea.height)
-            x: Math.round((root.coverSize - cover.side) / 2)
-            y: Math.round((coverArea.height - cover.side) / 2)
-            width: cover.side
-            height: cover.side
-            // Its stand-in drawn for the place's own size, through the move.
+            x: 0
+            y: 0
+            width: root.coverSize
+            height: root.coverSize
             layoutSize: root.coverSize
-            opacity: root.presence
+            opacity: root.coverOpacity
             uiBridge: root.uiBridge
             idle: root.idle
             coverPath: root.coverPath
-            // The size it loads its image at: the largest the cover is, so
-            // its image is not loaded again while it grows or shrinks, which
-            // would change it after the change ends.
+            // The size it loads its image at, whatever the place's size.
             coverSourceSize: Math.max(256, root.width)
             // No cover: the stand-in, its mark on the plot's floor, and in
             // a light theme an edge, so the dark tile reads as a cover
