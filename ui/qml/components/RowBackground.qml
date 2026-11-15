@@ -15,7 +15,10 @@ import org.kde.kirigami 2.20 as Kirigami
 // - focused (the current row of a list with keyboard focus, while the
 //   keyboard is in use): a 1 px ring;
 //   on a selected row, the tint and the ring are one rectangle; on an
-//   unselected row, the ring alone, as in Breeze.
+//   unselected row, the ring alone, as in Breeze. A list whose scrollbar
+//   lies over the rows' right end sets focusRingLane, and the ring stops
+//   short of it, so the thumb never runs over the ring (#373 H12 Z12);
+//   the tint goes on under the lane.
 // Selection and focus change at once.
 //
 // - opaque: the row also paints the view colour under its tints, so a row
@@ -34,6 +37,10 @@ Item {
     // The room on the right the row leaves free, for a scrollbar that
     // takes a lane of its own.
     property real scrollbarLane: 0
+    // The room on the right the focus ring keeps clear of, for an overlay
+    // scrollbar's lane while it shows.
+    property real focusRingLane: 0
+    readonly property real ringLane: root.focused ? root.focusRingLane : 0
 
     readonly property color tintColor: root.selected
         ? (root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive)
@@ -70,9 +77,21 @@ Item {
         id: tint
         objectName: "rowBackgroundTint"
         anchors.fill: parent
+        anchors.rightMargin: root.ringLane
         color: root.tintColor
         border.width: root.focused ? 1 : 0
         border.color: root.uiPalette.focusRing
         visible: root.selected || root.focused
+    }
+
+    // The tint under the lane the ring keeps clear of.
+    Rectangle {
+        objectName: "rowBackgroundTintLane"
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: root.ringLane
+        color: root.tintColor
+        visible: root.selected && root.ringLane > 0
     }
 }

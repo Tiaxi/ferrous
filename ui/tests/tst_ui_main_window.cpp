@@ -302,6 +302,31 @@ void showTree(LibraryTreeModel &model, const QStringList &expanded,
 
 const QStringList kAllExpanded{kArtistKey, kAlbumKey};
 
+// `count` artists, collapsed, each with one album, in the bridge's tree
+// format: a tree longer than the library's view.
+QByteArray manyArtistsTree(int count) {
+    QByteArray out;
+    appendLe<quint32>(out, static_cast<quint32>(count));
+    for (int index = 0; index < count; ++index) {
+        const QString name = QStringLiteral("Artist %1").arg(index, 2, 10, QLatin1Char('0'));
+        out.append(static_cast<char>(1));
+        appendLe<quint16>(out, 0);
+        appendLe<qint32>(out, -1);
+        appendLe<quint32>(out, 0);
+        appendLe<quint32>(out, 1);
+        appendLe<qint32>(out, 0);
+        appendUtf8(out, name);
+        appendUtf8(out, QStringLiteral("artist|") + name);
+        appendUtf8(out, name);
+        appendUtf8(out, QStringLiteral("/music/") + name);
+        appendUtf8(out, QString());
+        appendLe<quint64>(out, 0);
+        appendUtf8(out, QString());
+        appendLe<quint32>(out, 0);
+    }
+    return out;
+}
+
 double relativeLuminance(const QColor &color) {
     const auto linear = [](double channel) {
         return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
@@ -714,6 +739,7 @@ private slots:
     void regionHeadersNameTheRegionAndItsTotals();
     void libraryTreeHasOneIndentStep();
     void libraryAlbumWithoutACoverShowsAPlaceholderTile();
+    void libraryFocusRingStopsAtTheScrollBarLane();
     void libraryTreeChevronsGrowWithALargeFont();
     void libraryTreeMarksThePlayingTrackAndItsCollapsedAncestors();
     void collapsedRowNameElidesBeforeTheYear();
@@ -2815,6 +2841,78 @@ void UiMainWindowTest::collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath()
         bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/elsewhere.flac"));
         bridge->setProperty("currentTrackTreeKeys", QStringList{});
         QTRY_VERIFY(!artistMark());
+    }
+}
+
+// The library's focus ring stops at the scrollbar's lane while the
+// scrollbar shows, so its thumb never runs over the ring (#373 H12 Z12);
+// a selected row's tint goes on under the lane to the pane's edge, as the
+// thumb draws over tints (#373 H6). Without a scrollbar, the ring runs to
+// the edge.
+void UiMainWindowTest::libraryFocusRingStopsAtTheScrollBarLane() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QQuickItem *view = named(window, "libraryView");
+    QQuickItem *scrollBar = named(window, "libraryScrollBar");
+    QObject *controller = window->findChild<QObject *>(QStringLiteral("libraryController"));
+    QVERIFY(view && scrollBar && controller);
+    const auto rowAt = [view](int index) {
+        QQuickItem *row = nullptr;
+        QMetaObject::invokeMethod(view, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, row), Q_ARG(int, index));
+        return row;
+    };
+
+    for (const bool longTree : {true, false}) {
+        if (longTree) {
+            libraryModel.setLibraryTreeFromBinary(manyArtistsTree(60));
+        } else {
+            showTree(libraryModel, {});
+        }
+        QTRY_COMPARE(scrollBar->isVisible(), longTree);
+        named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(!view->hasActiveFocus());
+        view->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(view->hasActiveFocus());
+        QVERIFY(QMetaObject::invokeMethod(controller, "selectIndex", Q_ARG(QVariant, 0)));
+        QQuickItem *row = nullptr;
+        QQuickItem *tint = nullptr;
+        QTRY_VERIFY((row = rowAt(0)) != nullptr && (tint = itemNamed(row, QStringLiteral("rowBackgroundTint")))
+                    && shown(tint) && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() == 1.0
+                    && colorOf(tint) == tokenHex(window, "selection"));
+        QQuickItem *laneTint = itemNamed(row, QStringLiteral("rowBackgroundTintLane"));
+        QVERIFY(laneTint != nullptr);
+        const qreal edge = sceneRect(view).right();
+        const qreal lane = longTree ? 8.0 : 0.0;
+        QCOMPARE(scrollBar->property("lane").toReal(), 8.0);
+        QCOMPARE(sceneRect(tint).right(), edge - lane);
+        QCOMPARE(shown(laneTint), longTree);
+        if (longTree) {
+            QCOMPARE(sceneRect(laneTint).left(), edge - lane);
+            QCOMPARE(sceneRect(laneTint).right(), edge);
+            QCOMPARE(colorOf(laneTint), tokenHex(window, "selection"));
+        }
+        // As drawn, on the row's middle: the ring's right side 9 px in
+        // from the edge with the scrollbar, at the edge without it.
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / qreal(window->width());
+        const qreal y = sceneRect(row).center().y();
+        const auto pixel = [&](qreal x) {
+            return image.pixelColor(int(std::floor(x * scale)), int(std::floor(y * scale)));
+        };
+        const auto near = [](const QColor &a, const QColor &b) {
+            return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
+                && std::abs(a.blue() - b.blue()) <= 2;
+        };
+        const QColor ring = tokenOf(window, "focusRing");
+        QVERIFY2(near(pixel(edge - lane - 0.5), ring), qPrintable(pixel(edge - lane - 0.5).name()));
+        if (longTree) {
+            // Past the ring, the lane: the tint at the very edge.
+            QVERIFY2(!near(pixel(edge - 0.5), ring), qPrintable(pixel(edge - 0.5).name()));
+        }
     }
 }
 
