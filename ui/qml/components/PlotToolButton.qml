@@ -6,7 +6,8 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/KeyUtils.js" as KeyUtils
 
 // A 24 px tool button on a PlotPlate, larger with a larger font: a theme
-// icon (`icon.name`), or short text such as the M and S of a lane. Its `text` is the tooltip and the
+// icon (`icon.name`) or a symbolic mask of the app's own (`icon.source`),
+// or short text such as the M and S of a lane. Its `text` is the tooltip and the
 // accessible name. Checked is a solid fill with the glyph in the plot's
 // checked glyph colour: a state that is on, as a lane's Mute.
 //
@@ -16,11 +17,12 @@ import "../logic/KeyUtils.js" as KeyUtils
 // and as the loudest thing on the plot): the plot's text colour at 18 %
 // over the plate inside a 1 px edge of the plot's segmentEdge, at least
 // 3:1 on the plate (#373 H14 F4), with its glyph in the text colour whole; the others'
-// glyphs are at 60 %, whole only while pressed. Under the pointer one of
-// the others has a wash of the text colour at 8 %, well under the chosen
-// one's plate, so a hovered choice never reads as the chosen one (#373
-// H12 Z4: the 12 % hover with a whole glyph came to the plate's
-// brightness). The accent is left to the focus ring. A segment is a
+// glyphs are at 72 %, whole only while pressed. Under the pointer one of
+// the others has a wash of the text colour at 14 % and its glyph at 85 %,
+// which show (#373 H14 G4: 8 % and 60 % were 1.2:1, nearly invisible),
+// under the chosen one's plate and its edge, so a hovered choice never
+// reads as the chosen one (#373 H12 Z4: the 12 % hover with a whole glyph
+// came to the plate's brightness). The accent is left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (#373 H12: as a plain button
 // it told of its checked state changing but not that it could be checked),
@@ -41,21 +43,22 @@ ToolButton {
     // One of a plate's choices rather than a state that is on or off.
     property bool segment: false
     readonly property real segmentFillOpacity: 0.18
-    readonly property real segmentRestOpacity: 0.60
+    readonly property real segmentRestOpacity: 0.72
+    readonly property real segmentHoverGlyphOpacity: 0.85
     // The pointer's wash: a segment's, under its chosen plate, and a
     // button's, which checked turns into a solid fill.
-    readonly property real segmentHoverOpacity: 0.08
+    readonly property real segmentHoverOpacity: 0.14
     readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
     readonly property color hoverColor: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
                                                 root.plotColors.plotText.b, root.hoverOpacity)
     readonly property color glyphColor: root.segment
         ? root.plotColors.plotText
         : (root.checked ? root.plotColors.checkedGlyph : root.plotColors.plotText)
-    // A segment that is not the chosen one is quieter, under the pointer
-    // and with the keyboard's focus too, which its wash and the focus ring
-    // show; whole only while pressed.
-    readonly property real glyphOpacity: root.segment && !root.checked && !root.down
-        ? root.segmentRestOpacity : 1
+    // A segment that is not the chosen one is quieter, with the keyboard's
+    // focus too, which the focus ring shows, and a little less so under
+    // the pointer; whole only while pressed.
+    readonly property real glyphOpacity: !root.segment || root.checked || root.down ? 1
+        : (root.hovered ? root.segmentHoverGlyphOpacity : root.segmentRestOpacity)
     readonly property color checkedColor: root.segment
         ? Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
                   root.plotColors.plotText.b, root.segmentFillOpacity)
@@ -72,7 +75,7 @@ ToolButton {
     icon.height: root.uiPalette.toolIconSize
     icon.color: root.glyphColor
     focusPolicy: Qt.TabFocus
-    // The focus ring reaches over the plate's 2 px gap to the next button.
+    // The focus ring reaches into the plate's gap to the next button.
     z: root.visualFocus ? 1 : 0
 
     // A segment checks as a radio button does; its owner binds `checked`
@@ -103,16 +106,19 @@ ToolButton {
             width: root.icon.width
             height: root.icon.height
             visible: root.glyphText.length === 0
-            source: root.icon.name
+            source: root.icon.name.length > 0 ? root.icon.name : root.icon.source
             color: root.glyphColor
             opacity: root.glyphOpacity
             isMask: true
         }
 
+        // Drawn as curves, with grey antialiasing, as the plate's label is
+        // (PlotPlate).
         Label {
             objectName: "plotToolButtonGlyph"
             anchors.centerIn: parent
             visible: root.glyphText.length > 0
+            renderType: Text.CurveRendering
             text: root.glyphText
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.glyphPointSize

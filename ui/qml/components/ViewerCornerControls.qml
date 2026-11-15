@@ -8,7 +8,9 @@ import "." as Components
 // The controls of the visualization viewer in the main window, which has
 // no title strip: one plate in the top right corner, in the plot's colours,
 // right of the plot's mode switch. The new issues while there are any, and
-// Close: 24 px tool buttons, 2 px apart with 2 px around. The zoom is on the
+// Close: 24 px tool buttons, 4 px apart with 3 px around, as the mode
+// switch's beside it, so a focus ring stays inside the plate and clear of
+// the other button (#373 H14 G4). The zoom is on the
 // plot, left of the mode switch, as in the main pane and over the whole
 // screen: [Zoom ↺] [mode] [✕] everywhere.
 //
@@ -31,11 +33,12 @@ Item {
     property string closeButtonName: "viewerCloseButton"
 
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
-    readonly property real spacing: 2
+    readonly property real padding: 3
+    readonly property real spacing: 4
     readonly property bool issuesShown: root.unseenIssueCount > 0
 
-    implicitWidth: closeButton.x + closeButton.width + root.spacing
-    implicitHeight: root.uiPalette.toolButtonSize + 2 * root.spacing
+    implicitWidth: closeButton.x + closeButton.width + root.padding
+    implicitHeight: root.uiPalette.toolButtonSize + 2 * root.padding
     // As the title strip of the viewer over the whole screen: shown at once,
     // so the key that brings the controls back can move focus to them; it
     // fades out on the strip's curve, and hidden it takes no pointer.
@@ -70,8 +73,8 @@ Item {
     Components.PlotToolButton {
         id: issuesButton
         objectName: "viewerIssuesButton"
-        x: root.spacing
-        y: root.spacing
+        x: root.padding
+        y: root.padding
         visible: root.issuesShown
         plotColors: root.plotColors
         uiPalette: root.uiPalette
@@ -85,7 +88,7 @@ Item {
         id: closeButton
         objectName: root.closeButtonName
         x: issuesButton.x + (root.issuesShown ? issuesButton.width + root.spacing : 0)
-        y: root.spacing
+        y: root.padding
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         text: I18n.i18nc("@action:button", "Close")

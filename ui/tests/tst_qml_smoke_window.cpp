@@ -114,9 +114,10 @@ void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
     }
     QVERIFY2(modeSwitch != nullptr, "Visualization mode switch was not created");
     QCOMPARE(modeSwitch->property("selectedMode").toInt(), 0);
-    // Two 24 px tool buttons on one plate, 2 px apart with 2 px around.
-    QCOMPARE(modeSwitch->property("width").toDouble(), 54.0);
-    QCOMPARE(modeSwitch->property("height").toDouble(), 28.0);
+    // Two 24 px tool buttons on one plate, 4 px apart with 3 px around,
+    // which keeps a focus ring inside it (#373 H14 G4).
+    QCOMPARE(modeSwitch->property("width").toDouble(), 58.0);
+    QCOMPARE(modeSwitch->property("height").toDouble(), 30.0);
     QCOMPARE(modeSwitch->property("pointerHovered").toBool(), false);
     QJSValue setMode = qvariant_cast<QJSValue>(modeSwitch->property("setMode"));
     QVERIFY(setMode.isCallable());

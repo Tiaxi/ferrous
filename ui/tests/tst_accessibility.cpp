@@ -14,6 +14,7 @@
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
 #include <QQuickRenderControl>
@@ -353,6 +354,8 @@ private slots:
     void lightPaletteLeavesNoFixedColours();
     void modeSwitchIconFollowsTheMode();
     void modeSwitchSegmentsAreCheckableRadioButtons();
+    void modeSwitchStatesStayApart_data();
+    void modeSwitchStatesStayApart();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
     void laneButtonsAreCheckableToggles();
@@ -3620,20 +3623,45 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
-    // Real tool buttons with Breeze icons, tooltips and accessible names.
+    // Real tool buttons with glyphs, tooltips and accessible names: the
+    // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
+    // mask (#373 H14 G7: Breeze's bar chart said statistics), the
+    // waveform's Breeze's.
     for (const auto &[button, name, icon] : {
-             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("view-statistics")},
+             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
              std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
         QVERIFY(button->inherits("QQuickToolButton"));
         QCOMPARE(accessibleRole(button), QAccessible::RadioButton);
         QCOMPARE(accessibleText(button, QAccessible::Name), name);
         // The tool button's text is its tooltip.
         QCOMPARE(button->property("text").toString(), name);
-        QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+        QQuickItem *glyph = button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(glyph != nullptr);
+        QVERIFY(glyph->property("isMask").toBool());
+        QTRY_VERIFY2(glyph->property("valid").toBool(), qPrintable(name));
+        if (button == spectrogramButton) {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), QString());
+            const QString source = evaluateOn(button, QStringLiteral("icon.source")).toUrl().toString();
+            QVERIFY2(source.endsWith(QStringLiteral("/assets/") + icon), qPrintable(source));
+            QCOMPARE(glyph->property("source").toUrl().toString(), source);
+        } else {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+            QCOMPARE(glyph->property("source").toString(), icon);
+        }
+    }
+    {
+        // The glyph's 16 px source: two strokes, 1.5 px, round caps.
+        QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString svg = QString::fromUtf8(file.readAll());
+        QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\"")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 18 % over the switch's plate, with its glyph in the text colour
-    // whole; the other's glyph is at 60 % but while pressed (#373 H11: the
+    // whole; the other's glyph is at 72 % but while pressed (#373 H11: the
     // accent's solid fill read as keyboard focus; H12 Z4: whole under the
     // pointer, it rivalled the chosen one). Nothing of the switch is in the
     // accent, or in the plot's checked fill, without the keyboard's focus.
@@ -3673,9 +3701,10 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         if (glyph(chosen)->opacity() != 1.0) {
             return QStringLiteral("the chosen glyph at %1").arg(glyph(chosen)->opacity());
         }
-        // Quiet under the pointer and with the keyboard's focus too: whole
-        // only while pressed.
-        if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - 0.60) > 0.005) {
+        // Quiet with the keyboard's focus too, less so under the pointer:
+        // whole only while pressed (#373 H14 G4).
+        const double quiet = other->property("hovered").toBool() ? 0.85 : 0.72;
+        if (!other->property("down").toBool() && std::abs(glyph(other)->opacity() - quiet) > 0.005) {
             return QStringLiteral("the other glyph at %1").arg(glyph(other)->opacity());
         }
         // The focus ring, the plot's, shows only with the keyboard's focus.
@@ -3741,6 +3770,127 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
     QVERIFY(spectrogramButton->property("checked").toBool());
+}
+
+void AccessibilityTest::modeSwitchStatesStayApart_data() {
+    QTest::addColumn<int>("mode");
+    QTest::newRow("spectrogram") << 0;
+    QTest::newRow("waveform") << 1;
+}
+
+// The mode switch's states stay apart (#373 H14 G4): its buttons are 4 px
+// apart with 3 px of plate around them, so the keyboard's 2 px focus ring,
+// with its 1 px gap in the plate's colour, stays inside the plate and
+// clear of the chosen button's edge; the chosen glyph is whole, the other
+// at 72 %, and under the pointer at 85 % on a 14 % wash, which shows on
+// the plate and stays under the chosen one's plate. On both plots; in both
+// Breeze themes, UiFoundationsTest's plotSegmentHoverStaysUnderTheChosenPlate
+// and plotToolButtonDrawsCheckedAndFocusApart draw the hover and the ring.
+void AccessibilityTest::modeSwitchStatesStayApart() {
+    QFETCH(int, mode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *tokens = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(tokens != nullptr);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(viewer != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, mode)));
+    QQuickItem *plate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
+    QQuickItem *chosen = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(mode));
+    QQuickItem *other = visibleItemNamed(window, QStringLiteral("visualizationModeButton%1").arg(1 - mode));
+    QVERIFY(plate != nullptr && chosen != nullptr && other != nullptr);
+    QTRY_VERIFY(chosen->property("checked").toBool());
+    QVERIFY(!other->property("checked").toBool());
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    const auto part = [](QQuickItem *button, const char *name) {
+        return button->findChild<QQuickItem *>(QString::fromLatin1(name));
+    };
+
+    // 3 px of plate around the buttons, 4 px between them.
+    QQuickItem *first = mode == 0 ? chosen : other;
+    QQuickItem *second = mode == 0 ? other : chosen;
+    const QRectF plateRect = rectOf(plate);
+    QCOMPARE(rectOf(first).left() - plateRect.left(), 3.0);
+    QCOMPARE(rectOf(first).top() - plateRect.top(), 3.0);
+    QCOMPARE(plateRect.right() - rectOf(second).right(), 3.0);
+    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 3.0);
+    QCOMPARE(rectOf(second).left() - rectOf(first).right(), 4.0);
+
+    // The other one focused from the keyboard: its ring inside the plate,
+    // 1 px or more clear of the chosen one's edge, with its gap.
+    QVERIFY(tabTo(window, other));
+    QTRY_VERIFY(other->property("visualFocus").toBool());
+    QQuickItem *ring = part(other, "plotToolButtonFocusRing");
+    QQuickItem *gap = part(other, "plotToolButtonFocusGap");
+    QQuickItem *edge = part(chosen, "plotToolButtonCheckedEdge");
+    QVERIFY(ring != nullptr && gap != nullptr && edge != nullptr);
+    QTRY_VERIFY(ring->isVisible() && gap->isVisible() && edge->isVisible());
+    const QRectF ringRect = rectOf(ring);
+    QVERIFY2(plateRect.contains(ringRect),
+             qPrintable(QStringLiteral("ring %1,%2 %3x%4 in plate %5,%6 %7x%8")
+                            .arg(ringRect.left()).arg(ringRect.top()).arg(ringRect.width()).arg(ringRect.height())
+                            .arg(plateRect.left()).arg(plateRect.top()).arg(plateRect.width())
+                            .arg(plateRect.height())));
+    const QRectF edgeRect = rectOf(edge);
+    const double clearance = mode == 0 ? ringRect.left() - edgeRect.right() : edgeRect.left() - ringRect.right();
+    QVERIFY2(clearance >= 1.0, qPrintable(QString::number(clearance)));
+    QCOMPARE(QQmlProperty(ring, QStringLiteral("border.width")).read().toReal(), 2.0);
+    QCOMPARE(QQmlProperty(gap, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(rectOf(gap).left(), rectOf(other).left() - 1);
+    QCOMPARE(ringRect.left(), rectOf(other).left() - 3);
+
+    // The glyphs: the chosen one whole, the other quiet.
+    QQuickItem *chosenGlyph = part(chosen, "plotToolButtonIcon");
+    QQuickItem *otherGlyph = part(other, "plotToolButtonIcon");
+    QVERIFY(chosenGlyph != nullptr && otherGlyph != nullptr);
+    QVariant set;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "plotColors", Q_RETURN_ARG(QVariant, set), Q_ARG(QVariant, mode)));
+    QObject *plot = set.value<QObject *>();
+    QVERIFY(plot != nullptr);
+    const QColor text = plot->property("plotText").value<QColor>();
+    QCOMPARE(chosenGlyph->property("color").value<QColor>(), text);
+    QCOMPARE(chosenGlyph->opacity(), 1.0);
+    QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
+
+    // Under the pointer: a 14 % wash, its glyph at 85 %; as drawn, it
+    // shows on the plate, under the chosen one's plate.
+    QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
+    QTest::mouseMove(window, rectOf(other).center().toPoint());
+    QTRY_VERIFY(other->property("hovered").toBool());
+    QQuickItem *wash = part(other, "plotToolButtonHover");
+    QQuickItem *fill = part(chosen, "plotToolButtonChecked");
+    QVERIFY(wash != nullptr && fill != nullptr);
+    QTRY_COMPARE(wash->opacity(), 1.0);
+    QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
+    const QColor washColor = wash->property("color").value<QColor>();
+    const QColor fillColor = fill->property("color").value<QColor>();
+    QVERIFY2(std::abs(washColor.alphaF() - 0.14) < 0.005, qPrintable(QString::number(washColor.alphaF())));
+    QVERIFY(washColor.alphaF() < fillColor.alphaF());
+    // The plate whole, as the pointer on it reveals it.
+    const auto shownWhole = [&]() {
+        double opacity = 1.0;
+        for (QQuickItem *item = plate; item != nullptr; item = item->parentItem()) {
+            opacity *= item->opacity();
+        }
+        return opacity == 1.0;
+    };
+    QTRY_VERIFY(shownWhole());
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const QColor drawnWash = drawnAt(image, window, other, QPointF(2.5, 2.5));
+    const QColor drawnFill = drawnAt(image, window, chosen, QPointF(2.5, 2.5));
+    // The plate beside the chosen one, clear of the other's focus ring.
+    const QColor drawnPlate =
+        drawnAt(image, window, plate, QPointF(mode == 0 ? 1.5 : plate->width() - 1.5, plate->height() / 2));
+    const double washStep = contrastRatio(drawnWash, drawnPlate);
+    const double fillStep = contrastRatio(drawnFill, drawnPlate);
+    QVERIFY2(washStep >= 1.25 && washStep < fillStep,
+             qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
+                            .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
 }
 
 void AccessibilityTest::visualizationsHaveAccessibleRoles() {
@@ -4047,13 +4197,16 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *labelText = label->findChild<QQuickItem *>(QStringLiteral("plotPlateLabel"));
         QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
         QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);
+        // The switch's plate beside the chosen mode, clear of the focused
+        // one's ring, which reaches the plate's edge on its side (#373 H14
+        // G4).
+        const QPointF plateSpot(mode == 0 ? 1.0 : switchPlate->width() - 1.0, switchPlate->height() / 2);
         // Let the plates' fades settle before sampling: under a loaded
         // parallel run a fixed wait caught the chosen segment mid-fade.
         const auto settledFill = [&]() {
             const QImage grab = window->grabWindow();
             return contrastRatio(drawnAt(grab, window, checked, QPointF(checked->width() / 2, 2.5)),
-                                 drawnAt(grab, window, switchPlate,
-                                         QPointF(1.0, switchPlate->height() / 2)));
+                                 drawnAt(grab, window, switchPlate, plateSpot));
         };
         QTRY_VERIFY_WITH_TIMEOUT(settledFill() >= 1.4, 3000);
         const QImage image = window->grabWindow();
@@ -4067,7 +4220,7 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // (#373 H11: the plot's text colour at 20 %, not the accent's solid
         // fill), its glyph whole on it and the other's on the switch's
         // plate; and the focus ring.
-        const QColor switchFill = drawnAt(image, window, switchPlate, QPointF(1.0, switchPlate->height() / 2));
+        const QColor switchFill = drawnAt(image, window, switchPlate, plateSpot);
         // Between its 1 px edge (#373 H14 F4), rounded at the corners, and
         // its glyph.
         const QColor fill = drawnAt(image, window, checked, QPointF(checked->width() / 2, 2.5));
@@ -4076,15 +4229,31 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *checkedGlyph = checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
         QQuickItem *uncheckedGlyph = unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
         QVERIFY(checkedGlyph != nullptr && uncheckedGlyph != nullptr);
-        const QColor checkedInk = mostContrasting(
-            image, window, checkedGlyph, QRectF(0, 0, checkedGlyph->width(), checkedGlyph->height()), fill);
+        // A glyph's ink as drawn on `background`. A mask of the app's own,
+        // from a file, as the spectrogram's (#373 H14 G7), is coloured by
+        // the platform's icon loader, which offscreen leaves it black, as
+        // the transport's own glyphs are (TransportStatusTest): its colour
+        // at its opacity over the background stands for it.
+        const auto inkOf = [&](QQuickItem *glyph, const QColor &background) {
+            if (glyph->property("source").metaType() != QMetaType::fromType<QUrl>()) {
+                return mostContrasting(image, window, glyph, QRectF(0, 0, glyph->width(), glyph->height()),
+                                       background);
+            }
+            const QColor color = glyph->property("color").value<QColor>();
+            const double alpha = glyph->opacity();
+            return QColor::fromRgbF(color.redF() * alpha + background.redF() * (1 - alpha),
+                                    color.greenF() * alpha + background.greenF() * (1 - alpha),
+                                    color.blueF() * alpha + background.blueF() * (1 - alpha));
+        };
+        const QColor checkedInk = inkOf(checkedGlyph, fill);
         QVERIFY2(contrastRatio(checkedInk, fill) >= 4.5,
                  qPrintable(QStringLiteral("%1 chosen glyph: %2").arg(what).arg(contrastRatio(checkedInk, fill))));
-        const QColor uncheckedInk = mostContrasting(
-            image, window, uncheckedGlyph, QRectF(0, 0, uncheckedGlyph->width(), uncheckedGlyph->height()),
-            switchFill);
+        const QColor uncheckedInk = inkOf(uncheckedGlyph, switchFill);
         QVERIFY2(contrastRatio(uncheckedInk, switchFill) >= 3.0,
-                 qPrintable(QStringLiteral("%1 other glyph: %2").arg(what).arg(contrastRatio(uncheckedInk, switchFill))));
+                 qPrintable(QStringLiteral("%1 other glyph: %2 (%3 on %4, %5 at %6)").arg(what)
+                                .arg(contrastRatio(uncheckedInk, switchFill)).arg(uncheckedInk.name(), switchFill.name(),
+                                     uncheckedGlyph->property("color").value<QColor>().name())
+                                .arg(uncheckedGlyph->opacity())));
         const QColor ring = drawnAt(image, window, unchecked, QPointF(unchecked->width() / 2, -2.5));
         QVERIFY2(contrastRatio(ring, switchFill) >= 3.0,
                  qPrintable(QStringLiteral("%1 ring: %2").arg(what).arg(contrastRatio(ring, switchFill))));
@@ -4104,14 +4273,32 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // The fill just under its top, where it meets the trough and shows
         // the level: on the spectrogram, a ramp of the colour map, whose
         // floor is darker (#373 H10 V2). A few dB under the level, as the
-        // level decays while the test runs.
+        // level decays while the test runs; a rung of its ladder there,
+        // the trough showing between them (#373 H14 G3).
         const double meterBottom = bottom - LevelMeterItem::kInset;
         const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1.0;
-        const QColor meterFill = meterPixel(5.5, meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight));
         const QColor trough = meterPixel(5.5, top + 9);
-        QVERIFY2(contrastRatio(meterFill, trough) >= 3.0,
-                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4").arg(what, meterFill.name(), trough.name())
-                                .arg(contrastRatio(meterFill, trough))));
+        QColor meterFill = trough;
+        for (double offset = 0.5; offset < 3.0; offset += 1.0) {
+            const QColor shown =
+                meterPixel(5.5, std::floor(meterBottom - LevelMeterItem::meterPosition(-15, scaleHeight)) + offset);
+            if (contrastRatio(shown, trough) > contrastRatio(meterFill, trough)) {
+                meterFill = shown;
+            }
+        }
+        // On the waveform, 3:1 on the trough. On the spectrogram the fill
+        // stops at the map's magenta, as its orange and yellow were
+        // louder than the plot (#373 H14 G3): 3:1 on the plot's floor
+        // around the column and 2:1 on the trough, the track, which is
+        // 1.3:1 on the floor to show; the peak tick marks the level at
+        // full contrast (meterPeak, near white).
+        const double onTrough = contrastRatio(meterFill, trough);
+        const QColor floor = layer->property("plotColors").value<QObject *>()->property("plotBg").value<QColor>();
+        const double onFloor = contrastRatio(meterFill, floor);
+        QVERIFY2(mode == 0 ? onTrough >= 2.0 && onFloor >= 3.0 : onTrough >= 3.0,
+                 qPrintable(QStringLiteral("%1 meter: %2 on %3: %4, on the floor %5: %6")
+                                .arg(what, meterFill.name(), trough.name()).arg(onTrough)
+                                .arg(floor.name()).arg(onFloor)));
     }
 }
 

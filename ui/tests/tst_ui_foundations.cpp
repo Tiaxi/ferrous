@@ -548,7 +548,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // The spectrogram's fixed set.
     QVERIFY2(sameColor(colorOf(spectrogram, "plotBg"), fromHex(QStringLiteral("#14062e"))), qPrintable(colorOf(spectrogram, "plotBg").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotOutline"), fromHex(QStringLiteral("#000000"))), qPrintable(colorOf(spectrogram, "plotOutline").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#202020"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#1a1a1a")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#2e2e2e"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs #2e2e2e")));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#30244a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
@@ -577,7 +577,11 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     }
     // The lane seam and the meter's track stand out from the floor, and the
     // meter's gaps from its track. Its fill is quieter than the plot's text.
-    QVERIFY(contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg")) >= 1.15);
+    // The seam reads above the rest lines at rest, #261a3e, 1.19:1 on the
+    // floor (#373 H14 G6: at 1.18:1 it was under them).
+    const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
+    QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
+    QVERIFY(seamContrast > contrastRatio(fromHex(QStringLiteral("#261a3e")), colorOf(spectrogram, "plotBg")) + 0.1);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
@@ -1187,6 +1191,14 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QVERIFY(letter != nullptr);
     QVERIFY(letter->implicitHeight() <= buttonSize);
 
+    // The plates' letters, the lane's and the M, drawn as curves with grey
+    // antialiasing at any font size, DemiBold (#373 H14 G8: the platform's
+    // subpixel antialiasing fringed them in colour).
+    for (QQuickItem *item : {text, letter}) {
+        QCOMPARE(item->property("renderType").toInt(), 2 /* Text.CurveRendering */);
+        QCOMPARE(item->property("font").value<QFont>().weight(), QFont::DemiBold);
+    }
+
     // The plot's text, the lane label's and the M, at least 11 px at the
     // default font and growing with a larger one, as the rest of the
     // design's small text.
@@ -1219,10 +1231,11 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 // A segment of a plate's choices, as the visualization's mode switch,
 // under the pointer while another is the chosen one (#373 H12 Z4: the
 // 12 % hover with its glyph whole came to the chosen plate's brightness):
-// a wash of the plot's text colour at 8 %, against the chosen plate's
-// 18 %, with its glyph at the quiet 60 %, whole only while pressed. As
-// drawn, in both themes and on both plots, the hovered one stands off the
-// plate less than the chosen one does, by a clear margin.
+// a wash of the plot's text colour at 14 %, against the chosen plate's
+// 18 % and its edge, with its glyph at 85 %, whole only while pressed
+// (#373 H14 G4: 8 % with the glyph at 60 % was 1.2:1, nearly invisible).
+// As drawn, in both themes and on both plots, the hovered one shows on the
+// plate and stands off it less than the chosen one does.
 void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1262,10 +1275,10 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    QVERIFY2(std::abs(wash.alphaF() - 0.08) < 0.005, qPrintable(QString::number(wash.alphaF())));
+    QVERIFY2(std::abs(wash.alphaF() - 0.14) < 0.005, qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
     QVERIFY2(std::abs(plateFill.alphaF() - 0.18) < 0.005, qPrintable(QString::number(plateFill.alphaF())));
-    QVERIFY2(std::abs(letter->opacity() - 0.60) < 0.005, qPrintable(QString::number(letter->opacity())));
+    QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
     // As drawn: the plate around the buttons, the chosen one's plate and
     // the hovered one's wash, clear of their glyphs.
@@ -1284,10 +1297,10 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
              qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, plate)));
     // Toward the text colour, both: lighter on a dark plate, darker on a
-    // light one, the hovered one less by far.
+    // light one; the hovered one shows, and less than the chosen one.
     const qreal chosenStep = contrastRatio(drawnChosen, plate);
     const qreal hoverStep = contrastRatio(drawnHover, plate);
-    QVERIFY2(hoverStep > 1.0 && chosenStep - 1.0 >= 1.8 * (hoverStep - 1.0),
+    QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
     QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.05,
              qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));

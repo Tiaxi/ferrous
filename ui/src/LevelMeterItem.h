@@ -21,18 +21,20 @@
 // The level meter of the visualization: a column at the right end of each
 // lane, with a 1 px seam on its left, out to the pane's edge. Each column
 // is a vertical meter from -60 to 0 dBFS, with its listed levels evenly
-// spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): a 16 px
-// track the lane's height, and on it a 15 px bar out to the column's right
+// spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an 11 px
+// track the lane's height, and on it a 10 px bar out to the column's right
 // edge, with the track showing 1 px left of it: the fill from the bottom
-// and a 3 px clip lamp at the top. A bar that wide reads as an instrument,
-// not as the 6 px thumb of the queue's scrollbar above the pane, whose
-// right edge it shares, so it needs no strip of the plot's floor beside it
-// (#373 H8; H7's 8 px strip read as a black edge on the window). While
-// `colorMapFill` is set, the fill is a ramp of the spectrogram's colours:
-// each of its rows takes the map's colour of its own level, along the map
-// up to its last colour under kFillLightness of the map's top, so that the
-// meter reads as the plot's own scale rather than as its brightest
-// highlight (#373 H10 V2). While `scaleShown`,
+// and a 3 px clip lamp at the top. The fill is a ladder, 2 px rungs on a
+// 3 px pitch from the scale's foot, the track showing between them, so it
+// reads as an instrument, with some 40 % of a solid bar's ink (#373 H14
+// G3: a 15 px solid bar was louder than the data, and in the view's
+// colours read as the thumb of the queue's scrollbar above the pane, whose
+// right edge it shares; H8, H7). While `colorMapFill` is set, the rungs
+// are a ramp of the spectrogram's colours: each of their rows takes the
+// map's colour of its own level, along the map up to kFillCapPosition, its
+// magenta, never its red, orange or yellow, so that the meter reads as the
+// plot's own scale rather than as its loudest highlight, or as the amber
+// of the playhead (#373 H10 V2, H14 G3). While `scaleShown`,
 // 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
 // in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
 // 1 px gap under it where it is on the fill. Without a track, stopped, it
@@ -92,7 +94,7 @@ public:
     // A bin at full scale clips; its level is rounded to 0.001 of a dB.
     static constexpr double kClipDb = -0.001;
     // The column: a 1 px seam and the track out to its right edge.
-    static constexpr double kColumnWidth = 17.0;
+    static constexpr double kColumnWidth = 12.0;
     static constexpr double kTrackLeft = 1.0;
     static constexpr double kTrackWidth = kColumnWidth - kTrackLeft;
     // The bar on the track, out to the column's right edge: the fill and
@@ -105,21 +107,25 @@ public:
     static constexpr double kLampHeight = 3.0;
     // Lanes under this height have only the -12 and -24 dB ticks.
     static constexpr double kFullScaleLaneHeight = 64.0;
+    // The fill's rungs: kRungHeight lit pixels in every kRungPitch, from
+    // the scale's foot.
+    static constexpr double kRungHeight = 2.0;
+    static constexpr double kRungPitch = 3.0;
+    // Whether the logical pixel `fromFoot` up from the scale's foot is on
+    // a rung rather than in a gap between two.
+    static bool isRung(double fromFoot);
     // The ticks of the scale, in dB, as a lane of `laneHeight` shows them.
     static std::vector<double> ticksDb(double laneHeight);
-    // The colour-map fill's lightness at most: this much of the lightness
-    // of the map's top (see lightness()).
-    static constexpr double kFillLightness = 0.7;
+    // The highest place on the spectrogram's map, from 0 to 1, the colour-
+    // map fill takes: its magenta, under its red, orange and yellow.
+    static constexpr double kFillCapPosition = 0.46;
     // A colour's lightness, from 0 to 1: its luma, the Rec. 709 weights of
     // its gamma-encoded components, as a picture's brightness is measured.
     static double lightness(const QColor &color);
-    // The highest place on the spectrogram's map, from 0 to 1, whose colour
-    // is at most kFillLightness of the lightness of the map's top.
-    static double fillCapPosition();
     // The ramp's colour of a level of `db` dBFS on the spectrogram's map in
     // a view of `dbRange` dB: the map's colour, up to that of
-    // fillCapPosition(), so that loud levels top out in the map's own
-    // orange rather than in a darkened yellow or white (#373 H9 T2).
+    // kFillCapPosition, so that loud levels top out in the map's own
+    // magenta rather than in its orange or yellow (#373 H9 T2, H14 G3).
     static QColor colorMapColor(double db, double dbRange);
 
     explicit LevelMeterItem(QQuickItem *parent = nullptr);
@@ -234,6 +240,8 @@ private:
     double advanceTo(Clock::time_point now);
     void showCurrent();
     void setColor(QColor &member, const QColor &value);
+    // The rungs' one colour, or an invalid one for the colour map.
+    QColor rampColor() const;
     // The channel `lane` shows: one channel, or the loudest of all.
     Channel laneChannel(const std::vector<Channel> &channels, int lane) const;
     // The device pixels of the scale of `lane`.

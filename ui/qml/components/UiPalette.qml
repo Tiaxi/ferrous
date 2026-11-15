@@ -253,9 +253,10 @@ QtObject {
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
         // Neutral, as all that is drawn on the plot, and lighter than the
-        // floor: 1.18:1 on it, and it shows between lanes of black silence
-        // too.
-        plotLaneSeam: "#202020"
+        // floor: 1.41:1 on it, over the rest lines' 1.19:1, so the seam
+        // between lanes reads above them (#373 H14 G6: at 1.18:1 it was
+        // under them), and it shows between lanes of black silence too.
+        plotLaneSeam: "#2e2e2e"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
