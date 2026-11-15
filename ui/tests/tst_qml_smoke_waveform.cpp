@@ -3036,7 +3036,8 @@ Window {
         id: bridge
         objectName: "waveformBridge"
         property string playbackState: "Stopped"
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
@@ -3629,7 +3630,9 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
                 QTRY_VERIFY(!waveform->crosshairEnabled());
 
                 QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
-                const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 0);
+                // Off the middle row, where per channel the seam between
+                // two lanes is.
+                const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 8);
                 QTest::mouseMove(host, at);
                 QTRY_VERIFY2(!controlsChanged.isEmpty(), qPrintable(where));
                 autoHide->setProperty("hideDelay", 5000);
@@ -3644,10 +3647,18 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
                     QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier, at);
                     QTRY_COMPARE(seeks.count(), 1);
                 } else {
-                    auto *spectrogram = qobject_cast<SpectrogramItem *>(firstVisibleItemNamed(
-                        spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
-                    QVERIFY(spectrogram != nullptr);
-                    QTRY_VERIFY(spectrogram->m_hoverActive);
+                    // The lane under the pointer: per channel, before any
+                    // audio, the lower of a stereo track's two.
+                    const auto laneHovered = [&]() {
+                        for (QQuickItem *item : itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+                            auto *spectrogram = qobject_cast<SpectrogramItem *>(item);
+                            if (spectrogram != nullptr && spectrogram->isVisible() && spectrogram->m_hoverActive) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    QTRY_VERIFY2(laneHovered(), qPrintable(where));
                 }
             }
         }

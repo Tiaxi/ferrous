@@ -3762,9 +3762,12 @@ QQuickItem *plotLayerOf(QQuickWindow *window) {
     return window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
 }
 
-// Two labelled lanes on the plot layer, as a stereo track's.
+// Two labelled lanes on the plot layer, as a stereo track's, with a track
+// loaded: before any audio, the lanes at rest have no Mute and Solo.
 bool showStereoLanes(QQuickItem *layer) {
-    return layer->setProperty("laneCount", 2)
+    QObject *bridge = qvariant_cast<QObject *>(layer->property("uiBridge"));
+    return bridge != nullptr && bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/track.flac"))
+        && layer->setProperty("laneCount", 2)
         && layer->setProperty("laneLabels", QVariantList{QStringLiteral("L"), QStringLiteral("R")});
 }
 }

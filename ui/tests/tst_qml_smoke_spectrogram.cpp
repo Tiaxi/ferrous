@@ -58,7 +58,7 @@ private slots:
     void spectrogramAtRestDrawsItsScaleFaintly_data();
     void spectrogramAtRestDrawsItsScaleFaintly();
     void spectrogramAtRestFollowsTheScaleSetting();
-    void spectrogramAtRestDrawsLinesOnlyWithTheScale();
+    void spectrogramAtRestDrawsLabelsOnlyWithTheScale();
     void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
     void spectrogramRollingViewFillsUpToThePlayhead();
     void spectrogramTimeScaleOfAStretchedShortTrackShowsTenths();
@@ -198,7 +198,8 @@ Item {
         property int channelButtonsVisibility: 2
         property var mutedChannels: []
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property bool connected: true
@@ -349,7 +350,8 @@ Window {
         property var soloedChannels: []
         property int muteCalls: 0
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property bool connected: true
@@ -2058,7 +2060,8 @@ Window {
         property var mutedChannels: []
         property var soloedChannels: []
         property bool showLevelMeter: false
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property bool waveformEndsEarly: false
         property real waveformCoverageSeconds: 0
         property var currentTrackChannelLabels: []
@@ -2742,8 +2745,9 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
     }
 }
 
-// With the scale hidden (Preferences), the lane at rest is the plain floor:
-// lines without labels read as noise (#373 H10 P18).
+// With the scale hidden (Preferences), the lane at rest keeps its lines,
+// without the labels: an instrument at rest rather than a hole (#373 H14
+// F3, P23; H10 P18 left it the plain floor).
 void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
@@ -2761,12 +2765,13 @@ void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     const SpectrogramOverlayLayout hidden = layOut();
     QVERIFY(hidden.valid);
     QVERIFY(hidden.images.isEmpty());
-    QVERIFY(hidden.lines.isEmpty());
+    QCOMPARE(hidden.lines, shown.lines);
 }
 
-// As drawn: with the scale hidden, the lane at rest is black all the way
-// down; showing the scale brings its lines (#373 H10 P18).
-void SpectrogramSmokeTest::spectrogramAtRestDrawsLinesOnlyWithTheScale() {
+// As drawn: the lane at rest has its lines in white 8% on the floor with
+// the scale hidden or shown, and the scale's labels only while it shows
+// (#373 H14 F3; H10 P18: black all the way down without the scale).
+void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QQuickWindow window;
     window.resize(400, 200);
     auto *item = new SpectrogramItem(window.contentItem());
@@ -2776,37 +2781,49 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLinesOnlyWithTheScale() {
     item->setGridEnabled(false);
     window.show();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
-    QTRY_VERIFY([item]() {
-        QMutexLocker lock(&item->m_stateMutex);
-        return item->m_restGrid.valid;
-    }());
-    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
-    const QColor black(0, 0, 0);
-    const auto plainRows = [&black](const QImage &image) {
-        int lit = 0;
-        for (int y = 0; y < image.height(); ++y) {
-            if (image.pixelColor(100, y) != black) ++lit;
-        }
-        return lit;
-    };
-    const QImage plain = grab();
-    QCOMPARE(plain.height(), 200);
-    QCOMPARE(plainRows(plain), 0);
-
-    // The scale shown: its lines, in white 8% on the floor.
-    item->setGridEnabled(true);
     SpectrogramOverlayLayout rest;
     QTRY_VERIFY(!(rest = [item]() {
         QMutexLocker lock(&item->m_stateMutex);
         return item->m_restGrid;
     }()).lines.isEmpty());
+    QVERIFY(rest.images.isEmpty());
+    const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
+    const QColor black(0, 0, 0);
     const QColor line(20, 20, 20);
+    // The rows of the column at x that are not the floor, and the
+    // brightest pixel of them.
+    const auto litRows = [&black](const QImage &image, int x) {
+        int lit = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            if (image.pixelColor(x, y) != black) ++lit;
+        }
+        return lit;
+    };
+    const auto brightest = [](const QImage &image) {
+        int value = 0;
+        for (int y = 0; y < image.height(); ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                value = std::max(value, image.pixelColor(x, y).red());
+            }
+        }
+        return value;
+    };
     QTRY_COMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
-    QVERIFY(plainRows(grab()) >= rest.lines.size());
+    const QImage linesOnly = grab();
+    QCOMPARE(linesOnly.height(), 200);
+    QCOMPARE(litRows(linesOnly, 100), rest.lines.size());
+    // No labels: nothing brighter than the lines.
+    QCOMPARE(brightest(linesOnly), 20);
 
-    // Hidden again, plain again.
+    // The scale shown: the same lines, and its labels.
+    item->setGridEnabled(true);
+    QTRY_VERIFY(brightest(grab()) > 100);
+    QCOMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
+
+    // Hidden again, the lines alone again.
     item->setGridEnabled(false);
-    QTRY_COMPARE(plainRows(grab()), 0);
+    QTRY_COMPARE(brightest(grab()), 20);
+    QCOMPARE(litRows(grab(), 100), rest.lines.size());
 }
 
 // As drawn: in white 8% on the black floor, with labels in plotTextSecondary,
