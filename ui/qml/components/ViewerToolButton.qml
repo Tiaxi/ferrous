@@ -10,11 +10,14 @@ import "../logic/KeyUtils.js" as KeyUtils
 // chrome or view colour, such as the viewers' info and close buttons: a
 // theme icon (`icon.name`), or its text with `display:
 // AbstractButton.TextOnly`. Its `text` is the tooltip and the accessible
-// name; `toolTipText` replaces the tooltip. Checked is
-// the selection tint alone; the 2 px ring is for keyboard focus only.
+// name; `toolTipText` replaces the tooltip. Checked is the selection tint
+// alone on the window's colours; the 2 px ring is for keyboard focus only.
 // With `plotColors` (UiPalette's PlotColors), it takes its colours from the
 // plot it sits on rather than the window, as on a viewer's title strip
-// over the view.
+// over the view, and checked is the mode switch's chosen segment: the
+// plot's text colour at 18 % inside a 1 px edge of its segmentEdge, so the
+// plates have one way to show a choice that is on (#373 H14 F4: an accent
+// tint).
 ToolButton {
     id: root
 
@@ -31,7 +34,7 @@ ToolButton {
         ? ColorUtils.withAlpha(root.baseTextColor, root._plotIsDark ? 0.065 : 0.08)
         : root.uiPalette.hover
     readonly property color checkedColor: root.plotColors
-        ? root.plotColors.checkedTint : root.uiPalette.selection
+        ? ColorUtils.withAlpha(root.plotColors.plotText, 0.18) : root.uiPalette.selection
     readonly property color focusRingColor: root.plotColors
         ? root.plotColors.plotFocusRing : root.uiPalette.focusRing
 
@@ -104,13 +107,23 @@ ToolButton {
             }
         }
 
-        // Checked: the tint alone, never a ring.
+        // Checked: the fill, and on a plot its edge; never the focus ring.
         Rectangle {
             objectName: "viewerToolButtonChecked"
             anchors.fill: parent
             radius: 3
             visible: root.checked
             color: root.checkedColor
+        }
+
+        Rectangle {
+            objectName: "viewerToolButtonCheckedEdge"
+            anchors.fill: parent
+            radius: 3
+            visible: root.checked && root.plotColors !== null
+            color: "transparent"
+            border.width: 1
+            border.color: root.plotColors ? root.plotColors.segmentEdge : "transparent"
         }
 
         Rectangle {

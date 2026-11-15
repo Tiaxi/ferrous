@@ -212,9 +212,11 @@ QtObject {
         // the plate, and its glyph or letter, at least 4.5:1 on the fill.
         required property color checkedFill
         required property color checkedGlyph
-        // A checked flat button's tint, as on a viewer's title strip: the
-        // selection's mix on the plot's floor.
-        required property color checkedTint
+        // The 1 px edge inside a chosen choice on a plate, as the mode
+        // switch's chosen segment and a viewer's info toggle while on, over
+        // their neutral fill (#373 H14 F4: the fill alone was 1.4 to
+        // 1.7:1): at least 3:1 on the plate and on the fill.
+        required property color segmentEdge
         // A tool button's keyboard focus ring, at least 3:1 on the plate.
         required property color plotFocusRing
     }
@@ -269,8 +271,8 @@ QtObject {
         meterTopSeam: "transparent"
         checkedFill: root.accent
         checkedGlyph: "#000000"
-        // The dark theme's selection, on the floor.
-        checkedTint: ColorUtils.mixColor(spectrogramColors.plotBg, root.accent, 0.26)
+        // The dark theme's tertiary text, as the plot is dark in both.
+        segmentEdge: "#8f959a"
         // The dark theme's focus ring, as the plot is dark in both.
         plotFocusRing: root._withHslLightness(root.accent, 1.03, 0.686)
     }
@@ -307,7 +309,7 @@ QtObject {
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing
         checkedGlyph: root.themeIsDark ? root.view : "#ffffff"
-        checkedTint: root.selection
+        segmentEdge: root.textTertiary
         plotFocusRing: root.focusRing
     }
 
@@ -355,7 +357,7 @@ QtObject {
         meterTopSeam: spectrogramColors.meterTopSeam
         checkedFill: spectrogramColors.checkedFill
         checkedGlyph: spectrogramColors.checkedGlyph
-        checkedTint: ColorUtils.mixColor(mediaColors.plotBg, root.accent, 0.26)
+        segmentEdge: spectrogramColors.segmentEdge
         plotFocusRing: spectrogramColors.plotFocusRing
     }
 

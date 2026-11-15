@@ -632,12 +632,26 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
             <= 2);
     QVERIFY(sameColor(colorOf(waveform, "checkedGlyph"), dark ? view : QColor(Qt::white)));
     QVERIFY(sameColor(colorOf(waveform, "plotFocusRing"), colorOf(tokens, "focusRing")));
-    // A checked flat button, as on a viewer's title strip: the selection on
-    // the view, and the dark theme's selection on the spectrogram's floor.
-    QVERIFY(sameColor(colorOf(waveform, "checkedTint"), colorOf(tokens, "selection")));
-    QVERIFY(channelDistance(colorOf(spectrogram, "checkedTint"),
-                            mixed(fromHex(QStringLiteral("#14062e")), colorOf(tokens, "accent"), 0.26))
-            <= 1);
+    // A chosen choice on a plate, as the mode switch's segment and a
+    // viewer's info toggle: the plot's text at 18 % inside a 1 px edge that
+    // is 3:1 or more on the plate, over the floor, and on that fill
+    // (#373 H14 F4): the dark theme's tertiary text on the spectrogram's
+    // dark plot in both themes, and the theme's on the waveform's.
+    QVERIFY(sameColor(colorOf(spectrogram, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
+    QVERIFY(sameColor(colorOf(media, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
+    QVERIFY(sameColor(colorOf(waveform, "segmentEdge"), colorOf(tokens, "textTertiary")));
+    for (QObject *plot : {spectrogram, waveform, media}) {
+        const QColor plate = drawnOver(colorOf(plot, "plotPlate"), colorOf(plot, "plotBg"));
+        QColor text = colorOf(plot, "plotText");
+        text.setAlphaF(0.18);
+        const QColor fill = drawnOver(text, plate);
+        const QColor edge = colorOf(plot, "segmentEdge");
+        QVERIFY2(contrastRatio(edge, plate) >= 3.0, qPrintable(describe(QStringLiteral("edge on plate"), edge, plate)));
+        QVERIFY2(contrastRatio(edge, fill) >= 3.0, qPrintable(describe(QStringLiteral("edge on fill"), edge, fill)));
+        QVERIFY2(contrastRatio(edge, colorOf(plot, "plotBg")) >= 3.0,
+                 qPrintable(describe(QStringLiteral("edge on the plot"), edge, colorOf(plot, "plotBg"))));
+        QVERIFY(!plot->property("checkedTint").isValid());
+    }
     // A viewer's title strip is a plate over the plot: on the spectrogram,
     // its secondary text reads over the colour map's brightest white too.
     {

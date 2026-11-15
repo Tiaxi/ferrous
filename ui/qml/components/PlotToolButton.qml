@@ -14,7 +14,8 @@ import "../logic/KeyUtils.js" as KeyUtils
 // as the visualization's mode switch, shows the chosen one as a neutral
 // plate instead (#373 H11: the accent's solid blue read as keyboard focus,
 // and as the loudest thing on the plot): the plot's text colour at 18 %
-// over the plate, with its glyph in the text colour whole; the others'
+// over the plate inside a 1 px edge of the plot's segmentEdge, at least
+// 3:1 on the plate (#373 H14 F4), with its glyph in the text colour whole; the others'
 // glyphs are at 60 %, whole only while pressed. Under the pointer one of
 // the others has a wash of the text colour at 8 %, well under the chosen
 // one's plate, so a hovered choice never reads as the chosen one (#373
@@ -146,6 +147,19 @@ ToolButton {
             radius: 3
             visible: root.checked
             color: root.checkedColor
+        }
+
+        // A chosen segment's 1 px edge, inside it, over its neutral fill:
+        // the state at 3:1 or more, which the fill alone is not (#373 H14
+        // F4). The focus ring stays outside, 2 px and in the accent.
+        Rectangle {
+            objectName: "plotToolButtonCheckedEdge"
+            anchors.fill: parent
+            radius: 3
+            visible: root.checked && root.segment
+            color: "transparent"
+            border.width: 1
+            border.color: root.plotColors.segmentEdge
         }
 
         // The gap between the button and its focus ring: the plate, opaque.

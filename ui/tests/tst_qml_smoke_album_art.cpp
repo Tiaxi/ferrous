@@ -1237,7 +1237,17 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QVERIFY(tint->isVisible());
     QObject *plot = qvariant_cast<QObject *>(palette->property("mediaPlot"));
     QVERIFY(plot != nullptr);
-    QCOMPARE(colorOf(tint, "color"), colorOf(plot, "checkedTint"));
+    // The mode switch's chosen segment (#373 H14 F4): the plot's text at
+    // 18 %, inside a 1 px edge of segmentEdge, rather than an accent tint.
+    QColor neutral = QColor::fromRgba(colorOf(plot, "plotText"));
+    neutral.setAlphaF(0.18);
+    QVERIFY(std::abs(qAlpha(colorOf(tint, "color")) - neutral.alpha()) <= 1);
+    QCOMPARE(colorOf(tint, "color") & 0xffffff, neutral.rgba() & 0xffffff);
+    QQuickItem *edge = itemNamed(info, QStringLiteral("viewerToolButtonCheckedEdge"));
+    QVERIFY(edge != nullptr && edge->isVisible());
+    QCOMPARE(QQmlProperty(edge, QStringLiteral("border.width")).read().toReal(), 1.0);
+    QCOMPARE(QQmlProperty(edge, QStringLiteral("border.color")).read().value<QColor>().rgba(),
+             colorOf(plot, "segmentEdge"));
     QVERIFY(!ring->isVisible());
     QTRY_VERIFY(column->isVisible());
 
