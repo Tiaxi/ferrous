@@ -340,6 +340,7 @@ Item {
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
         tickColor: root.plotColors.meterTick
+        topSeamColor: root.plotColors.meterTopSeam
         // Part of the instrument (#373 H7 P11): on the spectrogram, the
         // fill takes the colour map's colour of its level, and the scale's
         // ticks show with the plot's own.

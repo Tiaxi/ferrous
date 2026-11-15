@@ -611,9 +611,20 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(std::abs(colorOf(waveform, "plotPlate").alphaF() - 0.94) < 0.002);
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
-    QVERIFY(channelDistance(colorOf(waveform, "meterFill"),
-                            fromHex(dark ? QStringLiteral("#7d8790") : QStringLiteral("#5b6670")))
-            <= 3);
+    // The waveform's meter in the waveform's colour (#373 H12 Z5): 35 %
+    // toward the view, 30 % in the light theme, where 35 % is under 3:1 on
+    // the trough; the trough faint, the text at 6 %; a seam across its top
+    // in the seam colour. The spectrogram's meter has no such seam.
+    {
+        const QColor wave = colorOf(tokens, "wave");
+        const double amount = dark ? 0.35 : 0.30;
+        QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
+                 qPrintable(colorOf(waveform, "meterFill").name()));
+        QVERIFY(std::abs(colorOf(waveform, "meterTrough").alphaF() - 0.06) < 0.003);
+        QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
+        QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);
+        QCOMPARE(colorOf(media, "meterTopSeam").alpha(), 0);
+    }
     // A checked button: the accent in dark, the focus ring's darker blue in
     // light; its glyph the view in dark, white in light.
     QVERIFY(channelDistance(colorOf(waveform, "checkedFill"),

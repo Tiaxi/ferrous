@@ -36,7 +36,10 @@
 // 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
 // in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
 // 1 px gap under it where it is on the fill. Without a track, stopped, it
-// is an empty track.
+// is an empty track. A `topSeamColor` that is not transparent draws a 1 px
+// line across the column's top, which sets it apart from what is above
+// it, as the queue's scrollbar lane over the waveform's meter (#373 H12
+// Z5: in the view's greys the bar read as a piece of that scrollbar).
 class LevelMeterItem : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(QString sourcePath READ sourcePath WRITE setSourcePath NOTIFY sourcePathChanged)
@@ -58,6 +61,8 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
     // The scale's ticks across the track.
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
+    // The line across the column's top; none while transparent.
+    Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
     // Whether the fill is a ramp of the spectrogram's colours, each row in
     // that of its level in a view of `dbRange` dB, rather than fillColor.
     Q_PROPERTY(bool colorMapFill READ colorMapFill WRITE setColorMapFill NOTIFY colorsChanged)
@@ -140,6 +145,7 @@ public:
     void setBackgroundColor(const QColor &value) { setColor(m_backgroundColor, value); }
     void setSeamColor(const QColor &value) { setColor(m_seamColor, value); }
     void setGapColor(const QColor &value) { setColor(m_gapColor, value); }
+    void setTopSeamColor(const QColor &value) { setColor(m_topSeamColor, value); }
     void setTroughColor(const QColor &value) { setColor(m_troughColor, value); }
     void setFillColor(const QColor &value) { setColor(m_fillColor, value); }
     void setPeakColor(const QColor &value) { setColor(m_peakColor, value); }
@@ -276,6 +282,7 @@ private:
     QColor m_clipOffColor{QColor::fromRgbF(1, 1, 1, 0.2)};
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
     QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
+    QColor m_topSeamColor{Qt::transparent};
     bool m_colorMapFill{false};
     double m_dbRange{132.0};
     bool m_scaleShown{false};

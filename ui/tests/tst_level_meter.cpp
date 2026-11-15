@@ -303,6 +303,7 @@ private slots:
     void readsItsFileOnlyWhileVisibleForPlayback();
     void scaleAndLanesAreLaidOutLikeThePlot();
     void sceneGraphDrawsAColumnPerLane();
+    void topSeamCrossesTheColumnOnlyWhenSet();
     void meterIsPartOfThePlot();
     void colorMapFillIsARamp_data();
     void colorMapFillIsARamp();
@@ -758,6 +759,55 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
                 QCOMPARE(pixel(5, peak - 2.5), 0x30);
             }
         }
+    }
+}
+
+// A top seam colour draws a 1 px line across the whole column's top, over
+// the seam on its left and the lane's floor, and nothing under it; while
+// it is transparent, as on the spectrogram, there is none (#373 H12 Z5:
+// the waveform's meter continued the queue's scrollbar lane above it).
+void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
+    constexpr double width = LevelMeterItem::kColumnWidth;
+    QQuickWindow view;
+    view.resize(int(width), 200);
+    LevelMeterItem item(view.contentItem());
+    item.setSize(QSizeF(width, 200));
+    item.setActive(true);
+    item.setBackgroundColor(QColor(0x10, 0x00, 0x00));
+    item.setSeamColor(QColor(0x20, 0x00, 0x00));
+    item.setTroughColor(QColor(0x30, 0x00, 0x00));
+    item.setLaneCount(2);
+    view.show();
+    QTRY_VERIFY(view.isExposed());
+    const auto rows = [&]() {
+        const QImage image = view.grabWindow();
+        const double scale = double(image.width()) / view.width();
+        QList<QPair<int, int>> found;
+        for (double x = 0.5; x < width; x += 1) {
+            found.push_back({image.pixelColor(int(x * scale), int(0.5 * scale)).red(),
+                             image.pixelColor(int(x * scale), int(1.5 * scale)).red()});
+        }
+        return found;
+    };
+    // None: the left seam and the lane's floor at the top.
+    QCOMPARE(item.property("topSeamColor").value<QColor>().alpha(), 0);
+    for (const auto &[first, second] : rows()) {
+        QVERIFY(first == 0x10 || first == 0x20);
+        QCOMPARE(first, second);
+    }
+    // Set: the top row across the column, the next as before.
+    item.setTopSeamColor(QColor(0xa0, 0x00, 0x00));
+    item.update();
+    const QList<QPair<int, int>> withSeam = rows();
+    for (qsizetype x = 0; x < withSeam.size(); ++x) {
+        QCOMPARE(withSeam[x].first, 0xa0);
+        QCOMPARE(withSeam[x].second, x == 0 ? 0x20 : 0x10);
+    }
+    // And gone again with a transparent colour.
+    item.setTopSeamColor(Qt::transparent);
+    item.update();
+    for (const auto &[first, second] : rows()) {
+        QCOMPARE(first, second);
     }
 }
 

@@ -206,6 +206,8 @@ QtObject {
         required property color meterPeak
         required property color meterClipOff
         required property color meterTick
+        // A 1 px line across the meter's top, or transparent for none.
+        required property color meterTopSeam
         // A checked tool button on a plate: a solid fill, at least 3:1 on
         // the plate, and its glyph or letter, at least 4.5:1 on the fill.
         required property color checkedFill
@@ -258,6 +260,7 @@ QtObject {
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         meterTick: Qt.rgba(1, 1, 1, 0.4)
+        meterTopSeam: "transparent"
         checkedFill: root.accent
         checkedGlyph: "#000000"
         // The dark theme's selection, on the floor.
@@ -280,14 +283,15 @@ QtObject {
         plotLaneSeam: root.hairline
         plotTick: root.textSecondary
         plotLink: root.link
-        meterTrough: ColorUtils.withAlpha(root.text, 0.10)
-        // #7d8790 / #5b6670: the inactive text, toward the view or the text.
-        // A theme whose inactive text is too close to its view to reach 3:1
-        // on the trough gets the text toward the view instead.
-        meterFill: ColorUtils.contrastRatio(root._waveformMeterFill,
-                                            ColorUtils.drawnOver(waveformColors.meterTrough, root.view)) >= 3
-            ? root._waveformMeterFill
-            : ColorUtils.mixColor(root.text, root.view, root.themeIsDark ? 0.45 : 0.27)
+        // The meter in the waveform's colour, so it reads as the plot's own
+        // instrument rather than as a piece of the queue's scrollbar above
+        // it, whose greys it had (#373 H12 Z5): a faint trough, the
+        // waveform's colour mixed about 35 % toward the view, less where
+        // that would be under 3:1 on the trough (the light theme's 30 %),
+        // and a seam across its top.
+        meterTrough: ColorUtils.withAlpha(root.text, 0.06)
+        meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
+        meterTopSeam: root.seam
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
@@ -301,9 +305,16 @@ QtObject {
         plotFocusRing: root.focusRing
     }
 
-    readonly property color _waveformMeterFill: root.themeIsDark
-        ? ColorUtils.mixColor(root._inactiveText, root.view, 0.231)
-        : ColorUtils.mixColor(root._inactiveText, root.text, 0.267)
+    // The waveform's colour toward the view: 35 %, or by 5 % steps less,
+    // the most of it that is 3:1 on `trough`.
+    function _waveformMeterFill(trough) {
+        for (let amount = 0.35; amount > 0; amount -= 0.05) {
+            const fill = ColorUtils.mixColor(root.wave, root.view, amount)
+            if (ColorUtils.contrastRatio(fill, trough) >= 3)
+                return fill
+        }
+        return root.wave
+    }
 
     // The plot set for a visualization mode: 0 is the spectrogram, 1 the
     // waveform.
@@ -335,6 +346,7 @@ QtObject {
         meterPeak: spectrogramColors.meterPeak
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
+        meterTopSeam: spectrogramColors.meterTopSeam
         checkedFill: spectrogramColors.checkedFill
         checkedGlyph: spectrogramColors.checkedGlyph
         checkedTint: ColorUtils.mixColor(mediaColors.plotBg, root.accent, 0.26)
