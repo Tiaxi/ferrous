@@ -966,7 +966,7 @@ private slots:
     void nowPlayingRightToLeftLineFadesWhole();
     void nowPlayingLineThatTurnsRightToLeftFadesInWhole();
     void nowPlayingElidedLineKeepsEdgesOffTheEllipsis();
-    void nowPlayingLineCutOffWithinWhatItSharesStaysStill();
+    void nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange();
     void nowPlayingStillRunsAreFieldsAndWordsInPlace();
     void nowPlayingStillRunsAreFieldsAndWordsInPlace_data();
     void nowPlayingOnlyTheNumberThatChangesFades();
@@ -1966,11 +1966,12 @@ void UiMotionTest::nowPlayingElidedLineKeepsEdgesOffTheEllipsis() {
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }, 5000));
 }
 
-// A line cut off within what the two share looks the same for both
-// tracks: it stays still. The album's line beside the narrow cover, whose
-// year differs past where a long album is cut off; the details leave out
-// what does not fit rather than be cut off (#373 H11).
-void UiMotionTest::nowPlayingLineCutOffWithinWhatItSharesStaysStill() {
+// The album's line beside the narrow cover keeps its year whole after an
+// album cut off (#373 H14 G2: the year was cut off with it, so a track
+// with another year looked the same): a track of the same album with
+// another year fades the line whole, as any line that changes, from the
+// year before to the new one, and then it is still.
+void UiMotionTest::nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
@@ -1989,6 +1990,10 @@ void UiMotionTest::nowPlayingLineCutOffWithinWhatItSharesStaysStill() {
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     const PanelLine line = panelLine(panel, QStringLiteral("NarrowAlbum"));
     QTRY_VERIFY(line.stillText()->property("truncated").toBool());
+    QQuickItem *tail = itemNamed(line.stillText(), QStringLiteral("nowPlayingLineTail"));
+    QVERIFY(tail != nullptr && tail->isVisible());
+    QCOMPARE(tail->property("text").toString(), QStringLiteral(" (2005)"));
+    QCOMPARE(line.text(), album);
 
     bridge->setProperty("currentTrackPath", kTrackA2);
     bridge->setProperty("currentTrackTitle", QStringLiteral("Second"));
@@ -1996,9 +2001,11 @@ void UiMotionTest::nowPlayingLineCutOffWithinWhatItSharesStaysStill() {
     QVERIFY(handover->property("running").toBool());
     QVERIFY(panelLine(panel, QStringLiteral("NarrowTitle")).fades());
     QCOMPARE(line.outgoingText(), album + QStringLiteral(" (2005)"));
-    QVERIFY(lineStill(panel, QStringLiteral("NarrowAlbum")));
+    QVERIFY(line.fades());
+    QCOMPARE(tail->property("text").toString(), QStringLiteral(" (2006)"));
     QVERIFY(QTest::qWaitFor([&]() { return !handover->property("running").toBool(); }));
     QVERIFY(allLinesStill(panel));
+    QVERIFY(tail->isVisible());
 }
 
 void UiMotionTest::nowPlayingStillRunsAreFieldsAndWordsInPlace_data() {

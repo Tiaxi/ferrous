@@ -254,6 +254,27 @@ Item {
     readonly property string narrowAlbumText: root.albumText.length > 0 && root.yearText.length > 0
         ? I18n.i18nc("@info album and its year", "%1 (%2)", root.albumText, root.yearText)
         : (root.albumText.length > 0 ? root.albumText : root.yearText)
+    // "Album (Year)" as the album and its year, [album, " (Year)"], or
+    // [text, ""] for a text without both: the album line draws the year
+    // whole after the album, which is cut off before it where the two do
+    // not fit, "A Remarkabl… (2024)" (#373 H14 G2: at 24 pt the year was
+    // lost to the ellipsis). The parts are read from the line's own
+    // format, so a translation that puts the year first has none.
+    readonly property var albumYearFormat: {
+        const format = I18n.i18nc("@info album and its year", "%1 (%2)", "\u0001", "\u0002")
+        const year = format.indexOf("\u0002")
+        return format.indexOf("\u0001") === 0 && year > 1
+            ? { between: format.slice(1, year), after: format.slice(year + 1) } : null
+    }
+    function _albumAndYear(text) {
+        const format = root.albumYearFormat
+        if (format === null || !text.endsWith(format.after))
+            return [text, ""]
+        const end = text.length - format.after.length
+        const at = text.lastIndexOf(format.between, end - 1)
+        return at > 0 && /^[0-9]+$/.test(text.slice(at + format.between.length, end))
+            ? [text.slice(0, at), text.slice(at)] : [text, ""]
+    }
     readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
                                                              root.lineSeparators.narrowDetails)
     // The details as the lines show them: all of them where the line has
@@ -559,13 +580,17 @@ Item {
         return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
     }
 
-    // The lines that wrap onto a second line rather than be cut off: in
-    // the narrow layout the title (#373 H11: beside the cover at 24 pt a
-    // long title was cut off), and under the narrow cover the artist and
-    // the album with its year too (#373 H14 F7: at 24 pt a long album kept
-    // a fifth of its text).
+    // The lines that wrap onto a second line rather than be cut off, and
+    // so fade whole: in the narrow layout the title (#373 H11: beside the
+    // cover at 24 pt a long title was cut off), and under the narrow cover
+    // and beside it in the compact layout the artist and the album with
+    // its year too (#373 H14 F7, G2: at 24 pt a long album kept a fifth of
+    // its text). The album line fades whole wherever it shows, as its year
+    // stands apart from it (_albumAndYear).
     readonly property var wrappingLines: root.wideRoom ? ({})
-        : (root.narrowStacked ? ({ title: true, artist: true, narrowAlbum: true }) : ({ title: true }))
+        : (root.narrowLinesWrap ? ({ title: true, artist: true, narrowAlbum: true })
+                                : ({ title: true, narrowAlbum: true }))
+    readonly property bool narrowLinesWrap: root.narrowStacked || root.compactLayout
     readonly property int stackedLineGap: 4
 
     // Whether the line of `key` fades whole, as one, going from `before` to
@@ -939,6 +964,17 @@ Item {
     // empty beside it (#373 H10).
     readonly property bool narrowStacked: root.width - root.narrowCoverSize - 2 * root.textInset < root.narrowLineMinimum
         || (root.narrow && root.narrowLinesHeight > 1.25 * root.narrowCoverSize)
+    // The compact layout: the lines beside the cover in a sidebar wide
+    // enough for the wide layout, which takes this one for its height
+    // alone, as with a large font. There the artist and the album with its
+    // year take two lines where they need them, as the title does (#373
+    // H14 G2: at 24 pt a long album was cut off on one line, its year
+    // lost), and the block keeps the room of them all, two lines each for
+    // the title, the artist and the album and one for the details,
+    // whatever the track, so a track change does not move the library.
+    readonly property bool compactLayout: !root.wideRoom && !root.narrow && !root.narrowStacked
+    readonly property real compactLinesHeight: root.narrowTextTop + narrowTitleProbe.implicitHeight
+        + root.narrowTitleGap + 2 * narrowTwoLinesProbe.implicitHeight + narrowLineProbe.implicitHeight
 
     FontMetrics {
         id: narrowTitleMetrics
@@ -980,6 +1016,23 @@ Item {
         id: wideDetailsProbe
         font.pointSize: root.uiPalette.smallPointSize
     }
+    // Two lines of the narrow title and of the small lines, and one of
+    // these, which the compact layout keeps room for.
+    LineProbe {
+        id: narrowTitleProbe
+        text: "X\nX"
+        font.pointSize: root.titlePointSize
+        font.weight: Font.DemiBold
+    }
+    LineProbe {
+        id: narrowTwoLinesProbe
+        text: "X\nX"
+        font.pointSize: root.uiPalette.smallPointSize
+    }
+    LineProbe {
+        id: narrowLineProbe
+        font.pointSize: root.uiPalette.smallPointSize
+    }
 
     // The tile's own mark, which shows only while the tile grows from the
     // compact row before the cover is known, or shrinks into it: a third
@@ -1001,7 +1054,8 @@ Item {
     // cover's height, and more when the lines need it.
     readonly property real narrowLayoutHeight: (root.narrowStacked
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
-            : Math.max(root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
+            : Math.max(root.narrowCoverSize, root.compactLayout ? root.compactLinesHeight
+                                                                : root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
     // The wide block's height: its three lines', whatever the track has
     // text for (#373 H14 G1), from the font alone.
@@ -1028,10 +1082,36 @@ Item {
         return parts.filter(part => part.length > 0).join(separator)
     }
 
-    // The text of a line, as each of its layers draws it: elided, on the
-    // whole width of the line, so the layers lay it out alike.
+    // A text of a line (`wholeText`), as each of its layers draws it:
+    // elided, on the whole width of the line, so the layers lay it out
+    // alike. Where the line keeps a tail of its text whole, as the album's
+    // year, the rest is the Text's `text` and the tail is drawn after it,
+    // on the last line, which is that much shorter, so what is cut off is
+    // cut off before the tail; or, where the rest ends on a line before
+    // the last with no room after it, at the start of the next line.
     component LineText: Text {
+        id: lineText
+
         required property var owner
+        required property string wholeText
+        readonly property var parts: lineText.owner.keepsTail
+            ? root._albumAndYear(lineText.wholeText) : [lineText.wholeText, ""]
+        readonly property string tail: lineText.parts[1]
+        readonly property real tailWidth: lineText.tail.length > 0
+            ? Math.ceil(tailMetrics.advanceWidth(lineText.tail)) : 0
+        // The last line as laid out: where it ends, its top and foot and
+        // its number.
+        property real lastLineEnd: 0
+        property real lastLineTop: 0
+        property real lastLineBottom: 0
+        property int lastLineNumber: 0
+        readonly property bool tailOnItsOwnLine: lineText.tail.length > 0
+            && lineText.lastLineNumber < lineText.maximumLineCount - 1
+            && lineText.lastLineEnd + lineText.tailWidth > lineText.width
+        // The height the tail adds on a line of its own.
+        readonly property real tailLineHeight: lineText.tailOnItsOwnLine ? tailText.implicitHeight : 0
+
+        text: lineText.parts[0]
         width: owner.width
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
@@ -1042,6 +1122,40 @@ Item {
         font.weight: owner.weight
         font.features: owner.features
         color: owner.color
+
+        // Each line in turn, on the line's width, which a text with this
+        // handler is elided on only where it is set; the last call is for
+        // the last line, as drawn.
+        onLineLaidOut: function(line) {
+            const last = line.number === lineText.maximumLineCount - 1
+            line.width = Math.max(0, lineText.width - (last ? lineText.tailWidth : 0))
+            if (lineText.tailWidth > 0) {
+                lineText.lastLineEnd = line.x + line.implicitWidth
+                lineText.lastLineTop = line.y
+                lineText.lastLineBottom = line.y + line.height
+                lineText.lastLineNumber = line.number
+            }
+        }
+        onTailWidthChanged: lineText.forceLayout()
+
+        FontMetrics {
+            id: tailMetrics
+            font: lineText.font
+        }
+
+        Text {
+            id: tailText
+            objectName: "nowPlayingLineTail"
+            x: lineText.tailOnItsOwnLine ? 0 : lineText.lastLineEnd
+            y: lineText.tailOnItsOwnLine ? lineText.lastLineBottom : lineText.lastLineTop
+            visible: lineText.tail.length > 0
+            // At a line's start without the space before it.
+            text: lineText.tailOnItsOwnLine ? lineText.tail.replace(/^\s+/, "") : lineText.tail
+            textFormat: Text.PlainText
+            font: lineText.font
+            color: lineText.color
+            Accessible.ignored: true
+        }
     }
 
     // A line of the playing track, with its text as the accessible name.
@@ -1074,6 +1188,9 @@ Item {
         // Whether the line keeps its row when a track has no text for it,
         // as under the wide cover; otherwise it then takes no room.
         property bool keepsRow: false
+        // Whether the line keeps the album's year whole after the album
+        // (see LineText).
+        property bool keepsTail: false
         readonly property bool collapsed: line.text.length === 0
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
@@ -1200,7 +1317,7 @@ Item {
         // rather than leave a blank line in the block (#373 H6), unless it
         // keeps its row.
         implicitHeight: line.collapsed ? (line.keepsRow ? rowProbe.implicitHeight : 0)
-                                       : stillText.implicitHeight
+                                       : stillText.implicitHeight + stillText.tailLineHeight
         visible: !line.collapsed || line.keepsRow
 
         // A line of the font, for a row kept empty.
@@ -1229,10 +1346,10 @@ Item {
                 id: stillText
                 objectName: "nowPlaying" + line.name
                 owner: line
-                text: line.text
+                wholeText: line.text
                 Accessible.role: Accessible.StaticText
-                Accessible.name: text
-                Accessible.ignored: text.length === 0
+                Accessible.name: wholeText
+                Accessible.ignored: wholeText.length === 0
             }
         }
 
@@ -1254,7 +1371,7 @@ Item {
                 LineText {
                     x: -stillWindow.x
                     owner: line
-                    text: line.text
+                    wholeText: line.text
                     Accessible.ignored: true
                 }
             }
@@ -1295,7 +1412,7 @@ Item {
                             objectName: "nowPlayingOutgoing" + line.name
                             x: -part.x
                             owner: line
-                            text: lineBefore.text
+                            wholeText: lineBefore.text
                             Accessible.ignored: true
                         }
                     }
@@ -1327,7 +1444,7 @@ Item {
                     LineText {
                         x: -changingWindow.x
                         owner: line
-                        text: line.text
+                        wholeText: line.text
                         Accessible.ignored: true
                     }
                 }
@@ -1543,7 +1660,7 @@ Item {
                 name: "NarrowArtist"
                 text: root.trackLines.artist
                 pointSize: root.uiPalette.smallPointSize
-                maximumLineCount: root.narrowStacked ? 2 : 1
+                maximumLineCount: root.narrowLinesWrap ? 2 : 1
                 width: narrowColumn.width
             }
             FadingLine {
@@ -1551,10 +1668,11 @@ Item {
                 lineKey: "narrowAlbum"
                 name: "NarrowAlbum"
                 text: root.trackLines.narrowAlbum
+                keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
-                // Under the cover, the year goes onto a second line with
-                // the album's end.
-                maximumLineCount: root.narrowStacked ? 2 : 1
+                // Under the cover, and beside it in the compact layout, the
+                // year goes onto a second line with the album's end.
+                maximumLineCount: root.narrowLinesWrap ? 2 : 1
                 width: narrowColumn.width
             }
             FadingLine {

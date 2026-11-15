@@ -741,6 +741,8 @@ private slots:
     void nowPlayingTitleIsAStepOverItsLines_data();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize();
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
+    void nowPlayingCompactKeepsTheAlbumAndItsYear_data();
+    void nowPlayingCompactKeepsTheAlbumAndItsYear();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
@@ -1321,7 +1323,7 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours at the Harbour"));
     QTRY_COMPARE(lineText(album)->property("lineCount").toInt(), 2);
     QTRY_VERIFY(!album->property("truncated").toBool());
-    QVERIFY(lineText(album)->property("text").toString().endsWith(QStringLiteral("(2005)")));
+    QVERIFY(lineText(album)->property("wholeText").toString().endsWith(QStringLiteral("(2005)")));
     QTRY_VERIFY(gapsAreFour());
     QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 12.0);
     QVERIFY(sceneRect(seam).top() > seamBefore);
@@ -1329,6 +1331,140 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     bridge->setProperty("currentTrackTitle", QStringLiteral("A Remarkably Long Track Title ").repeated(4));
     QTRY_VERIFY(title->property("truncated").toBool());
     QCOMPARE(lineText(title)->property("lineCount").toInt(), 2);
+}
+
+void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowHeight");
+    // The compact layout: the narrow one in a sidebar wide enough for the
+    // wide one, for the sidebar's height alone.
+    QTest::newRow("24 pt") << 24.0 << 1000;
+    QTest::newRow("default font, short window") << 10.0 << 700;
+}
+
+// Beside the 96 px cover in the compact layout, the title, the artist and
+// the album take two lines where they need them, and the block keeps the
+// room of them all, so no track moves the library (#373 H14 G2: at 24 pt
+// a long album was cut off on one line and its year lost). Where the album
+// is still cut off, its year stays whole after the ellipsis.
+void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *header = named(window, "libraryHeader");
+    QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
+    QQuickItem *album = named(window, "nowPlayingNarrowAlbum");
+    QQuickItem *details = named(window, "nowPlayingNarrowDetails");
+    QVERIFY(panel && cover && header && title && artist && album && details);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QVERIFY(panel->property("compactLayout").toBool());
+    QVERIFY(!panel->property("narrowStacked").toBool());
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+    const auto settled = [&]() { return !handover->property("running").toBool(); };
+    QTRY_VERIFY(settled());
+    const auto geometry = [&]() { return QList<QRectF>{sceneRect(panel), sceneRect(header), sceneRect(cover)}; };
+    const QList<QRectF> before = geometry();
+    // The room of two lines each for the title, the artist and the album,
+    // and one for the details.
+    const auto lineHeight = [](QQuickItem *line) {
+        return QFontMetricsF(line->property("font").value<QFont>()).height();
+    };
+    const qreal reserved = panel->property("compactLinesHeight").toReal();
+    QVERIFY2(reserved >= 10 + 2 * lineHeight(title) + 4 + 5 * lineHeight(artist) - 7,
+             qPrintable(QString::number(reserved)));
+    QCOMPARE(panel->height(), std::max(96.0, reserved) + 12 + 1);
+
+    // A long title, artist and album: two lines each, the block as it was.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal Over The Harbour At Night"));
+    bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian Chamber Ensemble Of The North"));
+    const QString longAlbum = QStringLiteral("A Remarkably Long Album Title That Runs On ").repeated(3).trimmed();
+    bridge->setProperty("currentTrackAlbum", longAlbum);
+    bridge->setProperty("currentTrackYear", 2024);
+    for (QQuickItem *line : {title, artist, album}) {
+        QTRY_COMPARE(line->property("lineCount").toInt(), 2);
+    }
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+    QVERIFY(sceneRect(details).bottom() <= sceneRect(panel).bottom() - 12);
+    // The album cut off before its year, which shows whole after it, on
+    // its second line, within the inset.
+    QTRY_VERIFY(album->property("truncated").toBool());
+    QCOMPARE(album->property("text").toString(), longAlbum);
+    QCOMPARE(album->property("wholeText").toString(), longAlbum + QStringLiteral(" (2024)"));
+    QQuickItem *tail = itemNamed(album, QStringLiteral("nowPlayingLineTail"));
+    QVERIFY(tail != nullptr);
+    QTRY_VERIFY(shown(tail));
+    QCOMPARE(tail->property("text").toString(), QStringLiteral(" (2024)"));
+    const QRectF tailRect = sceneRect(tail);
+    const QRectF albumRect = sceneRect(album);
+    QVERIFY2(tailRect.right() <= sceneRect(panel).right() - 12 + 1,
+             qPrintable(QStringLiteral("%1 past %2").arg(tailRect.right()).arg(sceneRect(panel).right() - 12)));
+    QVERIFY2(tailRect.left() > albumRect.left() + albumRect.width() / 2,
+             qPrintable(QString::number(tailRect.left() - albumRect.left())));
+    QCOMPARE(tailRect.top(), albumRect.top() + albumRect.height() / 2);
+    // Read whole: the album and its year.
+    QCOMPARE(QQmlProperty(album, QStringLiteral("Accessible.name"), qmlContext(album)).read().toString(),
+             longAlbum + QStringLiteral(" (2024)"));
+
+    // An album that fits with its year: the year right after it.
+    bridge->setProperty("currentTrackAlbum", QStringLiteral("Dusk"));
+    QTRY_COMPARE(album->property("wholeText").toString(), QStringLiteral("Dusk (2024)"));
+    QCOMPARE(album->property("text").toString(), QStringLiteral("Dusk"));
+    QVERIFY(shown(tail) && !album->property("truncated").toBool());
+    QCOMPARE(album->property("lineCount").toInt(), 1);
+    {
+        const QFontMetricsF metrics(album->property("font").value<QFont>());
+        QTRY_VERIFY2(std::abs(sceneRect(tail).left() - sceneRect(album).left()
+                              - metrics.horizontalAdvance(QStringLiteral("Dusk"))) <= 1.0,
+                     qPrintable(QString::number(sceneRect(tail).left() - sceneRect(album).left())));
+        QCOMPARE(sceneRect(tail).top(), sceneRect(album).top());
+    }
+
+    // An album that fills its first line: the year at the start of the
+    // next, as a wrapped "Album (Year)" would have it.
+    {
+        const QFontMetricsF metrics(album->property("font").value<QFont>());
+        const qreal width = album->width();
+        QString filling = QStringLiteral("Harbour");
+        for (const QString &word : {QStringLiteral(" Harbour"), QStringLiteral(" i")}) {
+            while (metrics.horizontalAdvance(filling + word) < width - 2) {
+                filling += word;
+            }
+        }
+        QVERIFY(metrics.horizontalAdvance(filling + QStringLiteral(" (2024)")) > width);
+        bridge->setProperty("currentTrackAlbum", filling);
+        QTRY_COMPARE(album->property("text").toString(), filling);
+        QTRY_COMPARE(album->property("lineCount").toInt(), 1);
+        QVERIFY(!album->property("truncated").toBool());
+        QTRY_COMPARE(tail->property("text").toString(), QStringLiteral("(2024)"));
+        QCOMPARE(sceneRect(tail).left(), sceneRect(album).left());
+        QTRY_VERIFY(sceneRect(tail).top() >= sceneRect(album).bottom() - 1);
+        // The line counts its second row; the details are under it.
+        QTRY_VERIFY(sceneRect(details).top() >= sceneRect(tail).bottom());
+        QTRY_VERIFY(settled());
+        QCOMPARE(geometry(), before);
+    }
+
+    // Untagged: the same block.
+    clearTrackTags(bridge);
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
@@ -2257,7 +2393,12 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
         // The lines run past the cover's foot at 24 pt.
         QVERIFY2(lowest > tile.bottom(), qPrintable(QString::number(lowest - tile.bottom())));
     }
-    QTRY_COMPARE(sceneRect(seam).top() - lowest, 12.0);
+    // The block keeps the room of every line at its most, two lines for
+    // the title, the artist and the album (#373 H14 G2), then 12 px.
+    QVERIFY(panel->property("compactLayout").toBool());
+    const qreal reservedLines = panel->property("compactLinesHeight").toReal();
+    QTRY_COMPARE(sceneRect(seam).top(), sceneRect(panel).top() + std::max(96.0, reservedLines) + 12);
+    QVERIFY(sceneRect(seam).top() - lowest >= 12.0);
 
     // A track, with tags and then without, switches nothing; nor does
     // nothing playing, which is the compact row in it too.
