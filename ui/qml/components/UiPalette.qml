@@ -223,8 +223,8 @@ QtObject {
     // analysed, and the part of a rolling view not yet filled (#373 H11
     // P19: black there read as a hole in the window, most of all in a light
     // theme, and unlike the pane once it plays). The now-playing panel's
-    // stand-in for a track without a cover and the library's tile for an
-    // album without one are of the same colour, as the plot's own.
+    // stand-in for a track without a cover is of the same colour, as the
+    // plot's own.
     readonly property color plotFloor: "#14062e"
 
     // The spectrogram is the same dark colour map in both themes, so its

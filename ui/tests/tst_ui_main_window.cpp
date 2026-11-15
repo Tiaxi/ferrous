@@ -2439,13 +2439,14 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     QVERIFY(!libraryTitle->property("truncated").toBool());
 }
 
-// An album row without a cover shows a 20 px swatch where a cover's
-// thumbnail is, the same size and in the same place, so its name lines up
-// with its neighbours' (#373 H10: it left an empty 20 px hole): the plot's
-// floor colour, #14062e in both themes, with no border, as the now-playing
-// panel's stand-in for a cover (#373 H11: the hover tint, a filled grey
-// box, read as a control). Once a cover has loaded, the cover alone; one
-// that has not loaded yet keeps the hover tint meanwhile.
+// An album row without a cover keeps the 20 px place a cover's thumbnail
+// has, so its name lines up with its neighbours' (#373 H10: it left an
+// empty 20 px hole), with the glyph the search's results show for an album
+// without a cover in it, 16 px, centred, in the tertiary text colour, and
+// no fill (#373 H12 Z2: the plot floor's swatch read as a failed load; H11
+// the hover tint, a filled grey box, as a control). Once a cover has
+// loaded, the cover alone; one that has not loaded yet has the hover tint
+// meanwhile, and no glyph.
 void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2458,8 +2459,9 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QQuickItem *title = itemNamed(album, QStringLiteral("libraryRowTitle"));
     QVERIFY(thumbnail && title);
     QVERIFY(album->property("coverPath").toString().isEmpty());
+    QQuickItem *glyph = itemNamed(album, QStringLiteral("libraryRowCoverPlaceholder"));
+    QVERIFY(glyph != nullptr);
     const QColor floor = tokenOf(window, "plotFloor");
-    QCOMPARE(hex(floor), QStringLiteral("#ff14062e"));
 
     // The tile and the row around it, as drawn: the tile's middle, and the
     // row just right of it.
@@ -2489,16 +2491,34 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
         QCOMPARE(title->mapToItem(album, QPointF()).x(), 78.0);
     };
 
-    // Without a cover: the swatch, the plot's floor, with no border.
+    // Without a cover: no fill, and the search's glyph for an album
+    // without one, centred in the place, in the tertiary colour.
     checkPlace();
-    QCOMPARE(hex(thumbnail->property("color").value<QColor>()), hex(floor));
+    QCOMPARE(thumbnail->property("color").value<QColor>().alpha(), 0);
     QCOMPARE(QQmlProperty(thumbnail, QStringLiteral("border.width")).read().toReal(), 0.0);
+    QVERIFY(shown(glyph));
+    QCOMPARE(glyph->size(), QSizeF(16, 16));
+    QCOMPARE(sceneRect(glyph).center(), sceneRect(thumbnail).center());
+    QCOMPARE(glyph->property("source").toString(), QStringLiteral("media-optical-audio"));
+    QVERIFY(glyph->property("isMask").toBool());
+    QCOMPARE(colorOf(glyph), tokenHex(window, "textTertiary"));
+    // As drawn: no floor-coloured square; the tile's corner is the row's.
     QColor tile;
     QColor row;
-    QTRY_VERIFY((drawn(&tile, &row), distance(tile, floor) <= 2));
-    QVERIFY2(distance(tile, row) >= 8, qPrintable(tile.name() + QLatin1Char(' ') + row.name()));
-    // The same colour as the stand-in for a cover in the now-playing panel.
-    QCOMPARE(hex(named(window, "nowPlayingCover")->property("standInColor").value<QColor>()), hex(floor));
+    QTest::qWait(50);
+    {
+        const QImage image = window->grabWindow();
+        const qreal scale = static_cast<qreal>(image.width()) / window->width();
+        const QRectF rect = sceneRect(thumbnail);
+        const auto at = [&](QPointF point) {
+            return image.pixelColor(int(std::floor(point.x() * scale)), int(std::floor(point.y() * scale)));
+        };
+        tile = at(rect.topLeft() + QPointF(0.5, 0.5));
+        row = at(QPointF(rect.right() + 3.5, rect.center().y()));
+        QVERIFY2(distance(tile, row) <= 2, qPrintable(tile.name() + QLatin1Char(' ') + row.name()));
+        QVERIFY2(distance(tile, floor) > 8, qPrintable(tile.name()));
+    }
+
 
     // With a cover loaded: the cover, nothing under it, in the same place.
     QTemporaryDir dir;
@@ -2507,10 +2527,12 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     coverImage.fill(QColor(200, 120, 40));
     const QString coverPath = dir.filePath(QStringLiteral("cover.png"));
     QVERIFY(coverImage.save(coverPath));
+    // A cover loaded: the glyph goes.
     thumbnail->setProperty("source", QUrl::fromLocalFile(coverPath));
     QTRY_COMPARE(thumbnail->property("status").toInt(), 1); // Image.Ready
     QCOMPARE(thumbnail->property("color").value<QColor>().alpha(), 0);
     checkPlace();
+    QVERIFY(!shown(glyph));
     QTRY_VERIFY((drawn(&tile, &row), distance(tile, QColor(200, 120, 40)) <= 2));
 }
 
