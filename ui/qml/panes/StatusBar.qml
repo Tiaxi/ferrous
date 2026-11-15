@@ -15,6 +15,10 @@ import "../components" as Components
 // track's format; on the right the library scan, the Last.fm slot and the
 // issues. Groups are 16 px apart, with middle dots only inside a group and
 // no dividers.
+// An error has one treatment here (#373 H11: red semibold words for a
+// stopped engine, plain words for one not running, and a glyph with words
+// for the issues and a failed scrobble): its words in the text colour
+// beside a 16 px glyph in the negative colour.
 ToolBar {
     id: root
 
@@ -161,6 +165,9 @@ ToolBar {
     // A glyph of the status bar: a theme icon drawn in `color`, `size` at
     // the default font and larger with a larger one, at that size rather
     // than rounded down to a theme icon size.
+    // An error's glyph: 16 px, as the Last.fm slot's.
+    readonly property int errorGlyphSize: Kirigami.Units.iconSizes.small
+
     component StatusGlyph: Kirigami.Icon {
         property int size: 14
         implicitWidth: root.uiPalette.scaledSize(size)
@@ -173,31 +180,47 @@ ToolBar {
     contentItem: RowLayout {
         spacing: 16
 
-        StatusLabel {
-            objectName: "statusBarBackendStoppedLabel"
-            visible: root.backendStopped
-            text: I18n.i18nc("@info:status", "Playback engine stopped")
-            color: root.uiPalette.negative
-            font.weight: Font.DemiBold
-        }
+        // The playback engine, the app's backend, has stopped with a
+        // failure, or has not started or has stopped without one to report:
+        // an error, in the user's words, with what to do in the tooltip.
+        Row {
+            objectName: "statusBarEngineError"
+            visible: root.backendStopped || root.isDisconnected
+            spacing: 6
+            Layout.alignment: Qt.AlignVCenter
 
-        // The playback engine, the app's backend, has not started, or has
-        // stopped without a failure to report: in the user's words, with
-        // what to do in the tooltip.
-        StatusLabel {
-            objectName: "statusBarDisconnectedLabel"
-            visible: root.isDisconnected
-            text: I18n.i18nc("@info:status", "Playback engine not running")
-            color: root.uiPalette.text
-
-            HoverHandler {
-                id: disconnectedHover
+            StatusGlyph {
+                objectName: "statusBarEngineErrorGlyph"
+                anchors.verticalCenter: parent.verticalCenter
+                size: root.errorGlyphSize
+                source: Qt.resolvedUrl("../assets/status-warning.svg")
+                color: root.uiPalette.negative
             }
-            ToolTip.visible: disconnectedHover.hovered
-            ToolTip.delay: Kirigami.Units.toolTipDelay
-            ToolTip.text: I18n.i18nc("@info:tooltip",
-                "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.")
-            Accessible.description: ToolTip.text
+
+            StatusLabel {
+                objectName: "statusBarBackendStoppedLabel"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.backendStopped
+                text: I18n.i18nc("@info:status", "Playback engine stopped")
+                color: root.uiPalette.text
+            }
+
+            StatusLabel {
+                objectName: "statusBarDisconnectedLabel"
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.isDisconnected
+                text: I18n.i18nc("@info:status", "Playback engine not running")
+                color: root.uiPalette.text
+
+                HoverHandler {
+                    id: disconnectedHover
+                }
+                ToolTip.visible: disconnectedHover.hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
+                ToolTip.text: I18n.i18nc("@info:tooltip",
+                    "Ferrous can't play music until its playback engine runs. Restart Ferrous to try again.")
+                Accessible.description: ToolTip.text
+            }
         }
 
         // The neutral playback state: the play, pause or stop glyph and the
@@ -286,10 +309,10 @@ ToolBar {
             Layout.fillHeight: true
             clip: formatRow.implicitWidth > width
             // How many of the parts fit: each one's width, after the first
-            // with a dot and its 6 px either side.
+            // with the separator before it.
             readonly property int shownCount: {
                 const parts = root.formatParts
-                const dot = Math.ceil(formatMetrics.advanceWidth("·")) + 12
+                const dot = Math.ceil(formatMetrics.advanceWidth(FormatUtils.fieldSeparator))
                 let used = 0
                 for (let i = 0; i < parts.length; ++i) {
                     used += Math.ceil(formatMetrics.advanceWidth(parts[i])) + (i > 0 ? dot : 0)
@@ -300,7 +323,7 @@ ToolBar {
                 return parts.length
             }
             readonly property var shownParts: root.formatParts.slice(0, formatGroup.shownCount)
-            readonly property string text: formatGroup.shownParts.join(" · ")
+            readonly property string text: formatGroup.shownParts.join(FormatUtils.fieldSeparator)
 
             // The status bar's 12 px label font, with its tabular figures.
             FontMetrics {
@@ -326,12 +349,14 @@ ToolBar {
                         required property int index
                         required property string modelData
 
+                        // The headers' separator, a middle dot between
+                        // two spaces, at their spacing (#373 H11: a dot
+                        // with 6 px either side stood wider than theirs).
                         StatusLabel {
+                            objectName: "statusBarFormatSeparator"
                             visible: index > 0
-                            text: "·"
+                            text: FormatUtils.fieldSeparator
                             color: root.uiPalette.textTertiary
-                            leftPadding: 6
-                            rightPadding: 6
                             Accessible.ignored: true
                         }
 
@@ -438,8 +463,9 @@ ToolBar {
             onSettingsRequested: root.lastFmSettingsRequested()
         }
 
-        // The issues: "2 new issues" with a negative warning glyph until
-        // the user has seen them, then "3 issues" in the secondary colour.
+        // The issues: "2 new issues" in the text colour with a negative
+        // warning glyph until the user has seen them, then "3 issues" and
+        // the glyph in the secondary colour, the glyph 16 px in both.
         // It opens Recent Issues; with none there is nothing to show.
         ToolButton {
             id: issuesButton
@@ -506,6 +532,7 @@ ToolBar {
                     StatusGlyph {
                         objectName: "statusBarErrorsGlyph"
                         anchors.verticalCenter: parent.verticalCenter
+                        size: root.errorGlyphSize
                         source: Qt.resolvedUrl("../assets/status-warning.svg")
                         color: issuesButton.glyphColor
                     }
