@@ -2408,13 +2408,13 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     QVERIFY(!libraryTitle->property("truncated").toBool());
 }
 
-// An album row without a cover shows a neutral 20 px tile, the hover tint
-// over the row, where a cover's thumbnail is, the same size and in the same
-// place, so its name lines up with its neighbours' (#373 H10: it left an
-// empty 20 px hole). Once a cover has loaded, the cover alone. The tile is
-// the hover tint, which tst_ui_foundations holds to 1.3:1 on the view in
-// Breeze Light and Breeze Dark; here, with Main.qml's own palette (a dark
-// palette here would keep Kirigami's dark text, so its tint proves nothing).
+// An album row without a cover shows a 20 px swatch where a cover's
+// thumbnail is, the same size and in the same place, so its name lines up
+// with its neighbours' (#373 H10: it left an empty 20 px hole): the plot's
+// floor colour, #14062e in both themes, with no border, as the now-playing
+// panel's stand-in for a cover (#373 H11: the hover tint, a filled grey
+// box, read as a control). Once a cover has loaded, the cover alone; one
+// that has not loaded yet keeps the hover tint meanwhile.
 void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -2427,8 +2427,8 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
     QQuickItem *title = itemNamed(album, QStringLiteral("libraryRowTitle"));
     QVERIFY(thumbnail && title);
     QVERIFY(album->property("coverPath").toString().isEmpty());
-    const QColor hover = tokenOf(window, "hover");
-    QVERIFY(hover.alphaF() > 0.0);
+    const QColor floor = tokenOf(window, "plotFloor");
+    QCOMPARE(hex(floor), QStringLiteral("#ff14062e"));
 
     // The tile and the row around it, as drawn: the tile's middle, and the
     // row just right of it.
@@ -2458,14 +2458,16 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
         QCOMPARE(title->mapToItem(album, QPointF()).x(), 78.0);
     };
 
-    // Without a cover: the tile, neutral, not the accent.
+    // Without a cover: the swatch, the plot's floor, with no border.
     checkPlace();
-    QCOMPARE(hex(thumbnail->property("color").value<QColor>()), hex(hover));
+    QCOMPARE(hex(thumbnail->property("color").value<QColor>()), hex(floor));
+    QCOMPARE(QQmlProperty(thumbnail, QStringLiteral("border.width")).read().toReal(), 0.0);
     QColor tile;
     QColor row;
-    QTRY_VERIFY((drawn(&tile, &row), distance(tile, drawnOver(hover, row)) <= 2));
+    QTRY_VERIFY((drawn(&tile, &row), distance(tile, floor) <= 2));
     QVERIFY2(distance(tile, row) >= 8, qPrintable(tile.name() + QLatin1Char(' ') + row.name()));
-    QVERIFY(tile.hslSaturation() <= 40);
+    // The same colour as the stand-in for a cover in the now-playing panel.
+    QCOMPARE(hex(named(window, "nowPlayingCover")->property("standInColor").value<QColor>()), hex(floor));
 
     // With a cover loaded: the cover, nothing under it, in the same place.
     QTemporaryDir dir;
