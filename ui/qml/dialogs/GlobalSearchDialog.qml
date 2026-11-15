@@ -242,26 +242,9 @@ Dialog {
             : root.controller.globalSearchModelApi.highlightSegments(text, queryField.text)
         return root.layOutRuns(segments, root.maxTitleRuns, root.titleWidth, regularMetrics, semiboldMetrics)
     }
-    // A result emphasises its match in one place (#373 H10): in its title,
-    // or, when the title has none, such as an album found by its artist,
-    // in its context, there only the first match, so the context does not
-    // outweigh the title. The context's runs: before the match, the match
-    // semibold, and the rest; none when nothing in it matches.
-    function contextRuns(context, room) {
-        if (!root.controller.globalSearchModelApi.highlightSegments || context.length === 0) {
-            return []
-        }
-        const segments = root.controller.globalSearchModelApi.highlightSegments(context, queryField.text)
-        const first = segments.findIndex(function(segment) { return segment.match })
-        if (first < 0) {
-            return []
-        }
-        const before = segments.slice(0, first).map(function(segment) { return segment.text }).join("")
-        const after = segments.slice(first + 1).map(function(segment) { return segment.text }).join("")
-        return root.layOutRuns([{ text: before, match: false }, { text: segments[first].text, match: true },
-                                { text: after, match: false }].filter(function(segment) { return segment.text.length > 0 }),
-                               3, room, smallMetrics, smallSemiboldMetrics)
-    }
+    // A result emphasises its match in its title only (#373 H10, H12): its
+    // context, such as the artist an album was found by, stays whole and
+    // regular, so it never outweighs the title.
     // `segments` as at most `maxRuns` runs side by side in `room`: matches
     // past the last run but one stay regular in the last.
     function layOutRuns(segments, maxRuns, room, regular, semibold) {
@@ -283,7 +266,6 @@ Dialog {
     FontMetrics { id: regularMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize }
     FontMetrics { id: semiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.basePointSize; font.weight: Font.DemiBold }
     FontMetrics { id: smallMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize }
-    FontMetrics { id: smallSemiboldMetrics; font.family: root.uiPalette.baseFont.family; font.pointSize: root.uiPalette.smallPointSize; font.weight: Font.DemiBold }
     TextMetrics {
         id: lengthMetrics
         text: "00:00"
@@ -536,12 +518,18 @@ Dialog {
                 maximumFlickVelocity: root.snappyScrollMaxFlickVelocity
                 opacity: root.searching ? 0.5 : 1
                 enabled: !root.searching
-                ScrollBar.vertical: ScrollBar {
+                // The app's lane scrollbar, as the library's and the
+                // queue's (#373 H12: Breeze's own was another hand here):
+                // over the lane the rows' text keeps clear of, its thumb
+                // over their tints, which run to the edge.
+                ScrollBar.vertical: Components.LaneScrollBar {
                     id: resultScrollBar
-                    policy: ScrollBar.AsNeeded
+                    objectName: "globalSearchScrollBar"
+                    uiPalette: root.uiPalette
                 }
-                // The lane the rows leave for the scrollbar, when it shows.
-                readonly property real scrollbarLane: resultScrollBar.size < 1 ? Kirigami.Units.largeSpacing : 0
+                // The lane the rows' text leaves for the scrollbar, when it
+                // shows.
+                readonly property real scrollbarLane: resultScrollBar.visible ? resultScrollBar.lane : 0
                 Keys.onPressed: function(event) {
                     if (root.handleResultKeys(event)) return
                     if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
@@ -579,10 +567,6 @@ Dialog {
                     readonly property real contextWidth: Math.max(0, (lengthText.visible
                         ? lengthText.x - root.columnGap
                         : width - root.sideInset - resultsView.scrollbarLane) - root.contextX)
-                    // The context's match, emphasised only when the title
-                    // has none (root.contextRuns).
-                    readonly property var contextRuns: isResult && !titleRuns.some(function(run) { return run.match })
-                        ? root.contextRuns(context, contextWidth) : []
                     // Asked for only when the shared tooltip shows.
                     function toolTipText() {
                         return model.label + "\n" + root.rowContext(model, true)
@@ -608,7 +592,6 @@ Dialog {
                         selected: resultRow.selected
                         active: true
                         focused: false
-                        scrollbarLane: resultsView.scrollbarLane
                     }
 
                     // A section's heading.
@@ -795,11 +778,10 @@ Dialog {
                         font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: resultRow.isNow ? root.uiPalette.now : root.uiPalette.text
                     }
-                    // The context, whole; or, with its match emphasised, in
-                    // runs as the title is.
+                    // The context, whole and regular.
                     Text {
                         objectName: "globalSearchResultContext"
-                        visible: resultRow.isResult && resultRow.contextRuns.length === 0
+                        visible: resultRow.isResult
                         x: root.contextX
                         width: resultRow.contextWidth
                         height: parent.height
@@ -809,54 +791,6 @@ Dialog {
                         elide: Text.ElideRight
                         font.family: root.uiPalette.baseFont.family
                         font.pointSize: root.uiPalette.smallPointSize
-                        color: root.uiPalette.textSecondary
-                    }
-                    Text {
-                        readonly property var run: resultRow.contextRuns.length > 0 ? resultRow.contextRuns[0] : null
-                        objectName: "globalSearchResultContextRun"
-                        visible: !!run && run.width > 0
-                        x: root.contextX + (run ? run.x : 0)
-                        width: run ? run.width : 0
-                        height: resultRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        text: run ? run.text : ""
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.smallPointSize
-                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: root.uiPalette.textSecondary
-                    }
-                    Text {
-                        readonly property var run: resultRow.contextRuns.length > 1 ? resultRow.contextRuns[1] : null
-                        objectName: "globalSearchResultContextRun"
-                        visible: !!run && run.width > 0
-                        x: root.contextX + (run ? run.x : 0)
-                        width: run ? run.width : 0
-                        height: resultRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        text: run ? run.text : ""
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.smallPointSize
-                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
-                        color: root.uiPalette.textSecondary
-                    }
-                    Text {
-                        readonly property var run: resultRow.contextRuns.length > 2 ? resultRow.contextRuns[2] : null
-                        objectName: "globalSearchResultContextRun"
-                        visible: !!run && run.width > 0
-                        x: root.contextX + (run ? run.x : 0)
-                        width: run ? run.width : 0
-                        height: resultRow.height
-                        verticalAlignment: Text.AlignVCenter
-                        text: run ? run.text : ""
-                        textFormat: Text.PlainText
-                        elide: Text.ElideRight
-                        font.family: root.uiPalette.baseFont.family
-                        font.pointSize: root.uiPalette.smallPointSize
-                        font.weight: run && run.match ? Font.DemiBold : Font.Normal
                         color: root.uiPalette.textSecondary
                     }
                     Text {

@@ -712,11 +712,11 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(visibleTextItems(column, QStringLiteral("Dimensions")).size(), 1);
     QCOMPARE(visibleTextItems(column, QStringLiteral("Source")).size(), 1);
 
-    // The folder is a row of the grid, as the others (#373 H11: its label
-    // stood on a line of its own, over the path): the label in the labels'
-    // column, on the baseline of the path's first line, and the path where
-    // the values start. The path wraps to a second line before it is cut
-    // short, in the middle of that line, with the whole path in its tooltip.
+    // The folder: its label on a line of its own, and under it the path on
+    // one line across the column's whole width, elided in the middle, with
+    // Copy Path at the line's end (#373 H12: in the grid the path had the
+    // values' part of the row and broke onto a second line). The whole path
+    // is in its tooltip.
     QQuickItem *folderLabel = itemNamed(column, QStringLiteral("albumArtFolderLabel"));
     QQuickItem *path = itemNamed(column, QStringLiteral("albumArtFolderPath"));
     QQuickItem *copy = itemNamed(column, QStringLiteral("albumArtCopyPathButton"));
@@ -733,14 +733,16 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QQuickItem *sourceLabel = itemNamed(rows.last(), QStringLiteral("albumArtInfoLabel"));
     QQuickItem *sourceValue = itemNamed(rows.last(), QStringLiteral("albumArtInfoValue"));
     QVERIFY(sourceLabel != nullptr && sourceValue != nullptr);
-    QTRY_COMPARE(boxOf(folderLabel).left(), boxOf(sourceLabel).left());
-    QCOMPARE(folderLabel->width(), sourceLabel->width());
-    QCOMPARE(boxOf(path).left(), boxOf(sourceValue).left());
-    QCOMPARE(boxOf(folderRow).left(), boxOf(rows.last()).left());
+    // The row spans the details' width, as the others.
+    QTRY_COMPARE(boxOf(folderRow).left(), boxOf(rows.last()).left());
     QCOMPARE(boxOf(folderRow).right(), boxOf(rows.last()).right());
-    QVERIFY2(qAbs((boxOf(folderLabel).top() + folderLabel->baselineOffset())
-                  - (boxOf(path).top() + path->baselineOffset())) < 0.5,
-             "the folder's label is off its path's baseline");
+    // The label starts where the other labels do, on a line of its own,
+    // over the path.
+    QCOMPARE(boxOf(folderLabel).left(), boxOf(sourceLabel).left());
+    QVERIFY2(boxOf(folderLabel).bottom() <= boxOf(path).top() + 0.01
+                 && boxOf(folderLabel).bottom() <= boxOf(copy).top() + 0.01,
+             "the folder's label is not on a line of its own");
+    QCOMPARE(folderLabel->property("lineCount").toInt(), 1);
     // The labels' column: 80 px at the default font (#373 H11: 76, the
     // width of "Dimensions").
     QCOMPARE(surface->property("infoLabelColumnMinimum").toReal(), 80.0);
@@ -748,71 +750,34 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     // The row follows the others at their rhythm.
     const qreal rhythm = surface->property("infoRowHeight").toReal();
     QCOMPARE(boxOf(folderRow).top() - boxOf(rows.last()).top(), rhythm);
-    // This path is too long for two lines: the first line whole, up to a
-    // separator, and the second cut short in its middle, its end kept.
-    QCOMPARE(path->property("path").toString(), folder);
-    const QStringList lines = path->property("text").toString().split(QLatin1Char('\n'));
-    QCOMPARE(lines.size(), 2);
-    QCOMPARE(path->property("lineCount").toInt(), 2);
-    QVERIFY(path->property("elided").toBool());
-    const auto endsAtASeparator = [](const QString &line) {
-        return line.endsWith(QLatin1Char('/')) || line.endsWith(QLatin1Char(' '));
-    };
-    QVERIFY2(folder.startsWith(lines.at(0)) && endsAtASeparator(lines.at(0)), qPrintable(lines.at(0)));
-    const QStringList ends = lines.at(1).split(QChar(0x2026));
-    QCOMPARE(ends.size(), 2);
-    QVERIFY2(!ends.at(0).isEmpty() && folder.mid(lines.at(0).size()).startsWith(ends.at(0)), qPrintable(lines.at(1)));
-    QVERIFY2(!ends.at(1).isEmpty() && folder.endsWith(ends.at(1)), qPrintable(lines.at(1)));
-    const QFontMetricsF pathMetrics(qvariant_cast<QFont>(path->property("font")));
-    // The room the row leaves the path: the values' column less Copy Path.
-    const qreal room = path->property("room").toReal();
-    QCOMPARE(room, sourceValue->width() - 4 - copy->width());
-    QTRY_COMPARE(path->width(), room);
-    for (const QString &line : lines) {
-        QVERIFY2(pathMetrics.horizontalAdvance(line) <= room + 0.5, qPrintable(line));
-    }
-    // Neither line could hold more: the next word would not fit the first.
-    const QString afterFirst = folder.mid(lines.at(0).size());
-    qsizetype nextEnd = 0;
-    while (nextEnd < afterFirst.size() && !endsAtASeparator(afterFirst.left(nextEnd + 1))) {
-        ++nextEnd;
-    }
-    const QString nextWord = afterFirst.left(nextEnd + 1);
-    QVERIFY2(pathMetrics.horizontalAdvance(lines.at(0) + nextWord.trimmed()) > room, qPrintable(nextWord));
-    QVERIFY2(pathMetrics.horizontalAdvance(lines.at(0)) >= room / 2, qPrintable(lines.at(0)));
-    QVERIFY2(pathMetrics.horizontalAdvance(lines.at(1)) > room * 0.8, qPrintable(lines.at(1)));
-    // Copy Path at the row's end, centred on the path's first line.
+    // The path from the column's start, not the values', to Copy Path at the
+    // row's end, centred on the path's line; one line, elided in its middle,
+    // so its start and its end stay.
+    QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
+    QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
     QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
-    QVERIFY2(qAbs(boxOf(copy).center().y() - (boxOf(path).top() + std::ceil(pathMetrics.height()) / 2)) <= 0.5,
-             "Copy Path is off the path's first line");
+    QVERIFY2(qAbs(boxOf(copy).center().y() - boxOf(path).center().y()) <= 0.5, "Copy Path is off the path's line");
+    QCOMPARE(path->property("path").toString(), folder);
+    QCOMPARE(path->property("text").toString(), folder);
+    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideMiddle));
+    QCOMPARE(path->property("maximumLineCount").toInt(), 1);
+    QCOMPARE(path->property("lineCount").toInt(), 1);
+    QTRY_VERIFY(path->property("elided").toBool());
+    const QFontMetricsF pathMetrics(qvariant_cast<QFont>(path->property("font")));
+    QVERIFY(pathMetrics.horizontalAdvance(folder) > path->width());
+    QTRY_COMPARE(path->height(), std::ceil(pathMetrics.height()));
     QTest::mouseMove(window, centerInWindow(path));
     QTRY_COMPARE(visibleTextItems(window->contentItem(), folder).size(), 1);
 
-    // A path that fits two lines is whole on them, and one that fits one
-    // line is on one, the row then as tall as the others.
-    const QString twoLines = QStringLiteral("/music/Meridian/Small Hours");
-    surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), twoLines + QStringLiteral("/cover.jpg")},
-                                                 {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
-                                                 {QStringLiteral("width"), 1400},
-                                                 {QStringLiteral("height"), 1400}});
-    QTRY_COMPARE(path->property("path").toString(), twoLines);
-    QVERIFY2(pathMetrics.horizontalAdvance(twoLines) > room, "the fixture's path fits one line");
-    QCOMPARE(path->property("text").toString(), QStringLiteral("/music/Meridian/\nSmall Hours"));
-    QVERIFY(!path->property("elided").toBool());
-    QTRY_COMPARE(folderRow->height(), 2 * std::ceil(pathMetrics.height()));
+    // A path that fits is whole, on its one line.
     surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), QStringLiteral("/music/cover.jpg")},
                                                  {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
                                                  {QStringLiteral("width"), 1400},
                                                  {QStringLiteral("height"), 1400}});
     QTRY_COMPARE(path->property("text").toString(), QStringLiteral("/music"));
-    QVERIFY(!path->property("elided").toBool());
-    // The rows are made anew for another file.
-    const auto lastRowHeight = [column]() {
-        const QList<QQuickItem *> shown = visibleItemsNamed(column, QStringLiteral("albumArtInfoRow"));
-        return shown.isEmpty() ? -1.0 : shown.last()->height();
-    };
-    QTRY_COMPARE(folderRow->height(), lastRowHeight());
+    QTRY_VERIFY(!path->property("elided").toBool());
+    QCOMPARE(path->property("lineCount").toInt(), 1);
     surface->setProperty("fileInfo", details);
     QTRY_COMPARE(path->property("path").toString(), folder);
 
@@ -942,14 +907,6 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
         // The column of the labels: the widest label, up to two fifths of
         // the row inside the column's margins, and never narrower than the
         // widest word.
-        // The folder's row is one of them.
-        QQuickItem *folderLabel = visibleItemsNamed(column, QStringLiteral("albumArtFolderLabel")).value(0);
-        QQuickItem *folderPath = visibleItemsNamed(column, QStringLiteral("albumArtFolderPath")).value(0);
-        QVERIFY2(folderLabel != nullptr && folderPath != nullptr, at.constData());
-        labels << folderLabel;
-        values << folderPath;
-        widest = qMax(widest, folderLabel->implicitWidth());
-        widestWord = qMax(widestWord, widestWordOf(folderLabel));
         // 80 px or more at the default font (#373 H11), more with a larger.
         const qreal least = surface->property("infoLabelColumnMinimum").toReal();
         QCOMPARE(least, pointSize > 10 ? std::round(80 * pointSize / 10) : 80.0);
@@ -1003,10 +960,7 @@ void AlbumArtSmokeTest::albumArtDetailsLabelsStayWholeWithLargerFonts() {
             // fit, and the values keep at least two fifths.
             QVERIFY2(inside.contains(boxOf(label)) && inside.contains(boxOf(value)),
                      qPrintable(where));
-            // The folder's path shares its part of the row with Copy Path.
-            if (value != folderPath) {
-                QVERIFY2(value->width() >= cap, qPrintable(where));
-            }
+            QVERIFY2(value->width() >= cap, qPrintable(where));
         }
         if (pointSize == 0.0) {
             // The usual font fits every label on its line.
@@ -2030,9 +1984,12 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(hairlines, 2);
 
     // Each row: a 64 px thumbnail, the title, and exactly one line of
-    // details, rows as tall as the thumbnail with 8 px above and below.
+    // details, rows as tall as the thumbnail with 8 px above and below. The
+    // size as the art viewer gives it, "1,200 × 1,200 px", with the locale's
+    // thousands separator (#373 H12: "1200 × 1200").
+    const QString itunesSize = QLocale().toString(1200.0, 'f', 0);
     const QStringList expectedDetails{
-        QStringLiteral("The Quiet Meridian · 1200 × 1200 · JPEG · 412 KiB"),
+        QStringLiteral("The Quiet Meridian · %1 × %1 px · JPEG · 412 KiB").arg(itunesSize),
         QStringLiteral("The Quiet Meridian · Loading high-resolution artwork…"),
         QStringLiteral("The artwork could not be downloaded."),
     };
@@ -2092,7 +2049,7 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(sceneRectOf(currentTitle).left(), sceneRectOf(firstTitle).left());
     QCOMPARE(visibleItemsNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails")).size(), 1);
     QTRY_COMPARE(itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails"))->property("text").toString(),
-                 QStringLiteral("1200 × 1200 · JPEG · 38 KiB"));
+                 QStringLiteral("%1 × %1 px · JPEG · 38 KiB").arg(itunesSize));
     QCOMPARE(currentRow->height(), 80.0);
     // The dialog's first line, with no space above it.
     QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());

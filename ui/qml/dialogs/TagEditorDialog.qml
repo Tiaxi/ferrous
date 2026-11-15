@@ -553,6 +553,26 @@ Components.DialogWindow {
         event.accepted = true
     }
 
+    // The current row follows the selection, however it changes: when the
+    // current row is not selected, the first selected row becomes current
+    // and the anchor, so the ring and the tint are on one row and the
+    // keyboard goes on from the selection (#373 H12: after the selection was
+    // set elsewhere, the ring stayed on row 1 while row 2 was selected). A
+    // row that Ctrl or Space has just deselected stays current: it is set
+    // after the selection changes.
+    function followSelection() {
+        const rows = root.tagEditorApi.selectedRows()
+        if (rows.length === 0 || rows.indexOf(tagEditorTable.currentIndex) >= 0) {
+            return
+        }
+        // The controller's selection is a set, in no order.
+        const first = Math.min.apply(null, rows.map(Number))
+        tagEditorTable.currentIndex = first
+        if (rows.indexOf(root.selectionAnchor) < 0) {
+            root.selectionAnchor = first
+        }
+    }
+
     function initializeSelection() {
         if (root.totalRows > 0 && root.selectedCount === 0) {
             root.selectOnlyRow(0)
@@ -608,6 +628,10 @@ Components.DialogWindow {
     Connections {
         target: root.tagEditorApi
         ignoreUnknownSignals: true
+
+        function onSelectionChanged() {
+            root.followSelection()
+        }
 
         function onOpenChanged() {
             if (root.tagEditorApi.open && !root.visible) {

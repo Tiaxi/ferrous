@@ -349,7 +349,8 @@ Components.DialogWindow {
     // The results the dialog opens tall enough for; more scroll.
     readonly property int shownResultRows: 5
     // The rows' secondary line: the details of an image, in plain words,
-    // such as "1200 × 1200 · JPEG · 412 KiB".
+    // such as "1,200 × 1,200 px · JPEG · 412 KiB": the size as the art
+    // viewer's details give it, with the locale's thousands separator.
     function imageDetailsText(info) {
         if (!info) {
             return ""
@@ -358,8 +359,8 @@ Components.DialogWindow {
         const height = Number(info.height || 0)
         return [
             width > 0 && height > 0
-                ? I18n.i18nc("@info image size in pixels, width × height", "%1 × %2",
-                    String(width), String(height))
+                ? I18n.i18nc("@info image size, width × height", "%1 × %2 px",
+                    width.toLocaleString(Qt.locale(), "f", 0), height.toLocaleString(Qt.locale(), "f", 0))
                 : "",
             info.format || info.extension || "",
             root.fileSizeText(info)

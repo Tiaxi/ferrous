@@ -452,10 +452,12 @@ ToolBar {
             readonly property bool seekAllowed: durationKnown && trackLoaded
             // The bar: 28 px, with the ±12 px waveform in its middle and
             // the playhead across its height, 2 px past the waveform's
-            // peaks on either side.
-            readonly property real boxHeight: 28
+            // peaks on either side. A larger font scales the waveform as it
+            // does the glyphs (#373 H12: at 24 pt it stayed 24 px beside
+            // 48 px glyphs).
+            readonly property real waveformHeight: root.scaled(24)
+            readonly property real boxHeight: waveformHeight + 4
             readonly property real playheadHeight: boxHeight
-            readonly property real waveformHeight: 24
             readonly property real windowDevicePixelRatio: root.windowDevicePixelRatio
             // The whole device pixels the bar holds. Rounded down, so the
             // playhead, which they place, never reaches past the bar's end.
@@ -592,7 +594,8 @@ ToolBar {
                     objectName: "seekWaveform"
                     x: 0
                     width: parent.width
-                    // ±12 px about the middle, on whole device pixels.
+                    // ±12 px about the middle at the default font, on whole
+                    // device pixels.
                     y: root.snapped((parent.height - seekSlider.waveformHeight) / 2)
                     height: seekSlider.waveformHeight
                     visible: root.uiBridge.playbackState !== "Stopped"
@@ -973,7 +976,7 @@ ToolBar {
             Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
             Layout.alignment: Qt.AlignVCenter
             Layout.preferredWidth: root.narrow ? 72 : 96
-            Layout.preferredHeight: 20
+            Layout.preferredHeight: volumeSlider.boxHeight
             padding: 0
             from: 0
             to: 1
@@ -985,11 +988,14 @@ ToolBar {
                 ? I18n.i18nc("@info:tooltip volume in percent, while muted", "Volume %1, muted",
                     volumeSlider.percentText)
                 : I18n.i18nc("@info:tooltip volume in percent", "Volume %1", volumeSlider.percentText)
-            // A 3 px groove and a 12 px thumb, both centred on the
-            // groove's middle, which lies on whole device pixels.
-            readonly property real grooveHeight: 3
+            // A 3 px groove and a 12 px thumb in a 20 px box, both centred
+            // on the groove's middle, which lies on whole device pixels; a
+            // larger font scales them as it does the glyphs (#373 H12: at
+            // 24 pt the thumb stayed 12 px beside 38 px glyphs).
+            readonly property real boxHeight: root.scaled(20)
+            readonly property real grooveHeight: root.scaled(3)
             readonly property real grooveY: root.snapped((height - grooveHeight) / 2)
-            readonly property real thumbSize: 12
+            readonly property real thumbSize: root.scaled(12)
             Accessible.name: I18n.i18nc("@label", "Volume")
             Accessible.description: volumeSlider.percentText
             // Every move, including a release's, sends its value, so the
@@ -1011,7 +1017,7 @@ ToolBar {
 
             background: Item {
                 implicitWidth: 96
-                implicitHeight: 20
+                implicitHeight: volumeSlider.boxHeight
 
                 Rectangle {
                     objectName: "volumeGroove"
