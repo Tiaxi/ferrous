@@ -1984,9 +1984,12 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(hairlines, 2);
 
     // Each row: a 64 px thumbnail, the title, and exactly one line of
-    // details, rows as tall as the thumbnail with 8 px above and below.
+    // details, rows as tall as the thumbnail with 8 px above and below. The
+    // size as the art viewer gives it, "1,200 × 1,200 px", with the locale's
+    // thousands separator (#373 H12: "1200 × 1200").
+    const QString itunesSize = QLocale().toString(1200.0, 'f', 0);
     const QStringList expectedDetails{
-        QStringLiteral("The Quiet Meridian · 1200 × 1200 · JPEG · 412 KiB"),
+        QStringLiteral("The Quiet Meridian · %1 × %1 px · JPEG · 412 KiB").arg(itunesSize),
         QStringLiteral("The Quiet Meridian · Loading high-resolution artwork…"),
         QStringLiteral("The artwork could not be downloaded."),
     };
@@ -2046,7 +2049,7 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     QCOMPARE(sceneRectOf(currentTitle).left(), sceneRectOf(firstTitle).left());
     QCOMPARE(visibleItemsNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails")).size(), 1);
     QTRY_COMPARE(itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentDetails"))->property("text").toString(),
-                 QStringLiteral("1200 × 1200 · JPEG · 38 KiB"));
+                 QStringLiteral("%1 × %1 px · JPEG · 38 KiB").arg(itunesSize));
     QCOMPARE(currentRow->height(), 80.0);
     // The dialog's first line, with no space above it.
     QCOMPARE(sceneRectOf(currentRow).top(), sceneRectOf(content).top());
