@@ -2147,10 +2147,32 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
 
     // One row of plates in the corner (#373 H6): the zoom's, the mode
     // switch's and the viewer's Close on the one plot plate, in its fill and
-    // edge, as tall and on one top, 4 px apart.
+    // edge, as tall and on one top: the plot's own, its zoom and its mode,
+    // 4 px apart, and the viewer's Close 8 px from them (#373 H11).
     QQuickItem *cornerPlate = itemNamed(controls, QStringLiteral("viewerCornerPlate"));
     QVERIFY(cornerPlate != nullptr);
-    QTRY_COMPARE(sceneRectOf(modeSwitch).right() + 4, sceneRectOf(cornerPlate).left());
+    QTRY_COMPARE(sceneRectOf(modeSwitch).right() + 8, sceneRectOf(cornerPlate).left());
+    // The readout is plain text in the plot's secondary colour, and Reset
+    // and the modes glyph buttons, none in the accent at rest.
+    {
+        QQuickItem *readout = itemNamed(plate, QStringLiteral("plotZoomReadout"));
+        QQuickItem *reset = itemNamed(plate, QStringLiteral("plotZoomResetButton"));
+        QVERIFY(readout != nullptr && reset != nullptr);
+        QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+        QObject *plot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
+        QCOMPARE(readout->property("color").value<QColor>().rgba(),
+                 plot->property("plotTextSecondary").value<QColor>().rgba());
+        QCOMPARE(reset->property("display").toInt(), 0); // AbstractButton.IconOnly
+        QVERIFY(!reset->property("checked").toBool());
+        for (int mode = 0; mode < 2; ++mode) {
+            QQuickItem *button = itemNamed(modeSwitch, QStringLiteral("visualizationModeButton%1").arg(mode));
+            QVERIFY(button != nullptr && button->property("segment").toBool());
+            QQuickItem *fill = itemNamed(button, QStringLiteral("plotToolButtonChecked"));
+            QVERIFY(fill != nullptr);
+            QVERIFY(fill->property("color").value<QColor>().rgba()
+                    != palette->property("accent").value<QColor>().rgba());
+        }
+    }
     for (QQuickItem *other : {modeSwitch, cornerPlate}) {
         QCOMPARE(sceneRectOf(other).top(), sceneRectOf(plate).top());
         QCOMPARE(sceneRectOf(other).height(), sceneRectOf(plate).height());

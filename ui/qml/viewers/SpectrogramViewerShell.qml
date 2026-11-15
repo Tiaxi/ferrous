@@ -97,12 +97,17 @@ Item {
     property alias fullscreenControlsHideDelay: fullscreenControlsAutoHide.hideDelay
     // What the visualization keeps clear of in its top right corner: in the
     // main window, the viewer's controls, with the plot layer's mode switch
-    // 4 px left of them; over the whole screen nothing, as the controls are
-    // in the title strip. It does not change as they auto-hide.
+    // `cornerGap` left of them; over the whole screen nothing, as the
+    // controls are in the title strip. It does not change as they auto-hide.
     readonly property size reservedCorner: root.useWholeScreenViewerMode
         ? Qt.size(0, 0)
-        : Qt.size(popupControls.width + 4,
+        : Qt.size(popupControls.width + root.cornerGap,
                   popupControls.anchors.topMargin + popupControls.height + 1)
+    // Between what belongs to the plot, its zoom and its mode, 4 px apart,
+    // and Close, which belongs to the viewer: 8 px, so the corner reads as
+    // the plot's controls and the window's (#373 H11: all 4 px apart, the
+    // three plates read as one row of unlike controls).
+    readonly property int cornerGap: 2 * Kirigami.Units.smallSpacing
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole
     // screen, the title strip's height while it can show. They show only

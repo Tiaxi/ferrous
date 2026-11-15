@@ -59,6 +59,10 @@ Item {
     // Whether the plot waits for the track's overview.
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
+    // Whether the plot has drawn the track's waveform, or has none to wait
+    // for (WaveformEditorItem's pictureReady): false from when it is shown,
+    // which gives it the track, until its first frame of it.
+    readonly property bool pictureReady: waveform.pictureReady
 
     Accessible.role: Accessible.Graphic
     Accessible.name: I18n.i18nc("@label", "Waveform")

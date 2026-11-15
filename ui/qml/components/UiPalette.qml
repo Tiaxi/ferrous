@@ -181,7 +181,7 @@ QtObject {
     // The colours of everything drawn on a visualization: they come from
     // the plot it sits on, never from the window.
     component PlotColors: QtObject {
-        // The floor.
+        // The floor, where the plot has nothing to draw.
         required property color plotBg
         // A label plate, with a 1 px edge outside it.
         required property color plotPlate
@@ -217,37 +217,49 @@ QtObject {
         required property color plotFocusRing
     }
 
+    // The plot's floor: the deep indigo of the spectrogram colour map's
+    // quiet end, fixed, the same in both themes. It is what the spectrogram
+    // shows where it has no column to draw: never played, while a track is
+    // analysed, and the part of a rolling view not yet filled (#373 H11
+    // P19: black there read as a hole in the window, most of all in a light
+    // theme, and unlike the pane once it plays). The now-playing panel's
+    // stand-in for a track without a cover and the library's tile for an
+    // album without one are of the same colour, as the plot's own.
+    readonly property color plotFloor: "#14062e"
+
     // The spectrogram is the same dark colour map in both themes, so its
-    // set is fixed, from the colour map's floor: black, the lowest entry of
-    // the colour and the greyscale map (SpectrogramItem::rebuildPalette),
-    // which silence is drawn in. What is drawn on it is neutral.
+    // set is fixed, on the plot's floor. Silence within a track is still
+    // the colour map's lowest entry, black (SpectrogramItem::
+    // rebuildPalette). What is drawn on it is neutral.
     readonly property PlotColors spectrogramPlot: PlotColors {
         id: spectrogramColors
-        plotBg: "#000000"
-        // A neutral dark lifted from the floor.
+        plotBg: root.plotFloor
+        // A neutral dark over the floor.
         plotPlate: Qt.rgba(20 / 255, 20 / 255, 20 / 255, 0.88)
         plotPlateEdge: Qt.rgba(1, 1, 1, 0.14)
-        // The plate over the floor, solid: #121212.
-        plotStrip: Qt.tint(spectrogramColors.plotBg, spectrogramColors.plotPlate)
+        // The plate over black, solid and neutral: #121212.
+        plotStrip: Qt.tint("#000000", spectrogramColors.plotPlate)
         plotText: "#ececec"
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
-        // Nothing is darker than the floor, so the seam is a little lighter.
-        plotLaneSeam: "#1a1a1a"
+        // Neutral, as all that is drawn on the plot, and lighter than the
+        // floor: 1.18:1 on it, and it shows between lanes of black silence
+        // too.
+        plotLaneSeam: "#202020"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
         // as part of the plot. The fill takes the colour map's colour of
         // its level (LevelMeterItem's colorMapFill); meterFill is its
-        // colour without one.
-        meterTrough: "#2b1f43"
+        // colour without one. The trough is 1.3:1 on the floor.
+        meterTrough: "#30244a"
         meterFill: "#8f87a3"
         meterSeam: "#0a0318"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         meterTick: Qt.rgba(1, 1, 1, 0.4)
         checkedFill: root.accent
-        checkedGlyph: spectrogramColors.plotBg
+        checkedGlyph: "#000000"
         // The dark theme's selection, on the floor.
         checkedTint: ColorUtils.mixColor(spectrogramColors.plotBg, root.accent, 0.26)
         // The dark theme's focus ring, as the plot is dark in both.
@@ -301,10 +313,33 @@ QtObject {
 
     // A media surface, such as the album art viewer: dark in both themes,
     // as a cover reads best on black and a light theme's white around it
-    // would outshine it (#373 H7, P10). It is the spectrogram's set, so
-    // both viewers are of one family: the art on the plot's floor, the
-    // title strip and the details on its strip colour.
-    readonly property PlotColors mediaPlot: root.spectrogramPlot
+    // would outshine it (#373 H7, P10). It is the spectrogram's set on a
+    // black floor, so both viewers are of one family: the art on black,
+    // the title strip and the details on the set's strip colour.
+    readonly property PlotColors mediaPlot: PlotColors {
+        id: mediaColors
+        plotBg: "#000000"
+        plotPlate: spectrogramColors.plotPlate
+        plotPlateEdge: spectrogramColors.plotPlateEdge
+        plotStrip: spectrogramColors.plotStrip
+        plotText: spectrogramColors.plotText
+        plotTextSecondary: spectrogramColors.plotTextSecondary
+        plotOutline: spectrogramColors.plotOutline
+        // Nothing is darker than the floor, so the seam is a little lighter.
+        plotLaneSeam: "#1a1a1a"
+        plotTick: spectrogramColors.plotTick
+        plotLink: spectrogramColors.plotLink
+        meterTrough: spectrogramColors.meterTrough
+        meterFill: spectrogramColors.meterFill
+        meterSeam: spectrogramColors.meterSeam
+        meterPeak: spectrogramColors.meterPeak
+        meterClipOff: spectrogramColors.meterClipOff
+        meterTick: spectrogramColors.meterTick
+        checkedFill: spectrogramColors.checkedFill
+        checkedGlyph: spectrogramColors.checkedGlyph
+        checkedTint: ColorUtils.mixColor(mediaColors.plotBg, root.accent, 0.26)
+        plotFocusRing: spectrogramColors.plotFocusRing
+    }
 
     // The colours before #373's tokens. They stay until every user has
     // moved to the tokens above.
@@ -366,6 +401,10 @@ QtObject {
     // count in rows all use it, so they follow the font size.
     readonly property real rowHeight: Math.round(root._baseFontMetrics.height)
         + 2 * Kirigami.Units.smallSpacing
+    // Kirigami's grid unit on the window's font: the height of a line of
+    // it, made even, as Kirigami.Units.gridUnit is of the platform's font;
+    // 18 px with the default 10 pt font, 44 px at 24 pt.
+    readonly property real gridUnit: 2 * Math.ceil(root._baseFontMetrics.height / 2)
     // The base font's size in points, for text sized relative to it.
     readonly property real basePointSize: root.baseFont.pointSize > 0
         ? root.baseFont.pointSize
@@ -377,6 +416,13 @@ QtObject {
     // The smallest text of the design, for the labels of the plot's short
     // lanes: 11 px with the default 10 pt font.
     readonly property real compactPointSize: root.basePointSize * 0.825
+    // The size of a Kirigami.Heading of `level` on the window's font, for
+    // plain text that is to be one: 1.35, 1.2, 1.15, 1.1 and 1.05 times it
+    // for levels 1 to 5.
+    function headingPointSize(level) {
+        const factors = [1.35, 1.20, 1.15, 1.10, 1.05]
+        return root.basePointSize * (factors[level - 1] || 1)
+    }
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 

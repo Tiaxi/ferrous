@@ -352,6 +352,7 @@ Item {
                     objectName: "spectrogramPaneItem"
                     anchors.fill: parent
                     channelMuted: modelData.muted || false
+                    floorColor: root.uiPalette.spectrogramPlot.plotBg
                     playheadVisible: root.playheadVisible
                     maxColumns: Math.max(Math.floor(width), Screen.desktopAvailableWidth)
                     dbRange: root.uiBridge.dbRange

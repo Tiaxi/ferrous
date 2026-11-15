@@ -5,8 +5,9 @@ import FerrousUi 1.0
 import "." as Components
 
 // The visualization's mode switch: two tool buttons on one plate,
-// Spectrogram and Waveform, the current one checked. Set `revealed` from
-// the pane's pointer and `focusInside`: hidden, the buttons stay Tab stops.
+// Spectrogram and Waveform, the current one checked, as a neutral plate
+// (PlotToolButton's `segment`). Set `revealed` from the pane's pointer and
+// `focusInside`: hidden, the buttons stay Tab stops.
 Components.PlotPlate {
     id: root
     objectName: "visualizationModeSwitch"
@@ -54,6 +55,7 @@ Components.PlotPlate {
             uiPalette: root.uiPalette
             text: modelData.name
             icon.name: modelData.icon
+            segment: true
             checked: root.selectedMode === index
             Accessible.role: Accessible.RadioButton
             Accessible.checkable: true

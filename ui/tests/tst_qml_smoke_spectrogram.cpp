@@ -549,16 +549,25 @@ ApplicationWindow {
     auto *pane = root->findChild<QQuickItem *>(QStringLiteral("floorPane"));
     auto *surface = root->findChild<QQuickItem *>(QStringLiteral("floorSurface"));
     QVERIFY(tokens != nullptr && pane != nullptr && surface != nullptr);
-    // The plot's floor is the colour map's: its lowest entry, for the colour
-    // and the greyscale (muted) map alike, which silence is drawn in.
+    // The plot's floor is the palette's plotFloor, its indigo (#373 H11
+    // P19), where the plot has no column to draw. Silence within a track
+    // is the colour map's lowest entry, black, for the colour and the
+    // greyscale (muted) map alike; a canvas pixel without a column is
+    // transparent, for the floor to show.
     QObject *plot = tokens->property("spectrogramPlot").value<QObject *>();
     QVERIFY(plot != nullptr);
     const QColor floor = plot->property("plotBg").value<QColor>();
-    QCOMPARE(plot->property("plotOutline").value<QColor>(), floor);
+    QCOMPARE(floor, QColor(QStringLiteral("#14062e")));
+    QCOMPARE(tokens->property("plotFloor").value<QColor>(), floor);
+    const QColor silence(Qt::black);
+    QCOMPARE(plot->property("plotOutline").value<QColor>(), silence);
     for (const bool muted : {false, true}) {
         SpectrogramItem item;
-        QCOMPARE(QColor(item.m_palette32.back()), floor);
-        QCOMPARE(QColor(item.m_palette32Gray.back()), floor);
+        // On its own, the item's floor is black; the surface gives it the
+        // plot's.
+        QCOMPARE(item.floorColor(), silence);
+        QCOMPARE(QColor(item.m_palette32.back()), silence);
+        QCOMPARE(QColor(item.m_palette32Gray.back()), silence);
         item.setWidth(200);
         item.setHeight(100);
         item.setDisplayMode(1);
@@ -569,9 +578,9 @@ ApplicationWindow {
             QByteArray(bins * 100, '\0'), bins, 0, 100,
             0, 400, 48000, 1024, false, true, 1, false, 1);
         QSGNode *node = paintSettled(item, nullptr);
-        // Silence, and the canvas past the columns, are the floor.
-        QCOMPARE(QColor(item.m_canvas.pixel(50, 50)), floor);
-        QCOMPARE(QColor(item.m_canvas.pixel(170, 50)), floor);
+        // Silence is black; the canvas past the columns is transparent.
+        QCOMPARE(item.m_canvas.pixel(50, 50), qRgb(0, 0, 0));
+        QCOMPARE(item.m_canvas.pixel(170, 50), kSpectrogramNoColumn);
         delete node;
     }
 
@@ -601,6 +610,10 @@ ApplicationWindow {
     QTRY_VERIFY((lanes.clear(), collectLanes(surface, &lanes), lanes.size() == 2));
     for (QQuickItem *lane : std::as_const(lanes)) {
         QCOMPARE(lane->property("color").value<QColor>(), floor);
+    }
+    // Each lane's item draws the floor itself, where it has no column.
+    for (QQuickItem *item : itemsNamed(surface, QStringLiteral("spectrogramPaneItem"))) {
+        QCOMPARE(qobject_cast<SpectrogramItem *>(item)->floorColor(), floor);
     }
     QObject *popupFloor = root->findChild<QObject *>(QStringLiteral("spectrogramPopupFloor"));
     QVERIFY(popupFloor != nullptr);
@@ -635,8 +648,7 @@ void SpectrogramSmokeTest::emptyPaneIsTheModesFloor_data() {
 
 // The pane's floor is the mode's, in both themes, with data or without, so
 // that the first Play keeps it (#373 H4, P5): the spectrogram's is the
-// colour map's floor, the colour silence is drawn in; the waveform's the
-// view colour. (H2 made the light theme's bare spectrogram pane the view
+// plot's floor, its indigo; the waveform's the view colour. (H2 made the light theme's bare spectrogram pane the view
 // colour; H3 the dark theme's the map's floor.)
 void SpectrogramSmokeTest::emptyPaneIsTheModesFloor() {
     QFETCH(bool, dark);
@@ -685,13 +697,13 @@ ApplicationWindow {
     QTRY_COMPARE(tokens->property("themeIsDark").toBool(), dark);
     pane->setProperty("visualizationMode", visualizationMode);
 
-    // The colour map's floor: the lowest entry of the colour map, which
-    // silence is drawn in.
-    const QColor mapFloor(SpectrogramItem().m_palette32.back());
+    // The plot's floor: its indigo, in both themes (#373 H11 P19; before,
+    // the colour map's lowest entry, black).
+    const QColor mapFloor = tokens->property("plotFloor").value<QColor>();
     const QColor view = tokens->property("view").value<QColor>();
     const QColor wanted = visualizationMode == 1 ? view : mapFloor;
     QCOMPARE(pane->property("color").value<QColor>(), wanted);
-    QCOMPARE(QColor(QStringLiteral("#000000")), mapFloor);
+    QCOMPARE(QColor(QStringLiteral("#14062e")), mapFloor);
     // As drawn.
     QVERIFY(QTest::qWaitForWindowExposed(window));
     QTRY_COMPARE(window->grabWindow().pixelColor(160, 100), wanted);

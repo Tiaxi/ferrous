@@ -114,10 +114,23 @@ QtObject {
     // with the font's square root, between bounds that grow with it: at
     // 24 pt, 360 px in a 1000 px window and 408 px in a 1600 px one, which
     // leave the queue its columns.
-    function sidebarDefaultWidth(splitWidth, fontScale) {
+    // Where the window allows more with a larger font, the pane is the
+    // 360 px of the default font or 22 grid units of the font, `gridUnit`
+    // (UiPalette.gridUnit), whichever is more: a column as wide in
+    // characters as the default one (#373 H11: 408 px at 24 pt cut most
+    // names). The window allows what leaves the panes after it
+    // `otherWidth`, the queue with all its columns: at 24 pt nothing more
+    // in a 1600 px window, where Album would drop, some 640 px in a
+    // 1920 px one, and the whole 968 px from about 2250 px.
+    function sidebarDefaultWidth(splitWidth, fontScale, gridUnit, otherWidth) {
         const least = Math.max(260, Math.round(150 * fontScale))
         const most = Math.max(360, Math.round(170 * fontScale))
-        return root.clamp(Math.round(splitWidth * 0.225 * Math.sqrt(fontScale)), least, most)
+        const width = root.clamp(Math.round(splitWidth * 0.225 * Math.sqrt(fontScale)), least, most)
+        if (!(fontScale > 1) || !(gridUnit > 0) || !(otherWidth > 0)) {
+            return width
+        }
+        const column = Math.max(360, 22 * gridUnit)
+        return Math.max(width, Math.min(column, Math.floor(splitWidth - otherWidth)))
     }
 
     // The library pane's width in a split `splitWidth` wide, leaving the

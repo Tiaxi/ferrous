@@ -35,6 +35,9 @@ QtObject {
     property real pendingAnchorOffset: 0
     property real pendingAnchorFallbackY: 0
     property bool pendingAnchorValid: false
+    // How many times a reveal has placed the view: a restore of the view's
+    // place that is still to run gives way to a later one (restoreViewAnchor).
+    property int viewPlacements: 0
     property string typeAheadBuffer: ""
     // The row the model is revealing once the backend sends it, and what
     // to do with it then: "select", "center", "open" or "restore".
@@ -472,7 +475,12 @@ QtObject {
         if (!root.view) {
             return
         }
+        const placement = root.viewPlacements
         const restoreY = function() {
+            // A reveal has placed the view since: its place stands.
+            if (placement !== root.viewPlacements) {
+                return
+            }
             let targetY = anchor && anchor.fallbackY !== undefined ? anchor.fallbackY : 0
             if (anchor && anchor.key && anchor.key.length > 0) {
                 const index = root.libraryModel.indexForSelectionKey(anchor.key)
@@ -996,6 +1004,15 @@ QtObject {
             }
             return
         }
+        // The reveal places the view. It may end while a tree is applied,
+        // when the backend sends the rows it waited for, as for Show in
+        // Library on a collapsed artist: the view's place from before that
+        // tree, which the apply restores, now and once more after the view
+        // has laid the tree out, is not put back over it (#373 H11: the
+        // tree opened, and the view went back to where it was, with the
+        // playing row out of sight).
+        root.pendingAnchorValid = false
+        ++root.viewPlacements
         if (purpose === "center") {
             root.setSingleSelection(row, rowMap)
             root.centerRow(row)

@@ -113,6 +113,14 @@ Rectangle {
     // of its characters, as in a narrow window at a large font.
     readonly property bool artistColumnVisible: root.width - root.reservedColumnsWidth
         - root.minimumTitleColumnWidth - root.columnGap >= root.minimumShownTextColumnWidth
+    // The least width at which the queue shows all its columns: Album,
+    // the first to drop, shows from here (albumColumnVisible). The number
+    // column is counted as the queue's minimum counts it, for up to 99,999
+    // tracks, so that it does not change as tracks are queued. The window
+    // gives the library pane more than its share only past this (#373 H11).
+    readonly property real widthWithAllColumns: Math.ceil(2 * (root.playlistIndicatorColumnWidth
+        + root.minimumOrderColumnWidth + root.titleGap + root.columnGap + root.defaultLengthColumnWidth
+        + root.rightPadding + root.minimumTitleColumnWidth))
     readonly property var resizableColumns: root.albumColumnVisible
         ? ["artist", "album", "length"]
         : (root.artistColumnVisible ? ["artist", "length"] : ["length"])

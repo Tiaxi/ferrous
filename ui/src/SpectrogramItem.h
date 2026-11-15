@@ -296,6 +296,11 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // crosshair's time keeps clear of them. Empty without any.
     Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
+    // The floor, where the item has no column to draw: before any audio,
+    // while a track is analysed, and the part of a rolling view not yet
+    // filled. The plot's floor (UiPalette's plotFloor); black, as silence
+    // is drawn, on its own.
+    Q_PROPERTY(QColor floorColor READ floorColor WRITE setFloorColor NOTIFY floorColorChanged)
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
@@ -376,6 +381,8 @@ public:
     void setShowCrosshairTime(bool value);
     QRectF laneHeadBounds() const;
     void setLaneHeadBounds(const QRectF &value);
+    QColor floorColor() const;
+    void setFloorColor(const QColor &value);
     QColor readoutPlateColor() const;
     void setReadoutPlateColor(const QColor &value);
     QColor readoutPlateEdgeColor() const;
@@ -486,6 +493,7 @@ signals:
     void showCrosshairTimeChanged();
     void laneHeadBoundsChanged();
     void readoutColorsChanged();
+    void floorColorChanged();
     void markerSecondsChanged();
     void markerXChanged();
     void gridEnabledChanged();
@@ -1217,6 +1225,8 @@ private:
     bool m_showCrosshairTime{true};
     QRectF m_laneHeadBounds;
     // UiPalette's spectrogramPlot plates, until QML sets them.
+    // floorColor, under the state mutex.
+    QColor m_floorColor{0, 0, 0};
     CrosshairReadout::Colors m_readoutColors{
         QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
     // The readout laid out with the crosshair, and the one the GUI thread

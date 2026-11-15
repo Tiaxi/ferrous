@@ -3615,7 +3615,11 @@ void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme() {
     // The tests' theme is a light one, where the view colour was white.
     QVERIFY(!palette->property("themeIsDark").toBool());
     QCOMPARE(colorOf(plot, "plotBg"), qRgb(0, 0, 0));
-    QVERIFY(plot == qvariant_cast<QObject *>(palette->property("spectrogramPlot")));
+    // The spectrogram's set, on black rather than on the plot's floor.
+    QObject *spectrogramPlot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
+    QVERIFY(spectrogramPlot != nullptr);
+    QCOMPARE(colorOf(plot, "plotStrip"), colorOf(spectrogramPlot, "plotStrip"));
+    QCOMPARE(colorOf(plot, "plotText"), colorOf(spectrogramPlot, "plotText"));
 
     setPlayingTrack(bridge);
     bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
