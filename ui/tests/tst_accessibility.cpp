@@ -4047,7 +4047,15 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *labelText = label->findChild<QQuickItem *>(QStringLiteral("plotPlateLabel"));
         QQuickItem *switchPlate = visibleItemNamed(window, QStringLiteral("visualizationModeSwitch"));
         QVERIFY(label != nullptr && labelText != nullptr && switchPlate != nullptr);
-        QTest::qWait(50);
+        // Let the plates' fades settle before sampling: under a loaded
+        // parallel run a fixed wait caught the chosen segment mid-fade.
+        const auto settledFill = [&]() {
+            const QImage grab = window->grabWindow();
+            return contrastRatio(drawnAt(grab, window, checked, QPointF(checked->width() / 2, 2.5)),
+                                 drawnAt(grab, window, switchPlate,
+                                         QPointF(1.0, switchPlate->height() / 2)));
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(settledFill() >= 1.4, 3000);
         const QImage image = window->grabWindow();
         // The label's text on its plate.
         const QColor plate = drawnAt(image, window, label, QPointF(1.5, 1.5));
