@@ -355,6 +355,7 @@ private slots:
     void modeSwitchSegmentsAreCheckableRadioButtons();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
+    void laneButtonsAreCheckableToggles();
     void levelMeterReservesItsColumnAndReadsOut();
     void plotLayerDrawsWithContrast();
     void plotLayerShowsThePaneStates();
@@ -3817,6 +3818,62 @@ void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
     QVERIFY(bridge->setProperty("channelButtonsVisibility", 0));
     QTRY_VERIFY(!plates[0]->isVisible());
     QVERIFY(!mutes[0]->isVisible());
+}
+
+// A lane's Mute and Solo tell assistive technology that they are toggles
+// and whether each is on (#373 H14 F6: only "focused, focusable" reached
+// it). What they show is the lane's state: a click asks for the change
+// and leaves the button as the lane is until the lane changes.
+void AccessibilityTest::laneButtonsAreCheckableToggles() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QVERIFY(layer != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    QList<QQuickItem *> heads;
+    QTRY_COMPARE((heads = itemsNamed(layer, QStringLiteral("plotLaneHead"))).size(), 2);
+    QQuickItem *mute = itemsNamed(heads[0], QStringLiteral("plotLaneMuteButton")).value(0);
+    QQuickItem *solo = itemsNamed(heads[1], QStringLiteral("plotLaneSoloButton")).value(0);
+    QVERIFY(mute != nullptr && solo != nullptr);
+    const auto problem = [&](QQuickItem *button, bool on) -> QString {
+        QAccessibleInterface *iface = inAccessibleTree(window, button);
+        if (iface == nullptr) {
+            return QStringLiteral("%1 is not in the tree").arg(button->objectName());
+        }
+        if (iface->role() != QAccessible::CheckBox) {
+            return QStringLiteral("%1 is a %2").arg(button->objectName()).arg(int(iface->role()));
+        }
+        const QAccessible::State state = iface->state();
+        if (!state.checkable) {
+            return QStringLiteral("%1 is not checkable").arg(button->objectName());
+        }
+        if (bool(state.checked) != on || button->property("checked").toBool() != on) {
+            return QStringLiteral("%1 checked %2").arg(button->objectName()).arg(bool(state.checked));
+        }
+        return {};
+    };
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+    QTRY_VERIFY2(problem(solo, false).isEmpty(), qPrintable(problem(solo, false)));
+
+    // The lane muted, and the other soloed: each says so.
+    QVERIFY(heads[0]->setProperty("muted", true));
+    QVERIFY(heads[1]->setProperty("soloed", true));
+    QTRY_VERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QTRY_VERIFY2(problem(solo, true).isEmpty(), qPrintable(problem(solo, true)));
+
+    // A click asks the lane to change, and the button stays as the lane
+    // is, which this test's bridge leaves alone; it still follows the lane.
+    QVERIFY(layer->setProperty("hoveredLane", 0));
+    QQuickItem *plate = itemsNamed(heads[0], QStringLiteral("plotLaneButtons")).value(0);
+    QTRY_COMPARE(plate->opacity(), 1.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      mute->mapToScene(QPointF(mute->width() / 2, mute->height() / 2)).toPoint());
+    QTest::qWait(50);
+    QVERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QVERIFY(heads[0]->setProperty("muted", false));
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
 }
 
 void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
