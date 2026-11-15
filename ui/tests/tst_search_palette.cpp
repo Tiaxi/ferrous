@@ -272,10 +272,9 @@ QQuickItem *visibleChildNamed(QQuickItem *root, const QString &name) {
     return items.isEmpty() ? nullptr : items.first();
 }
 
-// A result's context as drawn: whole, or in runs with its match emphasised.
+// A result's context as drawn: whole, in one text.
 QList<QQuickItem *> contextTexts(QQuickItem *row) {
-    return visibleNamed(row, QStringLiteral("globalSearchResultContext"))
-        + visibleNamed(row, QStringLiteral("globalSearchResultContextRun"));
+    return visibleNamed(row, QStringLiteral("globalSearchResultContext"));
 }
 
 // Where a result's context is drawn: the box of all its runs.
@@ -485,7 +484,7 @@ private slots:
     void paletteSitsUnderTheTransportOverADim();
     void sectionsFollowTheirBestMatch();
     void rowsShareTheirColumnsAndThumbnails();
-    void oneMatchIsEmphasisedPerRow();
+    void matchesAreEmphasisedInTheTitleOnly();
     void selectedHoveredAndPlayingRowsAreDrawn();
     void footerNamesTheKeysForEachState();
     void suggestionIsASelectableRow();
@@ -745,10 +744,10 @@ void SearchPaletteTest::rowsShareTheirColumnsAndThumbnails() {
 }
 
 // "Meridian Line" for "meridian": "Meridian" semibold, " Line" regular; the
-// context has no emphasis. A row emphasises its match in one place (#373
-// H10): in its title when the title matches, otherwise in its context, there
-// only the first match; an album found by its artist showed no emphasis.
-void SearchPaletteTest::oneMatchIsEmphasisedPerRow() {
+// context has no emphasis. A row emphasises its matches in its title only
+// (#373 H10, H12: the spec's rule; the context of an album found by its
+// artist had its match semibold, and outweighed the title).
+void SearchPaletteTest::matchesAreEmphasisedInTheTitleOnly() {
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
@@ -770,7 +769,12 @@ void SearchPaletteTest::oneMatchIsEmphasisedPerRow() {
         return texts;
     };
     const QString titleRun = QStringLiteral("globalSearchResultTitle");
-    const QString contextRun = QStringLiteral("globalSearchResultContextRun");
+    // The row's context: one text, whole and regular.
+    const auto wholeContext = [](QQuickItem *row) -> QString {
+        const QList<QQuickItem *> texts = contextTexts(row);
+        if (texts.size() != 1 || texts.first()->property("font").value<QFont>().weight() != QFont::Normal) return {};
+        return texts.first()->property("text").toString();
+    };
 
     QQuickItem *row = rowLabelled(QStringLiteral("Meridian Line"));
     QVERIFY(row != nullptr);
@@ -791,54 +795,39 @@ void SearchPaletteTest::oneMatchIsEmphasisedPerRow() {
     QCOMPARE(context->property("text").toString(), QStringLiteral("The Quiet Meridian — Grey Lines"));
     QCOMPARE(context->property("textFormat").toInt(), int(Qt::PlainText));
     QCOMPARE(context->property("font").value<QFont>().weight(), QFont::Normal);
-    QVERIFY(visibleNamed(row, contextRun).isEmpty());
+    QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian — Grey Lines"));
 
-    // An album found by its artist: the match in its context, where the
-    // context starts, in the context's size and colour; its title regular.
+    // An album found by its artist: its title has no match, so nothing is
+    // emphasised; its context, which has the match, stays whole and
+    // regular, where the context starts, in the context's size and colour.
     row = rowLabelled(QStringLiteral("Small Hours"));
     QVERIFY(row != nullptr);
     QVERIFY(emphasisedIn(row, titleRun).isEmpty());
-    QVERIFY(visibleChildNamed(row, QStringLiteral("globalSearchResultContext")) == nullptr);
-    const auto contextRuns = visibleNamed(row, contextRun);
-    QStringList contextTexts;
-    for (QQuickItem *run : contextRuns) contextTexts << run->property("text").toString();
-    QCOMPARE(contextTexts, (QStringList{QStringLiteral("The Quiet "), QStringLiteral("Meridian"), QStringLiteral(" · 2005")}));
-    QCOMPARE(emphasisedIn(row, contextRun), QStringList{QStringLiteral("Meridian")});
-    QCOMPARE(sceneRect(contextRuns.first()).left() - sceneRect(harness.palette()).left(), 364.0);
-    for (int i = 0; i < contextRuns.size(); ++i) {
-        QQuickItem *run = contextRuns[i];
-        QCOMPARE(run->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
-        QCOMPARE(hex(colorOf(run)), hex(harness.token("textSecondary")));
-        QCOMPARE(run->property("textFormat").toInt(), int(Qt::PlainText));
-        // Each run starts where the one before it ends.
-        if (i > 0) {
-            QVERIFY(std::abs(sceneRect(run).left() - sceneRect(contextRuns[i - 1]).right()) <= 1.0);
-        }
-    }
+    QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian · 2005"));
+    context = visibleChildNamed(row, QStringLiteral("globalSearchResultContext"));
+    QCOMPARE(sceneRect(context).left() - sceneRect(harness.palette()).left(), 364.0);
+    QCOMPARE(context->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
+    QCOMPARE(hex(colorOf(context)), hex(harness.token("textSecondary")));
 
-    // Only the context's first match: "Quiet" and "Small" both match this
-    // track's context, which shows only "Quiet" semibold.
+    // Two matches in a context: still whole and regular.
     harness.search(QStringLiteral("quiet small"), meridianRows(harness.coverUrl));
     row = rowLabelled(QStringLiteral("Lantern Signal"));
     QVERIFY(row != nullptr);
     QVERIFY(emphasisedIn(row, titleRun).isEmpty());
-    QCOMPARE(emphasisedIn(row, contextRun), QStringList{QStringLiteral("Quiet")});
-    QStringList whole;
-    for (QQuickItem *run : visibleNamed(row, contextRun)) whole << run->property("text").toString();
-    QCOMPARE(whole.join(QString()), QStringLiteral("The Quiet Meridian — Small Hours"));
+    QCOMPARE(wholeContext(row), QStringLiteral("The Quiet Meridian — Small Hours"));
     // A title that matches keeps every one of its matches, and its context
     // none.
     row = rowLabelled(QStringLiteral("Small Hours"));
     QVERIFY(row != nullptr);
     QCOMPARE(emphasisedIn(row, titleRun), QStringList{QStringLiteral("Small")});
-    QVERIFY(visibleNamed(row, contextRun).isEmpty());
+    QVERIFY(!wholeContext(row).isEmpty());
 
     // Two words, two matches; the rest regular.
     harness.search(QStringLiteral("quiet line"), meridianRows(harness.coverUrl));
     row = rowLabelled(QStringLiteral("The Quiet Meridian"));
     QVERIFY(row != nullptr);
     QCOMPARE(emphasisedIn(row, titleRun), QStringList{QStringLiteral("Quiet")});
-    QVERIFY(visibleNamed(row, contextRun).isEmpty());
+    QVERIFY(!wholeContext(row).isEmpty());
 
     // The playing track's title is all semibold: its context stays whole.
     harness.bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/lantern.flac"));
@@ -846,8 +835,7 @@ void SearchPaletteTest::oneMatchIsEmphasisedPerRow() {
     harness.search(QStringLiteral("quiet"), meridianRows(harness.coverUrl));
     row = rowLabelled(QStringLiteral("Lantern Signal"));
     QVERIFY(row != nullptr);
-    QVERIFY(visibleNamed(row, contextRun).isEmpty());
-    QVERIFY(visibleChildNamed(row, QStringLiteral("globalSearchResultContext")) != nullptr);
+    QVERIFY(!wholeContext(row).isEmpty());
 }
 
 // Selected: the selection tint; hovered: the hover tint, which differs from
@@ -1195,6 +1183,26 @@ void SearchPaletteTest::resultsListEndsOnAWholeRow() {
     }
     QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
     QTRY_COMPARE(view->height(), whole);
+    // The rest scroll under the app's lane scrollbar, as the library's and
+    // the queue's (#373 H12: Breeze's own was another hand): 8 px at the
+    // view's right edge, its thumb over the rows' tints, which run to the
+    // edge, while the rows' text keeps clear of its lane.
+    QQuickItem *scrollBar = harness.item(QStringLiteral("globalSearchScrollBar"));
+    QVERIFY(scrollBar != nullptr);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QCOMPARE(scrollBar->width(), 8.0);
+    QCOMPARE(sceneRect(scrollBar).right(), sceneRect(view).right());
+    QVERIFY(visibleChildNamed(scrollBar, QStringLiteral("laneScrollBarThumb")) != nullptr);
+    QCOMPARE(view->property("scrollbarLane").toReal(), 8.0);
+    QQuickItem *selectedRow = harness.row(harness.selection());
+    QVERIFY(selectedRow != nullptr);
+    QQuickItem *selectedTint = visibleChildNamed(selectedRow, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(selectedTint != nullptr);
+    QCOMPARE(sceneRect(selectedTint).right(), sceneRect(view).right());
+    QQuickItem *length = visibleChildNamed(selectedRow, QStringLiteral("globalSearchResultLength"));
+    if (length != nullptr) {
+        QVERIFY(sceneRect(length).right() <= sceneRect(scrollBar).left() - 16 + 0.5);
+    }
     // The footer's seam follows the last whole row.
     QTRY_COMPARE(sceneRect(footer).top() - 1, sceneRect(view).bottom());
     QQuickItem *last = harness.row(shown - 1);
@@ -1531,7 +1539,7 @@ void SearchPaletteTest::textMeetsItsContrastAsDrawn() {
             for (QQuickItem *run : visibleNamed(row, QStringLiteral("globalSearchResultTitle"))) {
                 check(QStringLiteral("title of row %1").arg(i), colorOf(run), background, 4.5);
             }
-            for (const QString &name : {QStringLiteral("globalSearchResultContext"), QStringLiteral("globalSearchResultContextRun"),
+            for (const QString &name : {QStringLiteral("globalSearchResultContext"),
                                         QStringLiteral("globalSearchResultLength"), QStringLiteral("globalSearchMoreLink"),
                                         QStringLiteral("globalSearchSectionHeading")}) {
                 for (QQuickItem *text : visibleNamed(row, name)) {
@@ -1624,12 +1632,16 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     // its text and the 5 px under it.
     int rows = 0;
     int headings = 0;
+    qreal titleLeft = -1;
     for (int i = 0; i < harness.model.rowCount(); ++i) {
         QQuickItem *row = harness.row(i);
         if (row == nullptr || !row->isVisible() || row->height() <= 0) {
             continue;
         }
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+        if (kind == QStringLiteral("item") && titleLeft < 0) {
+            titleLeft = sceneRect(visibleNamed(row, QStringLiteral("globalSearchResultTitle")).first()).left();
+        }
         if (kind == QStringLiteral("section")) {
             QQuickItem *heading = visibleChildNamed(row, QStringLiteral("globalSearchSectionHeading"));
             QVERIFY(heading != nullptr);
@@ -1658,6 +1670,7 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
 
     // The footer's four pairs wrap to more than one line, every pair
     // whole and inside the palette, and the footer is as tall as its lines.
+    // Each line starts where the results' titles do (#373 H12).
     QTRY_COMPARE(harness.hints().size(), 4);
     QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
     const QRectF footerRect = sceneRect(footer);
@@ -1674,7 +1687,9 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
         }
         if (!lineTops.contains(rect.top())) {
             lineTops << rect.top();
+            QCOMPARE(rect.left(), titleLeft);
         }
+        QVERIFY(rect.left() >= titleLeft);
     }
     QVERIFY2(lineTops.size() >= 2, qPrintable(QString::number(lineTops.size())));
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
