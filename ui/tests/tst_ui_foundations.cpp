@@ -548,7 +548,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // The spectrogram's fixed set.
     QVERIFY2(sameColor(colorOf(spectrogram, "plotBg"), fromHex(QStringLiteral("#14062e"))), qPrintable(colorOf(spectrogram, "plotBg").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotOutline"), fromHex(QStringLiteral("#000000"))), qPrintable(colorOf(spectrogram, "plotOutline").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#000000")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#202020"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#1a1a1a")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "plotLaneSeam"), fromHex(QStringLiteral("#2e2e2e"))), qPrintable(colorOf(spectrogram, "plotLaneSeam").name(QColor::HexArgb) + QStringLiteral(" vs #2e2e2e")));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#30244a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
@@ -577,7 +577,11 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     }
     // The lane seam and the meter's track stand out from the floor, and the
     // meter's gaps from its track. Its fill is quieter than the plot's text.
-    QVERIFY(contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg")) >= 1.15);
+    // The seam reads above the rest lines at rest, #261a3e, 1.19:1 on the
+    // floor (#373 H14 G6: at 1.18:1 it was under them).
+    const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
+    QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
+    QVERIFY(seamContrast > contrastRatio(fromHex(QStringLiteral("#261a3e")), colorOf(spectrogram, "plotBg")) + 0.1);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
