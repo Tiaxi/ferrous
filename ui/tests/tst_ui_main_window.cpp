@@ -2327,7 +2327,8 @@ void UiMainWindowTest::libraryFoldersAreFolderHeaders() {
     QCOMPARE(colorOf(title), tokenHex(window, "text"));
     // The count where an album's year is, tertiary and small.
     QCOMPARE(count->property("text").toString(), QStringLiteral("180 tracks"));
-    QCOMPARE(count->x() + count->width(), folder->width() - 8 - 12);
+    // 4 px in from the text's right end (#373 H11), as an album's year.
+    QCOMPARE(count->x() + count->width(), folder->width() - 8 - 12 - 4);
     QCOMPARE(xOf(album, "libraryRowYear") + itemNamed(album, QStringLiteral("libraryRowYear"))->width(),
              count->x() + count->width());
     QCOMPARE(colorOf(count), tokenHex(window, "textTertiary"));
@@ -2525,7 +2526,7 @@ void UiMainWindowTest::libraryTreeHasOneIndentStep() {
     QQuickItem *year = itemNamed(album, QStringLiteral("libraryRowYear"));
     QVERIFY(shown(year));
     QCOMPARE(year->property("text").toString(), QStringLiteral("2005"));
-    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12);
+    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12 - 4);
     QCOMPARE(colorOf(year), tokenHex(window, "textTertiary"));
     // Track: its number under the thumbnail, right-aligned, and its title
     // where the album's name starts; no number in the title.
@@ -2712,7 +2713,7 @@ void UiMainWindowTest::collapsedRowNameElidesBeforeTheYear() {
     QVERIFY(title != nullptr && shown(year));
     QVERIFY(title->property("implicitWidth").toReal() > title->width());
     // The year at the right end, the name's box a gap before it.
-    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12);
+    QCOMPARE(year->x() + year->width(), album->width() - 8 - 12 - 4);
     QCOMPARE(title->x() + title->width(), year->x() - 8);
     const QRectF yearRect = sceneRect(year);
 

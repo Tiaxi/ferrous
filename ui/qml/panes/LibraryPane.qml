@@ -55,6 +55,9 @@ Rectangle {
     // tile in the thumbnail's place, the hover tint over the row, so its
     // name lines up with its neighbours' and no hole is left (#373 H10).
     readonly property color thumbnailPlaceholderColor: root.uiPalette.hover
+    // The year, and a library folder's track count, 4 px in from the
+    // text's right end (#373 H11), clear of the scrollbar.
+    readonly property int yearInset: Kirigami.Units.smallSpacing
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
     // A library folder's glyph, in the thumbnail's column.
     readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
@@ -671,7 +674,7 @@ Rectangle {
                                 // implicit one: binding it again relays out the
                                 // text, whose implicit width the binding reads
                                 // (#474).
-                                x: libraryRow.textEnd - implicitWidth
+                                x: libraryRow.textEnd - root.yearInset - implicitWidth
                                 height: libraryRow.height
                                 verticalAlignment: Text.AlignVCenter
                                 text: !shown
