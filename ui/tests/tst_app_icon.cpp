@@ -146,15 +146,16 @@ std::vector<QRgb> traceColours(int size) {
 }
 
 // How tall each of the pixel grid's stairs is in every column, lowest first:
-// at 16 px two 2 px strokes; at 22 px a 3 px fundamental and a 2 px harmonic
-// (about 2.5 px each); at 32 px a 3 px fundamental and 2 px harmonics, the
-// whole-pixel taper nearest 1 : 0.8 : 0.65 (#373 hill climb, H10).
+// at 16 px a 2 px fundamental and at 22 px a 3 px one, each under a 1 px
+// harmonic (#373 hill climb, H11: with a 2 px harmonic the two ran together
+// where they climb, and read as one band); at 32 px a 3 px fundamental and
+// 2 px harmonics, the whole-pixel taper nearest 1 : 0.8 : 0.65 (H10).
 std::vector<int> stairHeights(int size) {
     switch (size) {
     case 16:
-        return {2, 2};
+        return {2, 1};
     case 22:
-        return {3, 2};
+        return {3, 1};
     default:
         return {3, 2, 2};
     }
@@ -751,9 +752,12 @@ void AppIconTest::smallestSizesHaveTwoStrokesApart_data() {
 
 // At 16 and 22 px H9's two upper strokes, rose and magenta 2 rows apart,
 // fused into one pink slab (#373 hill climb, H9). Now two strokes only, the
-// amber fundamental and the magenta 3rd harmonic, with 2 rows of the tile or
-// more between them in every column, so at least one device pixel of indigo
-// separates them wherever they run (H10).
+// amber fundamental and the magenta 3rd harmonic (H10), the harmonic a 1 px
+// line with 3 rows of the tile between them in every column at 16 px and 4
+// at 22 px, and more than one device pixel of indigo between them wherever
+// they run, where they climb as well (H11: H10's 2 px harmonic, 2 and 3
+// rows over the fundamental, left one pixel there, and the two read as one
+// band).
 void AppIconTest::smallestSizesHaveTwoStrokesApart() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
@@ -796,11 +800,39 @@ void AppIconTest::smallestSizesHaveTwoStrokesApart() {
         }
         QVERIFY2(magentaBottom >= 0 && amberTop < size, qPrintable(QStringLiteral("column %1").arg(x)));
         const int gap = amberTop - magentaBottom - 1;
-        QVERIFY2(gap >= 2, qPrintable(QStringLiteral("column %1: %2 rows between").arg(x).arg(gap)));
+        QVERIFY2(gap >= (size == 16 ? 3 : 4), qPrintable(QStringLiteral("column %1: %2 rows between").arg(x).arg(gap)));
         for (int y = magentaBottom + 1; y < amberTop; ++y) {
             QVERIFY(near(image.pixel(x, y), kTile, 1));
         }
     }
+
+    // The nearest the two come, from any pixel of one to any of the other,
+    // across columns as well: more than a device pixel at 16 px, more than
+    // two at 22 px.
+    QList<QPoint> magentaPixels;
+    QList<QPoint> amberPixels;
+    for (int y = inside.top(); y <= inside.bottom(); ++y) {
+        for (int x = inside.left(); x <= inside.right(); ++x) {
+            if (near(image.pixel(x, y), kThirdHarmonic, 1)) {
+                magentaPixels.push_back(QPoint(x, y));
+            } else if (near(image.pixel(x, y), kGlide, 1)) {
+                amberPixels.push_back(QPoint(x, y));
+            }
+        }
+    }
+    double nearest = size;
+    for (const QPoint &m : std::as_const(magentaPixels)) {
+        for (const QPoint &a : std::as_const(amberPixels)) {
+            nearest = std::min(nearest, std::hypot(std::max(0, std::abs(m.x() - a.x()) - 1),
+                                                   std::max(0, std::abs(m.y() - a.y()) - 1)));
+        }
+    }
+    QVERIFY2(nearest > (size == 16 ? 1.0 : 2.0), qPrintable(QStringLiteral("%1 px between them").arg(nearest)));
+    // The harmonic is the finer of the two, and still a whole line: a
+    // pixel in every column the fundamental has.
+    QVERIFY2(magentaPixels.size() * 2 <= amberPixels.size(),
+             qPrintable(QStringLiteral("%1 magenta, %2 amber").arg(magentaPixels.size()).arg(amberPixels.size())));
+    QCOMPARE(magentaPixels.size(), qsizetype(ink.width()));
 }
 
 void AppIconTest::largeSizesTaperWithRoundCaps_data() {
