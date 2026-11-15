@@ -482,8 +482,28 @@ Dialog {
             width: parent.width
             height: Math.max(0, contentColumn.height - y - 1 - root.footerHeight)
             clip: true
+            // The results' height: all of them, and 6 px under the last,
+            // where the palette has the room; otherwise as many rows, from
+            // the first, as fit it whole, and the rest scroll (#373 H11: the
+            // list ended in half a row). From the rows' kinds, not from the
+            // view's content height, which is an estimate while only some
+            // of its rows have items.
+            readonly property real resultsHeight: {
+                const room = root.maximumHeight - root.fieldHeight - 2 - root.footerHeight
+                const rows = root.controller.globalSearchModelApi
+                let used = 0
+                for (let i = 0; root.rowsRevision >= 0 && i < resultsView.count; ++i) {
+                    const kind = rows.rowDataAt(i).kind || ""
+                    const rowHeight = kind === "item" ? root.resultHeight : (kind === "" ? 0 : root.headingHeight)
+                    if (used + rowHeight > room) {
+                        return used
+                    }
+                    used += rowHeight
+                }
+                return used + resultsView.bottomMargin <= room ? used + resultsView.bottomMargin : used
+            }
             implicitHeight: root.resultsShown
-                ? resultsView.contentHeight + 6
+                ? body.resultsHeight
                 : (noResultsMessage.visible ? noResultsMessage.y + noResultsMessage.height : 0)
                     + (auxColumn.visible ? auxColumn.implicitHeight : 0)
                     + (noResultsMessage.visible || auxColumn.visible ? 8 : 0)
@@ -1056,11 +1076,12 @@ Dialog {
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
                         }
-                        // 18 px to the next pair; a Flow's spacing would
-                        // put it between the lines too.
+                        // 22 px to the next pair (#373 H11: at 18 px the
+                        // pairs ran together); a Flow's spacing would put
+                        // it between the lines too.
                         Item {
                             visible: index < root.keyHints.length - 1
-                            width: 18 - parent.spacing
+                            width: 22 - parent.spacing
                             height: 1
                         }
                     }

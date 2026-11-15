@@ -491,6 +491,8 @@ private slots:
     void suggestionIsASelectableRow();
     void recentSearchesShowBeforeTyping();
     void moreRowShowsTheWholeSectionAndKeepsTheSelection();
+    void resultsListEndsOnAWholeRow_data();
+    void resultsListEndsOnAWholeRow();
     void keyboardSelectsAndActs();
     void mouseSelectsAndActs();
     void staleAndBusyResultsDoNotAct();
@@ -921,7 +923,8 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // The hints name what the keys do for the selected row: a result's
 // actions, "Show All" for a more row, "Search" for a recent search,
 // "Search Instead" for a suggestion, and only Esc otherwise. The key in the
-// text colour, the action in the secondary one, 18 px between pairs.
+// text colour, the action in the secondary one, 22 px between pairs (#373
+// H11: 18 px).
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;
@@ -963,7 +966,7 @@ void SearchPaletteTest::footerNamesTheKeysForEachState() {
     QCOMPARE(hex(colorOf(keys.first())), hex(harness.token("text")));
     QCOMPARE(hex(colorOf(actions.first())), hex(harness.token("textSecondary")));
     QCOMPARE(keys.first()->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
-    QTRY_COMPARE(sceneRect(keys.last()).left() - sceneRect(actions.first()).right(), 18.0);
+    QTRY_COMPARE(sceneRect(keys.last()).left() - sceneRect(actions.first()).right(), 22.0);
     QCOMPARE(sceneRect(keys.first()).left() - sceneRect(harness.palette()).left(), 52.0);
 
     // No results.
@@ -1137,6 +1140,92 @@ void SearchPaletteTest::moreRowShowsTheWholeSectionAndKeepsTheSelection() {
     QCOMPARE(hex(colorOf(note)), hex(harness.token("textSecondary")));
 }
 
+void SearchPaletteTest::resultsListEndsOnAWholeRow_data() {
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("1000 px") << 1000;
+    QTest::newRow("760 px") << 760;
+    QTest::newRow("701 px") << 701;
+    QTest::newRow("640 px") << 640;
+}
+
+// With more results than the palette has room for, the list is as tall as
+// the rows that fit it whole, from the first, and the rest scroll (#373
+// H11: it was as tall as its room, and ended in half a row). The rows are
+// of two heights, results and headings, so the height is no multiple of
+// either. With room for them all, they all show, with 6 px under the last.
+void SearchPaletteTest::resultsListEndsOnAWholeRow() {
+    QFETCH(int, windowHeight);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, &errorText, 1600, windowHeight), qPrintable(errorText));
+    QVERIFY(harness.open());
+    auto rows = meridianRows(harness.coverUrl);
+    for (int i = 0; i < 22; ++i) {
+        Row extra = result(QStringLiteral("track"), QStringLiteral("Extra %1").arg(i, 2, 10, QLatin1Char('0')), 5.0f);
+        extra.trackPath = QStringLiteral("/fixture/extra%1.flac").arg(i);
+        rows << extra;
+    }
+    harness.search(QStringLiteral("meridian"), rows, {1, 2, 26});
+    QTRY_VERIFY(harness.view()->isVisible());
+    harness.model.presentSearchRows(rows, {1, 2, 26}, true);
+    harness.settleRows();
+    QQuickItem *view = harness.view();
+    QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
+    QVERIFY(footer != nullptr);
+
+    // Each row's height, by its kind.
+    QList<qreal> heights;
+    qreal all = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+        heights << (kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0));
+        all += heights.last();
+    }
+    QVERIFY2(all > 16 * 32.0, qPrintable(QString::number(all)));
+    // The room: 16 results' height at the most, and the window's height
+    // less the palette's top, 32 px under it, the field, the footer and
+    // their two seams.
+    const qreal paletteTop = sceneRect(harness.palette()).top();
+    const qreal room = std::min(16 * 32.0, windowHeight - paletteTop - 32 - 44 - 2 - footer->height());
+    qreal whole = 0;
+    int shown = 0;
+    while (shown < heights.size() && whole + heights.at(shown) <= room) {
+        whole += heights.at(shown);
+        ++shown;
+    }
+    QVERIFY2(shown > 2 && shown < heights.size(), qPrintable(QStringLiteral("%1 rows in %2 px").arg(shown).arg(room)));
+    QTRY_COMPARE(view->height(), whole);
+    // The footer's seam follows the last whole row.
+    QTRY_COMPARE(sceneRect(footer).top() - 1, sceneRect(view).bottom());
+    QQuickItem *last = harness.row(shown - 1);
+    QVERIFY(last != nullptr);
+    QTRY_COMPARE(sceneRect(last).bottom(), sceneRect(view).bottom());
+    // No row with an item is cut at either end of the view.
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        QQuickItem *item = harness.row(i);
+        if (item == nullptr || !item->isVisible() || item->height() <= 0) {
+            continue;
+        }
+        const QRectF rect = sceneRect(item);
+        const bool inside = rect.top() >= sceneRect(view).top() - 0.5 && rect.bottom() <= sceneRect(view).bottom() + 0.5;
+        const bool outside = rect.top() >= sceneRect(view).bottom() - 0.5 || rect.bottom() <= sceneRect(view).top() + 0.5;
+        QVERIFY2(inside || outside, qPrintable(QStringLiteral("row %1 at %2..%3 in %4..%5")
+                                                   .arg(i).arg(rect.top()).arg(rect.bottom())
+                                                   .arg(sceneRect(view).top()).arg(sceneRect(view).bottom())));
+    }
+
+    // A few results: all of them, and 6 px under the last.
+    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    qreal few = 0;
+    for (int i = 0; i < harness.model.rowCount(); ++i) {
+        const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
+        few += kind == QStringLiteral("item") ? 32.0 : (kind.isEmpty() ? 0.0 : 28.0);
+    }
+    if (few + 6 <= room) {
+        QTRY_COMPARE(view->height(), few + 6);
+    }
+}
+
 // Up and Down move between results (wrapping, skipping headings), Page Up
 // and Down by a page, Home and End to the ends in the list; Enter plays
 // and closes, Ctrl+Enter adds to the queue and stays open, Alt+Enter shows
@@ -1154,8 +1243,10 @@ void SearchPaletteTest::keyboardSelectsAndActs() {
     }
     harness.search(QStringLiteral("meridian"), rows);
     QTRY_VERIFY(harness.view()->isVisible());
-    // Many results: at most 16 result rows tall.
-    QTRY_COMPARE(sceneRect(harness.palette()).height(), 44.0 + 1 + 16 * 32 + 1 + 28);
+    // Many results: at most 16 result rows tall, and as tall as the rows
+    // that fit that whole (resultsListEndsOnAWholeRow): here a heading and
+    // 15 results.
+    QTRY_COMPARE(sceneRect(harness.palette()).height(), 44.0 + 1 + (28 + 15 * 32) + 1 + 28);
     QCOMPARE(harness.selection(), 1);
     const int first = harness.selection();
     QTest::keyClick(harness.window, Qt::Key_Up); // Wraps to the last.
