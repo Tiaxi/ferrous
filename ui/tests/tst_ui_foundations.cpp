@@ -1223,10 +1223,11 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 // A segment of a plate's choices, as the visualization's mode switch,
 // under the pointer while another is the chosen one (#373 H12 Z4: the
 // 12 % hover with its glyph whole came to the chosen plate's brightness):
-// a wash of the plot's text colour at 8 %, against the chosen plate's
-// 18 %, with its glyph at the quiet 60 %, whole only while pressed. As
-// drawn, in both themes and on both plots, the hovered one stands off the
-// plate less than the chosen one does, by a clear margin.
+// a wash of the plot's text colour at 14 %, against the chosen plate's
+// 18 % and its edge, with its glyph at 85 %, whole only while pressed
+// (#373 H14 G4: 8 % with the glyph at 60 % was 1.2:1, nearly invisible).
+// As drawn, in both themes and on both plots, the hovered one shows on the
+// plate and stands off it less than the chosen one does.
 void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1266,10 +1267,10 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    QVERIFY2(std::abs(wash.alphaF() - 0.08) < 0.005, qPrintable(QString::number(wash.alphaF())));
+    QVERIFY2(std::abs(wash.alphaF() - 0.14) < 0.005, qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
     QVERIFY2(std::abs(plateFill.alphaF() - 0.18) < 0.005, qPrintable(QString::number(plateFill.alphaF())));
-    QVERIFY2(std::abs(letter->opacity() - 0.60) < 0.005, qPrintable(QString::number(letter->opacity())));
+    QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
     // As drawn: the plate around the buttons, the chosen one's plate and
     // the hovered one's wash, clear of their glyphs.
@@ -1288,10 +1289,10 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QVERIFY2(channelDistance(drawnHover, drawnOver(wash, plate)) <= 3,
              qPrintable(describe(QStringLiteral("the hover wash"), drawnHover, plate)));
     // Toward the text colour, both: lighter on a dark plate, darker on a
-    // light one, the hovered one less by far.
+    // light one; the hovered one shows, and less than the chosen one.
     const qreal chosenStep = contrastRatio(drawnChosen, plate);
     const qreal hoverStep = contrastRatio(drawnHover, plate);
-    QVERIFY2(hoverStep > 1.0 && chosenStep - 1.0 >= 1.8 * (hoverStep - 1.0),
+    QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
     QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.05,
              qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));

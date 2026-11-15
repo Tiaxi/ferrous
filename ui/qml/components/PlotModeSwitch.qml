@@ -7,10 +7,16 @@ import "." as Components
 // The visualization's mode switch: two tool buttons on one plate,
 // Spectrogram and Waveform, the current one checked, as a neutral plate
 // (PlotToolButton's `segment`). Set `revealed` from the pane's pointer and
-// `focusInside`: hidden, the buttons stay Tab stops.
+// `focusInside`: hidden, the buttons stay Tab stops. The buttons are 4 px
+// apart with 3 px around them, so a button's focus ring, 3 px out from it,
+// stays inside the plate and 1 px clear of the other button, whose checked
+// edge it never touches (#373 H14 G4: 2 px apart and in, the ring ran over
+// the plate's edge and onto the chosen one's).
 Components.PlotPlate {
     id: root
     objectName: "visualizationModeSwitch"
+    padding: 3
+    contentSpacing: 4
 
     required property int selectedMode
     required property var setMode

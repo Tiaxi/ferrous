@@ -1798,7 +1798,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QCOMPARE(sceneRectOf(spectrogram).top(), 0.0);
     // The plot keeps its corner clear of the mode switch where it now is,
     // and of the 1 px edge around its plate.
-    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 4.0 + 28.0 + 1.0);
+    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 4.0 + 30.0 + 1.0);
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);

@@ -7,7 +7,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // A plate on a visualization, in the plot's own colours (UiPalette's
 // PlotColors) with a 1 px edge outside it. With `text`, it is a lane label;
 // otherwise it holds the items declared inside it, such as PlotToolButtons,
-// 2 px apart with 2 px around them. A plate that is not `revealed` fades
+// 2 px apart with 2 px around them, or `contentSpacing` apart with
+// `padding` around them. A plate that is not `revealed` fades
 // out but keeps its place and its Tab stops, so the keyboard can reveal it.
 // A `compact` label, for a short lane, is 16 px tall with 11 px text, both
 // larger with a larger font, rather than 20 px with 12 px text.
@@ -22,8 +23,10 @@ Item {
     // The smallest the plate is either way: a label's height, and the
     // narrowest it is.
     readonly property real minimumSize: root.compact ? 16 : 20
-    property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : 2
-    property real verticalPadding: root.isLabel ? 0 : 2
+    property real padding: 2
+    property real horizontalPadding: root.isLabel ? (root.compact ? 4 : 6) : root.padding
+    property real verticalPadding: root.isLabel ? 0 : root.padding
+    property real contentSpacing: 2
     property real radius: root.isLabel ? 3 : 4
     // Whether presses, clicks and double-clicks on the plate, between its
     // buttons too, stay on it rather than reach the view under it.
@@ -91,7 +94,7 @@ Item {
     Row {
         id: content
         anchors.centerIn: parent
-        spacing: 2
+        spacing: root.contentSpacing
 
         // Text, not a Label: the desktop style's Label has a hover handler,
         // which would take the hover from the view under the plate.

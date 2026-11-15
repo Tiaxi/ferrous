@@ -6,11 +6,13 @@ import "." as Components
 
 // The plot's zoom while it is zoomed, which nothing else shows with the
 // scale off: a readout and Reset, on a plate in the plot's colours, left of
-// the mode switch in the main pane and in both viewers. Not zoomed, it is
-// hidden and no Tab stop.
+// the mode switch in the main pane and in both viewers, as tall as the
+// switch, with its 3 px of plate around the buttons (PlotModeSwitch). Not
+// zoomed, it is hidden and no Tab stop.
 Components.PlotPlate {
     id: root
     objectName: "plotZoomPlate"
+    padding: 3
 
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
