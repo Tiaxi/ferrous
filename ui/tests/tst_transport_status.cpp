@@ -3329,6 +3329,24 @@ void TransportStatusTest::transportAndStatusBarGrowWithALargeFont() {
         QVERIFY2(item != nullptr, qPrintable(name));
         QVERIFY2(within(sceneRect(item), band), qPrintable(name + QLatin1Char(' ') + describeRect(sceneRect(item))));
     }
+    // The seek waveform and the volume's thumb grow as the glyphs do (#373
+    // H12: 24 and 12 px beside 48 px glyphs): 24 px and 12 px 2.4 times,
+    // the seek bar 2 px past the waveform on either side, and both inside
+    // the band.
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QQuickItem *seek = harness.item(QStringLiteral("seekSlider"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QVERIFY(waveform && seek && thumb && groove);
+    QCOMPARE(waveform->height(), 58.0);
+    QCOMPARE(seek->height(), 62.0);
+    QCOMPARE(sceneRect(waveform).center().y(), sceneRect(seek).center().y());
+    QCOMPARE(thumb->size(), QSizeF(29, 29));
+    QCOMPARE(groove->height(), 7.0);
+    QVERIFY(std::abs(sceneRect(thumb).center().y() - sceneRect(groove).center().y()) <= 0.5);
+    for (QQuickItem *item : {waveform, thumb}) {
+        QVERIFY2(within(sceneRect(item), band), qPrintable(item->objectName() + QLatin1Char(' ') + describeRect(sceneRect(item))));
+    }
     QVERIFY(sceneRect(harness.item(QStringLiteral("seekSlider"))).left() >= previousRight);
     QVERIFY(sceneRect(harness.item(QStringLiteral("muteButton"))).left()
             >= sceneRect(harness.item(QStringLiteral("transportTime"))).right());
