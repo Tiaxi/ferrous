@@ -496,6 +496,7 @@ struct SpectrogramSceneNode final : public QSGNode {
         background = new QSGSimpleRectNode();
         tilesRoot = new QSGNode();
         latest = new QSGSimpleTextureNode();
+        pastEnd = new QSGSimpleRectNode();
         playheadCasing = new QSGSimpleRectNode();
         playhead = new QSGSimpleRectNode();
         overlay = new QSGSimpleTextureNode();
@@ -513,6 +514,9 @@ struct SpectrogramSceneNode final : public QSGNode {
         appendChildNode(background);
         appendChildNode(tilesRoot);
         appendChildNode(latest);
+        // Over the whole canvas, the latest span last: its child, so the
+        // nodes after it keep their places.
+        latest->appendChildNode(pastEnd);
         appendChildNode(playheadCasing);
         appendChildNode(playhead);
         appendChildNode(freqGridLayer.root);
@@ -746,6 +750,11 @@ struct SpectrogramSceneNode final : public QSGNode {
     quint64 backdropSerial{0};
     QSGNode *tilesRoot{nullptr};
     QSGSimpleTextureNode *latest{nullptr};
+    // Over the canvas, from where the file is cut off (markerSeconds) to
+    // the view's end: the floor, as the time after a track's end is not
+    // the track's (#373 H12 Z10: the analysis's columns there, silence to
+    // the length the file claims, drew black).
+    QSGSimpleRectNode *pastEnd{nullptr};
     QSGSimpleRectNode *playheadCasing{nullptr};
     QSGSimpleRectNode *playhead{nullptr};
     // The lane at rest's lines and labels, on the floor.
@@ -4662,10 +4671,12 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
     const int w = std::max(1, static_cast<int>(std::floor(width())));
     const int h = std::max(1, static_cast<int>(std::floor(height())));
     node->background->setRect(0.0, 0.0, static_cast<double>(w), static_cast<double>(h));
+    QColor floorColor;
     {
         QMutexLocker lock(&m_stateMutex);
-        node->background->setColor(m_floorColor);
+        floorColor = m_floorColor;
     }
+    node->background->setColor(floorColor);
 
     // The canvas and the overlays are in device pixels, `scale` to a
     // logical one: cw x ch for the item.
@@ -5667,6 +5678,13 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
         node->crosshairLayer.opacity->setOpacity(crosshairOpacity);
     }
     const QVector<QSGTexture *> unusedOverlayTextures = node->takeUnusedOverlayTextures();
+    if (!std::isnan(markerX) && markerX < static_cast<double>(w)) {
+        const double left = std::max(0.0, markerX);
+        node->pastEnd->setRect(QRectF(left, 0.0, static_cast<double>(w) - left, static_cast<double>(h)));
+        node->pastEnd->setColor(floorColor);
+    } else {
+        node->pastEnd->setRect(QRectF());
+    }
     publishMarkerX(markerX);
 
     if (showOverlay && node->overlayTexture != nullptr && !overlaySize.isEmpty()) {

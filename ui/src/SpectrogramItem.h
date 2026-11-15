@@ -304,8 +304,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
     Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
-    // A time of the track to follow, such as where its file is cut off, or
-    // -1; markerX is where the view draws it, NaN while it does not.
+    // Where the track's file is cut off, or -1; markerX is where the view
+    // draws it, NaN while it does not. Past it the view is its floor, as
+    // the time after a track's end is (#373 H12 Z10).
     Q_PROPERTY(double markerSeconds READ markerSeconds WRITE setMarkerSeconds NOTIFY markerSecondsChanged)
     Q_PROPERTY(double markerX READ markerX NOTIFY markerXChanged)
     Q_PROPERTY(bool gridEnabled READ gridEnabled WRITE setGridEnabled NOTIFY gridEnabledChanged)

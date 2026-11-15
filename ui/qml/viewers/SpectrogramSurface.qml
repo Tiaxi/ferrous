@@ -383,7 +383,9 @@ Item {
                     frequencyCap: root.uiBridge.spectrogramFrequencyCap === true
                     // The time scale runs along the top of the first lane.
                     showTimeLabels: index === 0
-                    markerSeconds: index === 0 ? root.markerSeconds : -1
+                    // Every lane draws the floor past the cut; the first
+                    // one's markerX places the note.
+                    markerSeconds: root.markerSeconds
                     crosshairSharedX: root._crosshairSharedX
                     onCrosshairHoverChanged: (x) => { root._crosshairSharedX = x }
                     zoomEnabled: root.uiBridge.spectrogramZoomEnabled
