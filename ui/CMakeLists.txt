@@ -259,6 +259,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/assets/no-art-mark.svg
         qml/assets/no-art-mark-small.svg
         qml/assets/no-art-mark-20.svg
+        qml/assets/spectrogram-symbolic.svg
         qml/assets/volume.svg
         qml/assets/volume-muted.svg
         qml/logic/ChannelLabels.js

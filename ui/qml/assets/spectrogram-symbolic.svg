@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- The visualization mode switch's Spectrogram glyph (#373 H14 G7), drawn for 16 px at 1x: the app
+     icon's glide, a gentle rise, under its harmonic, which rises some two and a half times as far,
+     3.5 px apart at their common start and 7 px at the end, both curving as the icon's do. 1.5 px
+     strokes with round caps. A one-colour mask, drawn in the plot's text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 9.25C5.5 6.5 9 4.25 13.25 3.25"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 12.75C6 12 9.5 10.75 13.25 10.25"/>
+</svg>

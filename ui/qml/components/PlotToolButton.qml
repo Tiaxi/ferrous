@@ -6,7 +6,8 @@ import org.kde.kirigami 2.20 as Kirigami
 import "../logic/KeyUtils.js" as KeyUtils
 
 // A 24 px tool button on a PlotPlate, larger with a larger font: a theme
-// icon (`icon.name`), or short text such as the M and S of a lane. Its `text` is the tooltip and the
+// icon (`icon.name`) or a symbolic mask of the app's own (`icon.source`),
+// or short text such as the M and S of a lane. Its `text` is the tooltip and the
 // accessible name. Checked is a solid fill with the glyph in the plot's
 // checked glyph colour: a state that is on, as a lane's Mute.
 //
@@ -105,7 +106,7 @@ ToolButton {
             width: root.icon.width
             height: root.icon.height
             visible: root.glyphText.length === 0
-            source: root.icon.name
+            source: root.icon.name.length > 0 ? root.icon.name : root.icon.source
             color: root.glyphColor
             opacity: root.glyphOpacity
             isMask: true

@@ -3623,16 +3623,41 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QQuickItem *waveformButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton1"));
     QVERIFY(viewer != nullptr && spectrogramButton != nullptr && waveformButton != nullptr);
-    // Real tool buttons with Breeze icons, tooltips and accessible names.
+    // Real tool buttons with glyphs, tooltips and accessible names: the
+    // spectrogram's the app icon's glide and harmonic as a 16 px symbolic
+    // mask (#373 H14 G7: Breeze's bar chart said statistics), the
+    // waveform's Breeze's.
     for (const auto &[button, name, icon] : {
-             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("view-statistics")},
+             std::tuple{spectrogramButton, QStringLiteral("Spectrogram"), QStringLiteral("spectrogram-symbolic.svg")},
              std::tuple{waveformButton, QStringLiteral("Waveform"), QStringLiteral("waveform")}}) {
         QVERIFY(button->inherits("QQuickToolButton"));
         QCOMPARE(accessibleRole(button), QAccessible::RadioButton);
         QCOMPARE(accessibleText(button, QAccessible::Name), name);
         // The tool button's text is its tooltip.
         QCOMPARE(button->property("text").toString(), name);
-        QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+        QQuickItem *glyph = button->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
+        QVERIFY(glyph != nullptr);
+        QVERIFY(glyph->property("isMask").toBool());
+        QTRY_VERIFY2(glyph->property("valid").toBool(), qPrintable(name));
+        if (button == spectrogramButton) {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), QString());
+            const QString source = evaluateOn(button, QStringLiteral("icon.source")).toUrl().toString();
+            QVERIFY2(source.endsWith(QStringLiteral("/assets/") + icon), qPrintable(source));
+            QCOMPARE(glyph->property("source").toUrl().toString(), source);
+        } else {
+            QCOMPARE(evaluateOn(button, QStringLiteral("icon.name")).toString(), icon);
+            QCOMPARE(glyph->property("source").toString(), icon);
+        }
+    }
+    {
+        // The glyph's 16 px source: two strokes, 1.5 px, round caps.
+        QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QString svg = QString::fromUtf8(file.readAll());
+        QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\"")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 18 % over the switch's plate, with its glyph in the text colour
@@ -4204,15 +4229,31 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         QQuickItem *checkedGlyph = checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
         QQuickItem *uncheckedGlyph = unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));
         QVERIFY(checkedGlyph != nullptr && uncheckedGlyph != nullptr);
-        const QColor checkedInk = mostContrasting(
-            image, window, checkedGlyph, QRectF(0, 0, checkedGlyph->width(), checkedGlyph->height()), fill);
+        // A glyph's ink as drawn on `background`. A mask of the app's own,
+        // from a file, as the spectrogram's (#373 H14 G7), is coloured by
+        // the platform's icon loader, which offscreen leaves it black, as
+        // the transport's own glyphs are (TransportStatusTest): its colour
+        // at its opacity over the background stands for it.
+        const auto inkOf = [&](QQuickItem *glyph, const QColor &background) {
+            if (glyph->property("source").metaType() != QMetaType::fromType<QUrl>()) {
+                return mostContrasting(image, window, glyph, QRectF(0, 0, glyph->width(), glyph->height()),
+                                       background);
+            }
+            const QColor color = glyph->property("color").value<QColor>();
+            const double alpha = glyph->opacity();
+            return QColor::fromRgbF(color.redF() * alpha + background.redF() * (1 - alpha),
+                                    color.greenF() * alpha + background.greenF() * (1 - alpha),
+                                    color.blueF() * alpha + background.blueF() * (1 - alpha));
+        };
+        const QColor checkedInk = inkOf(checkedGlyph, fill);
         QVERIFY2(contrastRatio(checkedInk, fill) >= 4.5,
                  qPrintable(QStringLiteral("%1 chosen glyph: %2").arg(what).arg(contrastRatio(checkedInk, fill))));
-        const QColor uncheckedInk = mostContrasting(
-            image, window, uncheckedGlyph, QRectF(0, 0, uncheckedGlyph->width(), uncheckedGlyph->height()),
-            switchFill);
+        const QColor uncheckedInk = inkOf(uncheckedGlyph, switchFill);
         QVERIFY2(contrastRatio(uncheckedInk, switchFill) >= 3.0,
-                 qPrintable(QStringLiteral("%1 other glyph: %2").arg(what).arg(contrastRatio(uncheckedInk, switchFill))));
+                 qPrintable(QStringLiteral("%1 other glyph: %2 (%3 on %4, %5 at %6)").arg(what)
+                                .arg(contrastRatio(uncheckedInk, switchFill)).arg(uncheckedInk.name(), switchFill.name(),
+                                     uncheckedGlyph->property("color").value<QColor>().name())
+                                .arg(uncheckedGlyph->opacity())));
         const QColor ring = drawnAt(image, window, unchecked, QPointF(unchecked->width() / 2, -2.5));
         QVERIFY2(contrastRatio(ring, switchFill) >= 3.0,
                  qPrintable(QStringLiteral("%1 ring: %2").arg(what).arg(contrastRatio(ring, switchFill))));
