@@ -3010,7 +3010,7 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     // with the cells' 8 px padding.
     const QFont valueFont = paletteOf(window)->property("baseFont").value<QFont>();
     const QList<std::tuple<QString, QString, qreal>> narrow{
-        {QStringLiteral("trackNo"), QStringLiteral("00"), 36}, {QStringLiteral("year"), QStringLiteral("0000"), 52},
+        {QStringLiteral("trackNo"), QStringLiteral("00"), 40}, {QStringLiteral("year"), QStringLiteral("0000"), 52},
         {QStringLiteral("discNo"), QStringLiteral("00"), 40}, {QStringLiteral("formatKind"), QStringLiteral("FLAC"), 56}};
     for (const auto &[key, sample, width] : narrow) {
         const QString at = key + QStringLiteral(": ") + describeColumns();
@@ -3029,6 +3029,34 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QVERIFY2(columnWidth(key) >= width, qPrintable(key + QStringLiteral(": ") + describeColumns()));
     }
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
+    // The window is as wide as what it holds and no wider (#373 H11): its
+    // padding, the fields, the gap, the table's frame and insets, its
+    // columns at their widths and the scroll bar's lane.
+    QQuickItem *fields = visibleNamed(tags, QStringLiteral("tagEditorFields"));
+    QVERIFY(fields != nullptr);
+    qreal held = 2 * dialog->property("contentPadding").toReal() + fields->width()
+        + dialog->property("contentSpacing").toReal() + 2 + 2 * 8 + 18;
+    for (const auto &[key, sample, width] : narrow) {
+        held += columnWidth(key);
+    }
+    for (const auto &[key, width] : widths) {
+        held += width;
+    }
+    QVERIFY2(tags->width() <= qCeil(held), qPrintable(QStringLiteral("holds %1: ").arg(held) + describeColumns()));
+    QCOMPARE(qreal(tags->width()), dialog->property("fittedWidth").toReal());
+    // "of" is 4 px from the field on either side of it (#373 H11), and the
+    // number as far from its label as the other fields are from theirs.
+    for (const auto &[number, total] : {std::pair{QStringLiteral("trackNo"), QStringLiteral("totalTracks")},
+                                        std::pair{QStringLiteral("discNo"), QStringLiteral("totalDiscs")}}) {
+        QQuickItem *of = visibleNamed(tags, QStringLiteral("tagEditorOf_") + number);
+        QQuickItem *numberField = visibleNamed(tags, QStringLiteral("tagEditorField_") + number);
+        QQuickItem *totalField = visibleNamed(tags, QStringLiteral("tagEditorField_") + total);
+        QQuickItem *titleField = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+        QVERIFY2(of && numberField && totalField && titleField, qPrintable(number));
+        QCOMPARE(sceneRect(of).left() - sceneRect(numberField).right(), 4.0);
+        QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), 4.0);
+        QCOMPARE(sceneRect(numberField).left(), sceneRect(titleField).left());
+    }
     // Status takes no room, and shows no header, while no row has a status.
     QQuickItem *status = named(tags, QStringLiteral("tagEditorColumn_status"));
     QVERIFY(status != nullptr);
@@ -3388,19 +3416,81 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
         }
     }
     QCOMPARE(fields->width(), fieldsWidth);
-    // An edit gives its row a status, and Status its room: at 1600 px still
-    // without a sideways scroll bar; at 1300 px, the columns at their least
-    // leave too little room, and the table scrolls, with the fields at
-    // their width.
+    // An edit moves no column (#373 H11: Status came with the first edit,
+    // and took its room from File Name and Folder): the row has a mark in
+    // the # column's padding instead, there in every row, and Status stays
+    // away.
+    checkColumns(1600, false, false);
+    QVERIFY(!QTest::currentTestFailed());
+    QHash<QString, QRectF> placed;
+    for (const QString &key : keys) {
+        placed.insert(key, sceneRect(named(tags, QStringLiteral("tagEditorColumn_") + key)));
+    }
+    const auto shownMarks = [tags]() {
+        QList<QQuickItem *> marks;
+        for (QQuickItem *mark : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRowModifiedMark"))) {
+            if (mark->isVisible()) {
+                marks.push_back(mark);
+            }
+        }
+        return marks;
+    };
+    QVERIFY(shownMarks().isEmpty());
     editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
     QVERIFY(editor.dirty());
+    QTRY_COMPARE(shownMarks().size(), 1);
+    QTRY_VERIFY(!layoutPending(table));
+    for (const QString &key : keys) {
+        QCOMPARE(sceneRect(named(tags, QStringLiteral("tagEditorColumn_") + key)), placed.value(key));
+    }
+    checkColumns(1600, false, false);
+    QVERIFY(!QTest::currentTestFailed());
+    // The mark: a dot of the text colour in the # cell's left padding,
+    // clear of the number, which is unpadded, as the queue's (the file's
+    // tag holds "01").
+    QQuickItem *mark = shownMarks().first();
+    QQuickItem *number = cellOf(QStringLiteral("trackNo"));
+    QVERIFY(number != nullptr);
+    QCOMPARE(number->property("text").toString(), QStringLiteral("1"));
+    QCOMPARE(mark->size(), QSizeF(6, 6));
+    QCOMPARE(mark->property("color").value<QColor>(), paletteOf(window)->property("text").value<QColor>());
+    const QRectF markRect = sceneRect(mark);
+    const QRectF numberRect = sceneRect(number);
+    QVERIFY2(markRect.left() >= numberRect.left() && markRect.right() <= numberRect.left() + 8,
+             qPrintable(describeItem(mark) + describeItem(number)));
+    QCOMPARE(markRect.center().y(), numberRect.center().y());
+    // Three digits, the widest a track number gets, stay clear of it.
+    const qreal threeDigits = QFontMetricsF(number->property("font").value<QFont>())
+                                  .horizontalAdvance(QStringLiteral("000"));
+    QVERIFY2(numberRect.right() - 8 - threeDigits >= markRect.right() + 2,
+             qPrintable(QStringLiteral("%1 px of digits").arg(threeDigits)));
+    QCOMPARE(number->property("toolTipText").toString(), QStringLiteral("Modified"));
+    QCOMPARE(evaluate(mark->parentItem(), QStringLiteral("Accessible.description")).toString(),
+             QStringLiteral("Modified"));
+    // The edit undone, the mark goes, and still nothing moves.
+    editor.revertField(QStringLiteral("genre"));
+    QVERIFY(!editor.dirty());
+    QTRY_VERIFY(shownMarks().isEmpty());
+    for (const QString &key : keys) {
+        QCOMPARE(sceneRect(named(tags, QStringLiteral("tagEditorColumn_") + key)), placed.value(key));
+    }
+    QCOMPARE(number->property("toolTipText").toString(), QString());
+
+    // A save that failed for a row gives it a status to read, and Status
+    // its room: at 1600 px still without a sideways scroll bar; at 1300 px,
+    // the columns at their least leave too little room, and the table
+    // scrolls, with the fields at their width.
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.m_tableModel.applySaveResults({{editor.loadedPaths().constFirst(), QStringLiteral("Permission denied")}},
+                                         {});
+    QVERIFY(editor.hasRowErrors());
     checkColumns(1600, true, false);
     QVERIFY(!QTest::currentTestFailed());
     checkColumns(1300, true, true);
     QVERIFY(!QTest::currentTestFailed());
     QCOMPARE(fields->width(), fieldsWidth);
-    editor.revertField(QStringLiteral("genre"));
-    QVERIFY(!editor.dirty());
+    editor.m_tableModel.clearErrors();
+    QVERIFY(!editor.hasRowErrors());
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 0.0);
 
     // Wide: the tags at their widths, and File Name and Folder take the rest.
@@ -3412,7 +3502,8 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
     QCOMPARE(columnWidth(QStringLiteral("title")), 190.0);
     QCOMPARE(columnWidth(QStringLiteral("artist")), 170.0);
     QCOMPARE(columnWidth(QStringLiteral("status")), 0.0);
-    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.m_tableModel.applySaveResults({{editor.loadedPaths().constFirst(), QStringLiteral("Permission denied")}},
+                                         {});
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
     editor.close();
@@ -3810,6 +3901,12 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
                                QStringLiteral("directory"), QStringLiteral("status")}) {
         QQuickItem *column = named(tags, QStringLiteral("tagEditorColumn_") + key);
         QVERIFY2(column != nullptr, qPrintable(key));
+        if (key == QStringLiteral("status")) {
+            // The edits bring no Status column (#373 H11).
+            QCOMPARE(column->width(), 0.0);
+            QVERIFY(!column->isVisible());
+            continue;
+        }
         columnsWidth += column->width();
         QQuickItem *label = itemsNamed(column, QStringLiteral("tagEditorColumnLabel")).at(0);
         QTRY_VERIFY2(!label->property("truncated").toBool() && label->width() >= label->implicitWidth() - 0.5,
