@@ -1589,7 +1589,9 @@ bool WaveformEditorItem::shownOnScreen() const {
 void WaveformEditorItem::shownChanged() {
     if (!shownOnScreen()) {
         // Nothing would see them: no frames and no detail decoding until
-        // it is shown again. The detail it has stays.
+        // it is shown again. The detail it has stays, so that shown again
+        // its first frame draws it (#373 H14: the mode switch to the
+        // waveform waited some 200 ms for a fresh decode).
         cancelPlaybackFrame();
         m_requestTimer.stop();
         {
@@ -1598,6 +1600,16 @@ void WaveformEditorItem::shownChanged() {
                 invalidateDetailRequestLocked();
                 clearPendingRequestLocked();
             }
+            // Its picture is that of when it was shown: the view, which
+            // follows playback, moves on. Shown again, it has the picture
+            // if its detail covers the view then, or once a frame draws
+            // the detail that comes for it, or nothing more comes.
+            m_framePainted = false;
+            m_waveformPainted = false;
+        }
+        if (m_pictureReady) {
+            m_pictureReady = false;
+            emit pictureReadyChanged();
         }
         // The service keeps the coarse summaries of the current track,
         // which show the whole track again at once, and frees the rest.
@@ -1606,10 +1618,27 @@ void WaveformEditorItem::shownChanged() {
     }
     updateReaderLease();
     bool request = false;
+    bool pictureKept = false;
     {
         QMutexLocker lock(&m_stateMutex);
         const auto [requestStart, requestEnd] = detailRequestVisibleRangeLocked();
         request = !detailOrPendingRequestCoversLocked(requestStart, requestEnd);
+        // With the detail of the view now at its resolution, which it kept
+        // while hidden, its next frame draws the picture: what waits for it
+        // need not wait for that frame as well (#373 H14).
+        const auto [visibleStart, visibleEnd] = visibleRangeLocked();
+        pictureKept = !m_sourcePath.isEmpty() && !m_zoomOutHandoffPending
+            && !m_zoomFallbackToOverview && m_detail.framesPerPoint > 0
+            && detailCoversRangeLocked(visibleStart, visibleEnd)
+            && detailResolutionCoversLocked(visibleStart, visibleEnd);
+        if (pictureKept) {
+            m_framePainted = true;
+            m_waveformPainted = true;
+        }
+    }
+    if (pictureKept && !m_pictureReady) {
+        m_pictureReady = true;
+        emit pictureReadyChanged();
     }
     // The detail of where playback is now, if it has not got it.
     if (request) scheduleDetailRequest(true);
@@ -2267,6 +2296,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
     QSizeF reservedCorner;
     bool directDetail = false;
     bool tiledPlayback = false;
+    // Whether the detail covers the view at its resolution, as tiles draw it.
+    bool tiledDetailReady = false;
     bool playbackTilesComplete = false;
     int playbackTilesRendered = 0;
     std::vector<std::pair<int, int>> playbackTileGaps;
@@ -2342,6 +2373,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
                 detailCoversRangeLocked(visibleStart, visibleEnd)
                 && detailResolutionCoversLocked(visibleStart, visibleEnd)
                 && m_detail.framesPerPoint > 0;
+            tiledDetailReady = currentDetailReady;
             if (tiledPlayback && currentDetailReady) {
                 preparePlaybackTilesLocked(
                     visibleStart, visibleEnd, renderPixelHeightLocked());
@@ -2418,10 +2450,14 @@ void WaveformEditorItem::paint(QPainter *painter) {
         // picture while the detail is on its way: each such frame has the
         // GUI thread look again (updatePictureReady), so that it is the
         // picture once no detail comes for it.
-        const bool provisional = !directDetail && !tiledPlayback && m_cacheShowsWaveform
-            && m_cacheWaveformProvisional;
+        // Tiles of another view, while the view's detail is on its way,
+        // are not the picture either.
+        const bool tilesDraw = !playbackTilePaints.empty() || !playbackTileGaps.empty();
+        const bool provisional = !directDetail
+            && (tiledPlayback ? tilesDraw && !tiledDetailReady
+                              : m_cacheShowsWaveform && m_cacheWaveformProvisional);
         const bool drawsWaveform = directDetail
-            || (tiledPlayback ? !playbackTilePaints.empty() || !playbackTileGaps.empty()
+            || (tiledPlayback ? tilesDraw && tiledDetailReady
                               : m_cacheShowsWaveform && !m_cacheWaveformProvisional);
         pictureChanged = !m_framePainted || (drawsWaveform && !m_waveformPainted)
             || (provisional && !m_waveformPainted);
@@ -3138,7 +3174,10 @@ void WaveformEditorItem::rebuildCacheLocked(
     const double scale = renderScaleLocked();
     m_cacheShowsWaveform = detailReady
         || (useOverview ? overviewDrawableLocked(channels) : detailOverlapsViewport);
-    m_cacheWaveformProvisional = !detailReady && useOverview && overviewProvisionalLocked();
+    // Not the picture while detail is on its way (#373 H14): the overview
+    // at another scale, or detail that covers only part of the view or is
+    // of another zoom, standing in for it.
+    m_cacheWaveformProvisional = !detailReady && (!useOverview || overviewProvisionalLocked());
     if (detailReady) {
         drawDetailLocked(
             painter, grid.width, height,

@@ -1624,12 +1624,13 @@ ApplicationWindow {
         // input (#373 H7): hidden, it gave its analysis and columns up, so
         // that shown again it waited about 250 ms for a fresh session's
         // columns to fill its view. Kept live, its view is drawn when it is
-        // chosen, and it comes in at the click. The waveform, which is
-        // given the track only while it shows, comes in once it has drawn
-        // its first frame of it (`pictureReady`), at 0 over the
-        // spectrogram until then (#373 H11: it faded in from the click,
-        // and its per-channel lanes, which wait for their detail, were an
-        // empty floor for 80 to 170 ms).
+        // chosen, and it comes in at the click. The waveform comes in once
+        // it has drawn its first frame of the track's detail
+        // (`pictureReady`), at 0 over the spectrogram until then (#373 H11:
+        // it faded in from the click, and its per-channel lanes, which wait
+        // for their detail, were an empty floor for 80 to 170 ms). Hidden,
+        // it keeps the detail it has (#373 H14), so that frame is the first
+        // one after the click unless the track changed meanwhile.
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
         property int settledMode: -1
@@ -1698,7 +1699,7 @@ ApplicationWindow {
         }
         onModeInputsChanged: visualizationSurface.followMode()
         // The waveform's first frame of the track, which lets it come in.
-        // It loses its picture when the switch hides it, so this is a
+        // It gives its picture up when the switch hides it, so this is a
         // handler of its own rather than one of modeInputs.
         Connections {
             target: waveformSurface

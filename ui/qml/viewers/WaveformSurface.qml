@@ -60,8 +60,8 @@ Item {
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
     // Whether the plot has drawn the track's waveform, or has none to wait
-    // for (WaveformEditorItem's pictureReady): false from when it is shown,
-    // which gives it the track, until its first frame of it.
+    // for (WaveformEditorItem's pictureReady): false from when it is shown
+    // until its first frame that draws the track's detail of the view.
     readonly property bool pictureReady: waveform.pictureReady
 
     Accessible.role: Accessible.Graphic
@@ -84,7 +84,10 @@ Item {
         objectName: "waveformEditorItem"
         width: root.plotWidth
         height: root.height
-        sourcePath: root.visible ? root.uiBridge.currentTrackPath : ""
+        // Hidden too: the item decodes nothing while it is not shown, and
+        // keeps the detail it has, so that the mode switch back draws it at
+        // once (#373 H14). A new track while hidden clears it.
+        sourcePath: root.uiBridge.currentTrackPath
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
         overviewComplete: root.uiBridge.waveformComplete
