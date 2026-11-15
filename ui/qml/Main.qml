@@ -1622,8 +1622,12 @@ ApplicationWindow {
         // input (#373 H7): hidden, it gave its analysis and columns up, so
         // that shown again it waited about 250 ms for a fresh session's
         // columns to fill its view. Kept live, its view is drawn when it is
-        // chosen, and it comes in at the click. The waveform, which draws
-        // from its overview, waits only for that.
+        // chosen, and it comes in at the click. The waveform, which is
+        // given the track only while it shows, comes in once it has drawn
+        // its first frame of it (`pictureReady`), at 0 over the
+        // spectrogram until then (#373 H11: it faded in from the click,
+        // and its per-channel lanes, which wait for their detail, were an
+        // empty floor for 80 to 170 ms).
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
         property int settledMode: -1
@@ -1639,12 +1643,12 @@ ApplicationWindow {
             return mode === 0 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
         }
         // Whether `mode`'s plot can come in: the waveform once it has its
-        // data; the spectrogram, kept live, at once, with its view as it
-        // has drawn it: whole, unless no session has filled it yet, as
-        // right after a track starts, when its columns come in as they
-        // would were it shown.
+        // data and has drawn it; the spectrogram, kept live, at once, with
+        // its view as it has drawn it: whole, unless no session has filled
+        // it yet, as right after a track starts, when its columns come in
+        // as they would were it shown.
         function plotCanComeIn(mode) {
-            return mode === 0 || !waveformSurface.awaitingData
+            return mode === 0 || (!waveformSurface.awaitingData && waveformSurface.pictureReady)
         }
         // Whether the chosen plot still waits for its data while the one
         // before has some to show. Without a track to wait for, or with
@@ -1691,6 +1695,17 @@ ApplicationWindow {
             }
         }
         onModeInputsChanged: visualizationSurface.followMode()
+        // The waveform's first frame of the track, which lets it come in.
+        // It loses its picture when the switch hides it, so this is a
+        // handler of its own rather than one of modeInputs.
+        Connections {
+            target: waveformSurface
+            function onPictureReadyChanged() {
+                if (waveformSurface.pictureReady) {
+                    visualizationSurface.followMode()
+                }
+            }
+        }
         Component.onCompleted: {
             visualizationSurface.settledMode = viewerController.visualizationMode
         }

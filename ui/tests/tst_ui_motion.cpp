@@ -5203,11 +5203,16 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
 
     for (int round = 0; round < 2; ++round) {
         // To the waveform, which has its data: it comes in over the
-        // spectrogram at once, or with animations off replaces it.
+        // spectrogram once it has drawn its first frame of the track, at 0
+        // until then (#373 H11), or with animations off replaces it then.
         QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
         QVERIFY(waveform->isVisible());
         QVERIFY(spectrogram->isVisible());
+        QCOMPARE(waveform->opacity(), 0.0);
+        QVERIFY(whole(spectrogram));
         check("to the waveform");
+        QTRY_VERIFY(waveform->property("pictureReady").toBool());
+        check("the waveform's first frame");
         if (animated) {
             QVERIFY(fade->property("running").toBool());
             QVERIFY(waveform->z() > spectrogram->z());
@@ -5296,7 +5301,7 @@ void UiMotionTest::visualizationModeSwitchKeepsAPlotOnScreen() {
     // in at the click, with what it has, and its columns come in as they
     // would were it shown.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
-    QTRY_VERIFY(!fade->property("running").toBool());
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
     for (SpectrogramItem *pane : panes()) {
         pane->releaseStorage();
     }

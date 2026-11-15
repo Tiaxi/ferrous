@@ -96,12 +96,22 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // Whether the playhead is drawn: the plot going out under another as
     // the visualization mode switches draws none, so only one shows.
     Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
+    // Whether the item has its source's picture: a frame of it has drawn
+    // the waveform, from the overview or the detail, or has drawn without
+    // it while no detail is on its way, as for a file that cannot be read.
+    // False from a change of source until then: what shows the item over
+    // something else, such as the visualization's mode switch over the
+    // spectrogram, waits for it rather than show the bare floor (#373 H11:
+    // the per-channel view, which the overview has no lanes for, was empty
+    // for 80 to 170 ms, until its detail was decoded).
+    Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
 
 public:
     explicit WaveformEditorItem(QQuickItem *parent = nullptr);
     ~WaveformEditorItem() override;
 
     QString sourcePath() const;
+    bool pictureReady() const;
     void setSourcePath(const QString &value);
     QByteArray overviewData() const;
     void setOverviewData(const QByteArray &value);
@@ -203,6 +213,7 @@ signals:
     void samplePointsVisibleChanged();
     void colorsChanged();
     void playheadVisibleChanged();
+    void pictureReadyChanged();
     void markerSecondsChanged();
     void markerXChanged();
     void seekRequested(double seconds);
@@ -382,6 +393,14 @@ private:
     static bool parseWindow(const QByteArray &bytes, DetailWindow *window);
     void scheduleDetailRequest(bool immediate = false);
     void requestDetailWindow();
+    // Asks for the detail the view misses; false when none is on its way
+    // after it, as without a source or a duration.
+    bool startDetailRequest();
+    // Whether the overview has a waveform for `channels` lanes.
+    bool overviewDrawableLocked(int channels) const;
+    // Follows pictureReady, on the GUI thread: after a frame is painted,
+    // and when a detail request ends without one.
+    void updatePictureReady();
     void clearDetailLocked();
     void clearPendingRequestLocked();
     // The playback position and the view at a time on the clock. A frame
@@ -515,7 +534,7 @@ private:
     // m_cacheDetailArrivals.
     bool cacheRedrawDueLocked(double visibleStart, double visibleEnd) const;
     void queueGuiContinuationFromPaint(
-        bool notifySamplePointsChanged, bool requestRepaint);
+        bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged = false);
     void rebuildCacheLocked(
         int width, int height, double visibleStart, double visibleEnd);
     void rebuildCacheLocked(int width, int height);
@@ -691,6 +710,14 @@ private:
     // pixels.
     QImage m_cache;
     bool m_cacheDirty{true};
+    // Whether the cache holds a waveform, rather than the bare floor.
+    bool m_cacheShowsWaveform{false};
+    // Whether a frame has been painted for the source, and whether one of
+    // them drew its waveform (see pictureReady).
+    bool m_framePainted{false};
+    bool m_waveformPainted{false};
+    // pictureReady; the GUI thread's.
+    bool m_pictureReady{false};
     int m_cachedViewportWidth{0};
     int m_cachedViewportHeight{0};
     double m_cacheStartSeconds{0.0};
@@ -771,6 +798,7 @@ private:
     std::atomic_bool m_guiContinuationQueued{false};
     std::atomic_bool m_guiRepaintPending{false};
     std::atomic_bool m_samplePointsNotificationPending{false};
+    std::atomic_bool m_pictureCheckPending{false};
 #if defined(FERROUS_ENABLE_PROFILE_LOGS) && FERROUS_ENABLE_PROFILE_LOGS
     ProfileState m_profile;
 #endif

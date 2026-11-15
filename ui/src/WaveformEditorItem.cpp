@@ -261,6 +261,25 @@ void WaveformEditorItem::invalidateDetailRequestLocked() {
 }
 
 QString WaveformEditorItem::sourcePath() const { QMutexLocker lock(&m_stateMutex); return m_sourcePath; }
+bool WaveformEditorItem::pictureReady() const { return m_pictureReady; }
+
+void WaveformEditorItem::updatePictureReady() {
+    // It holds until the source changes: a zoom or a seek asks for more
+    // detail of a picture the item already shows.
+    if (m_pictureReady) return;
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (!m_framePainted) return;
+        // A frame without the waveform is the picture once no detail is on
+        // its way to it.
+        if (!m_waveformPainted
+            && (m_requestInFlight || m_decodeActive || m_requestTimer.isActive())) {
+            return;
+        }
+    }
+    m_pictureReady = true;
+    emit pictureReadyChanged();
+}
 QByteArray WaveformEditorItem::overviewData() const { QMutexLocker lock(&m_stateMutex); return m_overviewData; }
 PlaybackClock *WaveformEditorItem::clock() const { return m_clock; }
 double WaveformEditorItem::positionSeconds() const { QMutexLocker lock(&m_stateMutex); return displayedPositionSecondsLocked(); }
@@ -293,9 +312,15 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         m_zoomOutHandoffPending = false;
         m_zoomFallbackToOverview = false;
         invalidateCacheLocked();
+        m_framePainted = false;
+        m_waveformPainted = false;
     }
     // After its request for the previous file was cancelled.
     updateReaderLease();
+    if (m_pictureReady) {
+        m_pictureReady = false;
+        emit pictureReadyChanged();
+    }
     emit sourcePathChanged();
     emit channelCountChanged();
     emit sampleRateHzChanged();
@@ -772,6 +797,10 @@ void WaveformEditorItem::scheduleDetailRequest(bool immediate) {
 }
 
 void WaveformEditorItem::requestDetailWindow() {
+    if (!startDetailRequest()) updatePictureReady();
+}
+
+bool WaveformEditorItem::startDetailRequest() {
     QString path;
     double requestStart = 0.0;
     double requestEnd = 0.0;
@@ -789,8 +818,8 @@ void WaveformEditorItem::requestDetailWindow() {
 #endif
     {
         QMutexLocker lock(&m_stateMutex);
-        if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return;
-        if (!shownOnScreen()) return;
+        if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return false;
+        if (!shownOnScreen()) return false;
         if (m_decodeActive) {
             // A request still in flight for part of the view stays: its
             // arrival asks for what it misses. Replacing it instead would
@@ -800,10 +829,11 @@ void WaveformEditorItem::requestDetailWindow() {
             if (m_requestInFlight
                 && m_requestedStartSeconds < visibleEnd
                 && m_requestedEndSeconds > visibleStart) {
-                return;
+                return true;
             }
+            // Its decode, once it ends, asks again.
             invalidateDetailRequestLocked();
-            return;
+            return true;
         }
         m_decodeActive = true;
         cancelled = std::make_shared<std::atomic_bool>(false);
@@ -1008,7 +1038,12 @@ void WaveformEditorItem::requestDetailWindow() {
                 profileStagedSecondsPerPixel);
         }
 #endif
-        if (stale || parseFailed) return;
+        if (stale || parseFailed) {
+            // No detail comes of it: what the item drew without is its
+            // picture.
+            updatePictureReady();
+            return;
+        }
         if (channelsChanged) emit channelCountChanged();
         if (rateChanged) emit sampleRateHzChanged();
         if (zoomChanged) emit zoomLevelChanged();
@@ -1031,6 +1066,7 @@ void WaveformEditorItem::requestDetailWindow() {
             decoded->parsed = parseWindow(bytes, &decoded->window);
             return decoded;
         }));
+    return true;
 }
 
 quint64 WaveformEditorItem::nextDetailGeneration() {
@@ -1989,6 +2025,8 @@ bool WaveformEditorItem::advanceStagedCacheLocked(qint64 nowNs) {
         m_cachedViewportHeight = m_stagedCacheViewportHeight;
         m_cacheDetailArrivals = m_detailArrivals;
         m_cacheDirty = false;
+        // Staged from the detail.
+        m_cacheShowsWaveform = true;
         if (commitsDeferredZoom) {
             m_presentedZoomLevel = m_zoomLevel;
             m_zoomOutHandoffPending = false;
@@ -2015,7 +2053,10 @@ bool WaveformEditorItem::advanceStagedCacheLocked() {
 }
 
 void WaveformEditorItem::queueGuiContinuationFromPaint(
-    bool notifySamplePointsChanged, bool requestRepaint) {
+    bool notifySamplePointsChanged, bool requestRepaint, bool pictureChanged) {
+    if (pictureChanged) {
+        m_pictureCheckPending.store(true, std::memory_order_release);
+    }
     if (notifySamplePointsChanged) {
         m_samplePointsNotificationPending.store(true, std::memory_order_release);
     }
@@ -2040,6 +2081,9 @@ void WaveformEditorItem::queueGuiContinuationFromPaint(
             }
             if (m_guiRepaintPending.exchange(false, std::memory_order_acq_rel)) {
                 update();
+            }
+            if (m_pictureCheckPending.exchange(false, std::memory_order_acq_rel)) {
+                updatePictureReady();
             }
         },
         Qt::QueuedConnection);
@@ -2228,6 +2272,7 @@ void WaveformEditorItem::paint(QPainter *painter) {
     std::vector<PlaybackTilePaint> playbackTilePaints;
     bool presentationCommitted = false;
     bool stagingContinues = false;
+    bool pictureChanged = false;
     double scale = 1.0;
     Colors colors;
     double markerSeconds = -1.0;
@@ -2366,6 +2411,14 @@ void WaveformEditorItem::paint(QPainter *painter) {
         stagingContinues = !m_stagedCache.isNull();
         if (showFps) updateFpsEstimateLocked();
         fpsValue = m_fpsValue;
+        // The source's picture (pictureReady): this frame, and whether it
+        // draws the waveform rather than the bare floor.
+        const bool drawsWaveform = directDetail
+            || (tiledPlayback ? !playbackTilePaints.empty() || !playbackTileGaps.empty()
+                              : m_cacheShowsWaveform);
+        pictureChanged = !m_framePainted || (drawsWaveform && !m_waveformPainted);
+        m_framePainted = true;
+        m_waveformPainted = m_waveformPainted || drawsWaveform;
     }
     if (!directDetail) {
         bool cachePaintCoversCanvas = false;
@@ -2618,8 +2671,8 @@ void WaveformEditorItem::paint(QPainter *painter) {
         }
     }
 #endif
-    if (presentationCommitted || stagingContinues) {
-        queueGuiContinuationFromPaint(presentationCommitted, stagingContinues);
+    if (presentationCommitted || stagingContinues || pictureChanged) {
+        queueGuiContinuationFromPaint(presentationCommitted, stagingContinues, pictureChanged);
     }
 }
 
@@ -3075,6 +3128,8 @@ void WaveformEditorItem::rebuildCacheLocked(
     painter.setRenderHint(QPainter::Antialiasing, false);
     const int channels = displayedChannelCountLocked();
     const double scale = renderScaleLocked();
+    m_cacheShowsWaveform = detailReady
+        || (useOverview ? overviewDrawableLocked(channels) : detailOverlapsViewport);
     if (detailReady) {
         drawDetailLocked(
             painter, grid.width, height,
@@ -3257,15 +3312,19 @@ void WaveformEditorItem::drawGridLocked(QPainter &painter, int width, int height
     }
 }
 
+bool WaveformEditorItem::overviewDrawableLocked(int channels) const {
+    // The overview is a combined peak envelope, with no channel identity.
+    return !m_overviewData.isEmpty() && m_durationSeconds > 0.0
+        && !(m_viewMode == 1 && channels > 1)
+        && (m_overviewComplete || m_overviewCoverageSeconds > 0.0);
+}
+
 void WaveformEditorItem::drawOverviewLocked(QPainter &painter, int width, int height,
                                              double visibleStart, double visibleEnd, int channels,
                                              double pixelScale) const {
-    // The overview is a combined peak envelope, with no channel identity.
-    if (m_overviewData.isEmpty() || m_durationSeconds <= 0.0
-        || (m_viewMode == 1 && channels > 1)) return;
+    if (!overviewDrawableLocked(channels)) return;
     const double coverage = m_overviewComplete ? m_durationSeconds
         : std::min(m_durationSeconds, m_overviewCoverageSeconds);
-    if (coverage <= 0.0) return;
     const auto *peaks = reinterpret_cast<const uchar *>(m_overviewData.constData());
     const int count = m_overviewData.size();
     const double span = visibleEnd - visibleStart;
