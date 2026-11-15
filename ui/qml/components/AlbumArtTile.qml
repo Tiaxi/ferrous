@@ -10,16 +10,15 @@ import FerrousUi 1.0
 // track without a cover has a stand-in in its place (#373 H11: the panel
 // showed no tile for it, so a track change between one with a cover and
 // one without moved the whole sidebar by the cover's height): the plot's
-// floor colour, with `standInTitle`, the album, in the plot's text colour
-// at its top left, `standInInset` in, the inset of the panel's lines,
-// wrapping onto up to three lines (#373 H12 Z1: the album and the artist
-// at its foot repeated what the lines under it say, and read as a caption
-// on a slab). The panel gives it no title where its lines would say the
-// same, as without an album: the plain colour then. A tile too small for
-// about eight characters of the title a line, as the narrow one with a
-// large font, is the plain colour too, as the lines beside it say it. With
-// nothing playing (`idle`) it shows neither, only the placeholder colour
-// with Breeze's audio disc mark at its centre (#373 H1, H3): the
+// floor colour with one static mark at its centre, the same for every
+// track without a cover (#373 H14 F2: a stand-in of text repeated the
+// lines under it, and without an album it was blank): the app icon's glide
+// and its harmonics, two thirds of the tile wide, at a cover mark's
+// strength rather than data's. A small tile, as the narrow layout's 96 px
+// one, has the mark of two curves. In a light theme a 1 px edge
+// (`standInEdgeColor`) keeps the dark tile from reading as a hole in the
+// sidebar. With nothing playing (`idle`) it shows only the placeholder
+// colour with Breeze's audio disc mark at its centre (#373 H1, H3): the
 // now-playing panel shows its compact row then, and the tile only as it
 // shrinks into it.
 //
@@ -41,22 +40,15 @@ Rectangle {
     // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
     // The stand-in for a track without a cover: its colour, the plot's
-    // floor, its title and the title's colour, the plot's, the font it is
-    // sized from, and its inset from the tile's top and sides, which the
-    // now-playing panel sets to its lines' inset, so the title starts where
-    // they do.
+    // floor, and the 1 px edge around it, or transparent for none.
     property color standInColor: "transparent"
-    property color standInTextColor: Kirigami.Theme.textColor
-    property string standInTitle: ""
-    property font standInFont: Kirigami.Theme.defaultFont
-    property real standInInset: 2 * Kirigami.Units.largeSpacing
-    // The title's size in a tile with room for it, which the panel sets to
-    // the palette's display size; in a small tile, the font's own.
-    property real standInTitlePointSize: root.standInFont.pointSize * 1.35 * 1.25
+    property color standInEdgeColor: "transparent"
+    // How strongly its mark shows on the floor: a cover's mark, not the
+    // plot's data.
+    property real standInMarkOpacity: 0.68
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // A tile under ten grid units, such as the narrow layout's 96 px, has
-    // its title at the font's size, and where even that leaves under about
-    // eight characters a line, none.
+    // the mark of two curves, drawn for its size.
     readonly property bool standInCompact: Math.min(root.width, root.height) < 10 * Kirigami.Units.gridUnit
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
@@ -86,8 +78,8 @@ Rectangle {
     readonly property Item focusItem: focusTarget
     // The covers before, or their stand-in for none, over this one while
     // they fade out: the now-playing panel's album change. Oldest first,
-    // each {coverPath, from, title}, showing at `from` times
-    // `outgoingLevel`, and over the ones after it; `title` is a stand-in's.
+    // each {coverPath, from}, showing at `from` times `outgoingLevel`, and
+    // over the ones after it; one without a cover path is the stand-in.
     property var outgoingCovers: []
     property real outgoingLevel: 0
     // The most covers before that fade out at once.
@@ -135,51 +127,42 @@ Rectangle {
         visible: root.idle
     }
 
-    // The title of a stand-in, at its top left: up to three lines, fewer
-    // where the tile is short, cut off with an ellipsis past that.
-    // Assistive technology reads it from the panel's lines.
-    component StandInText: Item {
+    // The stand-in's mark, centred, two thirds of the tile wide and half
+    // as high, and its edge. Assistive technology hears "No album art"
+    // from the keyboard stop over it.
+    component StandInMark: Item {
         id: standIn
 
-        property string title: ""
-        readonly property real room: Math.max(0, standIn.height - 2 * root.standInInset)
-        readonly property real lineWidth: Math.max(0, standIn.width - 2 * root.standInInset)
-        // No title where a line has no room for about eight characters.
-        readonly property bool fits: standIn.lineWidth >= 8 * titleMetrics.averageCharacterWidth
-        readonly property int titleLines: Math.max(1, Math.min(3,
-            Math.floor(standIn.room / titleMetrics.lineSpacing)))
-
-        FontMetrics {
-            id: titleMetrics
-            font: titleText.font
+        Image {
+            objectName: "albumArtStandInMark"
+            anchors.centerIn: parent
+            width: Math.round(standIn.width * 2 / 3)
+            height: Math.round(width / 2)
+            source: root.standInCompact ? Qt.resolvedUrl("../assets/no-art-mark-small.svg")
+                                        : Qt.resolvedUrl("../assets/no-art-mark.svg")
+            // Drawn at its size, so its strokes stay crisp.
+            sourceSize.width: width
+            sourceSize.height: height
+            smooth: true
+            cache: true
+            opacity: root.standInMarkOpacity
+            Accessible.ignored: true
         }
 
-        Text {
-            id: titleText
-            objectName: "albumArtStandInTitle"
-            x: root.standInInset
-            y: root.standInInset
-            width: standIn.lineWidth
-            visible: standIn.fits && text.length > 0
-            text: standIn.title
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            maximumLineCount: standIn.titleLines
-            elide: Text.ElideRight
-            font.family: root.standInFont.family
-            font.pointSize: root.standInCompact
-                ? root.standInFont.pointSize : root.standInTitlePointSize
-            font.weight: Font.DemiBold
-            color: root.standInTextColor
-            Accessible.ignored: true
+        Rectangle {
+            objectName: "albumArtStandInEdge"
+            anchors.fill: parent
+            visible: root.standInEdgeColor.a > 0
+            color: "transparent"
+            border.width: 1
+            border.color: root.standInEdgeColor
         }
     }
 
-    StandInText {
+    StandInMark {
         objectName: "albumArtStandIn"
         anchors.fill: parent
         visible: root.standInShown
-        title: root.standInTitle
     }
 
     // The covers before fade out over this one, which shows whole all
@@ -206,7 +189,7 @@ Rectangle {
                 opacity: outgoing.cover !== null ? outgoing.cover.from * root.outgoingLevel : 0
                 color: outgoing.coverPath.length > 0 ? root.backdropColor : root.standInColor
                 // A cover fades out as one, on its backdrop, and a stand-in
-                // with its texts: without a layer the opacity would take
+                // with its mark: without a layer the opacity would take
                 // them apart, and the backdrop would show through the image.
                 layer.enabled: outgoing.visible
 
@@ -222,11 +205,10 @@ Rectangle {
                     sourceSize.height: root.coverSourceSize
                 }
 
-                StandInText {
+                StandInMark {
                     objectName: "albumArtOutgoingStandIn"
                     anchors.fill: parent
                     visible: outgoing.cover !== null && outgoing.coverPath.length === 0
-                    title: outgoing.cover !== null ? (outgoing.cover.title || "") : ""
                 }
             }
         }

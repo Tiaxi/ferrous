@@ -228,6 +228,12 @@ QtObject {
     // stand-in for a track without a cover is of the same colour, as the
     // plot's own.
     readonly property color plotFloor: "#14062e"
+    // A 1 px edge around a tile of the floor that stands for a cover, as
+    // the now-playing stand-in's in a light theme and the library's no-art
+    // thumbnail's (#373 H14 F2): lighter than the floor, towards the app
+    // icon's rim, as the icon's tile has one, so it reads as a cover rather
+    // than a hole.
+    readonly property color plotFloorEdge: ColorUtils.mixColor(root.plotFloor, Qt.color("#6a4ad0"), 0.45)
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed, on the plot's floor. Silence within a track is still
@@ -435,12 +441,6 @@ QtObject {
         const factors = [1.35, 1.20, 1.15, 1.10, 1.05]
         return root.basePointSize * (factors[level - 1] || 1)
     }
-    // A display size, a quarter over the largest heading, level 1: 22.5 px
-    // with the default 10 pt font. Kirigami's headings stop at level 1, 18
-    // px, which is the panel's title; a title that stands alone on a
-    // surface, as the now-playing stand-in's album (#373 H12 Z1), is a step
-    // over it.
-    readonly property real displayPointSize: root.headingPointSize(1) * 1.25
     // Old-style figures line up in columns with tabular figures.
     readonly property var tabularFigures: ({ "tnum": 1 })
 

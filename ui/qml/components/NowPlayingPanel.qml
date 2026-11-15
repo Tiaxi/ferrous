@@ -217,12 +217,6 @@ Item {
     }
     readonly property string artistText: root._trimmed(root.uiBridge.currentTrackArtist)
     readonly property string albumText: root._trimmed(root.uiBridge.currentTrackAlbum)
-    // What the stand-in for a cover says: the album, and nothing where it
-    // has none or it is named as the title, which the lines say already.
-    readonly property string standInTitle: root._standInTitle(root.albumText, root.titleText)
-    function _standInTitle(album, title) {
-        return album.length > 0 && album !== title ? album : ""
-    }
     readonly property string genreText: root._trimmed(root.uiBridge.currentTrackGenre)
     readonly property string yearText: {
         const year = root.uiBridge.currentTrackYear
@@ -732,11 +726,10 @@ Item {
         return parts.filter((part, index) => index === 0 || part.from !== parts[index - 1].from)
     }
 
-    // What a track shows in the cover's place: its cover, or the texts of
-    // its stand-in for one.
+    // What a track shows in the cover's place: its cover, or the stand-in
+    // for one, which is the same for every track without a cover.
     function _coverKey(track) {
-        return track.coverPath.length > 0 ? "cover\n" + track.coverPath
-            : "standIn\n" + track.standInTitle
+        return track.coverPath.length > 0 ? "cover\n" + track.coverPath : "standIn"
     }
 
     // The covers before in a fade that starts now, as they show when the
@@ -750,7 +743,7 @@ Item {
         const level = root._coversOutLevel(root.handover)
         const covers = root.outgoing === null ? [] : root.outgoing.covers
             .map(cover => ({ coverPath: cover.coverPath, from: cover.from * level,
-                             title: cover.title, key: cover.key }))
+                             key: cover.key }))
             .filter(cover => cover.from > 0)
         const key = root._coverKey(was)
         if (key !== root._coverKey(next)) {
@@ -758,7 +751,7 @@ Item {
             if (newest !== null && newest.key === key)
                 covers.pop()
             if (covers.length < root.maxOutgoingLayers)
-                covers.push({ coverPath: was.coverPath, from: 1, title: was.standInTitle, key: key })
+                covers.push({ coverPath: was.coverPath, from: 1, key: key })
         }
         return covers
     }
@@ -768,9 +761,6 @@ Item {
             trackKey: root.trackKey,
             album: root.albumText,
             coverPath: root.coverPath,
-            // From the tags themselves, as `standInTitle` is: a handler of
-            // the lines runs before every binding on them has followed.
-            standInTitle: root._standInTitle(root.albumText, root.titleText),
             lines: root.trackLines
         }
         const was = root.shown
@@ -1378,15 +1368,11 @@ Item {
             // its image is not loaded again while it grows or shrinks, which
             // would change it after the change ends.
             coverSourceSize: Math.max(256, root.width)
-            // No cover: the stand-in, on the plot's floor in the plot's
-            // text colour, which reads on it in both themes, its title at
-            // the lines' inset.
+            // No cover: the stand-in, its mark on the plot's floor, and in
+            // a light theme an edge, so the dark tile reads as a cover
+            // rather than a hole in the sidebar.
             standInColor: root.uiPalette.plotFloor
-            standInTextColor: root.uiPalette.spectrogramPlot.plotText
-            standInTitle: root.standInTitle
-            standInFont: root.uiPalette.baseFont
-            standInInset: root.textInset
-            standInTitlePointSize: root.uiPalette.displayPointSize
+            standInEdgeColor: root.uiPalette.themeIsDark ? "transparent" : root.uiPalette.plotFloorEdge
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             placeholderGlyphColor: root.placeholderMarkColor
