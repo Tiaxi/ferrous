@@ -3002,7 +3002,7 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace_data() {
 // longDuration, the one before fading out over the playing track's, which
 // shows whole under it. In every frame of the change the panel's height,
 // the library's place, the cover's place and where the lines are stay as
-// they were; the stand-in going out keeps its own texts.
+// they were; the stand-in going out keeps its own title.
 void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
     QFETCH(bool, narrow);
     QFETCH(bool, nextTrack);
@@ -3105,17 +3105,13 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
             QVERIFY2(before.first()->opacity() <= lastOut && before.first()->opacity() > 0.0, qPrintable(where));
             lastOut = before.first()->opacity();
             // What goes out is what showed: the cover, or the stand-in
-            // with the texts it had.
+            // with the album it had, and never the artist (#373 H12 Z1).
             QQuickItem *outgoingStandIn = itemNamed(before.first(), QStringLiteral("albumArtOutgoingStandIn"));
             QVERIFY(outgoingStandIn != nullptr);
             QCOMPARE(outgoingStandIn->isVisible(), toCover);
-            if (toCover) {
-                QCOMPARE(outgoingStandIn->property("title").toString(), QStringLiteral("Album A"));
-                QCOMPARE(outgoingStandIn->property("subtitle").toString(), QStringLiteral("Artist A"));
-            } else {
-                QCOMPARE(standIn->property("title").toString(), QStringLiteral("Album A"));
-                QCOMPARE(standIn->property("subtitle").toString(), QStringLiteral("Artist A"));
-            }
+            QQuickItem *shownStandIn = toCover ? outgoingStandIn : standIn;
+            QCOMPARE(shownStandIn->property("title").toString(), QStringLiteral("Album A"));
+            QVERIFY(!shownStandIn->property("subtitle").isValid());
         }
         QVERIFY2(lastOut < 0.05, qPrintable(QString::number(lastOut)));
         QVERIFY(QMetaObject::invokeMethod(handover, "resume"));

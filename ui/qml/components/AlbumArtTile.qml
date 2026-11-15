@@ -10,11 +10,14 @@ import FerrousUi 1.0
 // track without a cover has a stand-in in its place (#373 H11: the panel
 // showed no tile for it, so a track change between one with a cover and
 // one without moved the whole sidebar by the cover's height): the plot's
-// floor colour, with `standInTitle` and, under it, `standInSubtitle` in
-// the plot's text colours at its bottom left, the album and the artist,
-// wrapping onto up to three and two lines; a tile too small for about
-// eight characters of the title a line, as the narrow one with a large
-// font, is the plain colour, as the lines beside it say the same. With
+// floor colour, with `standInTitle`, the album, in the plot's text colour
+// at its top left, `standInInset` in, the inset of the panel's lines,
+// wrapping onto up to three lines (#373 H12 Z1: the album and the artist
+// at its foot repeated what the lines under it say, and read as a caption
+// on a slab). The panel gives it no title where its lines would say the
+// same, as without an album: the plain colour then. A tile too small for
+// about eight characters of the title a line, as the narrow one with a
+// large font, is the plain colour too, as the lines beside it say it. With
 // nothing playing (`idle`) it shows neither, only the placeholder colour
 // with Breeze's audio disc mark at its centre (#373 H1, H3): the
 // now-playing panel shows its compact row then, and the tile only as it
@@ -38,25 +41,23 @@ Rectangle {
     // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
     // The stand-in for a track without a cover: its colour, the plot's
-    // floor, its two texts and their colours, the plot's, and the font its
-    // texts are sized from.
+    // floor, its title and the title's colour, the plot's, the font it is
+    // sized from, and its inset from the tile's top and sides, which the
+    // now-playing panel sets to its lines' inset, so the title starts where
+    // they do.
     property color standInColor: "transparent"
     property color standInTextColor: Kirigami.Theme.textColor
-    property color standInSecondaryTextColor: Kirigami.Theme.textColor
     property string standInTitle: ""
-    property string standInSubtitle: ""
     property font standInFont: Kirigami.Theme.defaultFont
-    // The title's size in a tile with room for it, a level 1
-    // Kirigami.Heading's on that font; in a small tile, the font's own.
-    property real standInTitlePointSize: root.standInFont.pointSize * 1.35
-    property real standInSmallPointSize: root.standInFont.pointSize * 0.9
+    property real standInInset: 2 * Kirigami.Units.largeSpacing
+    // The title's size in a tile with room for it, which the panel sets to
+    // the palette's display size; in a small tile, the font's own.
+    property real standInTitlePointSize: root.standInFont.pointSize * 1.35 * 1.25
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // A tile under ten grid units, such as the narrow layout's 96 px, has
-    // its texts a step smaller, half the inset, and where even that leaves
-    // under about eight characters a line, none.
+    // its title at the font's size, and where even that leaves under about
+    // eight characters a line, none.
     readonly property bool standInCompact: Math.min(root.width, root.height) < 10 * Kirigami.Units.gridUnit
-    readonly property real standInInset: root.standInCompact
-        ? Kirigami.Units.largeSpacing : 2 * Kirigami.Units.largeSpacing
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
@@ -85,9 +86,8 @@ Rectangle {
     readonly property Item focusItem: focusTarget
     // The covers before, or their stand-in for none, over this one while
     // they fade out: the now-playing panel's album change. Oldest first,
-    // each {coverPath, from, title, subtitle}, showing at `from` times
-    // `outgoingLevel`, and over the ones after it; `title` and `subtitle`
-    // are a stand-in's texts.
+    // each {coverPath, from, title}, showing at `from` times
+    // `outgoingLevel`, and over the ones after it; `title` is a stand-in's.
     property var outgoingCovers: []
     property real outgoingLevel: 0
     // The most covers before that fade out at once.
@@ -135,76 +135,43 @@ Rectangle {
         visible: root.idle
     }
 
-    // The texts of a stand-in, at its bottom left: the title, up to three
-    // lines, and the subtitle under it, up to two, fewer where the tile is
-    // short, each cut off with an ellipsis past that. Assistive technology
-    // reads them from the panel's lines.
+    // The title of a stand-in, at its top left: up to three lines, fewer
+    // where the tile is short, cut off with an ellipsis past that.
+    // Assistive technology reads it from the panel's lines.
     component StandInText: Item {
         id: standIn
 
         property string title: ""
-        property string subtitle: ""
         readonly property real room: Math.max(0, standIn.height - 2 * root.standInInset)
         readonly property real lineWidth: Math.max(0, standIn.width - 2 * root.standInInset)
-        // No texts where a line has no room for about eight characters.
+        // No title where a line has no room for about eight characters.
         readonly property bool fits: standIn.lineWidth >= 8 * titleMetrics.averageCharacterWidth
-        readonly property int subtitleLines: standIn.subtitle.length === 0 ? 0
-            : (standIn.room >= 3 * titleMetrics.lineSpacing + 2 * subtitleMetrics.lineSpacing ? 2 : 1)
-        readonly property int titleLines: Math.max(1, Math.min(3, Math.floor(
-            (standIn.room - standIn.subtitleLines * subtitleMetrics.lineSpacing
-                - (standIn.subtitleLines > 0 ? texts.spacing : 0)) / titleMetrics.lineSpacing)))
+        readonly property int titleLines: Math.max(1, Math.min(3,
+            Math.floor(standIn.room / titleMetrics.lineSpacing)))
 
         FontMetrics {
             id: titleMetrics
             font: titleText.font
         }
-        FontMetrics {
-            id: subtitleMetrics
-            font: subtitleText.font
-        }
 
-        Column {
-            id: texts
+        Text {
+            id: titleText
+            objectName: "albumArtStandInTitle"
             x: root.standInInset
-            y: standIn.height - root.standInInset - texts.height
+            y: root.standInInset
             width: standIn.lineWidth
-            spacing: Kirigami.Units.smallSpacing
-            visible: standIn.fits
-
-            Text {
-                id: titleText
-                objectName: "albumArtStandInTitle"
-                width: parent.width
-                visible: text.length > 0
-                text: standIn.title
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                maximumLineCount: standIn.titleLines
-                elide: Text.ElideRight
-                font.family: root.standInFont.family
-                font.pointSize: root.standInCompact
-                    ? root.standInFont.pointSize : root.standInTitlePointSize
-                font.weight: Font.DemiBold
-                color: root.standInTextColor
-                Accessible.ignored: true
-            }
-
-            Text {
-                id: subtitleText
-                objectName: "albumArtStandInSubtitle"
-                width: parent.width
-                visible: text.length > 0
-                text: standIn.subtitle
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                maximumLineCount: Math.max(1, standIn.subtitleLines)
-                elide: Text.ElideRight
-                font.family: root.standInFont.family
-                font.pointSize: root.standInCompact
-                    ? root.standInSmallPointSize : root.standInFont.pointSize
-                color: root.standInSecondaryTextColor
-                Accessible.ignored: true
-            }
+            visible: standIn.fits && text.length > 0
+            text: standIn.title
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            maximumLineCount: standIn.titleLines
+            elide: Text.ElideRight
+            font.family: root.standInFont.family
+            font.pointSize: root.standInCompact
+                ? root.standInFont.pointSize : root.standInTitlePointSize
+            font.weight: Font.DemiBold
+            color: root.standInTextColor
+            Accessible.ignored: true
         }
     }
 
@@ -213,7 +180,6 @@ Rectangle {
         anchors.fill: parent
         visible: root.standInShown
         title: root.standInTitle
-        subtitle: root.standInSubtitle
     }
 
     // The covers before fade out over this one, which shows whole all
@@ -261,7 +227,6 @@ Rectangle {
                     anchors.fill: parent
                     visible: outgoing.cover !== null && outgoing.coverPath.length === 0
                     title: outgoing.cover !== null ? (outgoing.cover.title || "") : ""
-                    subtitle: outgoing.cover !== null ? (outgoing.cover.subtitle || "") : ""
                 }
             }
         }

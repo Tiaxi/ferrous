@@ -38,8 +38,11 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   cleared, shrinks it back. With animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
 //   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour,
-//   with the album and, under it, the artist at its bottom left; without
-//   an album, the title; without tags, the file's name. So the panel
+//   with the album at its top left, at the lines' inset, as a display
+//   title; never the artist, nor what the lines would say alone, so
+//   without an album, or with one named as the track, the plain colour
+//   (#373 H12 Z1: the album and artist at its foot, or the file's name,
+//   said again what the lines under it say). So the panel
 //   changes its geometry only between nothing loaded and a track (#373
 //   H9 to H11: a track without a cover had a layout of its own, a mark
 //   beside the title and no cover's place, and a track change between one
@@ -185,11 +188,12 @@ Item {
     }
     readonly property string artistText: root._trimmed(root.uiBridge.currentTrackArtist)
     readonly property string albumText: root._trimmed(root.uiBridge.currentTrackAlbum)
-    // What the stand-in for a cover says: the album, or without one the
-    // title, which is the file's name for a file without tags, and under
-    // it the artist.
-    readonly property string standInTitle: root.albumText.length > 0 ? root.albumText : root.titleText
-    readonly property string standInSubtitle: root.artistText
+    // What the stand-in for a cover says: the album, and nothing where it
+    // has none or it is named as the title, which the lines say already.
+    readonly property string standInTitle: root._standInTitle(root.albumText, root.titleText)
+    function _standInTitle(album, title) {
+        return album.length > 0 && album !== title ? album : ""
+    }
     readonly property string genreText: root._trimmed(root.uiBridge.currentTrackGenre)
     readonly property string yearText: {
         const year = root.uiBridge.currentTrackYear
@@ -323,8 +327,8 @@ Item {
     property bool coverCameWhileEmpty: false
     // What fades out, or null: `lines`, each line that fades by its key
     // in `trackLines` (see `_fadingLine`); `covers`, the covers before,
-    // oldest first, each {coverPath, from, title, subtitle}, fading out
-    // from `from`, the last two a stand-in's texts;
+    // oldest first, each {coverPath, from, title}, fading out from
+    // `from`, the last a stand-in's title;
     // whether the fade is a track change (`track`), which lines that come
     // to differ join; and whether it runs over longDuration (`long`): for
     // another cover or another album, even when the two look alike.
@@ -703,7 +707,7 @@ Item {
     // its stand-in for one.
     function _coverKey(track) {
         return track.coverPath.length > 0 ? "cover\n" + track.coverPath
-            : "standIn\n" + track.standInTitle + "\n" + track.standInSubtitle
+            : "standIn\n" + track.standInTitle
     }
 
     // The covers before in a fade that starts now, as they show when the
@@ -717,7 +721,7 @@ Item {
         const level = root._coversOutLevel(root.handover)
         const covers = root.outgoing === null ? [] : root.outgoing.covers
             .map(cover => ({ coverPath: cover.coverPath, from: cover.from * level,
-                             title: cover.title, subtitle: cover.subtitle, key: cover.key }))
+                             title: cover.title, key: cover.key }))
             .filter(cover => cover.from > 0)
         const key = root._coverKey(was)
         if (key !== root._coverKey(next)) {
@@ -725,8 +729,7 @@ Item {
             if (newest !== null && newest.key === key)
                 covers.pop()
             if (covers.length < root.maxOutgoingLayers)
-                covers.push({ coverPath: was.coverPath, from: 1, title: was.standInTitle,
-                              subtitle: was.standInSubtitle, key: key })
+                covers.push({ coverPath: was.coverPath, from: 1, title: was.standInTitle, key: key })
         }
         return covers
     }
@@ -738,8 +741,7 @@ Item {
             coverPath: root.coverPath,
             // From the tags themselves, as `standInTitle` is: a handler of
             // the lines runs before every binding on them has followed.
-            standInTitle: root.albumText.length > 0 ? root.albumText : root.titleText,
-            standInSubtitle: root.artistText,
+            standInTitle: root._standInTitle(root.albumText, root.titleText),
             lines: root.trackLines
         }
         const was = root.shown
@@ -905,8 +907,13 @@ Item {
     // characters of the font.
     readonly property real narrowLineMinimum: 12 * baseMetrics.averageCharacterWidth
     // How tall the four lines are beside the narrow cover, from its top.
-    readonly property real narrowLinesHeight: root.narrowTextTop + narrowTitleMetrics.height + 2
-        + 3 * narrowLineMetrics.height
+    readonly property real narrowLinesHeight: root.narrowTextTop + narrowTitleMetrics.height
+        + root.narrowTitleGap + 3 * narrowLineMetrics.height
+    // Beside the narrow cover, the gap between the title and the artist
+    // under it, which sets the title apart from the three small lines that
+    // are one group (#373 H12: 2 px, the same as between those, ran them
+    // together). The block stays the cover's height and the grid's.
+    readonly property int narrowTitleGap: 4
     // The lines go under the cover, on the whole width, where the room
     // beside it is under narrowLineMinimum, or where, in a narrow sidebar,
     // they would run well past the cover, as with a large font: there the
@@ -1343,15 +1350,14 @@ Item {
             // would change it after the change ends.
             coverSourceSize: Math.max(256, root.width)
             // No cover: the stand-in, on the plot's floor in the plot's
-            // text colours, which read on it in both themes.
+            // text colour, which reads on it in both themes, its title at
+            // the lines' inset.
             standInColor: root.uiPalette.plotFloor
             standInTextColor: root.uiPalette.spectrogramPlot.plotText
-            standInSecondaryTextColor: root.uiPalette.spectrogramPlot.plotTextSecondary
             standInTitle: root.standInTitle
-            standInSubtitle: root.standInSubtitle
             standInFont: root.uiPalette.baseFont
-            standInTitlePointSize: root.uiPalette.headingPointSize(1)
-            standInSmallPointSize: root.uiPalette.smallPointSize
+            standInInset: root.textInset
+            standInTitlePointSize: root.uiPalette.displayPointSize
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
             placeholderGlyphColor: root.placeholderMarkColor
@@ -1522,13 +1528,13 @@ Item {
                 maximumLineCount: 2
                 width: narrowColumn.width
             }
-            // Beside the cover, 2 px between the title and the artist; under
-            // it the column's spacing.
+            // Beside the cover, narrowTitleGap between the title and the
+            // artist; under it the column's spacing.
             Item {
                 visible: !root.narrowStacked
                     && (narrowArtist.visible || narrowAlbum.visible || narrowDetails.visible)
                 width: 1
-                height: 2
+                height: root.narrowTitleGap
             }
             FadingLine {
                 id: narrowArtist
