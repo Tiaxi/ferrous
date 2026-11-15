@@ -3687,12 +3687,12 @@ QRect WaveformEditorItem::lowestLaneHeadLocked(int height, int lanes) const {
 namespace {
 
 // The crosshair's readout of a level at `amplitude` of full scale:
-// "-12.5 dB", or "-∞ dB" for silence.
+// "−12.5 dB", or "−∞ dB" for silence, with the spectrogram's minus sign.
 QString crosshairLevel(double amplitude) {
     static const QString format = i18nc("@item:intext level in decibels", "%1 dB");
     return amplitude <= 0.00001
-        ? format.arg(QStringLiteral("-∞"))
-        : format.arg(20.0 * std::log10(amplitude), 0, 'f', 1);
+        ? format.arg(CrosshairReadout::minusInfinity())
+        : format.arg(CrosshairReadout::signedNumber(20.0 * std::log10(amplitude), 1));
 }
 
 } // namespace

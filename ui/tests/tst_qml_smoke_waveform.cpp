@@ -71,6 +71,7 @@ private slots:
     void waveformEditorCrosshairLabelsKeepApartInShortPlots();
     void waveformEditorCrosshairLabelsStayReadableInNarrowPlots();
     void waveformEditorDrawsNoCrosshairLabelItLeavesOut();
+    void waveformEditorLevelReadoutUsesTheMinusSign();
     void waveformOverlaysKeepClearOfTheReservedCorner();
     void waveformEditorSampleViewRepaintsCrosshairCleanly();
     void waveformEditorSampleViewUsesSmoothInterpolation();
@@ -2536,12 +2537,12 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsStayReadableInNarrowPlots()
     const QFontMetrics metrics(font);
     // The level changes with the pointer's height; whether it shows goes by
     // the widest it can be.
-    const QStringList levels{QStringLiteral("0.0 dB"), QStringLiteral("-6.0 dB"),
-                             QStringLiteral("-12.5 dB"), QStringLiteral("-100.0 dB"),
-                             QStringLiteral("-∞ dB")};
+    const QStringList levels{QStringLiteral("0.0 dB"), QStringLiteral("\u22126.0 dB"),
+                             QStringLiteral("\u221212.5 dB"), QStringLiteral("\u2212100.0 dB"),
+                             QStringLiteral("\u2212\u221e dB")};
     const int widestValue = std::max(
-        CrosshairReadout::widestDigitsWidth(QStringLiteral("-100.0 dB"), metrics),
-        CrosshairReadout::widestDigitsWidth(QStringLiteral("-∞ dB"), metrics));
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("\u2212100.0 dB"), metrics),
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("\u2212\u221e dB"), metrics));
     const int timeText = metrics.horizontalAdvance(QStringLiteral("0:28.980"));
     const int widestTime = CrosshairReadout::widestDigitsWidth(QStringLiteral("0:28.980"), metrics);
     const auto valueText = [&](int y) {
@@ -2592,14 +2593,36 @@ void WaveformSmokeTest::waveformEditorCrosshairLabelsStayReadableInNarrowPlots()
     }
 }
 
+// The waveform's level readout has the spectrogram's minus sign, U+2212,
+// not a hyphen (#373 H12: "-12.5 dB" beside the spectrogram's "−75 dB").
+void WaveformSmokeTest::waveformEditorLevelReadoutUsesTheMinusSign() {
+    QCOMPARE(CrosshairReadout::signedNumber(-12.46, 1), QStringLiteral("\u221212.5"));
+    QCOMPARE(CrosshairReadout::signedNumber(-0.04, 1), QStringLiteral("0.0"));
+    QCOMPARE(CrosshairReadout::signedNumber(3.0, 1), QStringLiteral("3.0"));
+    QCOMPARE(CrosshairReadout::signedNumber(-100.0, 1), QStringLiteral("\u2212100.0"));
+    QCOMPARE(CrosshairReadout::minusInfinity(), QStringLiteral("\u2212\u221e"));
+    // The readout's widest level is measured from what it draws: silence
+    // and -100 dB, with the minus sign, whose advance differs from the
+    // hyphen's.
+    const QFontMetrics metrics(CrosshairReadout::font());
+    const auto widest = [&metrics](const QString &minus) {
+        return std::max(CrosshairReadout::widestDigitsWidth(minus + QStringLiteral("100.0 dB"), metrics),
+                        CrosshairReadout::widestDigitsWidth(minus + QStringLiteral("\u221e dB"), metrics));
+    };
+    QVERIFY(widest(QStringLiteral("\u2212")) != widest(QStringLiteral("-")));
+    WaveformEditorItem item;
+    QMutexLocker lock(&item.m_stateMutex);
+    QCOMPARE(item.crosshairWidestLevelWidthLocked(), widest(QStringLiteral("\u2212")));
+}
+
 void WaveformSmokeTest::waveformEditorDrawsNoCrosshairLabelItLeavesOut() {
     // A plate the layout leaves out draws nothing: its text doesn't show
     // without its plate in the top left corner. At 180 px the level is left
     // out; at 120 px the time is too.
     const QFontMetrics metrics(CrosshairReadout::font());
     const int widestValue = std::max(
-        CrosshairReadout::widestDigitsWidth(QStringLiteral("-100.0 dB"), metrics),
-        CrosshairReadout::widestDigitsWidth(QStringLiteral("-∞ dB"), metrics));
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("\u2212100.0 dB"), metrics),
+        CrosshairReadout::widestDigitsWidth(QStringLiteral("\u2212\u221e dB"), metrics));
     const int widestTime = CrosshairReadout::widestDigitsWidth(QStringLiteral("0:00.000"), metrics);
     const QRect head(4, 3, 82, 26);
     constexpr int height = 27;

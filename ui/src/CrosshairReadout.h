@@ -261,4 +261,19 @@ inline void drawPlate(QPainter &painter, const QRect &rect, const QString &text,
     painter.restore();
 }
 
+// A readout's number with `decimals` decimals, its minus the typographic
+// minus sign (U+2212), as the plots' scale labels: "−12.5", "0.0", "3.0".
+// A value that rounds to zero has no sign.
+inline QString signedNumber(double value, int decimals) {
+    const double scale = std::pow(10.0, decimals);
+    const double rounded = std::round(value * scale) / scale;
+    const QString digits = QString::number(std::abs(rounded), 'f', decimals);
+    return rounded < 0.0 ? QStringLiteral("\u2212") + digits : digits;
+}
+
+// The level of silence: "−∞".
+inline QString minusInfinity() {
+    return QStringLiteral("\u2212\u221e");
+}
+
 } // namespace CrosshairReadout
