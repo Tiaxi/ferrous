@@ -516,6 +516,51 @@ auto useDarkPalette(bool dark) {
     return qScopeGuard([before]() { QGuiApplication::setPalette(before); });
 }
 
+// Why the wide now-playing block is not on the queue's row grid, or ""
+// (#373 H11): with the cover it is a whole number of the list's rows
+// high, so that the seam at its foot is on a line of the queue's rows; its
+// lines start 8 px under the cover, and what the grid leaves over is under
+// them, at least 8 px and less than that and a row.
+QString wideBlockProblem(QQuickWindow *window) {
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *title = named(window, "nowPlayingTitle");
+    QQuickItem *details = named(window, "nowPlayingDetails");
+    QQuickItem *header = named(window, "libraryHeader");
+    if (!panel || !cover || !seam || !title || !details || !header) {
+        return QStringLiteral("an item is missing");
+    }
+    if (panel->property("layoutMode").toString() != QStringLiteral("wide")
+        || panel->property("presence").toReal() != 1.0) {
+        return QStringLiteral("not the wide layout, whole");
+    }
+    const qreal rowHeight = paletteOf(window)->property("rowHeight").toReal();
+    const qreal block = sceneRect(seam).top() - sceneRect(cover).bottom();
+    const qreal rows = (cover->height() + block) / rowHeight;
+    if (std::abs(rows - std::round(rows)) > 0.001) {
+        return QStringLiteral("the cover and the %1 px block are %2 rows of %3 px").arg(block).arg(rows).arg(rowHeight);
+    }
+    if (std::abs(sceneRect(title).top() - sceneRect(cover).bottom() - 8.0) > 0.01) {
+        return QStringLiteral("the title %1 px under the cover").arg(sceneRect(title).top() - sceneRect(cover).bottom());
+    }
+    QQuickItem *last = shown(details) ? details : title;
+    for (const char *name : {"nowPlayingArtistAlbum", "nowPlayingWideAlbum"}) {
+        if (!shown(details) && shown(named(window, name))) {
+            last = named(window, name);
+        }
+    }
+    const qreal under = sceneRect(seam).top() - sceneRect(last).bottom();
+    if (under < 8.0 - 0.01 || under >= 8.0 + rowHeight) {
+        return QStringLiteral("%1 px under the lines").arg(under);
+    }
+    if (std::abs(sceneRect(seam).bottom() - sceneRect(header).top()) > 0.01
+        || std::abs(sceneRect(seam).bottom() - sceneRect(panel).bottom()) > 0.01) {
+        return QStringLiteral("the library is not right under the seam");
+    }
+    return {};
+}
+
 // The lines the panel shows, top to bottom: the sidebar's own, wide or
 // narrow, that have text.
 QList<QQuickItem *> shownLines(QQuickWindow *window) {
@@ -654,6 +699,8 @@ private slots:
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
+    void nowPlayingBlockIsOnTheQueuesRowGrid_data();
+    void nowPlayingBlockIsOnTheQueuesRowGrid();
     void nowPlayingDetailsAreOneColourAndNeverCutOff_data();
     void nowPlayingDetailsAreOneColourAndNeverCutOff();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize_data();
@@ -926,7 +973,9 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QQuickItem *details = named(window, "nowPlayingDetails");
     QVERIFY(title && artistAlbum && details);
     QCOMPARE(sceneRect(title).left() - sceneRect(panel).left(), 12.0);
-    QCOMPARE(sceneRect(title).top() - sceneRect(cover).bottom(), 12.0);
+    // 8 px under the cover (#373 H11: 12 px before the block was on the
+    // row grid; see nowPlayingBlockIsOnTheQueuesRowGrid).
+    QCOMPARE(sceneRect(title).top() - sceneRect(cover).bottom(), 8.0);
     QCOMPARE(title->property("text").toString(), QStringLiteral("Morning Tide Field"));
     QCOMPARE(artistAlbum->property("text").toString(), QStringLiteral("The Quiet Meridian — Small Hours"));
     QCOMPARE(details->property("text").toString(), QStringLiteral("2005 · Classical · Track 2 of 8"));
@@ -947,13 +996,10 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QCOMPARE(details->property("font").value<QFont>().pointSizeF(),
              palette->property("smallPointSize").toReal());
     QVERIFY(!panel->property("idle").toBool());
-    // Then 14 px, about 16 px under the details' text with their descent,
-    // and the seam into the library: two regions of one sheet, with no dead
-    // band between them (#373 H4).
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
-    const QFontMetricsF detailsMetrics(details->property("font").value<QFont>());
-    const qreal underText = sceneRect(seam).top() - (sceneRect(details).top() + detailsMetrics.ascent());
-    QVERIFY2(underText >= 14.0 && underText <= 20.0, qPrintable(QString::number(underText)));
+    // Then the seam into the library, the block with the cover a whole
+    // number of rows high (#373 H11): two regions of one sheet, with no
+    // dead band between them (#373 H4).
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(panel).bottom());
 
@@ -1070,7 +1116,7 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
 
     QQuickItem *seam = named(window, "nowPlayingSeam");
     QQuickItem *header = named(window, "libraryHeader");
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
 }
 
@@ -1329,6 +1375,85 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QCOMPARE(geometry(), withCover);
 }
 
+void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowHeight");
+    QTest::newRow("10 pt, 1600 by 1000") << 10.0 << 1000;
+    QTest::newRow("14 pt, 1600 by 1200") << 14.0 << 1200;
+    QTest::newRow("24 pt, 1600 by 1400") << 24.0 << 1400;
+}
+
+// The left column is on the queue's row grid (#373 H11): under the wide
+// cover, the now-playing text block is as high as makes it, with the
+// cover, a whole number of the list's rows, the queue's own row height,
+// at any font; so the seam at its foot and the hairline under the
+// library's header are on lines of the queue's rows. With the default
+// font and the 360 px sidebar the block is 82 px, three lines and their
+// spacing, and in the default window the library header's hairline
+// continues the seam between the queue and the visualization. The block
+// follows its lines, a whole row at a time: a file without tags, with the
+// one line, has a shorter one.
+void UiMainWindowTest::nowPlayingBlockIsOnTheQueuesRowGrid() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowHeight);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, windowHeight);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *palette = paletteOf(window);
+    QTRY_COMPARE(palette->property("basePointSize").toReal(), pointSize);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *header = named(window, "libraryHeader");
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QVERIFY(panel && cover && seam && header && queue);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
+    // The grid is the queue's: its rows are as high as the palette's.
+    const qreal rowHeight = palette->property("rowHeight").toReal();
+    QCOMPARE(queue->property("rowPitch").toReal(), rowHeight);
+    const qreal block = sceneRect(seam).top() - sceneRect(cover).bottom();
+    QCOMPARE(block, panel->property("wideBlockHeight").toReal());
+    // The header under it is a row, with its hairline at its foot: a
+    // whole number of rows and the seam's pixel under the column's top.
+    const qreal top = sceneRect(panel).top();
+    const qreal hairline = sceneRect(header).bottom() - top - 1;
+    QCOMPARE(std::fmod(hairline, rowHeight), 0.0);
+
+    if (pointSize == 10.0) {
+        QCOMPARE(rowHeight, 26.0);
+        QCOMPARE(cover->height(), 360.0);
+        QCOMPARE(block, 82.0);
+        // The default window: the queue's list ends on the same line, and
+        // the seam under it is the hairline's row of pixels.
+        const QList<QQuickItem *> handles = itemsNamed(window->contentItem(), QStringLiteral("seamHandle"));
+        QCOMPARE(handles.size(), 2);
+        QQuickItem *queueSeam = handles.at(0)->height() == 1.0 ? handles.at(0) : handles.at(1);
+        QCOMPARE(queueSeam->height(), 1.0);
+        QCOMPARE(sceneRect(queue).top(), top);
+        QCOMPARE(sceneRect(queueSeam).top(), sceneRect(header).bottom() - 1);
+        QCOMPARE(sceneRect(queueSeam).bottom(), sceneRect(header).bottom());
+    }
+
+    // A file without tags: its one line, and a block a whole number of
+    // rows shorter, on the grid still.
+    clearTrackTags(bridge);
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
+    const qreal bare = sceneRect(seam).top() - sceneRect(cover).bottom();
+    QVERIFY2(bare < block, qPrintable(QStringLiteral("%1 and %2").arg(bare).arg(block)));
+    QCOMPARE(std::fmod(block - bare, rowHeight), 0.0);
+}
+
 void UiMainWindowTest::nowPlayingDetailsAreOneColourAndNeverCutOff_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowHeight");
@@ -1557,7 +1682,7 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
         lastLine = albumLine;
     }
     QTRY_VERIFY(sceneRect(details).top() >= sceneRect(lastLine).bottom());
-    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 14.0);
+    QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
 
     // A track whose artist and album fit on one line goes back to it.
     bridge->setProperty("currentTrackArtist", QStringLiteral("Ash"));

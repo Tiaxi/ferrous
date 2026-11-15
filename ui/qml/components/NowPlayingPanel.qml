@@ -13,8 +13,10 @@ import "../logic/FormatUtils.js" as FormatUtils
 // card, and a seam at its foot, where the library starts.
 //
 // - Wide: the cover edge to edge, then the title, "Artist — Album" and
-//   "Year · Genre · Track n" under it, inset 12 px, then regionGap before
-//   the seam. Where "Artist — Album" would be cut off, as with a large
+//   "Year · Genre · Track n" under it, inset 12 px, in a block that with
+//   the cover is a whole number of the list's rows high (see
+//   wideTextTop), then the seam. Where "Artist — Album" would be cut off,
+//   as with a large
 //   font, the artist and the album take a line each, so the album is not
 //   lost to the ellipsis.
 // - Narrow (a sidebar under narrowWidth): a 96 px cover with four short
@@ -80,9 +82,9 @@ Item {
     // a track does not switch it.
     property real availableHeight: 0
     property real libraryReserve: 0
-    readonly property real wideReservedHeight: root.width + root.textInset
-        + wideTitleProbe.implicitHeight + 2 + wideLineProbe.implicitHeight + 2
-        + wideDetailsProbe.implicitHeight + root.regionGap + root.seamHeight
+    readonly property real wideReservedHeight: root.width + root._wideBlockHeight(
+        wideTitleProbe.implicitHeight + 2 + wideLineProbe.implicitHeight + 2
+        + wideDetailsProbe.implicitHeight) + root.seamHeight
     readonly property bool shortHeight: root.availableHeight > 0
         && root.availableHeight - root.wideReservedHeight < root.libraryReserve
     readonly property int textInset: 12
@@ -860,11 +862,24 @@ Item {
     readonly property real wideTitlePointSize: root.uiPalette.headingPointSize(1)
     readonly property real titlePointSize: root.uiPalette.headingPointSize(2)
 
-    // The space under the wide text block before the seam into the library,
-    // which sets the two apart as regions of one sheet: with the details'
-    // descent, about 16 px under their text, as the library's header has
-    // 12 px around its own (#373 H4; 28 px left a dead band).
-    readonly property int regionGap: 14
+    // The wide text block, under the cover, is on the queue's row grid
+    // (#373 H11): with the cover it is a whole number of the list's rows
+    // high, UiPalette's rowHeight, which the queue's rows are too, so that
+    // the seam at its foot and the hairline under the library's header
+    // fall on the lines of the queue's rows; with the default font and the
+    // 360 px sidebar the block is 82 px, and the header's hairline
+    // continues the seam between the queue and the visualization. The
+    // lines start `wideTextTop` under the cover, whatever the track, and
+    // what the grid leaves over is under them, at least `wideLeastGap`
+    // before the seam, which sets the panel and the library apart as
+    // regions of one sheet (#373 H4: 28 px there left a dead band).
+    readonly property int wideTextTop: 2 * Kirigami.Units.smallSpacing
+    readonly property int wideLeastGap: 2 * Kirigami.Units.smallSpacing
+    function _wideBlockHeight(linesHeight) {
+        const row = root.uiPalette.rowHeight
+        const least = root.width + root.wideTextTop + linesHeight + root.wideLeastGap
+        return row > 0 ? Math.ceil(least / row) * row - root.width : least - root.width
+    }
     // The 1 px seam at the panel's foot, where the library starts.
     readonly property int seamHeight: 1
     // The top of the lines beside the narrow cover.
@@ -981,8 +996,8 @@ Item {
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
             : Math.max(root.coverY + root.narrowCoverSize, root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
-    readonly property real wideLayoutHeight: root.width + root.textInset + liveText.wideHeight
-        + root.regionGap + root.seamHeight
+    readonly property real wideBlockHeight: root._wideBlockHeight(liveText.wideHeight)
+    readonly property real wideLayoutHeight: root.width + root.wideBlockHeight + root.seamHeight
     readonly property real layoutHeight: root.wideRoom ? root.wideLayoutHeight : root.narrowLayoutHeight
     // The compact row with nothing loaded, the block with a track, and
     // between them while one grows into the other.
@@ -1424,7 +1439,7 @@ Item {
             visible: root.wideRoom && !root.idle
             x: root.textInset
             // Under the cover's place, with which it moves while that grows.
-            y: root._whileGrowing(root.footTop + root.textInset)
+            y: root._whileGrowing(root.footTop + root.wideTextTop)
             width: Math.max(0, root.width - 2 * root.textInset)
             spacing: 2
 

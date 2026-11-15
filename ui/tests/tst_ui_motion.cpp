@@ -2836,7 +2836,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
                          || sceneRectOf(title.line()).top() >= sceneRectOf(row).bottom(),
                      qPrintable(where));
         } else {
-            QCOMPARE(sceneRectOf(title.line()).top(), sceneRectOf(area).bottom() + 12);
+            QCOMPARE(sceneRectOf(title.line()).top(), sceneRectOf(area).bottom() + 8);
         }
     }
     QVERIFY(QMetaObject::invokeMethod(growth, "resume"));
@@ -2931,7 +2931,11 @@ void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace() {
         QVERIFY2(step * travel >= 0, qPrintable(QString::number(index)));
         largest = std::max(largest, std::abs(step));
     }
-    QVERIFY2(largest <= 2 * rowHeight,
+    // Two rows, or the curve's own first frame where that is a hair more:
+    // an eighth of the way, which is under two rows up to sixteen rows of
+    // travel, as the default font's wide layout has on the row grid (#373
+    // H11); a smaller font's rows are a few more to the same cover.
+    QVERIFY2(largest <= std::max(2 * rowHeight, 0.125 * std::abs(travel)),
              qPrintable(QStringLiteral("%1 px in a frame of %2 px over %3 ms").arg(largest).arg(travel).arg(duration)));
     if (!narrow) {
         QVERIFY2(std::abs(travel) > 300, qPrintable(QString::number(travel)));
