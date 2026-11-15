@@ -47,9 +47,13 @@ Rectangle {
     // plot's data.
     property real standInMarkOpacity: 0.68
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
+    // The tile's size once in place: the now-playing panel keeps it while
+    // the tile grows or shrinks, so that the mark is neither drawn again
+    // at each size nor changed for the small one on the way.
+    property real layoutSize: Math.min(root.width, root.height)
     // A tile under ten grid units, such as the narrow layout's 96 px, has
     // the mark of two curves, drawn for its size.
-    readonly property bool standInCompact: Math.min(root.width, root.height) < 10 * Kirigami.Units.gridUnit
+    readonly property bool standInCompact: root.layoutSize < 10 * Kirigami.Units.gridUnit
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
@@ -140,9 +144,9 @@ Rectangle {
             height: Math.round(width / 2)
             source: root.standInCompact ? Qt.resolvedUrl("../assets/no-art-mark-small.svg")
                                         : Qt.resolvedUrl("../assets/no-art-mark.svg")
-            // Drawn at its size, so its strokes stay crisp.
-            sourceSize.width: width
-            sourceSize.height: height
+            // Drawn at its size in place, so its strokes stay crisp there.
+            sourceSize.width: Math.round(root.layoutSize * 2 / 3)
+            sourceSize.height: Math.round(root.layoutSize / 3)
             smooth: true
             cache: true
             opacity: root.standInMarkOpacity

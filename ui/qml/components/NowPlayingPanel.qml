@@ -1340,7 +1340,9 @@ Item {
 
     // The cover's place: the square, or, while the track's layout grows
     // from the compact row or shrinks back into it, a band of it from the
-    // row's height up, with the middle of the cover in it.
+    // row's height up, with the cover in the middle of it, square, as high
+    // as the band (#373 H14 F5: the middle of the whole cover, cut to the
+    // band, read as the cover squashed).
     Item {
         id: coverArea
         objectName: "nowPlayingCoverArea"
@@ -1356,10 +1358,14 @@ Item {
         Components.AlbumArtTile {
             id: cover
             objectName: "nowPlayingCover"
-            x: 0
-            y: Math.round((coverArea.height - cover.height) / 2)
-            width: root.coverSize
-            height: width
+            // Square at every point of the move, whole at its end.
+            readonly property real side: Math.min(root.coverSize, coverArea.height)
+            x: Math.round((root.coverSize - cover.side) / 2)
+            y: Math.round((coverArea.height - cover.side) / 2)
+            width: cover.side
+            height: cover.side
+            // Its stand-in drawn for the place's own size, through the move.
+            layoutSize: root.coverSize
             opacity: root.presence
             uiBridge: root.uiBridge
             idle: root.idle

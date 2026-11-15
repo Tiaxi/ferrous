@@ -2779,14 +2779,33 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QCOMPARE(growth->property("from").toDouble(), 0.0);
     QCOMPARE(growth->property("to").toDouble(), 1.0);
 
-    // Frame by frame: down, one way, from near where it was, to the end.
+    // Frame by frame: down, one way, from near where it was, to the end;
+    // the cover square in every frame, as high as its band and in the
+    // middle of it (#373 H14 F5: the whole cover cut to the band read as
+    // squashed).
     QList<double> tops;
+    QString unsquare;
+    const QMetaObject::Connection squareConnection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (!unsquare.isEmpty() || !area->isVisible()) {
+                return;
+            }
+            const QRectF band = sceneRectOf(area);
+            const QRectF tile = sceneRectOf(cover);
+            if (cover->width() != cover->height() || std::abs(tile.height() - band.height()) > 0.5
+                || std::abs(tile.center().x() - band.center().x()) > 0.5 || tile.top() < band.top() - 0.5) {
+                unsquare = QStringLiteral("%1x%2 in a %3x%4 band").arg(tile.width()).arg(tile.height())
+                               .arg(band.width()).arg(band.height());
+            }
+        });
     while (growth->property("running").toBool()) {
         QTest::qWait(5);
         if (libraryFollows(panel, header)) {
             tops.push_back(sceneRectOf(header).top());
         }
     }
+    QObject::disconnect(squareConnection);
+    QVERIFY2(unsquare.isEmpty(), qPrintable(unsquare));
     QVERIFY(panel->property("presence").toDouble() == 1.0);
     QTRY_VERIFY(libraryFollows(panel, header));
     const double full = panel->property("layoutHeight").toDouble();
@@ -2838,9 +2857,14 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         QCOMPARE(panel->height(), std::round(panel->height()));
         QVERIFY2(std::abs(area->height() - (rowHeight + (side - rowHeight) * at)) <= 0.5, qPrintable(where));
         QVERIFY2(qFuzzyCompare(cover->opacity(), at), qPrintable(where));
-        // The middle of the cover in its band.
-        QVERIFY2(std::abs(sceneRectOf(cover).center().y() - sceneRectOf(area).center().y()) <= 0.5,
+        // The cover square, as high as its band, in the middle of it.
+        QVERIFY2(cover->width() == cover->height()
+                     && std::abs(cover->height() - area->height()) <= 0.5
+                     && std::abs(sceneRectOf(cover).center().x() - sceneRectOf(area).center().x()) <= 0.5
+                     && std::abs(sceneRectOf(cover).center().y() - sceneRectOf(area).center().y()) <= 0.5,
                  qPrintable(where));
+        // Its stand-in's mark is drawn for the place's size all the way.
+        QCOMPARE(cover->property("layoutSize").toDouble(), side);
         QVERIFY2(area->clip(), qPrintable(where));
         QVERIFY2(qFuzzyCompare(1.0 + row->opacity(), 1.0 + std::max(0.0, 1.0 - 2.0 * at)), qPrintable(where));
         QCOMPARE(row->isVisible(), at < 0.5);
