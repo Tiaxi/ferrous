@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The mark for a track without a cover in a small tile, as the narrow layout's 96 px one: the glide and its 3rd harmonic of no-art-mark.svg, as the icon's small sizes draw them (#373 hill climb, H14 F2) -->
+<svg width="64" height="32" viewBox="0 0 64 32" xmlns="http://www.w3.org/2000/svg">
+  <path id="h3" fill="none" stroke="#e055b4" stroke-width="1.5" stroke-linecap="round" d="M1.50 21.88 C1.91 21.54 2.31 21.22 2.72 20.91 C3.33 20.44 3.94 19.99 4.55 19.57 C5.57 18.87 6.58 18.22 7.60 17.61 C9.02 16.78 10.45 16.02 11.87 15.31 C13.90 14.31 15.94 13.41 17.97 12.61 C20.61 11.55 23.26 10.62 25.90 9.78 C29.15 8.74 32.41 7.83 35.66 6.99 C39.73 5.95 43.79 5.03 47.86 4.20 C52.74 3.19 57.62 2.31 62.50 1.50"/>
+  <path id="fundamental" fill="none" stroke="#f2b035" stroke-width="2" stroke-linecap="round" d="M1.50 30.50 C1.91 30.39 2.31 30.28 2.72 30.18 C3.33 30.02 3.94 29.87 4.55 29.73 C5.57 29.50 6.58 29.28 7.60 29.08 C9.02 28.80 10.45 28.55 11.87 28.31 C13.90 27.98 15.94 27.68 17.97 27.41 C20.61 27.06 23.26 26.75 25.90 26.46 C29.15 26.12 32.41 25.81 35.66 25.54 C39.73 25.19 43.79 24.89 47.86 24.61 C52.74 24.27 57.62 23.98 62.50 23.70"/>
+</svg>

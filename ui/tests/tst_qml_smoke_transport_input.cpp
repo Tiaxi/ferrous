@@ -23,6 +23,7 @@ private slots:
     void visualizationModeSwitchStaysClearOfTheCornerOverlays();
     void visualizationModeSwitchShowsOnlyWithThePointerOrFocus();
     void visualizationModeSwitchShowsBeforeAnyAudio();
+    void paneAtRestIsAStereoInstrument();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenStripHidesWhatTheViewDrawsUnderIt();
@@ -985,9 +986,10 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsOnlyWithThePointerOrFo
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
 }
 
-// Before any audio the pane is its bare floor, with no message, and the
-// mode switch shows in its corner without the pointer, so a mode can be
-// picked first. There are no lanes: no labels, no Mute and Solo.
+// Before any audio the pane is at rest, with no message, and the mode
+// switch shows in its corner without the pointer, so a mode can be picked
+// first. Per channel, its lanes are a stereo track's, named L and R, with
+// no Mute and Solo, as there is nothing to mute (#373 H14 F3).
 void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1018,9 +1020,24 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     const QRectF plate = sceneRectOf(modeSwitch);
     QCOMPARE(plate.top() - pane.top(), 4.0);
     QCOMPARE(pane.right() - plate.right(), 4.0);
-    // No message on the plot, and no lanes to label.
+    // No message on the plot; a stereo track's lanes, named, without
+    // Mute and Solo.
     QVERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotAnalysingText")) == nullptr);
-    QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 0);
+    const auto restLanes = [&]() -> QString {
+        const QList<QQuickItem *> heads = visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead"));
+        QStringList labels;
+        for (QQuickItem *head : heads) {
+            labels.push_back(head->property("label").toString());
+        }
+        if (labels != QStringList{QStringLiteral("L"), QStringLiteral("R")}) {
+            return QStringLiteral("lanes %1").arg(labels.join(QLatin1Char(',')));
+        }
+        if (!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()) {
+            return QStringLiteral("Mute and Solo show");
+        }
+        return {};
+    };
+    QTRY_VERIFY2(restLanes().isEmpty(), qPrintable(restLanes()));
 
     // It works: a click picks the waveform, which still has no lanes.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(waveformButton).center().toPoint());
@@ -1034,7 +1051,7 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QVERIFY(waveformButton->property("checked").toBool());
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
-    QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 0);
+    QTRY_VERIFY2(restLanes().isEmpty(), qPrintable(restLanes()));
     // And back.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, sceneRectOf(spectrogramButton).center().toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 0);
@@ -1042,12 +1059,105 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
 
     // Once a track plays, the switch steps back to the pointer, and the
-    // waveform's lanes have their labels.
+    // waveform's lanes have their labels, with Mute and Solo.
     setPlayingTrack(bridge);
     QTRY_COMPARE(modeSwitch->opacity(), 0.0);
     viewer->setProperty("visualizationMode", 1);
     QTRY_VERIFY(waveform->isVisible());
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).isEmpty());
+    QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty());
+}
+
+// The pane at rest, before any audio, is an instrument waiting (#373 H14
+// F3, P23): each lane draws its frequency scale's lines faintly, the
+// scale's labels only while the scale shows; per channel it has a stereo
+// track's lanes, with the 1 px seam between them at mid-height, and mixed
+// one lane, unnamed, as a stereo track's would be. The first track's
+// columns come into those lanes: a stereo track keeps them, with nothing
+// laid out again. The waveform at rest has the same lanes.
+void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && spectrogram && waveformSurface);
+    QCOMPARE(bridge->property("currentTrackPath").toString(), QString());
+    QVERIFY(bridge->setProperty("showLevelMeter", false));
+    QVERIFY(bridge->setProperty("showSpectrogramScale", false));
+    const auto panes = [&]() {
+        QList<SpectrogramItem *> found;
+        for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+            found.push_back(qobject_cast<SpectrogramItem *>(item));
+        }
+        return found;
+    };
+    // Each lane's rest grid: lines, and labels only with the scale.
+    const auto restProblem = [&](bool labels) -> QString {
+        for (SpectrogramItem *pane : panes()) {
+            QMutexLocker lock(&pane->m_stateMutex);
+            if (!pane->m_restGrid.valid || pane->m_restGrid.lines.isEmpty()) {
+                return QStringLiteral("a lane without its rest lines");
+            }
+            if (pane->m_restGrid.images.isEmpty() == labels) {
+                return QStringLiteral("a lane's labels %1").arg(labels ? "missing" : "shown");
+            }
+        }
+        return {};
+    };
+
+    // Mixed: one lane, unnamed, with its lines.
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 0));
+    QTRY_COMPARE(panes().size(), 1);
+    QCOMPARE(spectrogram->property("laneCount").toInt(), 1);
+    QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
+    QCOMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 0);
+
+    // Per channel: a stereo track's two lanes, L and R, with the seam
+    // between them at mid-height, each with its lines.
+    QVERIFY(bridge->setProperty("spectrogramViewMode", 1));
+    QTRY_COMPARE(panes().size(), 2);
+    QCOMPARE(spectrogram->property("laneLabels").toStringList(),
+             (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
+    QTRY_COMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).size(), 2);
+    QVERIFY(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty());
+    const QRectF upper = sceneRectOf(panes().at(0));
+    const QRectF lower = sceneRectOf(panes().at(1));
+    const QRectF pane = sceneRectOf(spectrogram);
+    QCOMPARE(lower.top() - upper.bottom(), 1.0);
+    QVERIFY(std::abs((upper.bottom() + lower.top()) / 2 - pane.center().y()) <= 1.0);
+    QQuickItem *seams = itemsNamed(spectrogram, QStringLiteral("spectrogramLaneSeams")).value(0);
+    QVERIFY(seams != nullptr && seams->isVisible());
+    QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
+    // The scale shown: its labels too.
+    QVERIFY(bridge->setProperty("showSpectrogramScale", true));
+    QTRY_VERIFY2(restProblem(true).isEmpty(), qPrintable(restProblem(true)));
+    QVERIFY(bridge->setProperty("showSpectrogramScale", false));
+    QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
+
+    // The waveform at rest: the same two lanes, named.
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    QCOMPARE(waveformSurface->property("laneCount").toInt(), 2);
+    QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
+             (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
+    viewer->setProperty("visualizationMode", 0);
+    QTRY_VERIFY(spectrogram->isVisible() && spectrogram->opacity() == 1.0);
+
+    // A stereo track: its columns come into the lanes at rest, which stay.
+    const QList<SpectrogramItem *> before = panes();
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackChannels", 2);
+    QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
+                                      Q_ARG(int, 2), Q_ARG(bool, true)));
+    QCOMPARE(panes(), before);
+    QCOMPARE(sceneRectOf(panes().at(0)), upper);
+    QCOMPARE(sceneRectOf(panes().at(1)), lower);
+    QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()
+                || bridge->property("channelButtonsVisibility").toInt() == 0);
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {

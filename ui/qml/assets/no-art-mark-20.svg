@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The library's mark for an album without a cover, on its 20 px tile, drawn on the pixel grid inside the tile's 1 px edge: the glide, a 2 px stair, under its 3rd harmonic, a 1 px line, 2 clear rows apart at their common start and 6 at the end, the harmonic rising three rows for each of the glide's (no-art-mark.svg, as the icon's 16 px size draws it; #373 hill climb, H14 F2) -->
+<svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+  <path id="h3" fill="#e055b4" d="M3 11h1v1h-1z M4 10h1v1h-1z M5 9h1v1h-1z M6 8h2v1h-2z M8 7h2v1h-2z M10 6h3v1h-3z M13 5h4v1h-4z"/>
+  <path id="fundamental" fill="#f2b035" d="M3 14h3v2h-3z M6 13h5v2h-5z M11 12h6v2h-6z"/>
+</svg>

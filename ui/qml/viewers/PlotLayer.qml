@@ -184,7 +184,9 @@ Item {
             compact: root.laneHeight(index) < root.compactLaneHeight
             muted: (root.uiBridge.mutedChannels || [])[index] === true
             soloed: (root.uiBridge.soloedChannels || [])[index] === true
-            buttonsVisibility: root.uiBridge.channelButtonsVisibility
+            // Before any audio the lanes at rest are named, with nothing
+            // to mute or solo yet.
+            buttonsVisibility: root.beforeAudio ? 0 : root.uiBridge.channelButtonsVisibility
             controlsShown: root.controlsVisible
             controlsLevel: root.controlsLevel
             revealedWithControls: root.controlsAutoHide

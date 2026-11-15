@@ -355,6 +355,7 @@ private slots:
     void modeSwitchSegmentsAreCheckableRadioButtons();
     void visualizationsHaveAccessibleRoles();
     void laneButtonsAreTabStopsThatRevealThemselves();
+    void laneButtonsAreCheckableToggles();
     void levelMeterReservesItsColumnAndReadsOut();
     void plotLayerDrawsWithContrast();
     void plotLayerShowsThePaneStates();
@@ -3702,6 +3703,28 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         QVERIFY2(contrastRatio(drawn, plate) >= 1.4,
                  qPrintable(QStringLiteral("%1 on %2").arg(drawn.name(), plate.name())));
     }
+    // The chosen one's 1 px edge, inside it, at 3:1 or more on the plate
+    // and on its fill, as drawn (#373 H14 F4: the fill alone was 1.4 to
+    // 1.7:1), in both modes' plot colours.
+    const auto edgeProblem = [&](QQuickItem *chosen, QQuickItem *other) -> QString {
+        QQuickItem *edge = chosen->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
+        QQuickItem *otherEdge = other->findChild<QQuickItem *>(QStringLiteral("plotToolButtonCheckedEdge"));
+        if (edge == nullptr || !edge->isVisible() || otherEdge == nullptr || otherEdge->isVisible()) {
+            return QStringLiteral("the edge does not show on the chosen one alone");
+        }
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const QColor line = drawnAt(image, window, chosen, QPointF(chosen->width() / 2, 0.5));
+        // The fill between the edge and the glyph.
+        const QColor fill = drawnAt(image, window, chosen, QPointF(chosen->width() / 2, 2.5));
+        const QColor plate = drawnAt(image, window, other, QPointF(other->width() - 2.5, 2.5));
+        if (contrastRatio(line, plate) < 3.0 || contrastRatio(line, fill) < 3.0) {
+            return QStringLiteral("edge %1 on plate %2 and fill %3").arg(line.name(), plate.name(), fill.name());
+        }
+        return {};
+    };
+    QVERIFY2(edgeProblem(spectrogramButton, waveformButton).isEmpty(),
+             qPrintable(edgeProblem(spectrogramButton, waveformButton)));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                       waveformButton->mapToScene(QPointF(12, 12)).toPoint());
     QTRY_COMPARE(viewer->property("visualizationMode").toInt(), 1);
@@ -3711,6 +3734,8 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     QTest::mouseMove(window, QPoint(20, 20));
     QTRY_VERIFY2(neutralPlate(waveformButton, spectrogramButton, 1).isEmpty(),
                  qPrintable(neutralPlate(waveformButton, spectrogramButton, 1)));
+    QTRY_VERIFY2(edgeProblem(waveformButton, spectrogramButton).isEmpty(),
+                 qPrintable(edgeProblem(waveformButton, spectrogramButton)));
     // Space on the focused button sets the mode rather than playing.
     QVERIFY(tabTo(window, spectrogramButton));
     QTest::keyClick(window, Qt::Key_Space);
@@ -3761,9 +3786,12 @@ QQuickItem *plotLayerOf(QQuickWindow *window) {
     return window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
 }
 
-// Two labelled lanes on the plot layer, as a stereo track's.
+// Two labelled lanes on the plot layer, as a stereo track's, with a track
+// loaded: before any audio, the lanes at rest have no Mute and Solo.
 bool showStereoLanes(QQuickItem *layer) {
-    return layer->setProperty("laneCount", 2)
+    QObject *bridge = qvariant_cast<QObject *>(layer->property("uiBridge"));
+    return bridge != nullptr && bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/track.flac"))
+        && layer->setProperty("laneCount", 2)
         && layer->setProperty("laneLabels", QVariantList{QStringLiteral("L"), QStringLiteral("R")});
 }
 }
@@ -3817,6 +3845,62 @@ void AccessibilityTest::laneButtonsAreTabStopsThatRevealThemselves() {
     QVERIFY(bridge->setProperty("channelButtonsVisibility", 0));
     QTRY_VERIFY(!plates[0]->isVisible());
     QVERIFY(!mutes[0]->isVisible());
+}
+
+// A lane's Mute and Solo tell assistive technology that they are toggles
+// and whether each is on (#373 H14 F6: only "focused, focusable" reached
+// it). What they show is the lane's state: a click asks for the change
+// and leaves the button as the lane is until the lane changes.
+void AccessibilityTest::laneButtonsAreCheckableToggles() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *layer = plotLayerOf(window);
+    QVERIFY(layer != nullptr);
+    QVERIFY(showStereoLanes(layer));
+    QList<QQuickItem *> heads;
+    QTRY_COMPARE((heads = itemsNamed(layer, QStringLiteral("plotLaneHead"))).size(), 2);
+    QQuickItem *mute = itemsNamed(heads[0], QStringLiteral("plotLaneMuteButton")).value(0);
+    QQuickItem *solo = itemsNamed(heads[1], QStringLiteral("plotLaneSoloButton")).value(0);
+    QVERIFY(mute != nullptr && solo != nullptr);
+    const auto problem = [&](QQuickItem *button, bool on) -> QString {
+        QAccessibleInterface *iface = inAccessibleTree(window, button);
+        if (iface == nullptr) {
+            return QStringLiteral("%1 is not in the tree").arg(button->objectName());
+        }
+        if (iface->role() != QAccessible::CheckBox) {
+            return QStringLiteral("%1 is a %2").arg(button->objectName()).arg(int(iface->role()));
+        }
+        const QAccessible::State state = iface->state();
+        if (!state.checkable) {
+            return QStringLiteral("%1 is not checkable").arg(button->objectName());
+        }
+        if (bool(state.checked) != on || button->property("checked").toBool() != on) {
+            return QStringLiteral("%1 checked %2").arg(button->objectName()).arg(bool(state.checked));
+        }
+        return {};
+    };
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+    QTRY_VERIFY2(problem(solo, false).isEmpty(), qPrintable(problem(solo, false)));
+
+    // The lane muted, and the other soloed: each says so.
+    QVERIFY(heads[0]->setProperty("muted", true));
+    QVERIFY(heads[1]->setProperty("soloed", true));
+    QTRY_VERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QTRY_VERIFY2(problem(solo, true).isEmpty(), qPrintable(problem(solo, true)));
+
+    // A click asks the lane to change, and the button stays as the lane
+    // is, which this test's bridge leaves alone; it still follows the lane.
+    QVERIFY(layer->setProperty("hoveredLane", 0));
+    QQuickItem *plate = itemsNamed(heads[0], QStringLiteral("plotLaneButtons")).value(0);
+    QTRY_COMPARE(plate->opacity(), 1.0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      mute->mapToScene(QPointF(mute->width() / 2, mute->height() / 2)).toPoint());
+    QTest::qWait(50);
+    QVERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
+    QVERIFY(heads[0]->setProperty("muted", false));
+    QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
 }
 
 void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {
@@ -3976,7 +4060,9 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // fill), its glyph whole on it and the other's on the switch's
         // plate; and the focus ring.
         const QColor switchFill = drawnAt(image, window, switchPlate, QPointF(1.0, switchPlate->height() / 2));
-        const QColor fill = drawnAt(image, window, checked, QPointF(2.5, 2.5));
+        // Between its 1 px edge (#373 H14 F4), rounded at the corners, and
+        // its glyph.
+        const QColor fill = drawnAt(image, window, checked, QPointF(checked->width() / 2, 2.5));
         QVERIFY2(contrastRatio(fill, switchFill) >= 1.4,
                  qPrintable(QStringLiteral("%1 checked: %2").arg(what).arg(contrastRatio(fill, switchFill))));
         QQuickItem *checkedGlyph = checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"));

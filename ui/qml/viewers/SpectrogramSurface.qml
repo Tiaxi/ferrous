@@ -180,9 +180,27 @@ Item {
         return result
     }
 
+    // Before any track the pane is at rest, as an instrument waiting
+    // (#373 H14 F3, P23): its lanes are those of a stereo track, so that
+    // the first one's columns come in where it already is, each with its
+    // rest lines; per channel, two named lanes with the seam between them,
+    // and mixed, one. A track's own lanes replace them as its columns come.
+    readonly property bool atRest: (root.uiBridge.currentTrackPath || "").length === 0
     function placeholderDescriptors() {
-        return descriptorsForChannelCount(0)
+        return descriptorsForChannelCount(root.atRest && root.uiBridge.spectrogramViewMode === 1 ? 2 : 0)
     }
+    function followRest() {
+        if (!root.atRest) {
+            return
+        }
+        const next = root.placeholderDescriptors()
+        if (!root.sameDescriptors(next)) {
+            root.channelDescriptors = next
+        }
+    }
+    // What the lanes at rest follow.
+    readonly property var restInputs: [root.atRest, root.uiBridge.spectrogramViewMode]
+    onRestInputsChanged: root.followRest()
 
     function notePointerActivity(x, y) {
         if (root.pointerActivity) {

@@ -99,14 +99,18 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     // Whether the item has its source's picture: a frame of it has drawn
     // the waveform, from the overview or the detail, or has drawn without
     // it while no detail is on its way, as for a file that cannot be read.
-    // False from a change of source until then: what shows the item over
+    // False from a change of source, and from when the item stops being
+    // shown, until then: what shows the item over
     // something else, such as the visualization's mode switch over the
     // spectrogram, waits for it rather than show the bare floor (#373 H11:
     // the per-channel view, which the overview has no lanes for, was empty
     // for 80 to 170 ms, until its detail was decoded). A frame of the
     // overview where it is not to the detail's scale, as in the mixed view
     // of a source of more than one channel, is not the picture while the
-    // detail is on its way (see overviewProvisionalLocked).
+    // detail is on its way (see overviewProvisionalLocked), nor is detail
+    // that covers only part of the view. Hidden, the item keeps the detail
+    // it has (#373 H14): shown again, it has the picture at once when that
+    // detail covers the view at its resolution, as its next frame draws.
     Q_PROPERTY(bool pictureReady READ pictureReady NOTIFY pictureReadyChanged)
 
 public:
@@ -721,8 +725,9 @@ private:
     QImage m_cache;
     bool m_cacheDirty{true};
     // Whether the cache holds a waveform, rather than the bare floor, and
-    // whether that is the overview at a scale that is not the picture's
-    // (overviewProvisionalLocked).
+    // whether it stands in for the view's detail: the overview at a scale
+    // that is not the picture's (overviewProvisionalLocked), or detail of
+    // another zoom or of part of the view.
     bool m_cacheShowsWaveform{false};
     bool m_cacheWaveformProvisional{false};
     // Whether a frame has been painted for the source, and whether one of

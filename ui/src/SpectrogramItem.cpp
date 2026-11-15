@@ -139,8 +139,8 @@ const QColor kScaleTextColor(0xec, 0xec, 0xec);
 const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
-// The lane at rest, before it has columns, while the scale shows: a line
-// across it at each of the scale's ticks in white 8%, and the scale's text
+// The lane at rest, before it has columns: a line across it at each of the
+// scale's ticks in white 8%, and while the scale shows, the scale's text
 // in plotTextSecondary.
 const QColor kRestGridLineColor(255, 255, 255, 20);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
@@ -6286,11 +6286,6 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
         return;
     }
     m_restGrid.valid = true;
-    // With the scale hidden, the floor is plain: lines without the labels
-    // that say what they are read as noise (#373 H10 P18).
-    if (!m_gridEnabled) {
-        return;
-    }
     // The bins and rows a session at the analysis's settings will have at
     // the lane's rate, for the ticks the scale will then show (#373 H6 P6).
     const int bins = shownFrequencyBins(m_analysisFftSize, m_sampleRateHz, m_frequencyCap);
@@ -6300,11 +6295,15 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     const int lineWidth = deviceLineWidth(scale);
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, frequencyScaleTopClearanceLocked())) {
-        // Across the lane, where the scale's tick is, and the label over it
-        // where the scale's goes.
+        // Across the lane, where the scale's tick is, with the scale hidden
+        // too: the pane at rest is an instrument waiting, not a hole
+        // (#373 H14 F3, P23; H10 P18 left the floor plain). The label over
+        // it, where the scale's goes, only with the scale shown.
         m_restGrid.lines.push_back(QRect(0, tick.pixelY, width, lineWidth));
-        m_restGrid.images.push_back(
-            {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
+        if (m_gridEnabled) {
+            m_restGrid.images.push_back(
+                {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});
+        }
     }
     nameOverlayImagesLocked(m_restGrid);
 }

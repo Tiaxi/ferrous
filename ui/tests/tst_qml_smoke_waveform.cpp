@@ -3036,7 +3036,8 @@ Window {
         id: bridge
         objectName: "waveformBridge"
         property string playbackState: "Stopped"
-        property string currentTrackPath: ""
+        // A track: before any audio the lanes at rest have no Mute and Solo.
+        property string currentTrackPath: "/fixture/track.flac"
         property var waveformPeaksPacked: ""
         property real waveformCoverageSeconds: 0
         property bool waveformComplete: false
@@ -3477,11 +3478,74 @@ void WaveformSmokeTest::modeSwitchKeepsTheSpectrogramUntilTheWaveformHasItsPictu
     QVERIFY2(failure.isEmpty(), qPrintable(failure));
     QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
 
-    // Hidden again, it gives the track up, and its picture with it: the
-    // next switch waits for a frame of its own.
+    // Hidden again, it keeps the track and its detail, and gives its
+    // picture up: the view moves on with playback while it is hidden.
     QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
     QTRY_VERIFY(!waveformSurface->isVisible());
     QVERIFY(!waveform->pictureReady());
+    QCOMPARE(waveform->sourcePath(), QStringLiteral("/fixture/stereo.flac"));
+    QCOMPARE(waitsForDetail && decodes, waveform->m_detail.pointCount > 0);
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    // Any decode still held, as the mono track's, goes through.
+    gate->release(64);
+
+    // Back to the waveform (#373 H14: it waited about 200 ms for a fresh
+    // decode, and mixed, showed the overview's slab for another 116 ms):
+    // with its detail kept, its first frame is the picture, and it comes
+    // in a frame or two after the click, without decoding again.
+    const int decodesBefore = started->load();
+    int framesToShow = -1;
+    const int clickFrame = frames;
+    const QMetaObject::Connection shownConnection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (framesToShow < 0 && waveformSurface->isVisible() && waveformSurface->opacity() > 0.0) {
+                framesToShow = frames - clickFrame;
+            }
+        });
+    QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+    if (waitsForDetail && decodes) {
+        // Its detail covers the view: the frame it draws next is the
+        // picture, and the cross-fade starts at the click.
+        QVERIFY(waveform->pictureReady());
+        QVERIFY(fade->property("running").toBool() || !surface->property("modeSwitching").toBool());
+    }
+    QTRY_VERIFY(waveform->pictureReady());
+    QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+    QVERIFY(waitFrames(1));
+    QObject::disconnect(shownConnection);
+    QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    if (waitsForDetail && decodes) {
+        QCOMPARE(started->load(), decodesBefore);
+        // The first frame draws it at 0, as a fade starts; the next one
+        // shows it (one more for a loaded machine's software rendering).
+        QVERIFY2(framesToShow >= 0 && framesToShow <= 4,
+                 qPrintable(QStringLiteral("the waveform came in %1 frames after the click")
+                                .arg(framesToShow)));
+    }
+
+    if (waitsForDetail && decodes) {
+        // A new track while it is hidden: the detail and picture of the
+        // one before never show for it. The switch waits for its own.
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0)));
+        QTRY_VERIFY(!waveformSurface->isVisible());
+        while (gate->tryAcquire()) {
+        }
+        bridge->setProperty("currentTrackPath", QStringLiteral("/fixture/next.flac"));
+        QCOMPARE(waveform->sourcePath(), QStringLiteral("/fixture/next.flac"));
+        QCOMPARE(waveform->m_detail.pointCount, 0);
+        QVERIFY(!waveform->pictureReady());
+        QVERIFY(QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1)));
+        QTRY_COMPARE(started->load(), decodesBefore + 1);
+        QVERIFY(waitFrames(4));
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
+        QVERIFY(!waveform->pictureReady());
+        QCOMPARE(waveformSurface->opacity(), 0.0);
+        QCOMPARE(spectrogramSurface->opacity(), 1.0);
+        gate->release(64);
+        QTRY_VERIFY(waveform->pictureReady());
+        QTRY_VERIFY(!surface->property("modeSwitching").toBool());
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
+    }
     QObject::disconnect(connection);
 }
 
@@ -3566,7 +3630,9 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
                 QTRY_VERIFY(!waveform->crosshairEnabled());
 
                 QSignalSpy controlsChanged(autoHide, SIGNAL(controlsVisibleChanged()));
-                const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 0);
+                // Off the middle row, where per channel the seam between
+                // two lanes is.
+                const QPoint at = sceneRectOf(surface).center().toPoint() + QPoint(++nudge, 8);
                 QTest::mouseMove(host, at);
                 QTRY_VERIFY2(!controlsChanged.isEmpty(), qPrintable(where));
                 autoHide->setProperty("hideDelay", 5000);
@@ -3581,10 +3647,18 @@ void WaveformSmokeTest::pointerOverTheViewBringsTheViewerControlsBack() {
                     QTest::mouseClick(host, Qt::RightButton, Qt::NoModifier, at);
                     QTRY_COMPARE(seeks.count(), 1);
                 } else {
-                    auto *spectrogram = qobject_cast<SpectrogramItem *>(firstVisibleItemNamed(
-                        spectrogramSurface, QStringLiteral("spectrogramPaneItem")));
-                    QVERIFY(spectrogram != nullptr);
-                    QTRY_VERIFY(spectrogram->m_hoverActive);
+                    // The lane under the pointer: per channel, before any
+                    // audio, the lower of a stereo track's two.
+                    const auto laneHovered = [&]() {
+                        for (QQuickItem *item : itemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+                            auto *spectrogram = qobject_cast<SpectrogramItem *>(item);
+                            if (spectrogram != nullptr && spectrogram->isVisible() && spectrogram->m_hoverActive) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    QTRY_VERIFY2(laneHovered(), qPrintable(where));
                 }
             }
         }

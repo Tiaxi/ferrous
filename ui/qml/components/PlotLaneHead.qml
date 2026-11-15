@@ -111,10 +111,14 @@ Item {
             glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of mute", "M")
             text: I18n.i18nc("@action:button %1 is a channel", "Mute %1", root.label)
+            // Checkable, so that assistive technology hears it is a toggle
+            // and whether it is on (#373 H14 F6: the accessible state's
+            // checkable alone, set over a button that is not, was lost).
+            // The lane's state is what it shows: a click's own toggle goes
+            // back to it, which the click then changes.
+            checkable: true
             checked: root.muted
-            Accessible.role: Accessible.CheckBox
-            Accessible.checkable: true
-            Accessible.checked: checked
+            onToggled: muteButton.checked = Qt.binding(function() { return root.muted })
             Accessible.onPressAction: root.toggleMute()
             onClicked: root.toggleMute()
         }
@@ -129,10 +133,14 @@ Item {
             glyphPointSize: root.glyphPointSize
             glyphText: I18n.i18nc("@action:button one-letter abbreviation of solo", "S")
             text: I18n.i18nc("@action:button %1 is a channel", "Solo %1", root.label)
+            // Checkable, so that assistive technology hears it is a toggle
+            // and whether it is on (#373 H14 F6: the accessible state's
+            // checkable alone, set over a button that is not, was lost).
+            // The lane's state is what it shows: a click's own toggle goes
+            // back to it, which the click then changes.
+            checkable: true
             checked: root.soloed
-            Accessible.role: Accessible.CheckBox
-            Accessible.checkable: true
-            Accessible.checked: checked
+            onToggled: soloButton.checked = Qt.binding(function() { return root.soloed })
             Accessible.onPressAction: root.toggleSolo()
             onClicked: root.toggleSolo()
         }

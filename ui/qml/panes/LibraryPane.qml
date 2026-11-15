@@ -51,22 +51,21 @@ Rectangle {
     readonly property int chevronGap: 6
     readonly property int thumbnailSize: 20
     readonly property int thumbnailGap: 8
-    // An album without a cover, or whose cover failed to load: the glyph
-    // the search's results show for one, Breeze's audio disc, 16 px, in the
-    // tertiary text colour, centred in the thumbnail's place, so its name
-    // lines up with its neighbours' and no hole is left (#373 H10), and the
-    // lists have one way to say "no cover" (#373 H12 Z2: the plot floor's
-    // indigo swatch, at about 1:1 on the view, read as a cover that failed
-    // to load; a grey box, before, as a control). A cover that has not
-    // loaded yet has the hover tint for the moment it takes, so that rows
-    // coming into view do not flash the glyph before their covers.
-    readonly property string thumbnailPlaceholderGlyph: "media-optical-audio"
-    readonly property int thumbnailPlaceholderGlyphSize: Kirigami.Units.iconSizes.small
+    // An album without a cover, or whose cover failed to load: the
+    // now-playing stand-in's mark, drawn for 20 px, on a tile of the plot's
+    // floor with a 1 px edge, in the thumbnail's place, so its name lines
+    // up with its neighbours' and the app has one way to say "no cover"
+    // (#373 H14 F2; H12 Z2: the floor's swatch alone, at about 1:1 on the
+    // view, read as a cover that failed to load; H13: Breeze's audio disc
+    // glyph). A cover that has not loaded yet has the hover tint for the
+    // moment it takes, so that rows coming into view do not flash the
+    // mark before their covers.
+    readonly property url thumbnailPlaceholderMark: Qt.resolvedUrl("../assets/no-art-mark-20.svg")
     readonly property color thumbnailLoadingColor: root.uiPalette.hover
-    // No fill under the glyph: the loading tint, wholly transparent, so
-    // that the fill changes as a cover loads, which the thumbnail repaints
-    // on (Kirigami's ShadowedTexture does not for its image alone under
-    // the software renderer).
+    // No fill of the thumbnail's own under the tile: the loading tint,
+    // wholly transparent, so that the fill changes as a cover loads, which
+    // the thumbnail repaints on (Kirigami's ShadowedTexture does not for
+    // its image alone under the software renderer).
     readonly property color thumbnailMissingColor: ColorUtils.withAlpha(root.thumbnailLoadingColor, 0)
     // The year, and a library folder's track count, 4 px in from the
     // text's right end (#373 H11), clear of the scrollbar.
@@ -632,20 +631,32 @@ Rectangle {
                                 sourceSize.height: Math.ceil(root.thumbnailSize * Screen.devicePixelRatio)
                             }
 
-                            // An album without a cover: the disc glyph,
-                            // centred in the thumbnail's place. Its source
-                            // never changes, as a recycled row's would on
-                            // every scroll, which looks the icon up again.
-                            Kirigami.Icon {
+                            // An album without a cover: the no-art tile in
+                            // the thumbnail's place. Its mark's source never
+                            // changes, as a recycled row's would on every
+                            // scroll, which would load it again.
+                            Rectangle {
                                 objectName: "libraryRowCoverPlaceholder"
                                 visible: libraryRow.showsThumbnail && rowThumbnail.missing
-                                x: rowThumbnail.x + (root.thumbnailSize - width) / 2
-                                y: rowThumbnail.y + (root.thumbnailSize - height) / 2
-                                width: root.thumbnailPlaceholderGlyphSize
-                                height: root.thumbnailPlaceholderGlyphSize
-                                source: root.thumbnailPlaceholderGlyph
-                                isMask: true
-                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
+                                x: rowThumbnail.x
+                                y: rowThumbnail.y
+                                width: root.thumbnailSize
+                                height: root.thumbnailSize
+                                radius: rowThumbnail.radius
+                                color: root.uiPalette.plotFloor
+                                border.width: 1
+                                border.color: root.uiPalette.plotFloorEdge
+
+                                Image {
+                                    objectName: "libraryRowCoverPlaceholderMark"
+                                    anchors.fill: parent
+                                    source: root.thumbnailPlaceholderMark
+                                    sourceSize.width: root.thumbnailSize
+                                    sourceSize.height: root.thumbnailSize
+                                    smooth: false
+                                    cache: true
+                                    opacity: 0.85
+                                }
                             }
 
                             Text {

@@ -36,14 +36,16 @@ Item {
     readonly property var plotColors: root.uiPalette.waveformPlot
     // The lanes: one per channel in the per-channel view, one otherwise.
     readonly property int laneCount: waveform.viewMode === 1 ? Math.max(1, waveform.channelCount) : 1
-    // Before any audio, with neither a track nor its channels, there are
-    // no lanes to name: no labels, and so no Mute and Solo. A track change
-    // keeps them while the new track's channels are not known yet.
-    readonly property bool hasLanes: (root.uiBridge.currentTrackPath || "").length > 0
-        || root.uiBridge.currentTrackChannels > 0
+    // Before any audio, with neither a track nor its channels, the pane is
+    // at rest, as the spectrogram's (#373 H14 F3): per channel, the lanes of
+    // a stereo track, named, each with its centre line; the plot layer
+    // gives them no Mute and Solo then. A track change keeps the lanes
+    // while the new track's channels are not known yet.
+    readonly property bool atRest: (root.uiBridge.currentTrackPath || "").length === 0
+        && !(root.uiBridge.currentTrackChannels > 0)
     readonly property var laneLabels: {
         const labels = []
-        const named = waveform.viewMode === 1 && root.hasLanes
+        const named = waveform.viewMode === 1
         for (let i = 0; i < root.laneCount; ++i) {
             labels.push(named ? root.channelLabel(i) : "")
         }
@@ -60,8 +62,8 @@ Item {
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
     // Whether the plot has drawn the track's waveform, or has none to wait
-    // for (WaveformEditorItem's pictureReady): false from when it is shown,
-    // which gives it the track, until its first frame of it.
+    // for (WaveformEditorItem's pictureReady): false from when it is shown
+    // until its first frame that draws the track's detail of the view.
     readonly property bool pictureReady: waveform.pictureReady
 
     Accessible.role: Accessible.Graphic
@@ -84,7 +86,10 @@ Item {
         objectName: "waveformEditorItem"
         width: root.plotWidth
         height: root.height
-        sourcePath: root.visible ? root.uiBridge.currentTrackPath : ""
+        // Hidden too: the item decodes nothing while it is not shown, and
+        // keeps the detail it has, so that the mode switch back draws it at
+        // once (#373 H14). A new track while hidden clears it.
+        sourcePath: root.uiBridge.currentTrackPath
         overviewData: root.uiBridge.waveformPeaksPacked
         overviewCoverageSeconds: root.uiBridge.waveformCoverageSeconds
         overviewComplete: root.uiBridge.waveformComplete
@@ -102,7 +107,7 @@ Item {
         reservedCorner: root.reservedCorner
         laneHeadBounds: root.laneHeadBounds
         viewMode: root.uiBridge.spectrogramViewMode
-        channelCountHint: Math.max(1, root.uiBridge.currentTrackChannels)
+        channelCountHint: root.atRest ? 2 : Math.max(1, root.uiBridge.currentTrackChannels)
         markerSeconds: root.markerSeconds
         // Per channel: a 64-bit mask loses its low bits as a QML number.
         mutedChannels: root.uiBridge.mutedChannels || []
