@@ -1191,6 +1191,14 @@ void UiFoundationsTest::smallControlsScaleWithALargeFont() {
     QVERIFY(letter != nullptr);
     QVERIFY(letter->implicitHeight() <= buttonSize);
 
+    // The plates' letters, the lane's and the M, drawn as curves with grey
+    // antialiasing at any font size, DemiBold (#373 H14 G8: the platform's
+    // subpixel antialiasing fringed them in colour).
+    for (QQuickItem *item : {text, letter}) {
+        QCOMPARE(item->property("renderType").toInt(), 2 /* Text.CurveRendering */);
+        QCOMPARE(item->property("font").value<QFont>().weight(), QFont::DemiBold);
+    }
+
     // The plot's text, the lane label's and the M, at least 11 px at the
     // default font and growing with a larger one, as the rest of the
     // design's small text.

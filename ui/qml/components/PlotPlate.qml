@@ -97,10 +97,14 @@ Item {
         spacing: root.contentSpacing
 
         // Text, not a Label: the desktop style's Label has a hover handler,
-        // which would take the hover from the view under the plate.
+        // which would take the hover from the view under the plate. Its
+        // letters are drawn as curves, with grey antialiasing (#373 H14
+        // G8: the platform's subpixel antialiasing fringed them in colour
+        // on the plate, which is not the window's).
         Text {
             objectName: "plotPlateLabel"
             visible: root.isLabel
+            renderType: Text.CurveRendering
             text: root.text
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.compact ? root.uiPalette.compactPointSize : root.uiPalette.smallPointSize

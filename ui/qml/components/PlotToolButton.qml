@@ -112,10 +112,13 @@ ToolButton {
             isMask: true
         }
 
+        // Drawn as curves, with grey antialiasing, as the plate's label is
+        // (PlotPlate).
         Label {
             objectName: "plotToolButtonGlyph"
             anchors.centerIn: parent
             visible: root.glyphText.length > 0
+            renderType: Text.CurveRendering
             text: root.glyphText
             font.family: root.uiPalette.baseFont.family
             font.pointSize: root.glyphPointSize
