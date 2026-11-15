@@ -1285,9 +1285,10 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
         return;
     }
 
-    // Under the cover, the lines are 4 px apart, and a title or an artist
-    // too long for one line wraps onto a second rather than be cut off
-    // (#373 H5); the others stay on one line. The block grows with them.
+    // Under the cover, the lines are 4 px apart, and a title, an artist or
+    // an album too long for one line wraps onto a second rather than be cut
+    // off (#373 H5, H14 F7); the details stay on one line. The block grows
+    // with them.
     QQuickItem *title = named(window, "nowPlayingNarrowTitle");
     QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
     QQuickItem *album = named(window, "nowPlayingNarrowAlbum");
@@ -1318,6 +1319,16 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     QTRY_VERIFY(gapsAreFour());
     QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 12.0);
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
+    // A long album wraps too, its year onto the second line with its end,
+    // rather than keep a fifth of its text (#373 H14 F7); the block grows.
+    const qreal seamBefore = sceneRect(seam).top();
+    bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours at the Harbour"));
+    QTRY_COMPARE(lineText(album)->property("lineCount").toInt(), 2);
+    QTRY_VERIFY(!album->property("truncated").toBool());
+    QVERIFY(lineText(album)->property("text").toString().endsWith(QStringLiteral("(2005)")));
+    QTRY_VERIFY(gapsAreFour());
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 12.0);
+    QVERIFY(sceneRect(seam).top() > seamBefore);
     // A title too long even for two lines is cut off at the second's end.
     bridge->setProperty("currentTrackTitle", QStringLiteral("A Remarkably Long Track Title ").repeated(4));
     QTRY_VERIFY(title->property("truncated").toBool());

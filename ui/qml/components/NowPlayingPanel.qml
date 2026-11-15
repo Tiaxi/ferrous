@@ -559,9 +559,11 @@ Item {
 
     // The lines that wrap onto a second line rather than be cut off: in
     // the narrow layout the title (#373 H11: beside the cover at 24 pt a
-    // long title was cut off), and under the narrow cover the artist too.
+    // long title was cut off), and under the narrow cover the artist and
+    // the album with its year too (#373 H14 F7: at 24 pt a long album kept
+    // a fifth of its text).
     readonly property var wrappingLines: root.wideRoom ? ({})
-        : (root.narrowStacked ? ({ title: true, artist: true }) : ({ title: true }))
+        : (root.narrowStacked ? ({ title: true, artist: true, narrowAlbum: true }) : ({ title: true }))
     readonly property int stackedLineGap: 4
 
     // Whether the line of `key` fades whole, as one, going from `before` to
@@ -1575,6 +1577,9 @@ Item {
                 name: "NarrowAlbum"
                 text: root.trackLines.narrowAlbum
                 pointSize: root.uiPalette.smallPointSize
+                // Under the cover, the year goes onto a second line with
+                // the album's end.
+                maximumLineCount: root.narrowStacked ? 2 : 1
                 width: narrowColumn.width
             }
             FadingLine {
