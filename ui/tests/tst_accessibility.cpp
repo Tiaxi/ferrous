@@ -3652,26 +3652,26 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         }
     }
     {
-        // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
-        // px read lighter than Breeze's waveform glyph beside it), round
-        // caps, from a 1.5 px lowest stroke from x 2 to 14, the icon's
-        // fundamental, both starting on it (#373 H16 I7: without it the
-        // strokes read as "//"). The lowest rises 1 px along its length,
-        // most of it in its first half, a glide (#373 H20: level, it read
-        // as a chart's baseline). The upper two are 1.5 px or more clear of
-        // each other everywhere, their ends 1.5 px or more clear of the
-        // lowest stroke's end and of each other; all inside the 16 px
-        // square with their caps. The top one is the app icon's top
-        // harmonic, a glide (#373 H19: it rose at 81 degrees and read as a
-        // hook): it starts with the lowest at 55 to 70 degrees and bends
-        // over to under 35.
+        // The glyph's 16 px source: the app icon's small-size pair, a 1.75 px
+        // stroke (#373 H15 H8: 1.5 px read lighter than Breeze's waveform
+        // glyph beside it) with round caps, from a 1.5 px lowest stroke from
+        // x 2 to 14, the icon's fundamental, starting on it (#373 H16 I7:
+        // without it the stroke read as "/"); no middle trace (#373 H22: at
+        // 16 px it crowded the two). The lowest rises 1 px along its length,
+        // most of it in its first half, a glide (#373 H20: level, it read as
+        // a chart's baseline). The upper one's end is 1.5 px or more clear
+        // of the lowest stroke's end, and half way across 3 px or more clear
+        // of it; both inside the 16 px square with their caps. It is the app
+        // icon's top harmonic, a glide (#373 H19: it rose at 81 degrees and
+        // read as a hook): it starts with the lowest at 55 to 70 degrees and
+        // bends over to under 35.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
-        QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
-        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
-        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 1);
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
         QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\" stroke-linecap=\"round\" d=\"M")), 1);
         const QRegularExpression path(QStringLiteral(
             "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
@@ -3693,8 +3693,8 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             }
             curves.push_back(points);
         }
-        // The lowest stroke first, then the two over it.
-        QCOMPARE(curves.size(), 3);
+        // The lowest stroke first, then the one over it.
+        QCOMPARE(curves.size(), 2);
         const QList<QPointF> lowest = curves.takeFirst();
         controlPoints.removeFirst();
         {
@@ -3723,16 +3723,14 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             QVERIFY2(start >= 55 && start <= 70, qPrintable(QString::number(start)));
             QVERIFY2(end > 0 && end < 35, qPrintable(QString::number(end)));
         }
-        const auto clear = [](const QList<QPointF> &a, const QList<QPointF> &b) {
-            double least = 1e9;
-            for (const QPointF &p : a) {
-                for (const QPointF &q : b) {
-                    least = std::min(least, std::hypot(p.x() - q.x(), p.y() - q.y()));
-                }
-            }
-            return least - 1.75;
+        // Half way across, x 8, 3 px or more of clear space between them.
+        const auto heightAt = [](const QList<QPointF> &curve, double x) {
+            return std::min_element(curve.cbegin(), curve.cend(), [x](QPointF a, QPointF b) {
+                       return std::abs(a.x() - x) < std::abs(b.x() - x);
+                   })->y();
         };
-        QVERIFY2(clear(curves[0], curves[1]) >= 1.5, qPrintable(QString::number(clear(curves[0], curves[1]))));
+        const double halfWay = heightAt(lowest, 8) - heightAt(curves[0], 8) - (0.875 + 0.75);
+        QVERIFY2(halfWay >= 3.0, qPrintable(QString::number(halfWay)));
         // The top one starts with the lowest.
         QCOMPARE(curves[0].first(), lowest.first());
         for (const QList<QPointF> &curve : curves) {
@@ -3749,7 +3747,6 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
                 QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
             }
         }
-        QVERIFY(std::abs(curves[0].last().y() - curves[1].last().y()) - 1.75 >= 1.5);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
