@@ -164,7 +164,7 @@ std::vector<QRgb> traceColours(int size) {
 // The sizes with a detail tier: at 128 and 256 px a faint 4th harmonic over
 // the three traces (#373 hill climb, H21: the 64 px drawing enlarged left the
 // tile's upper left half empty beside Breeze's large icons). 64 px and the
-// scalable drawing, which serves 40 to 96 device px, keep three.
+// scalable drawing, which serves 40 to 60 device px, keep three.
 bool hasDetailTier(int size) {
     return size == 128 || size == 256;
 }
@@ -234,8 +234,8 @@ int capColumns(int size) {
 // Breeze Dark (#373 hill climb, H9, H11: at H10 only 16 to 32 px had it): a
 // hairline, 1 device px at every size (H18: H13's 32nd of the icon, 4 and 8
 // px at 128 and 256, framed the large sizes in a thick band; H21: H18's 2 px
-// at 128 and 256 read as a halo on Breeze Light). The scalable drawing keeps
-// a 64th of the icon (scalableDrawingHasTheRimInProportion).
+// at 128 and 256 read as a halo on Breeze Light). The scalable drawing's is
+// 1.5 units of its 64 (scalableDrawingKeepsADevicePixelRim).
 constexpr int kRimWidth = 1;
 
 // The tile inside its rim.
@@ -513,7 +513,7 @@ private slots:
     void everySizeIsBuiltIn();
     void tileHasTheSameLighterRimAtEverySize_data() { addSizeRows(); }
     void tileHasTheSameLighterRimAtEverySize();
-    void scalableDrawingHasTheRimInProportion();
+    void scalableDrawingKeepsADevicePixelRim();
     void tracesStandOnThePlainTile_data() { addSizeRows(); }
     void tracesStandOnThePlainTile();
     void harmonicsFanOutFromOneStart_data() { addSizeRows(); }
@@ -636,22 +636,52 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     QVERIFY(!traceInk(qRgba(qRed(kRim), qGreen(kRim), qBlue(kRim), 255)));
 }
 
-// The scalable drawing, which serves every size without a drawing of its
-// own, has the rim at a 64th of the icon: 1 px at 64 px and 2 px at 128,
-// as the drawings of those sizes have.
-void AppIconTest::scalableDrawingHasTheRimInProportion() {
+// The scalable drawing serves the slots no drawing of the theme's matches,
+// 40 to 60 device px or so: there its rim is 1.5 units of its 64, about a
+// device pixel, where a 64th of the icon, H21's, was 0.6 to 0.9 px, a
+// grey-violet smudge rather than an edge (#373 hill climb, H22). The tile
+// inside the rim, 1.5 units in from it all round.
+void AppIconTest::scalableDrawingKeepsADevicePixelRim() {
     const QString path = FerrousAppIcon::resourcePath(96);
     QCOMPARE(path, QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
-    for (const int size : {64, 128}) {
+    const QString source = QString::fromUtf8(contentsOf(path));
+    QVERIFY(source.contains(QLatin1String("<rect id=\"rim\" fill=\"#5a3fb0\" x=\"6\" y=\"6\" width=\"52\" height=\"52\" rx=\"5\"/>")));
+    QVERIFY(source.contains(QLatin1String("<rect id=\"tile\" fill=\"#3a1490\" x=\"7.5\" y=\"7.5\" width=\"49\" height=\"49\" rx=\"3.5\"/>")));
+    // At 128 and 256 px whole device pixels of it, 3 and 6, then the tile.
+    for (const int size : {128, 256}) {
         const QImage image = render(path, size);
         const QRect tile = tileOf(image);
         const QPoint middle = tile.center();
-        const int rim = size / 64;
-        for (int step = 0; step < rim; ++step) {
-            QVERIFY2(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2),
+        const int rim = size * 3 / 128;
+        for (int step = 0; step <= rim; ++step) {
+            QVERIFY2(near(image.pixel(middle.x(), tile.bottom() - step), step < rim ? kRim : kTile, 2),
                      qPrintable(QStringLiteral("%1 px: %2").arg(size).arg(step)));
         }
-        QVERIFY(near(image.pixel(middle.x(), tile.bottom() - rim), kTile, 2));
+    }
+    // From 40 px about a device pixel of it: the rim drawn alone covers
+    // that much more of a column across the bottom edge than the tile does.
+    const QStringList lines = source.split(QLatin1Char('\n'));
+    const auto alone = [&](const QString &id, int size) {
+        QStringList kept;
+        for (const QString &line : lines) {
+            if (!line.contains(QLatin1String("<rect")) && !line.contains(QLatin1String("<path"))) {
+                kept << line;
+            } else if (line.contains(QStringLiteral("id=\"%1\"").arg(id))) {
+                kept << line;
+            }
+        }
+        QByteArray bytes = kept.join(QLatin1Char('\n')).toUtf8();
+        QBuffer buffer(&bytes);
+        QImageReader reader(&buffer, "svg");
+        reader.setScaledSize(QSize(size, size));
+        return reader.read().convertToFormat(QImage::Format_ARGB32);
+    };
+    for (const int size : {40, 44, 56}) {
+        const Column rim = columnOf(alone(QStringLiteral("rim"), size), size / 2);
+        const Column tile = columnOf(alone(QStringLiteral("tile"), size), size / 2);
+        const double width = (rim.sum - tile.sum) / 2;
+        QVERIFY2(width >= 0.9 && std::abs(width - 1.5 * size / 64) <= 0.05,
+                 qPrintable(QStringLiteral("%1 px: a %2 px rim").arg(size).arg(width)));
     }
 }
 
