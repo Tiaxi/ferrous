@@ -2796,9 +2796,10 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 // cover, which lies at its full size at the band's top left in every
 // frame: a reveal, not a zoom (#373 H14 G5: a
 // square growing in the middle of the band, with empty flanks). The lines
-// come in after the move rather than with it (#373 H12 Z7, H14 G5): at 0
-// until it is 90 % of the way, then fading in over shortDuration,
-// OutCubic, or what is left of the move, whole as it ends. Nothing jumps:
+// come in late in the move rather than with it (#373 H12 Z7, H14 G5), and
+// not as a pop at its end (#373 H28 V6): at 0 until it is 60 % of the way,
+// then fading in over longDuration, OutCubic, or what is left of the move,
+// whole as it ends. Nothing jumps:
 // the header goes down frame by frame, one way, to where the full layout
 // puts it.
 void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
@@ -2907,15 +2908,23 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     const QStringList lines = narrow ? kNarrowLines : kWideLines;
     QQuickItem *linesItem = named(window, "nowPlayingLines");
     QVERIFY(linesItem != nullptr);
-    // The lines' opacity at `at` of the move: from where InOutQuad is 90 %
-    // of the way, over shortDuration or the rest of the move, OutCubic.
+    // The lines' opacity at `at` of the move: from where InOutQuad is 60 %
+    // of the way, over longDuration or the rest of the move, OutCubic
+    // (#373 H28 V6: from 90 % they popped in over the move's last 60 ms).
     const double duration = growth->property("duration").toDouble();
     const auto timeAt = [](double presence) {
         return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
     };
-    const double fadeStart = timeAt(0.9) * duration;
-    const double fadeLength = std::min<double>(units->shortDuration(), duration - fadeStart);
+    const double fadeStart = timeAt(0.6) * duration;
+    const double fadeLength = std::min<double>(units->longDuration(), duration - fadeStart);
     QVERIFY(fadeLength > 0);
+    // Under the wide cover, the fade starts past the move's middle and
+    // takes some 40 % of it, about 180 to 200 ms of its 450 at Kirigami's
+    // own durations, rather than its last 60 ms.
+    if (!narrow) {
+        QVERIFY2(fadeStart >= 0.5 * duration && fadeLength >= 0.4 * duration,
+                 qPrintable(QStringLiteral("from %1 for %2 of %3 ms").arg(fadeStart).arg(fadeLength).arg(duration)));
+    }
     const auto linesOpacityAt = [&](double presence) {
         const double rest = 1.0 - std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
         return 1.0 - rest * rest * rest;
@@ -2948,11 +2957,20 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
                  qPrintable(QStringLiteral("row %1, cover %2 at %3").arg(row->opacity()).arg(cover->opacity()).arg(where)));
         // The lines unfaded, the title under the cover's band or, beside
         // the narrow cover, under the compact row while that shows; in, as
-        // one, only once the move is 90 % of the way.
+        // one, only once the move is 60 % of the way, and never with
+        // "Nothing playing", so no two texts show at once.
         QVERIFY2(std::abs(linesItem->opacity() - linesOpacityAt(at)) < 1e-6,
                  qPrintable(QStringLiteral("%1 at %2").arg(linesItem->opacity()).arg(where)));
-        if (at <= 0.9) {
+        if (at <= 0.6) {
             QCOMPARE(linesItem->opacity(), 0.0);
+        }
+        if (linesItem->opacity() > 0.0) {
+            QVERIFY2(!row->isVisible(), qPrintable(where));
+        }
+        // Under the wide cover, the lines mostly in by 90 % of the way.
+        if (!narrow && at >= 0.9) {
+            QVERIFY2(linesItem->opacity() >= 0.6,
+                     qPrintable(QStringLiteral("%1 at %2").arg(linesItem->opacity()).arg(where)));
         }
         for (const QString &name : lines) {
             // Still: one window over the whole line, unfaded under the

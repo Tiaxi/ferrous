@@ -48,9 +48,10 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   square in the middle of the band read as a zoom, with empty flanks),
 //   fading in as the row goes, by the move's time (see idleOut), the
 //   lines and the library moving down
-//   with its foot, so nothing jumps (#373 H5); the lines fade in once the
-//   move is nearly done, so no text slides over the moving rows (#373 H12
-//   Z7). Going back to nothing
+//   with its foot, so nothing jumps (#373 H5); the lines fade in over the
+//   move's last part, once it is past its fastest, so no text slides over
+//   the moving rows (#373 H12 Z7) nor pops in at its end (#373 H28 V6).
+//   Going back to nothing
 //   loaded, as when the queue is cleared, shrinks it back. With
 //   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
@@ -158,21 +159,23 @@ Item {
     readonly property int moveDuration: Kirigami.Units.longDuration <= 0 ? 0
         : (root.wideRoom ? root.wideMoveDuration : Kirigami.Units.longDuration)
     readonly property int moveEasing: Easing.InOutQuad
-    // The lines come in after the move, not with it (#373 H12 Z7: they
+    // The lines come in late in the move, not with it (#373 H12 Z7: they
     // slid over the moving rows for some 190 ms): at 0 until the move is
-    // linesFromPresence of the way (#373 H14 G5: from 80 % they still
-    // arrived with the move), then fading in over shortDuration, OutCubic,
-    // or what is left of the move where that is shorter, so they are
-    // whole when it ends. Read from the move's progress, so a move that
+    // linesFromPresence of the way, past its fastest part, then fading in
+    // over longDuration, OutCubic, or what is left of the move where that
+    // is shorter, so they are whole when it ends: under the wide cover from
+    // some 250 ms of its 450 (#373 H28 V6: from 90 %, at some 390 ms, they
+    // popped in over its last 60 ms; H14 G5: from 80 % with shortDuration
+    // they arrived with it). Read from the move's progress, so a move that
     // turns back, or none, as with animations off, takes them with it.
-    readonly property real linesFromPresence: 0.9
+    readonly property real linesFromPresence: 0.6
     readonly property real linesOpacity: {
         if (root.presence >= 1)
             return 1
         if (root.presence <= 0 || root.moveDuration <= 0)
             return 0
         const start = root._moveTime(root.linesFromPresence) * root.moveDuration
-        const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
+        const length = Math.max(1, Math.min(Kirigami.Units.longDuration, root.moveDuration - start))
         return root._eased((root._moveTime(root.presence) * root.moveDuration - start) / length)
     }
     // The compact row of nothing loaded and the cover hand over by the
