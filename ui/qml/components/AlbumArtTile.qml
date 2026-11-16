@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Shapes
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 
@@ -43,9 +44,18 @@ Rectangle {
     // floor, and the 1 px edge around it, or transparent for none.
     property color standInColor: "transparent"
     property color standInEdgeColor: "transparent"
-    // How strongly its mark shows on the floor: a cover's mark, not the
-    // plot's data.
-    property real standInMarkOpacity: 0.68
+    // The mark's colours, as drawn on the floor: a cover's mark, not the
+    // plot's data. The glide in the icon's amber as it was at 68 %, 5:1;
+    // the harmonics in its magentas, a little brighter than at 68 %, some
+    // 3.8:1 on the floor rather than 3.2 (#373 H16 I6).
+    property color standInGlideColor: "#ab7a33"
+    property color standInHarmonicColor: "#b6476e"
+    property color standInHighHarmonicColor: "#b04698"
+    // The mark's strokes, by the tile's size, so they weigh alike at every
+    // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the
+    // glide's 2 px up to a 132 px tile, rising to 3 px at 360 and on; the
+    // harmonics 0.8 and 0.65 of it on the wide mark, 0.75 on the small.
+    readonly property real standInStroke: Math.min(3.5, 2 + Math.max(0, root.layoutSize - 132) / 228)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
     // the tile grows or shrinks, so that the mark is neither drawn again
@@ -132,25 +142,72 @@ Rectangle {
     }
 
     // The stand-in's mark, centred, two thirds of the tile wide and half
-    // as high, and its edge. Assistive technology hears "No album art"
-    // from the keyboard stop over it.
+    // as high, and its edge: the app icon's glide and its 2nd and 3rd
+    // harmonics (ferrous.svg's own curves, stretched to 2:1), rising
+    // 1 : 2 : 3 from a common start at the lower left, or in a small tile
+    // the glide and its 3rd harmonic, as the icon's small sizes draw them
+    // (#373 H14 F2); drawn as shapes, so their strokes keep the width set
+    // for the tile's size (standInStroke) as the curves scale to it.
+    // Assistive technology hears "No album art" from the keyboard stop over
+    // it.
     component StandInMark: Item {
         id: standIn
 
-        Image {
+        Shape {
+            id: mark
             objectName: "albumArtStandInMark"
+            // The paths' own box: 240 by 120, or the small mark's 64 by 32.
+            readonly property size box: root.standInCompact ? Qt.size(64, 32) : Qt.size(240, 120)
+            readonly property real glideStroke: root.standInStroke
+            readonly property real harmonicStroke: root.standInStroke * 0.8
+            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 0.75 : 0.65)
             anchors.centerIn: parent
             width: Math.round(standIn.width * 2 / 3)
             height: Math.round(width / 2)
-            source: root.standInCompact ? Qt.resolvedUrl("../assets/no-art-mark-small.svg")
-                                        : Qt.resolvedUrl("../assets/no-art-mark.svg")
-            // Drawn at its size in place, so its strokes stay crisp there.
-            sourceSize.width: Math.round(root.layoutSize * 2 / 3)
-            sourceSize.height: Math.round(root.layoutSize / 3)
-            smooth: true
-            cache: true
-            opacity: root.standInMarkOpacity
+            preferredRendererType: Shape.CurveRenderer
+            antialiasing: true
             Accessible.ignored: true
+
+            // The paths' scale to the mark's size: their strokes do not scale.
+            readonly property size pathScale: Qt.size(mark.width / mark.box.width, mark.height / mark.box.height)
+
+            ShapePath {
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                scale: mark.pathScale
+                strokeColor: root.standInHighHarmonicColor
+                strokeWidth: mark.highHarmonicStroke
+                PathSvg {
+                    path: root.standInCompact
+                        ? "M1.50 21.88 C1.91 21.54 2.31 21.22 2.72 20.91 C3.33 20.44 3.94 19.99 4.55 19.57 C5.57 18.87 6.58 18.22 7.60 17.61 C9.02 16.78 10.45 16.02 11.87 15.31 C13.90 14.31 15.94 13.41 17.97 12.61 C20.61 11.55 23.26 10.62 25.90 9.78 C29.15 8.74 32.41 7.83 35.66 6.99 C39.73 5.95 43.79 5.03 47.86 4.20 C52.74 3.19 57.62 2.31 62.50 1.50"
+                        : "M2.00 83.51 C3.59 82.17 5.13 80.88 6.72 79.63 C9.08 77.74 11.44 75.96 13.80 74.26 C17.75 71.47 21.65 68.87 25.60 66.46 C31.09 63.10 36.63 60.06 42.12 57.24 C49.97 53.23 57.87 49.65 65.72 46.42 C75.93 42.19 86.19 38.49 96.40 35.11 C108.97 30.97 121.59 27.30 134.16 23.98 C149.91 19.81 165.61 16.14 181.36 12.78 C200.24 8.77 219.12 5.23 238.00 2.00"
+                }
+            }
+            ShapePath {
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                scale: mark.pathScale
+                strokeColor: root.standInCompact ? "transparent" : root.standInHarmonicColor
+                strokeWidth: mark.harmonicStroke
+                PathSvg {
+                    path: "M2.00 100.76 C3.59 99.85 5.13 99.00 6.72 98.15 C9.08 96.90 11.44 95.74 13.80 94.61 C17.75 92.73 21.65 91.01 25.60 89.41 C31.09 87.15 36.63 85.11 42.12 83.23 C49.97 80.57 57.87 78.18 65.72 76.02 C75.93 73.23 86.19 70.75 96.40 68.50 C108.97 65.74 121.59 63.29 134.16 61.07 C149.91 58.28 165.61 55.83 181.36 53.60 C200.24 50.94 219.12 48.59 238.00 46.42"
+                }
+            }
+            ShapePath {
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                scale: mark.pathScale
+                strokeColor: root.standInGlideColor
+                strokeWidth: mark.glideStroke
+                PathSvg {
+                    path: root.standInCompact
+                        ? "M1.50 30.50 C1.91 30.39 2.31 30.28 2.72 30.18 C3.33 30.02 3.94 29.87 4.55 29.73 C5.57 29.50 6.58 29.28 7.60 29.08 C9.02 28.80 10.45 28.55 11.87 28.31 C13.90 27.98 15.94 27.68 17.97 27.41 C20.61 27.06 23.26 26.75 25.90 26.46 C29.15 26.12 32.41 25.81 35.66 25.54 C39.73 25.19 43.79 24.89 47.86 24.61 C52.74 24.27 57.62 23.98 62.50 23.70"
+                        : "M2.00 118.00 C3.59 117.56 5.13 117.12 6.72 116.71 C9.08 116.09 11.44 115.49 13.80 114.93 C17.75 113.99 21.65 113.11 25.60 112.33 C31.09 111.20 36.63 110.19 42.12 109.25 C49.97 107.90 57.87 106.71 65.72 105.65 C75.93 104.24 86.19 102.98 96.40 101.85 C108.97 100.47 121.59 99.25 134.16 98.15 C149.91 96.78 165.61 95.55 181.36 94.42 C200.24 93.08 219.12 91.92 238.00 90.82"
+                }
+            }
         }
 
         Rectangle {

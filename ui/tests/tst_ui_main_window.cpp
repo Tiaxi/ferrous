@@ -669,19 +669,40 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the mark %1 by %2, %3 px off centre").arg(mark->width()).arg(mark->height())
             .arg((markRect.center() - tile.center()).manhattanLength());
     }
-    const QString source = mark->property("source").toUrl().toString();
     const bool small = cover->property("standInCompact").toBool();
     if (small != (side < 180)) {
         return QStringLiteral("a %1 px tile has the %2 mark").arg(side).arg(small ? "small" : "wide");
     }
-    if (!source.endsWith(small ? QStringLiteral("/no-art-mark-small.svg") : QStringLiteral("/no-art-mark.svg"))) {
-        return QStringLiteral("the mark from %1").arg(source);
+    const QSizeF box = mark->property("box").toSizeF();
+    if (box != (small ? QSizeF(64, 32) : QSizeF(240, 120))) {
+        return QStringLiteral("the mark's paths in a %1 by %2 box").arg(box.width()).arg(box.height());
     }
-    if (mark->property("status").toInt() != 1 /* Image.Ready */) {
-        return QStringLiteral("the mark has not loaded");
+    if (mark->property("status").toInt() != 1 /* Shape.Ready */) {
+        return QStringLiteral("the mark has not drawn");
     }
-    if (mark->opacity() < 0.6 || mark->opacity() > 0.75) {
+    if (mark->opacity() != 1.0) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
+    }
+    // Its strokes by the tile's size, not scaled with it (#373 H16 I6): the
+    // glide 2 px up to 132 px, 3 px at 360; the harmonics thinner.
+    const qreal glide = mark->property("glideStroke").toReal();
+    const qreal wanted = std::min(3.5, 2.0 + std::max(0.0, side - 132.0) / 228.0);
+    if (std::abs(glide - wanted) > 0.01 || (side <= 132 && glide != 2.0) || (side >= 360 && glide < 3.0)) {
+        return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
+    }
+    if (!(mark->property("highHarmonicStroke").toReal() < glide && mark->property("harmonicStroke").toReal() < glide)) {
+        return QStringLiteral("the harmonics as heavy as the glide");
+    }
+    // The colours as drawn on the floor: the amber as at 68 %, the
+    // magentas 3.6 to 3.9:1 on the floor.
+    if (hex(cover->property("standInGlideColor").value<QColor>()) != QStringLiteral("#ffab7a33")) {
+        return QStringLiteral("the glide in %1").arg(hex(cover->property("standInGlideColor").value<QColor>()));
+    }
+    for (const char *name : {"standInHarmonicColor", "standInHighHarmonicColor"}) {
+        const double ratio = contrastRatio(cover->property(name).value<QColor>(), QColor(QStringLiteral("#14062e")));
+        if (ratio < 3.6 || ratio > 3.9) {
+            return QStringLiteral("%1 at %2:1 on the floor").arg(QString::fromLatin1(name)).arg(ratio);
+        }
     }
     // A 1 px edge in a light theme, none in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
