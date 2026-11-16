@@ -46,10 +46,12 @@ Rectangle {
     property color standInEdgeColor: "transparent"
     // The mark's colours, as drawn on the floor: a cover's mark, not the
     // plot's data. The glide in the icon's amber as it was at 68 %, 5:1;
-    // the harmonics in its magentas, a little brighter than at 68 %, some
-    // 3.8:1 on the floor rather than 3.2 (#373 H16 I6).
+    // the harmonics in its rose and magenta, a little brighter than at
+    // 68 %, the 3rd harmonic some 3.8:1 on the floor rather than 3.2 (#373
+    // H16 I6), and the 2nd a step lighter between them, 4.4:1, as the
+    // icon's rose is (H20: the two harmonics were one value).
     property color standInGlideColor: "#ab7a33"
-    property color standInHarmonicColor: "#b6476e"
+    property color standInHarmonicColor: "#bd5872"
     property color standInHighHarmonicColor: "#b04698"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the

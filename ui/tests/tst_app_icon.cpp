@@ -46,10 +46,11 @@ constexpr QRgb kBreezeDarkView = 0x31363b;
 constexpr QRgb kBreezeLightWindow = 0xeff0f1;
 constexpr QRgb kBreezeLightView = 0xffffff;
 // The chirp: the fundamental in amber, its 2nd harmonic in rose and its 3rd
-// in magenta, lower on the colour map and each 3:1 or more on the tile. At 16
-// and 22 px the fundamental and the 3rd harmonic only.
+// in magenta, lower on the colour map and each 3:1 or more on the tile, a
+// step darker each (H20: the rose was as dark as the magenta). At 16 and
+// 22 px the fundamental and the 3rd harmonic only.
 constexpr QRgb kGlide = 0xf2b035;
-constexpr QRgb kHarmonic = 0xf25a7e;
+constexpr QRgb kHarmonic = 0xf87089;
 constexpr QRgb kThirdHarmonic = 0xe055b4;
 
 QImage render(const QString &path, int size) {
@@ -688,6 +689,14 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     for (const QRgb colour : {kGlide, kHarmonic, kThirdHarmonic}) {
         QVERIFY2(contrastRatio(colour, kTile) >= 3.0, qPrintable(QString::number(colour, 16)));
     }
+    // A step of value from each trace to the one above it, so that the
+    // three hold apart in greyscale (#373 hill climb, H20: the rose was
+    // 3.9:1 on the tile, the magenta 3.6:1): the amber some 6.6:1, the rose
+    // 4.6:1, the magenta 3.6:1.
+    QVERIFY2(contrastRatio(kHarmonic, kTile) >= 4.4 && contrastRatio(kHarmonic, kTile) <= 4.8,
+             qPrintable(QString::number(contrastRatio(kHarmonic, kTile))));
+    QVERIFY(contrastRatio(kGlide, kTile) >= contrastRatio(kHarmonic, kTile) + 1.5);
+    QVERIFY(contrastRatio(kHarmonic, kTile) >= contrastRatio(kThirdHarmonic, kTile) + 0.8);
 
     // One time line at the start: the traces start in one column, in the
     // tile's left fifth. From 64 px their round caps reach past it by half

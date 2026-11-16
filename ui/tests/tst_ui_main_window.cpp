@@ -695,16 +695,23 @@ QString standInProblem(QQuickWindow *window) {
     if (!(mark->property("highHarmonicStroke").toReal() < glide && mark->property("harmonicStroke").toReal() < glide)) {
         return QStringLiteral("the harmonics as heavy as the glide");
     }
-    // The colours as drawn on the floor: the amber as at 68 %, the
-    // magentas 3.6 to 3.9:1 on the floor.
+    // The colours as drawn on the floor: the amber as at 68 %, the 3rd
+    // harmonic's magenta 3.6 to 3.9:1 on the floor, and the 2nd harmonic's
+    // rose a step lighter, between it and the amber, as in the app icon
+    // (#373 H20: the two harmonics were one value).
+    const QColor floor(QStringLiteral("#14062e"));
     if (hex(cover->property("standInGlideColor").value<QColor>()) != QStringLiteral("#ffab7a33")) {
         return QStringLiteral("the glide in %1").arg(hex(cover->property("standInGlideColor").value<QColor>()));
     }
-    for (const char *name : {"standInHarmonicColor", "standInHighHarmonicColor"}) {
-        const double ratio = contrastRatio(cover->property(name).value<QColor>(), QColor(QStringLiteral("#14062e")));
-        if (ratio < 3.6 || ratio > 3.9) {
-            return QStringLiteral("%1 at %2:1 on the floor").arg(QString::fromLatin1(name)).arg(ratio);
-        }
+    const double glideRatio = contrastRatio(cover->property("standInGlideColor").value<QColor>(), floor);
+    const double harmonicRatio = contrastRatio(cover->property("standInHarmonicColor").value<QColor>(), floor);
+    const double highRatio = contrastRatio(cover->property("standInHighHarmonicColor").value<QColor>(), floor);
+    if (highRatio < 3.6 || highRatio > 3.9) {
+        return QStringLiteral("the 3rd harmonic at %1:1 on the floor").arg(highRatio);
+    }
+    if (harmonicRatio < highRatio + 0.4 || harmonicRatio > glideRatio - 0.4) {
+        return QStringLiteral("the 2nd harmonic at %1:1 on the floor, between %2 and %3").arg(harmonicRatio).arg(highRatio)
+            .arg(glideRatio);
     }
     // A 1 px edge in a light theme, none in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
