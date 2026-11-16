@@ -3653,31 +3653,60 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     {
         // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
         // px read lighter than Breeze's waveform glyph beside it), round
-        // caps, at least 2 px clear between them where they start, inside
-        // the 16 px square with their caps.
+        // caps, over a 1.5 px baseline at y 14.5 from x 2 to 14, the
+        // icon's floor, both starting on it (#373 H16 I7: without it the
+        // strokes read as "//"); 1.5 px or more clear of each other
+        // everywhere, their ends 1.5 px or more clear of the baseline and
+        // each other; all inside the 16 px square with their caps.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
-        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
         QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
-        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
-        const QRegularExpression path(QStringLiteral("d=\"M([0-9.]+) ([0-9.]+)C[^\"]* ([0-9.]+) ([0-9.]+)\""));
-        QList<QPointF> starts;
-        QList<QPointF> ends;
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
+        // The baseline: with its round caps, x 2 to 14.
+        QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.5\" stroke-linecap=\"round\" d=\"M2.75 14.5H13.25\"")));
+        const QRegularExpression path(QStringLiteral(
+            "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
+        QList<QList<QPointF>> curves;
         for (auto match = path.globalMatch(svg); match.hasNext();) {
             const QRegularExpressionMatch each = match.next();
-            starts.push_back(QPointF(each.captured(1).toDouble(), each.captured(2).toDouble()));
-            ends.push_back(QPointF(each.captured(3).toDouble(), each.captured(4).toDouble()));
+            QList<QPointF> controls;
+            for (int i = 1; i <= 8; i += 2) {
+                controls.push_back(QPointF(each.captured(i).toDouble(), each.captured(i + 1).toDouble()));
+            }
+            QList<QPointF> points;
+            for (int step = 0; step <= 200; ++step) {
+                const double t = step / 200.0;
+                const double u = 1 - t;
+                points.push_back(u * u * u * controls[0] + 3 * u * u * t * controls[1] + 3 * u * t * t * controls[2]
+                                 + t * t * t * controls[3]);
+            }
+            curves.push_back(points);
         }
-        QCOMPARE(starts.size(), 2);
-        QCOMPARE(starts.at(0).x(), starts.at(1).x());
-        QVERIFY2(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75 >= 2.0,
-                 qPrintable(QStringLiteral("%1 px clear").arg(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75)));
-        for (const QPointF &point : starts + ends) {
-            QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
-            QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
+        QCOMPARE(curves.size(), 2);
+        const auto clear = [](const QList<QPointF> &a, const QList<QPointF> &b) {
+            double least = 1e9;
+            for (const QPointF &p : a) {
+                for (const QPointF &q : b) {
+                    least = std::min(least, std::hypot(p.x() - q.x(), p.y() - q.y()));
+                }
+            }
+            return least - 1.75;
+        };
+        QVERIFY2(clear(curves[0], curves[1]) >= 1.5, qPrintable(QString::number(clear(curves[0], curves[1]))));
+        for (const QList<QPointF> &curve : curves) {
+            // From the baseline, up and to the right.
+            QCOMPARE(curve.first().y(), 14.5);
+            QVERIFY(curve.first().x() >= 2.75 && curve.first().x() <= 13.25);
+            QVERIFY2(14.5 - curve.last().y() - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(curve.last().y())));
+            for (const QPointF &point : curve) {
+                QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
+                QVERIFY(point.y() - 0.875 >= 0.0 && point.y() <= 14.5);
+            }
         }
+        QVERIFY(std::abs(curves[0].last().y() - curves[1].last().y()) - 1.75 >= 1.5);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
@@ -3831,14 +3860,14 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
         return button->findChild<QQuickItem *>(QString::fromLatin1(name));
     };
 
-    // 3 px of plate around the buttons, 4 px between them.
+    // 4 px of plate around the buttons, 4 px between them (#373 H16 I5).
     QQuickItem *first = mode == 0 ? chosen : other;
     QQuickItem *second = mode == 0 ? other : chosen;
     const QRectF plateRect = rectOf(plate);
-    QCOMPARE(rectOf(first).left() - plateRect.left(), 3.0);
-    QCOMPARE(rectOf(first).top() - plateRect.top(), 3.0);
-    QCOMPARE(plateRect.right() - rectOf(second).right(), 3.0);
-    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 3.0);
+    QCOMPARE(rectOf(first).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(first).top() - plateRect.top(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(second).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 4.0);
     QCOMPARE(rectOf(second).left() - rectOf(first).right(), 4.0);
 
     // The other one focused from the keyboard: its ring inside the plate,
@@ -3851,7 +3880,8 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY(ring != nullptr && gap != nullptr && edge != nullptr);
     QTRY_VERIFY(ring->isVisible() && gap->isVisible() && edge->isVisible());
     const QRectF ringRect = rectOf(ring);
-    QVERIFY2(plateRect.contains(ringRect),
+    // With 1 px of the plate outside it (#373 H16 I5).
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(ringRect),
              qPrintable(QStringLiteral("ring %1,%2 %3x%4 in plate %5,%6 %7x%8")
                             .arg(ringRect.left()).arg(ringRect.top()).arg(ringRect.width()).arg(ringRect.height())
                             .arg(plateRect.left()).arg(plateRect.top()).arg(plateRect.width())
@@ -4075,6 +4105,36 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QVERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
     QVERIFY(heads[0]->setProperty("muted", false));
     QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+
+    // The buttons' plate: 4 px around them and between them, its top on
+    // one line with the label's and the mode switch's, and a button's
+    // focus ring inside it with 1 px of the plate outside it (#373 H16 I5:
+    // at 2 px, the ring ran past the plate's edge).
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    QQuickItem *label = itemsNamed(heads[0], QStringLiteral("plotLaneLabel")).value(0);
+    QQuickItem *firstSolo = itemsNamed(heads[0], QStringLiteral("plotLaneSoloButton")).value(0);
+    QQuickItem *modeSwitch = itemsNamed(layer, QStringLiteral("visualizationModeSwitch")).value(0);
+    QVERIFY(label != nullptr && firstSolo != nullptr && modeSwitch != nullptr);
+    const QRectF plateRect = rectOf(plate);
+    QCOMPARE(rectOf(mute).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(mute).top() - plateRect.top(), 4.0);
+    QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), 4.0);
+    QCOMPARE(plateRect.top(), rectOf(label).top());
+    QCOMPARE(rectOf(modeSwitch).top(), rectOf(label).top());
+    QCOMPARE(rectOf(label).top() - rectOf(layer).top(), 5.0);
+    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), 5.0);
+    mute->forceActiveFocus(Qt::TabFocusReason);
+    QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
+    QVERIFY(ring != nullptr);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(rectOf(ring)),
+             qPrintable(QStringLiteral("ring at %1,%2 in a plate at %3,%4")
+                            .arg(rectOf(ring).left()).arg(rectOf(ring).top())
+                            .arg(plateRect.left()).arg(plateRect.top())));
 }
 
 void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {

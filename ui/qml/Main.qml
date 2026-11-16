@@ -1783,6 +1783,7 @@ ApplicationWindow {
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
             markerSeconds: plotLayer.cutSeconds
+            crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
@@ -1805,6 +1806,7 @@ ApplicationWindow {
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
             markerSeconds: plotLayer.cutSeconds
+            crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
             uiPalette: root.uiPalette
             clock: playbackController.playbackClock
@@ -1837,6 +1839,9 @@ ApplicationWindow {
             hoveredLane: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.hoveredLane : waveformSurface.hoveredLane
             paneHovered: visualizationHover.hovered || spectrogramViewerShell.controlsHovered
+            pointerKnown: plotLayer.hoveredLane >= 0
+            pointerPosition: plotLayer.mapFromItem(null, visualizationSurface.spectrogramShown
+                ? spectrogramSurface.pointerScenePosition : waveformSurface.pointerScenePosition)
             analysing: visualizationSurface.spectrogramShown
                 ? spectrogramSurface.awaitingData : waveformSurface.awaitingData
             markerX: visualizationSurface.spectrogramShown
@@ -1866,7 +1871,7 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
+        cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 

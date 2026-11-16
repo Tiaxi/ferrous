@@ -461,6 +461,27 @@ Window {
     soloButton->setFocus(false);
     layer->forceActiveFocus();
     QTRY_COMPARE(buttons->opacity(), 0.0);
+
+    // A muted or soloed lane keeps its buttons shown with the pointer away,
+    // compact too, so the checked one stays in sight to undo it (#373 H16
+    // I4: they faded out as the pointer left).
+    QQuickItem *head = buttons->parentItem();
+    QVERIFY(head != nullptr && head->property("buttonsRevealed").isValid());
+    for (const bool compact : {false, true}) {
+        head->setProperty("compact", compact);
+        bridge->setProperty("mutedChannels", QVariantList{true});
+        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(muteButton->property("checked").toBool());
+        QTest::qWait(250);
+        QCOMPARE(buttons->opacity(), 1.0);
+        bridge->setProperty("mutedChannels", QVariantList{});
+        QTRY_COMPARE(buttons->opacity(), 0.0);
+        bridge->setProperty("soloedChannels", QVariantList{true});
+        QTRY_COMPARE(buttons->opacity(), 1.0);
+        QVERIFY(soloButton->property("checked").toBool());
+        bridge->setProperty("soloedChannels", QVariantList{});
+        QTRY_COMPARE(buttons->opacity(), 0.0);
+    }
 }
 
 // The pane, each lane and the viewer are the spectrogram's floor colour,

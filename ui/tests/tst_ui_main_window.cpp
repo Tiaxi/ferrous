@@ -24,6 +24,7 @@
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QStyleHints>
 #include <QScopeGuard>
 #include <QTemporaryDir>
@@ -668,19 +669,40 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the mark %1 by %2, %3 px off centre").arg(mark->width()).arg(mark->height())
             .arg((markRect.center() - tile.center()).manhattanLength());
     }
-    const QString source = mark->property("source").toUrl().toString();
     const bool small = cover->property("standInCompact").toBool();
     if (small != (side < 180)) {
         return QStringLiteral("a %1 px tile has the %2 mark").arg(side).arg(small ? "small" : "wide");
     }
-    if (!source.endsWith(small ? QStringLiteral("/no-art-mark-small.svg") : QStringLiteral("/no-art-mark.svg"))) {
-        return QStringLiteral("the mark from %1").arg(source);
+    const QSizeF box = mark->property("box").toSizeF();
+    if (box != (small ? QSizeF(64, 32) : QSizeF(240, 120))) {
+        return QStringLiteral("the mark's paths in a %1 by %2 box").arg(box.width()).arg(box.height());
     }
-    if (mark->property("status").toInt() != 1 /* Image.Ready */) {
-        return QStringLiteral("the mark has not loaded");
+    if (mark->property("status").toInt() != 1 /* Shape.Ready */) {
+        return QStringLiteral("the mark has not drawn");
     }
-    if (mark->opacity() < 0.6 || mark->opacity() > 0.75) {
+    if (mark->opacity() != 1.0) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
+    }
+    // Its strokes by the tile's size, not scaled with it (#373 H16 I6): the
+    // glide 2 px up to 132 px, 3 px at 360; the harmonics thinner.
+    const qreal glide = mark->property("glideStroke").toReal();
+    const qreal wanted = std::min(3.5, 2.0 + std::max(0.0, side - 132.0) / 228.0);
+    if (std::abs(glide - wanted) > 0.01 || (side <= 132 && glide != 2.0) || (side >= 360 && glide < 3.0)) {
+        return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
+    }
+    if (!(mark->property("highHarmonicStroke").toReal() < glide && mark->property("harmonicStroke").toReal() < glide)) {
+        return QStringLiteral("the harmonics as heavy as the glide");
+    }
+    // The colours as drawn on the floor: the amber as at 68 %, the
+    // magentas 3.6 to 3.9:1 on the floor.
+    if (hex(cover->property("standInGlideColor").value<QColor>()) != QStringLiteral("#ffab7a33")) {
+        return QStringLiteral("the glide in %1").arg(hex(cover->property("standInGlideColor").value<QColor>()));
+    }
+    for (const char *name : {"standInHarmonicColor", "standInHighHarmonicColor"}) {
+        const double ratio = contrastRatio(cover->property(name).value<QColor>(), QColor(QStringLiteral("#14062e")));
+        if (ratio < 3.6 || ratio > 3.9) {
+            return QStringLiteral("%1 at %2:1 on the floor").arg(QString::fromLatin1(name)).arg(ratio);
+        }
     }
     // A 1 px edge in a light theme, none in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
@@ -747,6 +769,8 @@ private slots:
     void nowPlayingNarrowShowsEveryLineAtAnyFontSize_data();
     void nowPlayingCompactKeepsTheAlbumAndItsYear_data();
     void nowPlayingCompactKeepsTheAlbumAndItsYear();
+    void nowPlayingLargeFontCompactIsAHeaderRow_data();
+    void nowPlayingLargeFontCompactIsAHeaderRow();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
@@ -1341,8 +1365,8 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowHeight");
     // The compact layout: the narrow one in a sidebar wide enough for the
-    // wide one, for the sidebar's height alone.
-    QTest::newRow("24 pt") << 24.0 << 1000;
+    // wide one, for the sidebar's height alone. With a large font it is a
+    // header row instead (nowPlayingLargeFontCompactIsAHeaderRow).
     QTest::newRow("default font, short window") << 10.0 << 700;
 }
 
@@ -1498,6 +1522,153 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
     // Untagged: the same block.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+}
+
+void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow_data() {
+    QTest::addColumn<int>("windowWidth");
+    QTest::newRow("1600x1000") << 1600;
+    QTest::newRow("1920x1000") << 1920;
+}
+
+// With a large font, the compact layout is a header row and lines on the
+// whole width (#373 H16 I1: beside a 132 px cover six reserved lines left
+// some 160 px empty under it, the year wrapped onto a line of its own and
+// the artist was cut off): the cover at the panel's corner, the title, on
+// up to two lines, and the artist, on one, beside it, 12 px after it and
+// from its top, the cover as high as the two lines of the title, the gap
+// and the artist; 8 px under it, at the 12 px inset and on the whole
+// width, "Album (Year)" on one line, the album cut off before its year,
+// and the details on one line. The block is one height whatever the track
+// has, so the library's header never moves on a track change.
+void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
+    QFETCH(int, windowWidth);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(24.0);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *header = named(window, "libraryHeader");
+    QQuickItem *seam = named(window, "nowPlayingSeam");
+    QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
+    QQuickItem *album = named(window, "nowPlayingNarrowAlbum");
+    QQuickItem *details = named(window, "nowPlayingNarrowDetails");
+    QVERIFY(panel && cover && header && seam && title && artist && album && details);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
+    QVERIFY(panel->property("compactLayout").toBool());
+    QVERIFY(panel->property("compactHeader").toBool());
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+    const auto settled = [&]() { return !handover->property("running").toBool(); };
+    QTRY_VERIFY(settled());
+    const QRectF panelRect = sceneRect(panel);
+    const auto lineHeight = [](QQuickItem *line) {
+        return QFontMetricsF(line->property("font").value<QFont>()).height();
+    };
+
+    // A title on two lines: the cover spans it and the artist under it.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal Over The Harbour At Night"));
+    QTRY_COMPARE(title->property("lineCount").toInt(), 2);
+    QTRY_VERIFY(settled());
+    const qreal side = panel->property("compactCoverSize").toReal();
+    QVERIFY2(side > 96.0, qPrintable(QString::number(side)));
+    QVERIFY2(std::abs(side - (2 * lineHeight(title) + 4 + lineHeight(artist))) <= 6.0,
+             qPrintable(QStringLiteral("%1 for %2 and %3").arg(side).arg(lineHeight(title)).arg(lineHeight(artist))));
+    QCOMPARE(cover->width(), side);
+    QCOMPARE(cover->height(), side);
+    const QRectF coverRect = sceneRect(cover);
+    QCOMPARE(coverRect.topLeft(), panelRect.topLeft());
+    QTRY_COMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QCOMPARE(sceneRect(artist).left(), coverRect.right() + 12);
+    QTRY_VERIFY2(std::abs(sceneRect(artist).bottom() - coverRect.bottom()) <= 1.0,
+                 qPrintable(QStringLiteral("the artist ends at %1, the cover at %2")
+                                .arg(sceneRect(artist).bottom()).arg(coverRect.bottom())));
+    for (QQuickItem *line : {title, artist}) {
+        QVERIFY(sceneRect(line).right() <= panelRect.right() - 12);
+    }
+    // Under the cover, 8 px down, at the inset and on the whole width.
+    const auto checkFootLines = [&]() {
+        QCOMPARE(sceneRect(album).topLeft(), QPointF(panelRect.left() + 12, coverRect.bottom() + 8));
+        QCOMPARE(album->width(), panelRect.width() - 24);
+        QCOMPARE(sceneRect(details).left(), panelRect.left() + 12);
+        QCOMPARE(details->width(), panelRect.width() - 24);
+        QVERIFY(sceneRect(details).top() >= sceneRect(album).bottom() - 1);
+        QVERIFY2(sceneRect(seam).top() - sceneRect(details).bottom() >= 11.0,
+                 qPrintable(QString::number(sceneRect(seam).top() - sceneRect(details).bottom())));
+    };
+    checkFootLines();
+    QTRY_COMPARE(album->property("wholeText").toString(), QStringLiteral("Small Hours (2005)"));
+    QCOMPARE(album->property("lineCount").toInt(), 1);
+    QQuickItem *tail = itemNamed(album, QStringLiteral("nowPlayingLineTail"));
+    QVERIFY(tail != nullptr && shown(tail));
+    QCOMPARE(sceneRect(tail).top(), sceneRect(album).top());
+    // The details whole, on one line, where the whole width has room.
+    QCOMPARE(details->property("lineCount").toInt(), 1);
+    {
+        const QFontMetricsF metrics(details->property("font").value<QFont>());
+        const QString whole = panel->property("narrowDetailsText").toString();
+        if (metrics.horizontalAdvance(QString(whole).replace(QRegularExpression(QStringLiteral("[0-9]")), QStringLiteral("8")))
+            < details->width() - 4) {
+            QCOMPARE(panel->property("shownNarrowDetailsText").toString(), whole);
+        }
+        QVERIFY(!details->property("truncated").toBool());
+    }
+    const auto geometry = [&]() {
+        return QList<QRectF>{sceneRect(panel), sceneRect(header), sceneRect(cover), sceneRect(album)};
+    };
+    const QList<QRectF> before = geometry();
+    QCOMPARE(panel->height(), panel->property("compactHeaderHeight").toReal() + 12 + 1);
+
+    // A long artist and album: the artist on one line, elided; the album
+    // cut off before its year, which shows whole after it on the line.
+    const QString longArtist = QStringLiteral("The Quiet Meridian Chamber Ensemble Of The North");
+    bridge->setProperty("currentTrackArtist", longArtist);
+    const QString longAlbum = QStringLiteral("A Remarkably Long Album Title That Runs On ").repeated(3).trimmed();
+    bridge->setProperty("currentTrackAlbum", longAlbum);
+    bridge->setProperty("currentTrackYear", 2024);
+    QTRY_VERIFY(artist->property("truncated").toBool());
+    QCOMPARE(artist->property("lineCount").toInt(), 1);
+    QTRY_VERIFY(album->property("truncated").toBool());
+    QCOMPARE(album->property("lineCount").toInt(), 1);
+    QTRY_COMPARE(tail->property("text").toString(), QStringLiteral(" (2024)"));
+    QVERIFY(shown(tail));
+    QCOMPARE(sceneRect(tail).top(), sceneRect(album).top());
+    QVERIFY2(sceneRect(tail).right() <= panelRect.right() - 12 + 1,
+             qPrintable(QStringLiteral("%1 past %2").arg(sceneRect(tail).right()).arg(panelRect.right() - 12)));
+    QVERIFY(sceneRect(tail).left() > sceneRect(album).left() + album->width() / 2);
+    QVERIFY(panel->property("textTruncated").toBool());
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+    checkFootLines();
+
+    // A title alone, a short title, and none of the tags: the same block.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
+    for (const char *property : {"currentTrackArtist", "currentTrackAlbum", "currentTrackGenre"}) {
+        bridge->setProperty(property, QString());
+    }
+    bridge->setProperty("currentTrackYear", QVariant());
+    bridge->setProperty("currentTrackNumber", 0);
+    QTRY_COMPARE(panel->property("narrowAlbumText").toString(), QString());
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    clearTrackTags(bridge);
+    QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
+    QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+    checkFootLines();
+    playTrack(bridge);
     QTRY_VERIFY(settled());
     QCOMPARE(geometry(), before);
 }
@@ -1953,9 +2124,13 @@ void UiMainWindowTest::nowPlayingDetailsAreOneColourAndNeverCutOff() {
             QVERIFY2(metrics.horizontalAdvance(candidate) > details->width() - 1.0, qPrintable(candidate));
         }
         QVERIFY(metrics.horizontalAdvance(shownText) <= details->width() + 0.5);
-        // What is left out is in the tooltip.
+        // What is left out is in the tooltip: the details' parts, the
+        // title's end, or beside the compact header's cover the artist's.
+        QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
+        QVERIFY(artist != nullptr);
         QCOMPARE(panel->property("textTruncated").toBool(),
-                 shownText != whole || title->property("truncated").toBool());
+                 shownText != whole || title->property("truncated").toBool()
+                     || (!wide && artist->property("truncated").toBool()));
     }
     if (!wide) {
         // "Morning Tide Field" at 24 pt beside the cover: on two lines, whole.
@@ -2391,14 +2566,15 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QVERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
 
     // Short: narrow, the compact cover, 96 px with the default font and
-    // larger with a large one, and at least six rows of the library.
+    // with a large one as high as two lines of the title and one of the
+    // artist (#373 H16 I1), and at least six rows of the library.
     window->resize(windowWidth, shortHeight);
     QTRY_COMPARE(window->height(), shortHeight);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QVERIFY(panel->property("shortHeight").toBool());
     const qreal coverSide = panel->property("compactCoverSize").toReal();
-    QVERIFY2(pointSize > 0 ? coverSide > 96.0 && coverSide <= 132.0 : coverSide == 96.0,
-             qPrintable(QString::number(coverSide)));
+    QVERIFY2(pointSize > 0 ? coverSide > 96.0 : coverSide == 96.0, qPrintable(QString::number(coverSide)));
+    QCOMPARE(panel->property("compactHeader").toBool(), pointSize > 0);
     QTRY_COMPARE(cover->width(), coverSide);
     QCOMPARE(panel->property("wideReservedHeight").toReal(), reserved);
     QTRY_VERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
@@ -2420,13 +2596,18 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
                              "nowPlayingNarrowDetails"}) {
         QQuickItem *line = named(window, name);
         QVERIFY2(line != nullptr && shown(line), name);
-        QTRY_COMPARE(sceneRect(line).left(), tile.right() + 12);
+        // With a large font, the album and the details under the header
+        // row, at the panel's inset (#373 H16 I1).
+        const bool under = pointSize > 0 && (qstrcmp(name, "nowPlayingNarrowAlbum") == 0
+                                             || qstrcmp(name, "nowPlayingNarrowDetails") == 0);
+        QTRY_COMPARE(sceneRect(line).left(), under ? sceneRect(panel).left() + 12 : tile.right() + 12);
         QVERIFY2(sceneRect(line).right() <= sceneRect(panel).right() - 12, name);
         lowest = std::max(lowest, sceneRect(line).bottom());
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
+    // Beside the compact header's cover, from its top.
     QCOMPARE(sceneRect(narrowTitle).top(),
-             sceneRect(panel).top() + panel->property("narrowTextTop").toReal());
+             sceneRect(panel).top() + (pointSize > 0 ? 0.0 : panel->property("narrowTextTop").toReal()));
     QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
     QCOMPARE(tile.topLeft(), sceneRect(panel).topLeft());
     QVERIFY(!panel->property("insetCover").isValid());
@@ -2439,8 +2620,9 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     // the title and the album (#373 H14 G2) and one for the artist (H15
     // H1), then 12 px.
     QVERIFY(panel->property("compactLayout").toBool());
-    const qreal reservedLines = panel->property("compactLinesHeight").toReal();
-    QTRY_COMPARE(sceneRect(seam).top(), sceneRect(panel).top() + std::max(coverSide, reservedLines) + 12);
+    const qreal reservedLines = pointSize > 0 ? panel->property("compactHeaderHeight").toReal()
+                                              : std::max(coverSide, panel->property("compactLinesHeight").toReal());
+    QTRY_COMPARE(sceneRect(seam).top(), sceneRect(panel).top() + reservedLines + 12);
     QVERIFY(sceneRect(seam).top() - lowest >= 12.0);
 
     // A track, with tags and then without, switches nothing; nor does

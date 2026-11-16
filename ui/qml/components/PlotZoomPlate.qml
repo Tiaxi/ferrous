@@ -7,12 +7,12 @@ import "." as Components
 // The plot's zoom while it is zoomed, which nothing else shows with the
 // scale off: a readout and Reset, on a plate in the plot's colours, left of
 // the mode switch in the main pane and in both viewers, as tall as the
-// switch, with its 3 px of plate around the buttons (PlotModeSwitch). Not
+// switch, with its 4 px of plate around the buttons (PlotModeSwitch). Not
 // zoomed, it is hidden and no Tab stop.
 Components.PlotPlate {
     id: root
     objectName: "plotZoomPlate"
-    padding: 3
+    padding: 4
 
     // The view's zoom, 1 at the default; Reset calls resetView.
     property real zoomLevel: 1.0
@@ -26,7 +26,10 @@ Components.PlotPlate {
     takesPointer: true
     Accessible.name: I18n.i18nc("@label", "Zoom")
 
+    readonly property bool pointerHovered: zoomHover.hovered
+
     HoverHandler {
+        id: zoomHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

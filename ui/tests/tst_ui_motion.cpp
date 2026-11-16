@@ -995,6 +995,8 @@ private slots:
     void nowPlayingCoverAndStandInCrossFadeInPlace();
     void nowPlayingCoverAndStandInChangeAtOnceWithAnimationsOff();
     void nowPlayingShrinksBackIntoTheCompactRow();
+    void nowPlayingFirstPlayBandIsNeverEmpty_data();
+    void nowPlayingFirstPlayBandIsNeverEmpty();
     void nowPlayingLateCoverKeepsEveryLayerContinuous();
     void nowPlayingLateCoverKeepsEveryLayerContinuous_data();
     void nowPlayingThirdTrackGoesOnFromEveryLayer();
@@ -2737,6 +2739,22 @@ double grownHeight(QQuickItem *panel, double presence, double full) {
     return rest + (full - rest) * presence;
 }
 
+// The compact row's and the cover's opacity `elapsed` ms into the move
+// from the compact row, by its time (#373 H16 I2): the row out from 20 % to
+// 50 % of shortDuration, linear; the cover in from 12 % to 112 % of it,
+// OutCubic.
+double idleRowOpacityAt(double elapsed, double shortDuration) {
+    return 1.0 - std::clamp((elapsed - 0.2 * shortDuration) / (0.3 * shortDuration), 0.0, 1.0);
+}
+double coverOpacityAt(double elapsed, double shortDuration) {
+    const double rest = 1.0 - std::clamp((elapsed - 0.12 * shortDuration) / shortDuration, 0.0, 1.0);
+    return 1.0 - rest * rest * rest;
+}
+// How far into an InOutQuad move, from 0 to 1, it is `presence` of the way.
+double moveTimeAt(double presence) {
+    return presence < 0.5 ? std::sqrt(presence / 2) : 1 - std::sqrt((1 - presence) / 2);
+}
+
 // Whether the library's header is laid out right under the panel.
 bool libraryFollows(QQuickItem *panel, QQuickItem *header) {
     return std::abs(sceneRectOf(header).top() - sceneRectOf(panel).bottom()) < 0.01
@@ -2753,11 +2771,14 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay_data() {
 // compact row to its full size, InOutQuad (#373 H7; H12 Z7: OutCubic left
 // at some 3,100 px/s): the panel's height and the cover's band follow one
 // progress, the lines and the library's header move down with it, and the
-// compact row fades out over the first 12 %. The band uncovers the cover,
-// which lies at its full size at the band's top left in every frame, and
-// fades in only once the row has gone, from 12 % to 57 % (#373 H15 H5: the
-// row's text, still at 0.8 to 0.2, was drawn across the incoming art): a
-// reveal, not a zoom (#373 H14 G5: a
+// compact row and the cover hand over by the move's time: the row out from
+// 20 to 50 ms, the cover in from 12 to 112 ms, OutCubic, with Kirigami's
+// shortDuration, so the band always shows one of them at least half (#373
+// H16 I2: by presence the row was gone by 12 % and the cover faint until
+// past it, an empty band for some 60 to 140 ms) and the row's text is not
+// drawn across the art for long (#373 H15 H5). The band uncovers the
+// cover, which lies at its full size at the band's top left in every
+// frame: a reveal, not a zoom (#373 H14 G5: a
 // square growing in the middle of the band, with empty flanks). The lines
 // come in after the move rather than with it (#373 H12 Z7, H14 G5): at 0
 // until it is 90 % of the way, then fading in over shortDuration,
@@ -2883,7 +2904,8 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         const double rest = 1.0 - std::clamp((timeAt(presence) * duration - fadeStart) / fadeLength, 0.0, 1.0);
         return 1.0 - rest * rest * rest;
     };
-    for (const double at : {0.05, 0.1, 0.12, 0.15, 0.25, 0.5, 0.75, 0.8, 0.9, 0.93, 0.97}) {
+    for (const double at : {0.0001, 0.0005, 0.001, 0.002, 0.005, 0.05, 0.1, 0.12, 0.15, 0.25, 0.5, 0.75, 0.8,
+                            0.9, 0.93, 0.97}) {
         panel->setProperty("presence", at);
         const QString where = QString::number(at);
         QTRY_VERIFY2(libraryFollows(panel, header), qPrintable(where));
@@ -2891,8 +2913,9 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
         QCOMPARE(panel->height(), std::round(panel->height()));
         QVERIFY2(std::abs(area->height() - (rowHeight + (side - rowHeight) * at)) <= 0.5, qPrintable(where));
-        QVERIFY2(qFuzzyCompare(1.0 + cover->opacity(), 1.0 + std::clamp((at - 0.12) / 0.45, 0.0, 1.0)),
-                 qPrintable(where));
+        const double elapsed = moveTimeAt(at) * duration;
+        QVERIFY2(std::abs(cover->opacity() - coverOpacityAt(elapsed, units->shortDuration())) < 1e-6,
+                 qPrintable(QStringLiteral("cover %1 at %2").arg(cover->opacity()).arg(where)));
         // The cover whole, at its full size, at the band's top left: the
         // band uncovers it.
         QVERIFY2(cover->width() == side && cover->height() == side
@@ -2901,10 +2924,11 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
         // Its stand-in's mark is drawn for the place's size all the way.
         QCOMPARE(cover->property("layoutSize").toDouble(), side);
         QVERIFY2(area->clip(), qPrintable(where));
-        QVERIFY2(qFuzzyCompare(1.0 + row->opacity(), 1.0 + std::max(0.0, 1.0 - at / 0.12)), qPrintable(where));
-        QCOMPARE(row->isVisible(), at < 0.12);
-        // The row gone before the cover shows: never both.
-        QVERIFY2(row->opacity() == 0.0 || cover->opacity() == 0.0,
+        QVERIFY2(std::abs(row->opacity() - idleRowOpacityAt(elapsed, units->shortDuration())) < 1e-6,
+                 qPrintable(QStringLiteral("row %1 at %2").arg(row->opacity()).arg(where)));
+        QCOMPARE(row->isVisible(), row->opacity() > 0.0);
+        // The band never shows neither.
+        QVERIFY2(std::max(row->opacity(), cover->opacity()) >= 0.5,
                  qPrintable(QStringLiteral("row %1, cover %2 at %3").arg(row->opacity()).arg(cover->opacity()).arg(where)));
         // The lines unfaded, the title under the cover's band or, beside
         // the narrow cover, under the compact row while that shows; in, as
@@ -2940,6 +2964,66 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     QVERIFY(grown(panel));
     QCOMPARE(linesItem->opacity(), 1.0);
     QVERIFY(panelIdle(panel, lines));
+}
+
+void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::newRow("wide") << false;
+    QTest::newRow("narrow") << true;
+}
+
+// On the first Play, at Kirigami's own durations, every frame drawn shows
+// the compact row or the cover at least at half, from the first frame of
+// the move on: no blink of an empty band (#373 H16 I2: 60 to 80 ms of it),
+// and the cover at its full size all along.
+void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
+    QFETCH(bool, narrow);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    if (narrow) {
+        window->resize(1000, 720);
+        QTRY_COMPARE(window->width(), 1000);
+    }
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *row = named(window, "nowPlayingIdleRow");
+    QVERIFY(panel && cover && row);
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(growth != nullptr);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    QVERIFY(panel->property("idle").toBool());
+    const double side = narrow ? 96.0 : panel->width();
+    QList<double> shown;
+    QString problem;
+    const QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (!growth->property("running").toBool() && shown.isEmpty()) {
+                return;
+            }
+            const double rowOpacity = row->isVisible() ? row->opacity() : 0.0;
+            const double coverOpacity = cover->isVisible() ? cover->opacity() : 0.0;
+            shown.push_back(std::max(rowOpacity, coverOpacity));
+            if (problem.isEmpty() && (cover->width() != side || cover->height() != side)) {
+                problem = QStringLiteral("the cover %1x%2").arg(cover->width()).arg(cover->height());
+            }
+        });
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
+    QTest::qWait(50);
+    QObject::disconnect(connection);
+    QVERIFY2(problem.isEmpty(), qPrintable(problem));
+    QVERIFY2(shown.size() >= 5, qPrintable(QString::number(shown.size())));
+    for (qsizetype index = 1; index < shown.size(); ++index) {
+        QVERIFY2(shown.at(index) >= 0.49, qPrintable(QStringLiteral("frame %1 of %2: %3").arg(index)
+                                                         .arg(shown.size()).arg(shown.at(index))));
+    }
+    QCOMPARE(cover->opacity(), 1.0);
+    QVERIFY(!row->isVisible());
 }
 
 void UiMotionTest::nowPlayingLibrarySlidesWithTheCoversPlace_data() {
@@ -3360,8 +3444,10 @@ void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
         const QString where = QString::number(at);
         QTRY_VERIFY2(libraryFollows(panel, header), qPrintable(where));
         QVERIFY2(std::abs(panel->height() - grownHeight(panel, at, full)) <= 0.5, qPrintable(where));
-        // The row back only once the cover has gone (#373 H15 H5).
-        QCOMPARE(row->isVisible(), at < 0.12);
+        // The row back only as the cover goes, by the move's time (#373
+        // H16 I2).
+        const double elapsed = moveTimeAt(at) * growth->property("duration").toDouble();
+        QCOMPARE(row->isVisible(), elapsed < 0.5 * units->shortDuration());
     }
     QVERIFY(QMetaObject::invokeMethod(growth, "resume"));
     QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));

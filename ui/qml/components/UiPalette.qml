@@ -250,6 +250,12 @@ QtObject {
     // is plotLaneSeam's neutral one.
     readonly property color plotRestLaneSeam: ColorUtils.drawnOver(
         root._tintOf(Qt.color("#ffffff"), root.plotFloor, 1.45), root.plotFloor)
+    // The never-played waveform's rest lines, at half of full scale over
+    // and under each lane's centre line: the text over the view, the
+    // least in whole percent that is 1.3:1 on it, as the spectrogram's rest
+    // lines are faint on its floor (#373 H16 I8).
+    readonly property color waveformRestLine: ColorUtils.drawnOver(
+        root._tintOf(root.text, root.view, 1.3), root.view)
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed, on the plot's floor. Silence within a track is still
@@ -309,19 +315,21 @@ QtObject {
         plotLink: root.link
         // The meter in the waveform's colour, so it reads as the plot's own
         // instrument rather than as a piece of the queue's scrollbar above
-        // it, whose greys it had (#373 H12 Z5): a faint trough, the
-        // waveform's colour mixed about 35 % toward the view, less where
-        // that would be under 3:1 on the trough (the light theme's 30 %),
-        // and a seam across its top. From the pane's waveform colour, so it
-        // stays the plot's own (#373 H15 H6).
-        meterTrough: ColorUtils.withAlpha(root.text, 0.06)
+        // it, whose greys it had (#373 H12 Z5): the waveform's colour mixed
+        // about 35 % toward the view, less where that would be under 3:1 on
+        // the trough, and a seam across its top. From the pane's waveform
+        // colour, so it stays the plot's own (#373 H15 H6). The trough
+        // frames the bar (LevelMeterItem's `framed`), a step off the view,
+        // so the column reads as an instrument and not as the waveform's
+        // tail (#373 H16 I3: at 1.2:1 it did not show).
+        meterTrough: root.themeIsDark ? "#2b2d2f" : "#e8e9ea"
         meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
         meterTopSeam: root.seam
         meterSeam: root.view
         meterPeak: ColorUtils.withAlpha(root.text, 0.95)
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
-        // The waveform has no scale: the meter shows no ticks on it.
-        meterTick: ColorUtils.withAlpha(root.text, 0.4)
+        // The meter's marks: the text colour, faint.
+        meterTick: ColorUtils.withAlpha(root.text, 0.3)
         // The accent is 2.4:1 on white: the light fill is the focus ring's
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing

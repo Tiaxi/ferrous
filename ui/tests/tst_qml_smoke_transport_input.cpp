@@ -25,6 +25,7 @@ private slots:
     void visualizationModeSwitchShowsBeforeAnyAudio();
     void paneAtRestIsAStereoInstrument();
     void visualizationModeSwitchLeavesTheCornerToTheView();
+    void crosshairGivesWayToThePlotsPlates();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenStripHidesWhatTheViewDrawsUnderIt();
     void viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls();
@@ -1011,15 +1012,16 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QVERIFY(modeSwitch != nullptr && waveformButton != nullptr && spectrogramButton != nullptr);
 
-    // The pointer off the pane: the switch shows, in its corner, 4 px in.
+    // The pointer off the pane: the switch shows, in its corner, 5 px in,
+    // as the lane heads are (#373 H16 I5).
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QVERIFY(!sceneRectOf(spectrogram).contains(QPointF(4, window->height() - 4)));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(modeSwitch->isVisible());
     const QRectF pane = sceneRectOf(spectrogram);
     const QRectF plate = sceneRectOf(modeSwitch);
-    QCOMPARE(plate.top() - pane.top(), 4.0);
-    QCOMPARE(pane.right() - plate.right(), 4.0);
+    QCOMPARE(plate.top() - pane.top(), 5.0);
+    QCOMPARE(pane.right() - plate.right(), 5.0);
     // No message on the plot; a stereo track's lanes, named, without
     // Mute and Solo.
     QVERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotAnalysingText")) == nullptr);
@@ -1150,6 +1152,36 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(waveformSurface->property("laneCount").toInt(), 2);
     QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
              (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
+    // Each lane with its rest lines at half of full scale over and under
+    // its centre, 1 px, faint, about 1.3:1 on the view (#373 H16 I8).
+    const auto restLines = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")); };
+    QTRY_COMPARE(restLines().size(), 4);
+    {
+        const QColor view = palette->property("view").value<QColor>();
+        const QColor line = palette->property("waveformRestLine").value<QColor>();
+        const auto luminance = [](const QColor &color) {
+            const auto channel = [](double value) {
+                return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+            };
+            return 0.2126 * channel(color.redF()) + 0.7152 * channel(color.greenF()) + 0.0722 * channel(color.blueF());
+        };
+        const double ratio = (std::max(luminance(view), luminance(line)) + 0.05)
+            / (std::min(luminance(view), luminance(line)) + 0.05);
+        QVERIFY2(ratio >= 1.25 && ratio <= 1.45, qPrintable(QString::number(ratio)));
+        const QRectF plot = sceneRectOf(waveformSurface);
+        const double laneHeight = plot.height() / 2;
+        for (int lane = 0; lane < 2; ++lane) {
+            const double centre = plot.top() + std::floor(lane * laneHeight + laneHeight / 2);
+            const double quarter = (laneHeight / 2 - 1) / 2;
+            QList<double> wanted{std::round(centre - quarter), std::round(centre + quarter)};
+            for (QQuickItem *rest : restLines()) {
+                QCOMPARE(rest->height(), 1.0);
+                QCOMPARE(rest->property("color").value<QColor>(), line);
+                wanted.removeIf([&](double y) { return std::abs(sceneRectOf(rest).top() - y) <= 1.0; });
+            }
+            QVERIFY2(wanted.isEmpty(), qPrintable(QStringLiteral("lane %1 lacks a line at %2").arg(lane).arg(wanted.value(0))));
+        }
+    }
     viewer->setProperty("visualizationMode", 0);
     QTRY_VERIFY(spectrogram->isVisible() && spectrogram->opacity() == 1.0);
 
@@ -1165,6 +1197,72 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(sceneRectOf(panes().at(1)), lower);
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()
                 || bridge->property("channelButtonsVisibility").toInt() == 0);
+    // The waveform's rest lines gone with the first track.
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    QTRY_VERIFY(restLines().isEmpty());
+}
+
+// The crosshair and its readout give way to the plot's plates: on a lane's
+// label or its buttons, or on the mode switch, they fade out over
+// shortDuration, and come back off them (#373 H16 I9: its line ran under
+// the plates and through them), in both modes.
+void TransportInputSmokeTest::crosshairGivesWayToThePlotsPlates() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && layer && spectrogramSurface && waveformSurface);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("spectrogramViewMode", 1);
+    QQuickItem *modeSwitch = firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_VERIFY(!visibleItemsNamed(layer, QStringLiteral("plotLaneLabel")).isEmpty());
+    QQuickItem *label = visibleItemsNamed(layer, QStringLiteral("plotLaneLabel")).first();
+    const auto opacities = [&](int mode) {
+        if (mode == 0) {
+            QList<double> values;
+            for (QQuickItem *pane : visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+                values.push_back(pane->property("crosshairOpacity").toDouble());
+            }
+            return values;
+        }
+        auto *waveform = waveformSurface->property("waveformItem").value<QObject *>();
+        return QList<double>{waveform->property("crosshairOpacity").toDouble()};
+    };
+    const auto all = [&](int mode, double value) {
+        const QList<double> values = opacities(mode);
+        return !values.isEmpty()
+            && std::all_of(values.begin(), values.end(), [&](double each) { return std::abs(each - value) < 1e-6; });
+    };
+    for (const int mode : {0, 1}) {
+        viewer->setProperty("visualizationMode", mode);
+        QTRY_VERIFY((mode == 0 ? spectrogramSurface : waveformSurface)->isVisible());
+        const QPoint onPlot = sceneRectOf(layer).center().toPoint();
+        QTest::mouseMove(window, onPlot);
+        QTRY_VERIFY(all(mode, 1.0));
+        QCOMPARE(layer->property("crosshairLevel").toDouble(), 1.0);
+        for (QQuickItem *plate : {label, modeSwitch}) {
+            QTest::mouseMove(window, sceneRectOf(plate).center().toPoint());
+            QTRY_VERIFY(layer->property("plateHovered").toBool());
+            QTRY_VERIFY2(all(mode, 0.0), qPrintable(QStringLiteral("mode %1 on %2").arg(mode).arg(plate->objectName())));
+            QTest::mouseMove(window, onPlot);
+            QTRY_VERIFY(!layer->property("plateHovered").toBool());
+            QTRY_VERIFY(all(mode, 1.0));
+        }
+    }
+    // Over shortDuration, OutCubic.
+    QTest::mouseMove(window, sceneRectOf(modeSwitch).center().toPoint());
+    QTRY_VERIFY(layer->property("plateHovered").toBool());
+    QTest::qWait(16);
+    const double during = layer->property("crosshairLevel").toDouble();
+    QVERIFY2(during < 1.0, qPrintable(QString::number(during)));
+    QTRY_COMPARE(layer->property("crosshairLevel").toDouble(), 0.0);
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {
@@ -1548,10 +1646,10 @@ void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
     QTRY_VERIFY((title = visibleItemNamed(window, QStringLiteral("albumArtInfoTitle"))) != nullptr);
     const qreal plateBottom = sceneRectOf(controls).bottom();
     if (pointSize == 0) {
-        QCOMPARE(plateBottom, 32.0);
-        QTRY_COMPARE(sceneRectOf(title).top(), 44.0);
+        QCOMPARE(plateBottom, 33.0);
+        QTRY_COMPARE(sceneRectOf(title).top(), 45.0);
     } else {
-        QVERIFY2(plateBottom > 32.0, qPrintable(QString::number(plateBottom)));
+        QVERIFY2(plateBottom > 33.0, qPrintable(QString::number(plateBottom)));
     }
     QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), plateBottom);
     QTRY_VERIFY2(sceneRectOf(title).top() >= plateBottom + 12 - 0.5,
@@ -1733,14 +1831,14 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
     QVERIFY(albumArtAutoHide->property("active").toBool());
     QQuickItem *popupClose = visibleItemNamed(window, QStringLiteral("albumArtPopupCloseButton"));
     QVERIFY(popupClose != nullptr);
-    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
     albumArtAutoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!popupClose->isVisible());
     albumArtAutoHide->setProperty("hideDelay", 600000);
     QTest::mouseMove(window, QPoint(window->width() / 3, window->height() / 2));
     QTest::mouseMove(window, QPoint(window->width() / 3 + 5, window->height() / 2));
     QTRY_VERIFY(popupClose->isVisible());
-    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
@@ -1764,8 +1862,8 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     setChannelCount(bridge, surface, 2);
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
-    // The pane's: the mode switch 4 px from the top, the first lane's head
-    // 5 px.
+    // The pane's: the mode switch and the first lane's head 5 px from the
+    // top (#373 H16 I5).
     const auto controlsTop = [](QQuickItem *in) {
         QQuickItem *modeSwitch = firstVisibleItemNamed(in, QStringLiteral("visualizationModeSwitch"));
         QQuickItem *laneHead = firstVisibleItemNamed(in, QStringLiteral("plotLaneHead"));
@@ -1773,14 +1871,14 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
                               laneHead ? sceneRectOf(laneHead).top() : -1.0);
     };
     QTRY_COMPARE(controlsTop(window->contentItem()),
-                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
+                 std::make_pair(sceneRectOf(surface).top() + 5.0, sceneRectOf(surface).top() + 5.0));
 
     // The viewer in the main window has no strip: the same.
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
     QVERIFY(popup != nullptr);
     QTRY_VERIFY(popup->property("opened").toBool());
-    QTRY_COMPARE(controlsTop(window->contentItem()), std::make_pair(4.0, 5.0));
+    QTRY_COMPARE(controlsTop(window->contentItem()), std::make_pair(5.0, 5.0));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     QTRY_VERIFY(!popup->property("visible").toBool());
@@ -1797,7 +1895,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
     QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
     auto *spectrogram = qobject_cast<SpectrogramItem *>(
         firstVisibleItemNamed(surface, QStringLiteral("spectrogramPaneItem")));
     QVERIFY(spectrogram != nullptr);
@@ -1805,17 +1903,17 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QCOMPARE(sceneRectOf(spectrogram).top(), 0.0);
     // The plot keeps its corner clear of the mode switch where it now is,
     // and of the 1 px edge around its plate.
-    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 4.0 + 30.0 + 1.0);
+    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 5.0 + 32.0 + 1.0);
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
         QQuickItem *modeSwitch =
             firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("visualizationModeSwitch"));
         QVERIFY(modeSwitch != nullptr);
-        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 4.0);
+        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 5.0);
         QVERIFY(!sceneRectOf(strip).intersects(sceneRectOf(modeSwitch)));
     }
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
     autoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
     QTRY_VERIFY(!strip->isVisible());
@@ -1828,7 +1926,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
 
     // Back in the pane, as before.
     QTRY_COMPARE(controlsTop(window->contentItem()),
-                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
+                 std::make_pair(sceneRectOf(surface).top() + 5.0, sceneRectOf(surface).top() + 5.0));
 }
 
 void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
@@ -1884,8 +1982,8 @@ void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
         QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 0, window->width(), window->height()));
         QQuickItem *controls = visibleItemNamed(window, shown.controlsName);
         QVERIFY2(controls != nullptr, name.constData());
-        QCOMPARE(sceneRectOf(controls).right(), window->width() - 4.0);
-        QCOMPARE(sceneRectOf(controls).top(), 4.0);
+        QCOMPARE(sceneRectOf(controls).right(), window->width() - 5.0);
+        QCOMPARE(sceneRectOf(controls).top(), 5.0);
         QQuickItem *close = visibleItemNamed(window, shown.closeName);
         QVERIFY(close != nullptr && controls->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
@@ -2106,9 +2204,9 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
                                                     ? QStringLiteral("spectrogramFullscreenCloseButton")
                                                     : QStringLiteral("spectrogramPopupCloseButton"));
         QVERIFY(close != nullptr);
-        // The window has its size: the controls end 4 px from its right.
+        // The window has its size: the controls end 5 px from its right.
         QTRY_COMPARE(sceneRectOf(controls).right(),
-                     fullscreenMode == 1 ? double(host->width()) : host->width() - 4.0);
+                     fullscreenMode == 1 ? double(host->width()) : host->width() - 5.0);
 
         for (const int mode : {0, 1}) {
             viewer->setProperty("visualizationMode", mode);

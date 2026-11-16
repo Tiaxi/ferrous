@@ -644,14 +644,25 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(sameColor(colorOf(waveform, "plotStrip"), view));
     QVERIFY(sameColor(colorOf(waveform, "meterSeam"), view));
     // The waveform's meter in the waveform's colour (#373 H12 Z5): 35 %
-    // toward the view, 30 % in the light theme, where 35 % is under 3:1 on
-    // the trough; the trough faint, the text at 6 %; a seam across its top
-    // in the seam colour. The spectrogram's meter has no such seam.
+    // toward the view, or by 5 % steps less, the most that is 3:1 on the
+    // trough; the trough a step off the view that frames the bar, #2b2d2f
+    // in dark and #e8e9ea in light (#373 H16 I3: the text at 6 %, 1.2:1,
+    // did not show); the marks the text at 30 %; a seam across its top in
+    // the seam colour. The spectrogram's meter has no such seam.
     {
         const QColor wave = colorOf(tokens, "paneWave");
-        const double amount = dark ? 0.35 : 0.30;
+        QVERIFY(sameColor(colorOf(waveform, "meterTrough"),
+                          fromHex(dark ? QStringLiteral("#2b2d2f") : QStringLiteral("#e8e9ea"))));
+        double amount = 0.35;
+        while (amount > 0.01 && contrastRatio(mixed(wave, view, amount), colorOf(waveform, "meterTrough")) < 3.0) {
+            amount -= 0.05;
+        }
+        QVERIFY2(amount >= 0.2, qPrintable(QString::number(amount)));
         QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
                  qPrintable(colorOf(waveform, "meterFill").name()));
+        const QColor tick = colorOf(waveform, "meterTick");
+        QVERIFY(std::abs(tick.alphaF() - 0.3) < 0.003 && sameColor(QColor(tick.rgb()), QColor(colorOf(tokens, "text").rgb())));
+        QVERIFY(std::abs(colorOf(spectrogram, "meterTick").alphaF() - 0.4) < 0.003);
         // Its rungs 3:1 on their trough, as drawn on the view.
         const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
         QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
@@ -668,7 +679,9 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
         } else {
             QVERIFY(sameColor(wave, colorOf(tokens, "wave")));
         }
-        QVERIFY(std::abs(colorOf(waveform, "meterTrough").alphaF() - 0.06) < 0.003);
+        // The trough reads against the view it frames.
+        QVERIFY2(contrastRatio(colorOf(waveform, "meterTrough"), view) >= 1.15,
+                 qPrintable(QString::number(contrastRatio(colorOf(waveform, "meterTrough"), view))));
         QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
         QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);
         QCOMPARE(colorOf(media, "meterTopSeam").alpha(), 0);

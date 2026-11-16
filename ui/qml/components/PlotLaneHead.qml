@@ -12,7 +12,10 @@ import "." as Components
 // window (#373 H8), has a 16 px label with 11 px text and 20 px buttons,
 // larger with a larger font, and its buttons show only on the pointer or
 // keyboard focus, not with a viewer's controls: there, every lane's would
-// show at once and crowd the lanes.
+// show at once and crowd the lanes. A lane that is muted or soloed keeps
+// its buttons shown, compact or not, so the checked one says why the lane
+// is silent, or why the others are, and is there to undo it (#373 H16 I4:
+// a muted lane and one silenced by another's Solo looked the same).
 Item {
     id: root
 
@@ -39,12 +42,23 @@ Item {
     property var toggleSolo: function() {}
     property var pointerActivity: null
     readonly property bool focusInside: muteButton.activeFocus || soloButton.activeFocus
+    // Where the pointer is over the plot, in the head's parent's
+    // coordinates, while `pointerKnown`: the label takes no hover of its
+    // own, which would take it from the plot under it and its crosshair.
+    property point pointerPosition: Qt.point(0, 0)
+    property bool pointerKnown: false
+    readonly property bool labelHovered: root.pointerKnown
+        && root.pointerPosition.x >= root.x && root.pointerPosition.x < root.x + labelPlate.width
+        && root.pointerPosition.y >= root.y && root.pointerPosition.y < root.y + labelPlate.height
+    // Whether the pointer is on the label's plate or the buttons': the
+    // plot's crosshair gives way there (PlotLayer's crosshairLevel).
+    readonly property bool plateHovered: root.labelHovered || buttonsHover.hovered
     // Whether the buttons show by their own rule; the viewer's controls
     // hiding fades them through `controlsLevel` instead, on its curve.
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
         || (root.buttonsVisibility === 1
             && ((root.revealedWithControls && !root.compact) || root.laneHovered
-                || buttonsHover.hovered || root.focusInside))
+                || buttonsHover.hovered || root.focusInside || root.muted || root.soloed))
     // The buttons' size: the label's height and 2 px above and below it,
     // compact; otherwise the design's small tool button.
     readonly property real buttonSize: root.compact
@@ -54,8 +68,9 @@ Item {
         ? root.uiPalette.compactPointSize
         : root.uiPalette.smallPointSize
 
-    // The label's box: the buttons' plate, taller, is centred on it and
-    // overhangs it above and below.
+    // The label's box; the buttons' plate, taller, has its top on one line
+    // with the label's, as the mode switch's is (#373 H16 I5), and runs
+    // below it.
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
     // What the head takes of its lane, from its own top left, with the
@@ -78,13 +93,19 @@ Item {
         uiPalette: root.uiPalette
         text: root.label
         compact: root.compact
+
     }
 
     Components.PlotPlate {
         id: buttons
         objectName: "plotLaneButtons"
         x: labelPlate.width + 8
-        anchors.verticalCenter: labelPlate.verticalCenter
+        y: 0
+        // 4 px around the buttons and between them, as on the mode switch,
+        // so a button's focus ring, 3 px out from it, keeps 1 px of the
+        // plate outside it (#373 H16 I5).
+        padding: 4
+        contentSpacing: 4
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         visible: root.buttonsVisibility !== 0 && (root.controlsShown || root.controlsLevel > 0)

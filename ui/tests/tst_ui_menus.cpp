@@ -1123,8 +1123,10 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
 // queue's scrollbar above the pane, with no strip of the plot's floor
 // beside it; its bar is far wider than the scrollbar's thumb, and nothing
 // of either overlaps the other. Its fill is the plot set's meterFill, the
-// app icon's magenta on the spectrogram (#373 H15 H2), and on the
-// spectrogram its ticks show with the plot's scale.
+// app icon's magenta on the spectrogram (#373 H15 H2). It is one meter
+// for both visualization modes, of the same input, scale and marks, so
+// one signal reads the same in either: only its colours change, and on
+// the waveform its bar is framed by the trough (#373 H16 I3).
 void UiMenusTest::levelMeterIsPartOfThePlot() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1160,14 +1162,13 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     QVERIFY2(std::abs(meterRect.right() - laneRect.right()) < 1.0,
              qPrintable(QStringLiteral("meter ends at %1, the lane at %2").arg(meterRect.right()).arg(laneRect.right())));
     QCOMPARE(meter->implicitWidth(), LevelMeterItem::kColumnWidth);
-    // The bar out to that edge, 10 px: a ladder of 2 px rungs on a 3 px
+    // The bar out to that edge, 10 px: a ladder of 3 px rungs on a 4 px
     // pitch rather than a solid bar, which tells it from the scrollbar's
-    // solid thumb (#373 H14 G3: a 15 px solid bar was louder than the
-    // plot, and in the view's colours still read as a thumb).
+    // solid thumb (#373 H14 G3; H16 I3: 2 px on 3 read as a hatch).
     QCOMPARE(LevelMeterItem::kBarLeft + LevelMeterItem::kBarWidth, meter->width());
     QCOMPARE(LevelMeterItem::kBarWidth, 10.0);
-    QCOMPARE(LevelMeterItem::kRungHeight, 2.0);
-    QCOMPARE(LevelMeterItem::kRungPitch, 3.0);
+    QCOMPARE(LevelMeterItem::kRungHeight, 3.0);
+    QCOMPARE(LevelMeterItem::kRungPitch, 4.0);
     // Neither overlaps the other: the thumb ends above the pane.
     QVERIFY2(!meterRect.intersects(laneRect) && !meterRect.intersects(thumbRect),
              qPrintable(QStringLiteral("meter %1, %2 lane %3, %4, thumb to %5")
@@ -1183,15 +1184,40 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
     };
     QCOMPARE(meter->property("fillColor").value<QColor>(), fillOf("spectrogramPlot"));
     QCOMPARE(fillOf("spectrogramPlot"), QColor(QStringLiteral("#c149a0")));
-    QVERIFY(!meter->scaleShown());
+    QVERIFY(!meter->framed());
+    // Every property of the meter but its colours and frame, which decide
+    // what it reads and where on its scale: the same in either mode, and
+    // with or without the spectrogram's scale.
+    const auto reading = [&]() {
+        QVariantMap values;
+        for (const char *name : {"sourcePath", "laneCount", "active", "playing", "durationSeconds",
+                                 "channelCountHint", "clock", "width", "height"}) {
+            values.insert(QString::fromLatin1(name), meter->property(name));
+        }
+        return values;
+    };
+    const QVariantMap spectrogramReading = reading();
     bridge->setProperty("showSpectrogramScale", true);
-    QTRY_VERIFY(meter->scaleShown());
-    // The waveform: its own fill and no scale.
+    QTest::qWait(50);
+    QCOMPARE(reading(), spectrogramReading);
+    // The waveform: its own fill, the bar framed, and the same meter.
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1));
     QTRY_COMPARE(meter->property("fillColor").value<QColor>(), fillOf("waveformPlot"));
-    QVERIFY(!meter->scaleShown());
+    QVERIFY(meter->framed());
+    QCOMPARE(qobject_cast<LevelMeterItem *>(child(window, "levelMeter")), meter);
+    QCOMPARE(reading(), spectrogramReading);
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0));
-    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot") && meter->scaleShown());
+    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot") && !meter->framed());
+    // Its marks are where its scale puts -6, -12 and -24 dB, whatever the
+    // mode: the meter's own mapping, the same as the levels'.
+    const double scaleHeight = 300;
+    const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
+    QCOMPARE(gaps.size(), std::size_t(3));
+    const double levels[] = {-24.0, -12.0, -6.0};
+    for (std::size_t i = 0; i < gaps.size(); ++i) {
+        QCOMPARE(gaps[i] + 1, int(std::lround(LevelMeterItem::meterPosition(levels[i], scaleHeight))));
+    }
+    QCOMPARE(LevelMeterItem::meterPosition(-6.0, scaleHeight), 0.8 * scaleHeight);
 }
 
 void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {

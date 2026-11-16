@@ -27,13 +27,13 @@ constexpr double kRequestLeadSeconds = 0.5;
 constexpr double kLookaheadSeconds = 0.5;
 // How often readers of the levels hear of new ones.
 constexpr int kReadoutIntervalMs = 250;
-// The scale's ticks, in dB, and those of a short lane.
-constexpr double kTicksDb[] = {0.0, -12.0, -24.0, -48.0};
-constexpr double kShortLaneTicksDb[] = {-12.0, -24.0};
+// The meter's marks, in dB, and those of a short lane.
+constexpr double kMarksDb[] = {-6.0, -12.0, -24.0};
+constexpr double kShortLaneMarksDb[] = {-6.0, -24.0};
 // Per lane: the column's floor, the track, the lamp, the gap under it, the
-// fill, the four ticks of the scale, the gap under the peak tick and the
-// peak tick.
-constexpr int kNodesPerLane = 11;
+// fill, the three marks' ticks, the gap under the peak tick and the peak
+// tick.
+constexpr int kNodesPerLane = 10;
 // Which of a lane's nodes is the fill, a texture of its rungs; the others
 // are rectangles of one colour.
 constexpr int kRampNode = 4;
@@ -119,7 +119,7 @@ void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double
     for (int row = 0; row < rows; ++row) {
         // The row's middle, in device pixels up from the scale's foot.
         const double fromFoot = rows - row - 0.5;
-        image.setPixel(0, row, Self::isRung(fromFoot / dpr) ? rung : qRgba(0, 0, 0, 0));
+        image.setPixel(0, row, Self::isRung(fromFoot / dpr, scalePixels / dpr) ? rung : qRgba(0, 0, 0, 0));
     }
     // The old texture goes once the node no longer draws it.
     std::unique_ptr<QSGTexture> texture(window->createTextureFromImage(image));
@@ -131,15 +131,36 @@ void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double
 }
 }
 
-std::vector<double> LevelMeterItem::ticksDb(double laneHeight) {
+std::vector<double> LevelMeterItem::marksDb(double laneHeight) {
     return laneHeight < kFullScaleLaneHeight
-        ? std::vector<double>(std::begin(kShortLaneTicksDb), std::end(kShortLaneTicksDb))
-        : std::vector<double>(std::begin(kTicksDb), std::end(kTicksDb));
+        ? std::vector<double>(std::begin(kShortLaneMarksDb), std::end(kShortLaneMarksDb))
+        : std::vector<double>(std::begin(kMarksDb), std::end(kMarksDb));
 }
 
-bool LevelMeterItem::isRung(double fromFoot) {
+std::vector<int> LevelMeterItem::markGaps(double scaleHeight) {
+    std::vector<int> gaps;
+    const double laneHeight = scaleHeight + 2 * kInset + kLampHeight + 1.0;
+    // From the lowest mark up.
+    std::vector<double> marks = marksDb(laneHeight);
+    std::sort(marks.begin(), marks.end());
+    for (const double db : marks) {
+        gaps.push_back(static_cast<int>(std::lround(meterPosition(db, scaleHeight) - kMarkGap / 2)));
+    }
+    return gaps;
+}
+
+bool LevelMeterItem::isRung(double fromFoot, double scaleHeight) {
     if (fromFoot < 0.0) return false;
-    return std::fmod(std::floor(fromFoot), kRungPitch) < kRungHeight;
+    const double row = std::floor(fromFoot);
+    // The rungs start again over each gap, so each mark has whole rungs
+    // under and over it.
+    double from = 0.0;
+    for (const int gap : markGaps(scaleHeight)) {
+        if (row < gap) break;
+        if (row < gap + kMarkGap) return false;
+        from = gap + kMarkGap;
+    }
+    return std::fmod(row - from, kRungPitch) < kRungHeight;
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {
@@ -315,10 +336,10 @@ void LevelMeterItem::setActive(bool value) {
     noteReadout();
 }
 
-void LevelMeterItem::setScaleShown(bool value) {
-    if (m_scaleShown == value) return;
-    m_scaleShown = value;
-    emit scaleShownChanged();
+void LevelMeterItem::setFramed(bool value) {
+    if (m_framed == value) return;
+    m_framed = value;
+    emit framedChanged();
     update();
 }
 
@@ -697,7 +718,6 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     }
     setRect(node->firstChild(), boundingRect(), m_seamColor);
     const double dpr = window()->effectiveDevicePixelRatio();
-    const auto snap = [dpr](double value) { return std::round(value * dpr) / dpr; };
     m_painted = painted(m_shown);
     QSGNode *child = node->firstChild()->nextSibling();
     const auto next = [&child](const QRectF &rect, const QColor &color) {
@@ -717,7 +737,9 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     };
     // Across the track, and along the bar on it.
     const auto track = [](double y, double height) { return QRectF(kTrackLeft, y, kTrackWidth, height); };
-    const auto bar = [](double y, double height) { return QRectF(kBarLeft, y, kBarWidth, height); };
+    const auto bar = [this](double y, double height) {
+        return m_framed ? QRectF(kFramedInset, y, kFramedBarWidth, height) : QRectF(kBarLeft, y, kBarWidth, height);
+    };
     for (int lane = 0; lane < m_laneCount; ++lane) {
         const auto [top, bottom] = laneRows(lane, m_laneCount, height());
         next(QRectF(kTrackLeft, top, std::max(0.0, width() - kTrackLeft), bottom - top), m_backgroundColor);
@@ -741,12 +763,12 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         // foot (#373 H14 G3), of one colour.
         const double fill = shown.fill / dpr;
         nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
-        // The scale's ticks, while the plot shows its scale.
-        const std::vector<double> ticks = m_scaleShown ? ticksDb(bottom - top) : std::vector<double>{};
-        for (std::size_t i = 0; i < std::size(kTicksDb); ++i) {
-            const double y = i < ticks.size()
-                ? std::max(scaleTop, snap(meterBottom - meterPosition(ticks[i], scaleHeight))) : 0.0;
-            next(i < ticks.size() ? track(y, 1.0) : QRectF(), m_tickColor);
+        // The marks' ticks, across the track, each in the upper row of its
+        // gap in the ladder.
+        const std::vector<int> gaps = markGaps(scaleHeight);
+        for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
+            const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
+            next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
         }
         // The 2 px tick is centred on its level, inside the scale. On the
         // fill, a 1 px gap under it keeps it a mark of its own, whatever

@@ -89,6 +89,37 @@ Item {
     // have compact heads (#373 H8): 72 px with the default font, where a
     // 20 px label and its 28 px buttons would take most of the lane.
     readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
+    // The plates' inset from the plot's corners: the lane heads' and the
+    // mode switch's.
+    readonly property int plateInset: 5
+    // Where the pointer is on the plot, in this layer's coordinates, while
+    // `pointerKnown`: for the lane labels, which take no hover.
+    property point pointerPosition: Qt.point(0, 0)
+    property bool pointerKnown: false
+    // Whether the pointer is on one of the plot's plates: a lane's label or
+    // its buttons, the mode switch or the zoom.
+    readonly property bool plateHovered: {
+        if (modeSwitch.pointerHovered || (zoomPlate.visible && zoomPlate.pointerHovered))
+            return true
+        for (let i = 0; i < laneHeads.count; ++i) {
+            const head = laneHeads.itemAt(i)
+            if (head && head.plateHovered)
+                return true
+        }
+        return false
+    }
+    // How much of the plot's crosshair and its readout show: none while the
+    // pointer is on a plate, where they ran under it and through it (#373
+    // H16 I9), fading over shortDuration, OutCubic; at once with
+    // animations off.
+    property real crosshairLevel: root.plateHovered ? 0 : 1
+    Behavior on crosshairLevel {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
@@ -115,8 +146,10 @@ Item {
         z: 2
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.topMargin: root.topInset + 4
-        anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
+        // 5 px in, as the lane heads are, their plates' tops on one line
+        // with its own (#373 H16 I5).
+        anchors.topMargin: root.topInset + root.plateInset
+        anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset + root.trailingInset
         // In a viewer, it hides and shows with the viewer's controls, at
         // their level; hidden, it takes no pointer.
         visible: root.controlsVisible || root.controlsLevel > 0
@@ -174,8 +207,8 @@ Item {
             required property int index
             objectName: "plotLaneHead"
             z: 1
-            x: 5
-            y: Math.max(root.laneTop(index), root.topInset) + 5
+            x: root.plateInset
+            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette
@@ -191,6 +224,8 @@ Item {
             controlsLevel: root.controlsLevel
             revealedWithControls: root.controlsAutoHide
             laneHovered: root.hoveredLane === index
+            pointerPosition: root.pointerPosition
+            pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }
             toggleSolo: function() { root.uiBridge.soloChannel(index) }
@@ -343,9 +378,11 @@ Item {
         clipColor: root.uiPalette.negative
         tickColor: root.plotColors.meterTick
         topSeamColor: root.plotColors.meterTopSeam
-        // Part of the instrument (#373 H7 P11): on the spectrogram, the
-        // scale's ticks show with the plot's own.
-        scaleShown: root.visualizationMode === 0 && root.uiBridge.showSpectrogramScale === true
+        // On the waveform, whose colour the bar has, the bar is framed by
+        // its trough, so it reads as an instrument rather than as the
+        // waveform's tail (#373 H16 I3). Its marks and scale are the same
+        // in both modes.
+        framed: root.visualizationMode === 1
         // Out to the pane's edge, in the main window and in the viewers
         // alike: its bar is far wider than the queue's scrollbar above it.
     }

@@ -20,6 +20,9 @@ Item {
     // the crosshair shows until they have faded out. Without a level of
     // the viewer's, they show and hide at once.
     property real interactiveOverlaysLevel: root.interactiveOverlaysVisible ? 1 : 0
+    // How much of the crosshair shows besides that: none while the pointer
+    // is on a plate of the plot (PlotLayer's crosshairLevel).
+    property real crosshairLevel: 1
     // Whether the plot draws the playhead; see Main.qml's mode switch.
     property bool playheadVisible: true
     property var pointerActivity: null
@@ -58,6 +61,8 @@ Item {
     // Kept for the tests and the per-channel lanes: the channel row the
     // pointer is on, or -1.
     readonly property int hoveredChannel: waveform.viewMode === 1 ? root.hoveredLane : -1
+    // Where the pointer is on the plot, in the scene, while it is on it.
+    readonly property point pointerScenePosition: waveformHover.point.scenePosition
     // Whether the plot waits for the track's overview.
     readonly property bool awaitingData: !root.uiBridge.waveformComplete
         && root.uiBridge.waveformCoverageSeconds <= 0
@@ -102,7 +107,7 @@ Item {
         gridEnabled: false
         crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
             && (root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0)
-        crosshairOpacity: root.interactiveOverlaysLevel
+        crosshairOpacity: root.interactiveOverlaysLevel * root.crosshairLevel
         showFpsOverlay: root.uiBridge.showFps
         reservedCorner: root.reservedCorner
         laneHeadBounds: root.laneHeadBounds
@@ -127,6 +132,32 @@ Item {
         onSeekRequested: function(seconds) {
             if (root.seekCommitted) {
                 root.seekCommitted(seconds)
+            }
+        }
+
+        // Before any audio, each lane's rest lines at half of full scale
+        // over and under its centre line, which the item draws, so the
+        // pane waits as an instrument, as the spectrogram's does with its
+        // rest lines (#373 H16 I8). Gone with the first track, whose lanes
+        // they are in.
+        Repeater {
+            model: root.atRest ? root.laneCount * 2 : 0
+
+            delegate: Rectangle {
+                required property int index
+                // The item's lane: the centre line between its top and
+                // foot, its full scale a pixel inside them.
+                readonly property int lane: Math.floor(index / 2)
+                readonly property real laneTop: lane * waveform.height / root.laneCount
+                readonly property real laneBottom: (lane + 1) * waveform.height / root.laneCount
+                readonly property real centre: Math.floor((laneTop + laneBottom) / 2)
+                readonly property real fullScale: (laneBottom - laneTop) / 2 - 1
+                objectName: "waveformRestLine"
+                x: 0
+                y: Math.round(centre + (index % 2 === 0 ? -1 : 1) * fullScale / 2)
+                width: waveform.width
+                height: 1
+                color: root.uiPalette.waveformRestLine
             }
         }
 

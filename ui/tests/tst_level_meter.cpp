@@ -229,25 +229,62 @@ struct ReferenceMeter {
     std::size_t bins{0};
 };
 
+// The marks' gaps on a scale `scaleHeight` logical pixels tall: 2 px each,
+// centred on -6, -12 and -24 dB, or on -6 and -24 dB in a lane under 64 px
+// (#373 H16 I3), as [foot, top) in logical pixels up the scale's foot.
+QList<std::pair<int, int>> markGaps(double scaleHeight) {
+    const double laneHeight = scaleHeight + 10;
+    QList<double> marks = laneHeight < 64 ? QList<double>{-24, -6} : QList<double>{-24, -12, -6};
+    QList<std::pair<int, int>> gaps;
+    for (const double db : marks) {
+        const int foot = int(std::lround(LevelMeterItem::meterPosition(db, scaleHeight) - 1));
+        gaps.push_back({foot, foot + 2});
+    }
+    return gaps;
+}
+
 // Whether the row `row` device pixels up the scale, at `dpr` device pixels
-// to the logical one, is on one of the fill's rungs: 2 px of every 3 from
-// the scale's foot (#373 H14 G3).
-bool onRung(int row, double dpr) {
-    return std::fmod(std::floor((row + 0.5) / dpr), 3.0) < 2.0;
+// to the logical one, is on one of the fill's rungs: 3 px of every 4 from
+// the scale's foot, and again from over each mark's gap, never in one
+// (#373 H14 G3, H16 I3).
+bool onRung(int row, double dpr, double scaleHeight) {
+    const int logical = int(std::floor((row + 0.5) / dpr));
+    int from = 0;
+    for (const auto &[foot, top] : markGaps(scaleHeight)) {
+        if (logical < foot) {
+            break;
+        }
+        if (logical < top) {
+            return false;
+        }
+        from = top;
+    }
+    return (logical - from) % 4 < 3;
+}
+
+// Whether the row is the upper one of a mark's gap, where its tick is.
+bool onMarkTick(int row, double dpr, double scaleHeight) {
+    const int logical = int(std::floor((row + 0.5) / dpr));
+    const QList<std::pair<int, int>> gaps = markGaps(scaleHeight);
+    return std::any_of(gaps.begin(), gaps.end(), [&](const auto &gap) { return logical == gap.second - 1; });
 }
 
 // The highest row at or under `row` that is on a rung.
-int rungAtOrUnder(int row, double dpr) {
-    while (row > 0 && !onRung(row, dpr)) {
+int rungAtOrUnder(int row, double dpr, double scaleHeight) {
+    while (row > 0 && !onRung(row, dpr, scaleHeight)) {
         --row;
     }
     return row;
 }
 
-// The colour the fill draws at `row`: on a rung, `fill`; between rungs,
-// the trough.
-QColor ladderColor(int row, double dpr, const QColor &trough, const QColor &fill) {
-    return onRung(row, dpr) ? fill : trough;
+// The colour the fill draws at `row`: on a rung, `fill`; on a mark's tick,
+// `tick`; elsewhere the trough.
+QColor ladderColor(int row, double dpr, double scaleHeight, const QColor &trough, const QColor &fill,
+                   const QColor &tick) {
+    if (onMarkTick(row, dpr, scaleHeight)) {
+        return tick;
+    }
+    return onRung(row, dpr, scaleHeight) ? fill : trough;
 }
 
 // A meter drawn offscreen at `dpr` device pixels to a logical one, through
@@ -700,6 +737,7 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
     item.setClipOffColor(QColor(0x60, 0x00, 0x00));
     item.setClipColor(QColor(0x70, 0x00, 0x00));
     item.setGapColor(QColor(0x80, 0x00, 0x00));
+    item.setTickColor(QColor(0x90, 0x00, 0x00));
     view.show();
     QTRY_VERIFY(view.isExposed());
     for (int lanes : {1, 2, 6}) {
@@ -730,7 +768,7 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
             QCOMPARE(pixel(5, top + 1), 0x10);
             QCOMPARE(pixel(5, bottom - 1), 0x10);
             // A rung of the fill, at -40 dB or just under it.
-            const double rung = meterBottom - rungAtOrUnder(int(meterBottom - at(-40)), 1.0) - 0.5;
+            const double rung = meterBottom - rungAtOrUnder(int(meterBottom - at(-40)), 1.0, scaleHeight) - 0.5;
             QCOMPARE(pixel(5, at(-18)), 0x30);
             QCOMPARE(pixel(5, rung), 0x40);
             QCOMPARE(pixel(5, top + 4), lane == 0 ? 0x70 : 0x60);
@@ -748,19 +786,21 @@ void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
                 QCOMPARE(pixel(x, top + 4), lane == 0 ? 0x70 : 0x60);
             }
             QCOMPARE(pixel(1.5, at(-18)), 0x30);
-            // The fill a ladder from the scale's foot: 2 px rungs on a 3 px
-            // pitch, the trough between them, across the bar.
+            // The fill a ladder from the scale's foot: 3 px rungs on a 4 px
+            // pitch, the trough between them, across the bar (#373 H16 I3).
             for (int row = 0; row < 12; ++row) {
                 for (double x = 2.5; x < width; x += 1) {
-                    QCOMPARE(pixel(x, meterBottom - row - 0.5), row % 3 < 2 ? 0x40 : 0x30);
+                    QCOMPARE(pixel(x, meterBottom - row - 0.5), row % 4 < 3 ? 0x40 : 0x30);
                 }
             }
-            // Without the plot's scale, no ticks: the trough above the
-            // fill, the fill's rungs and gaps below its top.
-            QCOMPARE(pixel(5, std::round(at(-24)) + 0.5), 0x30);
-            QCOMPARE(pixel(5, std::round(at(-12)) + 0.5), 0x30);
+            // The marks' ticks above the fill, whatever the plot's scale;
+            // no tick at -48 dB, where the ladder goes on.
+            for (const auto &[foot, gapTop] : markGaps(scaleHeight)) {
+                QCOMPARE(pixel(5, meterBottom - gapTop + 0.5), 0x90);
+                QCOMPARE(pixel(5, meterBottom - foot - 0.5), 0x30);
+            }
             QCOMPARE(pixel(5, std::round(at(-48)) + 0.5),
-                     onRung(int(meterBottom - std::round(at(-48)) - 1), 1.0) ? 0x40 : 0x30);
+                     onRung(int(meterBottom - std::round(at(-48)) - 1), 1.0, scaleHeight) ? 0x40 : 0x30);
             if (lane == 0) {
                 // The peak: 2 px across the track at -9 dB.
                 const double peak = at(-9);
@@ -824,15 +864,17 @@ void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
 }
 
 // The meter as part of the plot (#373 H7 P11, H8): its bar out to the
-// column's right edge, with no strip of the plot's floor beside it; the
-// fill of one colour from its foot to its level (#373 H15 H2: the colour
-// map's capped magenta was one colour at nearly every level, and 2.3:1 on
-// the trough); the scale's ticks only while the plot shows its scale,
-// fewer in a short lane; the peak tick a mark of its own on any fill.
+// column's right edge, with no strip of the plot's floor beside it, or
+// framed by its track, 2 px in from either edge (#373 H16 I3); the fill of
+// one colour from its foot to its level (#373 H15 H2); its marks at -6,
+// -12 and -24 dB, fewer in a short lane, a 2 px gap in the ladder with a
+// 1 px tick across the track in its upper row, on the fill and above it,
+// whatever the plot's scale (#373 H16 I3); the peak tick a mark of its own
+// on any fill.
 void LevelMeterTest::meterIsPartOfThePlot() {
-    // The ticks: four in a full lane, two in a short one.
-    QCOMPARE(LevelMeterItem::ticksDb(200), (std::vector<double>{0, -12, -24, -48}));
-    QCOMPARE(LevelMeterItem::ticksDb(50), (std::vector<double>{-12, -24}));
+    // The marks: three in a full lane, two in a short one.
+    QCOMPARE(LevelMeterItem::marksDb(200), (std::vector<double>{-6, -12, -24}));
+    QCOMPARE(LevelMeterItem::marksDb(50), (std::vector<double>{-6, -24}));
 
     constexpr double width = LevelMeterItem::kColumnWidth;
     QQuickWindow view;
@@ -852,11 +894,11 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     view.show();
     QTRY_VERIFY(view.isExposed());
     for (int lanes : {1, 6}) {
-        for (const double level : {-50.0, -30.0, -8.0}) {
-            for (const bool scaleShown : {false, true}) {
+        for (const double level : {-50.0, -30.0, -8.0, -3.0}) {
+            for (const bool framed : {false, true}) {
                 item.setLaneCount(lanes);
                 item.setChannelCountHint(lanes);
-                item.setScaleShown(scaleShown);
+                item.setFramed(framed);
                 item.m_channels.assign(static_cast<std::size_t>(lanes), {});
                 for (auto &channel : item.m_channels) {
                     channel.observe(level, 0);
@@ -870,46 +912,52 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                 const double scale = double(image.width()) / view.width();
                 const auto color = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
                 const auto red = [&](double x, double y) { return color(x, y).red(); };
-                const QString where = QStringLiteral("%1 lanes at %2 dB, scale %3").arg(lanes).arg(level).arg(scaleShown);
+                const QString where = QStringLiteral("%1 lanes at %2 dB, %3").arg(lanes).arg(level)
+                                          .arg(framed ? QStringLiteral("framed") : QStringLiteral("out to the edge"));
+                const double barRight = framed ? width - LevelMeterItem::kFramedInset : width;
+                const double barLeft = framed ? LevelMeterItem::kFramedInset : LevelMeterItem::kBarLeft;
                 for (int lane = 0; lane < lanes; ++lane) {
                     const auto [top, bottom] = LevelMeterItem::laneRows(lane, lanes, 402);
                     const double height = bottom - top;
                     const double meterBottom = bottom - 3;
                     const double scaleHeight = height - 6 - 3 - 1;
-                    const auto at = [&](double db) { return meterBottom - LevelMeterItem::meterPosition(db, scaleHeight); };
                     // The plot's floor only above and below the meter; the
-                    // lamp and the fill out to the column's right edge.
+                    // lamp and the fill on the bar, the track beside it.
+                    const double scalePixels = scaleHeight * scale;
+                    const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
+                    const int topRung = rungAtOrUnder(rows - 1, scale, scaleHeight);
+                    const double rungY = meterBottom - (topRung + 0.5) / scale;
                     for (double x = LevelMeterItem::kTrackLeft + 0.5; x < width; x += 1) {
                         for (const double y : {top + 1, bottom - 1}) {
                             QVERIFY2(red(x, y) == 0x10, qPrintable(where + QStringLiteral(": x %1, y %2").arg(x).arg(y)));
                         }
-                        if (x > LevelMeterItem::kBarLeft) {
-                            QVERIFY2(red(x, top + 4) == 0x60 && color(x, meterBottom - 1.5) == color(5, meterBottom - 1.5),
-                                     qPrintable(where + QStringLiteral(": x %1").arg(x)));
-                        }
+                        const bool onBar = x > barLeft && x < barRight;
+                        QVERIFY2(red(x, top + 4) == (onBar ? 0x60 : 0x30) && red(x, rungY) == (onBar ? 0x40 : 0x30),
+                                 qPrintable(where + QStringLiteral(": x %1").arg(x)));
                     }
                     // The fill, of one colour: at its bottom rung and at its
                     // top one.
-                    const double scalePixels = scaleHeight * scale;
-                    const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
-                    const int topRung = rungAtOrUnder(rows - 1, scale);
-                    for (const double y : {meterBottom - 0.5 / scale, meterBottom - (topRung + 0.5) / scale}) {
+                    for (const double y : {meterBottom - 0.5 / scale, rungY}) {
                         QVERIFY2(color(5, y) == QColor(0x40, 0x00, 0x00),
                                  qPrintable(where + QStringLiteral(": fill %1 at y %2").arg(color(5, y).name()).arg(y)));
                     }
-                    // The ticks only with the scale, where they are; the
-                    // trough or the fill without.
-                    const std::vector<double> ticks = LevelMeterItem::ticksDb(height);
-                    for (const double tick : {0.0, -12.0, -24.0, -48.0}) {
-                        const bool listed = std::find(ticks.begin(), ticks.end(), tick) != ticks.end();
-                        const double y = std::max(meterBottom - scaleHeight, std::round(at(tick))) + 0.5;
-                        const int under = tick < level ? 0x00 : 0x30;
-                        if (scaleShown && listed) {
-                            QVERIFY2(red(5, y) == 0x90, qPrintable(where + QStringLiteral(": tick at %1 dB").arg(tick)));
-                        } else if (under == 0x30) {
-                            QVERIFY2(red(5, y) == 0x30, qPrintable(where + QStringLiteral(": no tick at %1 dB, lane %2, y %3, drawn %4").arg(tick).arg(lane).arg(y).arg(color(5, y).name())));
-                        } else {
-                            QVERIFY2(red(5, y) != 0x90, qPrintable(where + QStringLiteral(": no tick at %1 dB").arg(tick)));
+                    // Each mark: its tick across the track in the gap's
+                    // upper row, the track in its lower one, on the fill or
+                    // above it; a rung starting right over the gap where
+                    // the fill reaches it.
+                    const QList<std::pair<int, int>> gaps = markGaps(scaleHeight);
+                    QCOMPARE(gaps.size(), height < 64 ? 2 : 3);
+                    for (const auto &[foot, gapTop] : gaps) {
+                        const double tickY = meterBottom - gapTop + 0.5;
+                        const double lowerY = meterBottom - foot - 0.5;
+                        for (double x = LevelMeterItem::kTrackLeft + 0.5; x < width; x += 1) {
+                            QVERIFY2(red(x, tickY) == 0x90 && red(x, lowerY) == 0x30,
+                                     qPrintable(where + QStringLiteral(": mark at %1 px, x %2: %3, %4")
+                                                    .arg(foot).arg(x).arg(red(x, tickY)).arg(red(x, lowerY))));
+                        }
+                        if (gapTop + 3 <= LevelMeterItem::meterPosition(level, scaleHeight)) {
+                            QVERIFY2(red(5, meterBottom - gapTop - 0.5) == 0x40,
+                                     qPrintable(where + QStringLiteral(": rungs about the mark at %1").arg(foot)));
                         }
                     }
                 }
@@ -921,7 +969,7 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     // it keeps it apart from the fill's colour.
     item.setLaneCount(1);
     item.setChannelCountHint(1);
-    item.setScaleShown(false);
+    item.setFramed(false);
     item.m_channels.assign(1, {});
     item.m_channels[0].observe(-20, 0);
     item.m_channels[0].level = -20.1;
@@ -966,6 +1014,9 @@ void LevelMeterTest::loudFillIsOneColourAndItsPeakIsFull() {
     item.setPeakColor(Qt::white);
     item.setClipOffColor(QColor(0x33, 0x33, 0x33));
     item.setClipColor(QColor(0xed, 0x5a, 0x6a));
+    // The marks' ticks: the spectrogram's white at 40 %, over the trough.
+    item.setTickColor(QColor::fromRgbF(1, 1, 1, 0.4));
+    const QColor tick(0x83, 0x7c, 0x92);
     view.show();
     QTRY_VERIFY(view.isExposed());
     for (const double level : {-6.0, -1.0, -0.01}) {
@@ -992,10 +1043,15 @@ void LevelMeterTest::loudFillIsOneColourAndItsPeakIsFull() {
         // Under the tick and its gap, the rungs in the fill's colour and
         // the trough between them, across the bar.
         for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); ++y) {
-            const QColor wanted = ladderColor(int(meterBottom * scale) - 1 - y, scale, trough, fillColor);
+            const QColor wanted = ladderColor(int(meterBottom * scale) - 1 - y, scale, scaleHeight, trough,
+                                              fillColor, tick);
             for (int x = int(LevelMeterItem::kBarLeft * scale); x < image.width(); ++x) {
                 const QColor pixel = image.pixelColor(x, y);
-                QVERIFY2(pixel == wanted, qPrintable(where + QStringLiteral(": %1, %2 is %3, wanted %4")
+                const auto near = [](const QColor &a, const QColor &b) {
+                    return std::abs(a.red() - b.red()) <= 1 && std::abs(a.green() - b.green()) <= 1
+                        && std::abs(a.blue() - b.blue()) <= 1;
+                };
+                QVERIFY2(near(pixel, wanted), qPrintable(where + QStringLiteral(": %1, %2 is %3, wanted %4")
                                                          .arg(x).arg(y).arg(pixel.name(), wanted.name())));
             }
         }
@@ -1061,22 +1117,25 @@ void LevelMeterTest::fillIsALadderOfOneColour() {
     // a gap's the trough.
     const QColor fill(0x40, 0x00, 0x00);
     for (int row = 0; row < rows; ++row) {
-        const QColor wanted = ladderColor(row, dpr, trough, fill);
+        const QColor wanted = ladderColor(row, dpr, scalePixels / dpr, trough, fill, QColor(0x90, 0x00, 0x00));
         for (int x = barLeft; x < image.width(); ++x) {
             QVERIFY2(pixel(x, row) == wanted, qPrintable(QStringLiteral("row %1, x %2: %3, wanted %4")
                 .arg(row).arg(x).arg(pixel(x, row).name(), wanted.name())));
         }
     }
-    // Rungs of 2 px on a 3 px pitch, in logical pixels, from the foot.
+    // Rungs of 3 px on a 4 px pitch, in logical pixels, from the foot
+    // (#373 H16 I3).
     for (int row = 0; row < int(12 * dpr); ++row) {
-        QCOMPARE(pixel(barLeft, row) != trough, int(row / dpr) % 3 < 2);
+        QCOMPARE(pixel(barLeft, row) != trough, int(row / dpr) % 4 < 3);
     }
-    // Above the level, the trough and the peak tick only.
+    // Above the level, the trough, the marks' ticks and the peak tick only.
     int peakRows = 0;
+    const QColor tick(0x90, 0x00, 0x00);
     for (int row = rows; row < scalePixels; ++row) {
         for (int x = barLeft; x < image.width(); ++x) {
             const QColor shown = pixel(x, row);
-            QVERIFY2(shown == trough || shown == peak, qPrintable(QStringLiteral("row %1, x %2: %3")
+            QVERIFY2(shown == trough || shown == peak || (shown == tick && onMarkTick(row, dpr, scalePixels / dpr)),
+                     qPrintable(QStringLiteral("row %1, x %2: %3")
                 .arg(row).arg(x).arg(shown.name())));
         }
         peakRows += pixel(barLeft, row) == peak ? 1 : 0;
