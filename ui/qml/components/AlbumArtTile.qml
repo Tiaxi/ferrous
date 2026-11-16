@@ -54,9 +54,10 @@ Rectangle {
     property color standInHarmonicColor: "#bd5872"
     property color standInHighHarmonicColor: "#b04698"
     // The wide mark's 4th harmonic, as the app icon draws it from 128 px: a
-    // faint violet, some 2.6:1 on the floor, below the 3rd harmonic's value
-    // (#373 H21 N1).
-    property color standInFourthHarmonicColor: "#723b9f"
+    // faint violet, some 2.9:1 on the floor, below the 3rd harmonic's value
+    // (#373 H21 N1; H24: lifted from 2.6:1 as the icon's was, where its cut
+    // on the top edge fused with the rim).
+    property color standInFourthHarmonicColor: "#7944a4"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): on
     // the wide mark the glide's 3.5 px at a 180 px tile, rising to 6.5 px at

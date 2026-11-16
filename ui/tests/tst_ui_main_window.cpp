@@ -724,9 +724,10 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the 2nd harmonic at %1:1 on the floor, between %2 and %3").arg(harmonicRatio).arg(highRatio)
             .arg(glideRatio);
     }
-    // The 4th harmonic a dim violet, some 2.6:1, a step below the 3rd.
+    // The 4th harmonic a dim violet, some 2.9:1, a step below the 3rd (#373
+    // H24: 2.6:1 before, lifted as the app icon's was).
     const double fourthRatio = contrastRatio(cover->property("standInFourthHarmonicColor").value<QColor>(), floor);
-    if (fourthRatio < 2.4 || fourthRatio > 2.8 || fourthRatio > highRatio - 0.8) {
+    if (fourthRatio < 2.8 || fourthRatio > 3.0 || fourthRatio > highRatio - 0.8) {
         return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
     // A 1 px edge in a light theme, none in a dark one.
