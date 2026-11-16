@@ -60,8 +60,10 @@ constexpr QRgb kThirdHarmonic = 0xe055b4;
 constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 constexpr QRgb kDarkerHarmonic = 0xf87089;
 // The faint 4th harmonic of the 128 and 256 px drawings, a violet a step
-// darker again (#373 hill climb, H21).
-constexpr QRgb kFourthHarmonic = 0x9a4bd0;
+// darker again (#373 hill climb, H21), and H21's, darker still, whose cut on
+// the tile's top inner edge fused with the rim (H24).
+constexpr QRgb kFourthHarmonic = 0xa456d6;
+constexpr QRgb kDarkerFourthHarmonic = 0x9a4bd0;
 
 QImage render(const QString &path, int size) {
     QImageReader reader(path);
@@ -1659,12 +1661,22 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     if (!hasDetailTier(size)) {
         return;
     }
-    QVERIFY(source.contains(QLatin1String("<path id=\"h4\" fill=\"#9a4bd0\"")));
+    QVERIFY(source.contains(QLatin1String("<path id=\"h4\" fill=\"#a456d6\"")));
     // Faint: a step of value below the 3rd harmonic, as each trace is below
-    // the one under it, and fainter than any of the three.
+    // the one under it, and fainter than any of the three, some 2.9:1 on the
+    // tile, 8 grey levels or more under the magenta in Rec. 709 luma. Yet
+    // light enough that its cut on the top inner edge reads against the rim,
+    // 1.7:1 or more on it (#373 hill climb, H24: H21's #9a4bd0, 2.55:1 on the
+    // tile, was 1.55:1 on the rim, and the cut fused with it); the hue kept.
     const double ratio = contrastRatio(kFourthHarmonic, kTile);
-    QVERIFY2(ratio >= 2.3 && ratio <= 2.8, qPrintable(QString::number(ratio)));
-    QVERIFY(contrastRatio(kThirdHarmonic, kTile) >= ratio + 0.8);
+    QVERIFY2(ratio >= 2.8 && ratio <= 3.0, qPrintable(QString::number(ratio)));
+    QVERIFY(contrastRatio(kThirdHarmonic, kTile) >= ratio + 0.6);
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    QVERIFY2(luma(kThirdHarmonic) - luma(kFourthHarmonic) >= 8, qPrintable(QString::number(luma(kFourthHarmonic))));
+    QVERIFY2(contrastRatio(kFourthHarmonic, kRim) >= 1.7, qPrintable(QString::number(contrastRatio(kFourthHarmonic, kRim))));
+    QVERIFY(contrastRatio(kDarkerFourthHarmonic, kRim) < 1.6);
+    QVERIFY(std::abs(QColor(kFourthHarmonic).hue() - QColor(kDarkerFourthHarmonic).hue()) <= 3);
+    QVERIFY(!source.contains(QLatin1String("#9a4bd0")));
 
     const double unit = size / 64.0;
     const QRect inside = insideRim(tileOf(render(path, size)));
