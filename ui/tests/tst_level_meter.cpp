@@ -348,6 +348,8 @@ private slots:
     void fillIsALadderOfOneColour();
     void loudFillIsOneColourAndItsPeakIsFull();
     void stoppedMeterIsAnEmptyTrough();
+    void meterAtRestShowsItsMarksAlone_data();
+    void meterAtRestShowsItsMarksAlone();
     void oneLaneShowsTheLoudestChannel();
     void readoutGivesExactLevelsOnlyToReaders();
     void shownLevelsFollowTheBallistics();
@@ -719,6 +721,93 @@ void LevelMeterTest::scaleAndLanesAreLaidOutLikeThePlot() {
     QCOMPARE(LevelMeterItem::laneRows(1, 2, 201), Rows(102, 201));
     QCOMPARE(LevelMeterItem::laneRows(2, 6, 300), Rows(101, 150));
     QCOMPARE(LevelMeterItem::laneRows(5, 6, 300), Rows(251, 300));
+}
+
+void LevelMeterTest::meterAtRestShowsItsMarksAlone_data() {
+    QTest::addColumn<double>("dpr");
+    QTest::addColumn<bool>("framed");
+    QTest::addColumn<int>("lanes");
+    for (const double dpr : {1.0, 2.0}) {
+        for (const bool framed : {false, true}) {
+            for (const int lanes : {1, 2, 8}) {
+                QTest::addRow("%gx, %s, %d lanes", dpr, framed ? "framed" : "out to the edge", lanes)
+                    << dpr << framed << lanes;
+            }
+        }
+    }
+}
+
+// At rest, with no track or stopped, each column is the trough with the
+// marks' ticks alone, -6, -12 and -24 dB (only -6 and -24 in a short lane),
+// each a 1 px row across the track where it is while playing, in the
+// ticks' colour: no lamp, fill or peak tick (#373 H30: the blank trough at
+// the first run read as a scrollbar's). Framed or out to the edge, at 1x
+// and 2x; the levels it last read, here loud and clipping, show nothing.
+void LevelMeterTest::meterAtRestShowsItsMarksAlone() {
+    QFETCH(double, dpr);
+    QFETCH(bool, framed);
+    QFETCH(int, lanes);
+    constexpr double width = LevelMeterItem::kColumnWidth;
+    constexpr int height = 402;
+    const QColor background(0x10, 0x00, 0x00);
+    const QColor seam(0x20, 0x00, 0x00);
+    const QColor trough(0x30, 0x00, 0x00);
+    const QColor tick(0x90, 0x00, 0x00);
+    // Draws the meter, active or at rest, with the same levels.
+    const auto draw = [&](bool active) {
+        ScaledMeter meter(QSize(int(width), height), dpr);
+        LevelMeterItem &item = meter.item;
+        item.setActive(active);
+        item.setFramed(framed);
+        item.setBackgroundColor(background);
+        item.setSeamColor(seam);
+        item.setTroughColor(trough);
+        item.setFillColor(QColor(0x40, 0x00, 0x00));
+        item.setPeakColor(QColor(0x50, 0x00, 0x00));
+        item.setClipOffColor(QColor(0x60, 0x00, 0x00));
+        item.setClipColor(QColor(0x70, 0x00, 0x00));
+        item.setGapColor(QColor(0x80, 0x00, 0x00));
+        item.setTickColor(tick);
+        item.setLaneCount(lanes);
+        item.setChannelCountHint(lanes);
+        item.m_channels.assign(static_cast<std::size_t>(lanes), {});
+        for (auto &channel : item.m_channels) {
+            channel.observe(0, 0);
+        }
+        item.m_shown = item.m_channels;
+        item.update();
+        return std::pair{meter.initialized, meter.render()};
+    };
+    const auto [restDrawn, rest] = draw(false);
+    const auto [playingDrawn, playing] = draw(true);
+    QVERIFY(restDrawn && playingDrawn);
+    QCOMPARE(rest.size(), QSize(int(width * dpr), int(height * dpr)));
+    for (int lane = 0; lane < lanes; ++lane) {
+        const auto [top, bottom] = LevelMeterItem::laneRows(lane, lanes, height);
+        const double scaleHeight = bottom - top - 2 * LevelMeterItem::kInset - LevelMeterItem::kLampHeight - 1;
+        const int meterTop = int(std::lround((top + LevelMeterItem::kInset) * dpr));
+        const int meterBottom = int(std::lround((bottom - LevelMeterItem::kInset) * dpr));
+        const int scalePixels = int(std::lround(scaleHeight * dpr));
+        int tickRows = 0;
+        for (int y = meterTop; y < meterBottom; ++y) {
+            // Rows up from the scale's foot.
+            const int row = meterBottom - 1 - y;
+            const bool onTick = row < scalePixels && onMarkTick(row, dpr, scaleHeight);
+            tickRows += onTick ? 1 : 0;
+            for (int x = int(LevelMeterItem::kTrackLeft * dpr); x < rest.width(); ++x) {
+                const QString where = QStringLiteral("lane %1, row %2 (y %3), x %4").arg(lane).arg(row).arg(y).arg(x);
+                QVERIFY2(rest.pixelColor(x, y) == (onTick ? tick : trough),
+                         qPrintable(where + QStringLiteral(": %1").arg(rest.pixelColor(x, y).name())));
+                // Where the ticks are while playing, the same.
+                if (onTick) {
+                    QVERIFY2(playing.pixelColor(x, y) == tick, qPrintable(where + QStringLiteral(" playing")));
+                }
+            }
+        }
+        // Each mark's tick is 1 px tall.
+        QCOMPARE(tickRows, int(markGaps(scaleHeight).size() * dpr));
+        QCOMPARE(markGaps(scaleHeight).size(), qsizetype(bottom - top < 64 ? 2 : 3));
+    }
 }
 
 void LevelMeterTest::sceneGraphDrawsAColumnPerLane() {
@@ -1162,7 +1251,8 @@ void LevelMeterTest::stoppedMeterIsAnEmptyTrough() {
     item.update();
     QImage image = view.grabWindow();
     const double scale = double(image.width()) / view.width();
-    // No fill, scale, lamp or tick: the trough from top to bottom.
+    // No fill, lamp or peak tick: the trough, but for the marks' ticks
+    // (meterAtRestShowsItsMarksAlone).
     for (double y : {4.0, 6.5, 100.0, 190.0}) {
         QCOMPARE(image.pixelColor(int(5 * scale), int(y * scale)).red(), 0x30);
     }

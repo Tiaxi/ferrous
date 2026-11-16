@@ -913,6 +913,8 @@ private slots:
     void nowPlayingLargeFontCompactIsAHeaderRow_data();
     void nowPlayingLargeFontCompactIsAHeaderRow();
     void nowPlayingLongTitleFillsItsFirstLine();
+    void levelMeterAtRestShowsItsMarks_data();
+    void levelMeterAtRestShowsItsMarks();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange_data();
@@ -2244,6 +2246,85 @@ void UiMainWindowTest::nowPlayingLongTitleFillsItsFirstLine() {
     const qreal lantern = metrics.horizontalAdvance(QStringLiteral("Lantern"));
     QTRY_VERIFY2(std::abs(firstLineInk() - lantern) <= 4.0,
                  qPrintable(QStringLiteral("line 0 %1 px, \"Lantern\" %2").arg(firstLineInk()).arg(lantern)));
+}
+
+void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<int>("mode");
+    for (const bool dark : {false, true}) {
+        for (const int mode : {0, 1}) {
+            QTest::addRow("%s, %s", dark ? "dark" : "light", mode == 0 ? "spectrogram" : "waveform") << dark << mode;
+        }
+    }
+}
+
+// With nothing loaded, the visualization's level meter is its trough with
+// the -6, -12 and -24 dB marks' ticks across it, 1 px each, in the ticks'
+// colour, where they are while it plays, and no lamp, fill or peak tick
+// (#373 H30: the blank trough of the first run read as a scrollbar's): in
+// either mode and theme.
+void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
+    QFETCH(bool, dark);
+    QFETCH(int, mode);
+    const auto restorePalette = useDarkPalette(dark);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QVERIFY(bridge != nullptr && viewer != nullptr);
+    QCOMPARE(bridge->property("currentTrackPath").toString(), QString());
+    QVERIFY(bridge->setProperty("showLevelMeter", true));
+    QVERIFY(viewer->setProperty("visualizationMode", mode));
+    const auto visibleMeter = [&]() -> LevelMeterItem * {
+        for (QQuickItem *item : itemsNamed(window->contentItem(), QStringLiteral("levelMeter"))) {
+            if (item->isVisible() && item->width() > 0 && item->height() > 0) {
+                return qobject_cast<LevelMeterItem *>(item);
+            }
+        }
+        return nullptr;
+    };
+    QTRY_VERIFY(visibleMeter() != nullptr);
+    LevelMeterItem *meter = visibleMeter();
+    QVERIFY(!meter->active());
+    QCOMPARE(meter->framed(), mode == 1);
+    const QColor trough = meter->property("troughColor").value<QColor>();
+    const QColor tick = meter->property("tickColor").value<QColor>();
+    // The tick as drawn over the trough.
+    const QColor drawn = QColor::fromRgbF(
+        tick.redF() * tick.alphaF() + trough.redF() * (1 - tick.alphaF()),
+        tick.greenF() * tick.alphaF() + trough.greenF() * (1 - tick.alphaF()),
+        tick.blueF() * tick.alphaF() + trough.blueF() * (1 - tick.alphaF()));
+    const auto near = [](const QColor &a, const QColor &b) {
+        return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
+            && std::abs(a.blue() - b.blue()) <= 2;
+    };
+    QTest::qWait(50);
+    const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const double scale = double(image.width()) / window->width();
+    const QRectF rect = sceneRect(meter);
+    const auto pixel = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
+    const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
+    for (int lane = 0; lane < meter->laneCount(); ++lane) {
+        const auto [top, bottom] = LevelMeterItem::laneRows(lane, meter->laneCount(), meter->height());
+        const double meterTop = rect.top() + top + LevelMeterItem::kInset;
+        const double meterBottom = rect.top() + bottom - LevelMeterItem::kInset;
+        const double scaleHeight = meterBottom - meterTop - LevelMeterItem::kLampHeight - 1;
+        const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
+        QCOMPARE(gaps.size(), std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3));
+        int tickRows = 0;
+        for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
+            const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
+                return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
+            });
+            tickRows += onTick ? 1 : 0;
+            QVERIFY2(near(pixel(x, y), onTick ? drawn : trough),
+                     qPrintable(QStringLiteral("lane %1, y %2: %3, wanted %4")
+                                    .arg(lane).arg(y - rect.top()).arg(hex(pixel(x, y)), hex(onTick ? drawn : trough))));
+        }
+        QCOMPARE(tickRows, int(gaps.size()));
+    }
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
