@@ -116,8 +116,11 @@ QtObject {
             const restoreVolume = root.rememberedVolumeBeforeMute > 0.0001
                 ? root.rememberedVolumeBeforeMute
                 : 1.0
-            root.volumeMuted = false
+            // The volume first, which the bridge shows at once, then the
+            // state: the other way, what shows the bridge's volume while
+            // unmuted would read the 0 of the mute in between.
             root.uiBridge.setVolume(restoreVolume)
+            root.volumeMuted = false
             return
         }
 

@@ -334,7 +334,7 @@ private slots:
     void seekHoverShowsTheTimeUnderThePointer();
     void seekHoverShowsTheTimeAClickSeeksTo();
     void seekHoverFollowsTheWindowsDevicePixels();
-    void seekGesturesShowTheTimeBesideThePlayhead();
+    void seekGesturesShowTheTimeOverThePlayhead();
     void seekHoverShowsNothingWithoutATrack();
     void seekTimeFadesOutWhereItWas();
     void seekTouchShowsNoHoverTime();
@@ -1268,8 +1268,8 @@ std::optional<SeekPoint> pointBetweenSteps(QQuickItem *seek, qreal fraction) {
     return std::nullopt;
 }
 
-// The seek bar's time: a native tooltip beside the line it names, within
-// the bar's height.
+// The seek bar's time: a native tooltip above the bar, over the line it
+// names.
 struct SeekTimeBox {
     QObject *box = nullptr;
 
@@ -1293,42 +1293,39 @@ struct SeekTimeBox {
     }
 };
 
-// Why `box` is not beside `anchorX`, in the slider's coordinates, as drawn:
-// its right edge its left gap before it, or its left edge its right gap
-// after it, to within the device pixel it is rounded to, clear of the line
-// there, and centred on the bar's height rather than under the bar (#373
-// H5); or an empty text.
+// Why `box` is not over `anchorX`, in the slider's coordinates, as drawn:
+// above the bar, its bottom edge on the bar's top, so it covers none of the
+// waveform (#373 H33 AA2) and nothing under the bar (#373 H5); centred on
+// the line, to within the device pixel it is rounded to, or against the
+// bar's end where centring would take it past it; or an empty text.
 QString timeBoxPlacementError(QQuickItem *seek, const SeekTimeBox &box, qreal anchorX, qreal dpr) {
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
-    if (popup == nullptr) {
+    // A hover's time shows after a moment.
+    if (popup == nullptr || !QTest::qWaitFor([&]() { return popup->isVisible(); })) {
         return QStringLiteral("not drawn");
     }
     const QRectF drawn = popup->mapRectToScene(QRectF(0, 0, popup->width(), popup->height()));
     const QRectF bar = seek->mapRectToScene(QRectF(0, 0, seek->width(), seek->height()));
     const qreal left = drawn.left() - bar.left();
     const qreal right = drawn.right() - bar.left();
-    const qreal leftGap = box.box->property("leftGap").toReal();
-    const qreal rightGap = box.box->property("rightGap").toReal();
     const qreal slack = 0.5 / dpr + 1e-6;
     QStringList errors;
-    if (leftGap < 2 || rightGap < leftGap) {
-        errors.push_back(QStringLiteral("gaps of %1 and %2").arg(leftGap).arg(rightGap));
+    const bool centred = std::abs((left + right) / 2 - anchorX) <= slack;
+    const bool atStart = std::abs(left) <= slack && anchorX < drawn.width() / 2 + slack;
+    const bool atEnd = std::abs(right - bar.width()) <= slack && anchorX > bar.width() - drawn.width() / 2 - slack;
+    if (!centred && !atStart && !atEnd) {
+        errors.push_back(QStringLiteral("from %1 to %2, not over %3").arg(left).arg(right).arg(anchorX));
     }
-    const bool beforeIt = std::abs(right - (anchorX - leftGap)) <= slack;
-    const bool afterIt = std::abs(left - (anchorX + rightGap)) <= slack;
-    if (!beforeIt && !afterIt) {
-        errors.push_back(QStringLiteral("from %1 to %2, not beside %3").arg(left).arg(right).arg(anchorX));
-    }
-    if (right > anchorX - 1 && left < anchorX + 1) {
-        errors.push_back(QStringLiteral("over the line at %1").arg(anchorX));
+    if (left > anchorX + slack || right < anchorX - slack) {
+        errors.push_back(QStringLiteral("not over the line at %1").arg(anchorX));
     }
     if (!fuzzyEqual(drawn.left() * dpr, std::round(drawn.left() * dpr))) {
         errors.push_back(QStringLiteral("at %1 device pixels").arg(drawn.left() * dpr));
     }
-    if (std::abs(drawn.center().y() - bar.center().y()) > slack) {
-        errors.push_back(QStringLiteral("centred at %1, not on the bar's %2")
-                             .arg(drawn.center().y()).arg(bar.center().y()));
+    if (std::abs(drawn.bottom() - bar.top()) > slack) {
+        errors.push_back(QStringLiteral("its bottom at %1, not on the bar's top at %2")
+                             .arg(drawn.bottom()).arg(bar.top()));
     }
     return errors.join(QStringLiteral("; "));
 }
@@ -1778,7 +1775,7 @@ void AccessibilityTest::seekHoverShowsTheTimeUnderThePointer() {
     QVERIFY(between.has_value());
 
     // Across the bar and at either end, the tooltip shows the second under
-    // the pointer, beside it.
+    // the pointer, over it.
     struct Expected {
         qreal x;
         QString time;
@@ -1836,7 +1833,7 @@ void AccessibilityTest::seekHoverShowsTheTimeAClickSeeksTo() {
         const QPoint scene = seek->mapToScene(QPointF(x, y)).toPoint();
         QTest::mouseMove(window, scene);
         const QString hovered = timeBox.shown();
-        QVERIFY(!hovered.isEmpty());
+        QVERIFY2(!hovered.isEmpty(), qPrintable(QStringLiteral("at %1").arg(x)));
         QCOMPARE(recordedValues(root.data(), "seeks").size(), clicks);
 
         // A click there seeks to the time the box showed, and the box,
@@ -1891,7 +1888,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
         const qreal width = seek->width();
 
         // At fractional pointer positions, and at either end, the box shows
-        // the time a click there seeks to, beside the pointer.
+        // the time a click there seeks to, over the pointer.
         for (const qreal x : {0.0, 0.4, 3.3, width * 0.37 + 0.6, width * 0.62 + 0.15, width - 0.2}) {
             hover(x);
             const QString time = minutesAndSeconds(secondsAtX(seek, x));
@@ -1947,7 +1944,7 @@ void AccessibilityTest::seekHoverFollowsTheWindowsDevicePixels() {
     }
 }
 
-void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
+void AccessibilityTest::seekGesturesShowTheTimeOverThePlayhead() {
     QQmlEngine engine;
     QScopedPointer<QObject> root;
     QString errorText;
@@ -1961,8 +1958,8 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     const qreal y = seek->height() / 2;
     const auto lineCentre = [&]() { return line->mapToItem(seek, QPointF(line->width() / 2, 0)).x(); };
 
-    // A drag past the bar's end shows the time beside the playhead, at the
-    // end, not beside the pointer.
+    // A drag past the bar's end shows the time over the playhead, at the
+    // end, not over the pointer.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
                       seek->mapToScene(QPointF(seek->width() * 0.5, y)).toPoint());
     QTest::mouseMove(window, seek->mapToScene(QPointF(seek->width() * 0.7, y)).toPoint());
@@ -1995,7 +1992,7 @@ void AccessibilityTest::seekGesturesShowTheTimeBesideThePlayhead() {
     placementError = timeBoxPlacementError(seek, timeBox, dragEndX, dpr);
     QVERIFY2(placementError.isEmpty(), qPrintable(placementError));
 
-    // Held arrow keys show their time beside the playhead while the mouse
+    // Held arrow keys show their time over the playhead while the mouse
     // hovers elsewhere on the bar; the hover's returns when they end.
     QVERIFY(tabTo(window, seek));
     const QPoint hovered = seek->mapToScene(QPointF(seek->width() * 0.8, y)).toPoint();
@@ -2074,7 +2071,8 @@ SeekTimeFade followSeekTimeFade(QQuickWindow *window, const SeekTimeBox &box, co
     SeekTimeFade fade;
     auto *content = box.box->property("contentItem").value<QQuickItem *>();
     QQuickItem *popup = content != nullptr ? content->parentItem() : nullptr;
-    if (popup == nullptr || !popup->isVisible() || !QTest::qWaitFor([&]() { return popup->opacity() >= 1.0; })) {
+    // A hover's time shows after a moment.
+    if (popup == nullptr || !QTest::qWaitFor([&]() { return popup->isVisible() && popup->opacity() >= 1.0; })) {
         fade.error = QStringLiteral("not shown in full");
         return fade;
     }
@@ -2205,7 +2203,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     error = expectShown(middleTime, middleX);
     QVERIFY2(error.isEmpty(), qPrintable(error));
 
-    // A drag shows the playhead's time beside it, and the hover's comes back
+    // A drag shows the playhead's time over it, and the hover's comes back
     // at the pointer where it ends.
     const QPoint dragEnd = seek->mapToScene(QPointF(seek->width() * 0.3, y)).toPoint();
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, middle->scene);
@@ -2222,7 +2220,7 @@ void AccessibilityTest::seekTimeFadesOutWhereItWas() {
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(recordedValues(root.data(), "seeks").size(), 1);
 
-    // A touch's drag, which has no hover, fades its time out beside the
+    // A touch's drag, which has no hover, fades its time out over the
     // playhead.
     QTest::mouseMove(window, away);
     QPointingDevice *touchScreen = QTest::createTouchDevice();

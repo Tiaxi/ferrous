@@ -52,7 +52,9 @@ class BridgeClient : public QObject {
     Q_PROPERTY(PlaybackClock *playbackClock READ playbackClock CONSTANT)
     Q_PROPERTY(QString durationText READ durationText NOTIFY playbackChanged)
     Q_PROPERTY(double durationSeconds READ durationSeconds NOTIFY playbackChanged)
-    Q_PROPERTY(double volume READ volume NOTIFY snapshotChanged)
+    // The volume asked for last, from the time it is asked for, or the
+    // backend's once it has taken every request: see setVolume.
+    Q_PROPERTY(double volume READ volume NOTIFY volumeChanged)
     Q_PROPERTY(int queueLength READ queueLength NOTIFY snapshotChanged)
     Q_PROPERTY(QString queueDurationText READ queueDurationText NOTIFY snapshotChanged)
     Q_PROPERTY(QObject* queueRows READ queueRows CONSTANT)
@@ -543,6 +545,10 @@ signals:
     void trackIdentityChanged();
     void trackMetadataChanged();
     void snapshotChanged();
+    // The volume changed: at once for a request of the UI's, and with the
+    // snapshot for one of the backend's, such as a change made outside the
+    // app.
+    void volumeChanged();
     // The library's rows, roots, counts, view state and sort mode changed.
     void libraryChanged();
     // A scan's progress changed; it changes many times a second.
@@ -851,6 +857,12 @@ private:
     QString m_durationText{"00:00"};
     double m_durationSeconds{0.0};
     double m_volume{1.0};
+    // The volume requests sent to the backend. A snapshot's volume is the
+    // backend's once it has taken them all; one built before then still
+    // has the volume from before the latest.
+    quint64 m_volumeRequestsSent{0};
+    // The volume requests the latest snapshot says the backend had taken.
+    quint64 m_volumeRequestsTaken{0};
     // The rows' count, which follows the model's row signals.
     int m_queueLength{0};
     QString m_queueDurationText{"00:00"};

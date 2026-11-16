@@ -147,6 +147,7 @@ fn handle_playback_bridge_command(
             context.playback.command(PlaybackCommand::Seek(*pos));
         }
         BridgePlaybackCommand::SetVolume(volume) => {
+            state.volume_requests_taken = state.volume_requests_taken.wrapping_add(1);
             command_volume(state, context.playback, *volume);
             *context.settings_dirty = true;
         }
@@ -281,6 +282,7 @@ fn handle_settings_bridge_command(
         }
         BridgeSettingsCommand::SaveToDisk => save_settings_now(context),
         BridgeSettingsCommand::SetVolume(volume) => {
+            state.volume_requests_taken = state.volume_requests_taken.wrapping_add(1);
             command_volume(state, context.playback, *volume);
             *context.settings_dirty = true;
         }

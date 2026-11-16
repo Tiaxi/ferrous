@@ -45,7 +45,8 @@ QtObject {
         [root.view, ColorUtils.drawnOver(root.hover, root.view)], 4.6)
     // Tertiary text on a hovered list row: lightened or darkened to be
     // 4.6:1 on it, only there, so the rest keeps its step below the
-    // secondary colour. #9ca2a8 / #525b64.
+    // secondary colour. #9ca2a8 / #59626d: the light hover is as faint as
+    // a button's, which the tertiary colour already reads on.
     readonly property color textTertiaryHovered: root.readableOn(root.textTertiary, [root.hoveredRow], 4.6)
     // A field's placeholder, such as Edit Tags' "Multiple values", which
     // tells what saving does: the theme's own placeholder colour, its
@@ -75,19 +76,26 @@ QtObject {
     readonly property color pressed: root._tintOf(root.text, root.view, 1.65)
     // The hover tint of the main window's lists, the library's and the
     // queue's: text over the row, the least of it in whole percent that is
-    // 1.44:1 on the view, about 1.45:1, a step stronger than a button's, so
-    // the row under the pointer reads across a wide list (#373 H13: at
-    // 1.3:1 it was faint): 13% (#323436) / 19% (#d5d6d6). It stays apart
-    // from the selection by its hue: it is neutral, the selection blue.
-    readonly property color rowHover: root._tintOf(root.text, root.view, 1.44)
+    // 1.44:1 on a dark view, a step stronger than a button's, so the row
+    // under the pointer reads across a wide list (#373 H13: at 1.3:1 it was
+    // faint), and 1.31:1 on a light one, where 1.44:1 outweighed the pale
+    // selection and the row under the pointer looked the more selected
+    // (#373 H33 AA1): 13% (#323436) / 14% (#e0e1e1). It stays under the
+    // selection in contrast and apart from it in hue: it is neutral, the
+    // selection blue.
+    readonly property color rowHover: root._tintOf(root.text, root.view, root.themeIsDark ? 1.44 : 1.31)
     // A hovered row of the library or the queue: rowHover on the view.
     readonly property color hoveredRow: ColorUtils.drawnOver(root.rowHover, root.view)
-    // The view mixed with the accent. #1f3e4e / #d4edfa.
+    // The view mixed with the accent: 1.6:1 / 1.4:1 on the view, a clear
+    // step past a hovered row in weight as well as in hue (#373 H33 AA1: at
+    // 22 %, #d4edfa, the light one was 1.2:1, under the hover).
+    // #1f3e4e / #b5e0f7.
     readonly property color selection: ColorUtils.mixColor(
-        root.view, root.accent, root.themeIsDark ? 0.26 : 0.22)
-    // The selection of a list without keyboard focus.
+        root.view, root.accent, root.themeIsDark ? 0.26 : 0.38)
+    // The selection of a list without keyboard focus: quieter, yet further
+    // from the view than a hovered row. #1c3442 / #cbe9f9.
     readonly property color selectionInactive: ColorUtils.mixColor(
-        root.view, root.accent, root.themeIsDark ? 0.20 : 0.16)
+        root.view, root.accent, root.themeIsDark ? 0.20 : 0.27)
     // The 1 px ring on the focused row: the accent, lighter on dark and
     // darker on light, to stand out from the selection tint. #6cc5f2 / #1a74a8.
     readonly property color focusRing: root.themeIsDark
@@ -115,8 +123,8 @@ QtObject {
     // Fixed: the spectrogram colour map's amber. It marks only what is
     // playing: the playing row's glyph and title, the playing tree row, the
     // name of a collapsed tree row that holds it, and the seek playhead.
-    // The light one is darkened to be 4.5:1 on a hovered row as well.
-    // #f2b035 / #905200.
+    // The light one is darkened to be 4.5:1 on a hovered and a selected
+    // row as well. #f2b035 / #8b4f00.
     readonly property color now: root.themeIsDark
         ? "#f2b035"
         : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection], 4.5)

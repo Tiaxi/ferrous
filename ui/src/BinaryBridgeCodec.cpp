@@ -662,6 +662,10 @@ bool decodeSettingsSection(const QByteArray &payload, DecodedSettings *out) {
     if (!reader.atEnd() && !reader.readU8(&stretchShortTracks)) {
         return false;
     }
+    out->hasVolumeRequestsTaken = !reader.atEnd();
+    if (out->hasVolumeRequestsTaken && !reader.readU64(&out->volumeRequestsTaken)) {
+        return false;
+    }
     if (!reader.atEnd()) {
         return false;
     }

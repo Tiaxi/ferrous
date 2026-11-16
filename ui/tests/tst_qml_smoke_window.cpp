@@ -62,6 +62,7 @@ private slots:
     void windowLayoutSurvivesARestart();
     void aWindowSavedOffTheScreensOpensOnOne();
     void queueColumnWidthsSurviveARestart();
+    void unmuteShowsTheVolumeAtOnce();
     void theWindowOpensWithoutASavedLayoutThatDoesNotCome();
     void quittingWhileMinimizedKeepsTheWindowMaximized();
     void aWindowOffScreenStopsTheClockAndTheFeeds();
@@ -1070,6 +1071,87 @@ void WindowSmokeTest::queueColumnWidthsSurviveARestart() {
     window->setGeometry(wide);
     QTRY_COMPARE(header(window, "artist")->width(), 260.0);
     QTRY_COMPARE(header(window, "album")->width(), album);
+    QVERIFY(closeThroughTheQuitFlow(window));
+    QFile::remove(savedSettingsPath());
+}
+
+// Unmuting showed the volume slider at 0, and the muted glyph, until a
+// snapshot of the backend's brought the restored volume some 50 ms later
+// (#373 H34 AA4). With the real bridge and backend: from the mute to the
+// backend's snapshot after the unmute, the slider shows the volume in every
+// frame, and the glyph the state, at once.
+void WindowSmokeTest::unmuteShowsTheVolumeAtOnce() {
+    QFile::remove(savedSettingsPath());
+    const auto restoreQuit = keepRunningWhenTheWindowCloses();
+    BridgeClient bridge;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *slider = visibleItemNamed(window, QStringLiteral("volumeSlider"));
+    QQuickItem *glyph = visibleItemNamed(window, QStringLiteral("muteButtonGlyph"));
+    auto *muteAction = window->findChild<QObject *>(QStringLiteral("muteAction"));
+    QVERIFY(slider && glyph && muteAction);
+    const auto taken = [&bridge]() { return bridge.m_volumeRequestsTaken == bridge.m_volumeRequestsSent; };
+    const auto value = [slider]() { return slider->property("value").toDouble(); };
+    // The volume the test sets, within the rounding of the backend's float.
+    const auto atVolume = [](double shown) { return std::abs(shown - 0.6) < 1e-3; };
+    const auto mutedGlyph = [glyph]() {
+        return glyph->property("source").toUrl().fileName() == QStringLiteral("volume-muted.svg");
+    };
+
+    // A volume of 0.6, which the backend has taken.
+    bridge.setVolume(0.6);
+    QTRY_VERIFY(taken());
+    QTRY_VERIFY(atVolume(value()));
+    QVERIFY(!mutedGlyph());
+
+    // What every frame shows, from the mute on.
+    struct Shown {
+        double value;
+        bool muted;
+    };
+    QList<Shown> frames;
+    const QMetaObject::Connection recording = QObject::connect(
+        window, &QQuickWindow::afterAnimating, window,
+        [&]() { frames.push_back({value(), mutedGlyph()}); });
+    const auto describeFrames = [&frames]() {
+        QStringList lines;
+        for (const Shown &frame : frames) {
+            lines.push_back(QStringLiteral("%1%2").arg(frame.value).arg(frame.muted ? QStringLiteral(" muted") : QString()));
+        }
+        return lines.join(QStringLiteral(", "));
+    };
+
+    // Muted, the thumb stays where it was and the glyph is the muted one.
+    QVERIFY(QMetaObject::invokeMethod(muteAction, "trigger"));
+    QVERIFY2(atVolume(value()), qPrintable(QString::number(value())));
+    QVERIFY(mutedGlyph());
+    QTRY_VERIFY(taken());
+    QVERIFY(bridge.m_volumeRequestsSent > 0);
+    QCOMPARE(bridge.volume(), 0.0);
+    window->update();
+    QTRY_VERIFY(!frames.isEmpty() && frames.constLast().muted);
+
+    // Unmuted, the same at once, and in every frame until the backend's
+    // snapshot, and after.
+    const qsizetype unmutedFrom = frames.size();
+    QVERIFY(QMetaObject::invokeMethod(muteAction, "trigger"));
+    QVERIFY2(atVolume(value()), qPrintable(QString::number(value())));
+    QVERIFY(!mutedGlyph());
+    QTRY_VERIFY(taken());
+    window->update();
+    QTRY_VERIFY(frames.size() > unmutedFrom + 1);
+    QObject::disconnect(recording);
+    for (qsizetype i = 0; i < frames.size(); ++i) {
+        const Shown &frame = frames.at(i);
+        QVERIFY2(atVolume(frame.value), qPrintable(describeFrames()));
+        if (i >= unmutedFrom) {
+            QVERIFY2(!frame.muted, qPrintable(describeFrames()));
+        }
+    }
+    QVERIFY(atVolume(bridge.volume()));
     QVERIFY(closeThroughTheQuitFlow(window));
     QFile::remove(savedSettingsPath());
 }

@@ -417,6 +417,11 @@ struct DecodedSettings {
     bool hasQueueColumnWidths{false};
     QueueColumnWidths queueColumnWidths;
     quint32 queueColumnWidthsGeneration{0};
+    // Whether the section ended with the count of volume requests the
+    // backend had taken, which older backends do not send, and the count:
+    // every SetVolume command it took.
+    bool hasVolumeRequestsTaken{false};
+    quint64 volumeRequestsTaken{0};
 };
 
 // What the scrobble progress indicator shows. Mirrors ScrobbleIndicatorState

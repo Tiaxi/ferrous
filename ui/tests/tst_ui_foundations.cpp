@@ -192,26 +192,34 @@ double contrastRatio(const QColor &a, const QColor &b) {
     return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
 }
 
-// The CIE76 distance of two opaque colours in CIELAB, under D65.
-double labDistance(const QColor &a, const QColor &b) {
-    const auto lab = [](const QColor &color) {
-        const auto linear = [](double channel) {
-            return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
-        };
-        const double r = linear(color.redF());
-        const double g = linear(color.greenF());
-        const double b = linear(color.blueF());
-        const double x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
-        const double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        const double z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
-        const auto f = [](double t) {
-            return t > 216.0 / 24389.0 ? std::cbrt(t) : (24389.0 / 27.0 * t + 16.0) / 116.0;
-        };
-        return std::array<double, 3>{116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))};
+// An opaque colour in CIELAB, under D65.
+std::array<double, 3> labOf(const QColor &color) {
+    const auto linear = [](double channel) {
+        return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
     };
-    const std::array<double, 3> la = lab(a);
-    const std::array<double, 3> lb = lab(b);
+    const double r = linear(color.redF());
+    const double g = linear(color.greenF());
+    const double b = linear(color.blueF());
+    const double x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+    const double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const double z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+    const auto f = [](double t) {
+        return t > 216.0 / 24389.0 ? std::cbrt(t) : (24389.0 / 27.0 * t + 16.0) / 116.0;
+    };
+    return std::array<double, 3>{116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z))};
+}
+
+// The CIE76 distance of two opaque colours in CIELAB.
+double labDistance(const QColor &a, const QColor &b) {
+    const std::array<double, 3> la = labOf(a);
+    const std::array<double, 3> lb = labOf(b);
     return std::hypot(la[0] - lb[0], la[1] - lb[1], la[2] - lb[2]);
+}
+
+// The CIELAB chroma of an opaque colour: 0 for a neutral grey.
+double labChroma(const QColor &color) {
+    const std::array<double, 3> lab = labOf(color);
+    return std::hypot(lab[1], lab[2]);
 }
 
 QString describe(const QString &what, const QColor &a, const QColor &b) {
@@ -285,6 +293,8 @@ private slots:
     void plotColorsFollowThePlot();
     void listRowHoverStandsOutAndApart_data();
     void listRowHoverStandsOutAndApart();
+    void selectionOutweighsRowHover_data();
+    void selectionOutweighsRowHover();
     void hoverAndPressedTintsOnAnotherBackground_data();
     void hoverAndPressedTintsOnAnotherBackground();
     void rowBackgroundShowsEachState_data();
@@ -358,14 +368,15 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"seam", QStringLiteral("#383b40"), QStringLiteral("#d6d9dc")},
         {"hairline", QStringLiteral("#26292c"), QStringLiteral("#ebedef")},
         {"chromeLine", QStringLiteral("#383b40"), QStringLiteral("#c9cdd1")},
-        {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#d4edfa")},
+        // Light: 38 %, 1.4:1 on the view, past a hovered row (#373 H33 AA1).
+        {"selection", QStringLiteral("#1f3e4e"), QStringLiteral("#b5e0f7")},
         {"focusRing", QStringLiteral("#6cc5f2"), QStringLiteral("#1a74a8")},
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
         // Light: darkened from #955500 to be 4.5:1 on a hovered list row
-        // (#373 H13: #905200 on the 1.3:1 hover).
-        {"now", QStringLiteral("#f2b035"), QStringLiteral("#864c00")},
+        // and on the selection (#373 H33 AA1: #864c00 on the 1.44:1 hover).
+        {"now", QStringLiteral("#f2b035"), QStringLiteral("#8b4f00")},
     };
     for (const Expected &entry : expected) {
         const QColor actual = colorOf(tokens, entry.token);
@@ -390,7 +401,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     lighterHover.setAlphaF(hover.alphaF() - 0.01f);
     QVERIFY(contrastRatio(drawnOver(lighterHover, view), view) < 1.3);
     QVERIFY(sameColor(colorOf(tokens, "hoveredRow"), drawnOver(colorOf(tokens, "rowHover"), view)));
-    QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.20 : 0.16)) <= 1);
+    QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.20 : 0.27)) <= 1);
     const QColor dim = colorOf(tokens, "dim");
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
     QVERIFY(std::abs(dim.alphaF() - (dark ? 0.65 : 0.25)) < 0.002);
@@ -785,12 +796,14 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The library's and the queue's hover tint is about 1.45:1 on the view
-// (#373 H13: at 1.3:1 a hovered row was faint across a wide list): the
-// least of the text in whole percent that is 1.44:1, 13% / 19% in Breeze. It stays
-// apart from the selection and the inactive selection, and every text a
-// row has, the playing row's amber title among them, stays readable on it;
-// tertiary text steps up to 4.6:1 there, and only there.
+// The library's and the queue's hover tint is about 1.45:1 on a dark view
+// (#373 H13: at 1.3:1 a hovered row was faint across a wide list) and
+// 1.31:1 on a light one, where more outweighed the selection (#373 H33
+// AA1): the least of the text in whole percent that reaches it, 13% / 14%
+// in Breeze. It stays apart from the selection and the inactive
+// selection, and every text a row has, the playing row's amber title among
+// them, stays readable on it; tertiary text steps up to 4.6:1 there, and
+// only there, where it falls short.
 void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -805,16 +818,22 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     const QColor text = colorOf(tokens, "text");
     const QColor rowHover = colorOf(tokens, "rowHover");
     QCOMPARE(channelDistance(rowHover, text), 0);
-    QVERIFY2(std::abs(rowHover.alphaF() - (dark ? 0.13 : 0.19)) < 0.002, qPrintable(QString::number(rowHover.alphaF())));
+    QVERIFY2(std::abs(rowHover.alphaF() - (dark ? 0.13 : 0.14)) < 0.002, qPrintable(QString::number(rowHover.alphaF())));
     const QColor hovered = colorOf(tokens, "hoveredRow");
     QVERIFY(sameColor(hovered, drawnOver(rowHover, view)));
-    QVERIFY2(contrastRatio(hovered, view) >= 1.44 && contrastRatio(hovered, view) < 1.5,
+    const double target = dark ? 1.44 : 1.31;
+    QVERIFY2(contrastRatio(hovered, view) >= target && contrastRatio(hovered, view) < target + 0.06,
              qPrintable(describe(QStringLiteral("row hover"), hovered, view)));
     QColor lighter = rowHover;
     lighter.setAlphaF(rowHover.alphaF() - 0.01f);
-    QVERIFY(contrastRatio(drawnOver(lighter, view), view) < 1.44);
-    // A step past a button's hover tint.
-    QVERIFY(rowHover.alphaF() > colorOf(tokens, "hover").alphaF());
+    QVERIFY(contrastRatio(drawnOver(lighter, view), view) < target);
+    // A step past a button's hover tint on dark; as faint as it on light,
+    // never fainter.
+    if (dark) {
+        QVERIFY(rowHover.alphaF() > colorOf(tokens, "hover").alphaF());
+    } else {
+        QVERIFY(rowHover.alphaF() >= colorOf(tokens, "hover").alphaF());
+    }
 
     // Apart from the selection, active or not: neutral where they are blue.
     for (const char *selection : {"selection", "selectionInactive"}) {
@@ -835,8 +854,11 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
                  qPrintable(describe(QLatin1String(token), colorOf(tokens, token), hovered)));
     }
     // The tertiary colour keeps its step below the secondary elsewhere:
-    // only a hovered row's is stronger.
-    QVERIFY(!sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")));
+    // only a hovered row's is stronger, where the plain one falls short of
+    // 4.6:1 on it, as on dark; on light's fainter hover it already reads.
+    QCOMPARE(sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")),
+             contrastRatio(colorOf(tokens, "textTertiary"), hovered) >= 4.6);
+    QCOMPARE(sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")), !dark);
     QVERIFY2(std::abs(contrastRatio(colorOf(tokens, "textTertiary"), view) - 6.2) <= 0.15,
              qPrintable(describe(QStringLiteral("tertiary"), colorOf(tokens, "textTertiary"), view)));
     const auto tertiaryOn = [tokens](bool selected, bool rowHovered) {
@@ -848,6 +870,73 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     QVERIFY(sameColor(tertiaryOn(false, false), colorOf(tokens, "textTertiary")));
     QVERIFY(sameColor(tertiaryOn(false, true), tertiaryHovered));
     QVERIFY(sameColor(tertiaryOn(true, true), colorOf(tokens, "textSecondary")));
+}
+
+void UiFoundationsTest::selectionOutweighsRowHover_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A selected row of the library or the queue reads as more selected than
+// the row under the pointer, in both themes: further from the view, in
+// contrast and in CIELAB, and blue where the hover is neutral (#373 H33
+// AA1: light's 1.44:1 hover outweighed its 1.2:1 selection). Every text
+// a selected row draws stays 4.5:1 on it, active or not.
+void UiFoundationsTest::selectionOutweighsRowHover() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+
+    const QColor view = colorOf(tokens, "view");
+    const QColor hovered = colorOf(tokens, "hoveredRow");
+    const QColor selection = colorOf(tokens, "selection");
+    const QColor selectionInactive = colorOf(tokens, "selectionInactive");
+
+    // Weight: the selection is the stronger step off the view.
+    QVERIFY2(contrastRatio(selection, view) >= contrastRatio(hovered, view) + 0.05,
+             qPrintable(describe(QStringLiteral("selection"), selection, view)
+                        + QStringLiteral(" vs ") + describe(QStringLiteral("hover"), hovered, view)));
+    for (const QColor &selected : {selection, selectionInactive}) {
+        QVERIFY2(labDistance(selected, view) >= 1.15 * labDistance(hovered, view),
+                 qPrintable(QStringLiteral("%1 is %2 from the view, hover %3 is %4")
+                                .arg(selected.name())
+                                .arg(labDistance(selected, view))
+                                .arg(hovered.name())
+                                .arg(labDistance(hovered, view))));
+        // Hue: blue, where the hover is a neutral grey.
+        QVERIFY2(labChroma(selected) >= 10.0 && labChroma(hovered) < 3.0,
+                 qPrintable(QStringLiteral("chroma: %1 %2, hover %3 %4")
+                                .arg(selected.name())
+                                .arg(labChroma(selected))
+                                .arg(hovered.name())
+                                .arg(labChroma(hovered))));
+    }
+    QVERIFY(labDistance(selection, view) > labDistance(selectionInactive, view));
+
+    // The texts of a selected row: the title, the secondary and column
+    // text, the playing amber, and the selected row's number, which is
+    // tertiary stepped up.
+    QVariant number;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, number),
+                                      Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(true))));
+    const QList<std::pair<QString, QColor>> texts{
+        {QStringLiteral("text"), colorOf(tokens, "text")},
+        {QStringLiteral("secondary"), colorOf(tokens, "textSecondary")},
+        {QStringLiteral("column"), colorOf(tokens, "textColumn")},
+        {QStringLiteral("now"), colorOf(tokens, "now")},
+        {QStringLiteral("selected number"), number.value<QColor>()},
+    };
+    for (const QColor &selected : {selection, selectionInactive}) {
+        for (const auto &[what, color] : texts) {
+            QVERIFY2(contrastRatio(color, selected) >= 4.5, qPrintable(describe(what, color, selected)));
+        }
+    }
 }
 
 void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground_data() {

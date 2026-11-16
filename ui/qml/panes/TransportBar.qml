@@ -168,6 +168,10 @@ ToolBar {
     // The content's inset, on both sides: Previous starts where the
     // library's rows and the status bar's text do.
     readonly property int edgeInset: 12
+    // Where the titles of a menu bar right above the transport end, in the
+    // transport's coordinates, or 0 for none: the seek bar's time, which
+    // shows above the bar, keeps right of them.
+    property real menuTitlesEnd: 0
     leftPadding: root.edgeInset
     rightPadding: root.edgeInset
     topPadding: 0
@@ -746,10 +750,13 @@ ToolBar {
                 restoreMode: Binding.RestoreNone
             }
 
-            // The time in a native tooltip within the bar's height, beside
-            // the line it names: the playhead while a gesture moves it,
-            // otherwise the hovering pointer's line (#373 H5: under the bar
-            // it hung over the queue's header).
+            // The time in a native tooltip above the bar, over the line it
+            // names: the playhead while a gesture moves it, otherwise the
+            // hovering pointer's line. Its bottom edge is on the bar's top,
+            // in the band the volume's tooltip takes, so it hides none of
+            // the waveform it reads (#373 H33 AA2: beside the line it
+            // covered some 40 px of it where the pointer was; #373 H5:
+            // under the bar it hung over the queue's header).
             ToolTip {
                 id: seekTimeBox
                 objectName: "seekTimeBox"
@@ -767,8 +774,30 @@ ToolBar {
                     value: !seekSlider.gestureHeld()
                     restoreMode: Binding.RestoreNone
                 }
-                visible: shown
+                // A hover's time comes after a moment, so a pointer that
+                // crosses the bar on its way elsewhere shows none; a
+                // gesture's at once, as does a hover's that comes back
+                // while the last one still fades out.
+                readonly property int hoverDelay: 80
+                // Set together with the delay, which the tooltip reads when
+                // it is made visible: a binding of each could see the other
+                // still unchanged.
+                visible: false
                 delay: 0
+                function showOrHide() {
+                    delay = seekSlider.gestureHeld() || contentItem.visible ? 0 : hoverDelay
+                    visible = shown
+                }
+                onShownChanged: showOrHide()
+                Connections {
+                    target: seekSlider
+                    // A press on a hover still waiting shows the time at once.
+                    function onAdjustingChanged() {
+                        if (seekTimeBox.shown && !seekTimeBox.contentItem.visible) {
+                            seekTimeBox.showOrHide()
+                        }
+                    }
+                }
                 timeout: -1
                 // The point the tooltip is centred on: the playhead's during
                 // a gesture, the pointer's while it hovers, and otherwise
@@ -783,45 +812,24 @@ ToolBar {
                         : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
-                // Its edge nearest the line: on the left, clear of the
-                // playhead's casing; on the right, clear of the pointer's
-                // arrow as well, which hangs right of the line.
-                readonly property real leftGap: Kirigami.Units.smallSpacing
-                    + seekSlider.playheadLineWidth / 2 + seekSlider.playheadOutlineWidth
-                readonly property real rightGap: Kirigami.Units.gridUnit
-                readonly property real leftX: anchorX - leftGap - width
-                readonly property real rightX: anchorX + rightGap
-                // Left of the line, where the pointer is not, unless there
-                // the hover's tooltip would cover the playhead, or the bar
-                // has no room for it; then right, if it has room there.
-                function fitsLeft() {
-                    if (leftX < 0) {
-                        return false
-                    }
-                    if (seekSlider.gestureHeld()) {
-                        return true
-                    }
-                    const headLeft = seekSlider.playheadX - seekSlider.playheadOutlineWidth
-                    const headRight = seekSlider.playheadX + seekSlider.playheadLineWidth
-                        + seekSlider.playheadOutlineWidth
-                    const coversHead = seekSlider.trackLoaded && headRight > leftX && headLeft < anchorX
-                    return !coversHead || rightX + width > seekSlider.width
-                }
-                // Chosen while it shows, and kept while hidden, as the anchor
-                // is, so it fades out where it was.
-                property bool placedLeft: true
-                Binding on placedLeft {
-                    value: seekSlider.gestureHeld() || seekHover.hovered
-                        ? seekTimeBox.fitsLeft()
-                        : seekTimeBox.placedLeft
-                    restoreMode: Binding.RestoreNone
-                }
-                // On whole device pixels, so a pointer's move within one
-                // moves the tooltip by none and draws no frame.
-                readonly property real placedX: root.snapped(placedLeft ? leftX : rightX)
+                // Where the band above the bar is free of the menu bar's
+                // titles, in the slider's coordinates.
+                readonly property real menuClearX: root.menuTitlesEnd > 0
+                    ? root.menuTitlesEnd + Kirigami.Units.smallSpacing - root.leftPadding - seekSlider.x
+                    : 0
+                // Centred on the line, within the bar at either end; and
+                // where the bar starts under the menu bar's titles, right
+                // of them, so it covers no title, even if it then hangs
+                // past the bar's end.
+                readonly property real centredX: anchorX - width / 2
+                readonly property real placedX: root.snapped(Math.max(menuClearX, 0,
+                    Math.min(seekSlider.width - width, centredX)))
                 x: placedX
-                // Centred on the bar, whose band of the transport holds it.
-                y: root.snapped((seekSlider.height - height) / 2)
+                // Its bottom edge on the bar's top. It may reach the
+                // window's top edge, which it nearly does at 24 pt: the
+                // style's 6 px margin there would flip it under the bar.
+                y: -height
+                topMargin: 0
                 // It comes in over the short duration of the window's other
                 // hovers, and goes as the style's tooltips do.
                 enter: Transition {
@@ -869,7 +877,10 @@ ToolBar {
         }
 
         // "1:17 / 3:49": the position in the text colour, the length in the
-        // secondary one; "–:––" with nothing playing.
+        // secondary one; "–:–– / –:––" in the secondary colour with nothing
+        // playing, which fills the box as a time does, so the volume keeps
+        // its distance from what is drawn (#373 H33 AA3: "–:––" alone left
+        // a hole of some 45 px before it).
         Item {
             id: transportTime
             objectName: "transportTime"
@@ -922,12 +933,12 @@ ToolBar {
                 Label {
                     id: timeLength
                     objectName: "transportTimeLength"
-                    visible: !transportTime.empty
                     font.features: root.uiPalette.tabularFigures
                     color: root.uiPalette.textSecondary
-                    text: transportTime.empty ? ""
-                        : I18n.i18nc("@info:status the track's length after its position", " / %1",
-                            transportTime.lengthText)
+                    text: I18n.i18nc("@info:status the track's length after its position", " / %1",
+                        transportTime.empty
+                            ? I18n.i18nc("@info:status no time", "–:––")
+                            : transportTime.lengthText)
                 }
             }
         }

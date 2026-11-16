@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -241,6 +242,7 @@ private slots:
     void windowLayoutIsSentAsTheBackendReadsIt();
     void savedWindowLayoutIsDecodedAndFittedToTheScreens();
     void queueColumnWidthsAreSentAsTheBackendReadsThem();
+    void volumeShowsTheRequestUntilTheBackendHasTakenIt();
     void queueColumnWidthsAreDecodedFromTheSettingsAndTheWindowLayout();
     void spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt();
     void scrobbleProgressSettingIsSentAndDecodedAsTheBackendHasIt();
@@ -1892,6 +1894,115 @@ void BridgeClientTest::queueColumnWidthsAreSentAsTheBackendReadsThem() {
     QCOMPARE(sentColumnWidths(sent[0]).generation, quint32(1));
     QCOMPARE(sentColumnWidths(sent[1]).generation, quint32(2));
     QCOMPARE(sentColumnWidths(sent[2]).generation, quint32(3));
+}
+
+// The volume shows what the UI asked for from the time it asks, and the
+// backend's again once a snapshot says the backend has taken every request:
+// a snapshot it built before then still has the volume from before, which
+// showed the volume slider at 0 and the muted glyph for some 50 ms after an
+// unmute (#373 H34 AA4). A change the backend makes, as one made outside the
+// app, shows once it has.
+void BridgeClientTest::volumeShowsTheRequestUntilTheBackendHasTakenIt() {
+    // The settings section ends with the count, after the stretch setting;
+    // older backends end it before, and their volume is taken as it is.
+    {
+        QByteArray payload = settingsSectionPayload({300, 190, 0}, 12);
+        payload.append(QByteArray(4, '\1'));
+        BinaryBridgeCodec::DecodedSnapshot older;
+        QString error;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload), &older, &error),
+                 qPrintable(error));
+        QVERIFY(!older.settings.hasVolumeRequestsTaken);
+        QByteArray count(8, '\0');
+        qToLittleEndian<quint64>(Q_UINT64_C(0x0102030405060708), count.data());
+        BinaryBridgeCodec::DecodedSnapshot decoded;
+        QVERIFY2(BinaryBridgeCodec::decodeSnapshotPacket(
+                     packetWithSection(BinaryBridgeCodec::SectionSettings, payload + count), &decoded,
+                     &error),
+                 qPrintable(error));
+        QVERIFY(decoded.settings.hasVolumeRequestsTaken);
+        QCOMPARE(decoded.settings.volumeRequestsTaken, Q_UINT64_C(0x0102030405060708));
+        // A part of a count, or more after it, is no section.
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + count.left(4)), &decoded,
+            &error));
+        QVERIFY(!BinaryBridgeCodec::decodeSnapshotPacket(
+            packetWithSection(BinaryBridgeCodec::SectionSettings, payload + count + '\0'), &decoded,
+            &error));
+    }
+
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QList<QByteArray> sent;
+    bool sending = true;
+    client.m_sendCommandOverride = [&sent, &sending](const QByteArray &payload) {
+        if (sending) {
+            sent.push_back(payload);
+        }
+        return sending;
+    };
+    // Every volume the client shows, as it shows it.
+    QList<double> shown;
+    QObject::connect(&client, &BridgeClient::volumeChanged, &client,
+                     [&shown, &client]() { shown.push_back(client.volume()); });
+    const auto backendSnapshot = [](double volume, quint64 taken) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.settings.present = true;
+        snapshot.settings.volume = static_cast<float>(volume);
+        snapshot.settings.hasVolumeRequestsTaken = true;
+        snapshot.settings.volumeRequestsTaken = taken;
+        return snapshot;
+    };
+    const auto sentVolume = [](const QByteArray &command) {
+        return qFromLittleEndian<double>(command.constData() + BinaryBridgeCodec::kCommandHeaderBytes);
+    };
+    client.processBinarySnapshot(backendSnapshot(0.6, 0));
+    QCOMPARE(client.volume(), double(0.6F));
+    shown.clear();
+
+    // Mute: 0 at once, before any snapshot, and sent.
+    client.setVolume(0.0);
+    QCOMPARE(shown, (QList<double>{0.0}));
+    QCOMPARE(sent.size(), 1);
+    QCOMPARE(qFromLittleEndian<quint16>(sent[0].constData()), quint16(BinaryBridgeCodec::CmdSetVolume));
+    QCOMPARE(sentVolume(sent[0]), 0.0);
+    // A snapshot the backend built before it took the mute keeps it.
+    client.processBinarySnapshot(backendSnapshot(0.6, 0));
+    QCOMPARE(client.volume(), 0.0);
+    client.processBinarySnapshot(backendSnapshot(0.0, 1));
+    QCOMPARE(client.volume(), 0.0);
+
+    // Unmute: the volume at once, and no snapshot built before the backend
+    // took it shows the 0 from before.
+    client.setVolume(0.6);
+    QCOMPARE(client.volume(), 0.6);
+    QCOMPARE(sentVolume(sent[1]), 0.6);
+    client.processBinarySnapshot(backendSnapshot(0.0, 1));
+    QCOMPARE(client.volume(), 0.6);
+    // The backend's, within the rounding of its float, is the volume shown.
+    client.processBinarySnapshot(backendSnapshot(0.6, 2));
+    QCOMPARE(client.volume(), 0.6);
+    QCOMPARE(shown, (QList<double>{0.0, 0.6}));
+
+    // A change of the backend's own, once it has taken every request.
+    client.processBinarySnapshot(backendSnapshot(0.3, 2));
+    QCOMPARE(client.volume(), double(0.3F));
+    // A volume that cannot be sent, or that is not a number, is not shown.
+    sending = false;
+    client.setVolume(0.9);
+    sending = true;
+    client.setVolume(std::numeric_limits<double>::quiet_NaN());
+    QCOMPARE(client.volume(), double(0.3F));
+    QCOMPARE(sent.size(), 2);
+    client.processBinarySnapshot(backendSnapshot(0.5, 2));
+    QCOMPARE(client.volume(), double(0.5F));
+    // An older backend's volume is taken as it is.
+    BinaryBridgeCodec::DecodedSnapshot older;
+    older.settings.present = true;
+    older.settings.volume = 0.25F;
+    client.processBinarySnapshot(older);
+    QCOMPARE(client.volume(), double(0.25F));
 }
 
 void BridgeClientTest::spectrogramFrequencyCapIsSentAndDecodedAsTheBackendHasIt() {
