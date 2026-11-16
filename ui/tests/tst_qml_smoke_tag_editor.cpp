@@ -2,6 +2,8 @@
 
 #include "QmlSmokeTest.h"
 
+#include <functional>
+
 // The tag editor, renaming, and quitting with tag edits.
 class TagEditorSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -13,6 +15,7 @@ private slots:
     void tagEditorOpensALargeSelectionWithoutBuildingEveryRow();
     void tagEditorCancelAsksBeforeDroppingEdits();
     void typedTextCanBeSavedBeforeTheFieldIsLeft();
+    void typedTextMarksItsChangeAtOnce();
     void closingTheTagEditorKeepsTheFieldBeingTyped();
     void tagEditorStaysOpenWhileSavingAndShowsTheResult();
     void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
@@ -414,6 +417,79 @@ void TagEditorSmokeTest::typedTextCanBeSavedBeforeTheFieldIsLeft() {
     QTRY_COMPARE(fixture.saves->saveCount(), 1);
     QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0y"));
     QTRY_VERIFY(!fixture.editor.saving());
+}
+
+// Typed text marks its change at once, as it does once applied (#373 H38:
+// Save was enabled, but nothing else showed the change until the field
+// lost focus): the field's label turns semibold and its Revert shows, the
+// column's header turns semibold with its Revert, and the rows the text
+// goes to get the modified dot. Typed back to what the field held, the
+// marks go; applied, they stay.
+void TagEditorSmokeTest::typedTextMarksItsChangeAtOnce() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(3, false));
+    fixture.editor.selectRange(0, 1);
+    QQuickItem *content = fixture.tags()->contentItem();
+    const auto item = [content](const QString &name) {
+        return qobject_cast<QQuickItem *>(findQuickItemByObjectName(content, name));
+    };
+    QQuickItem *title = item(QStringLiteral("tagEditorField_title"));
+    QQuickItem *label = item(QStringLiteral("tagEditorLabel_title"));
+    QQuickItem *revert = item(QStringLiteral("tagEditorRevert_title"));
+    QQuickItem *columnRevert = item(QStringLiteral("tagEditorColumnRevert_title"));
+    QVERIFY(title != nullptr && label != nullptr && revert != nullptr && columnRevert != nullptr);
+    // The rows' dots, by row.
+    const auto marks = [&]() {
+        QList<bool> shown(3, false);
+        std::function<void(QQuickItem *)> visit = [&](QQuickItem *node) {
+            for (QQuickItem *child : node->childItems()) {
+                if (child->objectName() == QStringLiteral("tagEditorRow")) {
+                    const int row = child->property("index").toInt();
+                    for (QQuickItem *part : child->childItems()) {
+                        if (part->objectName() == QStringLiteral("tagEditorRowModifiedMark") && row >= 0 && row < 3) {
+                            shown[row] = part->isVisible();
+                        }
+                    }
+                } else {
+                    visit(child);
+                }
+            }
+        };
+        visit(content);
+        return shown;
+    };
+    const auto marked = [&]() {
+        return label->property("font").value<QFont>().weight() == QFont::DemiBold && revert->isVisible()
+            && columnRevert->isVisible();
+    };
+    const auto unmarked = [&]() {
+        return label->property("font").value<QFont>().weight() == QFont::Normal && !revert->isVisible()
+            && !columnRevert->isVisible();
+    };
+    QTRY_VERIFY(unmarked());
+    QCOMPARE(marks(), (QList<bool>{false, false, false}));
+
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), 'x');
+    QVERIFY(!fixture.editor.dirty());
+    QTRY_VERIFY(marked());
+    QTRY_COMPARE(marks(), (QList<bool>{true, true, false}));
+
+    // Typed back: nothing changes.
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QTRY_VERIFY(unmarked());
+    QCOMPARE(marks(), (QList<bool>{false, false, false}));
+
+    // Applied, the marks stay, now from the edits.
+    QTest::keyClick(fixture.tags(), 'y');
+    QTRY_VERIFY(marked());
+    QTest::keyClick(fixture.tags(), Qt::Key_Return);
+    QTRY_VERIFY(fixture.editor.dirty());
+    // The two titles differed, so the field held none: both are "y" now.
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(1, QStringLiteral("title")), QStringLiteral("y"));
+    QVERIFY(marked());
+    QCOMPARE(marks(), (QList<bool>{true, true, false}));
 }
 
 void TagEditorSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {

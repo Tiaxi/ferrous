@@ -111,8 +111,7 @@ Components.DialogWindow {
         columnHeaderMetrics.font
         columnValueMetrics.font
         const header = columnHeaderMetrics.advanceWidth(column.label)
-            + (root.fieldAt(column.key) !== null && root.summaryRevision >= 0
-                && root.tagEditorApi.fieldChanged(column.key) ? root.columnRevertRoom : 0)
+            + (root.fieldAt(column.key) !== null && root.columnMarked(column.key) ? root.columnRevertRoom : 0)
         const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
         return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
     }
@@ -343,6 +342,29 @@ Components.DialogWindow {
     // disabled while the user typed, and Ctrl+S did nothing).
     property Item pendingEditField: null
     readonly property bool hasUnsavedChanges: root.tagEditorApi.dirty || root.pendingEditField !== null
+    // The typed text marks its change at once, as it will once applied
+    // (#373 H38: nothing showed it until the field lost focus): its
+    // field's label and Revert, its column's header, and the rows it
+    // goes to.
+    readonly property string pendingEditKey: root.pendingEditField ? root.pendingEditField.field.key : ""
+    readonly property var pendingEditRows: {
+        const rows = ({})
+        const snapshot = root.pendingEditField ? root.pendingEditField.editRowsSnapshot : []
+        for (let i = 0; i < snapshot.length; ++i) {
+            rows[snapshot[i]] = true
+        }
+        return rows
+    }
+    // Whether the edits change a field in the selected rows, or in any
+    // row, typed text included.
+    function bulkFieldMarked(key) {
+        return root.pendingEditKey === key
+            || (root.summaryRevision >= 0 && root.tagEditorApi.bulkFieldChanged(key))
+    }
+    function columnMarked(key) {
+        return root.pendingEditKey === key
+            || (root.summaryRevision >= 0 && root.tagEditorApi.fieldChanged(key))
+    }
     readonly property bool canSave: !root.tagEditorApi.loading && !root.tagEditorApi.saving
         && root.hasUnsavedChanges
 
@@ -820,8 +842,7 @@ Components.DialogWindow {
             }
         }
         property var editRowsSnapshot: []
-        readonly property bool changed: root.summaryRevision >= 0
-            && root.tagEditorApi.bulkFieldChanged(fieldEditor.field.key)
+        readonly property bool changed: root.bulkFieldMarked(fieldEditor.field.key)
 
         function captureEditRowsSnapshot() {
             editRowsSnapshot = root.tagEditorApi.selectedRows()
@@ -922,8 +943,7 @@ Components.DialogWindow {
     // The label of a field: semibold while the edits change it.
     component FieldLabel: Label {
         required property var field
-        readonly property bool changed: root.summaryRevision >= 0
-            && root.tagEditorApi.bulkFieldChanged(field.key)
+        readonly property bool changed: root.bulkFieldMarked(field.key)
         objectName: "tagEditorLabel_" + field.key
         Layout.preferredWidth: root.fieldLabelWidth
         horizontalAlignment: Text.AlignRight
@@ -1210,8 +1230,8 @@ Components.DialogWindow {
                                 required property var modelData
                                 required property int index
                                 readonly property bool editable: root.fieldAt(headerCell.modelData.key) !== null
-                                readonly property bool changed: headerCell.editable && root.summaryRevision >= 0
-                                    && root.tagEditorApi.fieldChanged(headerCell.modelData.key)
+                                readonly property bool changed: headerCell.editable
+                                    && root.columnMarked(headerCell.modelData.key)
                                 objectName: "tagEditorColumn_" + headerCell.modelData.key
                                 width: root.columnWidth(headerCell.index)
                                 height: parent.height
@@ -1290,12 +1310,14 @@ Components.DialogWindow {
                     required property string errorText
                     required property var extraValues
                     readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
+                    // Unsaved edits, typed text included.
+                    readonly property bool marked: tableRow.dirty || root.pendingEditRows[tableRow.index] === true
 
                     width: root.tableContentWidth
                     height: root.tableRowHeight
                     Accessible.role: Accessible.Row
                     Accessible.name: tableRow.fileName
-                    Accessible.description: tableRow.dirty ? root.modifiedText : ""
+                    Accessible.description: tableRow.marked ? root.modifiedText : ""
                     Accessible.selected: tableRow.selected
 
                     Components.RowBackground {
@@ -1354,7 +1376,7 @@ Components.DialogWindow {
                                 // says what its mark means.
                                 readonly property string toolTipText: modelData.path && tableCell.truncated
                                     ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                    : (modelData.key === "trackNo" && tableRow.dirty ? root.modifiedText : "")
+                                    : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
 
                                 HoverHandler {
                                     id: cellHover
@@ -1373,7 +1395,7 @@ Components.DialogWindow {
                     // it moves nothing.
                     Rectangle {
                         objectName: "tagEditorRowModifiedMark"
-                        visible: tableRow.dirty
+                        visible: tableRow.marked
                         x: root.tableInset + Math.round((Kirigami.Units.largeSpacing - width) / 2)
                         y: Math.round((parent.height - height) / 2)
                         width: root.modifiedMarkSize
