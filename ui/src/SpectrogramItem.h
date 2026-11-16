@@ -230,6 +230,9 @@ struct SpectrogramOverlayLayout {
     // The device pixels it was laid out for.
     QSize size;
     QVector<QRect> lines;
+    // Each line's own colour, where it has one rather than the overlay's:
+    // an invalid colour, or a line past the end of it, has the overlay's.
+    QVector<QColor> lineColors;
     QVector<SpectrogramOverlayImage> images;
 };
 

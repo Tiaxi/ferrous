@@ -2020,7 +2020,7 @@ void UiMotionTest::nowPlayingAlbumCutOffKeepsItsYearThroughATrackChange() {
     QVERIFY(grown(panel));
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     const PanelLine line = panelLine(panel, QStringLiteral("NarrowAlbum"));
-    QTRY_VERIFY(line.stillText()->property("truncated").toBool());
+    QTRY_VERIFY(line.stillText()->property("elided").toBool());
     QQuickItem *tail = itemNamed(line.stillText(), QStringLiteral("nowPlayingLineTail"));
     QVERIFY(tail != nullptr && tail->isVisible());
     QCOMPARE(tail->property("text").toString(), QStringLiteral(" (2005)"));

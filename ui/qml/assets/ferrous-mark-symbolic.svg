@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Ferrous's mark for 16 px at 1x, the now-playing panel's "Nothing playing" glyph: the
+     now-playing stand-in's traces (AlbumArtTile), a glide and its 2nd and 3rd harmonics, each
+     starting on its own in one column at the left, 3 px apart, 1.5 px clear, as the stand-in's do
+     (a common start read as an angle sign at 16 px, #373 H23), and rising 1 : 2 : 3, 2, 4 and 6 px,
+     most of it in their first half, bending over as a glide does, so they fan apart to 5 px at the
+     right, where they run out to the square's edge. Round caps; the glide, the lowest, a 1.75 px
+     stroke over the harmonics' 1.5, in the app icon's weight order. A one-colour mask, drawn in the
+     secondary text colour. -->
+<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M2.75 13.25C6.75 12.15 11.25 11.45 15.25 11.25"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 10.25C6.75 8.05 11.25 6.65 15.25 6.25"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 7.25C6.75 3.95 11.25 1.85 15.25 1.25"/>
+</svg>

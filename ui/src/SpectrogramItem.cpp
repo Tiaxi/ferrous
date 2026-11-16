@@ -146,6 +146,11 @@ const QColor kScaleTickColor(236, 236, 236, 191);
 // lines), over the lane seam at rest, which is darker than the floor, and
 // while the scale shows, the scale's text in plotTextSecondary.
 const QColor kRestGridLineColor(255, 255, 255, 51);
+// A rest line in the band of a plate over the lane, its label or the mode
+// switch, within kRestQuietReach of its top or foot: white 10 %, some
+// 1.3:1, so that beside the plate it reads as the grid going on behind it
+// rather than a connector cut into it (#373 H31 Y4).
+const QColor kRestGridQuietLineColor(255, 255, 255, 26);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
@@ -302,6 +307,8 @@ struct SpectrogramPlacedOverlayImage {
 // What an overlay draws in a frame, in logical pixels.
 struct SpectrogramOverlayFrame {
     QVector<QRectF> lines;
+    // As SpectrogramOverlayLayout's lineColors.
+    QVector<QColor> lineColors;
     QVector<SpectrogramPlacedOverlayImage> images;
 };
 
@@ -559,8 +566,10 @@ struct SpectrogramSceneNode final : public QSGNode {
         for (int i = 0; i < layer.lines.size(); ++i) {
             QSGSimpleRectNode *line = layer.lines[i];
             const QRectF rect = i < frame.lines.size() ? frame.lines[i] : QRectF();
-            if (line->color() != lineColor) {
-                line->setColor(lineColor);
+            const QColor color = i < frame.lineColors.size() && frame.lineColors[i].isValid()
+                ? frame.lineColors[i] : lineColor;
+            if (line->color() != color) {
+                line->setColor(color);
             }
             if (line->rect() != rect) {
                 line->setRect(rect);
@@ -4852,12 +4861,14 @@ QSGNode *SpectrogramItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData 
             // `shown`, lines that start outside it are left out, and
             // so are images centred outside it.
             if (shown.isNull()) shown = pane;
-            for (const QRect &line : layout.lines) {
+            for (qsizetype i = 0; i < layout.lines.size(); ++i) {
+                const QRect &line = layout.lines[i];
                 const QRectF rect((line.x() - shift) / scale, line.y() / scale,
                     line.width() / scale, line.height() / scale);
                 if (rect.intersects(pane) && rect.left() >= shown.left()
                     && rect.left() <= shown.right()) {
                     frame.lines.push_back(rect);
+                    frame.lineColors.push_back(layout.lineColors.value(i));
                 }
             }
             for (const SpectrogramOverlayImage &image : layout.images) {
@@ -6328,6 +6339,9 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // line. The plates' rects are logical, with their 1 px edges.
     constexpr double kPlateGap = 6.0;
     constexpr double kPlateReach = 8.0;
+    // A line within kRestQuietReach of a plate's top or foot, in its band,
+    // is quieter (kRestGridQuietLineColor), its cuts kept.
+    constexpr double kRestQuietReach = 4.0;
     const double logicalWidth = static_cast<double>(width) / scale;
     const QRectF corner = m_reservedCorner.isEmpty()
         ? QRectF()
@@ -6350,6 +6364,12 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
             ? std::clamp(static_cast<int>(std::floor((corner.left() - kPlateGap) * scale)), 0, width)
             : width;
         m_restGrid.lines.push_back(QRect(left, tick.pixelY, std::max(0, right - left), lineWidth));
+        const bool inPlateBand = std::ranges::any_of(
+            std::array{m_laneLabelBounds, corner}, [&](const QRectF &plate) {
+                return !plate.isEmpty() && row + rowHeight > plate.top() - kRestQuietReach
+                    && row < plate.bottom() + kRestQuietReach;
+            });
+        m_restGrid.lineColors.push_back(inPlateBand ? kRestGridQuietLineColor : QColor());
         if (m_gridEnabled) {
             m_restGrid.images.push_back(
                 {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});

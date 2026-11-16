@@ -482,7 +482,7 @@ bool grown(QQuickWindow *window) {
 
 // Why the now-playing panel is not the compact row of nothing loaded, or ""
 // (#373 H7): one list row's height and the seam, the library's header right
-// under it; a 16 px disc mark, larger with a larger font, at the 12 px
+// under it; Ferrous's 16 px mark, larger with a larger font, at the 12 px
 // inset, and "Nothing playing" where a library row's text starts, 6 px
 // after it, both in the secondary text colour and centred in the row; no
 // cover's square and none of a track's lines.
@@ -530,7 +530,7 @@ QString compactRowProblem(QQuickWindow *window) {
     if (!at(glyphRect.left(), block.left() + 12) || !at(glyphRect.center().y(), rowRect.center().y())) {
         return QStringLiteral("glyph at %1, %2").arg(glyphRect.left() - block.left()).arg(glyphRect.top() - block.top());
     }
-    if (glyph->property("source").toString() != QStringLiteral("media-optical-audio-symbolic")
+    if (!glyph->property("source").toUrl().toString().endsWith(QStringLiteral("/ferrous-mark-symbolic.svg"))
         || !glyph->property("isMask").toBool() || colorOf(glyph) != tokenHex(window, "textSecondary")) {
         return QStringLiteral("glyph %1 in %2").arg(glyph->property("source").toString(), colorOf(glyph));
     }
@@ -915,8 +915,11 @@ private slots:
     void nowPlayingCompactKeepsTheAlbumAndItsYear();
     void nowPlayingLargeFontCompactIsAHeaderRow_data();
     void nowPlayingLargeFontCompactIsAHeaderRow();
-    void nowPlayingLongTitleKeepsWholeWords_data();
-    void nowPlayingLongTitleKeepsWholeWords();
+    void nowPlayingTitleIsOneSizePerLayout_data();
+    void nowPlayingTitleIsOneSizePerLayout();
+    void nowPlayingEllipsisFollowsTheTextWithoutASpace();
+    void nowPlayingIdleGlyphIsFerrousMark_data();
+    void nowPlayingIdleGlyphIsFerrousMark();
     void levelMeterAtRestShowsItsMarks_data();
     void levelMeterAtRestShowsItsMarks();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
@@ -1266,7 +1269,7 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // tooltip; nothing scrolls.
     const QString longTitle = QStringLiteral("A Remarkably Long Track Title That Will Certainly Need Eliding");
     bridge->setProperty("currentTrackTitle", longTitle);
-    QTRY_VERIFY(title->property("truncated").toBool());
+    QTRY_VERIFY(title->property("elided").toBool());
     QVERIFY(panel->property("textTruncated").toBool());
     QCOMPARE(title->property("x").toReal(), 0.0);
 
@@ -1304,7 +1307,7 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // of a title was), and the seam is 12 px under the lowest of the
     // lines, the cover flush with it.
     QTRY_COMPARE(narrowTitle->property("lineCount").toInt(), 2);
-    QVERIFY(narrowTitle->property("truncated").toBool());
+    QVERIFY(narrowTitle->property("elided").toBool());
     QVERIFY(QQuickTest::qWaitForPolish(window));
     QTRY_COMPARE(sceneRect(seam).top() - sceneRect(named(window, "nowPlayingNarrowDetails")).bottom(), 12.0);
     QCOMPARE(sceneRect(cover).bottom(), sceneRect(seam).top());
@@ -1447,7 +1450,9 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     } else if (coverSide < 0) {
         const QFontMetricsF titleMetrics(named(window, "nowPlayingNarrowTitle")->property("font").value<QFont>());
         coverSide = panel->property("headerCoverSize").toReal();
-        QVERIFY2(coverSide > 96.0 && std::abs(coverSide - 2 * titleMetrics.height()) <= 6.0,
+        // Two lines of the title, never under 96 px (#373 H31 Y1: at the
+        // base size in a 360 px sidebar, 96 px).
+        QVERIFY2(coverSide >= 96.0 && std::abs(coverSide - std::max(96.0, 2 * titleMetrics.height())) <= 6.0,
                  qPrintable(QString::number(coverSide)));
     }
     QTRY_COMPARE(cover->width(), coverSide);
@@ -1507,12 +1512,13 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     const qreal seamAt = sceneRect(seam).top();
     if (headerRow) {
-        // The title from the cover's top; the artist 8 px under the cover,
-        // the album and the details 4 px apart, then 12 px.
+        // The title on the cover's foot, within it; the artist 8 px under
+        // the cover, the album and the details 4 px apart, then 12 px.
         QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
         QQuickItem *album = named(window, "nowPlayingNarrowAlbum");
         QQuickItem *details = named(window, "nowPlayingNarrowDetails");
-        QCOMPARE(sceneRect(named(window, "nowPlayingNarrowTitle")).top(), tile.top());
+        const QRectF titleRect = sceneRect(named(window, "nowPlayingNarrowTitle"));
+        QVERIFY(std::abs(titleRect.bottom() - tile.bottom()) <= 1.0 && titleRect.top() >= tile.top());
         QTRY_COMPARE(sceneRect(artist).top(), tile.bottom() + 8);
         QCOMPARE(sceneRect(album).top(), sceneRect(artist).bottom() + 4);
         QCOMPARE(sceneRect(details).top(), sceneRect(album).bottom() + 4);
@@ -1554,7 +1560,7 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
         QQuickItem *text = lineText(line);
         QVERIFY(text != nullptr);
         QTRY_COMPARE(text->property("lineCount").toInt(), 2);
-        QTRY_VERIFY2(!line->property("truncated").toBool(), qPrintable(line->objectName()));
+        QTRY_VERIFY2(!line->property("elided").toBool(), qPrintable(line->objectName()));
         const QFontMetricsF metrics(text->property("font").value<QFont>());
         // (Text lays a line out on whole pixels, up to one under the
         // font's height.)
@@ -1580,7 +1586,7 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal Over Harbour"));
     wraps(title);
     QTRY_COMPARE(lineText(artist)->property("lineCount").toInt(), 1);
-    QTRY_VERIFY(artist->property("truncated").toBool());
+    QTRY_VERIFY(artist->property("elided").toBool());
     QVERIFY(panel->property("textTruncated").toBool());
     blockKept();
     // A long album wraps under a title and an artist on one line each, its
@@ -1590,12 +1596,12 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     bridge->setProperty("currentTrackArtist", QStringLiteral("The Quiet Meridian"));
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Small Hours at the Harbour"));
     QTRY_COMPARE(lineText(album)->property("lineCount").toInt(), 2);
-    QTRY_VERIFY(!album->property("truncated").toBool());
+    QTRY_VERIFY(!album->property("elided").toBool());
     QVERIFY(lineText(album)->property("wholeText").toString().endsWith(QStringLiteral("(2005)")));
     blockKept();
     // A title too long even for two lines is cut off at the second's end.
     bridge->setProperty("currentTrackTitle", QStringLiteral("A Remarkably Long Track Title ").repeated(4));
-    QTRY_VERIFY(title->property("truncated").toBool());
+    QTRY_VERIFY(title->property("elided").toBool());
     QCOMPARE(lineText(title)->property("lineCount").toInt(), 2);
 }
 
@@ -1767,7 +1773,7 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
         QVERIFY2(linesInside(), track.name);
         if (track.wraps != nullptr) {
             QVERIFY2(track.wraps->property("lineCount").toInt() == 2, track.name);
-            QVERIFY2(!track.wraps->property("truncated").toBool(), track.name);
+            QVERIFY2(!track.wraps->property("elided").toBool(), track.name);
         }
     }
 }
@@ -1859,7 +1865,7 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
     for (QQuickItem *line : {title, album}) {
         QTRY_COMPARE(line->property("lineCount").toInt(), 2);
     }
-    QTRY_VERIFY(artist->property("truncated").toBool());
+    QTRY_VERIFY(artist->property("elided").toBool());
     QCOMPARE(artist->property("lineCount").toInt(), 1);
     QCOMPARE(artist->property("elide").toInt(), static_cast<int>(Qt::ElideRight));
     QTRY_VERIFY(settled());
@@ -1872,7 +1878,7 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
     QVERIFY(panel->property("textTruncated").toBool());
     // The album cut off before its year, which shows whole after it, on
     // its second line, within the inset.
-    QTRY_VERIFY(album->property("truncated").toBool());
+    QTRY_VERIFY(album->property("elided").toBool());
     QCOMPARE(album->property("text").toString(), longAlbum);
     QCOMPARE(album->property("wholeText").toString(), longAlbum + QStringLiteral(" (2024)"));
     QQuickItem *tail = itemNamed(album, QStringLiteral("nowPlayingLineTail"));
@@ -1895,7 +1901,7 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
     bridge->setProperty("currentTrackAlbum", QStringLiteral("Dusk"));
     QTRY_COMPARE(album->property("wholeText").toString(), QStringLiteral("Dusk (2024)"));
     QCOMPARE(album->property("text").toString(), QStringLiteral("Dusk"));
-    QVERIFY(shown(tail) && !album->property("truncated").toBool());
+    QVERIFY(shown(tail) && !album->property("elided").toBool());
     QCOMPARE(album->property("lineCount").toInt(), 1);
     {
         const QFontMetricsF metrics(album->property("font").value<QFont>());
@@ -1920,7 +1926,7 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
         bridge->setProperty("currentTrackAlbum", filling);
         QTRY_COMPARE(album->property("text").toString(), filling);
         QTRY_COMPARE(album->property("lineCount").toInt(), 1);
-        QVERIFY(!album->property("truncated").toBool());
+        QVERIFY(!album->property("elided").toBool());
         QTRY_COMPARE(tail->property("text").toString(), QStringLiteral("(2024)"));
         QCOMPARE(sceneRect(tail).left(), sceneRect(album).left());
         QTRY_VERIFY(sceneRect(tail).top() >= sceneRect(album).bottom() - 1);
@@ -2003,14 +2009,20 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_COMPARE(title->property("lineCount").toInt(), 2);
     QTRY_VERIFY(settled());
     const qreal side = panel->property("headerCoverSize").toReal();
-    QVERIFY2(side > 96.0, qPrintable(QString::number(side)));
-    QVERIFY2(std::abs(side - 2 * lineHeight(title)) <= 6.0,
+    QVERIFY2(side >= 96.0, qPrintable(QString::number(side)));
+    QVERIFY2(std::abs(side - std::max(96.0, 2 * lineHeight(title))) <= 6.0,
              qPrintable(QStringLiteral("%1 for %2").arg(side).arg(lineHeight(title))));
     QCOMPARE(cover->width(), side);
     QCOMPARE(cover->height(), side);
     const QRectF coverRect = sceneRect(cover);
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft());
-    QTRY_COMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QTRY_COMPARE(sceneRect(title).left(), coverRect.right() + 12);
+    // Its two lines span the cover, or, at the base size under a 96 px
+    // cover, end on its foot (#373 H31 Y1).
+    QVERIFY2(std::abs(sceneRect(title).top() - (coverRect.top() + std::max(0.0, side - sceneRect(title).height())))
+                 <= 1.0,
+             qPrintable(QStringLiteral("the title from %1, %2 px high").arg(sceneRect(title).top())
+                            .arg(sceneRect(title).height())));
     QVERIFY(sceneRect(title).right() <= panelRect.right() - 12);
     // A text of the title, on one line or two, ends on the cover's foot
     // (#373 H29 W1: a title on one line sat at the cover's top, with some
@@ -2053,7 +2065,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
             < details->width() - 4) {
             QCOMPARE(panel->property("shownNarrowDetailsText").toString(), whole);
         }
-        QVERIFY(!details->property("truncated").toBool());
+        QVERIFY(!details->property("elided").toBool());
     }
     const auto geometry = [&]() {
         return QList<QRectF>{sceneRect(panel), sceneRect(header), sceneRect(cover), sceneRect(album)};
@@ -2068,9 +2080,9 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     const QString longAlbum = QStringLiteral("A Remarkably Long Album Title That Runs On ").repeated(3).trimmed();
     bridge->setProperty("currentTrackAlbum", longAlbum);
     bridge->setProperty("currentTrackYear", 2024);
-    QTRY_VERIFY(artist->property("truncated").toBool());
+    QTRY_VERIFY(artist->property("elided").toBool());
     QCOMPARE(artist->property("lineCount").toInt(), 1);
-    QTRY_VERIFY(album->property("truncated").toBool());
+    QTRY_VERIFY(album->property("elided").toBool());
     QCOMPARE(album->property("lineCount").toInt(), 1);
     // "Album (Year)" a step below the artist (#373 H18 C2).
     QCOMPARE(album->property("color").value<QColor>().rgba(),
@@ -2092,7 +2104,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
     bridge->setProperty("currentTrackArtist", longArtist);
     QTRY_COMPARE(title->property("lineCount").toInt(), 1);
-    QTRY_VERIFY(artist->property("truncated").toBool());
+    QTRY_VERIFY(artist->property("elided").toBool());
     QCOMPARE(artist->property("lineCount").toInt(), 1);
     QTRY_VERIFY(settled());
     QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
@@ -2155,31 +2167,38 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(geometry(), before);
 }
 
-void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords_data() {
+void UiMainWindowTest::nowPlayingTitleIsOneSizePerLayout_data() {
     QTest::addColumn<QSize>("windowSize");
-    // A title that the heading's size cuts within a word in its two lines,
-    // and the words the base size fits on its first line.
+    // Whether the layout's titles are at the base size (headerTitleSmall).
+    QTest::addColumn<bool>("small");
+    // A title on two lines, cut off, and the words its size fits on its
+    // first line.
     QTest::addColumn<QString>("longTitle");
     QTest::addColumn<QString>("firstLine");
-    QTest::newRow("1000x720") << QSize(1000, 720) << QStringLiteral("A Remarkably Long Title For The Evening Tide")
+    QTest::newRow("1000x720") << QSize(1000, 720) << true
+                              << QStringLiteral("A Remarkably Long Title For The Evening Tide")
                               << QStringLiteral("A Remarkably");
-    QTest::newRow("1600x1000") << QSize(1600, 1000)
-                               << QStringLiteral("A Thunderstruck Evening Over The Harbour")
-                               << QStringLiteral("A Thunderstruck");
+    QTest::newRow("1600x1000") << QSize(1600, 1000) << false
+                               << QStringLiteral("Morning Tide Field Over The Harbour At Night")
+                               << QStringLiteral("Morning Tide");
 }
 
-// The large-font header's title keeps its words whole (#373 H30: at 24 pt
-// in the narrow window "A Remarka / bly Long …" split a word with no
-// mark). A title that the heading's size would cut within a word in its two
-// lines takes the base size instead, DemiBold, wrapped between words:
-// "A Remarkably / Long Title F…". Where even that cuts a word, as a single
-// very long word does, it breaks with a hyphen, U+2010, at least 4
+// The large-font header's title is one size for every track of a layout,
+// never per track (#373 H31 Y1: at 24 pt in the narrow window a long title
+// stepped down to the base size on its own, 228x88 px against 228x108, so
+// only its weight ranked it over the artist). Where the room beside the
+// heading-size header's cover is under a dozen characters of the
+// heading-size title, as at 24 pt in a 1000x720 window, every title is at
+// the base size, DemiBold, and the cover spans its two lines, 96 px or
+// more; otherwise, as at 24 pt in a 1600x1000 window, at the heading's.
+// A short, a medium and a long title, and a title going out in a fade,
+// are at that size, on the cover's foot, the panel's height and the
+// library's place the same. A long title wraps between words; a single
+// word wider than the line breaks with a hyphen, U+2010, at least 4
 // characters before it and 3 after, the first line full; never anywhere.
-// Ordinary titles keep the heading's size. The title's seat, the cover's
-// foot, and the panel's height stay; a title going out in a fade keeps
-// the size it showed at.
-void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords() {
+void UiMainWindowTest::nowPlayingTitleIsOneSizePerLayout() {
     QFETCH(QSize, windowSize);
+    QFETCH(bool, small);
     QFETCH(QString, longTitle);
     QFETCH(QString, firstLine);
     const QFont applicationFont = QGuiApplication::font();
@@ -2194,12 +2213,14 @@ void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords() {
     QObject *bridge = bridgeOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *header = named(window, "libraryHeader");
-    QVERIFY(panel && title && cover && header);
+    QVERIFY(panel && title && artist && cover && header);
     playTrack(bridge);
     QVERIFY(grown(window));
     QVERIFY(panel->property("largeHeader").toBool());
+    QCOMPARE(panel->property("headerTitleSmall").toBool(), small);
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(handover != nullptr);
     const auto settled = [&]() { return !handover->property("running").toBool(); };
@@ -2207,18 +2228,30 @@ void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords() {
     const qreal headingSize = panel->property("titlePointSize").toReal();
     const qreal baseSize = paletteOf(window)->property("basePointSize").toReal();
     QVERIFY(headingSize > baseSize);
+    const qreal titleSize = small ? baseSize : headingSize;
     const auto pointSize = [](QQuickItem *text) { return text->property("font").value<QFont>().pointSizeF(); };
-    // An ordinary title, at the heading's size.
     QTRY_VERIFY(settled());
-    QCOMPARE(pointSize(title), headingSize);
-    const QFont headingFont = title->property("font").value<QFont>();
-    QCOMPARE(headingFont.weight(), QFont::DemiBold);
-    QFont baseFont = headingFont;
-    baseFont.setPointSizeF(baseSize);
-    const QFontMetricsF heading(headingFont);
-    const QFontMetricsF base(baseFont);
+    QCOMPARE(pointSize(title), titleSize);
+    QFont titleFont = title->property("font").value<QFont>();
+    QCOMPARE(titleFont.weight(), QFont::DemiBold);
+    const QFontMetricsF metrics(titleFont);
     const qreal width = title->width();
-    // The seat and the block, which nothing here changes.
+    // The rule, from the fonts and the width: the room beside the cover a
+    // heading-size title would have, against 12 of its average characters.
+    QFont headingFont = titleFont;
+    headingFont.setPointSizeF(headingSize);
+    const qreal headingCover = std::max(96.0, qreal(std::round(2 * QFontMetricsF(headingFont).height())));
+    const qreal roomBesideHeading = panel->width() - headingCover - 2 * 12;
+    QVERIFY2((roomBesideHeading < 12 * QFontMetricsF(headingFont).averageCharWidth()) == small,
+             qPrintable(QStringLiteral("%1 px beside a %2 px cover").arg(roomBesideHeading).arg(headingCover)));
+    // The cover spans the title's two lines, and is never under 96 px.
+    const qreal side = panel->property("headerCoverSize").toReal();
+    QVERIFY2(side >= 96.0 && std::abs(side - std::max(96.0, 2 * metrics.height())) <= 6.0,
+             qPrintable(QStringLiteral("%1 for a title line of %2").arg(side).arg(metrics.height())));
+    QCOMPARE(cover->width(), side);
+    // The title over the artist: larger than it, or as large and heavier.
+    QVERIFY(titleSize > pointSize(artist));
+    // The seat and the block, which no title changes.
     const QRectF coverRect = sceneRect(cover);
     const qreal panelHeight = panel->height();
     const qreal headerTop = sceneRect(header).top();
@@ -2259,33 +2292,34 @@ void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords() {
         return right < 0 ? 0.0 : (right + 1) / scale - rect.left();
     };
 
-    // The heading's size cuts it within a word: the words of the first line
-    // do not fit it, nor the first word of the second with the ellipsis, or
-    // a word is wider than the line. The base size fits them.
-    const QString secondWord = firstLine.section(QLatin1Char(' '), -1);
-    QVERIFY2(heading.horizontalAdvance(firstLine) > width
-                 && (heading.horizontalAdvance(secondWord + QStringLiteral("…")) > width
-                     || heading.horizontalAdvance(secondWord) > width),
+    // A short, a medium and a long title, each of another track: one size.
+    const QString nextWord = longTitle.mid(firstLine.size() + 1).section(QLatin1Char(' '), 0, 0);
+    QVERIFY2(metrics.horizontalAdvance(firstLine) <= width
+                 && metrics.horizontalAdvance(firstLine + QLatin1Char(' ') + nextWord) > width,
              qPrintable(QStringLiteral("the column %1 px").arg(width)));
-    QVERIFY(base.horizontalAdvance(firstLine) <= width);
-    bridge->setProperty("currentTrackTitle", longTitle);
-    QTRY_COMPARE(title->property("wholeText").toString(), longTitle);
-    QTRY_VERIFY(settled());
-    QCOMPARE(pointSize(title), baseSize);
-    QCOMPARE(title->property("font").value<QFont>().weight(), QFont::DemiBold);
-    QCOMPARE(title->property("text").toString(), longTitle);
-    QCOMPARE(title->property("wrapMode").toInt(), kWrap);
+    const QStringList titles{QStringLiteral("Shore"), QStringLiteral("Lantern Signal"), longTitle};
+    for (int index = 0; index < titles.size(); ++index) {
+        const QString &next = titles.at(index);
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/%1.flac").arg(index + 10));
+        bridge->setProperty("currentTrackTitle", next);
+        QTRY_COMPARE(title->property("wholeText").toString(), next);
+        QTRY_VERIFY(settled());
+        QVERIFY2(pointSize(title) == titleSize, qPrintable(next));
+        QCOMPARE(title->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(title->property("wrapMode").toInt(), kWrap);
+        QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
+        QVERIFY2(blockProblem().isEmpty(), qPrintable(blockProblem()));
+    }
+    // The long one on two lines, cut off, its first line its first words,
+    // whole.
     QCOMPARE(title->property("lineCount").toInt(), 2);
-    QVERIFY(title->property("truncated").toBool());
-    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
-    QVERIFY2(blockProblem().isEmpty(), qPrintable(blockProblem()));
-    // Its first line is its first words, whole.
-    const qreal wanted = base.horizontalAdvance(firstLine);
-    QTRY_VERIFY2(std::abs(firstLineInk() - wanted) <= 4.0,
+    QVERIFY(!title->property("text").toString().contains(QChar(0x2010)));
+    const qreal wanted = metrics.horizontalAdvance(firstLine);
+    QTRY_VERIFY2(std::abs(firstLineInk() - wanted) <= 8.0,
                  qPrintable(QStringLiteral("line 0 %1 px, \"%2\" %3").arg(firstLineInk()).arg(firstLine).arg(wanted)));
 
-    // In a fade to an ordinary title, each keeps its own size.
-    const QString shortTitle = QStringLiteral("Lantern Signal");
+    // In a fade to a short title, both are at the layout's size.
+    const QString shortTitle = QStringLiteral("Dusk");
     bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/03.flac"));
     bridge->setProperty("currentTrackTitle", shortTitle);
     QTRY_VERIFY(handover->property("running").toBool());
@@ -2296,48 +2330,243 @@ void UiMainWindowTest::nowPlayingLongTitleKeepsWholeWords() {
         QQuickItem *incomingWindow = itemNamed(panel, QStringLiteral("nowPlayingIncomingNarrowTitleWindow"));
         QVERIFY(outgoing != nullptr && incomingWindow != nullptr && !incomingWindow->childItems().isEmpty());
         QQuickItem *incoming = incomingWindow->childItems().first();
-        QCOMPARE(outgoing->property("text").toString(), longTitle);
-        QCOMPARE(pointSize(outgoing), baseSize);
+        QCOMPARE(outgoing->property("wholeText").toString(), longTitle);
+        QCOMPARE(pointSize(outgoing), titleSize);
         QCOMPARE(incoming->property("text").toString(), shortTitle);
-        QCOMPARE(pointSize(incoming), headingSize);
+        QCOMPARE(pointSize(incoming), titleSize);
         QVERIFY2(seatedProblem(outgoing).isEmpty(), qPrintable(seatedProblem(outgoing)));
         QVERIFY2(seatedProblem(incoming).isEmpty(), qPrintable(seatedProblem(incoming)));
     }
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     QTRY_VERIFY(settled());
     QCOMPARE(title->property("text").toString(), shortTitle);
-    QCOMPARE(pointSize(title), headingSize);
-    QCOMPARE(title->property("wrapMode").toInt(), kWrap);
-    QVERIFY(!title->property("truncated").toBool());
+    QCOMPARE(pointSize(title), titleSize);
     QVERIFY2(blockProblem().isEmpty(), qPrintable(blockProblem()));
 
-    // A single very long word: at the base size, hyphenated where its
-    // first line fills, the rest on the second, elided where it does not
-    // fit.
+    // A single very long word: hyphenated where its first line fills, the
+    // rest on the second, elided where it does not fit.
     const QString word = QStringLiteral("Supercalifragilisticexpialidociously");
-    QVERIFY(base.horizontalAdvance(word) > width);
+    QVERIFY(metrics.horizontalAdvance(word) > width);
     bridge->setProperty("currentTrackPath", kTrackPath);
     bridge->setProperty("currentTrackTitle", word);
     QTRY_COMPARE(title->property("wholeText").toString(), word);
     QTRY_VERIFY(settled());
-    QCOMPARE(pointSize(title), baseSize);
+    QCOMPARE(pointSize(title), titleSize);
     QCOMPARE(title->property("wrapMode").toInt(), kWrap);
     const QString laidOut = title->property("text").toString();
     const QString hyphen = QStringLiteral("‐\n");
     QVERIFY2(laidOut.count(hyphen) == 1, qPrintable(laidOut));
     const QString head = laidOut.section(hyphen, 0, 0);
     const QString rest = laidOut.section(hyphen, 1);
-    QCOMPARE(head + rest, word);
-    QVERIFY2(head.size() >= 4 && rest.size() >= 3, qPrintable(laidOut));
+    QVERIFY2(word.startsWith(head + rest.chopped(rest.endsWith(QChar(0x2026)) ? 1 : 0)), qPrintable(laidOut));
+    QVERIFY2(head.size() >= 4 && word.size() - head.size() >= 3, qPrintable(laidOut));
     // The first line full: one more character with the hyphen would not fit.
-    QVERIFY(base.horizontalAdvance(head + QStringLiteral("‐")) <= width);
-    QVERIFY(base.horizontalAdvance(word.left(head.size() + 1) + QStringLiteral("‐")) > width);
+    QVERIFY(metrics.horizontalAdvance(head + QStringLiteral("‐")) <= width);
+    QVERIFY(metrics.horizontalAdvance(word.left(head.size() + 1) + QStringLiteral("‐")) > width);
     QCOMPARE(title->property("lineCount").toInt(), 2);
     // The rest elided where it does not fit the second line.
-    QCOMPARE(title->property("truncated").toBool(), base.horizontalAdvance(rest) > width);
+    QCOMPARE(title->property("elided").toBool(), metrics.horizontalAdvance(word.mid(head.size())) > width);
     QCOMPARE(QQmlProperty::read(title, QStringLiteral("Accessible.name"), qmlContext(title)).toString(), word);
     QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     QVERIFY2(blockProblem().isEmpty(), qPrintable(blockProblem()));
+}
+
+// A line the panel cuts off has no space before its ellipsis (#373 H31
+// Y6: "Track Title That …"): where Text would elide after a space, the
+// panel elides the line itself, "Title That…", on one line under the wide
+// cover and on the second of the large-font header's title, its first line
+// as it was; the whole of it stays the accessible name and the tooltip's.
+// A line cut within a word is elided as Text elides it, "Long Track T…".
+void UiMainWindowTest::nowPlayingEllipsisFollowsTheTextWithoutASpace() {
+    const QString ellipsis(QChar(0x2026));
+    // A run of narrow letters, so that some length of it puts the cut
+    // right after "That ".
+    const auto findLead = [&](const QFontMetricsF &metrics, qreal width, const QString &before) {
+        for (int length = 1; length < 120; ++length) {
+            const QString lead(length, QLatin1Char('i'));
+            if (!before.isEmpty() && metrics.horizontalAdvance(before + QLatin1Char(' ') + lead) <= width) {
+                continue;
+            }
+            const QString line = lead + QStringLiteral(" Title That Wandering Line");
+            if (metrics.elidedText(line, Qt::ElideRight, width) == lead + QStringLiteral(" Title That ") + ellipsis) {
+                return lead;
+            }
+        }
+        return QString();
+    };
+    const auto pointSize = [](QQuickItem *text) { return text->property("font").value<QFont>().pointSizeF(); };
+
+    // Under the wide cover, one line.
+    {
+        LibraryTreeModel libraryModel;
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = loadMainWindow(engine, libraryModel);
+        QVERIFY2(window != nullptr, "Main.qml failed to show");
+        QObject *bridge = bridgeOf(window);
+        QQuickItem *panel = named(window, "nowPlayingPanel");
+        QQuickItem *title = named(window, "nowPlayingTitle");
+        QVERIFY(panel && title);
+        playTrack(bridge);
+        QVERIFY(grown(window));
+        QCOMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+        const QFontMetricsF metrics(title->property("font").value<QFont>());
+        const qreal width = title->width();
+        const QString lead = findLead(metrics, width, QString());
+        QVERIFY2(!lead.isEmpty(), qPrintable(QString::number(width)));
+        const QString whole = lead + QStringLiteral(" Title That Wandering Line");
+        bridge->setProperty("currentTrackTitle", whole);
+        QTRY_COMPARE(title->property("wholeText").toString(), whole);
+        QTRY_COMPARE(title->property("text").toString(), lead + QStringLiteral(" Title That") + ellipsis);
+        QVERIFY(title->property("elided").toBool());
+        QVERIFY(panel->property("textTruncated").toBool());
+        QCOMPARE(QQmlProperty::read(title, QStringLiteral("Accessible.name"), qmlContext(title)).toString(), whole);
+        QVERIFY(metrics.horizontalAdvance(title->property("text").toString()) <= width);
+
+        // Cut within a word: as Text elides it.
+        const QString withinAWord = QStringLiteral("A Remarkably Long Track Title That Will Certainly Need Eliding");
+        QVERIFY(!metrics.elidedText(withinAWord, Qt::ElideRight, width).endsWith(QLatin1Char(' ') + ellipsis));
+        bridge->setProperty("currentTrackTitle", withinAWord);
+        QTRY_COMPARE(title->property("text").toString(), withinAWord);
+        QTRY_VERIFY(title->property("truncated").toBool());
+        QVERIFY(title->property("elided").toBool());
+    }
+
+    // The large-font header's title, on its second line.
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(24.0);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1000, 720);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QVERIFY(panel && title);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QVERIFY(panel->property("largeHeader").toBool());
+    const QFontMetricsF metrics(title->property("font").value<QFont>());
+    const qreal width = title->width();
+    const QString first = QStringLiteral("Remarkably");
+    QVERIFY(metrics.horizontalAdvance(first) <= width);
+    const QString lead = findLead(metrics, width, first);
+    QVERIFY2(!lead.isEmpty(), qPrintable(QString::number(width)));
+    const QString whole = first + QLatin1Char(' ') + lead + QStringLiteral(" Title That Wandering Line");
+    bridge->setProperty("currentTrackTitle", whole);
+    QTRY_COMPARE(title->property("wholeText").toString(), whole);
+    QTRY_COMPARE(title->property("text").toString(),
+                 first + QLatin1Char('\n') + lead + QStringLiteral(" Title That") + ellipsis);
+    QCOMPARE(title->property("lineCount").toInt(), 2);
+    QVERIFY(title->property("elided").toBool());
+    QVERIFY(panel->property("textTruncated").toBool());
+    QCOMPARE(pointSize(title), paletteOf(window)->property("basePointSize").toReal());
+    QCOMPARE(QQmlProperty::read(title, QStringLiteral("Accessible.name"), qmlContext(title)).toString(), whole);
+}
+
+void UiMainWindowTest::nowPlayingIdleGlyphIsFerrousMark_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// The "Nothing playing" row's glyph is Ferrous's mark (#373 H31 Y3: the
+// stock disc was unreadable at 16 px): ferrous-mark-symbolic.svg, the
+// now-playing stand-in's glide and its 2nd and 3rd harmonics drawn for
+// 16 px, a mask in the secondary text colour. At 1:1, in either theme, it
+// reads as three traces: across its right half, three runs of ink apart,
+// each rising to the right and fanning apart, solid where they are; the
+// item is a mask in the secondary text colour; the SVG has three
+// round-capped strokes in a 16 px box, the glide the heaviest.
+void UiMainWindowTest::nowPlayingIdleGlyphIsFerrousMark() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/ferrous-mark-symbolic.svg"));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QString svg = QString::fromUtf8(file.readAll());
+    QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+    QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
+    QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
+    QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.75\"")));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
+    QTRY_VERIFY2(compactRowProblem(window).isEmpty(), qPrintable(compactRowProblem(window)));
+    QQuickItem *glyph = named(window, "nowPlayingIdleGlyph");
+    QQuickItem *row = named(window, "nowPlayingIdleRow");
+    QVERIFY(glyph && row);
+    QTest::qWait(50);
+    const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const qreal scale = qreal(image.width()) / window->width();
+    QCOMPARE(scale, 1.0);
+    const QRect box = sceneRect(glyph).toRect();
+    QCOMPARE(box.size(), QSize(16, 16));
+    const QColor background = image.pixelColor(box.left() - 4, box.center().y());
+    const auto difference = [&](int x, int y) {
+        const QColor pixel = image.pixelColor(box.left() + x, box.top() + y);
+        return std::abs(pixel.red() - background.red()) + std::abs(pixel.green() - background.green())
+            + std::abs(pixel.blue() - background.blue());
+    };
+    // How much of its ink a pixel has, 0 to 1: from the row's background
+    // to the glyph's strongest pixel. (Its colour is the item's, above:
+    // the offscreen platform draws a mask unrecoloured.)
+    int strongest = 1;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            strongest = std::max(strongest, difference(x, y));
+        }
+    }
+    QVERIFY2(strongest >= 30, qPrintable(QString::number(strongest)));
+    const auto coverage = [&](int x, int y) { return double(difference(x, y)) / strongest; };
+    QString rows;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            const double c = coverage(x, y);
+            rows += c > 0.66 ? QLatin1Char('#') : c > 0.25 ? QLatin1Char('+') : QLatin1Char('.');
+        }
+        rows += QLatin1Char('\n');
+    }
+    // Each column of its right half: three runs of ink, with clear rows
+    // between them; their middles in each column.
+    QList<QList<double>> middles;
+    for (int x = 8; x < 16; ++x) {
+        QList<double> runs;
+        int start = -1;
+        for (int y = 0; y <= 16; ++y) {
+            const bool on = y < 16 && coverage(x, y) > 0.25;
+            if (on && start < 0) {
+                start = y;
+            } else if (!on && start >= 0) {
+                runs.push_back((start + y - 1) / 2.0);
+                start = -1;
+            }
+        }
+        QVERIFY2(runs.size() == 3, qPrintable(QStringLiteral("column %1:\n%2").arg(x).arg(rows)));
+        middles.push_back(runs);
+    }
+    // Rising to the right, each trace, and fanning apart.
+    for (int trace = 0; trace < 3; ++trace) {
+        QVERIFY2(middles.last().at(trace) < middles.first().at(trace), qPrintable(rows));
+    }
+    QVERIFY2(middles.last().at(2) - middles.last().at(0) > middles.first().at(2) - middles.first().at(0) - 0.01,
+             qPrintable(rows));
+    // Solid where the strokes are, not a haze.
+    int solid = 0;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            solid += coverage(x, y) > 0.8 ? 1 : 0;
+        }
+    }
+    QVERIFY2(solid >= 20, qPrintable(rows));
+    // Ink within the box only: the row around it is the background.
+    for (int x = -2; x < 18; ++x) {
+        QVERIFY2(coverage(x, -2) < 0.1 && coverage(x, 17) < 0.1, qPrintable(rows));
+    }
 }
 
 void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
@@ -2351,10 +2580,14 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
 }
 
 // With nothing loaded, the visualization's level meter is its trough with
-// the -6, -12 and -24 dB marks' ticks across it, 1 px each, in the ticks'
-// colour, where they are while it plays, and no lamp, fill or peak tick
-// (#373 H30: the blank trough of the first run read as a scrollbar's): in
-// either mode and theme.
+// the -6, -12 and -24 dB marks' ticks across it, 1 px each, where they are
+// while it plays, and no lamp, fill or peak tick (#373 H30: the blank
+// trough of the first run read as a scrollbar's): in either mode and
+// theme. Before any audio, the pane at rest, the trough is the plot's
+// floor and the marks the rest lines' colour, on the spectrogram #14062e
+// and #433858 (#373 H31 Y5: the lit #30244a trough was the one instrument
+// switched on); with a track, paused or stopped, the lit trough and its
+// ticks; and with the queue cleared, the floor again.
 void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     QFETCH(bool, dark);
     QFETCH(int, mode);
@@ -2381,42 +2614,89 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     LevelMeterItem *meter = visibleMeter();
     QVERIFY(!meter->active());
     QCOMPARE(meter->framed(), mode == 1);
-    const QColor trough = meter->property("troughColor").value<QColor>();
-    const QColor tick = meter->property("tickColor").value<QColor>();
-    // The tick as drawn over the trough.
-    const QColor drawn = QColor::fromRgbF(
-        tick.redF() * tick.alphaF() + trough.redF() * (1 - tick.alphaF()),
-        tick.greenF() * tick.alphaF() + trough.greenF() * (1 - tick.alphaF()),
-        tick.blueF() * tick.alphaF() + trough.blueF() * (1 - tick.alphaF()));
+    QObject *palette = paletteOf(window);
+    QObject *plotColors = qvariant_cast<QObject *>(
+        palette->property(mode == 0 ? "spectrogramPlot" : "waveformPlot"));
+    QVERIFY(plotColors != nullptr);
     const auto near = [](const QColor &a, const QColor &b) {
         return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
             && std::abs(a.blue() - b.blue()) <= 2;
     };
-    QTest::qWait(50);
-    const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
-    const double scale = double(image.width()) / window->width();
-    const QRectF rect = sceneRect(meter);
-    const auto pixel = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
-    const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
-    for (int lane = 0; lane < meter->laneCount(); ++lane) {
-        const auto [top, bottom] = LevelMeterItem::laneRows(lane, meter->laneCount(), meter->height());
-        const double meterTop = rect.top() + top + LevelMeterItem::kInset;
-        const double meterBottom = rect.top() + bottom - LevelMeterItem::kInset;
-        const double scaleHeight = meterBottom - meterTop - LevelMeterItem::kLampHeight - 1;
-        const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
-        QCOMPARE(gaps.size(), std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3));
-        int tickRows = 0;
-        for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
-            const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
-                return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
-            });
-            tickRows += onTick ? 1 : 0;
-            QVERIFY2(near(pixel(x, y), onTick ? drawn : trough),
-                     qPrintable(QStringLiteral("lane %1, y %2: %3, wanted %4")
-                                    .arg(lane).arg(y - rect.top()).arg(hex(pixel(x, y)), hex(onTick ? drawn : trough))));
+    // The column's track and its marks as drawn, against `trough` and
+    // `tick` drawn over it.
+    const auto checkMarks = [&](const QColor &trough, const QColor &tick, const QString &where) {
+        QCOMPARE(meter->property("troughColor").value<QColor>(), trough);
+        QCOMPARE(meter->property("tickColor").value<QColor>(), tick);
+        const QColor drawn = QColor::fromRgbF(
+            tick.redF() * tick.alphaF() + trough.redF() * (1 - tick.alphaF()),
+            tick.greenF() * tick.alphaF() + trough.greenF() * (1 - tick.alphaF()),
+            tick.blueF() * tick.alphaF() + trough.blueF() * (1 - tick.alphaF()));
+        QTest::qWait(50);
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const double scale = double(image.width()) / window->width();
+        const QRectF rect = sceneRect(meter);
+        const auto pixel = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
+        const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
+        for (int lane = 0; lane < meter->laneCount(); ++lane) {
+            const auto [top, bottom] = LevelMeterItem::laneRows(lane, meter->laneCount(), meter->height());
+            const double meterTop = rect.top() + top + LevelMeterItem::kInset;
+            const double meterBottom = rect.top() + bottom - LevelMeterItem::kInset;
+            const double scaleHeight = meterBottom - meterTop - LevelMeterItem::kLampHeight - 1;
+            const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
+            QCOMPARE(gaps.size(), std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3));
+            int tickRows = 0;
+            for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
+                const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
+                    return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
+                });
+                tickRows += onTick ? 1 : 0;
+                QVERIFY2(near(pixel(x, y), onTick ? drawn : trough),
+                         qPrintable(QStringLiteral("%1, lane %2, y %3: %4, wanted %5")
+                                        .arg(where).arg(lane).arg(y - rect.top())
+                                        .arg(hex(pixel(x, y)), hex(onTick ? drawn : trough))));
+            }
+            QCOMPARE(tickRows, int(gaps.size()));
         }
-        QCOMPARE(tickRows, int(gaps.size()));
+    };
+
+    // Before any audio: the floor and the rest lines' colour.
+    const QColor restTrough = plotColors->property("meterRestTrough").value<QColor>();
+    const QColor restTick = plotColors->property("meterRestTick").value<QColor>();
+    if (mode == 0) {
+        QCOMPARE(restTrough, QColor(QStringLiteral("#14062e")));
+        QCOMPARE(restTick.name(), QStringLiteral("#433858"));
+    } else {
+        QCOMPARE(restTrough, palette->property("view").value<QColor>());
+        QCOMPARE(restTick, palette->property("waveformRestLine").value<QColor>());
     }
+    QCOMPARE(restTrough, plotColors->property("plotBg").value<QColor>());
+    checkMarks(restTrough, restTick, QStringLiteral("before audio"));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // A track, paused and stopped: the lit trough and its ticks.
+    const QColor trough = plotColors->property("meterTrough").value<QColor>();
+    const QColor tick = plotColors->property("meterTick").value<QColor>();
+    QVERIFY(trough != restTrough);
+    for (const QString &state : {QStringLiteral("Paused"), QStringLiteral("Stopped")}) {
+        playTrack(bridge, state);
+        QTRY_VERIFY(visibleMeter() != nullptr
+                    && visibleMeter()->property("troughColor").value<QColor>() == trough);
+        meter = visibleMeter();
+        QVERIFY2(!meter->active(), qPrintable(state));
+        checkMarks(trough, tick, state);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+
+    // The queue cleared: the pane at rest again.
+    bridge->setProperty("currentTrackPath", QString());
+    QTRY_VERIFY(visibleMeter() != nullptr
+                && visibleMeter()->property("troughColor").value<QColor>() == restTrough);
+    meter = visibleMeter();
+    checkMarks(restTrough, restTick, QStringLiteral("cleared"));
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
@@ -3038,7 +3318,7 @@ void UiMainWindowTest::nowPlayingDetailsAreOneColourAndNeverCutOff() {
                                : QStringLiteral("Classical · Track 2 of 8");
     QCOMPARE(panel->property(wide ? "detailsText" : "narrowDetailsText").toString(), whole);
     const QString shownText = details->property("text").toString();
-    QVERIFY2(!details->property("truncated").toBool(), qPrintable(shownText));
+    QVERIFY2(!details->property("elided").toBool(), qPrintable(shownText));
     if (pointSize == 0.0) {
         // Room for all of it.
         QCOMPARE(shownText, whole);
@@ -3065,12 +3345,12 @@ void UiMainWindowTest::nowPlayingDetailsAreOneColourAndNeverCutOff() {
         QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
         QVERIFY(artist != nullptr);
         QCOMPARE(panel->property("textTruncated").toBool(),
-                 shownText != whole || title->property("truncated").toBool()
-                     || (!wide && artist->property("truncated").toBool()));
+                 shownText != whole || title->property("elided").toBool()
+                     || (!wide && artist->property("elided").toBool()));
     }
     if (!wide) {
         // "Morning Tide Field" at 24 pt beside the cover: on two lines, whole.
-        QVERIFY2(!title->property("truncated").toBool(), qPrintable(title->property("text").toString()));
+        QVERIFY2(!title->property("elided").toBool(), qPrintable(title->property("text").toString()));
         QVERIFY(title->property("lineCount").toInt() <= 2);
     }
 
@@ -3134,14 +3414,14 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
     const auto notWhole = [&](QQuickItem *line, const QString &text) -> QString {
         const QRectF rect = sceneRect(line);
         const QFontMetricsF metrics(line->property("font").value<QFont>());
-        if (shown(line) && line->property("text").toString() == text && !line->property("truncated").toBool()
+        if (shown(line) && line->property("text").toString() == text && !line->property("elided").toBool()
             && metrics.horizontalAdvance(text) <= rect.width() && rect.left() >= block.left() + 12
             && rect.right() <= block.right() - 12) {
             return {};
         }
         return QStringLiteral("%1: \"%2\" (%3 px, truncated %4) in %5 to %6 of %7 to %8")
             .arg(line->objectName(), line->property("text").toString())
-            .arg(metrics.horizontalAdvance(text)).arg(line->property("truncated").toBool())
+            .arg(metrics.horizontalAdvance(text)).arg(line->property("elided").toBool())
             .arg(rect.left()).arg(rect.right()).arg(block.left()).arg(block.right());
     };
 
@@ -3185,7 +3465,7 @@ void UiMainWindowTest::nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize() {
         QTRY_VERIFY2(notWhole(combined, both).isEmpty(), qPrintable(notWhole(combined, both)));
     } else {
         // Elided, within the inset, with the whole of it in the tooltip.
-        QTRY_VERIFY(combined->property("truncated").toBool());
+        QTRY_VERIFY(combined->property("elided").toBool());
         QVERIFY(sceneRect(combined).left() >= block.left() + 12);
         QVERIFY(sceneRect(combined).right() <= block.right() - 12);
         QVERIFY(panel->property("textTruncated").toBool());
@@ -3267,7 +3547,7 @@ void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack() {
     playTrack(bridge);
     bridge->setProperty("currentTrackAlbum",
                         QStringLiteral("A Remarkably Long Album Title That Runs On Past The Cover"));
-    QTRY_VERIFY(artistAlbum->property("truncated").toBool());
+    QTRY_VERIFY(artistAlbum->property("elided").toBool());
     QTRY_VERIFY(!handover->property("running").toBool());
     QCOMPARE(geometry(), tagged);
     QVERIFY(panel->property("textTruncated").toBool());

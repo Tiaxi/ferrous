@@ -214,6 +214,12 @@ QtObject {
         required property color meterTick
         // A 1 px line across the meter's top, or transparent for none.
         required property color meterTopSeam
+        // The meter before any audio, while the pane is at rest: its track
+        // in the plot's floor and its marks in the rest lines' colour, so
+        // it is of one piece with the pane waiting (#373 H31 Y5: the lit
+        // trough stood out as the one instrument switched on).
+        required property color meterRestTrough
+        required property color meterRestTick
         // A checked tool button on a plate: a solid fill, at least 3:1 on
         // the plate, and its glyph or letter, at least 4.5:1 on the fill.
         required property color checkedFill
@@ -291,6 +297,9 @@ QtObject {
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)
         meterTick: Qt.rgba(1, 1, 1, 0.4)
         meterTopSeam: "transparent"
+        // The floor, and the rest lines' white 20 % on it: #433858.
+        meterRestTrough: root.plotFloor
+        meterRestTick: ColorUtils.drawnOver(Qt.rgba(1, 1, 1, 0.2), root.plotFloor)
         checkedFill: root.accent
         checkedGlyph: "#000000"
         // The dark theme's tertiary text, as the plot is dark in both.
@@ -330,6 +339,9 @@ QtObject {
         meterClipOff: ColorUtils.withAlpha(root.text, 0.18)
         // The meter's marks: the text colour, faint.
         meterTick: ColorUtils.withAlpha(root.text, 0.3)
+        // The view, and the waveform's rest lines on it.
+        meterRestTrough: root.view
+        meterRestTick: root.waveformRestLine
         // The accent is 2.4:1 on white: the light fill is the focus ring's
         // darker blue. #3daee9 / #1a74a8.
         checkedFill: root.themeIsDark ? root.accent : root.focusRing
@@ -380,6 +392,8 @@ QtObject {
         meterClipOff: spectrogramColors.meterClipOff
         meterTick: spectrogramColors.meterTick
         meterTopSeam: spectrogramColors.meterTopSeam
+        meterRestTrough: spectrogramColors.meterRestTrough
+        meterRestTick: spectrogramColors.meterRestTick
         checkedFill: spectrogramColors.checkedFill
         checkedGlyph: spectrogramColors.checkedGlyph
         segmentEdge: spectrogramColors.segmentEdge
