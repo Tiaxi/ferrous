@@ -43,7 +43,7 @@ Item {
     required property var uiPalette
     // Whether the viewer is over the whole screen: the details' text is
     // then a step larger, 1.2 times the window's, the file's name 18 px,
-    // and their column 320 px with its seam.
+    // and their column as much wider, 336 px with its seam.
     property bool fullscreen: false
     // The colours of the view, dark in both themes.
     readonly property var plot: root.uiPalette.mediaPlot
@@ -550,9 +550,9 @@ Item {
     // default font, up to two fifths of the view, and never under 280 px;
     // in a wide view, a quarter of it, up to 320 px, a seventh wider, so the
     // details are not crammed beside a wide art (#373 H37: 280 px in a
-    // 1600 px window); over the whole screen 320 px, for its larger text,
-    // which the column's room to spare at the desktop size takes the rest
-    // of.
+    // 1600 px window). Over the whole screen it follows its text, 1.2 times
+    // larger: 336 px, or 40 characters of that text (#373 H38: at 320 px a
+    // folder's path was cut beside the screen's room to spare).
     // During a preview, it is wider for its buttons if they need it, up to
     // half the view: in a narrower view, the buttons stack, so neither is
     // cut short.
@@ -560,12 +560,14 @@ Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
         readonly property real widthScale: root.fullscreen
-            ? 8 / 7 : Math.max(280, Math.min(320, Math.floor(root.width / 4))) / 280
-        // Without its seam: 279 px, 319 px in a view 1280 px wide or more
-        // and over the whole screen.
+            ? root.infoScale : Math.max(280, Math.min(320, Math.floor(root.width / 4))) / 280
+        // Without its seam: 279 px, 319 px in a view 1280 px wide or more,
+        // 335 px over the whole screen.
         readonly property real minimumWidth: Math.round(280 * infoColumn.widthScale) - 1
+        // Forty characters of the details' text; in a window, a quarter of
+        // the view's width wider in a wide one, as the column.
         readonly property real fortyCharacters: Math.max(infoColumn.minimumWidth,
-            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * infoColumn.widthScale) - 1)
+            Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * (root.fullscreen ? 1 : infoColumn.widthScale)) - 1)
         visible: root.infoVisible
         anchors.right: parent.right
         anchors.top: parent.top
@@ -576,9 +578,12 @@ Item {
                     previewApplyButton.visible ? previewApplyButton.implicitWidth : 0)) + 2 * root.infoPadding)))
             : Math.max(infoColumn.minimumWidth, Math.min(Math.floor(root.width * 0.4), infoColumn.fortyCharacters))
 
+        // The details' text: the body font, 1.2 times it over the whole
+        // screen.
         FontMetrics {
             id: infoFontMetrics
-            font: root.uiPalette.baseFont
+            font.family: root.uiPalette.baseFont.family
+            font.pointSize: root.infoPointSize
         }
 
         // Opaque, so the details read the same over any art: the plot's
@@ -765,11 +770,12 @@ Item {
                 }
 
                 // The folder: its label on a line of its own, and under it
-                // the path on one line across the column's whole width,
-                // elided in the middle, so its start and the folder's name
-                // stay, with Copy Path at the line's end (#373 H12: in the
-                // grid, the path had the values' part of the row and broke
-                // onto a second line).
+                // the path across the column's whole width, with Copy Path
+                // at its end (#373 H12: in the grid, the path had the
+                // values' part of the row and broke onto a second line). A
+                // long path wraps after a slash, on up to three lines, and
+                // what does not fit is elided (#373 H38: on one line, it
+                // was cut to its start and its last folder's end).
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -803,10 +809,13 @@ Item {
                             readonly property bool elided: folderPathLabel.truncated
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignVCenter
-                            text: folderPathLabel.path
+                            // A zero-width space after each slash: the lines
+                            // break there rather than within a folder's name.
+                            text: folderPathLabel.path.replace(/\//g, "/\u200b")
                             textFormat: Text.PlainText
-                            elide: Text.ElideMiddle
-                            maximumLineCount: 1
+                            wrapMode: Text.Wrap
+                            elide: Text.ElideRight
+                            maximumLineCount: 3
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path
