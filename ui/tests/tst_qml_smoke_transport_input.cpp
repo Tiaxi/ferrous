@@ -1862,13 +1862,17 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     setChannelCount(bridge, surface, 2);
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
-    // The pane's: the mode switch and the first lane's head 5 px from the
-    // top (#373 H16 I5).
-    const auto controlsTop = [](QQuickItem *in) {
+    // The pane's: the mode switch and the first lane's head's plates 5 px
+    // from the top (#373 H16 I5), the label centred on its buttons' plate,
+    // which reaches above it (H18 C4).
+    const auto headPlatesTop = [](QQuickItem *laneHead) {
+        return sceneRectOf(laneHead).top() - laneHead->property("plateReach").toReal();
+    };
+    const auto controlsTop = [&](QQuickItem *in) {
         QQuickItem *modeSwitch = firstVisibleItemNamed(in, QStringLiteral("visualizationModeSwitch"));
         QQuickItem *laneHead = firstVisibleItemNamed(in, QStringLiteral("plotLaneHead"));
         return std::make_pair(modeSwitch ? sceneRectOf(modeSwitch).top() : -1.0,
-                              laneHead ? sceneRectOf(laneHead).top() : -1.0);
+                              laneHead ? headPlatesTop(laneHead) : -1.0);
     };
     QTRY_COMPARE(controlsTop(window->contentItem()),
                  std::make_pair(sceneRectOf(surface).top() + 5.0, sceneRectOf(surface).top() + 5.0));
@@ -1919,7 +1923,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QTRY_VERIFY(!strip->isVisible());
     QQuickItem *laneHead = firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("plotLaneHead"));
     QVERIFY(laneHead != nullptr);
-    QCOMPARE(sceneRectOf(laneHead).top(), 33.0 + 5.0);
+    QCOMPARE(headPlatesTop(laneHead), 33.0 + 5.0);
     autoHide->setProperty("hideDelay", 5000);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());

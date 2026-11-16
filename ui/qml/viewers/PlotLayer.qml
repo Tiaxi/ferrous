@@ -208,7 +208,9 @@ Item {
             objectName: "plotLaneHead"
             z: 1
             x: root.plateInset
-            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset
+            // The buttons' plate 5 px in, as the mode switch, and the label
+            // centred on it: the head's own top is the label's.
+            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset + plateReach
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette

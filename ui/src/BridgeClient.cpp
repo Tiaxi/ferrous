@@ -5529,10 +5529,12 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     const double dur = snapshot.playback.present ? snapshot.playback.durationSeconds : m_durationSeconds;
     const int repeatMode = std::clamp(snapshot.playback.present ? snapshot.playback.repeatMode : m_repeatMode, 0, 2);
     const bool shuffleEnabled = snapshot.playback.present ? snapshot.playback.shuffleEnabled : m_shuffleEnabled;
-    const QString playbackCurrentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
-    const QString currentPath = isStopped && playbackCurrentPath.trimmed().isEmpty()
-        ? m_currentTrackPath
-        : playbackCurrentPath;
+    // The engine reports no current track only once its queue is empty: a
+    // stop keeps the track current. Nothing current, then, also while
+    // stopped, so that Stop then Clear leaves "Nothing playing" rather than
+    // the stopped track (#373 H18 C3: the track's path, and with it its
+    // text, outlived the queue).
+    const QString currentPath = snapshot.playback.present ? snapshot.playback.currentPath : m_currentTrackPath;
     int playing = snapshot.playback.present ? snapshot.playback.currentQueueIndex : m_playingQueueIndex;
 
     // A delta applies only to the rows of the revision it builds on.

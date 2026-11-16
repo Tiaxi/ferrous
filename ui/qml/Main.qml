@@ -1629,8 +1629,9 @@ ApplicationWindow {
         // (`pictureReady`), at 0 over the spectrogram until then (#373 H11:
         // it faded in from the click, and its per-channel lanes, which wait
         // for their detail, were an empty floor for 80 to 170 ms). Hidden,
-        // it keeps the detail it has (#373 H14), so that frame is the first
-        // one after the click unless the track changed meanwhile.
+        // it keeps the detail it has (#373 H14), and fetches the detail of a
+        // new track's lanes once its overview comes (H18), so that frame is
+        // the first one after the click, from a track's first switch on.
         readonly property int chosenMode: viewerController.visualizationMode
         // The plot that shows whole, under the chosen one while it comes in.
         property int settledMode: -1

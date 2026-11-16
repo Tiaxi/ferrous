@@ -124,6 +124,11 @@ Item {
         mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
         centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
         laneSeamColor: root.plotColors.plotLaneSeam
+        // The crosshair's readout on the plot's plates, as the
+        // spectrogram's, and its dashes in the plot's text (#373 H18 C5).
+        readoutPlateColor: root.plotColors.plotPlate
+        readoutPlateEdgeColor: root.plotColors.plotPlateEdge
+        readoutTextColor: root.plotColors.plotText
         // Dark: a light core in a black casing; light: a dark core in white.
         playheadColor: root.uiPalette.themeIsDark ? "#e8e8e8" : "#202326"
         playheadCasingColor: root.uiPalette.themeIsDark

@@ -4107,9 +4107,11 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
 
     // The buttons' plate: 4 px around them and between them, its top on
-    // one line with the label's and the mode switch's, and a button's
+    // one line with the mode switch's, 5 px into the lane, and a button's
     // focus ring inside it with 1 px of the plate outside it (#373 H16 I5:
-    // at 2 px, the ring ran past the plate's edge).
+    // at 2 px, the ring ran past the plate's edge). The label is centred on
+    // it, so that L and M stand on one centre line (H18 C4: the plates'
+    // tops were on one line, their letters 6 px apart).
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
@@ -4123,9 +4125,14 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), 4.0);
     QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), 4.0);
     QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), 4.0);
-    QCOMPARE(plateRect.top(), rectOf(label).top());
-    QCOMPARE(rectOf(modeSwitch).top(), rectOf(label).top());
-    QCOMPARE(rectOf(label).top() - rectOf(layer).top(), 5.0);
+    QCOMPARE(plateRect.top(), rectOf(modeSwitch).top());
+    QCOMPARE(plateRect.top() - rectOf(layer).top(), 5.0);
+    QVERIFY2(std::abs(rectOf(label).center().y() - plateRect.center().y()) <= 0.5,
+             qPrintable(QStringLiteral("label centre %1, plate centre %2")
+                            .arg(rectOf(label).center().y()).arg(plateRect.center().y())));
+    QVERIFY2(std::abs(rectOf(modeSwitch).center().y() - plateRect.center().y()) <= 0.5,
+             qPrintable(QStringLiteral("switch centre %1, plate centre %2")
+                            .arg(rectOf(modeSwitch).center().y()).arg(plateRect.center().y())));
     QCOMPARE(rectOf(label).left() - rectOf(layer).left(), 5.0);
     mute->forceActiveFocus(Qt::TabFocusReason);
     QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
