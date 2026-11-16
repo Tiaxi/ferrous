@@ -12,7 +12,10 @@ import "." as Components
 // window (#373 H8), has a 16 px label with 11 px text and 20 px buttons,
 // larger with a larger font, and its buttons show only on the pointer or
 // keyboard focus, not with a viewer's controls: there, every lane's would
-// show at once and crowd the lanes.
+// show at once and crowd the lanes. A lane that is muted or soloed keeps
+// its buttons shown, compact or not, so the checked one says why the lane
+// is silent, or why the others are, and is there to undo it (#373 H16 I4:
+// a muted lane and one silenced by another's Solo looked the same).
 Item {
     id: root
 
@@ -44,7 +47,7 @@ Item {
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
         || (root.buttonsVisibility === 1
             && ((root.revealedWithControls && !root.compact) || root.laneHovered
-                || buttonsHover.hovered || root.focusInside))
+                || buttonsHover.hovered || root.focusInside || root.muted || root.soloed))
     // The buttons' size: the label's height and 2 px above and below it,
     // compact; otherwise the design's small tool button.
     readonly property real buttonSize: root.compact
