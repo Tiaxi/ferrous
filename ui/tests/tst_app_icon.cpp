@@ -1673,9 +1673,11 @@ void AppIconTest::oneMagentaAtEverySize_data() {
 // rose is a step lighter instead, its hue kept: in Rec. 709 luma at their
 // full colours some 30 levels over the magenta and as many under the amber
 // (H22: 21 over the magenta), and nothing of H22's colours in any file.
-// Rendered, down the middle column, each trace's centre is that far apart
-// in grey, to within what a 2 px stroke's centre row loses to the tile at
-// 32 px, and the magenta's 3:1 or more on the tile there.
+// Rendered, down the middle column, each trace's core, its brightest pixel
+// there, is that far apart in grey, to within what a 2 px stroke's centre row
+// loses to the tile at 32 px, and the magenta's 3:1 or more on the tile there.
+// (A thin stroke whose centre falls between two rows covers both in part:
+// the middle row of its ink can be the fainter one.)
 void AppIconTest::oneMagentaAtEverySize() {
     QFETCH(QString, path);
     QFETCH(int, size);
@@ -1706,11 +1708,14 @@ void AppIconTest::oneMagentaAtEverySize() {
             ++y;
             continue;
         }
-        const int top = y;
+        QRgb core = image.pixel(x, y);
         while (y < size && traceInk(image.pixel(x, y))) {
+            if (luma(image.pixel(x, y)) > luma(core)) {
+                core = image.pixel(x, y);
+            }
             ++y;
         }
-        centres.push_back(image.pixel(x, (top + y) / 2));
+        centres.push_back(core);
     }
     QCOMPARE(centres.size(), static_cast<size_t>(3));
     const double magentaToRose = luma(centres[1]) - luma(centres[0]);
@@ -1733,10 +1738,17 @@ void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
 // baseline, y 55.5, as in H19, their starts where they were, so that the top
 // trace runs out to the tile's edge some 3 units below its rounded corner
 // rather than into it (#373 hill climb, H20): at the edge their centres are
-// at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline (the
-// fundamental's lower by its fundamentalUnderside), and the top
+// at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline, and the top
 // trace's ink starts 2.5 units or more below the corner's arc, which ends 4
-// units below the tile's inner edge.
+// units below the tile's inner edge. The fundamental's centre sits its
+// fundamentalUnderside lower (H25: its added weight on its underside). With
+// the 4th harmonic, whose spacing shows the series, the series is the
+// fundamental's own: each harmonic that much higher per number over the 2nd,
+// so that in every column past the caps each is as far above the one under
+// it as the 2nd is above the fundamental, to within a quarter unit (#373
+// hill climb, H27: the 3rd sat that much, and the 4th twice that, under the
+// series). At 64 px, three traces, the 3rd stays on the 2nd's series, where
+// it keeps the corner's air.
 void AppIconTest::topTraceClearsTheCornerFrom64px() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1749,7 +1761,8 @@ void AppIconTest::topTraceClearsTheCornerFrom64px() {
         const QImage &trace = cover.value(ids[n]);
         const Column end = columnOf(trace, inside.right());
         const double centre = end.centre / unit;
-        const double expected = 55.5 - 0.94 * k * (55.5 - 13) / 3 + (k == 1 ? fundamentalUnderside(size) : 0);
+        const double expected = 55.5 - 0.94 * k * (55.5 - 13) / 3
+            + (hasDetailTier(size) ? 2 - k : (k == 1 ? 1 : 0)) * fundamentalUnderside(size);
         QVERIFY2(std::abs(centre - expected) <= 0.4,
                  qPrintable(QStringLiteral("%1 ends at %2 units, not %3").arg(ids[n]).arg(centre).arg(expected)));
     }
@@ -1757,6 +1770,20 @@ void AppIconTest::topTraceClearsTheCornerFrom64px() {
     const double cornerEnd = inside.top() + 4 * unit;
     QVERIFY2(top.top >= cornerEnd + 2.5 * unit,
              qPrintable(QStringLiteral("the top trace from row %1, the corner to %2").arg(top.top).arg(cornerEnd)));
+
+    if (!hasDetailTier(size)) {
+        return;
+    }
+    const QImage &fundamental = cover.value(QStringLiteral("fundamental"));
+    const QImage &second = cover.value(QStringLiteral("h2"));
+    const QImage &third = cover.value(QStringLiteral("h3"));
+    for (int x = columnsOf(fundamental).first + capColumns(size); x <= inside.right(); ++x) {
+        const double first = columnOf(fundamental, x).centre - columnOf(second, x).centre;
+        const double next = columnOf(second, x).centre - columnOf(third, x).centre;
+        QVERIFY2(std::abs(next - first) <= 0.25 * unit,
+                 qPrintable(QStringLiteral("column %1: the 3rd %2 above the 2nd, the 2nd %3 above the fundamental")
+                                .arg(x).arg(next).arg(first)));
+    }
 }
 
 void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
@@ -1779,13 +1806,17 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // (#373 hill climb, H26: H25 bent its last stretch up to leave at 40
 // degrees, the only reversed curvature, and spaced it wider than the series),
 // and cropped by the tile's top inner edge as the others are by its right
-// one, where the series puts it: from where its upper edge meets that edge,
-// x 44 or more of the 64-unit drawing, its lower edge runs on along its curve
-// to the same row, by 50, and the cut runs along the edge between them (H23:
-// H22 cut it square across the stroke, a corner on the rim with a wedge of
-// the tile under the cut), so that nothing of it is in the tile's rounded
-// corner, whose arc starts at x 53, where Plasma draws a task's badge (x over
-// 51, y under 20). Below 128 px, and in the scalable drawing, three traces.
+// one, where the series puts it: the stroke run on along its own curve past
+// the tile and intersected with it, so that both its edges cross that edge
+// at the series' slope there, some 25 degrees, its upper edge from x 42 of
+// the 64-unit drawing and its lower edge by 47.5, and the edge runs between
+// them only for the stroke's width across that slant: no stretch of the
+// trace lies along it (#373 hill climb, H27: 2 fundamentalUnderside under the
+// series, it left at 23 degrees from x 44.6; H23: H22 cut it square across
+// the stroke, a corner on the rim with a wedge of the tile under the cut),
+// so that nothing of it is in the tile's rounded corner, whose arc starts at
+// x 53, where Plasma draws a task's badge (x over 51, y under 20). Below 128
+// px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1845,25 +1876,31 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     // edge's end, as far on as the stroke's width across the edge's slant
     // there, to within a tenth.
     static const QRegularExpression endCut(QStringLiteral(
-        "<path id=\"h4\"[^>]* C[0-9.]+ [0-9.]+ ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) L([0-9.]+) ([0-9.]+) C"));
+        "<path id=\"h4\"[^>]* C[0-9.]+ [0-9.]+ ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) L([0-9.]+) ([0-9.]+) C([0-9.]+) ([0-9.]+) "));
     const QRegularExpressionMatch cut = endCut.match(source);
     QVERIFY(cut.hasMatch());
     const QPointF control(cut.captured(1).toDouble(), cut.captured(2).toDouble());
     const QPointF upper(cut.captured(3).toDouble(), cut.captured(4).toDouble());
     const QPointF lower(cut.captured(5).toDouble(), cut.captured(6).toDouble());
+    const QPointF lowerControl(cut.captured(7).toDouble(), cut.captured(8).toDouble());
     // The tile inside a rim of one device pixel.
     const double edge = 6 + 64.0 / size;
     QVERIFY2(std::abs(upper.y() - edge) <= 0.001 && std::abs(lower.y() - edge) <= 0.001,
              qPrintable(QStringLiteral("%1, %2").arg(upper.y()).arg(lower.y())));
-    // Where the series puts it, clear of the corner: the cut from x 44 to 50
-    // (88 to 100 of 128 px).
-    QVERIFY2(upper.x() >= 44 && lower.x() <= 50, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
+    // Where the series puts it, clear of the corner: the cut from x 42 to
+    // 47.5 (84 to 95 of 128 px).
+    QVERIFY2(upper.x() >= 42 && lower.x() <= 47.5, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
     const QPointF along = upper - control;
     const double slant = std::abs(along.y()) / std::hypot(along.x(), along.y());
-    // At the series' slope there, some 23 degrees to the edge: not bent up
-    // (H25's met it at 40).
+    // Both edges at the series' slope there, some 25 degrees to the edge,
+    // the lower a little flatter, as the curve flattens across the stroke:
+    // not bent up (H25's met it at 40), and neither edge run flat along it.
     const double angle = qRadiansToDegrees(std::asin(slant));
-    QVERIFY2(angle >= 21 && angle <= 26, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
+    QVERIFY2(angle >= 24 && angle <= 27.5, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
+    const QPointF back = lowerControl - lower;
+    const double lowerAngle = qRadiansToDegrees(std::asin(std::abs(back.y()) / std::hypot(back.x(), back.y())));
+    QVERIFY2(lowerAngle >= 22.5 && lowerAngle <= angle && angle - lowerAngle <= 2.5,
+             qPrintable(QStringLiteral("the lower edge at %1 degrees, the upper at %2").arg(lowerAngle).arg(angle)));
     const double across = fourthWidth(size) / unit;
     QVERIFY2(std::abs((lower.x() - upper.x()) * slant - across) <= 0.1 * across,
              qPrintable(QStringLiteral("a %1 unit cut, a %2 unit stroke").arg(lower.x() - upper.x()).arg(across)));
@@ -1881,6 +1918,15 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     }
     QVERIFY2(std::abs(topRow - (lower.x() - upper.x()) * unit) <= 1.0,
              qPrintable(QStringLiteral("%1 px of it in the top row, a %2 px cut").arg(topRow).arg((lower.x() - upper.x()) * unit)));
+    // Nothing of it along the top row outside the cut, but the antialiased
+    // pixels where its upper edge comes in at that slope, two device pixels
+    // or so: it crosses the edge, it does not run along it.
+    for (int x = inside.left(); x <= inside.right(); ++x) {
+        QVERIFY2(alphaAt(fourth, x, inside.top()) <= kTouched
+                     || (x >= std::floor(upper.x() * unit) - 3 && x <= std::ceil(lower.x() * unit)),
+                 qPrintable(QStringLiteral("column %1: %2 of the top row, the cut from %3 to %4 px").arg(x)
+                                .arg(alphaAt(fourth, x, inside.top())).arg(upper.x() * unit).arg(lower.x() * unit)));
+    }
     // Nothing in the badge's corner.
     for (int y = 0; y < 20 * unit; ++y) {
         for (int x = static_cast<int>(51 * unit); x < size; ++x) {
@@ -1895,11 +1941,12 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double rises = (centre(fourth, start) - centre(fourth, middle)) / (centre(third, start) - centre(third, middle));
     QVERIFY2(rises >= 1.3 && rises <= 1.36, qPrintable(QString::number(rises)));
     // On the series in every column up to the cut: as far above the 3rd as
-    // the 3rd is above the 2nd, to within a unit.
+    // the 3rd is above the 2nd, to within a quarter unit, the 2nd as far
+    // above the fundamental's centre (topTraceClearsTheCornerFrom64px).
     for (int x = start; x < cutStart - 1; ++x) {
         const double gap = centre(third, x) - centre(fourth, x);
         const double series = centre(second, x) - centre(third, x);
-        QVERIFY2(std::abs(gap - series) <= unit,
+        QVERIFY2(std::abs(gap - series) <= 0.25 * unit,
                  qPrintable(QStringLiteral("column %1: %2 above the 3rd, which is %3 above the 2nd").arg(x).arg(gap).arg(series)));
     }
     // One flattening curve: over each quarter of the way to the cut it rises
