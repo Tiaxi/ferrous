@@ -93,6 +93,13 @@ class WaveformEditorItem : public QQuickItem, public PlaybackFrameScheduler::Cli
     Q_PROPERTY(QColor laneSeamColor READ laneSeamColor WRITE setLaneSeamColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadColor READ playheadColor WRITE setPlayheadColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor playheadCasingColor READ playheadCasingColor WRITE setPlayheadCasingColor NOTIFY colorsChanged)
+    // The crosshair's readout plates, in the plot's colours (UiPalette's
+    // PlotColors), as the spectrogram's, and its dashed lines in the text's
+    // colour (#373 H18 C5: translucent grey plates and a dotted line of
+    // their own).
+    Q_PROPERTY(QColor readoutPlateColor READ readoutPlateColor WRITE setReadoutPlateColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutPlateEdgeColor READ readoutPlateEdgeColor WRITE setReadoutPlateEdgeColor NOTIFY readoutColorsChanged)
+    Q_PROPERTY(QColor readoutTextColor READ readoutTextColor WRITE setReadoutTextColor NOTIFY readoutColorsChanged)
     // Whether the playhead is drawn: the plot going out under another as
     // the visualization mode switches draws none, so only one shows.
     Q_PROPERTY(bool playheadVisible READ playheadVisible WRITE setPlayheadVisible NOTIFY playheadVisibleChanged)
@@ -185,6 +192,12 @@ public:
     void setPlayheadColor(const QColor &value);
     QColor playheadCasingColor() const;
     void setPlayheadCasingColor(const QColor &value);
+    QColor readoutPlateColor() const;
+    void setReadoutPlateColor(const QColor &value);
+    QColor readoutPlateEdgeColor() const;
+    void setReadoutPlateEdgeColor(const QColor &value);
+    QColor readoutTextColor() const;
+    void setReadoutTextColor(const QColor &value);
     bool playheadVisible() const;
     void setPlayheadVisible(bool value);
 
@@ -219,6 +232,7 @@ signals:
     void sampleRateHzChanged();
     void samplePointsVisibleChanged();
     void colorsChanged();
+    void readoutColorsChanged();
     void playheadVisibleChanged();
     void pictureReadyChanged();
     void markerSecondsChanged();
@@ -374,6 +388,10 @@ private:
         QColor playheadCasing{8, 18, 14, 235};
     };
     void setColor(QColor Colors::*member, const QColor &value);
+    void setReadoutColor(QColor CrosshairReadout::Colors::*member, const QColor &value);
+    // The readout's plates: the spectrogram's plot colours until set.
+    CrosshairReadout::Colors m_readoutColors{
+        QColor(20, 20, 20, 224), QColor(0xec, 0xec, 0xec), QColor(255, 255, 255, 36)};
 
     // What the workers that make playback tiles share with the item: they
     // hand a tile over only while the item lives, and only for the tiles
@@ -600,7 +618,12 @@ private:
         QPainter &painter, const QLineF &line,
         const QColor &foreground, const QColor &contrast);
     static QPainterPath buildSamplePath(const QPolygonF &samples);
-    static QString formatCrosshairTime(double seconds);
+    // The crosshair's time, "1:46.0", with `decimals` decimals, 1 to 3.
+    static QString formatCrosshairTime(double seconds, int decimals);
+    // Its decimals: one at the default zoom, as the spectrogram's; zoomed
+    // in, as many as tell a column of `secondsPerColumn` from the next,
+    // up to milliseconds.
+    static int crosshairTimeDecimals(double secondsPerColumn, double zoomLevel);
     // The lowest lane's label and buttons, in a plot `height` tall of
     // `lanes` lanes.
     QRect lowestLaneHeadLocked(int height, int lanes) const;
@@ -608,7 +631,8 @@ private:
         int width, int height, int x, int y,
         int valueTextWidth, int timeTextWidth, int textHeight,
         const QSizeF &reservedCorner = QSizeF(), const QRect &laneHead = QRect(),
-        int widestValueTextWidth = 0, int widestTimeTextWidth = 0);
+        int widestValueTextWidth = 0, int widestTimeTextWidth = 0,
+        const CrosshairReadout::Colors &colors = CrosshairReadout::Colors());
     // These draw in the painter's pixels, pixelScale to a logical pixel
     // and deviceScale device pixels to one of the painter's.
     void drawOverviewLocked(QPainter &painter, int width, int height,

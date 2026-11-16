@@ -402,6 +402,11 @@ Item {
     QCOMPARE(waveform->waveformColor(), palette->property("paneWave").value<QColor>());
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
+    // The crosshair's readout on the plot's plates, as the spectrogram's
+    // (#373 H18 C5: a translucent grey of its own, #5f5f65 on Breeze Light).
+    QCOMPARE(waveform->readoutPlateColor(), plotColors->property("plotPlate").value<QColor>());
+    QCOMPARE(waveform->readoutPlateEdgeColor(), plotColors->property("plotPlateEdge").value<QColor>());
+    QCOMPARE(waveform->readoutTextColor(), plotColors->property("plotText").value<QColor>());
     QTRY_VERIFY(waveform->crosshairEnabled());
     QTRY_VERIFY(waveform->showFpsOverlay());
     QVERIFY(!waveform->playing());
@@ -1005,12 +1010,31 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         item->setHoverPosition(pointerX, 50.0, true);
         const auto drawn = record();
         // The crosshair is on the device column under the pointer, at its
-        // left edge.
-        const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::DotLine);
+        // left edge, dashed as the spectrogram's: 4 px on, 3 off, in the
+        // plot's text at 45 % (#373 H18 C5).
+        const QVector<double> crosshair = verticalLinesIn(drawn->engine, Qt::CustomDashLine);
         QCOMPARE(crosshair.size(), 1);
         const double columnX = std::floor(pointerX * scale + 1e-6) / scale;
         QVERIFY(std::abs(crosshair.constFirst() - columnX) < 1e-9);
-        static const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{3}$"));
+        for (const auto &[line, pen] : drawn->engine.lines) {
+            if (pen.style() == Qt::CustomDashLine) {
+                QCOMPARE(pen.dashPattern(), (QList<qreal>{4.0, 3.0}));
+                QCOMPARE(pen.color().rgb(), item->readoutTextColor().rgb());
+                QVERIFY(std::abs(pen.color().alphaF() - item->readoutTextColor().alphaF() * 0.45) < 0.01);
+            }
+        }
+        // The time with one decimal at the default zoom, as the
+        // spectrogram's; zoomed in, as many as tell its columns apart.
+        double viewStart = 0.0;
+        double viewEnd = 0.0;
+        {
+            QMutexLocker lock(&item->m_stateMutex);
+            std::tie(viewStart, viewEnd) = item->visibleRangeLocked();
+        }
+        const int decimals = WaveformEditorItem::crosshairTimeDecimals(
+            (viewEnd - viewStart) / std::ceil(320 * scale - 1e-6), zoom);
+        QCOMPARE(decimals, zoom == 1.0 ? 1 : 3);
+        const QRegularExpression timeLabel(QStringLiteral("^\\d+:\\d\\d\\.\\d{%1}$").arg(decimals));
         const QStringList shown = drawn->engine.texts.filter(timeLabel);
         QCOMPARE(shown.size(), 1);
 
@@ -1021,7 +1045,7 @@ void WaveformSmokeTest::waveformEditorSeeksWhereTheCrosshairShows() {
         item->mousePressEvent(&press);
         QCOMPARE(seekSpy.count(), 1);
         const double seconds = seekSpy.at(0).at(0).toDouble();
-        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds), shown.constFirst());
+        QCOMPARE(WaveformEditorItem::formatCrosshairTime(seconds, decimals), shown.constFirst());
         double start = 0.0;
         double end = 0.0;
         {
@@ -2451,12 +2475,28 @@ void WaveformSmokeTest::waveformEditorHoverDrawsCrosshairAndReadouts() {
 }
 
 void WaveformSmokeTest::waveformEditorCrosshairLabelsMatchSpectrogramMargins() {
-    QCOMPARE(
-        WaveformEditorItem::formatCrosshairTime(28.98),
-        QStringLiteral("0:28.980"));
-    QCOMPARE(
-        WaveformEditorItem::formatCrosshairTime(3'723.004),
-        QStringLiteral("1:02:03.004"));
+    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 3), QStringLiteral("0:28.980"));
+    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 3), QStringLiteral("1:02:03.004"));
+    // One decimal, as the spectrogram's: "1:46.0".
+    QCOMPARE(WaveformEditorItem::formatCrosshairTime(106.0, 1), QStringLiteral("1:46.0"));
+    QCOMPARE(WaveformEditorItem::formatCrosshairTime(28.98, 1), QStringLiteral("0:29.0"));
+    QCOMPARE(WaveformEditorItem::formatCrosshairTime(3'723.004, 2), QStringLiteral("1:02:03.00"));
+    // One at the default zoom, whatever the track's length; zoomed in, as
+    // many as a column needs, to milliseconds.
+    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 1.0), 1);
+    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.002, 1.0), 1);
+    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.24, 2.0), 1);
+    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.05, 4.0), 2);
+    QCOMPARE(WaveformEditorItem::crosshairTimeDecimals(0.0001, 64.0), 3);
+    // With the plates' 1 px edge, as the spectrogram's, each plate is 2 px
+    // larger each way.
+    {
+        const CrosshairReadout::Colors edged{QColor(Qt::black), QColor(Qt::white), QColor(255, 255, 255, 36)};
+        const auto [value, time] = WaveformEditorItem::crosshairLabelRects(
+            1'183, 318, 563, 137, 42, 48, 12, QSizeF(), QRect(), 0, 0, edged);
+        QCOMPARE(value.size(), QSize(42 + 8, 12 + 8));
+        QCOMPARE(time.size(), QSize(48 + 8, 12 + 8));
+    }
 
     constexpr int width = 1'183;
     constexpr int height = 318;
