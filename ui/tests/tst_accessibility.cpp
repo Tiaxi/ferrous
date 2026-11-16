@@ -21,6 +21,7 @@
 #include <QQuickRenderTarget>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QWheelEvent>
 #include <QtEndian>
@@ -3650,14 +3651,33 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         }
     }
     {
-        // The glyph's 16 px source: two strokes, 1.5 px, round caps.
+        // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
+        // px read lighter than Breeze's waveform glyph beside it), round
+        // caps, at least 2 px clear between them where they start, inside
+        // the 16 px square with their caps.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
         QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
-        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\"")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
         QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
+        const QRegularExpression path(QStringLiteral("d=\"M([0-9.]+) ([0-9.]+)C[^\"]* ([0-9.]+) ([0-9.]+)\""));
+        QList<QPointF> starts;
+        QList<QPointF> ends;
+        for (auto match = path.globalMatch(svg); match.hasNext();) {
+            const QRegularExpressionMatch each = match.next();
+            starts.push_back(QPointF(each.captured(1).toDouble(), each.captured(2).toDouble()));
+            ends.push_back(QPointF(each.captured(3).toDouble(), each.captured(4).toDouble()));
+        }
+        QCOMPARE(starts.size(), 2);
+        QCOMPARE(starts.at(0).x(), starts.at(1).x());
+        QVERIFY2(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75 >= 2.0,
+                 qPrintable(QStringLiteral("%1 px clear").arg(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75)));
+        for (const QPointF &point : starts + ends) {
+            QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
+            QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
+        }
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
