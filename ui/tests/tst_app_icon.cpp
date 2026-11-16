@@ -53,6 +53,10 @@ constexpr QRgb kBreezeLightView = 0xffffff;
 constexpr QRgb kGlide = 0xf2b035;
 constexpr QRgb kHarmonic = 0xf87089;
 constexpr QRgb kThirdHarmonic = 0xe055b4;
+// At 32 and 48 px, and their 2x drawings, the 3rd harmonic a deeper magenta,
+// so that it holds apart from the rose in greyscale there, where the traces
+// are 2 to 2.5 px (#373 hill climb, H22): still 3:1 on the tile.
+constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 // The faint 4th harmonic of the 128 and 256 px drawings, a violet a step
 // darker again (#373 hill climb, H21).
 constexpr QRgb kFourthHarmonic = 0x9a4bd0;
@@ -155,6 +159,9 @@ bool onPixelGrid(int size) {
 // 32 px up, the fundamental and the magenta 3rd harmonic at 16 and 22 px,
 // where a middle trace fused with its neighbours (#373 hill climb, H10, H18).
 std::vector<QRgb> traceColours(int size) {
+    if (size == 32 || size == 48) {
+        return {kGlide, kHarmonic, kDeepThirdHarmonic};
+    }
     if (size >= 32) {
         return {kGlide, kHarmonic, kThirdHarmonic};
     }
@@ -529,6 +536,8 @@ private slots:
     void smallCurvesAreEvenAndEndOnWholeRows_data();
     void smallCurvesAreEvenAndEndOnWholeRows();
     void fundamentalThinsSmoothlyWithSize();
+    void magentaDeepensAt32And48px_data();
+    void magentaDeepensAt32And48px();
     void topTraceClearsTheCornerFrom64px_data();
     void topTraceClearsTheCornerFrom64px();
     void detailTierAddsAFaint4thHarmonic_data();
@@ -630,7 +639,7 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     // icon then, and quieter on the tile than any trace.
     QVERIFY2(contrastRatio(kRim, kTile) <= 1.75, qPrintable(QString::number(contrastRatio(kRim, kTile))));
     QVERIFY(contrastRatio(kRim, kTile) < contrastRatio(kLoudRim, kTile));
-    for (const QRgb trace : {kGlide, kHarmonic, kThirdHarmonic}) {
+    for (const QRgb trace : {kGlide, kHarmonic, kThirdHarmonic, kDeepThirdHarmonic}) {
         QVERIFY(contrastRatio(kRim, kTile) < contrastRatio(trace, kTile));
     }
     QVERIFY(!traceInk(qRgba(qRed(kRim), qGreen(kRim), qBlue(kRim), 255)));
@@ -769,7 +778,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(contrastRatio(strongest, kTile) >= 3.0,
                  qPrintable(QStringLiteral("trace %1: %2:1").arg(i).arg(contrastRatio(strongest, kTile))));
     }
-    for (const QRgb colour : {kGlide, kHarmonic, kThirdHarmonic}) {
+    for (const QRgb colour : {kGlide, kHarmonic, kThirdHarmonic, kDeepThirdHarmonic}) {
         QVERIFY2(contrastRatio(colour, kTile) >= 3.0, qPrintable(QString::number(colour, 16)));
     }
     // A step of value from each trace to the one above it, so that the
@@ -792,11 +801,13 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(std::abs(trace.bounds.right() - traces.front().bounds.right()) <= capSlack,
                  qPrintable(QStringLiteral("ends at %1, not %2").arg(trace.bounds.right()).arg(traces.front().bounds.right())));
     }
-    // The columns every trace crosses at its full width, past the caps.
-    int start = 0;
+    // The columns every trace crosses at its full width, past the caps: the
+    // caps share a centre, and the fundamental's, the widest, reaches
+    // furthest back from it. (A harmonic's faint cap tip, as ink, depends on
+    // its colour: at 32 px the deeper magenta's first column is too faint.)
+    const int start = traces.front().bounds.left() + capColumns(size);
     int end = size;
     for (const Trace &trace : traces) {
-        start = std::max(start, trace.bounds.left() + capColumns(size));
         end = std::min(end, trace.bounds.right() - 1);
     }
     QVERIFY(traces.front().bounds.left() <= tile.left() + tile.width() / 5);
@@ -1376,6 +1387,60 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
                  qPrintable(QStringLiteral("%1 px: %2 of the tile after %3").arg(size).arg(share).arg(before)));
         before = share;
     }
+}
+
+void AppIconTest::magentaDeepensAt32And48px_data() {
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<int>("size");
+    QTest::addColumn<bool>("deep");
+    for (const int size : FerrousAppIcon::kSizes) {
+        if (!onPixelGrid(size)) {
+            QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size << (size == 32 || size == 48);
+        }
+    }
+    QTest::addRow("32px@2") << doubledPath(32) << 64 << true;
+    QTest::addRow("48px@2") << doubledPath(48) << 96 << true;
+}
+
+// At 32 and 48 px, and in their 2x drawings, the 3rd harmonic is a deeper
+// magenta than elsewhere (#373 hill climb, H22: there the magenta and the
+// rose, 2 to 2.5 px strokes, were some 24 grey levels apart and read as one
+// in greyscale): some 38 levels below the rose in Rec. 709 luma at its full
+// colour, against 21 for the magenta of the other sizes, and 3:1 or more on
+// the tile still. Rendered, the traces' centres at half way across are as
+// far apart in grey.
+void AppIconTest::magentaDeepensAt32And48px() {
+    QFETCH(QString, path);
+    QFETCH(int, size);
+    QFETCH(bool, deep);
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    QVERIFY(luma(kHarmonic) - luma(kDeepThirdHarmonic) >= 35);
+    QVERIFY(luma(kHarmonic) - luma(kThirdHarmonic) <= 25);
+    QVERIFY(contrastRatio(kDeepThirdHarmonic, kTile) >= 3.0);
+    const QRgb magenta = deep ? kDeepThirdHarmonic : kThirdHarmonic;
+    const QString fill = QStringLiteral("<path id=\"h3\" fill=\"#%1\"").arg(magenta & 0xffffff, 6, 16, QLatin1Char('0'));
+    QVERIFY2(QString::fromUtf8(contentsOf(path)).contains(fill), qPrintable(fill));
+    if (!deep) {
+        return;
+    }
+    // Rendered: down the middle column, each trace's centre row in grey.
+    const QImage image = renderSeries(path, size);
+    const int x = size / 2;
+    std::vector<double> greys;
+    for (int y = 0; y < size;) {
+        if (!traceInk(image.pixel(x, y))) {
+            ++y;
+            continue;
+        }
+        const int top = y;
+        while (y < size && traceInk(image.pixel(x, y))) {
+            ++y;
+        }
+        greys.push_back(luma(image.pixel(x, (top + y) / 2)));
+    }
+    QCOMPARE(greys.size(), static_cast<size_t>(3));
+    QVERIFY2(greys[1] - greys[0] >= 32 && greys[2] - greys[1] >= 32,
+             qPrintable(QStringLiteral("%1, %2, %3").arg(greys[0]).arg(greys[1]).arg(greys[2])));
 }
 
 void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
