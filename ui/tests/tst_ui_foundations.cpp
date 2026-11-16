@@ -401,7 +401,7 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     lighterHover.setAlphaF(hover.alphaF() - 0.01f);
     QVERIFY(contrastRatio(drawnOver(lighterHover, view), view) < 1.3);
     QVERIFY(sameColor(colorOf(tokens, "hoveredRow"), drawnOver(colorOf(tokens, "rowHover"), view)));
-    QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.20 : 0.27)) <= 1);
+    QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.24 : 0.33)) <= 1);
     const QColor dim = colorOf(tokens, "dim");
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
     QVERIFY(std::abs(dim.alphaF() - (dark ? 0.65 : 0.25)) < 0.002);
@@ -881,8 +881,11 @@ void UiFoundationsTest::selectionOutweighsRowHover_data() {
 // A selected row of the library or the queue reads as more selected than
 // the row under the pointer, in both themes: further from the view, in
 // contrast and in CIELAB, and blue where the hover is neutral (#373 H33
-// AA1: light's 1.44:1 hover outweighed its 1.2:1 selection). Every text
-// a selected row draws stays 4.5:1 on it, active or not.
+// AA1: light's 1.44:1 hover outweighed its 1.2:1 selection). The selection
+// of a list without focus sits between them in contrast: hover < inactive
+// < active (#373 H34 AB2: the dark inactive one, 1.40:1, and the light,
+// 1.27:1, were under the hover). Every text a selected row draws stays
+// 4.5:1 on it, active or not.
 void UiFoundationsTest::selectionOutweighsRowHover() {
     QFETCH(bool, dark);
     QQmlEngine engine;
@@ -918,6 +921,13 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
                                 .arg(labChroma(hovered))));
     }
     QVERIFY(labDistance(selection, view) > labDistance(selectionInactive, view));
+    // In contrast on the view: hover < inactive < active, each a visible
+    // step.
+    QVERIFY2(contrastRatio(selectionInactive, view) >= contrastRatio(hovered, view) + 0.02
+                 && contrastRatio(selection, view) >= contrastRatio(selectionInactive, view) + 0.02,
+             qPrintable(describe(QStringLiteral("hover"), hovered, view) + QStringLiteral(", ")
+                        + describe(QStringLiteral("inactive"), selectionInactive, view) + QStringLiteral(", ")
+                        + describe(QStringLiteral("active"), selection, view)));
 
     // The texts of a selected row: the title, the secondary and column
     // text, the playing amber, and the selected row's number, which is
