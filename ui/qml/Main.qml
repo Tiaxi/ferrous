@@ -1453,12 +1453,6 @@ ApplicationWindow {
             setAppVolume: playbackController.setAppVolume
             normalizedVolumeValue: playbackController.normalizedVolumeValue
             seekCommitted: playbackController.seekCommitted
-            // The menu bar is right above the transport, and both start at
-            // the window's left edge: its titles end after its padding and
-            // their own widths.
-            menuTitlesEnd: root.menuBar && root.menuBar.visible
-                ? root.menuBar.leftPadding + root.menuBar.contentWidth
-                : 0
         }
 
         // The first of the four seams: between the transport's chrome and

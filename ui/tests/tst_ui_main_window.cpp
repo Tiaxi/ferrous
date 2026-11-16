@@ -900,8 +900,8 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
-    void seekTimeKeepsClearOfTheMenuTitles_data();
-    void seekTimeKeepsClearOfTheMenuTitles();
+    void seekTimeStaysOverItsLine_data();
+    void seekTimeStaysOverItsLine();
     void contentIsOneSheetWithFourSeams();
     void sidebarWidthFollowsTheWindowAndTheFont_data();
     void sidebarWidthFollowsTheWindowAndTheFont();
@@ -958,11 +958,14 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
+    void queueFocusRingStopsAtTheScrollBarLane_data();
+    void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
+    void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void emptyQueueNamesItselfAtThePanesInset_data();
     void emptyQueueNamesItselfAtThePanesInset();
@@ -1065,7 +1068,7 @@ void UiMainWindowTest::contentIsOneSheetWithFourSeams() {
     QVERIFY(columnSeam->contains(columnSeam->mapFromScene(QPointF(columnRect.left() + 3, 300))));
 }
 
-void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles_data() {
+void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
@@ -1075,12 +1078,13 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles_data() {
     QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
 }
 
-// The seek bar's time shows above the bar, in the menu bar's band, so
-// where the bar starts under the menu's titles it keeps right of them: it
-// covers no title, however near the bar's start the pointer is, and none
-// of the waveform (#373 H33 AA2). Past the titles, it is centred on the
-// pointer.
-void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
+// The seek bar's time shows above the bar, in the menu bar's band, centred
+// on the line it reads, wherever the pointer is on the bar, and within the
+// bar at either end, so it stays in the window; it covers none of the
+// waveform (#373 H33 AA2). Near the bar's start it may cover a menu title
+// for a moment (#373 H34 AB4: kept right of the titles, it was up to 350 px
+// from its line).
+void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
@@ -1101,22 +1105,16 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
     playTrack(bridge);
     QQuickItem *seek = named(window, "seekSlider");
     QQuickItem *waveform = named(window, "seekWaveform");
-    QQuickItem *menuBar = named(window, "mainMenuBar");
     QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && waveform && menuBar && tip);
+    QVERIFY(seek && waveform && tip);
     QTRY_VERIFY(seek->isEnabled());
     // Laid out in the window's width.
     QTRY_VERIFY(sceneRect(named(window, "transportBar")).right() <= windowWidth);
-    const QList<QQuickItem *> labels = itemsNamed(menuBar, QStringLiteral("menuBarItemLabel"));
-    QVERIFY(labels.size() >= 6);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
-    // The bar starts under the titles, so the clearing is put to the test.
-    QVERIFY2(bar.left() < sceneRect(labels.constLast()).right(),
-             qPrintable(QStringLiteral("the bar starts at %1, past the titles").arg(bar.left())));
 
-    for (const qreal fraction : {0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.9, 1.0}) {
+    for (const qreal fraction : {0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.9, 0.98, 1.0}) {
         const QPoint at = QPointF(std::min(bar.left() + bar.width() * fraction, bar.right() - 1),
                                   bar.center().y()).toPoint();
         QTest::mouseMove(window, at);
@@ -1131,14 +1129,21 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
                                   .arg(bar.x()).arg(bar.y()).arg(bar.width()).arg(bar.height());
         QVERIFY2(std::abs(box.bottom() - bar.top()) <= 0.5, qPrintable(where));
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
-        for (QQuickItem *label : labels) {
-            QVERIFY2(!box.intersects(sceneRect(label)),
-                     qPrintable(where + QStringLiteral(" covers ") + label->property("text").toString()));
+        // In the window.
+        QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth && box.top() >= 0.0, qPrintable(where));
+        // Centred on its line, or, where that would hang past the bar's
+        // end, flush with that end and still over the line.
+        const qreal half = box.width() / 2;
+        const bool nearStart = at.x() - bar.left() < half;
+        const bool nearEnd = bar.right() - at.x() < half;
+        if (nearStart) {
+            QVERIFY2(std::abs(box.left() - bar.left()) <= 0.5, qPrintable(where));
+        } else if (nearEnd) {
+            QVERIFY2(std::abs(box.right() - bar.right()) <= 0.5, qPrintable(where));
+        } else {
+            QVERIFY2(std::abs(box.center().x() - at.x()) <= 1.0, qPrintable(where));
         }
-        // Over its line, or right of the titles where they keep it from it.
-        const bool centred = std::abs(box.center().x() - at.x()) <= 1.0;
-        const bool clearOfTitles = box.left() >= sceneRect(labels.constLast()).right();
-        QVERIFY2(centred || clearOfTitles || std::abs(box.right() - bar.right()) <= 0.5, qPrintable(where));
+        QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
     }
 }
 
@@ -4907,6 +4912,88 @@ void UiMainWindowTest::queueRowTintsRunToThePaneEdgeUnderTheScrollBar() {
     }
 }
 
+void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// The queue's focus ring stops at the scrollbar's lane while the scrollbar
+// shows, as the library's does, so its thumb never runs over the ring
+// (#373 H34 AB1: it ran under the thumb); the selection tint goes on under
+// the lane to the pane's edge. A short queue, with no scrollbar, keeps the
+// ring to the edge.
+void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QQuickItem *scrollBar = named(window, "queueScrollBar");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView && scrollBar && queue);
+    QCOMPARE(scrollBar->property("lane").toReal(), 8.0);
+
+    for (const int count : {80, 3}) {
+        const bool scrolls = count > 3;
+        bridge->setProperty("queueRows", sampleQueueRows(count));
+        bridge->setProperty("queueLength", count);
+        QTRY_COMPARE(queueView->property("count").toInt(), count);
+        QTRY_COMPARE(scrollBar->isVisible(), scrolls);
+        named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(!queueView->hasActiveFocus());
+        queueView->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(queueView->hasActiveFocus());
+        // The second row, beside the thumb.
+        QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
+        QQuickItem *row = nullptr;
+        QQuickItem *tint = nullptr;
+        QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr
+                    && (tint = itemNamed(row, QStringLiteral("rowBackgroundTint"))) && shown(tint)
+                    && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() == 1.0
+                    && colorOf(tint) == tokenHex(window, "selection"));
+        QQuickItem *laneTint = itemNamed(row, QStringLiteral("rowBackgroundTintLane"));
+        QVERIFY(laneTint != nullptr);
+        const qreal edge = sceneRect(queueView).right();
+        const qreal lane = scrolls ? 8.0 : 0.0;
+        QVERIFY2(sceneRect(tint).right() <= edge - lane,
+                 qPrintable(QStringLiteral("ring to %1, edge %2").arg(sceneRect(tint).right()).arg(edge)));
+        QCOMPARE(sceneRect(tint).right(), edge - lane);
+        QCOMPARE(shown(laneTint), scrolls);
+        if (scrolls) {
+            QCOMPARE(sceneRect(laneTint).left(), edge - lane);
+            QCOMPARE(sceneRect(laneTint).right(), edge);
+            QCOMPARE(colorOf(laneTint), tokenHex(window, "selection"));
+        }
+        // As drawn, on the row's middle: the ring's right side just inside
+        // the lane with the scrollbar, at the edge without it; past it, in
+        // the lane, the thumb or the tint, never the ring.
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / qreal(window->width());
+        const qreal y = sceneRect(row).center().y();
+        const auto pixel = [&](qreal x) {
+            return image.pixelColor(int(std::floor(x * scale)), int(std::floor(y * scale)));
+        };
+        const auto near = [](const QColor &a, const QColor &b) {
+            return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
+                && std::abs(a.blue() - b.blue()) <= 2;
+        };
+        const QColor ring = tokenOf(window, "focusRing");
+        QVERIFY2(near(pixel(edge - lane - 0.5), ring), qPrintable(pixel(edge - lane - 0.5).name()));
+        if (scrolls) {
+            for (qreal x = edge - lane + 0.5; x < edge; x += 1.0) {
+                QVERIFY2(!near(pixel(x), ring), qPrintable(QStringLiteral("the ring at %1 of %2").arg(x).arg(edge)));
+            }
+        }
+    }
+}
+
 // Tab into the library or the queue with no row selected: a row it shows
 // becomes the current one and has the 1 px ring, so the keyboard's place
 // shows. Nothing is selected and the view stays where it is.
@@ -5154,6 +5241,98 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QTRY_VERIFY(!treeGlyph->isVisible());
     QTRY_VERIFY(!queueGlyph->isVisible());
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumn"));
+}
+
+// A file that fails to play stays the current row, stopped, as the backend
+// leaves it when it was the queue's last: the queue's row and the tree's
+// show the unreadable warning, whose tooltip gives the reason, not the stop
+// mark (#373 H35 AB7: the warning came only once another row played).
+// Played again, the row shows what the playback does; a readable track
+// that stops keeps the stop mark.
+void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && errors && queueView);
+    showTree(libraryModel, kAllExpanded);
+    QVariantList rows = sampleQueueRows(4);
+    QVariantMap last = rows.at(3).toMap();
+    last.insert(QStringLiteral("path"), kTrackPath);
+    rows[3] = last;
+    bridge->setProperty("queueRows", rows);
+    bridge->setProperty("queueLength", 4);
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    QTRY_COMPARE(queueView->property("count").toInt(), 4);
+    const auto queueGlyph = [queueView](int index) {
+        QQuickItem *row = viewRowAt(queueView, index);
+        QQuickItem *glyph = row != nullptr ? itemNamed(row, QStringLiteral("queueRowState")) : nullptr;
+        return shown(glyph) ? glyph->property("source").toString() : QString();
+    };
+    QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
+    QVERIFY(treeGlyph != nullptr);
+    const auto treeGlyphName = [treeGlyph]() {
+        return shown(treeGlyph) ? treeGlyph->property("source").toString() : QString();
+    };
+
+    // The last row starts to play, and fails: the bridge's playback error
+    // about the file, and playback stops with the row still current.
+    bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-start"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-start"));
+    const QString reason = QStringLiteral("Couldn't play \u201c02.flac\u201d (No valid frames found before end of "
+                                          "stream); playback stopped.");
+    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, reason), Q_ARG(int, 1), Q_ARG(int, 1),
+                                      Q_ARG(QString, kTrackPath)));
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("dialog-warning"));
+    QQuickItem *row = viewRowAt(queueView, 3);
+    QVERIFY(row != nullptr && row->property("isCurrentQueueRow").toBool());
+    QQuickItem *glyph = itemNamed(row, QStringLiteral("queueRowState"));
+    QCOMPARE(colorOf(glyph), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(itemNamed(row, QStringLiteral("queueCell_title"))), tokenHex(window, "textSecondary"));
+    QCOMPARE(row->property("unreadableReason").toString(), reason);
+    QCOMPARE(colorOf(treeGlyph), tokenHex(window, "textSecondary"));
+    // The other rows show nothing.
+    for (int index = 0; index < 3; ++index) {
+        QCOMPARE(queueGlyph(index), QString());
+    }
+
+    // Another row plays: the failed one keeps its warning.
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/2.flac"));
+    bridge->setProperty("playingQueueIndex", 2);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-start"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("dialog-warning"));
+    // A readable track that stops shows the stop mark.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-stop"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+
+    // Played again, say once the file is fixed, the row shows the playback
+    // until it stops.
+    bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-pause"));
+    QCOMPARE(colorOf(itemNamed(viewRowAt(queueView, 3), QStringLiteral("queueRowState"))), tokenHex(window, "now"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-pause"));
+    QCOMPARE(queueGlyph(2), QString());
+
+    // With the issue cleared, a stopped current row is the stop mark again.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-stop"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-stop"));
 }
 
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
@@ -5793,9 +5972,10 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(library->hasActiveFocus());
 }
 
-// The transport's first button starts at the content's 12 px inset, where
+// The transport's first glyph starts at the content's 12 px inset, where
 // the library's chevrons and the status bar's text do, and its volume ends
-// the same 12 px from the right edge.
+// the same 12 px from the right edge: both measured to what is drawn
+// (#373 H34 AB6: the first button's frame was at 12 px, its glyph at 20).
 void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -5809,9 +5989,10 @@ void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     QQuickItem *previous = named(window, "transportButton_previous");
     QQuickItem *volume = named(window, "volumeSlider");
     QQuickItem *chevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
-    QVERIFY(previous && volume && chevron);
-    QTRY_COMPARE(sceneRect(previous).left(), 12.0);
-    QCOMPARE(sceneRect(chevron).left(), sceneRect(previous).left());
+    QQuickItem *previousGlyph = previous != nullptr ? itemNamed(previous, QStringLiteral("transportButtonGlyph")) : nullptr;
+    QVERIFY(previous && previousGlyph && volume && chevron);
+    QTRY_COMPARE(sceneRect(previousGlyph).left(), 12.0);
+    QCOMPARE(sceneRect(chevron).left(), sceneRect(previousGlyph).left());
     QCOMPARE(sceneRect(volume).right(), window->width() - 12.0);
 }
 

@@ -101,8 +101,9 @@ ToolBar {
     // The volume slider, in the seek bar's language (#373 H5): its groove
     // filled up to the thumb in the played colour and the rest in the
     // unplayed one, opaque, and a solid thumb in the played colour. While
-    // muted, the filled part dims to the unplayed colour and the thumb
-    // stays at the volume a mute put aside.
+    // muted, the filled part and the thumb at rest dim to the unplayed
+    // colour together (#373 H34 AB3), and the thumb stays at the volume a
+    // mute put aside.
     readonly property color volumeFilledColor: root.seekPlayedColor
     readonly property color volumeUnfilledColor: ColorUtils.mixColor(
         root.chromeColor, root.seekPlayedColor, root.seekUnplayedOpacity)
@@ -165,14 +166,17 @@ ToolBar {
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     // 48 px, or the buttons and 8 px above and below them.
     implicitHeight: Math.max(48, root.buttonSize + 16)
-    // The content's inset, on both sides: Previous starts where the
-    // library's rows and the status bar's text do.
+    // The content's inset, on both sides, measured to what is drawn, as
+    // the transport's other gaps are (#373 H8): Previous's glyph starts
+    // where the library's rows and the status bar's text do, with its
+    // button's clear space in the inset (#373 H34 AB6: its ink was at 20
+    // px), and the volume groove ends at it. The button's focus ring, 3 px
+    // outside it, stays in the window: at a large font, whose wider clear
+    // space leaves less than that, the glyph starts a pixel or two further
+    // in. On whole pixels, as the clear space can be a half.
     readonly property int edgeInset: 12
-    // Where the titles of a menu bar right above the transport end, in the
-    // transport's coordinates, or 0 for none: the seek bar's time, which
-    // shows above the bar, keeps right of them.
-    property real menuTitlesEnd: 0
-    leftPadding: root.edgeInset
+    readonly property int buttonFocusRingOutset: 3
+    leftPadding: Math.max(root.buttonFocusRingOutset, Math.round(root.edgeInset - root.smallGlyphInset))
     rightPadding: root.edgeInset
     topPadding: 0
     bottomPadding: 0
@@ -265,7 +269,7 @@ ToolBar {
             objectName: "transportButtonFocusRing"
             visible: buttonBackground.button.visualFocus
             anchors.fill: parent
-            anchors.margins: -3
+            anchors.margins: -root.buttonFocusRingOutset
             radius: 6
             color: "transparent"
             border.width: 2
@@ -812,17 +816,13 @@ ToolBar {
                         : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
-                // Where the band above the bar is free of the menu bar's
-                // titles, in the slider's coordinates.
-                readonly property real menuClearX: root.menuTitlesEnd > 0
-                    ? root.menuTitlesEnd + Kirigami.Units.smallSpacing - root.leftPadding - seekSlider.x
-                    : 0
-                // Centred on the line, within the bar at either end; and
-                // where the bar starts under the menu bar's titles, right
-                // of them, so it covers no title, even if it then hangs
-                // past the bar's end.
+                // Centred on the line, within the bar at either end. Near
+                // the bar's start it may cover a menu bar's titles above
+                // it for a moment, which costs less than a time away from
+                // its line (#373 H34 AB4: kept right of them, it was up to
+                // 350 px from it).
                 readonly property real centredX: anchorX - width / 2
-                readonly property real placedX: root.snapped(Math.max(menuClearX, 0,
+                readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
                 x: placedX
                 // Its bottom edge on the bar's top. It may reach the
@@ -1003,7 +1003,10 @@ ToolBar {
             // 8 px from the glyph to the groove.
             Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
             Layout.alignment: Qt.AlignVCenter
-            Layout.preferredWidth: root.narrow ? 72 : 96
+            // 96 px, 72 px in a narrow window; a larger font widens the
+            // groove with the thumb and the glyphs, up to half again
+            // (#373 H34 AB5: at 24 pt a 29 px thumb crowded a 96 px groove).
+            Layout.preferredWidth: volumeSlider.grooveWidth(root.narrow)
             Layout.preferredHeight: volumeSlider.boxHeight
             padding: 0
             from: 0
@@ -1024,6 +1027,9 @@ ToolBar {
             readonly property real grooveHeight: root.scaled(3)
             readonly property real grooveY: root.snapped((height - grooveHeight) / 2)
             readonly property real thumbSize: root.scaled(12)
+            function grooveWidth(narrow) {
+                return Math.round((narrow ? 72 : 96) * Math.min(1.5, root.fontScale))
+            }
             Accessible.name: I18n.i18nc("@label", "Volume")
             Accessible.description: volumeSlider.percentText
             // Every move, including a release's, sends its value, so the
@@ -1044,7 +1050,7 @@ ToolBar {
             }
 
             background: Item {
-                implicitWidth: 96
+                implicitWidth: volumeSlider.grooveWidth(false)
                 implicitHeight: volumeSlider.boxHeight
 
                 Rectangle {
@@ -1067,11 +1073,21 @@ ToolBar {
                     height: volumeSlider.grooveHeight
                     radius: height / 2
                     color: root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor
+
+                    // As the thumb's, so a mute dims both together.
+                    Behavior on color {
+                        enabled: Kirigami.Units.shortDuration > 0
+                        ColorAnimation {
+                            duration: Kirigami.Units.shortDuration
+                            easing.type: Easing.OutCubic
+                        }
+                    }
                 }
             }
 
-            // The solid thumb: the played colour, and the text colour while
-            // hovered or dragged. Keyboard focus draws a 2 px ring around it.
+            // The solid thumb: the played colour, the unplayed one at rest
+            // while muted, as the fill, and the text colour while hovered
+            // or dragged. Keyboard focus draws a 2 px ring around it.
             handle: Rectangle {
                 objectName: "volumeThumb"
                 readonly property bool tinted: volumeSlider.hovered || volumeSlider.pressed
@@ -1081,7 +1097,9 @@ ToolBar {
                 implicitWidth: volumeSlider.thumbSize
                 implicitHeight: volumeSlider.thumbSize
                 radius: width / 2
-                color: tinted ? root.uiPalette.text : root.volumeFilledColor
+                color: tinted
+                    ? root.uiPalette.text
+                    : (root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor)
                 border.width: 0
 
                 Behavior on color {

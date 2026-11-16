@@ -92,10 +92,14 @@ QtObject {
     // #1f3e4e / #b5e0f7.
     readonly property color selection: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.26 : 0.38)
-    // The selection of a list without keyboard focus: quieter, yet further
-    // from the view than a hovered row. #1c3442 / #cbe9f9.
+    // The selection of a list without keyboard focus: quieter than the
+    // selection, yet further from the view than a hovered row: 1.52:1 /
+    // 1.34:1 on the view, between rowHover's 1.45:1 / 1.31:1 and the
+    // selection's 1.6:1 / 1.4:1 (#373 H34 AB2: at 20 % and 27 %, #1c3442
+    // and #cbe9f9, it was 1.40:1 / 1.27:1, under the hover). The playing
+    // amber is 6.3:1 / 4.9:1 on it. #1e3a4a / #bfe4f8.
     readonly property color selectionInactive: ColorUtils.mixColor(
-        root.view, root.accent, root.themeIsDark ? 0.20 : 0.27)
+        root.view, root.accent, root.themeIsDark ? 0.24 : 0.33)
     // The 1 px ring on the focused row: the accent, lighter on dark and
     // darker on light, to stand out from the selection tint. #6cc5f2 / #1a74a8.
     readonly property color focusRing: root.themeIsDark

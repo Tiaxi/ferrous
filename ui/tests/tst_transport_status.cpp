@@ -465,6 +465,10 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void narrowTransportShortensTheVolume();
+    void volumeGrooveGrowsWithTheThumb_data();
+    void volumeGrooveGrowsWithTheThumb();
+    void previousGlyphStartsOnTheContentEdge_data();
+    void previousGlyphStartsOnTheContentEdge();
     void playPauseIsOneButtonThatShowsTheState();
     void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
@@ -570,7 +574,9 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
         QVERIFY2(button != nullptr, qPrintable(names[i]));
         const QRectF rect = sceneRect(button);
         QCOMPARE(rect.size(), QSizeF(32, 32));
-        QCOMPARE(rect.left(), 12.0 + i * 36.0);
+        // Previous's 16 px glyph, 8 px into its button, on the 12 px
+        // content edge (#373 H34 AB6).
+        QCOMPARE(rect.left(), 4.0 + i * 36.0);
         QCOMPARE(rect.top() - top, 8.0);
         QVERIFY(button->property("flat").toBool());
         QCOMPARE(button->property("glyphSize").toInt(), glyphs[i]);
@@ -596,7 +602,7 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
     QVERIFY(seek && time && mute && volume && waveform);
     const QRectF seekRect = sceneRect(seek);
-    QCOMPARE(seekRect.left(), 12.0 + 4 * 32.0 + 3 * 4.0 + 16.0);
+    QCOMPARE(seekRect.left(), 4.0 + 4 * 32.0 + 3 * 4.0 + 16.0);
     QCOMPARE(seekRect.height(), 28.0);
     QCOMPARE(seekRect.top() - top, 10.0);
     // The waveform is ±12 px about the bar's middle, 2 px from its edges.
@@ -1016,30 +1022,15 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     tipRect = sceneRect(tipBox);
     expectAbove(tipRect);
     QCOMPARE(tipRect.right(), bar.right());
-
-    // A menu bar's titles above the bar's start: the box keeps right of
-    // them, where it would reach over them, and is centred again past them.
-    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
-    QVERIFY(transport != nullptr);
-    const qreal titlesEnd = bar.left() - sceneRect(transport).left() + 120;
-    transport->setProperty("menuTitlesEnd", titlesEnd);
-    const qreal clearOfTitles = sceneRect(transport).left() + titlesEnd
-        + evaluateOn(seek, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
-    for (const qreal offset : {3.0, 60.0, 119.0}) {
-        const QPointF under(bar.left() + offset, bar.center().y());
-        QTest::mouseMove(harness.window, under.toPoint());
-        QTRY_COMPARE(sceneRect(hoverLine).left(), under.x());
-        tipRect = sceneRect(tipBox);
-        expectAbove(tipRect);
-        QVERIFY2(tipRect.left() >= clearOfTitles - 0.5 && tipRect.left() <= clearOfTitles + 1.0,
-                 qPrintable(QStringLiteral("at %1: %2").arg(offset).arg(describeRect(tipRect))));
-    }
-    const QPointF pastTitles(clearOfTitles + 200, bar.center().y());
-    QTest::mouseMove(harness.window, pastTitles.toPoint());
-    QTRY_COMPARE(sceneRect(hoverLine).left(), pastTitles.x());
+    // Nothing else moves it: a little way in from the start, it is centred
+    // on its line again (#373 H34 AB4: a menu bar's titles kept it right of
+    // them, up to 350 px from its line).
+    const QPointF nearStart(bar.left() + tipRect.width() / 2 + 20, bar.center().y());
+    QTest::mouseMove(harness.window, nearStart.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), std::floor(nearStart.x()));
     tipRect = sceneRect(tipBox);
-    QVERIFY2(std::abs(tipRect.center().x() - pastTitles.x()) <= 1.0, qPrintable(describeRect(tipRect)));
-    transport->setProperty("menuTitlesEnd", 0);
+    expectAbove(tipRect);
+    QVERIFY2(std::abs(tipRect.center().x() - nearStart.x()) <= 1.0, qPrintable(describeRect(tipRect)));
 
     // Away from the bar, both go.
     QTest::mouseMove(harness.window, QPoint(static_cast<int>(at.x()), static_cast<int>(bar.bottom() + 60)));
@@ -1846,6 +1837,153 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.7);
 }
 
+void TransportStatusTest::volumeGrooveGrowsWithTheThumb_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<qreal>("expectedWidth");
+    QTest::addColumn<qreal>("thumbSize");
+    QTest::newRow("10 pt, wide") << 10.0 << 1600 << 96.0 << 12.0;
+    QTest::newRow("10 pt, narrow") << 10.0 << 1000 << 72.0 << 12.0;
+    QTest::newRow("12 pt, wide") << 12.0 << 1600 << 115.0 << 14.0;
+    QTest::newRow("24 pt, wide") << 24.0 << 1600 << 144.0 << 29.0;
+    QTest::newRow("24 pt, narrow") << 24.0 << 1000 << 108.0 << 29.0;
+}
+
+// A larger font widens the volume's groove with its thumb and the glyphs,
+// up to half again: at 24 pt, 144 px and 108 px in a narrow window (#373
+// H34 AB5: the 29 px thumb crowded a 96 px groove). The default font keeps
+// 96 px and 72 px. The groove ends on the content edge, and its background
+// is as wide as the slider.
+void TransportStatusTest::volumeGrooveGrowsWithTheThumb() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(qreal, expectedWidth);
+    QFETCH(qreal, thumbSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, windowWidth, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), pointSize);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QVERIFY(transport && volume && groove && thumb);
+    QCOMPARE(volume->width(), expectedWidth);
+    QCOMPARE(sceneRect(groove).width(), expectedWidth);
+    QCOMPARE(thumb->width(), thumbSize);
+    QCOMPARE(sceneRect(transport).right() - sceneRect(groove).right(), 12.0);
+    auto *background = volume->property("background").value<QQuickItem *>();
+    QVERIFY(background != nullptr);
+    QCOMPARE(background->width(), expectedWidth);
+}
+
+void TransportStatusTest::previousGlyphStartsOnTheContentEdge_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<bool>("dark");
+    for (const qreal pointSize : {10.0, 14.0, 24.0}) {
+        for (const bool dark : {true, false}) {
+            QTest::addRow("%g pt, %s", pointSize, dark ? "dark" : "light") << pointSize << dark;
+        }
+    }
+}
+
+// Previous's glyph starts on the 12 px content edge, where the library's
+// rows and the status bar's text do, as the transport's right end is
+// measured to the volume's groove (#373 H34 AB6: its ink was at 20 px,
+// with the button's clear space added to the inset). Its hover tint and
+// focus ring stay inside the window: at a large font, whose clear space
+// would put the ring past the window's edge, the glyph starts a pixel or
+// two further in.
+void TransportStatusTest::previousGlyphStartsOnTheContentEdge() {
+    QFETCH(qreal, pointSize);
+    QFETCH(bool, dark);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), pointSize);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *button = harness.item(QStringLiteral("transportButton_previous"));
+    QVERIFY(transport && button);
+    QCOMPARE(sceneRect(transport).left(), 0.0);
+    QQuickItem *glyph = nullptr;
+    QList<QQuickItem *> pending{button};
+    while (!pending.isEmpty() && glyph == nullptr) {
+        QQuickItem *item = pending.takeFirst();
+        if (item->objectName() == QStringLiteral("transportButtonGlyph")) {
+            glyph = item;
+        }
+        pending.append(item->childItems());
+    }
+    QVERIFY(glyph != nullptr);
+    const qreal clearSpace = transport->property("smallGlyphInset").toReal();
+    // 12 px, unless the ring, 3 px outside the button, would leave the
+    // window.
+    const qreal expectedLeft = std::max(12.0, 3.0 + clearSpace);
+    QCOMPARE(sceneRect(glyph).left(), expectedLeft);
+    if (pointSize == 10.0) {
+        QCOMPARE(expectedLeft, 12.0);
+    }
+
+    // As drawn, along the glyph's middle row: the first column at least
+    // half as far from the chrome as the glyph's strongest, so that how a
+    // mask is coloured offscreen, or a disabled glyph's colour, doesn't
+    // count. The glyph's bar is at its left.
+    const QColor chrome = harness.transportChrome();
+    const auto inkColumn = [&]() {
+        qreal scale = 1;
+        const QImage image = grabbed(harness.window, &scale);
+        const int middle = int(sceneRect(glyph).center().y());
+        QList<int> distances;
+        for (int x = 0; x < int(sceneRect(glyph).right()) + 2; ++x) {
+            distances.append(channelDistance(pixelAt(image, QPointF(x + 0.5, middle + 0.5), scale), chrome));
+        }
+        const int strongest = *std::max_element(distances.cbegin(), distances.cend());
+        for (int x = 0; strongest >= 16 && x < distances.size(); ++x) {
+            if (distances[x] * 2 >= strongest) {
+                return x;
+            }
+        }
+        return -1;
+    };
+    int ink = -1;
+    QTRY_VERIFY((ink = inkColumn()) >= 0);
+    QCOMPARE(qreal(ink), expectedLeft);
+
+    // Hovered and focused, the tint and the ring inside the window.
+    auto *background = button->property("background").value<QQuickItem *>();
+    QVERIFY(background != nullptr);
+    QQuickItem *hover = background->findChildren<QQuickItem *>(QStringLiteral("transportButtonHover")).value(0);
+    QQuickItem *ring = background->findChildren<QQuickItem *>(QStringLiteral("transportButtonFocusRing")).value(0);
+    QVERIFY(hover && ring);
+    button->setProperty("hoverEnabled", true);
+    // From elsewhere, so that the move is one, after the last row's.
+    QTest::mouseMove(harness.window, QPoint(harness.window->width() / 2, harness.window->height() - 10));
+    QTest::mouseMove(harness.window, sceneCentre(button));
+    QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
+    QVERIFY2(sceneRect(hover).left() >= 0.0, qPrintable(describeRect(sceneRect(hover))));
+    button->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(sceneRect(ring).left() >= 0.0 && sceneRect(ring).top() >= sceneRect(transport).top(),
+             qPrintable(describeRect(sceneRect(ring))));
+    // The ring's left side drawn, in full, at the window's edge or in it.
+    qreal scale = 1;
+    const QImage image = grabbed(harness.window, &scale);
+    const QColor ringColor = harness.token("focusRing");
+    const QPointF ringLeft(sceneRect(ring).left() + 1.0, sceneRect(ring).center().y());
+    QVERIFY2(channelDistance(pixelAt(image, ringLeft, scale), ringColor) <= 8,
+             qPrintable(pixelAt(image, ringLeft, scale).name()));
+}
+
 void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
     QTest::addColumn<bool>("dark");
     QTest::newRow("breeze dark") << true;
@@ -1853,8 +1991,10 @@ void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
 }
 
 // A mute leaves the thumb at the volume it put aside (#373 H5: it threw the
-// thumb to 0), dims the filled groove to the unfilled colour and shows the
-// muted glyph; the tooltip says so. Unmuting brings the fill back.
+// thumb to 0), dims the filled groove and the thumb at rest to the unfilled
+// colour together, over the same fade (#373 H34 AB3: the thumb stayed
+// bright), and shows the muted glyph; the tooltip says so. A hover still
+// shows the thumb in the text colour. Unmuting brings both back.
 void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1875,24 +2015,54 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     const qreal fillWidth = fill->width();
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume.svg")));
 
+    const QColor unfilled = groove->property("color").value<QColor>();
+    QVERIFY(sameColor(thumb->property("color").value<QColor>(), played));
+    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
+    const auto colorOf = [](QQuickItem *item) { return item->property("color").value<QColor>(); };
+    // The fill and the thumb fade as one: the same colour at every frame
+    // of the fade, which takes the short duration.
+    const auto fadeTogether = [&](const QColor &to) {
+        QElapsedTimer fading;
+        fading.start();
+        bool between = false;
+        while (!(sameColor(colorOf(fill), to) && sameColor(colorOf(thumb), to)) && fading.elapsed() < 2000) {
+            QVERIFY2(sameColor(colorOf(fill), colorOf(thumb)),
+                     qPrintable(QStringLiteral("fill %1, thumb %2 at %3 ms")
+                                    .arg(colorOf(fill).name(), colorOf(thumb).name())
+                                    .arg(fading.elapsed())));
+            between = between || (!sameColor(colorOf(fill), played) && !sameColor(colorOf(fill), unfilled));
+            QTest::qWait(5);
+        }
+        QVERIFY(sameColor(colorOf(fill), to) && sameColor(colorOf(thumb), to));
+        QVERIFY2(between, "no fade");
+    };
+
+    // Away from the slider, so the thumb is at rest.
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
     QTRY_VERIFY(harness.root->property("muted").toBool());
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.0);
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
-    // The thumb and the fill stay; the fill dims to the groove's colour.
+    // The thumb and the fill stay; both dim to the groove's colour.
     QCOMPARE(volume->property("value").toDouble(), 0.8);
     QCOMPARE(thumb->x(), thumbX);
     QCOMPARE(fill->width(), fillWidth);
-    QVERIFY(sameColor(fill->property("color").value<QColor>(), groove->property("color").value<QColor>()));
-    QVERIFY(sameColor(thumb->property("color").value<QColor>(), played));
+    fadeTogether(unfilled);
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%, muted"));
     QCOMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("80%"));
+
+    // A hover shows the thumb in the text colour while muted too, and the
+    // fill stays dim.
+    QTest::mouseMove(harness.window, sceneCentre(thumb));
+    QTRY_VERIFY(sameColor(colorOf(thumb), harness.token("text")));
+    QVERIFY(sameColor(colorOf(fill), unfilled));
+    QTest::mouseMove(harness.window, sceneCentre(mute));
+    QTRY_VERIFY(sameColor(colorOf(thumb), unfilled));
 
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
     QTRY_VERIFY(!harness.root->property("muted").toBool());
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.8);
     QCOMPARE(thumb->x(), thumbX);
-    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
+    fadeTogether(played);
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
 }
 
