@@ -1184,12 +1184,17 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
         QVERIFY2(crisp >= (n == 0 ? (last - first + 1) / 3 : 3),
                  qPrintable(QStringLiteral("trace %1: %2 crisp columns").arg(n).arg(crisp)));
     }
-    // The harmonic's start no heavier than its stroke: its first columns
-    // its height and no more (#373 hill climb, H21: a 3 px shoulder where it
-    // turned from its first climb weighed on the start).
-    for (int x = start; x < start + 3; ++x) {
+    // The harmonic's start no heavier than its first climb, which it starts
+    // on (#373 hill climb, H21: a 3 px shoulder where it turned from its
+    // first climb weighed on the start). At 22 and 24 px that climb is three
+    // rows tall, its start's columns included, as wide across its 45 degree
+    // slope, some 2.1 px, as its flats' 2 rows (H26: at two rows, 1.4 px
+    // across, the climb read thin and faint beside the amber); at 16 px two,
+    // its height.
+    const int climb = size == 16 ? heights.back() : heights.back() + 1;
+    for (int x = start; x < start + (size == 16 ? 3 : 5); ++x) {
         const double tall = columnOf(traces.back(), x).sum;
-        QVERIFY2(std::abs(tall - heights.back()) <= 0.05, qPrintable(QStringLiteral("the harmonic's column %1: %2 px tall").arg(x).arg(tall)));
+        QVERIFY2(std::abs(tall - climb) <= 0.05, qPrintable(QStringLiteral("the harmonic's column %1: %2 px tall").arg(x).arg(tall)));
     }
     // At 16 px the fundamental starts at 2 px, a clear row under the
     // harmonic's start, for two columns, and from its 4th column on it is
