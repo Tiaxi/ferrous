@@ -531,9 +531,11 @@ double widthAcross(const QImage &trace, int start, int end) {
 // The sizes with a drawing of their own for their slot at 2x scaling: 16 and
 // 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
 // climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
-// rim where the 16 and 22 px slots had 2); 24 and 36 px the 22 and 32 px
-// slots' moved in, and 64 px its drawing doubled (H22).
-constexpr std::array<int, 7> kDoubledSizes{16, 22, 24, 32, 36, 48, 64};
+// rim where the 16 and 22 px slots had 2); 36 px the 32 px slot's moved in,
+// and 64 px its drawing doubled (H22). None for 24 px, whose slot at 2x
+// takes the 22 px slot's (hicolorsOwnIndexPicksTheSlotsDrawings; H23: H22's
+// 24x24@2 was never chosen).
+constexpr std::array<int, 6> kDoubledSizes{16, 22, 32, 36, 48, 64};
 
 // The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
@@ -588,6 +590,7 @@ private slots:
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
+    void noDrawingForA24pxSlotAt2x();
     void iconThemeGivesEachSizeItsDrawing_data();
     void iconThemeGivesEachSizeItsDrawing();
     void hicolorsOwnIndexPicksTheSlotsDrawings_data();
@@ -1705,7 +1708,6 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("16px@2") << 16;
     QTest::addRow("22px@2") << 22;
-    QTest::addRow("24px@2") << 24;
 }
 
 // A 16 or 22 px slot at 2x scaling shows the drawing it shows at 1x, doubled
@@ -1884,15 +1886,14 @@ void AppIconTest::sizesDrawnAsASmallerSize_data() {
     QTest::addColumn<int>("size");
     QTest::addColumn<int>("smaller");
     QTest::addRow("24px") << FerrousAppIcon::resourcePath(24) << FerrousAppIcon::resourcePath(22) << 24 << 22;
-    QTest::addRow("24px@2") << doubledPath(24) << doubledPath(22) << 48 << 44;
     QTest::addRow("36px") << FerrousAppIcon::resourcePath(36) << FerrousAppIcon::resourcePath(32) << 36 << 32;
     QTest::addRow("36px@2") << doubledPath(36) << doubledPath(32) << 72 << 64;
 }
 
 // The 24 px drawing is the 22 px one moved a pixel in on a 24 px canvas, as
-// Breeze draws its 24 px icons, and its 2x the 22 px slot's 2x moved two
-// (#373 hill climb, H22: the slot took the 32 px drawing scaled down, three
-// thin traces, or the 22 px one scaled up); the 36 px drawing the 32 px one
+// Breeze draws its 24 px icons, for the window icon's 24 px slot (#373 hill
+// climb, H22: the slot took the 32 px drawing scaled down, three thin
+// traces, or the 22 px one scaled up); the 36 px drawing the 32 px one
 // moved two, its exits on whole rows still, and its 2x the 32 px slot's
 // moved four (H22: the slot took the 48 px drawing scaled down, or the
 // scalable one with a rim of half a device px): pixel for pixel the same,
@@ -1967,6 +1968,22 @@ void AppIconTest::everySizeInstalls() {
     const QImage image = render(path, drawn);
     QVERIFY(!image.isNull());
     QVERIFY(countWhere(image, image.rect(), [](QRgb p) { return near(p, kGlide, 24); }) >= drawn / 2);
+}
+
+// No 24x24@2 drawing, built in or installed (#373 hill climb, H23): the
+// hicolor theme's 22 px directories serve 20 to 24 px and come first, so a
+// 24 px slot at 2x takes 22x22@2 (hicolorsOwnIndexPicksTheSlotsDrawings), and
+// the window icon has 1x pixmaps only. The 24 px drawing stays, for the
+// window icon's 24 px slot (windowIconHasEachSizesDrawing).
+void AppIconTest::noDrawingForA24pxSlotAt2x() {
+    QVERIFY(!QFile::exists(doubledPath(24)));
+    QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(24)));
+    QVERIFY(std::find(FerrousAppIcon::kSizes.cbegin(), FerrousAppIcon::kSizes.cend(), 24) != FerrousAppIcon::kSizes.cend());
+    if (installPrefix().isEmpty()) {
+        QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
+    }
+    QVERIFY(QFile::exists(installedIcon(QStringLiteral("24x24"))));
+    QVERIFY(!QDir(installPrefix()).exists(QStringLiteral("share/icons/hicolor/24x24@2")));
 }
 
 void AppIconTest::iconThemeGivesEachSizeItsDrawing_data() {

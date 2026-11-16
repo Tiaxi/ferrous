@@ -141,13 +141,14 @@ ferrous_enable_strict_warnings(ferrous)
 
 # The app icon: a drawing of its own for each size (src/AppIcon.h), the 24
 # and 36 px ones the 22 and 32 px drawings in a larger canvas, and for 2x
-# scaling the 16 and 22 px drawings doubled (and the 22 px one's in the 24 px
-# slot), the 64 px composition in the 32, 36 and 48 px slots and the 64 px
-# drawing doubled in its own (the @2 directories), installed
+# scaling the 16 and 22 px drawings doubled, the 64 px composition in the 32,
+# 36 and 48 px slots and the 64 px drawing doubled in its own (the @2
+# directories; none for 24 px, whose slot the hicolor theme's 22 px
+# directories serve at 1x and 2x), installed
 # in the hicolor icon theme and built in, for the window icon and the queue's
 # first-run image. The QML that shows it is loaded from the source directory
 # by the tests, which link this library too.
-set(FERROUS_APP_ICON_DIRS 16x16 16x16@2 22x22 22x22@2 24x24 24x24@2 32x32 32x32@2 36x36 36x36@2 48x48 48x48@2 64x64 64x64@2 128x128 256x256 scalable)
+set(FERROUS_APP_ICON_DIRS 16x16 16x16@2 22x22 22x22@2 24x24 32x32 32x32@2 36x36 36x36@2 48x48 48x48@2 64x64 64x64@2 128x128 256x256 scalable)
 set(FERROUS_APP_ICON_FILES "")
 foreach(_icon_dir IN LISTS FERROUS_APP_ICON_DIRS)
     list(APPEND FERROUS_APP_ICON_FILES assets/icons/hicolor/${_icon_dir}/apps/ferrous.svg)
