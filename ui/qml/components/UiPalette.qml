@@ -33,13 +33,20 @@ QtObject {
     readonly property color textSecondary: ColorUtils.mixColor(
         root._inactiveText, root.text, root.themeIsDark ? 0.15 : 0.41)
     // Counts, years and track numbers. #91989f / #59626d: lightened or
-    // darkened from the mix to be 4.6:1 on a hovered row, a margin over
+    // darkened from the mix to be 4.6:1 on the view's hover tint, a margin over
     // 4.5:1 that rendering cannot round away (6.2:1 on view in both).
     // On a selected row, use textTertiaryOn(true): it is 3.7:1 on the
     // focused tint.
+    // On a hovered list row, whose tint is stronger, use
+    // textTertiaryOn(false, true).
     readonly property color textTertiary: root.readableOn(root.themeIsDark
         ? ColorUtils.mixColor(root._inactiveText, root.view, 0.134)
-        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185), [root.view, root.hoveredRow], 4.6)
+        : ColorUtils.mixColor(root._inactiveText, root.text, 0.185),
+        [root.view, ColorUtils.drawnOver(root.hover, root.view)], 4.6)
+    // Tertiary text on a hovered list row: lightened or darkened to be
+    // 4.6:1 on it, only there, so the rest keeps its step below the
+    // secondary colour. #9ca2a8 / #525b64.
+    readonly property color textTertiaryHovered: root.readableOn(root.textTertiary, [root.hoveredRow], 4.6)
     // A field's placeholder, such as Edit Tags' "Multiple values", which
     // tells what saving does: the theme's own placeholder colour, its
     // inactive text, darkened or lightened where it is under 4.6:1 on the
@@ -66,8 +73,15 @@ QtObject {
     // a press reads apart from a hover (#373 H5: 10% read as the hover).
     // The least, in whole percent, that is 1.65:1 on the view: 17% / 25%.
     readonly property color pressed: root._tintOf(root.text, root.view, 1.65)
-    // A hovered row: the hover tint on the view.
-    readonly property color hoveredRow: ColorUtils.drawnOver(root.hover, root.view)
+    // The hover tint of the main window's lists, the library's and the
+    // queue's: text over the row, the least of it in whole percent that is
+    // 1.44:1 on the view, about 1.45:1, a step stronger than a button's, so
+    // the row under the pointer reads across a wide list (#373 H13: at
+    // 1.3:1 it was faint): 13% (#323436) / 19% (#d5d6d6). It stays apart
+    // from the selection by its hue: it is neutral, the selection blue.
+    readonly property color rowHover: root._tintOf(root.text, root.view, 1.44)
+    // A hovered row of the library or the queue: rowHover on the view.
+    readonly property color hoveredRow: ColorUtils.drawnOver(root.rowHover, root.view)
     // The view mixed with the accent. #1f3e4e / #d4edfa.
     readonly property color selection: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.26 : 0.22)
@@ -180,9 +194,10 @@ QtObject {
         return ColorUtils.withAlpha(color, 0.3)
     }
 
-    // Tertiary text steps up to secondary on a selected row.
-    function textTertiaryOn(selected) {
-        return selected ? root.textSecondary : root.textTertiary
+    // Tertiary text steps up to secondary on a selected row, and to the
+    // hovered row's own on a hovered one.
+    function textTertiaryOn(selected, hovered) {
+        return selected ? root.textSecondary : (hovered ? root.textTertiaryHovered : root.textTertiary)
     }
 
     // `base` with its saturation scaled by `saturationScale` and its HSL

@@ -956,6 +956,7 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
+    void queueRowHoverIsTheListsTint();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
@@ -4644,10 +4645,12 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     // At rest: neither tint.
     QVERIFY(!tint->isVisible());
     QVERIFY(!hover->isVisible());
-    // Hover: the hover tint.
+    // Hover: the lists' hover tint (#373 H13: about 1.45:1), and the year
+    // stepped up to stay 4.6:1 on it.
     QTest::mouseMove(window, sceneRect(album).center().toPoint());
     QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
-    QCOMPARE(colorOf(hover), tokenHex(window, "hover"));
+    QCOMPARE(colorOf(hover), tokenHex(window, "rowHover"));
+    QCOMPARE(colorOf(itemNamed(album, QStringLiteral("libraryRowYear"))), tokenHex(window, "textTertiaryHovered"));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     QTRY_VERIFY(!hover->isVisible());
 
@@ -4676,6 +4679,57 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// A queue row under the pointer takes the lists' hover tint, about 1.45:1
+// on the view (#373 H13: at 1.3:1 it was faint), as drawn, with its number
+// stepped up to stay 4.6:1 on it; a selected row keeps its selection tint
+// over it, and the playing row its amber title.
+void UiMainWindowTest::queueRowHoverIsTheListsTint() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView != nullptr && queue != nullptr);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_COMPARE(queueView->property("count").toInt(), 3);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 0)) != nullptr);
+    QQuickItem *hover = itemNamed(row, QStringLiteral("rowBackgroundHover"));
+    QQuickItem *number = itemNamed(row, QStringLiteral("queueCell_order"));
+    QVERIFY(hover != nullptr && number != nullptr);
+    QVERIFY(!hover->isVisible());
+    QCOMPARE(colorOf(number), tokenHex(window, "textTertiary"));
+
+    QTest::mouseMove(window, sceneRect(row).center().toPoint());
+    QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
+    QCOMPARE(colorOf(hover), tokenHex(window, "rowHover"));
+    QCOMPARE(colorOf(number), tokenHex(window, "textTertiaryHovered"));
+    // As drawn, at the row's left end, where it has no text.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = image.width() / qreal(window->width());
+    const QPointF corner = sceneRect(row).topLeft() + QPointF(2.5, 2.5);
+    const QColor drawn = image.pixelColor(int(std::floor(corner.x() * scale)), int(std::floor(corner.y() * scale)));
+    const QColor hovered = tokenOf(window, "hoveredRow");
+    QVERIFY2(std::abs(drawn.red() - hovered.red()) <= 2 && std::abs(drawn.green() - hovered.green()) <= 2
+                 && std::abs(drawn.blue() - hovered.blue()) <= 2,
+             qPrintable(drawn.name() + QStringLiteral(" for ") + hovered.name()));
+
+    // Selected under the pointer: the selection tint over the hover's.
+    QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(rowTinted(queueView, 0));
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr && shown(tint));
+    QVERIFY(tint->z() >= hover->z());
+    QCOMPARE(tint->property("color").value<QColor>().alpha(), 255);
+    QCOMPARE(colorOf(number), tokenHex(window, "textSecondary"));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QTRY_VERIFY(!hover->isVisible());
 }
 
 // The transport is window chrome in the theme's Header colour set, as

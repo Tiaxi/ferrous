@@ -747,6 +747,7 @@ Rectangle {
                         uiPalette: root.uiPalette
                         opaque: true
                         hovered: playlistRowMouseArea.containsMouse
+                        hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
@@ -821,7 +822,8 @@ Rectangle {
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: root.playlistOrderText(index)
-                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected)
+                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected,
+                            playlistRowMouseArea.containsMouse)
                     }
 
                     Text {
