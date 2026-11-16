@@ -482,7 +482,7 @@ bool grown(QQuickWindow *window) {
 
 // Why the now-playing panel is not the compact row of nothing loaded, or ""
 // (#373 H7): one list row's height and the seam, the library's header right
-// under it; a 16 px disc mark, larger with a larger font, at the 12 px
+// under it; Ferrous's 16 px mark, larger with a larger font, at the 12 px
 // inset, and "Nothing playing" where a library row's text starts, 6 px
 // after it, both in the secondary text colour and centred in the row; no
 // cover's square and none of a track's lines.
@@ -530,7 +530,7 @@ QString compactRowProblem(QQuickWindow *window) {
     if (!at(glyphRect.left(), block.left() + 12) || !at(glyphRect.center().y(), rowRect.center().y())) {
         return QStringLiteral("glyph at %1, %2").arg(glyphRect.left() - block.left()).arg(glyphRect.top() - block.top());
     }
-    if (glyph->property("source").toString() != QStringLiteral("media-optical-audio-symbolic")
+    if (!glyph->property("source").toUrl().toString().endsWith(QStringLiteral("/ferrous-mark-symbolic.svg"))
         || !glyph->property("isMask").toBool() || colorOf(glyph) != tokenHex(window, "textSecondary")) {
         return QStringLiteral("glyph %1 in %2").arg(glyph->property("source").toString(), colorOf(glyph));
     }
@@ -918,6 +918,8 @@ private slots:
     void nowPlayingTitleIsOneSizePerLayout_data();
     void nowPlayingTitleIsOneSizePerLayout();
     void nowPlayingEllipsisFollowsTheTextWithoutASpace();
+    void nowPlayingIdleGlyphIsFerrousMark_data();
+    void nowPlayingIdleGlyphIsFerrousMark();
     void levelMeterAtRestShowsItsMarks_data();
     void levelMeterAtRestShowsItsMarks();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
@@ -2462,6 +2464,109 @@ void UiMainWindowTest::nowPlayingEllipsisFollowsTheTextWithoutASpace() {
     QVERIFY(panel->property("textTruncated").toBool());
     QCOMPARE(pointSize(title), paletteOf(window)->property("basePointSize").toReal());
     QCOMPARE(QQmlProperty::read(title, QStringLiteral("Accessible.name"), qmlContext(title)).toString(), whole);
+}
+
+void UiMainWindowTest::nowPlayingIdleGlyphIsFerrousMark_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// The "Nothing playing" row's glyph is Ferrous's mark (#373 H31 Y3: the
+// stock disc was unreadable at 16 px): ferrous-mark-symbolic.svg, the
+// now-playing stand-in's glide and its 2nd and 3rd harmonics drawn for
+// 16 px, a mask in the secondary text colour. At 1:1, in either theme, it
+// reads as three traces: across its right half, three runs of ink apart,
+// each rising to the right and fanning apart, solid where they are; the
+// item is a mask in the secondary text colour; the SVG has three
+// round-capped strokes in a 16 px box, the glide the heaviest.
+void UiMainWindowTest::nowPlayingIdleGlyphIsFerrousMark() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/ferrous-mark-symbolic.svg"));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QString svg = QString::fromUtf8(file.readAll());
+    QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
+    QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
+    QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
+    QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.75\"")));
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
+    QTRY_VERIFY2(compactRowProblem(window).isEmpty(), qPrintable(compactRowProblem(window)));
+    QQuickItem *glyph = named(window, "nowPlayingIdleGlyph");
+    QQuickItem *row = named(window, "nowPlayingIdleRow");
+    QVERIFY(glyph && row);
+    QTest::qWait(50);
+    const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const qreal scale = qreal(image.width()) / window->width();
+    QCOMPARE(scale, 1.0);
+    const QRect box = sceneRect(glyph).toRect();
+    QCOMPARE(box.size(), QSize(16, 16));
+    const QColor background = image.pixelColor(box.left() - 4, box.center().y());
+    const auto difference = [&](int x, int y) {
+        const QColor pixel = image.pixelColor(box.left() + x, box.top() + y);
+        return std::abs(pixel.red() - background.red()) + std::abs(pixel.green() - background.green())
+            + std::abs(pixel.blue() - background.blue());
+    };
+    // How much of its ink a pixel has, 0 to 1: from the row's background
+    // to the glyph's strongest pixel. (Its colour is the item's, above:
+    // the offscreen platform draws a mask unrecoloured.)
+    int strongest = 1;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            strongest = std::max(strongest, difference(x, y));
+        }
+    }
+    QVERIFY2(strongest >= 30, qPrintable(QString::number(strongest)));
+    const auto coverage = [&](int x, int y) { return double(difference(x, y)) / strongest; };
+    QString rows;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            const double c = coverage(x, y);
+            rows += c > 0.66 ? QLatin1Char('#') : c > 0.25 ? QLatin1Char('+') : QLatin1Char('.');
+        }
+        rows += QLatin1Char('\n');
+    }
+    // Each column of its right half: three runs of ink, with clear rows
+    // between them; their middles in each column.
+    QList<QList<double>> middles;
+    for (int x = 8; x < 16; ++x) {
+        QList<double> runs;
+        int start = -1;
+        for (int y = 0; y <= 16; ++y) {
+            const bool on = y < 16 && coverage(x, y) > 0.25;
+            if (on && start < 0) {
+                start = y;
+            } else if (!on && start >= 0) {
+                runs.push_back((start + y - 1) / 2.0);
+                start = -1;
+            }
+        }
+        QVERIFY2(runs.size() == 3, qPrintable(QStringLiteral("column %1:\n%2").arg(x).arg(rows)));
+        middles.push_back(runs);
+    }
+    // Rising to the right, each trace, and fanning apart.
+    for (int trace = 0; trace < 3; ++trace) {
+        QVERIFY2(middles.last().at(trace) < middles.first().at(trace), qPrintable(rows));
+    }
+    QVERIFY2(middles.last().at(2) - middles.last().at(0) > middles.first().at(2) - middles.first().at(0) - 0.01,
+             qPrintable(rows));
+    // Solid where the strokes are, not a haze.
+    int solid = 0;
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            solid += coverage(x, y) > 0.8 ? 1 : 0;
+        }
+    }
+    QVERIFY2(solid >= 20, qPrintable(rows));
+    // Ink within the box only: the row around it is the background.
+    for (int x = -2; x < 18; ++x) {
+        QVERIFY2(coverage(x, -2) < 0.1 && coverage(x, 17) < 0.1, qPrintable(rows));
+    }
 }
 
 void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {

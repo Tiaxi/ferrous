@@ -42,7 +42,7 @@ import "../logic/PathUtils.js" as PathUtils
 //   window, takes it too (#373 H6), with the lines beside the cover
 //   however far past it they run, as its room beside it is wide (#373 H10).
 // - Nothing loaded, wide or narrow: one compact row of the list's row
-//   height, a 16 px disc mark at the 12 px inset and "Nothing playing"
+//   height, Ferrous's 16 px mark at the 12 px inset and "Nothing playing"
 //   where a library row has its text, both in the secondary colour; the
 //   library gets the height (#373 H7: the empty square took 360 px). The
 //   first track grows the cover's place from the row to its full size
@@ -1852,7 +1852,7 @@ Item {
         }
     }
 
-    // Nothing loaded: the disc mark and "Nothing playing", in one row.
+    // Nothing loaded: Ferrous's mark and "Nothing playing", in one row.
     Item {
         id: idleRow
         objectName: "nowPlayingIdleRow"
@@ -1870,7 +1870,10 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             width: root.idleGlyphSize
             height: width
-            source: "media-optical-audio-symbolic"
+            // Ferrous's mark, the stand-in's traces drawn for 16 px, rather
+            // than a stock disc, which read as noise at this size (#373 H31
+            // Y3).
+            source: Qt.resolvedUrl("../assets/ferrous-mark-symbolic.svg")
             roundToIconSize: false
             isMask: true
             color: root.uiPalette.textSecondary
