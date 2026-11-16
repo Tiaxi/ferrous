@@ -159,7 +159,8 @@ Rectangle {
     // the way in and, as in the icon, run out to the tile's right edge, cut
     // flush there: a crop of a spectrogram, not a chart's series ending in
     // round caps (H19), nor ending in the tile's free air (H20: they ended
-    // at three quarters of its width).
+    // at three quarters of its width); the 4th leaves through the top edge,
+    // as in the icon (H23: it ran out on the right, under the corner).
     // Drawn as shapes, so their strokes keep the width set for the tile's
     // size (standInStroke) as the curves scale to it. Assistive technology
     // hears "No album art" from the keyboard stop over it.
@@ -169,11 +170,14 @@ Rectangle {
             id: mark
             objectName: "albumArtStandInMark"
             // The paths' own box, the whole tile, 1000 units a side: the
-            // icon's 64-unit drawing at 12.3 units to the icon's one, from a
+            // icon's 64-unit drawing at 16 units to the icon's one, from a
             // start 240 units in, the ink of its lower three traces centred
             // on the tile's height, the small mark's three too, the 4th
-            // harmonic above them. The paths run on past
-            // the tile's right side, and the clip cuts them there.
+            // harmonic above them, rising 1.06 times its share as in the icon
+            // (#373 H23: at 12.3 units it ran out under the top right corner,
+            // where the icon's leaves through the top edge). The paths run on
+            // past the tile's right side, the 4th's past its top, and the clip
+            // cuts them there.
             readonly property size box: Qt.size(1000, 1000)
             readonly property real glideStroke: root.standInCompact ? 4 : root.standInStroke
             readonly property real harmonicStroke: root.standInCompact ? 3.5 : root.standInStroke * 0.8
@@ -196,7 +200,7 @@ Rectangle {
                 strokeColor: root.standInCompact ? "transparent" : root.standInFourthHarmonicColor
                 strokeWidth: mark.fourthHarmonicStroke
                 PathSvg {
-                    path: "M240.35 534.90 C243.92 528.53 247.48 522.42 251.05 516.52 C256.39 507.68 261.74 499.32 267.09 491.36 C276.00 478.10 284.91 465.93 293.82 454.56 C306.29 438.64 318.77 424.29 331.24 411.03 C347.28 393.97 363.32 378.71 379.36 364.67 C400.74 345.94 422.13 329.38 443.51 314.22 C468.46 296.53 493.41 280.77 518.36 266.30 C550.44 247.70 582.51 231.23 614.59 216.15 C650.23 199.39 685.87 184.37 721.52 170.53 C766.07 153.23 810.62 137.77 855.17 123.56 C913.45 104.97 971.72 88.51 1030.00 73.44"
+                    path: "M240.35 519.94 C244.99 511.16 249.62 502.74 254.25 494.61 C261.20 482.43 268.15 470.92 275.10 459.95 C286.69 441.67 298.27 424.90 309.86 409.23 C326.07 387.30 342.29 367.52 358.51 349.25 C379.36 325.74 400.21 304.72 421.06 285.37 C448.86 259.56 476.66 236.73 504.46 215.84 C536.89 191.47 569.33 169.76 601.76 149.82 C643.46 124.18 685.16 101.48 726.86 80.70 C773.20 57.61 819.53 36.91 865.86 17.84 C907.56 0.67 949.27 -15.16 990.97 -30.00"
                 }
             }
             ShapePath {
@@ -207,7 +211,7 @@ Rectangle {
                 strokeColor: root.standInHighHarmonicColor
                 strokeWidth: mark.highHarmonicStroke
                 PathSvg {
-                    path: "M240.35 602.49 C243.92 597.72 247.48 593.13 251.05 588.71 C256.39 582.08 261.74 575.81 267.09 569.84 C276.00 559.89 284.91 550.77 293.82 542.24 C306.29 530.30 318.77 519.54 331.24 509.59 C347.28 496.80 363.32 485.36 379.36 474.82 C400.74 460.78 422.13 448.35 443.51 436.98 C468.46 423.72 493.41 411.90 518.36 401.05 C550.44 387.09 582.51 374.74 614.59 363.43 C650.23 350.86 685.87 339.60 721.52 329.22 C766.07 316.24 810.62 304.65 855.17 293.99 C913.45 280.05 971.72 267.70 1030.00 256.40"
+                    path: "M240.35 607.81 C244.99 601.60 249.62 595.64 254.25 589.90 C261.20 581.27 268.15 573.13 275.10 565.37 C286.69 552.43 298.27 540.57 309.86 529.48 C326.07 513.96 342.29 499.97 358.51 487.04 C379.36 470.41 400.21 455.53 421.06 441.84 C448.86 423.58 476.66 407.43 504.46 392.65 C536.89 375.41 569.33 360.04 601.76 345.93 C643.46 327.79 685.16 311.73 726.86 297.03 C773.20 280.70 819.53 266.05 865.86 252.55 C920.58 236.62 975.29 222.29 1030.00 209.07"
                 }
             }
             ShapePath {
@@ -218,7 +222,7 @@ Rectangle {
                 strokeColor: root.standInHarmonicColor
                 strokeWidth: mark.harmonicStroke
                 PathSvg {
-                    path: "M240.35 670.09 C243.92 666.90 247.48 663.85 251.05 660.90 C256.39 656.48 261.74 652.30 267.09 648.32 C276.00 641.69 284.91 635.60 293.82 629.92 C306.29 621.96 318.77 614.79 331.24 608.15 C347.28 599.63 363.32 592.00 379.36 584.97 C400.74 575.61 422.13 567.33 443.51 559.75 C468.46 550.91 493.41 543.03 518.36 535.79 C550.44 526.49 582.51 518.25 614.59 510.71 C650.23 502.34 685.87 494.83 721.52 487.90 C766.07 479.25 810.62 471.53 855.17 464.42 C913.45 455.13 971.72 446.90 1030.00 439.36"
+                    path: "M240.35 695.69 C244.99 691.55 249.62 687.57 254.25 683.74 C261.20 677.99 268.15 672.56 275.10 667.39 C286.69 658.77 298.27 650.86 309.86 643.47 C326.07 633.12 342.29 623.79 358.51 615.17 C379.36 604.09 400.21 594.17 421.06 585.04 C448.86 572.87 476.66 562.10 504.46 552.25 C536.89 540.75 569.33 530.51 601.76 521.10 C643.46 509.01 685.16 498.30 726.86 488.50 C773.20 477.61 819.53 467.85 865.86 458.85 C920.58 448.23 975.29 438.68 1030.00 429.86"
                 }
             }
             ShapePath {
@@ -229,7 +233,7 @@ Rectangle {
                 strokeColor: root.standInGlideColor
                 strokeWidth: mark.glideStroke
                 PathSvg {
-                    path: "M240.35 737.68 C243.92 736.09 247.48 734.56 251.05 733.09 C256.39 730.88 261.74 728.79 267.09 726.80 C276.00 723.48 284.91 720.44 293.82 717.60 C306.29 713.62 318.77 710.03 331.24 706.72 C347.28 702.45 363.32 698.64 379.36 695.13 C400.74 690.45 422.13 686.30 443.51 682.51 C468.46 678.09 493.41 674.15 518.36 670.54 C550.44 665.88 582.51 661.77 614.59 658.00 C650.23 653.81 685.87 650.05 721.52 646.59 C766.07 642.27 810.62 638.40 855.17 634.85 C913.45 630.20 971.72 626.09 1030.00 622.32"
+                    path: "M240.35 783.56 C244.99 781.49 249.62 779.51 254.25 777.59 C261.20 774.72 268.15 772.00 275.10 769.41 C286.69 765.10 298.27 761.15 309.86 757.45 C326.07 752.28 342.29 747.61 358.51 743.30 C379.36 737.76 400.21 732.80 421.06 728.24 C448.86 722.15 476.66 716.77 504.46 711.84 C536.89 706.09 569.33 700.97 601.76 696.27 C643.46 690.22 685.16 684.87 726.86 679.97 C773.20 674.52 819.53 669.64 865.86 665.14 C920.58 659.83 975.29 655.06 1030.00 650.65"
                 }
             }
         }

@@ -3654,17 +3654,19 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     {
         // The glyph's 16 px source: the app icon's small-size pair, a 1.75 px
         // stroke (#373 H15 H8: 1.5 px read lighter than Breeze's waveform
-        // glyph beside it) with round caps, from a 1.5 px lowest stroke from
-        // x 2 to 14, the icon's fundamental, starting on it (#373 H16 I7:
-        // without it the stroke read as "/"); no middle trace (#373 H22: at
-        // 16 px it crowded the two). The lowest rises 1 px along its length,
-        // most of it in its first half, a glide (#373 H20: level, it read as
-        // a chart's baseline). The upper one's end is 1.5 px or more clear
-        // of the lowest stroke's end, and half way across 3 px or more clear
-        // of it; both inside the 16 px square with their caps. It is the app
-        // icon's top harmonic, a glide (#373 H19: it rose at 81 degrees and
-        // read as a hook): it starts with the lowest at 55 to 70 degrees and
-        // bends over to under 35.
+        // glyph beside it) with round caps, over a 1.5 px lowest stroke from
+        // x 2 to 14, the icon's fundamental (#373 H16 I7: without it the
+        // stroke read as "/"); no middle trace (#373 H22: at 16 px it crowded
+        // the two). Each starts on its own, in the same column, as the icon's
+        // traces do, with 1.5 px or more of clear space between them
+        // everywhere (#373 H23: from one vertex the two read as an angle
+        // sign). The lowest rises 1 px along its length, most of it in its
+        // first half, a glide (#373 H20: level, it read as a chart's
+        // baseline). The upper one's end is 1.5 px or more clear of the
+        // lowest stroke's end, and half way across 3 px or more clear of it;
+        // both inside the 16 px square with their caps. It is the app icon's
+        // top harmonic, a glide (#373 H19: it rose at 81 degrees and read as a
+        // hook): it starts at 40 to 55 degrees and bends over to under 35.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
@@ -3720,7 +3722,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             };
             const double start = degrees(top[0], top[1]);
             const double end = degrees(top[2], top[3]);
-            QVERIFY2(start >= 55 && start <= 70, qPrintable(QString::number(start)));
+            QVERIFY2(start >= 40 && start <= 55, qPrintable(QString::number(start)));
             QVERIFY2(end > 0 && end < 35, qPrintable(QString::number(end)));
         }
         // Half way across, x 8, 3 px or more of clear space between them.
@@ -3731,16 +3733,19 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         };
         const double halfWay = heightAt(lowest, 8) - heightAt(curves[0], 8) - (0.875 + 0.75);
         QVERIFY2(halfWay >= 3.0, qPrintable(QString::number(halfWay)));
-        // The top one starts with the lowest.
-        QCOMPARE(curves[0].first(), lowest.first());
         for (const QList<QPointF> &curve : curves) {
-            // From the lowest stroke, up and to the right.
-            double onIt = 1e9;
-            for (const QPointF &q : lowest) {
-                onIt = std::min(onIt, std::hypot(curve.first().x() - q.x(), curve.first().y() - q.y()));
+            // Its own start, in the lowest one's column and above it, and
+            // 1.5 px or more of clear space between the strokes everywhere,
+            // caps included: no shared vertex.
+            QCOMPARE(curve.first().x(), lowest.first().x());
+            QVERIFY(curve.first().y() < lowest.first().y());
+            double nearest = 1e9;
+            for (const QPointF &p : curve) {
+                for (const QPointF &q : lowest) {
+                    nearest = std::min(nearest, std::hypot(p.x() - q.x(), p.y() - q.y()));
+                }
             }
-            QVERIFY2(onIt <= 0.05, qPrintable(QString::number(onIt)));
-            QVERIFY(curve.first().x() >= 2.75 && curve.first().x() <= 13.25);
+            QVERIFY2(nearest - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(nearest)));
             QVERIFY2(lowest.last().y() - curve.last().y() - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(curve.last().y())));
             for (const QPointF &point : curve) {
                 QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);

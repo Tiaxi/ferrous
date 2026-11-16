@@ -776,9 +776,13 @@ qreal standInMarkInk(QQuickWindow *window) {
 // (#373 H19: three series ending in round caps inside the mark read as a
 // line chart; H20: cut at three quarters of the tile, they ended in its
 // free air): as grabbed, the column just inside the tile's right edge
-// crosses each of its curves, four (H21) or the small mark's three (H22), and they start
-// some 24 % in: the columns before a fifth of the tile are floor, and a
-// column at 30 % crosses them all.
+// crosses each of its three lower curves, and they start some 24 % in: the
+// columns before a fifth of the tile are floor, and a column at 30 % crosses
+// them all, the wide mark's four (H21) or the small mark's three (H22). The
+// wide mark's 4th harmonic leaves through the top edge, as in the app icon
+// (H23: it ran out on the right, under the corner): one run of ink in the row
+// just inside the top edge, between four fifths of the way across and the
+// corner; the small mark leaves that row floor.
 QString standInMarkRunsOut(QQuickWindow *window) {
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *mark = cover ? itemNamed(cover, QStringLiteral("albumArtStandInMark")) : nullptr;
@@ -795,22 +799,40 @@ QString standInMarkRunsOut(QQuickWindow *window) {
     const int right = static_cast<int>(std::ceil(rect.right() * scale));
     const int width = right - left;
     const QColor floor(QStringLiteral("#14062e"));
+    const auto inked = [&](int x, int y) {
+        const QColor pixel = image.pixelColor(x, y);
+        return std::max({std::abs(pixel.red() - floor.red()), std::abs(pixel.green() - floor.green()),
+                         std::abs(pixel.blue() - floor.blue())})
+               > 24;
+    };
     const auto runs = [&](int x) {
         int count = 0;
         bool in = false;
         for (int y = top; y < bottom; ++y) {
-            const QColor pixel = image.pixelColor(x, y);
-            const bool ink = std::max({std::abs(pixel.red() - floor.red()), std::abs(pixel.green() - floor.green()),
-                                       std::abs(pixel.blue() - floor.blue())})
-                             > 24;
+            const bool ink = inked(x, y);
             count += ink && !in ? 1 : 0;
             in = ink;
         }
         return count;
     };
-    const int curves = cover->property("standInCompact").toBool() ? 3 : 4;
-    if (runs(right - 2) != curves) {
-        return QStringLiteral("%1 curves at the tile's right edge, not %2").arg(runs(right - 2)).arg(curves);
+    const bool small = cover->property("standInCompact").toBool();
+    const int curves = small ? 3 : 4;
+    if (runs(right - 2) != 3) {
+        return QStringLiteral("%1 curves at the tile's right edge, not 3").arg(runs(right - 2));
+    }
+    // The row just inside the top edge.
+    int first = -1;
+    int last = -1;
+    int topRuns = 0;
+    for (int x = left + 2; x < right - 2; ++x) {
+        if (inked(x, top)) {
+            topRuns += last == x - 1 ? 0 : 1;
+            first = first < 0 ? x : first;
+            last = x;
+        }
+    }
+    if (small ? topRuns != 0 : (topRuns != 1 || first < left + width * 4 / 5 || last >= right - 3)) {
+        return QStringLiteral("%1 runs in the top row, from %2 to %3 of %4 px").arg(topRuns).arg(first - left).arg(last - left).arg(width);
     }
     for (int x = left + 2; x < left + width / 5; ++x) {
         if (runs(x) != 0) {
