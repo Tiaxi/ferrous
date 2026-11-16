@@ -3037,8 +3037,19 @@ QList<int> queueSelection(QObject *controller) {
 } // namespace
 
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
+    // A length that is not known, as the transport writes it: en dashes
+    // (#373 H35 AC2), from the bridge and in the row's own fallback.
+    QCOMPARE(formatQueueDuration(-1.0), QStringLiteral("\u2013:\u2013\u2013"));
+    QCOMPARE(formatQueueDuration(std::numeric_limits<double>::infinity()), QStringLiteral("\u2013:\u2013\u2013"));
+    BinaryBridgeCodec::DecodedQueueTrack unknownTrack;
+    unknownTrack.path = QStringLiteral("/music/unknown.flac");
+    unknownTrack.lengthSeconds = -1.0f;
+    QCOMPARE(queueRowFromTrack(unknownTrack).lengthText, QStringLiteral("\u2013:\u2013\u2013"));
     QueueRowsModel rows;
     loadQueueRows(rows, 6);
+    QueueRowData unknownLength = *rows.rowAt(5);
+    unknownLength.lengthText.clear();
+    QVERIFY(rows.updateRow(5, unknownLength));
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -3120,6 +3131,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(cell(3, "order")->property("text").toString(), QStringLiteral("4"));
     QCOMPARE(cell(3, "length")->property("text").toString(), QStringLiteral("1:00"));
     QCOMPARE(cell(3, "artist")->property("text").toString(), QString());
+    QCOMPARE(cell(5, "length")->property("text").toString(), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(glyphName(0), QString());
     QCOMPARE(tint(0), QStringLiteral("#00000000"));
     QCOMPARE(tint(1), QStringLiteral("#00000000"));

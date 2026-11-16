@@ -685,7 +685,8 @@ Rectangle {
                     readonly property string titleValue: rowValues.title || ""
                     readonly property string artistValue: rowValues.artist || ""
                     readonly property string albumValue: rowValues.album || ""
-                    readonly property string lengthTextValue: rowValues.lengthText || "--:--"
+                    readonly property string lengthTextValue: rowValues.lengthText
+                        || I18n.i18nc("@info:status no time", "–:––")
                     readonly property string pathValue: rowValues.path || ""
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
                     // Playing or paused: amber marks only what is playing now.
