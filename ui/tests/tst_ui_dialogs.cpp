@@ -3608,9 +3608,12 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
     QTest::newRow("24 pt") << 24.0;
 }
 
-// Auto Number is one form in reading order (#373 H38): the tracks' start;
-// Write disc numbers, then the disc's start it enables, then totals; then
-// when numbering starts over. The check boxes have no labels and start
+// Auto Number is one form in reading order (#373 H38): the tracks' start
+// and Write totals, which writes the tracks' totals with or without the
+// discs' (under the disc's start, it read as a disc option); Write disc
+// numbers, then the disc's start it enables; then when numbering starts
+// over. The groups are a FormGroupGap apart, 16 px with the default font,
+// and their rows the form's row spacing, 4 px. The check boxes have no labels and start
 // where the fields do, the description too, so the dialog has one left
 // edge; it had two, with Write disc numbers under the field it enables.
 // The start fields hold four digits, 5 grid units, and their errors wrap
@@ -3649,9 +3652,16 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
 
     // Every row within the window, whole, top to bottom in reading order.
-    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteDiscCheck"),
-                            QStringLiteral("autoNumberStartingDiscField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                            QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberStartingDiscField"),
                             QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+    // The rows that start a group.
+    const QStringList groupStarts{QStringLiteral("autoNumberWriteDiscCheck"),
+                                  QStringLiteral("autoNumberResetOnFolderCheck")};
+    const qreal rowSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
+    const qreal groupSpacing = evaluate(dialog, QStringLiteral("Kirigami.Units.largeSpacing * 2")).toReal();
+    QVERIFY(rowSpacing > 0 && groupSpacing > rowSpacing);
+    qreal bottom = -1;
     QQuickItem *form = visibleNamed(numbers, QStringLiteral("autoNumberForm"));
     QVERIFY(form != nullptr);
     qreal top = -1;
@@ -3666,7 +3676,17 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
             .arg(numbers->width());
         QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
         QVERIFY2(rect.top() > top, qPrintable(where));
+        // The rhythm: the form's row spacing within a group, a group's gap
+        // between groups. A row's cell is a whole pixel taller than a check
+        // box's own fractional height.
+        if (bottom >= 0) {
+            const qreal expected = groupStarts.contains(name) ? groupSpacing : rowSpacing;
+            QVERIFY2(rect.top() - bottom >= expected - 0.01 && rect.top() - bottom < expected + 1,
+                     qPrintable(QStringLiteral("%1: %2 px below the row above, not %3")
+                                    .arg(where).arg(rect.top() - bottom).arg(expected)));
+        }
         top = rect.top();
+        bottom = rect.bottom();
         // One left edge: the fields' and the check boxes'.
         if (fieldsLeft < 0) {
             fieldsLeft = rect.left();
