@@ -2850,7 +2850,7 @@ void UiMotionTest::nowPlayingGrowsFromTheCompactRowOnTheFirstPlay() {
     // Frame by frame: down, one way, from near where it was, to the end;
     // the cover at its full size at the band's top left in every frame,
     // only the band's height changing (#373 H14 G5).
-    const double side = narrow ? 96.0 : panel->width();
+    const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
     QList<double> tops;
     QList<double> bands;
     QString unsquare;
@@ -3030,7 +3030,7 @@ void UiMotionTest::nowPlayingFirstPlayBandIsNeverEmpty() {
     QVERIFY(growth != nullptr);
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
     QVERIFY(panel->property("idle").toBool());
-    const double side = narrow ? 96.0 : panel->width();
+    const double side = narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width();
     QList<double> shown;
     QString problem;
     const QMetaObject::Connection connection =
@@ -3271,7 +3271,7 @@ void UiMotionTest::nowPlayingCoverAndStandInCrossFadeInPlace() {
                              sceneRectOf(column)};
     };
     const QList<QRectF> still = geometry();
-    QCOMPARE(cover->width(), narrow ? 96.0 : panel->width());
+    QCOMPARE(cover->width(), narrow ? panel->property("narrowLayoutCoverSize").toDouble() : panel->width());
 
     // The outgoing covers that show, the oldest first.
     const auto outgoing = [&]() {
@@ -4770,8 +4770,12 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::newRow("wide") << false << 0.0;
     QTest::newRow("narrow") << true << 0.0;
-    // 24 pt: the lines under the cover, the title and the artist wrapping.
-    QTest::newRow("narrow, stacked") << true << 24.0;
+    // 18 pt in a 270 px sidebar: the lines under the cover, the title and
+    // the artist wrapping.
+    QTest::newRow("narrow, stacked") << true << 18.0;
+    // 24 pt in a 360 px one: the large-font header, the title beside the
+    // cover and the rest under it (#373 H28 V1).
+    QTest::newRow("narrow, header") << true << 24.0;
 }
 
 // A line that changes cross-fades (#373 H6: out, then in, left each line
@@ -4816,7 +4820,8 @@ void UiMotionTest::nowPlayingChangedLinesCrossFadeWithoutABlink() {
     bridge->setProperty("currentTrackGenre", QStringLiteral("Ambient"));
     tellTrack(bridge, kTrackA1, QStringLiteral("Moth Copper"), QStringLiteral("Album A"), 2005, 1, covers.all.at(0));
     QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
-    QCOMPARE(panel->property("narrowStacked").toBool(), pointSize > 0);
+    QCOMPARE(panel->property("narrowStacked").toBool(), pointSize > 0 && pointSize < 20);
+    QCOMPARE(panel->property("largeHeader").toBool(), pointSize >= 20);
     QTRY_VERIFY(panelLine(panel, names.first()).line()->width() > 0);
     QVERIFY(grown(panel));
     QVERIFY(panelIdle(panel, names));
