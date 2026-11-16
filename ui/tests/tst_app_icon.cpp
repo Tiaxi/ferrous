@@ -1508,9 +1508,11 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // large icons): the faint 4th harmonic of the same glide, in violet, half
 // the fundamental's width, from the common start, rising 4/3 as far as the
 // 3rd harmonic over the same columns, give or take the few hundredths that
-// keep its cut clear of the badge, and cut flush on the tile's top inner
-// edge between x 40 and 46 of the 64-unit drawing, so that nothing of it is
-// in the corner where Plasma draws a task's badge (x over 48, y under 20).
+// keep its cut clear of the badge, and cut square across its stroke where
+// its upper edge meets the tile's top inner edge, between x 40 and 46 of
+// the 64-unit drawing (H22: cut along the edge, its end ran into the 1 px
+// rim for some device pixels), so that nothing of it is in the corner where
+// Plasma draws a task's badge (x over 48, y under 20).
 // Below 128 px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
@@ -1552,23 +1554,35 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double above = centre(third, start) - centre(fourth, start);
     QVERIFY2(std::abs(above - step) <= unit, qPrintable(QStringLiteral("%1 above the 3rd, which is %2 above the 2nd").arg(above).arg(step)));
 
-    // Cut flush on the top inner edge: its ink reaches the edge's row, and
-    // there it is as wide as in the row under it, not a rounded end.
-    int cutFirst = -1;
-    int cutLast = -1;
-    double cutRow = 0;
-    double rowUnder = 0;
+    // Cut square across the stroke: in the file, the outline's end runs
+    // from its upper corner, on the top inner edge, straight to its lower
+    // one, at right angles to the stroke's edge there.
+    static const QRegularExpression endCut(QStringLiteral(
+        "<path id=\"h4\"[^>]* C[0-9.]+ [0-9.]+ ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) L([0-9.]+) ([0-9.]+) C"));
+    const QRegularExpressionMatch cut = endCut.match(source);
+    QVERIFY(cut.hasMatch());
+    const QPointF control(cut.captured(1).toDouble(), cut.captured(2).toDouble());
+    const QPointF upper(cut.captured(3).toDouble(), cut.captured(4).toDouble());
+    const QPointF lower(cut.captured(5).toDouble(), cut.captured(6).toDouble());
+    // The tile inside a rim of one device pixel.
+    const double edge = 6 + 64.0 / size;
+    QVERIFY2(std::abs(upper.y() - edge) <= 0.001, qPrintable(QString::number(upper.y())));
+    const QPointF along = upper - control;
+    const QPointF across = lower - upper;
+    const double cosine = (along.x() * across.x() + along.y() * across.y())
+                          / (std::hypot(along.x(), along.y()) * std::hypot(across.x(), across.y()));
+    QVERIFY2(std::abs(cosine) <= 0.03, qPrintable(QString::number(cosine)));
+    QVERIFY2(upper.x() >= 40 && lower.x() <= 46, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
+    // Rendered, it meets the rim at a corner, not along it: the corner's
+    // sliver in the tile's top row inside the rim, some 1.2 device px of
+    // ink where the cut along the edge left 7, and it reaches up to that
+    // row.
+    double topRow = 0;
     for (int x = inside.left(); x <= inside.right(); ++x) {
-        cutRow += alphaAt(fourth, x, inside.top());
-        rowUnder += alphaAt(fourth, x, inside.top() + 1);
-        if (alphaAt(fourth, x, inside.top()) > 0.5) {
-            cutFirst = cutFirst < 0 ? x : cutFirst;
-            cutLast = x;
-        }
+        topRow += alphaAt(fourth, x, inside.top());
     }
-    QVERIFY2(cutFirst >= 0 && cutRow >= 0.85 * rowUnder, qPrintable(QStringLiteral("%1 at the edge, %2 under it").arg(cutRow).arg(rowUnder)));
-    QVERIFY2(cutFirst >= 40 * unit && cutLast + 1 <= 46 * unit,
-             qPrintable(QStringLiteral("cut from %1 to %2 units").arg(cutFirst / unit).arg((cutLast + 1) / unit)));
+    QVERIFY2(topRow > 0 && topRow <= 1.5, qPrintable(QStringLiteral("%1 px of it in the top row").arg(topRow)));
+    QVERIFY(columnOf(fourth, static_cast<int>(upper.x() * unit)).top <= inside.top() + 1);
     // Nothing in the badge's corner.
     for (int y = 0; y < 20 * unit; ++y) {
         for (int x = static_cast<int>(48 * unit); x < size; ++x) {
@@ -1578,7 +1592,7 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
 
     // 4/3 as steep as the 3rd harmonic: their rises over two thirds of the
     // way from the start to the cut.
-    const int middle = start + (cutFirst - start) * 2 / 3;
+    const int middle = start + (static_cast<int>(upper.x() * unit) - start) * 2 / 3;
     const double rises = (centre(fourth, start) - centre(fourth, middle)) / (centre(third, start) - centre(third, middle));
     QVERIFY2(rises >= 1.3 && rises <= 1.45, qPrintable(QString::number(rises)));
     // Half the fundamental's width across, over the same columns.
