@@ -511,6 +511,8 @@ private slots:
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
     void recentIssuesOpenWithTheirFocusShown();
+    void diagnosticsActionsShareOneRow_data();
+    void diagnosticsActionsShareOneRow();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
@@ -2671,6 +2673,132 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QTRY_VERIFY(copyWithoutPaths->isEnabled());
     click(diagnosticsWindow, copyWithoutPaths);
     QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
+}
+
+void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Diagnostics has one verb for deleting its log and one row of actions
+// under the log's path (#373 H38: Clear… asked to delete the log, and the
+// actions were over two rows with two ragged right edges): Reload and
+// Delete Log… on the left, Open Folder, Copy All and Copy Log Without
+// Paths on the right, ending where the log's frame does. The log's scroll
+// bars are inside its frame.
+void UiDialogsTest::diagnosticsActionsShareOneRow() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QStringList lines;
+    for (int index = 0; index < 80; ++index) {
+        lines << QStringLiteral("[library] warning: could not read /fixture/library/Artist/Album/%1 - A track "
+                                "with a title long enough to run past the log's right edge.flac: %2")
+                     .arg(index)
+                     .arg(QString(160, QLatin1Char('x')));
+    }
+    QVERIFY(bridge->setProperty("diagnosticsText", lines.join(QLatin1Char('\n'))));
+    QVERIFY(bridge->setProperty("diagnosticsLogPath", QStringLiteral("/fixture/state/diagnostics.log")));
+    QObject *dialog = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *diagnostics = windowOf(dialog);
+    QQuickItem *pathRow = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogPathRow"));
+    QQuickItem *frame = visibleNamed(diagnostics, QStringLiteral("diagnosticsLogFrame"));
+    QQuickItem *scrollView = visibleNamed(diagnostics, QStringLiteral("diagnosticsScrollView"));
+    QVERIFY(pathRow != nullptr && frame != nullptr && scrollView != nullptr);
+    QList<QQuickItem *> buttons;
+    for (const char *name : {"diagnosticsReloadButton", "diagnosticsClearButton", "diagnosticsOpenFolderButton",
+                             "diagnosticsCopyAllButton", "diagnosticsCopyWithoutPathsButton"}) {
+        QQuickItem *button = visibleNamed(diagnostics, QString::fromLatin1(name));
+        QVERIFY2(button != nullptr, name);
+        buttons << button;
+    }
+    QTRY_VERIFY(!layoutPending(frame) && !layoutPending(buttons.constFirst()));
+
+    // One verb: Delete Log…, which asks Delete Diagnostics Log.
+    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log…"));
+    QCOMPARE(evaluate(buttons.at(1), QStringLiteral("icon.name")).toString(), QStringLiteral("edit-delete"));
+    QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    QCOMPARE(confirm->property("title").toString(), QStringLiteral("Delete Diagnostics Log"));
+    QCOMPARE(confirm->property("message").toString(), QStringLiteral("Delete the diagnostics log?"));
+    QCOMPARE(confirm->property("confirmText").toString(), QStringLiteral("Delete Log"));
+
+    // The path's row holds no action.
+    for (QQuickItem *button : buttons) {
+        QVERIFY2(!pathRow->isAncestorOf(button), qPrintable(describeItem(button)));
+        QVERIFY2(sceneRect(button).top() >= sceneRect(pathRow).bottom(), qPrintable(describeItem(button)));
+    }
+    // One row, in order, two on the left and three on the right, under the
+    // path and above the log.
+    const qreal middle = sceneRect(buttons.constFirst()).center().y();
+    for (qsizetype index = 0; index < buttons.size(); ++index) {
+        const QRectF rect = sceneRect(buttons.at(index));
+        QVERIFY2(std::abs(rect.center().y() - middle) < 0.5, qPrintable(describeItem(buttons.at(index))));
+        QVERIFY2(rect.bottom() <= sceneRect(frame).top(), qPrintable(describeItem(buttons.at(index))));
+        if (index > 0) {
+            QVERIFY2(rect.left() > sceneRect(buttons.at(index - 1)).right(), qPrintable(describeItem(buttons.at(index))));
+        }
+    }
+    QCOMPARE(sceneRect(buttons.at(0)).left(), sceneRect(frame).left());
+    // The gap between the log's own actions and the others.
+    QVERIFY(sceneRect(buttons.at(2)).left() - sceneRect(buttons.at(1)).right()
+            > 2 * (sceneRect(buttons.at(1)).left() - sceneRect(buttons.at(0)).right()));
+    // One right edge: the last action's, the path's row's and the log's.
+    QCOMPARE(sceneRect(buttons.constLast()).right(), sceneRect(frame).right());
+    QCOMPARE(sceneRect(pathRow).right(), sceneRect(frame).right());
+
+    // The scroll bars, both shown by the long and many lines, are inside the
+    // log's frame.
+    for (const char *bar : {"ScrollBar.horizontal", "ScrollBar.vertical"}) {
+        auto *scrollBar = qobject_cast<QQuickItem *>(
+            qvariant_cast<QObject *>(evaluate(scrollView, QString::fromLatin1(bar))));
+        QVERIFY2(scrollBar != nullptr, bar);
+        QTRY_VERIFY2(scrollBar->isVisible() && scrollBar->width() > 0 && scrollBar->height() > 0, bar);
+        QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
+                 qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
+    }
+    // Made as narrow as it goes, the actions on the right go under the
+    // others, at the same right edge, each whole and none over another.
+    diagnostics->resize(diagnostics->minimumWidth(), diagnostics->height());
+    QTRY_COMPARE(diagnostics->width(), diagnostics->minimumWidth());
+    QTRY_VERIFY(!layoutPending(frame));
+    QTRY_VERIFY(sceneRect(buttons.at(2)).top() >= sceneRect(buttons.at(0)).bottom()
+                || sceneRect(buttons.at(2)).left() > sceneRect(buttons.at(1)).right());
+    for (qsizetype index = 0; index < buttons.size(); ++index) {
+        const QRectF rect = sceneRect(buttons.at(index));
+        QVERIFY2(rect.left() >= sceneRect(frame).left() - 0.5 && rect.right() <= sceneRect(frame).right() + 0.5
+                     && rect.bottom() <= sceneRect(frame).top(),
+                 qPrintable(describeItem(buttons.at(index))));
+        QVERIFY2(buttons.at(index)->width() >= buttons.at(index)->implicitWidth() - 0.5,
+                 qPrintable(describeItem(buttons.at(index))));
+        for (qsizetype other = 0; other < index; ++other) {
+            QVERIFY2(!rect.intersects(sceneRect(buttons.at(other))), qPrintable(describeItem(buttons.at(index))));
+        }
+    }
+    QCOMPARE(sceneRect(buttons.constLast()).right(), sceneRect(frame).right());
+    // The minimum stays put as the log empties and the buttons that act on
+    // it are disabled.
+    const int minimumWidth = diagnostics->minimumWidth();
+    QVERIFY(bridge->setProperty("diagnosticsText", QString()));
+    QVERIFY(QMetaObject::invokeMethod(bridge, "diagnosticsChanged"));
+    QTRY_VERIFY(!buttons.at(1)->isEnabled());
+    QCOMPARE(diagnostics->minimumWidth(), minimumWidth);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!diagnostics->isVisible());
 }
 
 // Recent Issues has the keyboard where it shows it (#373 H38): opened
