@@ -815,10 +815,22 @@ Item {
                         elide: Text.ElideRight
                     }
 
-                    RowLayout {
+                    // The path, and Copy Path at its end, centred on the
+                    // path's first line (#373 H38: on the middle of its
+                    // three lines); taller than the line, it reaches up
+                    // beside the folder's label, whose one word is far to
+                    // its left. The button and its glyph are a step larger
+                    // over the whole screen, as the details' text is.
+                    Item {
+                        id: folderPathRow
                         objectName: "albumArtFolderPathRow"
+                        readonly property real spacing: 4
+                        // The height of one of the path's lines.
+                        readonly property real lineHeight: folderPathLabel.lineCount > 0
+                            ? folderPathLabel.contentHeight / folderPathLabel.lineCount
+                            : folderPathLabel.implicitHeight
                         Layout.fillWidth: true
-                        spacing: 4
+                        implicitHeight: Math.max(folderPathLabel.implicitHeight, copyPathButton.y + copyPathButton.height)
 
                         Label {
                             id: folderPathLabel
@@ -827,8 +839,9 @@ Item {
                             // short.
                             readonly property string path: root.displayPath(root.folderPath)
                             readonly property bool elided: folderPathLabel.truncated
-                            Layout.fillWidth: true
-                            Layout.alignment: Qt.AlignVCenter
+                            anchors.left: parent.left
+                            anchors.right: copyPathButton.left
+                            anchors.rightMargin: folderPathRow.spacing
                             // A zero-width space after each slash: the lines
                             // break there rather than within a folder's name.
                             text: folderPathLabel.path.replace(/\//g, "/\u200b")
@@ -852,7 +865,12 @@ Item {
                         Components.ViewerToolButton {
                             id: copyPathButton
                             objectName: "albumArtCopyPathButton"
-                            Layout.alignment: Qt.AlignVCenter
+                            anchors.right: parent.right
+                            y: Math.round((folderPathRow.lineHeight - copyPathButton.height) / 2)
+                            implicitWidth: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            implicitHeight: Math.round(root.uiPalette.toolButtonSize * root.infoScale)
+                            icon.width: root.detailsIconSize
+                            icon.height: root.detailsIconSize
                             uiPalette: root.uiPalette
                             plotColors: root.plot
                             text: I18n.i18nc("@action:button", "Copy Path")
