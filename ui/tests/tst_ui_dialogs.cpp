@@ -498,6 +498,8 @@ private slots:
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
     void aboutKdeHasAboutsHeadingAndPage();
+    void aboutPagesSitOnAFrameJoinedToTheTabs_data();
+    void aboutPagesSitOnAFrameJoinedToTheTabs();
     void aboutPagesNeverRunUnderTheButtons_data();
     void aboutPagesNeverRunUnderTheButtons();
     void recentIssuesIsAPopupAboveTheStatusBar();
@@ -2047,6 +2049,99 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QVERIFY(sceneRect(view).bottom() <= sceneRect(close).top() - 12 + 0.5);
     QVERIFY(QMetaObject::invokeMethod(kdeDialog, "reject"));
     QTRY_VERIFY(!kde->isVisible());
+}
+
+void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// About's pages sit on a frame joined to the tabs, as KDE's About dialog
+// draws them (#373 H38: the tabs' band stopped mid-window, with no page
+// under it): the frame is as wide as the content, its top edge on the
+// tabs' last row of pixels, open under the selected tab and drawn on
+// either side of it, and every page is inside it.
+void UiDialogsTest::aboutPagesSitOnAFrameJoinedToTheTabs() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *about = windowOf(dialog);
+    QQuickItem *tabs = visibleNamed(about, QStringLiteral("aboutTabs"));
+    QQuickItem *frame = visibleNamed(about, QStringLiteral("aboutPagesFrame"));
+    QQuickItem *view = visibleNamed(about, QStringLiteral("aboutPagesView"));
+    QQuickItem *heading = visibleNamed(about, QStringLiteral("aboutName"));
+    QVERIFY(tabs != nullptr && frame != nullptr && view != nullptr && heading != nullptr);
+    for (int tab = 0; tab < 4; ++tab) {
+        const QString at = QStringLiteral("tab %1").arg(tab);
+        dialog->setProperty("tabIndex", tab);
+        auto *selected = qvariant_cast<QQuickItem *>(tabs->property("currentItem"));
+        QVERIFY2(selected != nullptr, qPrintable(at));
+        QTRY_VERIFY2(!layoutPending(frame) && !layoutPending(view), qPrintable(at));
+        const QRectF frameRect = sceneRect(frame);
+        const QRectF tabsRect = sceneRect(tabs);
+        const QRectF tabRect = sceneRect(selected);
+        // As wide as the tabs' row, which spans the content, whatever the
+        // tabs' own width.
+        QCOMPARE(frameRect.left(), tabsRect.left());
+        QCOMPARE(frameRect.right(), tabsRect.right());
+        QCOMPARE(frameRect.top(), tabsRect.bottom() - 1);
+        QVERIFY2(within(sceneRect(view), frameRect.adjusted(1, 1, -1, -1)), qPrintable(at));
+
+        const QImage shown = about->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const auto pixel = [&](qreal x, qreal y) {
+            return QColor(shown.pixel(int(x * dpr), int(y * dpr)));
+        };
+        const qreal edgeY = frameRect.top();
+        // The window's own colour, between the frame and the buttons.
+        const QColor background = pixel(frameRect.center().x(), frameRect.bottom() + 4);
+        // Open under the selected tab, between its sides.
+        for (const qreal x : {tabRect.left() + 2, tabRect.center().x(), tabRect.right() - 3}) {
+            QVERIFY2(pixel(x, edgeY) == background,
+                     qPrintable(QStringLiteral("%1: %2 under the selected tab at %3")
+                                    .arg(at, hex(pixel(x, edgeY))).arg(x)));
+        }
+        // Drawn on beside it, up to the frame's corners.
+        const qreal beside = tabRect.right() + 4 < frameRect.right() - 8 ? frameRect.right() - 8
+                                                                        : tabRect.left() - 4;
+        QVERIFY2(beside > frameRect.left() + 6, qPrintable(at));
+        QVERIFY2(pixel(beside, edgeY) != background,
+                 qPrintable(QStringLiteral("%1: no edge at %2").arg(at).arg(beside)));
+        // The selected tab's sides run on down the frame's, whole, at the
+        // frame's corners too.
+        if (tabRect.left() <= frameRect.left() + 0.5) {
+            for (int dy = 0; dy < 6; ++dy) {
+                QVERIFY2(pixel(frameRect.left(), edgeY + dy) != background,
+                         qPrintable(QStringLiteral("%1: the left corner open %2 px down").arg(at).arg(dy)));
+                QVERIFY2(pixel(frameRect.left() + 1, edgeY + dy) == background,
+                         qPrintable(QStringLiteral("%1: the left corner drawn round %2 px down").arg(at).arg(dy)));
+            }
+        }
+        if (tabRect.right() >= frameRect.right() - 0.5) {
+            for (int dy = 0; dy < 6; ++dy) {
+                QVERIFY2(pixel(frameRect.right() - 1, edgeY + dy) != background,
+                         qPrintable(QStringLiteral("%1: the right corner open %2 px down").arg(at).arg(dy)));
+                QVERIFY2(pixel(frameRect.right() - 2, edgeY + dy) == background,
+                         qPrintable(QStringLiteral("%1: the right corner drawn round %2 px down").arg(at).arg(dy)));
+            }
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!about->isVisible());
 }
 
 void UiDialogsTest::aboutPagesNeverRunUnderTheButtons_data() {
