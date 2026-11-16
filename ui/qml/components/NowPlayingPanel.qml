@@ -1220,6 +1220,42 @@ Item {
         return parts.filter(part => part.length > 0).join(separator)
     }
 
+    // Whether `text`, wrapped between words onto `lines` lines `width` wide
+    // in the font of `metrics` and elided on the last, is broken within a
+    // word all the same: where a word is wider than the line, or where the
+    // last line is cut off and its first word does not fit before the
+    // ellipsis. Breaking it anywhere then fills the first line (#373 H29
+    // W3: at 24 pt in the narrow window "A Remarkably Long …" took "A"
+    // alone on the first line, as "A Remarkably" did not fit it, and was
+    // cut off at "Remarka…" on the second, as "Remarkably…" did not).
+    function _cutWithinAWord(text, width, lines, metrics) {
+        // Read the font, for the answer to follow it.
+        metrics.font
+        const words = text.split(/\s+/).filter(word => word.length > 0)
+        if (width <= 0 || lines < 2 || words.length === 0)
+            return false
+        if (words.some(word => metrics.advanceWidth(word) > width))
+            return true
+        let line = 1
+        let current = ""
+        for (let index = 0; index < words.length; ++index) {
+            const next = current.length > 0 ? current + " " + words[index] : words[index]
+            if (metrics.advanceWidth(next) <= width) {
+                current = next
+                continue
+            }
+            current = words[index]
+            if (++line === lines) {
+                // The last line, from this word on: cut off within it
+                // where the rest does not fit and the word with the
+                // ellipsis does not either.
+                return metrics.advanceWidth(words.slice(index).join(" ")) > width
+                    && metrics.advanceWidth(words[index] + "…") > width
+            }
+        }
+        return false
+    }
+
     // A text of a line (`wholeText`), as each of its layers draws it:
     // elided, on the whole width of the line, so the layers lay it out
     // alike. Where the line keeps a tail of its text whole, as the album's
@@ -1259,7 +1295,13 @@ Item {
         y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
-        wrapMode: owner.maximumLineCount > 1 ? Text.Wrap : Text.NoWrap
+        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap
+            : lineText.wrapsAnywhere ? Text.WrapAnywhere : Text.Wrap
+        // Where the text is broken within a word anyway, it breaks
+        // anywhere, so that the first line fills; otherwise between words
+        // (see _cutWithinAWord).
+        readonly property bool wrapsAnywhere: lineText.owner.breaksLongWords
+            && root._cutWithinAWord(lineText.text, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
         textFormat: Text.PlainText
         font.family: root.uiPalette.baseFont.family
         font.pointSize: owner.pointSize
@@ -1339,6 +1381,9 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
+        // Whether a text that is broken within a word anyway breaks
+        // anywhere, rather than between words (see _cutWithinAWord).
+        property bool breaksLongWords: false
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
         // line on the cover's foot (#373 H29 W1).
@@ -1791,6 +1836,7 @@ Item {
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
+                breaksLongWords: true
                 // In the large-font header, a title on one line on the
                 // cover's foot, where a title on two ends, so the header
                 // reads as one stack down to the lines under it (#373 H29

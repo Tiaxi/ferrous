@@ -910,6 +910,7 @@ private slots:
     void nowPlayingCompactKeepsTheAlbumAndItsYear();
     void nowPlayingLargeFontCompactIsAHeaderRow_data();
     void nowPlayingLargeFontCompactIsAHeaderRow();
+    void nowPlayingLongTitleFillsItsFirstLine();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange_data();
@@ -2144,6 +2145,103 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     playTrack(bridge);
     QTRY_VERIFY(settled());
     QCOMPARE(geometry(), before);
+}
+
+// A title that is broken within a word anyway, as where its last line is
+// cut off before a word that does not fit with the ellipsis, breaks
+// anywhere, so its first line fills; any other breaks between words (#373
+// H29 W3: at 24 pt in the narrow window, "A" stood alone on the first line
+// and the title was cut off at "Remarka…"). The line going out in a fade
+// keeps its own way of breaking.
+void UiMainWindowTest::nowPlayingLongTitleFillsItsFirstLine() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(24.0);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1000, 720);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QVERIFY(panel && title);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QVERIFY(panel->property("largeHeader").toBool());
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+    const auto settled = [&]() { return !handover->property("running").toBool(); };
+    constexpr int kWrap = 4;          // Text.Wrap
+    constexpr int kWrapAnywhere = 3;  // Text.WrapAnywhere
+    const QFontMetricsF metrics(title->property("font").value<QFont>());
+    // How far the first line's ink reaches from the title's left edge.
+    const auto firstLineInk = [&]() {
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal scale = qreal(image.width()) / window->width();
+        const QRectF rect = sceneRect(title);
+        const qreal lineHeight = title->height() / std::max(1, title->property("lineCount").toInt());
+        const QColor background = image.pixelColor(int((rect.right() + 4) * scale), int(rect.top() * scale) + 2);
+        int right = -1;
+        for (int y = int(rect.top() * scale); y < int((rect.top() + lineHeight) * scale); ++y) {
+            for (int x = int(rect.left() * scale); x < int((rect.right() + 1) * scale) && x < image.width(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                if (std::max({std::abs(pixel.red() - background.red()), std::abs(pixel.green() - background.green()),
+                              std::abs(pixel.blue() - background.blue())}) > 60) {
+                    right = std::max(right, x);
+                }
+            }
+        }
+        return right < 0 ? 0.0 : (right + 1) / scale - rect.left();
+    };
+
+    // Cut within a word anyway: anywhere, the first line full.
+    const QString longTitle = QStringLiteral("A Remarkably Long Title For The Evening Tide");
+    bridge->setProperty("currentTrackTitle", longTitle);
+    QTRY_COMPARE(title->property("text").toString(), longTitle);
+    QTRY_VERIFY(settled());
+    // "A Remarkably" does not fit the first line, nor "Remarkably…" the
+    // second, which is cut off: between words, "A" stood alone on the
+    // first line and the second was cut at "Remarka…".
+    QVERIFY2(metrics.horizontalAdvance(QStringLiteral("A Remarkably")) > title->width()
+                 && metrics.horizontalAdvance(QStringLiteral("Remarkably…")) > title->width(),
+             qPrintable(QStringLiteral("the column %1 px").arg(title->width())));
+    QVERIFY(title->property("truncated").toBool());
+    QCOMPARE(title->property("wrapMode").toInt(), kWrapAnywhere);
+    QCOMPARE(title->property("lineCount").toInt(), 2);
+    QTRY_VERIFY2(firstLineInk() >= 0.8 * title->width(),
+                 qPrintable(QStringLiteral("line 0 %1 px of %2").arg(firstLineInk()).arg(title->width())));
+
+    // Words that fit: between them, "Lantern" alone on the first line.
+    const QString shortTitle = QStringLiteral("Lantern Signal");
+    QVERIFY(metrics.horizontalAdvance(shortTitle) > title->width());
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/03.flac"));
+    bridge->setProperty("currentTrackTitle", shortTitle);
+    QTRY_VERIFY(handover->property("running").toBool());
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.2);
+    // In the fade, the title going out still breaks anywhere, the one
+    // coming in between words.
+    {
+        QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowTitle"));
+        QQuickItem *incomingWindow = itemNamed(panel, QStringLiteral("nowPlayingIncomingNarrowTitleWindow"));
+        QVERIFY(outgoing != nullptr && incomingWindow != nullptr && !incomingWindow->childItems().isEmpty());
+        QQuickItem *incoming = incomingWindow->childItems().first();
+        QCOMPARE(outgoing->property("text").toString(), longTitle);
+        QCOMPARE(outgoing->property("wrapMode").toInt(), kWrapAnywhere);
+        QCOMPARE(incoming->property("text").toString(), shortTitle);
+        QCOMPARE(incoming->property("wrapMode").toInt(), kWrap);
+    }
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QTRY_VERIFY(settled());
+    QCOMPARE(title->property("text").toString(), shortTitle);
+    QCOMPARE(title->property("wrapMode").toInt(), kWrap);
+    QCOMPARE(title->property("lineCount").toInt(), 2);
+    QVERIFY(!title->property("truncated").toBool());
+    const qreal lantern = metrics.horizontalAdvance(QStringLiteral("Lantern"));
+    QTRY_VERIFY2(std::abs(firstLineInk() - lantern) <= 4.0,
+                 qPrintable(QStringLiteral("line 0 %1 px, \"Lantern\" %2").arg(firstLineInk()).arg(lantern)));
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
