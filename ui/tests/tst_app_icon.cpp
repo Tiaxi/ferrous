@@ -1051,6 +1051,17 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
         const double tall = columnOf(traces.back(), x).sum;
         QVERIFY2(std::abs(tall - heights.back()) <= 0.05, qPrintable(QStringLiteral("the harmonic's column %1: %2 px tall").arg(x).arg(tall)));
     }
+    // At 16 px the fundamental's too, over its first climb: its top and
+    // bottom edges climb in one column, so that no column of its start is
+    // more than its 2 px (#373 hill climb, H22: they climbed a column apart,
+    // and the start read as a block three rows tall).
+    if (size == 16) {
+        for (int x = start; x < start + 4; ++x) {
+            const double tall = columnOf(traces.front(), x).sum;
+            QVERIFY2(std::abs(tall - heights.front()) <= 0.05,
+                     qPrintable(QStringLiteral("the fundamental's column %1: %2 px tall").arg(x).arg(tall)));
+        }
+    }
 }
 
 void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim_data() {
