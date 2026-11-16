@@ -1075,12 +1075,16 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
     QTest::addColumn<QSize>("windowSize");
     QTest::addColumn<int>("viewMode");
+    // The application font's size, or 0 for the default.
+    QTest::addColumn<qreal>("pointSize");
     for (const QSize &size : {QSize(1600, 1000), QSize(1000, 720)}) {
         for (const int mode : {0, 1}) {
             QTest::addRow("%dx%d, %s", size.width(), size.height(), mode == 0 ? "mixed" : "per channel")
-                << size << mode;
+                << size << mode << 0.0;
         }
     }
+    // 24 pt: the lanes shorter, two lines each.
+    QTest::newRow("1600x1000, per channel, 24 pt") << QSize(1600, 1000) << 1 << 24.0;
 }
 
 // The never-played pane's rest lines keep clear of the plates over it: a
@@ -1094,10 +1098,22 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
 // 1000x720 no line is within 4 to 8 px of a plate, so nothing there
 // changed. Every tick keeps its line. The seam between the lanes at rest is a 3 px groove in
 // the plot's deep violet, centred on the 1 px seam and drawn over the
-// lanes, whose heights stay; playing, the seam is 1 px again.
+// lanes, whose heights stay; playing, the seam is 1 px again. A line in a
+// plate's band, within 4 px of its top or foot, is white 10 % rather than
+// 20 %, its cuts kept, and every other line 20 % (#373 H31 Y4: beside the
+// plates the line read as a connector cut into them), at the default font
+// and at 24 pt.
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
     QFETCH(QSize, windowSize);
     QFETCH(int, viewMode);
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont font = applicationFont;
+        font.setPointSizeF(pointSize);
+        QGuiApplication::setFont(font);
+    }
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
@@ -1136,6 +1152,17 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         }
         return lines;
     };
+    // Each line's colour, in the order of linesOf: white 20 %, or 10 %.
+    const auto lineColorsOf = [&](SpectrogramItem *pane) {
+        QList<QColor> colors;
+        QMutexLocker lock(&pane->m_stateMutex);
+        for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
+            const QColor own = pane->m_restGrid.lineColors.value(i);
+            colors.push_back(own.isValid() ? own : QColor(255, 255, 255, 51));
+        }
+        return colors;
+    };
+    int quiet = 0;
     // Laid out for the window's size, and drawn.
     for (SpectrogramItem *pane : panes()) {
         QTRY_VERIFY(!linesOf(pane).isEmpty());
@@ -1158,13 +1185,16 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         QTRY_VERIFY(!linesOf(pane).isEmpty());
         const QRectF lane = sceneRectOf(pane);
         const QList<QRectF> lines = linesOf(pane);
+        const QList<QColor> colors = lineColorsOf(pane);
+        QCOMPARE(colors.size(), lines.size());
         // Every tick keeps its line, most of the lane wide.
-        QVERIFY2(lines.size() >= 3, qPrintable(QString::number(lines.size())));
+        QVERIFY2(lines.size() >= (pointSize > 0 ? 2 : 3), qPrintable(QString::number(lines.size())));
         double topLine = lane.bottom();
         for (const QRectF &line : lines) {
             topLine = std::min(topLine, line.top());
         }
-        for (const QRectF &line : lines) {
+        for (qsizetype index = 0; index < lines.size(); ++index) {
+            const QRectF &line = lines.at(index);
             QVERIFY2(line.width() >= lane.width() / 2,
                      qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
             const auto within = [&](const QRectF &plate, double reach) {
@@ -1172,7 +1202,15 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
                     && plate.left() < lane.right() && plate.right() > lane.left();
             };
             const auto beside = [&](const QRectF &plate) { return within(plate, 8); };
-            if (windowSize == QSize(1000, 720)) {
+            // In a plate's band: the switch's, or its own lane's label's.
+            bool inBand = within(switchPlate, 4);
+            for (const QRectF &label : std::as_const(labels)) {
+                inBand = inBand || (within(label, 4) && label.top() >= lane.top() - 4 && label.top() < lane.bottom());
+            }
+            QVERIFY2(colors.at(index) == (inBand ? QColor(255, 255, 255, 26) : QColor(255, 255, 255, 51)),
+                     qPrintable(QStringLiteral("a line at y %1, alpha %2").arg(line.top()).arg(colors.at(index).alpha())));
+            quiet += inBand ? 1 : 0;
+            if (windowSize == QSize(1000, 720) && pointSize <= 0) {
                 for (const QRectF &plate : QList<QRectF>{switchPlate} + labels) {
                     QVERIFY2(within(plate, 8) == within(plate, 4),
                              qPrintable(QStringLiteral("a line at y %1, 4 to 8 px from a plate %2 to %3")
@@ -1208,9 +1246,13 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
     }
     // Per channel at 1600x1000, the first line is under the switch's foot,
     // and each lane's top line under its label, the first lane's too.
-    if (viewMode == 1 && windowSize == QSize(1600, 1000)) {
+    if (viewMode == 1 && windowSize == QSize(1600, 1000) && pointSize <= 0) {
         QVERIFY(shortened > 0);
         QCOMPARE(topLinesAfterALabel, laneCount);
+    }
+    // Per channel, a line in the plates' band, quieter.
+    if (viewMode == 1) {
+        QVERIFY(quiet > 0);
     }
 
     // The groove between the lanes at rest, per channel.
