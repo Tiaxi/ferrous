@@ -1011,15 +1011,16 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QQuickItem *spectrogramButton = visibleItemNamed(window, QStringLiteral("visualizationModeButton0"));
     QVERIFY(modeSwitch != nullptr && waveformButton != nullptr && spectrogramButton != nullptr);
 
-    // The pointer off the pane: the switch shows, in its corner, 4 px in.
+    // The pointer off the pane: the switch shows, in its corner, 5 px in,
+    // as the lane heads are (#373 H16 I5).
     QTest::mouseMove(window, QPoint(4, window->height() - 4));
     QVERIFY(!sceneRectOf(spectrogram).contains(QPointF(4, window->height() - 4)));
     QTRY_COMPARE(modeSwitch->opacity(), 1.0);
     QVERIFY(modeSwitch->isVisible());
     const QRectF pane = sceneRectOf(spectrogram);
     const QRectF plate = sceneRectOf(modeSwitch);
-    QCOMPARE(plate.top() - pane.top(), 4.0);
-    QCOMPARE(pane.right() - plate.right(), 4.0);
+    QCOMPARE(plate.top() - pane.top(), 5.0);
+    QCOMPARE(pane.right() - plate.right(), 5.0);
     // No message on the plot; a stereo track's lanes, named, without
     // Mute and Solo.
     QVERIFY(firstVisibleItemNamed(window->contentItem(), QStringLiteral("plotAnalysingText")) == nullptr);
@@ -1548,10 +1549,10 @@ void TransportInputSmokeTest::albumArtDetailsKeepBelowTheViewerControls() {
     QTRY_VERIFY((title = visibleItemNamed(window, QStringLiteral("albumArtInfoTitle"))) != nullptr);
     const qreal plateBottom = sceneRectOf(controls).bottom();
     if (pointSize == 0) {
-        QCOMPARE(plateBottom, 32.0);
-        QTRY_COMPARE(sceneRectOf(title).top(), 44.0);
+        QCOMPARE(plateBottom, 33.0);
+        QTRY_COMPARE(sceneRectOf(title).top(), 45.0);
     } else {
-        QVERIFY2(plateBottom > 32.0, qPrintable(QString::number(plateBottom)));
+        QVERIFY2(plateBottom > 33.0, qPrintable(QString::number(plateBottom)));
     }
     QTRY_COMPARE(albumArt->property("infoTopInset").toReal(), plateBottom);
     QTRY_VERIFY2(sceneRectOf(title).top() >= plateBottom + 12 - 0.5,
@@ -1733,14 +1734,14 @@ void TransportInputSmokeTest::fullscreenViewersGiveTheViewTheWholeScreen() {
     QVERIFY(albumArtAutoHide->property("active").toBool());
     QQuickItem *popupClose = visibleItemNamed(window, QStringLiteral("albumArtPopupCloseButton"));
     QVERIFY(popupClose != nullptr);
-    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
     albumArtAutoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!popupClose->isVisible());
     albumArtAutoHide->setProperty("hideDelay", 600000);
     QTest::mouseMove(window, QPoint(window->width() / 3, window->height() / 2));
     QTest::mouseMove(window, QPoint(window->width() / 3 + 5, window->height() / 2));
     QTRY_VERIFY(popupClose->isVisible());
-    QCOMPARE(sceneRectOf(popupClose).top(), 6.0);
+    QCOMPARE(sceneRectOf(popupClose).top(), 7.0);
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
@@ -1764,8 +1765,8 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     setChannelCount(bridge, surface, 2);
     QTRY_COMPARE(surface->property("laneCount").toInt(), 2);
 
-    // The pane's: the mode switch 4 px from the top, the first lane's head
-    // 5 px.
+    // The pane's: the mode switch and the first lane's head 5 px from the
+    // top (#373 H16 I5).
     const auto controlsTop = [](QQuickItem *in) {
         QQuickItem *modeSwitch = firstVisibleItemNamed(in, QStringLiteral("visualizationModeSwitch"));
         QQuickItem *laneHead = firstVisibleItemNamed(in, QStringLiteral("plotLaneHead"));
@@ -1773,14 +1774,14 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
                               laneHead ? sceneRectOf(laneHead).top() : -1.0);
     };
     QTRY_COMPARE(controlsTop(window->contentItem()),
-                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
+                 std::make_pair(sceneRectOf(surface).top() + 5.0, sceneRectOf(surface).top() + 5.0));
 
     // The viewer in the main window has no strip: the same.
     QVERIFY(QMetaObject::invokeMethod(viewer, "openSpectrogramViewer"));
     QObject *popup = window->findChild<QObject *>(QStringLiteral("spectrogramViewerPopup"));
     QVERIFY(popup != nullptr);
     QTRY_VERIFY(popup->property("opened").toBool());
-    QTRY_COMPARE(controlsTop(window->contentItem()), std::make_pair(4.0, 5.0));
+    QTRY_COMPARE(controlsTop(window->contentItem()), std::make_pair(5.0, 5.0));
     QVERIFY(QMetaObject::invokeMethod(viewer, "closeSpectrogramViewer"));
     QTRY_VERIFY(!viewer->property("spectrogramViewerOpen").toBool());
     QTRY_VERIFY(!popup->property("visible").toBool());
@@ -1797,7 +1798,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QQuickItem *strip = visibleItemNamed(fullscreen, QStringLiteral("spectrogramFullscreenStrip"));
     QVERIFY(strip != nullptr);
     QTRY_COMPARE(sceneRectOf(surface).top(), 0.0);
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
     auto *spectrogram = qobject_cast<SpectrogramItem *>(
         firstVisibleItemNamed(surface, QStringLiteral("spectrogramPaneItem")));
     QVERIFY(spectrogram != nullptr);
@@ -1805,17 +1806,17 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
     QCOMPARE(sceneRectOf(spectrogram).top(), 0.0);
     // The plot keeps its corner clear of the mode switch where it now is,
     // and of the 1 px edge around its plate.
-    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 4.0 + 30.0 + 1.0);
+    QTRY_COMPARE(spectrogram->reservedCorner().height(), 33.0 + 5.0 + 32.0 + 1.0);
     for (const int mode : {1, 0}) {
         viewer->setProperty("visualizationMode", mode);
         QTRY_COMPARE(viewer->property("visualizationMode").toInt(), mode);
         QQuickItem *modeSwitch =
             firstVisibleItemNamed(fullscreen->contentItem(), QStringLiteral("visualizationModeSwitch"));
         QVERIFY(modeSwitch != nullptr);
-        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 4.0);
+        QTRY_COMPARE(sceneRectOf(modeSwitch).top(), 33.0 + 5.0);
         QVERIFY(!sceneRectOf(strip).intersects(sceneRectOf(modeSwitch)));
     }
-    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 4.0, 33.0 + 5.0));
+    QTRY_COMPARE(controlsTop(fullscreen->contentItem()), std::make_pair(33.0 + 5.0, 33.0 + 5.0));
     autoHide->setProperty("hideDelay", 1);
     QTRY_VERIFY(!autoHide->property("controlsVisible").toBool());
     QTRY_VERIFY(!strip->isVisible());
@@ -1828,7 +1829,7 @@ void TransportInputSmokeTest::fullscreenVisualizationKeepsItsControlsBelowTheStr
 
     // Back in the pane, as before.
     QTRY_COMPARE(controlsTop(window->contentItem()),
-                 std::make_pair(sceneRectOf(surface).top() + 4.0, sceneRectOf(surface).top() + 5.0));
+                 std::make_pair(sceneRectOf(surface).top() + 5.0, sceneRectOf(surface).top() + 5.0));
 }
 
 void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
@@ -1884,8 +1885,8 @@ void TransportInputSmokeTest::viewersInTheMainWindowAreNamedInItsTitle() {
         QTRY_COMPARE(sceneRectOf(surface), QRectF(0, 0, window->width(), window->height()));
         QQuickItem *controls = visibleItemNamed(window, shown.controlsName);
         QVERIFY2(controls != nullptr, name.constData());
-        QCOMPARE(sceneRectOf(controls).right(), window->width() - 4.0);
-        QCOMPARE(sceneRectOf(controls).top(), 4.0);
+        QCOMPARE(sceneRectOf(controls).right(), window->width() - 5.0);
+        QCOMPARE(sceneRectOf(controls).top(), 5.0);
         QQuickItem *close = visibleItemNamed(window, shown.closeName);
         QVERIFY(close != nullptr && controls->isAncestorOf(close));
         QCOMPARE(sceneRectOf(close).size(), QSizeF(24, 24));
@@ -2106,9 +2107,9 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
                                                     ? QStringLiteral("spectrogramFullscreenCloseButton")
                                                     : QStringLiteral("spectrogramPopupCloseButton"));
         QVERIFY(close != nullptr);
-        // The window has its size: the controls end 4 px from its right.
+        // The window has its size: the controls end 5 px from its right.
         QTRY_COMPARE(sceneRectOf(controls).right(),
-                     fullscreenMode == 1 ? double(host->width()) : host->width() - 4.0);
+                     fullscreenMode == 1 ? double(host->width()) : host->width() - 5.0);
 
         for (const int mode : {0, 1}) {
             viewer->setProperty("visualizationMode", mode);

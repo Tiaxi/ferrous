@@ -3831,14 +3831,14 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
         return button->findChild<QQuickItem *>(QString::fromLatin1(name));
     };
 
-    // 3 px of plate around the buttons, 4 px between them.
+    // 4 px of plate around the buttons, 4 px between them (#373 H16 I5).
     QQuickItem *first = mode == 0 ? chosen : other;
     QQuickItem *second = mode == 0 ? other : chosen;
     const QRectF plateRect = rectOf(plate);
-    QCOMPARE(rectOf(first).left() - plateRect.left(), 3.0);
-    QCOMPARE(rectOf(first).top() - plateRect.top(), 3.0);
-    QCOMPARE(plateRect.right() - rectOf(second).right(), 3.0);
-    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 3.0);
+    QCOMPARE(rectOf(first).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(first).top() - plateRect.top(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(second).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(second).bottom(), 4.0);
     QCOMPARE(rectOf(second).left() - rectOf(first).right(), 4.0);
 
     // The other one focused from the keyboard: its ring inside the plate,
@@ -3851,7 +3851,8 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY(ring != nullptr && gap != nullptr && edge != nullptr);
     QTRY_VERIFY(ring->isVisible() && gap->isVisible() && edge->isVisible());
     const QRectF ringRect = rectOf(ring);
-    QVERIFY2(plateRect.contains(ringRect),
+    // With 1 px of the plate outside it (#373 H16 I5).
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(ringRect),
              qPrintable(QStringLiteral("ring %1,%2 %3x%4 in plate %5,%6 %7x%8")
                             .arg(ringRect.left()).arg(ringRect.top()).arg(ringRect.width()).arg(ringRect.height())
                             .arg(plateRect.left()).arg(plateRect.top()).arg(plateRect.width())
@@ -4075,6 +4076,36 @@ void AccessibilityTest::laneButtonsAreCheckableToggles() {
     QVERIFY2(problem(mute, true).isEmpty(), qPrintable(problem(mute, true)));
     QVERIFY(heads[0]->setProperty("muted", false));
     QTRY_VERIFY2(problem(mute, false).isEmpty(), qPrintable(problem(mute, false)));
+
+    // The buttons' plate: 4 px around them and between them, its top on
+    // one line with the label's and the mode switch's, and a button's
+    // focus ring inside it with 1 px of the plate outside it (#373 H16 I5:
+    // at 2 px, the ring ran past the plate's edge).
+    const auto rectOf = [](QQuickItem *item) {
+        return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+    };
+    QQuickItem *label = itemsNamed(heads[0], QStringLiteral("plotLaneLabel")).value(0);
+    QQuickItem *firstSolo = itemsNamed(heads[0], QStringLiteral("plotLaneSoloButton")).value(0);
+    QQuickItem *modeSwitch = itemsNamed(layer, QStringLiteral("visualizationModeSwitch")).value(0);
+    QVERIFY(label != nullptr && firstSolo != nullptr && modeSwitch != nullptr);
+    const QRectF plateRect = rectOf(plate);
+    QCOMPARE(rectOf(mute).left() - plateRect.left(), 4.0);
+    QCOMPARE(rectOf(mute).top() - plateRect.top(), 4.0);
+    QCOMPARE(rectOf(firstSolo).left() - rectOf(mute).right(), 4.0);
+    QCOMPARE(plateRect.right() - rectOf(firstSolo).right(), 4.0);
+    QCOMPARE(plateRect.bottom() - rectOf(mute).bottom(), 4.0);
+    QCOMPARE(plateRect.top(), rectOf(label).top());
+    QCOMPARE(rectOf(modeSwitch).top(), rectOf(label).top());
+    QCOMPARE(rectOf(label).top() - rectOf(layer).top(), 5.0);
+    QCOMPARE(rectOf(label).left() - rectOf(layer).left(), 5.0);
+    mute->forceActiveFocus(Qt::TabFocusReason);
+    QQuickItem *ring = mute->findChild<QQuickItem *>(QStringLiteral("plotToolButtonFocusRing"));
+    QVERIFY(ring != nullptr);
+    QTRY_VERIFY(ring->isVisible());
+    QVERIFY2(plateRect.adjusted(1, 1, -1, -1).contains(rectOf(ring)),
+             qPrintable(QStringLiteral("ring at %1,%2 in a plate at %3,%4")
+                            .arg(rectOf(ring).left()).arg(rectOf(ring).top())
+                            .arg(plateRect.left()).arg(plateRect.top())));
 }
 
 void AccessibilityTest::levelMeterReservesItsColumnAndReadsOut() {

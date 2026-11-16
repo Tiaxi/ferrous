@@ -310,7 +310,7 @@ Item {
             z: 20
             anchors.top: parent.top
             anchors.right: parent.right
-            anchors.margins: 4
+            anchors.margins: 5
             implicitWidth: popupControls.implicitWidth + 4
             implicitHeight: popupControls.implicitHeight + 4
             opacity: root.fullscreenControlsLevel

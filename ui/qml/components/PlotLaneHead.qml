@@ -57,8 +57,9 @@ Item {
         ? root.uiPalette.compactPointSize
         : root.uiPalette.smallPointSize
 
-    // The label's box: the buttons' plate, taller, is centred on it and
-    // overhangs it above and below.
+    // The label's box; the buttons' plate, taller, has its top on one line
+    // with the label's, as the mode switch's is (#373 H16 I5), and runs
+    // below it.
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
     // What the head takes of its lane, from its own top left, with the
@@ -87,7 +88,12 @@ Item {
         id: buttons
         objectName: "plotLaneButtons"
         x: labelPlate.width + 8
-        anchors.verticalCenter: labelPlate.verticalCenter
+        y: 0
+        // 4 px around the buttons and between them, as on the mode switch,
+        // so a button's focus ring, 3 px out from it, keeps 1 px of the
+        // plate outside it (#373 H16 I5).
+        padding: 4
+        contentSpacing: 4
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         visible: root.buttonsVisibility !== 0 && (root.controlsShown || root.controlsLevel > 0)

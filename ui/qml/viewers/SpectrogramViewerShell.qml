@@ -32,7 +32,7 @@ Item {
     property string positionText: "00:00"
     // How far the corner controls keep from the right edge, clear of the
     // level meter's column.
-    property real cornerRightMargin: 4
+    property real cornerRightMargin: 5
     // Whether the title strip shows over the whole screen when the pointer
     // moves: the Preferences setting.
     property bool stripEnabled: true
@@ -341,7 +341,7 @@ Item {
                 z: 20
                 anchors.top: parent.top
                 anchors.right: parent.right
-                anchors.topMargin: 4
+                anchors.topMargin: 5
                 anchors.rightMargin: root.cornerRightMargin
                 plotColors: root.uiPalette.plotColors(root.visualizationMode)
                 uiPalette: root.uiPalette

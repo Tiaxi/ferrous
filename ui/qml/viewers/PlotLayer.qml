@@ -89,6 +89,9 @@ Item {
     // have compact heads (#373 H8): 72 px with the default font, where a
     // 20 px label and its 28 px buttons would take most of the lane.
     readonly property real compactLaneHeight: 4 * Kirigami.Units.gridUnit
+    // The plates' inset from the plot's corners: the lane heads' and the
+    // mode switch's.
+    readonly property int plateInset: 5
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
@@ -115,8 +118,10 @@ Item {
         z: 2
         anchors.top: parent.top
         anchors.right: parent.right
-        anchors.topMargin: root.topInset + 4
-        anchors.rightMargin: (root.meterShown ? root.meterWidth + 6 : 4) + root.trailingInset
+        // 5 px in, as the lane heads are, their plates' tops on one line
+        // with its own (#373 H16 I5).
+        anchors.topMargin: root.topInset + root.plateInset
+        anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset + root.trailingInset
         // In a viewer, it hides and shows with the viewer's controls, at
         // their level; hidden, it takes no pointer.
         visible: root.controlsVisible || root.controlsLevel > 0
@@ -174,8 +179,8 @@ Item {
             required property int index
             objectName: "plotLaneHead"
             z: 1
-            x: 5
-            y: Math.max(root.laneTop(index), root.topInset) + 5
+            x: root.plateInset
+            y: Math.max(root.laneTop(index), root.topInset) + root.plateInset
             visible: label.length > 0
             plotColors: root.plotColors
             uiPalette: root.uiPalette

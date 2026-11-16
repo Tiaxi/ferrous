@@ -1866,7 +1866,7 @@ ApplicationWindow {
         errorController: errorController
         uiBridge: root.uiBridge
         positionText: playbackController.positionText
-        cornerRightMargin: plotLayer.meterShown ? plotLayer.meterWidth + 6 : 4
+        cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
     }
 

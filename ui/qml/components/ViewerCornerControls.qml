@@ -33,7 +33,8 @@ Item {
     property string closeButtonName: "viewerCloseButton"
 
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
-    readonly property real padding: 3
+    // As the mode switch's: a focus ring stays 1 px inside the plate.
+    readonly property real padding: 4
     readonly property real spacing: 4
     readonly property bool issuesShown: root.unseenIssueCount > 0
 
