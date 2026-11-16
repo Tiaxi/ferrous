@@ -2786,10 +2786,11 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates_data()
 }
 
 // A line at rest on a row beside a plate, the mode switch's corner or the
-// lane's label, or within 4 px under or over it, ends 6 px before the
+// lane's label, or within 8 px under or over it, ends 6 px before the
 // corner and starts 6 px after the label (#373 H29 W4: the first line ran
-// along the switch's foot); every tick keeps its line, and a line clear of
-// both runs the lane's width.
+// along the switch's foot; H30: one rule for both lanes, where the first
+// lane's top line 4 px under its label ran on); every tick keeps its line,
+// and a line clear of both runs the lane's width.
 void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
     QFETCH(double, scale);
     SpectrogramItem item;
@@ -2809,18 +2810,22 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
         QCOMPARE(line.x(), 0);
         QCOMPARE(line.width(), width);
     }
-    // Plates around the second line from the top: the corner's foot 1 px
-    // over it, the label's top 3 px under it; the top line is beside the
-    // corner alone.
+    // Plates around the second line from the top, each past the 4 px the
+    // rule reached before and within its 8: the corner's foot 5 px over it,
+    // the label's top 6 px under it; the top line is beside the corner
+    // alone.
     QList<int> rows;
     for (const QRect &line : plain.lines) {
         rows.push_back(line.y());
     }
     std::sort(rows.begin(), rows.end());
     const double row = rows.at(1) / scale;
-    QVERIFY(row > 8);
-    item.setReservedCorner(QSizeF(70, row - 1));
-    item.setLaneLabelBounds(QRectF(4, row + 3, 20, 18));
+    QVERIFY(row > 12);
+    constexpr double reach = 8.0;
+    const double cornerFoot = row - 5;
+    const double labelTop = row + 6;
+    item.setReservedCorner(QSizeF(70, cornerFoot));
+    item.setLaneLabelBounds(QRectF(4, labelTop, 20, 18));
     const SpectrogramOverlayLayout clear = layOut();
     QCOMPARE(clear.lines.size(), plain.lines.size());
     int cornerOnly = 0;
@@ -2832,8 +2837,8 @@ void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
         QCOMPARE(line.height(), plain.lines.at(i).height());
         const double top = line.y() / scale;
         const double bottom = (line.y() + line.height()) / scale;
-        const bool besideCorner = top < row - 1 + 4;
-        const bool besideLabel = bottom > row + 3 - 4 && top < row + 21 + 4;
+        const bool besideCorner = top < cornerFoot + reach;
+        const bool besideLabel = bottom > labelTop - reach && top < labelTop + 18 + reach;
         QCOMPARE(line.x(), besideLabel ? qCeil((24 + 6) * scale) : 0);
         QCOMPARE(line.x() + line.width(), besideCorner ? qFloor((600 - 70 - 6) * scale) : width);
         cornerOnly += besideCorner && !besideLabel ? 1 : 0;
