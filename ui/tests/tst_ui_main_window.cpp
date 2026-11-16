@@ -661,7 +661,9 @@ QString standInProblem(QQuickWindow *window) {
     const bool wide = panel->property("layoutMode").toString() == QStringLiteral("wide");
     // The narrow layout's 96 px, or the compact one's (#373 H15 H1).
     const qreal side = wide ? panel->width() : panel->property("narrowLayoutCoverSize").toReal();
-    if (!wide && side != (panel->property("compactLayout").toBool() ? panel->property("compactCoverSize").toReal() : 96.0)) {
+    const qreal narrowSide = panel->property("largeHeader").toBool() ? panel->property("headerCoverSize").toReal()
+        : panel->property("narrowBeside").toBool() ? panel->property("besideCoverSize").toReal() : 96.0;
+    if (!wide && (side < 96.0 || side != narrowSide)) {
         return QStringLiteral("the narrow cover's side %1").arg(side);
     }
     // At the panel's corner, wide or narrow, at any font size (#373 H14
@@ -1258,13 +1260,27 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     QVERIFY(panel->property("textTruncated").toBool());
     QCOMPARE(title->property("x").toReal(), 0.0);
 
-    // Narrow: a 96 px cover with the lines beside it, then 12 px and the
-    // seam before the library.
+    // Narrow: the cover with the lines beside it, as high as the block,
+    // flush with its top, its left and the seam (#373 H28 V2: a 96 px
+    // cover left a 25 px band of the view under it), the block as high as
+    // the 96 px cover's or the lines' room, then 12 px.
     window->resize(1000, 720);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
-    QTRY_COMPARE(cover->width(), 96.0);
-    QCOMPARE(cover->height(), 96.0);
     QVERIFY(!panel->property("narrowStacked").toBool());
+    QVERIFY(panel->property("narrowBeside").toBool());
+    QVERIFY(grown(window));
+    {
+        const qreal block = std::max(96.0, panel->property("narrowTextTop").toReal()
+                                               + panel->property("narrowReservedHeight").toReal()) + 12;
+        QTRY_COMPARE(panel->height(), block + 1);
+        QTRY_COMPARE(cover->width(), block);
+        QCOMPARE(cover->height(), block);
+        QVERIFY2(block > 96.0 + 12, qPrintable(QString::number(block)));
+        QCOMPARE(sceneRect(cover).topLeft(), sceneRect(panel).topLeft());
+        QCOMPARE(sceneRect(cover).bottom(), sceneRect(seam).top());
+        // The lines' top stays, 10 px down beside it.
+        QCOMPARE(sceneRect(named(window, "nowPlayingNarrowTitle")).top() - sceneRect(panel).top(), 10.0);
+    }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
     QVERIFY(shown(narrowTitle));
     QCOMPARE(sceneRect(narrowTitle).left() - sceneRect(cover).right(), 12.0);
@@ -1276,13 +1292,12 @@ void UiMainWindowTest::nowPlayingHasItsWideNarrowAndEmptyLayouts() {
     // Beside the cover the long title wraps onto a second line, where it
     // is cut off (#373 H11: on one line, beside the cover at 24 pt, most
     // of a title was), and the seam is 12 px under the lowest of the
-    // cover and the lines.
+    // lines, the cover flush with it.
     QTRY_COMPARE(narrowTitle->property("lineCount").toInt(), 2);
     QVERIFY(narrowTitle->property("truncated").toBool());
     QVERIFY(QQuickTest::qWaitForPolish(window));
-    QTRY_COMPARE(sceneRect(seam).top() - std::max(sceneRect(cover).bottom(),
-                                                  sceneRect(named(window, "nowPlayingNarrowDetails")).bottom()),
-                 12.0);
+    QTRY_COMPARE(sceneRect(seam).top() - sceneRect(named(window, "nowPlayingNarrowDetails")).bottom(), 12.0);
+    QCOMPARE(sceneRect(cover).bottom(), sceneRect(seam).top());
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     // A title that fits stays on one line, and the block keeps the room of
     // two (#373 H28: it shrank to the cover's, so a track change moved the
@@ -1366,21 +1381,33 @@ void UiMainWindowTest::nowPlayingTitleIsAStepOverItsLines() {
 
 void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize_data() {
     QTest::addColumn<qreal>("pointSize");
-    QTest::addColumn<bool>("stacked");
-    QTest::newRow("10 pt") << 10.0 << false;
-    QTest::newRow("14 pt") << 14.0 << false;
-    QTest::newRow("24 pt") << 24.0 << true;
+    QTest::addColumn<QString>("arrangement");
+    QTest::addColumn<qreal>("coverSide");
+    // Beside the cover, which fills the block where the lines keep a dozen
+    // characters beside it (0: the block's height less the seam), and is
+    // 96 px where they would not (#373 H28 V2).
+    QTest::newRow("10 pt") << 10.0 << QStringLiteral("beside") << 0.0;
+    QTest::newRow("14 pt") << 14.0 << QStringLiteral("beside") << 96.0;
+    QTest::newRow("18 pt") << 18.0 << QStringLiteral("stacked") << 96.0;
+    // (-1: two lines of the title.)
+    QTest::newRow("24 pt") << 24.0 << QStringLiteral("header") << -1.0;
 }
 
 // In a narrow window, at any font size, the now-playing lines all show,
 // each with at least 8 characters of its text (#373 H2, 24 pt in 1000 by
-// 720): beside the 96 px cover, the block as tall as the cover or as its
-// lines, whichever is taller; under the cover, on the whole width, once the
-// room beside it is under about 12 characters. Then 12 px and the seam
+// 720): beside the cover, the block as tall as the 96 px cover or as its
+// lines, whichever is taller, the cover filling it where the lines keep a
+// dozen characters beside it; under the 96 px cover, on the whole width,
+// once the room beside it is under about 12 characters; and with a large
+// font, the header: the title beside a cover two of its lines high, the
+// rest under it on the whole width (#373 H28 V1). Then 12 px and the seam
 // before the library.
 void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     QFETCH(qreal, pointSize);
-    QFETCH(bool, stacked);
+    QFETCH(QString, arrangement);
+    QFETCH(qreal, coverSide);
+    const bool stacked = arrangement == QStringLiteral("stacked");
+    const bool headerRow = arrangement == QStringLiteral("header");
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
@@ -1398,11 +1425,23 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
     QQuickItem *panel = named(window, "nowPlayingPanel");
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QCOMPARE(panel->property("narrowStacked").toBool(), stacked);
+    QCOMPARE(panel->property("largeHeader").toBool(), headerRow);
+    QCOMPARE(panel->property("narrowBeside").toBool(), arrangement == QStringLiteral("beside"));
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *seam = named(window, "nowPlayingSeam");
     QQuickItem *header = named(window, "libraryHeader");
-    QTRY_COMPARE(cover->width(), 96.0);
     QVERIFY(grown(window));
+    QTRY_VERIFY(QQuickTest::qWaitForPolish(window));
+    if (coverSide == 0.0) {
+        coverSide = panel->height() - 1;
+    } else if (coverSide < 0) {
+        const QFontMetricsF titleMetrics(named(window, "nowPlayingNarrowTitle")->property("font").value<QFont>());
+        coverSide = panel->property("headerCoverSize").toReal();
+        QVERIFY2(coverSide > 96.0 && std::abs(coverSide - 2 * titleMetrics.height()) <= 6.0,
+                 qPrintable(QString::number(coverSide)));
+    }
+    QTRY_COMPARE(cover->width(), coverSide);
+    QCOMPARE(cover->height(), coverSide);
     // The lines laid out for the font, one under the other.
     QTRY_VERIFY(sceneRect(named(window, "nowPlayingNarrowArtist")).top()
                     >= sceneRect(named(window, "nowPlayingNarrowTitle")).bottom()
@@ -1412,8 +1451,9 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
                     >= sceneRect(named(window, "nowPlayingNarrowAlbum")).bottom());
     const QRectF tile = sceneRect(cover);
     const QRectF block = sceneRect(panel);
+    QCOMPARE(tile.topLeft(), block.topLeft());
 
-    qreal bottom = tile.bottom();
+    qreal bottom = 0;
     for (const char *name : {"nowPlayingNarrowTitle", "nowPlayingNarrowArtist", "nowPlayingNarrowAlbum",
                              "nowPlayingNarrowDetails"}) {
         QQuickItem *line = named(window, name);
@@ -1428,6 +1468,12 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
         if (stacked) {
             QVERIFY2(rect.top() >= tile.bottom() + 12, name);
             QCOMPARE(rect.left(), block.left() + 12);
+        } else if (headerRow && qstrcmp(name, "nowPlayingNarrowTitle") != 0) {
+            // Under the header, 8 px under the cover, at the inset, on the
+            // whole width.
+            QVERIFY2(rect.top() >= tile.bottom() + 8, name);
+            QCOMPARE(rect.left(), block.left() + 12);
+            QCOMPARE(rect.width(), block.width() - 24);
         } else {
             QCOMPARE(rect.left(), tile.right() + 12);
         }
@@ -1438,21 +1484,37 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
                  qPrintable(QStringLiteral("%1: %2 in %3 px").arg(QString::fromLatin1(name), text).arg(rect.width())));
         bottom = std::max(bottom, rect.bottom());
     }
-    // The seam 12 px or more under the lowest of them or the cover: the
-    // block keeps the room of a title on two lines, whatever the track
-    // (#373 H28; nowPlayingNarrowBlockIsOneHeightForEveryTrack).
+    // The seam 12 px or more under the lowest of them, and under the cover
+    // but where the cover fills the block beside the lines, flush with the
+    // seam: the block keeps the room of a title on two lines, whatever the
+    // track (#373 H28; nowPlayingNarrowBlockIsOneHeightForEveryTrack).
     QTRY_VERIFY(sceneRect(seam).top() - bottom >= 12.0);
+    if (arrangement == QStringLiteral("beside") && coverSide > 96.0) {
+        QCOMPARE(tile.bottom(), sceneRect(seam).top());
+    } else {
+        QVERIFY(sceneRect(seam).top() - tile.bottom() >= 12.0);
+    }
     QCOMPARE(sceneRect(seam).bottom(), sceneRect(header).top());
     const qreal seamAt = sceneRect(seam).top();
+    if (headerRow) {
+        // The title from the cover's top; the artist 8 px under the cover,
+        // the album and the details 4 px apart, then 12 px.
+        QQuickItem *artist = named(window, "nowPlayingNarrowArtist");
+        QQuickItem *album = named(window, "nowPlayingNarrowAlbum");
+        QQuickItem *details = named(window, "nowPlayingNarrowDetails");
+        QCOMPARE(sceneRect(named(window, "nowPlayingNarrowTitle")).top(), tile.top());
+        QTRY_COMPARE(sceneRect(artist).top(), tile.bottom() + 8);
+        QCOMPARE(sceneRect(album).top(), sceneRect(artist).bottom() + 4);
+        QCOMPARE(sceneRect(details).top(), sceneRect(album).bottom() + 4);
+        QCOMPARE(seamAt - sceneRect(details).bottom(), 12.0);
+        return;
+    }
     if (!stacked) {
         // Beside the cover, the title 4 px over the artist (#373 H12: 2 px
         // ran it into the small lines), and the block no taller for it.
         QCOMPARE(sceneRect(named(window, "nowPlayingNarrowArtist")).top()
                      - sceneRect(named(window, "nowPlayingNarrowTitle")).bottom(),
                  4.0);
-        if (pointSize <= 10.0) {
-            QCOMPARE(bottom, tile.bottom());
-        }
         return;
     }
 
@@ -1484,10 +1546,16 @@ void UiMainWindowTest::nowPlayingNarrowShowsEveryLineAtAnyFontSize() {
         QTRY_COMPARE(text->property("lineCount").toInt(), 2);
         QTRY_VERIFY2(!line->property("truncated").toBool(), qPrintable(line->objectName()));
         const QFontMetricsF metrics(text->property("font").value<QFont>());
-        QTRY_VERIFY2(line->height() >= 2 * metrics.height() - 1, qPrintable(line->objectName()));
+        // (Text lays a line out on whole pixels, up to one under the
+        // font's height.)
+        QTRY_VERIFY2(line->height() >= 2 * metrics.height() - 2, qPrintable(line->objectName()));
+    };
+    const auto gapsText = [&]() {
+        return QStringLiteral("%1 %2 %3").arg(sceneRect(artist).top() - sceneRect(title).bottom())
+            .arg(sceneRect(album).top() - sceneRect(artist).bottom()).arg(sceneRect(details).top() - sceneRect(album).bottom());
     };
     const auto blockKept = [&]() {
-        QTRY_VERIFY(gapsAreFour());
+        QTRY_VERIFY2(gapsAreFour(), qPrintable(gapsText()));
         QVERIFY(QQuickTest::qWaitForPolish(window));
         QCOMPARE(sceneRect(seam).top(), seamAt);
         QVERIFY(sceneRect(seam).top() - sceneRect(details).bottom() >= 12.0);
@@ -1529,7 +1597,11 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack_data() {
     QTest::newRow("beside, default font, 1000x720") << 10.0 << 1000 << 720 << QStringLiteral("beside");
     QTest::newRow("beside, 12 pt, 1000x720") << 12.0 << 1000 << 720 << QStringLiteral("beside");
     QTest::newRow("beside, 14 pt, 1000x720") << 14.0 << 1000 << 720 << QStringLiteral("beside");
-    QTest::newRow("stacked, 24 pt, 1000x720") << 24.0 << 1000 << 720 << QStringLiteral("stacked");
+    // In a 270 px sidebar, too narrow for the title beside the header's
+    // cover.
+    QTest::newRow("stacked, 18 pt, 1000x720") << 18.0 << 1000 << 720 << QStringLiteral("stacked");
+    QTest::newRow("header, 16 pt, 1000x720") << 16.0 << 1000 << 720 << QStringLiteral("header");
+    QTest::newRow("header, 24 pt, 1000x720") << 24.0 << 1000 << 720 << QStringLiteral("header");
     QTest::newRow("compact, default font, 1600x700") << 10.0 << 1600 << 700 << QStringLiteral("compact");
     QTest::newRow("header, 24 pt, 1600x1000") << 24.0 << 1600 << 1000 << QStringLiteral("header");
 }
@@ -1565,8 +1637,10 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QCOMPARE(panel->property("narrowStacked").toBool(), arrangement == QStringLiteral("stacked"));
     QCOMPARE(panel->property("compactLayout").toBool(),
-             arrangement == QStringLiteral("compact") || arrangement == QStringLiteral("header"));
-    QCOMPARE(panel->property("compactHeader").toBool(), arrangement == QStringLiteral("header"));
+             (arrangement == QStringLiteral("compact") || arrangement == QStringLiteral("header"))
+                 && !panel->property("narrow").toBool());
+    QCOMPARE(panel->property("largeHeader").toBool(), arrangement == QStringLiteral("header"));
+    QCOMPARE(panel->property("narrowBeside").toBool(), arrangement == QStringLiteral("beside"));
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(handover != nullptr);
     // The lines laid out (the column places them when it is polished),
@@ -1587,6 +1661,20 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
             .arg(sceneRect(header).top());
     };
     const QString common = sample();
+    // The large-font header's block, from the fonts alone: its cover, as
+    // high as two lines of the title and never under 96 px, 8 px, the
+    // artist, the album and the details, 4 px apart, then 12 px and the
+    // seam (#373 H28 V1).
+    if (arrangement == QStringLiteral("header")) {
+        QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+        const qreal titleLine = QFontMetricsF(title->property("font").value<QFont>()).height();
+        const qreal side = panel->property("headerCoverSize").toReal();
+        QVERIFY2(side >= 96.0 && side >= std::round(2 * titleLine) - 1 && side <= std::max(96.0, 2 * titleLine + 6),
+                 qPrintable(QStringLiteral("%1 for a title line of %2").arg(side).arg(titleLine)));
+        QCOMPARE(named(window, "nowPlayingCover")->width(), side);
+        QCOMPARE(panel->height(), side + 8 + 3 * details->height() + 2 * 4 + 12 + 1);
+        QCOMPARE(panel->height(), panel->property("largeHeaderHeight").toReal() + 12 + 1);
+    }
     // The lines stay in the block, 12 px or more over the seam.
     const auto linesInside = [&]() {
         return sceneRect(seam).top() - sceneRect(details).bottom() >= 11.0;
@@ -1649,6 +1737,11 @@ void UiMainWindowTest::nowPlayingNarrowBlockIsOneHeightForEveryTrack() {
              bridge->setProperty("currentTrackTitle", longTitle.repeated(2));
              bridge->setProperty("currentTrackArtist", longArtist.repeated(2));
              bridge->setProperty("currentTrackAlbum", longAlbum.repeated(2));
+         }},
+        {"no cover",
+         [&]() {
+             playTrack(bridge);
+             bridge->setProperty("currentTrackCoverPath", QString());
          }},
         {"common again", [&]() { playTrack(bridge); }},
     };
@@ -1734,7 +1827,7 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
     // 132 px; at the panel's corner, the lines 12 px after it.
     const qreal coverSide = std::clamp(
         static_cast<qreal>(std::round(lineHeight(title) + 4 + 2 * lineHeight(artist))), 96.0, 132.0);
-    QCOMPARE(panel->property("compactCoverSize").toReal(), coverSide);
+    QCOMPARE(panel->property("narrowLayoutCoverSize").toReal(), coverSide);
     QCOMPARE(cover->width(), coverSide);
     QCOMPARE(cover->height(), coverSide);
     QCOMPARE(sceneRect(cover).topLeft(), sceneRect(panel).topLeft());
@@ -1836,22 +1929,30 @@ void UiMainWindowTest::nowPlayingCompactKeepsTheAlbumAndItsYear() {
 
 void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow_data() {
     QTest::addColumn<int>("windowWidth");
-    QTest::newRow("1600x1000") << 1600;
-    QTest::newRow("1920x1000") << 1920;
+    QTest::addColumn<int>("windowHeight");
+    // The compact layout, in a sidebar wide enough for the wide one.
+    QTest::newRow("1600x1000") << 1600 << 1000;
+    QTest::newRow("1920x1000") << 1920 << 1000;
+    // A narrow sidebar, 360 px (#373 H28 V1: the 96 px cover stood alone
+    // on a row over the lines).
+    QTest::newRow("1000x720") << 1000 << 720;
 }
 
-// With a large font, the compact layout is a header row and lines on the
-// whole width (#373 H16 I1: beside a 132 px cover six reserved lines left
-// some 160 px empty under it, the year wrapped onto a line of its own and
-// the artist was cut off): the cover at the panel's corner, the title, on
-// up to two lines, and the artist, on one, beside it, 12 px after it and
-// from its top, the cover as high as the two lines of the title, the gap
-// and the artist; 8 px under it, at the 12 px inset and on the whole
-// width, "Album (Year)" on one line, the album cut off before its year,
-// and the details on one line. The block is one height whatever the track
-// has, so the library's header never moves on a track change.
+// With a large font, the narrow layouts are a header row and lines on the
+// whole width, in a narrow sidebar and in the compact layout alike (#373
+// H16 I1: beside a 132 px cover six reserved lines left some 160 px empty
+// under it; H28 V1: in a narrow sidebar the 96 px cover stood alone on a
+// row with some 264 px empty beside it, and in the compact one the artist
+// beside a 152 px cover was cut off): the cover at the panel's corner, as
+// high as two lines of the title, and the title, on up to two lines,
+// beside it, 12 px after it and from its top; 8 px under the cover, at the
+// 12 px inset and on the whole width, the artist, "Album (Year)", the
+// album cut off before its year, and the details, a line each, 4 px apart.
+// The block is one height whatever the track has, so the library's header
+// never moves on a track change.
 void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QFETCH(int, windowWidth);
+    QFETCH(int, windowHeight);
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QFont font = applicationFont;
@@ -1859,7 +1960,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QGuiApplication::setFont(font);
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
-    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, 1000);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, windowWidth, windowHeight);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *bridge = bridgeOf(window);
     QQuickItem *panel = named(window, "nowPlayingPanel");
@@ -1874,8 +1975,10 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     playTrack(bridge);
     QVERIFY(grown(window));
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
-    QVERIFY(panel->property("compactLayout").toBool());
-    QVERIFY(panel->property("compactHeader").toBool());
+    QCOMPARE(panel->property("compactLayout").toBool(), !panel->property("narrow").toBool());
+    QCOMPARE(panel->property("narrow").toBool(), windowWidth == 1000);
+    QVERIFY(panel->property("largeHeader").toBool());
+    QVERIFY(!panel->property("narrowStacked").toBool());
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QVERIFY(handover != nullptr);
     const auto settled = [&]() { return !handover->property("running").toBool(); };
@@ -1885,35 +1988,31 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
         return QFontMetricsF(line->property("font").value<QFont>()).height();
     };
 
-    // A title on two lines: the cover spans it and the artist under it.
+    // A title on two lines: the cover spans them.
     bridge->setProperty("currentTrackTitle", QStringLiteral("Lantern Signal Over The Harbour At Night"));
     QTRY_COMPARE(title->property("lineCount").toInt(), 2);
     QTRY_VERIFY(settled());
-    const qreal side = panel->property("compactCoverSize").toReal();
+    const qreal side = panel->property("headerCoverSize").toReal();
     QVERIFY2(side > 96.0, qPrintable(QString::number(side)));
-    QVERIFY2(std::abs(side - (2 * lineHeight(title) + 4 + lineHeight(artist))) <= 6.0,
-             qPrintable(QStringLiteral("%1 for %2 and %3").arg(side).arg(lineHeight(title)).arg(lineHeight(artist))));
+    QVERIFY2(std::abs(side - 2 * lineHeight(title)) <= 6.0,
+             qPrintable(QStringLiteral("%1 for %2").arg(side).arg(lineHeight(title))));
     QCOMPARE(cover->width(), side);
     QCOMPARE(cover->height(), side);
     const QRectF coverRect = sceneRect(cover);
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft());
     QTRY_COMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
-    QCOMPARE(sceneRect(artist).left(), coverRect.right() + 12);
-    QTRY_VERIFY2(std::abs(sceneRect(artist).bottom() - coverRect.bottom()) <= 1.0,
-                 qPrintable(QStringLiteral("the artist ends at %1, the cover at %2")
-                                .arg(sceneRect(artist).bottom()).arg(coverRect.bottom())));
-    for (QQuickItem *line : {title, artist}) {
-        QVERIFY(sceneRect(line).right() <= panelRect.right() - 12);
-    }
+    QVERIFY(sceneRect(title).right() <= panelRect.right() - 12);
+    // At least a dozen characters beside the cover.
+    QVERIFY2(title->width() >= panel->property("narrowLineMinimum").toReal(), qPrintable(QString::number(title->width())));
     // Under the cover, 8 px down, at the inset and on the whole width.
     const auto checkFootLines = [&]() {
-        QCOMPARE(sceneRect(album).topLeft(), QPointF(panelRect.left() + 12, coverRect.bottom() + 8));
+        QCOMPARE(sceneRect(artist).topLeft(), QPointF(panelRect.left() + 12, coverRect.bottom() + 8));
+        QCOMPARE(artist->width(), panelRect.width() - 24);
+        QCOMPARE(sceneRect(album).topLeft(), QPointF(panelRect.left() + 12, sceneRect(artist).bottom() + 4));
         QCOMPARE(album->width(), panelRect.width() - 24);
-        QCOMPARE(sceneRect(details).left(), panelRect.left() + 12);
+        QCOMPARE(sceneRect(details).topLeft(), QPointF(panelRect.left() + 12, sceneRect(album).bottom() + 4));
         QCOMPARE(details->width(), panelRect.width() - 24);
-        QVERIFY(sceneRect(details).top() >= sceneRect(album).bottom() - 1);
-        QVERIFY2(sceneRect(seam).top() - sceneRect(details).bottom() >= 11.0,
-                 qPrintable(QString::number(sceneRect(seam).top() - sceneRect(details).bottom())));
+        QCOMPARE(sceneRect(seam).top() - sceneRect(details).bottom(), 12.0);
     };
     checkFootLines();
     QTRY_COMPARE(album->property("wholeText").toString(), QStringLiteral("Small Hours (2005)"));
@@ -1936,7 +2035,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
         return QList<QRectF>{sceneRect(panel), sceneRect(header), sceneRect(cover), sceneRect(album)};
     };
     const QList<QRectF> before = geometry();
-    QCOMPARE(panel->height(), panel->property("compactHeaderHeight").toReal() + 12 + 1);
+    QCOMPARE(panel->height(), panel->property("largeHeaderHeight").toReal() + 12 + 1);
 
     // A long artist and album: the artist on one line, elided; the album
     // cut off before its year, which shows whole after it on the line.
@@ -1963,25 +2062,16 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(geometry(), before);
     checkFootLines();
 
-    // Under a title on one line, an artist too long for one line takes the
-    // line the title leaves, whole, inside the cover's height; the block
-    // stays (#373 H18 C2: it was cut off with a line free).
+    // Under a title on one line, a long artist stays on its own line under
+    // the cover, elided, and the title's second line beside the cover stays
+    // empty; the block stays.
     bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
-    // The fewest words that take a second line.
-    for (QString words = QStringLiteral("Quiet"); words.size() < 200; words += QStringLiteral(" Quiet")) {
-        bridge->setProperty("currentTrackArtist", words);
-        QCoreApplication::processEvents();
-        if (artist->property("lineCount").toInt() == 2) {
-            break;
-        }
-    }
+    bridge->setProperty("currentTrackArtist", longArtist);
     QTRY_COMPARE(title->property("lineCount").toInt(), 1);
-    QTRY_COMPARE(artist->property("lineCount").toInt(), 2);
-    QTRY_VERIFY2(!artist->property("truncated").toBool(), qPrintable(artist->property("text").toString()));
+    QTRY_VERIFY(artist->property("truncated").toBool());
+    QCOMPARE(artist->property("lineCount").toInt(), 1);
     QTRY_VERIFY(settled());
-    QTRY_VERIFY2(sceneRect(artist).bottom() <= coverRect.bottom() + 1.0,
-                 qPrintable(QStringLiteral("the artist ends at %1, the cover at %2")
-                                .arg(sceneRect(artist).bottom()).arg(coverRect.bottom())));
+    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
     QCOMPARE(geometry(), before);
     checkFootLines();
 
@@ -2908,7 +2998,7 @@ void UiMainWindowTest::nothingPlayingIsACompactRow() {
     playTrack(bridgeOf(window));
     QTRY_VERIFY(!panel->property("idle").toBool());
     QVERIFY(grown(window));
-    QTRY_COMPARE(cover->width(), narrow ? 96.0 : panel->width());
+    QTRY_COMPARE(cover->width(), narrow ? panel->property("narrowLayoutCoverSize").toReal() : panel->width());
     QCOMPARE(cover->height(), cover->width());
     QVERIFY(shown(cover));
     QCOMPARE(sceneRect(cover).topLeft(), sceneRect(panel).topLeft());
@@ -3006,15 +3096,15 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     QVERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
 
     // Short: narrow, the compact cover, 96 px with the default font and
-    // with a large one as high as two lines of the title and one of the
-    // artist (#373 H16 I1), and at least six rows of the library.
+    // with a large one the header's, as high as two lines of the title
+    // (#373 H16 I1, H28 V1), and at least six rows of the library.
     window->resize(windowWidth, shortHeight);
     QTRY_COMPARE(window->height(), shortHeight);
     QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("narrow"));
     QVERIFY(panel->property("shortHeight").toBool());
-    const qreal coverSide = panel->property("compactCoverSize").toReal();
+    const qreal coverSide = panel->property("narrowLayoutCoverSize").toReal();
     QVERIFY2(pointSize > 0 ? coverSide > 96.0 : coverSide == 96.0, qPrintable(QString::number(coverSide)));
-    QCOMPARE(panel->property("compactHeader").toBool(), pointSize > 0);
+    QCOMPARE(panel->property("largeHeader").toBool(), pointSize > 0);
     QTRY_COMPARE(cover->width(), coverSide);
     QCOMPARE(panel->property("wideReservedHeight").toReal(), reserved);
     QTRY_VERIFY2(rows() >= 6, qPrintable(QString::number(rows())));
@@ -3036,16 +3126,15 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
                              "nowPlayingNarrowDetails"}) {
         QQuickItem *line = named(window, name);
         QVERIFY2(line != nullptr && shown(line), name);
-        // With a large font, the album and the details under the header
-        // row, at the panel's inset (#373 H16 I1).
-        const bool under = pointSize > 0 && (qstrcmp(name, "nowPlayingNarrowAlbum") == 0
-                                             || qstrcmp(name, "nowPlayingNarrowDetails") == 0);
+        // With a large font, all but the title under the header row, at
+        // the panel's inset (#373 H16 I1, H28 V1).
+        const bool under = pointSize > 0 && qstrcmp(name, "nowPlayingNarrowTitle") != 0;
         QTRY_COMPARE(sceneRect(line).left(), under ? sceneRect(panel).left() + 12 : tile.right() + 12);
         QVERIFY2(sceneRect(line).right() <= sceneRect(panel).right() - 12, name);
         lowest = std::max(lowest, sceneRect(line).bottom());
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
-    // Beside the compact header's cover, from its top.
+    // Beside the large-font header's cover, from its top.
     QCOMPARE(sceneRect(narrowTitle).top(),
              sceneRect(panel).top() + (pointSize > 0 ? 0.0 : panel->property("narrowTextTop").toReal()));
     QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
@@ -3060,7 +3149,7 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
     // the title and the album (#373 H14 G2) and one for the artist (H15
     // H1), then 12 px.
     QVERIFY(panel->property("compactLayout").toBool());
-    const qreal reservedLines = pointSize > 0 ? panel->property("compactHeaderHeight").toReal()
+    const qreal reservedLines = pointSize > 0 ? panel->property("largeHeaderHeight").toReal()
                                               : std::max(coverSide, panel->property("compactLinesHeight").toReal());
     QTRY_COMPARE(sceneRect(seam).top(), sceneRect(panel).top() + reservedLines + 12);
     QVERIFY(sceneRect(seam).top() - lowest >= 12.0);

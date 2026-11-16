@@ -242,14 +242,14 @@ QtObject {
     // icon's rim, as the icon's tile has one, so it reads as a cover rather
     // than a hole.
     readonly property color plotFloorEdge: ColorUtils.mixColor(root.plotFloor, Qt.color("#6a4ad0"), 0.45)
-    // The seam between the lanes at rest, never played: the floor's violet
-    // lightened, white over it, the least in whole percent that is 1.45:1
-    // on it (15 %, #372b4d), so it reads in the plot's own hue and above
-    // the rest lines' 1.3:1 (#373 H15 H7: the playing seam's neutral grey
-    // stood apart from the violet floor and its lines). Playing, the seam
-    // is plotLaneSeam's neutral one.
-    readonly property color plotRestLaneSeam: ColorUtils.drawnOver(
-        root._tintOf(Qt.color("#ffffff"), root.plotFloor, 1.45), root.plotFloor)
+    // The seam between the lanes at rest, never played: a cut, the plot's
+    // deep violet under the floor, as the level meter's seams are (#373 H28
+    // V4: a lighter seam, #372b4d at 1.45:1, read as one more of the rest
+    // lines, white 20 % at 1.78:1, which it is now 1.87:1 from), in the
+    // plot's own hue (#373 H15 H7: the playing seam's neutral grey stood
+    // apart from the violet floor and its lines). Playing, the seam is
+    // plotLaneSeam's neutral one, which shows between lanes of silence.
+    readonly property color plotRestLaneSeam: root.spectrogramPlot.meterSeam
     // The never-played waveform's rest lines, at half of full scale over
     // and under each lane's centre line: the text over the view, the
     // least in whole percent that is 1.3:1 on it, as the spectrogram's rest
@@ -273,9 +273,9 @@ QtObject {
         plotTextSecondary: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.72)
         plotOutline: "#000000"
         // Neutral, as all that is drawn on the plot, and lighter than the
-        // floor: 1.41:1 on it, over the rest lines' 1.19:1, so the seam
-        // between lanes reads above them (#373 H14 G6: at 1.18:1 it was
-        // under them), and it shows between lanes of black silence too.
+        // floor: 1.41:1 on it, so the seam between lanes reads (#373 H14 G6:
+        // at 1.18:1 it did not), and it shows between lanes of black
+        // silence too.
         plotLaneSeam: "#2e2e2e"
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"

@@ -3769,7 +3769,8 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         }
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
-    // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
+    // over the switch's plate, 3:1 on it (#373 H28 V3; PlotToolButton's
+    // segmentFillOpacity), with its glyph in the text colour
     // whole; the other's glyph is at 72 % but while pressed (#373 H11: the
     // accent's solid fill read as keyboard focus; H12 Z4: whole under the
     // pointer, it rivalled the chosen one). Nothing of the switch is in the
@@ -3796,7 +3797,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             return QStringLiteral("the chosen one's plate does not show, or the other's does");
         }
         if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
-            || fill.alphaF() < 0.235f || fill.alphaF() > 0.345f
+            || fill.alphaF() < 0.3f || fill.alphaF() > 0.55f
             || std::abs(fill.alphaF() - chosen->property("segmentFillOpacity").toFloat()) > 0.005f) {
             return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
         }
@@ -4352,14 +4353,28 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // one's ring, which reaches the plate's edge on its side (#373 H14
         // G4).
         const QPointF plateSpot(mode == 0 ? 1.0 : switchPlate->width() - 1.0, switchPlate->height() / 2);
-        // Let the plates' fades settle before sampling: under a loaded
-        // parallel run a fixed wait caught the chosen segment mid-fade.
+        // Let the plates' and the plots' fades settle before sampling: under
+        // a loaded parallel run a fixed wait caught the chosen segment
+        // mid-fade, and so did a wait for its fill alone, which reads on its
+        // plate early in the mode switch's fade (#373 H28 V3): the chosen
+        // fill and the switch's plate the same in two grabs in a row.
+        QColor lastFill;
+        QColor lastPlate;
         const auto settledFill = [&]() {
             const QImage grab = window->grabWindow();
-            return contrastRatio(drawnAt(grab, window, checked, QPointF(checked->width() / 2, 2.5)),
-                                 drawnAt(grab, window, switchPlate, plateSpot));
+            const QColor fill = drawnAt(grab, window, checked, QPointF(checked->width() / 2, 2.5));
+            const QColor plate = drawnAt(grab, window, switchPlate, plateSpot);
+            const bool same = fill == lastFill && plate == lastPlate;
+            lastFill = fill;
+            lastPlate = plate;
+            return same && contrastRatio(fill, plate) >= 1.4;
         };
-        QTRY_VERIFY_WITH_TIMEOUT(settledFill() >= 1.4, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(settledFill(), 3000);
+        // The level again, which decayed while the fades settled.
+        meter->m_channels.assign(2, {});
+        meter->m_channels[0].observe(-12, 0);
+        meter->m_shown = meter->m_channels;
+        meter->update();
         const QImage image = window->grabWindow();
         // The label's text on its plate.
         const QColor plate = drawnAt(image, window, label, QPointF(1.5, 1.5));
@@ -4398,7 +4413,8 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         };
         const QColor checkedInk = inkOf(checkedGlyph, fill);
         QVERIFY2(contrastRatio(checkedInk, fill) >= 4.5,
-                 qPrintable(QStringLiteral("%1 chosen glyph: %2").arg(what).arg(contrastRatio(checkedInk, fill))));
+                 qPrintable(QStringLiteral("%1 chosen glyph: %2 (%3 on %4)").arg(what)
+                                .arg(contrastRatio(checkedInk, fill)).arg(checkedInk.name(), fill.name())));
         const QColor uncheckedInk = inkOf(uncheckedGlyph, switchFill);
         QVERIFY2(contrastRatio(uncheckedInk, switchFill) >= 3.0,
                  qPrintable(QStringLiteral("%1 other glyph: %2 (%3 on %4, %5 at %6)").arg(what)

@@ -341,8 +341,8 @@ Item {
         }
     }
 
-    // The seams between the lanes: at rest in the floor's violet, over its
-    // rest lines (UiPalette's plotRestLaneSeam).
+    // The seams between the lanes: at rest a cut in the plot's deep violet,
+    // apart from its rest lines (UiPalette's plotRestLaneSeam).
     Rectangle {
         objectName: "spectrogramLaneSeams"
         width: root.plotWidth

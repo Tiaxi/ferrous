@@ -1140,6 +1140,43 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QObject *spectrogramPlot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
     QCOMPARE(seams->property("color").value<QColor>(), palette->property("plotRestLaneSeam").value<QColor>());
     QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
+    // As drawn (#373 H28 V4: the lines at 1.3:1 left the never-played pane
+    // an empty slab, and the seam, at 1.45:1, read as one more line): the
+    // rest lines white 20 % over the floor, some 1.78:1 on it, and the seam
+    // between the lanes a cut, darker than the floor, well apart from them.
+    {
+        const auto luminance = [](const QColor &color) {
+            const auto channel = [](double value) {
+                return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+            };
+            return 0.2126 * channel(color.redF()) + 0.7152 * channel(color.greenF()) + 0.0722 * channel(color.blueF());
+        };
+        const auto contrast = [&](const QColor &a, const QColor &b) {
+            return (std::max(luminance(a), luminance(b)) + 0.05) / (std::min(luminance(a), luminance(b)) + 0.05);
+        };
+        const QColor floor = palette->property("plotFloor").value<QColor>();
+        QRect line;
+        {
+            SpectrogramItem *pane = panes().at(0);
+            QMutexLocker lock(&pane->m_stateMutex);
+            QVERIFY(!pane->m_restGrid.lines.isEmpty());
+            line = pane->m_restGrid.lines.constLast();
+        }
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        QVERIFY(!image.isNull());
+        const double scale = double(image.width()) / window->width();
+        const QPointF origin = upper.topLeft() * scale;
+        const QColor drawnLine = image.pixelColor(int(origin.x()) + line.center().x(), int(origin.y()) + line.top());
+        const double lineContrast = contrast(drawnLine, floor);
+        QVERIFY2(lineContrast >= 1.72 && lineContrast <= 1.84,
+                 qPrintable(QStringLiteral("rest line %1, %2:1 on the floor").arg(drawnLine.name()).arg(lineContrast)));
+        const QColor drawnSeam = image.pixelColor(int((pane.center().x()) * scale), int((upper.bottom() + 0.5) * scale));
+        QCOMPARE(drawnSeam.rgb(), palette->property("plotRestLaneSeam").value<QColor>().rgb());
+        QVERIFY2(luminance(drawnSeam) < luminance(floor), qPrintable(drawnSeam.name()));
+        QVERIFY2(contrast(drawnSeam, drawnLine) >= 1.8,
+                 qPrintable(QStringLiteral("seam %1 on the lines' %2").arg(drawnSeam.name(), drawnLine.name())));
+    }
     // The scale shown: its labels too.
     QVERIFY(bridge->setProperty("showSpectrogramScale", true));
     QTRY_VERIFY2(restProblem(true).isEmpty(), qPrintable(restProblem(true)));

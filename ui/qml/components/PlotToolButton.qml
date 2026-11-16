@@ -15,18 +15,18 @@ import "../logic/KeyUtils.js" as KeyUtils
 // A `segment`, one of a plate's choices of which one is always checked,
 // as the visualization's mode switch, shows the chosen one as a neutral
 // plate instead (#373 H11: the accent's solid blue read as keyboard focus,
-// and as the loudest thing on the plot): the plot's text colour at 24 %
-// or more over the plate inside a 1 px edge of the plot's segmentEdge, at
-// least 3:1 on the plate and on the fill (#373 H14 F4), with its glyph in
+// and as the loudest thing on the plot): the plot's text colour over the
+// plate, 3:1 on a dark one (#373 H28 V3), inside a 1 px edge of the plot's
+// segmentEdge, at least 3:1 on the plate and on the fill (#373 H14 F4), with its glyph in
 // the text colour whole; the others' glyphs are at 72 %, whole only while
 // pressed. Under the pointer one of the others has a wash of the text
 // colour at 10 % or more, 1.25:1 on the plate, and its glyph at 85 %,
 // which show (#373 H14 G4: 8 % and 60 % were 1.2:1, nearly invisible),
 // fading in and out over shortDuration, OutCubic; the chosen one's plate
-// is 1.45:1 on that wash, more on a light plate where the same tints are
-// closer, so a hovered choice never reads as the chosen one (#373 H12 Z4:
-// the 12 % hover with a whole glyph came to the plate's brightness; H15
-// H4: 18 % on 14 % was 1.14:1). The accent is left to the focus ring. A segment is a
+// is 2:1 or more on that wash, so a hovered choice never reads as the
+// chosen one (#373 H12 Z4: the 12 % hover with a whole glyph came to the
+// plate's brightness; H15 H4: 18 % on 14 % was 1.14:1). The accent is
+// left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (#373 H12: as a plain button
 // it told of its checked state changing but not that it could be checked),
@@ -61,8 +61,17 @@ ToolButton {
         return 0.6
     }
     readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.25)
-    readonly property real segmentFillOpacity: root._tintFor(0.24, ColorUtils.drawnOver(
-        ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 1.45)
+    // The chosen one's fill: 2:1 on the hover wash, and on a dark plate 3:1
+    // on the plate, so the choice reads by its fill and not by its edge
+    // alone (#373 H28 V3: at 2:1 on the plate it was carried by the edge,
+    // beside the lanes' solid M and S). On a light plate it stops at the
+    // wash's 2:1, some 2.5:1 on the plate: at 3:1 the thin strokes of its
+    // dark glyph drew under 4.5:1 on it.
+    readonly property bool lightPlate: ColorUtils.relativeLuminance(root.plateColor) > 0.5
+    readonly property real segmentFillOpacity: Math.max(
+        root.lightPlate ? 0 : root._tintFor(0.24, root.plateColor, 3),
+        root._tintFor(0.24, ColorUtils.drawnOver(
+            ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 2))
     readonly property real segmentRestOpacity: 0.72
     readonly property real segmentHoverGlyphOpacity: 0.85
     // The chosen segment's edge: the plot's, or lighter on a dark plate and
