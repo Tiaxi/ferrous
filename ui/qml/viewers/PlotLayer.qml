@@ -343,9 +343,11 @@ Item {
         clipColor: root.uiPalette.negative
         tickColor: root.plotColors.meterTick
         topSeamColor: root.plotColors.meterTopSeam
-        // Part of the instrument (#373 H7 P11): on the spectrogram, the
-        // scale's ticks show with the plot's own.
-        scaleShown: root.visualizationMode === 0 && root.uiBridge.showSpectrogramScale === true
+        // On the waveform, whose colour the bar has, the bar is framed by
+        // its trough, so it reads as an instrument rather than as the
+        // waveform's tail (#373 H16 I3). Its marks and scale are the same
+        // in both modes.
+        framed: root.visualizationMode === 1
         // Out to the pane's edge, in the main window and in the viewers
         // alike: its bar is far wider than the queue's scrollbar above it.
     }

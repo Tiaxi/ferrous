@@ -23,21 +23,24 @@
 // is a vertical meter from -60 to 0 dBFS, with its listed levels evenly
 // spaced (-6, -12, -24 and -48 dB at 4/5 to 1/5 of the height): an 11 px
 // track the lane's height, and on it a 10 px bar out to the column's right
-// edge, with the track showing 1 px left of it: the fill from the bottom
-// and a 3 px clip lamp at the top. The fill is a ladder, 2 px rungs on a
-// 3 px pitch from the scale's foot, the track showing between them, so it
-// reads as an instrument, with some 40 % of a solid bar's ink (#373 H14
-// G3: a 15 px solid bar was louder than the data, and in the view's
+// edge, with the track showing 1 px left of it, or, `framed`, an 8 px bar
+// 2 px in from either edge of the column, the track framing it: the fill
+// from the bottom and a 3 px clip lamp at the top. The fill is a ladder,
+// 3 px rungs on a 4 px pitch from the scale's foot, the track showing
+// between them, so it reads as an instrument rather than a solid bar (#373
+// H14 G3: a 15 px solid bar was louder than the data, and in the view's
 // colours read as the thumb of the queue's scrollbar above the pane, whose
-// right edge it shares; H8, H7). The rungs are of one colour, fillColor:
-// on the spectrogram the app icon's harmonic magenta, at 3:1 on the trough
-// (#373 H15 H2: the colour map's capped magenta, which with a ladder's
-// rungs was one colour at nearly every level, was 2.3:1 on it). While
-// `scaleShown`,
-// 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
-// in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
-// 1 px gap under it where it is on the fill. Without a track, stopped, it
-// is an empty track. A `topSeamColor` that is not transparent draws a 1 px
+// right edge it shares; H8, H7; H16 I3: 2 px rungs on a 3 px pitch read as
+// a hatch). The meter's marks, at -6, -12 and -24 dB (only -6 and -24 in a
+// lane under 64 px), are 2 px gaps in the ladder, its rungs starting again
+// over each, and a 1 px tick across the track in each gap, which shows
+// above the fill too (#373 H16 I3: without them the ladder had no
+// reference). The same marks, scale and input in either visualization
+// mode; only the colours, and the frame, differ. The rungs are of one
+// colour, fillColor: on the spectrogram the app icon's harmonic magenta,
+// at 3:1 on the trough (#373 H15 H2). A 2 px peak tick, at full
+// brightness, with a 1 px gap under it where it is on the fill. Without a
+// track, stopped, it is an empty track. A `topSeamColor` that is not transparent draws a 1 px
 // line across the column's top, which sets it apart from what is above
 // it, as the queue's scrollbar lane over the waveform's meter (#373 H12
 // Z5: in the view's greys the bar read as a piece of that scrollbar).
@@ -60,12 +63,14 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor peakColor MEMBER m_peakColor WRITE setPeakColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipOffColor MEMBER m_clipOffColor WRITE setClipOffColor NOTIFY colorsChanged)
     Q_PROPERTY(QColor clipColor MEMBER m_clipColor WRITE setClipColor NOTIFY colorsChanged)
-    // The scale's ticks across the track.
+    // The marks' ticks across the track.
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
-    // Whether the plot shows its scale: the meter then shows its ticks.
-    Q_PROPERTY(bool scaleShown READ scaleShown WRITE setScaleShown NOTIFY scaleShownChanged)
+    // Whether the bar is framed by the track, kFramedInset in from either
+    // edge of the column, as on the waveform, where the bar in the plot's
+    // own colour otherwise read as the waveform's tail (#373 H16 I3).
+    Q_PROPERTY(bool framed READ framed WRITE setFramed NOTIFY framedChanged)
     // Whether something reads the levels, such as a tooltip: then
     // readoutChanged() tells it of new ones, a few times a second. It also
     // does while an assistive technology is active.
@@ -96,21 +101,29 @@ public:
     // the lamp.
     static constexpr double kBarLeft = 2.0;
     static constexpr double kBarWidth = kColumnWidth - kBarLeft;
+    // A framed bar: kFramedInset in from either edge of the column.
+    static constexpr double kFramedInset = 2.0;
+    static constexpr double kFramedBarWidth = kColumnWidth - 2 * kFramedInset;
     // The meter keeps 3 px clear above and below in its lane; its top 3 px
     // are the clip lamp, with a 1 px gap under it.
     static constexpr double kInset = 3.0;
     static constexpr double kLampHeight = 3.0;
-    // Lanes under this height have only the -12 and -24 dB ticks.
+    // Lanes under this height have only the -6 and -24 dB marks.
     static constexpr double kFullScaleLaneHeight = 64.0;
     // The fill's rungs: kRungHeight lit pixels in every kRungPitch, from
-    // the scale's foot.
-    static constexpr double kRungHeight = 2.0;
-    static constexpr double kRungPitch = 3.0;
-    // Whether the logical pixel `fromFoot` up from the scale's foot is on
-    // a rung rather than in a gap between two.
-    static bool isRung(double fromFoot);
-    // The ticks of the scale, in dB, as a lane of `laneHeight` shows them.
-    static std::vector<double> ticksDb(double laneHeight);
+    // the scale's foot and from over each mark's gap.
+    static constexpr double kRungHeight = 3.0;
+    static constexpr double kRungPitch = 4.0;
+    // A mark's gap in the ladder, centred on its level.
+    static constexpr double kMarkGap = 2.0;
+    // The marks, in dB, as a lane of `laneHeight` shows them.
+    static std::vector<double> marksDb(double laneHeight);
+    // The marks of a scale `scaleHeight` logical pixels tall: each gap's
+    // foot, in whole logical pixels up from the scale's foot, in order.
+    static std::vector<int> markGaps(double scaleHeight);
+    // Whether the logical pixel `fromFoot` up the foot of a scale
+    // `scaleHeight` tall is on a rung rather than in a gap.
+    static bool isRung(double fromFoot, double scaleHeight);
 
     explicit LevelMeterItem(QQuickItem *parent = nullptr);
     ~LevelMeterItem() override;
@@ -142,8 +155,8 @@ public:
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
     void setTickColor(const QColor &value) { setColor(m_tickColor, value); }
-    bool scaleShown() const { return m_scaleShown; }
-    void setScaleShown(bool value);
+    bool framed() const { return m_framed; }
+    void setFramed(bool value);
 
     QString sourcePath() const { return m_sourcePath; }
     PlaybackClock *clock() const { return m_clock; }
@@ -166,7 +179,7 @@ signals:
     void activeChanged();
     void colorsChanged();
     void readoutWantedChanged();
-    void scaleShownChanged();
+    void framedChanged();
     // The levels laneReadout() gives changed.
     void readoutChanged();
 
@@ -269,7 +282,7 @@ private:
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
     QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
     QColor m_topSeamColor{Qt::transparent};
-    bool m_scaleShown{false};
+    bool m_framed{false};
     // Tells readers of the levels of new ones, at most every 250 ms.
     QTimer m_readoutTimer;
     // Wakes the meter when the drawn levels next change, while no frame is due.
