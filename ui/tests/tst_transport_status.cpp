@@ -939,62 +939,117 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     QVERIFY(!hoverLine->isVisible());
     QVERIFY(!tip->property("visible").toBool());
 
-    // Over the bar, at 62% of its width.
+    // Over the bar, at 62% of its width. The time waits a moment, so a
+    // pointer crossing the bar shows none, and its line comes with it.
     const QRectF bar = sceneRect(seek);
     const QPointF at(bar.left() + std::round(bar.width() * 0.62), bar.center().y());
+    QElapsedTimer waited;
     QTest::mouseMove(harness.window, at.toPoint());
+    waited.start();
+    QVERIFY(tip->property("shown").toBool());
+    QVERIFY(!tip->property("visible").toBool());
+    QVERIFY(!hoverLine->isVisible());
+    QTRY_VERIFY(tip->property("visible").toBool());
+    QVERIFY2(waited.elapsed() >= 70, qPrintable(QString::number(waited.elapsed())));
     QTRY_VERIFY(hoverLine->isVisible());
     QCOMPARE(sceneRect(hoverLine).left(), std::floor(at.x()));
     QCOMPARE(hoverLine->width(), 1.0);
     QCOMPARE(hoverLine->height(), 28.0);
     QVERIFY(sameColor(hoverLine->property("color").value<QColor>(), withAlpha(harness.token("text"), 0.7)));
-    QTRY_VERIFY(tip->property("visible").toBool());
     const double seconds = seek->property("hoverSecond").toInt();
     const QString expected = QStringLiteral("%1:%2")
                                  .arg(static_cast<int>(seconds) / 60)
                                  .arg(static_cast<int>(seconds) % 60, 2, 10, QLatin1Char('0'));
     QCOMPARE(tip->property("text").toString(), expected);
     QVERIFY2(!expected.startsWith(QLatin1Char('0')), qPrintable(expected));
-    // Within the bar's height, in the transport's band, so it covers
-    // nothing under it such as the queue's header (#373 H5); left of the
-    // line, where the pointer is not, 6 px clear of it.
+    // Above the bar, its bottom edge on the bar's top, centred on the line:
+    // it covers none of the waveform it reads (#373 H33 AA2), and nothing
+    // under the bar such as the queue's header (#373 H5).
     auto *tipBox = tip->property("background").value<QQuickItem *>();
-    QVERIFY(tipBox != nullptr);
-    const QRectF band = sceneRect(harness.item(QStringLiteral("transportBar")));
+    QQuickItem *waveform = harness.item(QStringLiteral("seekWaveform"));
+    QVERIFY(tipBox != nullptr && waveform != nullptr);
     QTRY_VERIFY(tip->property("opened").toBool());
+    const auto expectAbove = [&](const QRectF &tipRect) {
+        QVERIFY2(std::abs(tipRect.bottom() - bar.top()) <= 0.5, qPrintable(describeRect(tipRect)));
+        QVERIFY2(!tipRect.intersects(sceneRect(waveform)), qPrintable(describeRect(tipRect)));
+        QVERIFY2(!tipRect.intersects(bar), qPrintable(describeRect(tipRect)));
+    };
     QRectF tipRect = sceneRect(tipBox);
-    QVERIFY2(std::abs(tipRect.center().y() - bar.center().y()) <= 1.0, qPrintable(describeRect(tipRect)));
-    QVERIFY2(tipRect.top() >= band.top() && tipRect.bottom() <= band.bottom(), qPrintable(describeRect(tipRect)));
-    QCOMPARE(tipRect.right(), at.x() - 6.0);
-    QVERIFY(!tipRect.intersects(sceneRect(hoverLine)));
+    expectAbove(tipRect);
+    QVERIFY2(std::abs(tipRect.center().x() - at.x()) <= 1.0, qPrintable(describeRect(tipRect)));
+    QVERIFY(tipRect.left() < at.x() && tipRect.right() > at.x());
 
-    // Just right of the playhead, where on the left it would cover it: on
-    // the right, clear of the pointer's arrow. It covers neither the hover
-    // line nor the playhead.
+    // Beside the playhead, still centred on the line, now that it covers
+    // neither the playhead nor the waveform: nothing to dodge.
     QQuickItem *playhead = harness.item(QStringLiteral("seekPlayhead"));
     QVERIFY(playhead != nullptr);
     const QRectF head = sceneRect(playhead);
-    const QPointF nearHead(std::round(head.right() + 20), bar.center().y());
+    const QPointF nearHead(std::round(head.right() + 4), bar.center().y());
     QTest::mouseMove(harness.window, nearHead.toPoint());
     QTRY_COMPARE(sceneRect(hoverLine).left(), std::floor(nearHead.x()));
-    QTRY_VERIFY(!tip->property("placedLeft").toBool());
     tipRect = sceneRect(tipBox);
-    QCOMPARE(tipRect.left(), nearHead.x() + evaluateOn(seek, QStringLiteral("Kirigami.Units.gridUnit")).toReal());
-    QVERIFY(!tipRect.intersects(sceneRect(hoverLine)));
+    expectAbove(tipRect);
+    QVERIFY2(std::abs(tipRect.center().x() - nearHead.x()) <= 1.0, qPrintable(describeRect(tipRect)));
     QVERIFY(!tipRect.intersects(head));
-    QVERIFY2(std::abs(tipRect.center().y() - bar.center().y()) <= 1.0, qPrintable(describeRect(tipRect)));
 
-    // At the bar's start, where the left has no room: on the right.
+    // At either end of the bar, within it.
     const QPointF atStart(bar.left() + 3, bar.center().y());
     QTest::mouseMove(harness.window, atStart.toPoint());
     QTRY_COMPARE(sceneRect(hoverLine).left(), atStart.x());
-    QTRY_VERIFY(!tip->property("placedLeft").toBool());
-    QVERIFY(sceneRect(tipBox).left() >= atStart.x() + 1);
+    tipRect = sceneRect(tipBox);
+    expectAbove(tipRect);
+    QCOMPARE(tipRect.left(), bar.left());
+    const QPointF atEnd(bar.right() - 2, bar.center().y());
+    QTest::mouseMove(harness.window, atEnd.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), atEnd.x());
+    tipRect = sceneRect(tipBox);
+    expectAbove(tipRect);
+    QCOMPARE(tipRect.right(), bar.right());
+
+    // A menu bar's titles above the bar's start: the box keeps right of
+    // them, where it would reach over them, and is centred again past them.
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(transport != nullptr);
+    const qreal titlesEnd = bar.left() - sceneRect(transport).left() + 120;
+    transport->setProperty("menuTitlesEnd", titlesEnd);
+    const qreal clearOfTitles = sceneRect(transport).left() + titlesEnd
+        + evaluateOn(seek, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
+    for (const qreal offset : {3.0, 60.0, 119.0}) {
+        const QPointF under(bar.left() + offset, bar.center().y());
+        QTest::mouseMove(harness.window, under.toPoint());
+        QTRY_COMPARE(sceneRect(hoverLine).left(), under.x());
+        tipRect = sceneRect(tipBox);
+        expectAbove(tipRect);
+        QVERIFY2(tipRect.left() >= clearOfTitles - 0.5 && tipRect.left() <= clearOfTitles + 1.0,
+                 qPrintable(QStringLiteral("at %1: %2").arg(offset).arg(describeRect(tipRect))));
+    }
+    const QPointF pastTitles(clearOfTitles + 200, bar.center().y());
+    QTest::mouseMove(harness.window, pastTitles.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), pastTitles.x());
+    tipRect = sceneRect(tipBox);
+    QVERIFY2(std::abs(tipRect.center().x() - pastTitles.x()) <= 1.0, qPrintable(describeRect(tipRect)));
+    transport->setProperty("menuTitlesEnd", 0);
 
     // Away from the bar, both go.
     QTest::mouseMove(harness.window, QPoint(static_cast<int>(at.x()), static_cast<int>(bar.bottom() + 60)));
     QTRY_VERIFY(!hoverLine->isVisible());
     QTRY_VERIFY(!tip->property("visible").toBool());
+    QTRY_VERIFY(!tipBox->isVisible());
+
+    // A press on the bar shows the playhead's time at once, with no wait
+    // and no hover line, centred on the playhead above the bar.
+    QTest::mousePress(harness.window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
+    QVERIFY(seek->property("adjusting").toBool());
+    QVERIFY(tip->property("visible").toBool());
+    QTRY_VERIFY(tip->property("opened").toBool());
+    QVERIFY(!hoverLine->isVisible());
+    QQuickItem *playheadLine = harness.item(QStringLiteral("seekPlayheadLine"));
+    QVERIFY(playheadLine != nullptr);
+    tipRect = sceneRect(tipBox);
+    expectAbove(tipRect);
+    QVERIFY2(std::abs(tipRect.center().x() - sceneRect(playheadLine).center().x()) <= 1.0,
+             qPrintable(describeRect(tipRect)));
+    QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
 }
 
 void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar_data() {
