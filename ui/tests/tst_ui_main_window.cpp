@@ -962,6 +962,8 @@ private slots:
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
+    void emptyQueueNamesItselfAtThePanesInset_data();
+    void emptyQueueNamesItselfAtThePanesInset();
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
@@ -5130,6 +5132,61 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QCOMPARE(sceneRect(line).top(), sceneRect(queueHeader).top());
     QCOMPARE(sceneRect(line).height(), sceneRect(queueHeader).height());
     QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
+}
+
+void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("1600x1000") << 1600 << 1000 << 10.0;
+    QTest::newRow("1000x720") << 1000 << 720 << 10.0;
+    QTest::newRow("1600x1000, 24 pt") << 1600 << 1000 << 24.0;
+    QTest::newRow("1000x720, 24 pt") << 1000 << 720 << 24.0;
+}
+
+// An empty queue's name has no rows to align with: it sits at the panes'
+// 12 px inset, where "Library" is beside it (#373 H13: it stood alone at
+// the Title column's 66 px). With tracks, it is over the Title column, and
+// back at 12 px once they are gone.
+void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
+    QFETCH(int, width);
+    QFETCH(int, height);
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, width, height);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *library = named(window, "libraryPane");
+    QQuickItem *queueHeader = named(window, "queueHeader");
+    QQuickItem *libraryHeader = named(window, "libraryHeader");
+    QVERIFY(queue && library && queueHeader && libraryHeader);
+    QQuickItem *name = itemNamed(queueHeader, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *libraryName = itemNamed(libraryHeader, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *title = itemNamed(queueHeader, QStringLiteral("queueHeader_title"));
+    QVERIFY(name && libraryName && title);
+    QCOMPARE(bridge->property("queueLength").toInt(), 0);
+    const auto inset = [](QQuickItem *item, QQuickItem *pane) {
+        return item->mapToScene(QPointF()).x() - pane->mapToScene(QPointF()).x();
+    };
+    QTRY_COMPARE(inset(name, queue), 12.0);
+    QCOMPARE(inset(libraryName, library), 12.0);
+    QVERIFY(!name->property("truncated").toBool());
+
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    QVERIFY(inset(name, queue) > 12.0);
+
+    bridge->setProperty("queueRows", QVariantList{});
+    bridge->setProperty("queueLength", 0);
+    QTRY_COMPARE(inset(name, queue), 12.0);
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {
