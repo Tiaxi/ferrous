@@ -75,6 +75,9 @@ Item {
     property size reservedCorner: Qt.size(0, 0)
     // What the lowest lane's label and buttons take of it; see PlotLayer.
     property rect laneHeadBounds: Qt.rect(0, 0, 0, 0)
+    // What each lane's label and buttons take of it, by the lane's index;
+    // see PlotLayer's laneHeadBoundsByLane.
+    property var laneHeadBoundsByLane: []
     // The pointer hides once the overlays have faded out, not as they start.
     readonly property int pointerCursorShape: root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0
         ? Qt.ArrowCursor
@@ -397,6 +400,7 @@ Item {
                     showCrosshairTime: index === spectrogramRepeater.count - 1
                     laneHeadBounds: index === spectrogramRepeater.count - 1
                         ? root.laneHeadBounds : Qt.rect(0, 0, 0, 0)
+                    laneLabelBounds: root.laneHeadBoundsByLane[index] || Qt.rect(0, 0, 0, 0)
                     readoutPlateColor: root.uiPalette.spectrogramPlot.plotPlate
                     readoutPlateEdgeColor: root.uiPalette.spectrogramPlot.plotPlateEdge
                     readoutTextColor: root.uiPalette.spectrogramPlot.plotText
@@ -489,6 +493,24 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // At rest, never played, each seam between the lanes is a groove: 3 px
+    // of plotRestLaneSeam centred on it, over the lanes' rows beside it,
+    // so it reads as a cut between them (#373 H29 W4: 1 px of it was hard
+    // to find). The lanes keep their heights; playing, the seam is 1 px.
+    Repeater {
+        model: root.atRest ? Math.max(0, spectrogramRepeater.count - 1) : 0
+
+        delegate: Rectangle {
+            required property int index
+
+            objectName: "spectrogramRestSeamGroove"
+            width: root.plotWidth
+            y: PlotLanes.bottom(index, spectrogramRepeater.count, root.height) - 1
+            height: 3
+            color: root.uiPalette.plotRestLaneSeam
         }
     }
 }

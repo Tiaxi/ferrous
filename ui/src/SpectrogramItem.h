@@ -295,6 +295,9 @@ class SpectrogramItem : public QQuickItem, public PlaybackFrameScheduler::Client
     // What this lane's label and buttons take of it, from its top left; the
     // crosshair's time keeps clear of them. Empty without any.
     Q_PROPERTY(QRectF laneHeadBounds READ laneHeadBounds WRITE setLaneHeadBounds NOTIFY laneHeadBoundsChanged)
+    // What this lane's own label takes of it, from its top left, whichever
+    // lane it is; the lines at rest keep clear of it. Empty without one.
+    Q_PROPERTY(QRectF laneLabelBounds READ laneLabelBounds WRITE setLaneLabelBounds NOTIFY laneLabelBoundsChanged)
     // The readout's plates, in the plot's colours (UiPalette's PlotColors).
     // The floor, where the item has no column to draw: before any audio,
     // while a track is analysed, and the part of a rolling view not yet
@@ -382,6 +385,8 @@ public:
     void setShowCrosshairTime(bool value);
     QRectF laneHeadBounds() const;
     void setLaneHeadBounds(const QRectF &value);
+    QRectF laneLabelBounds() const;
+    void setLaneLabelBounds(const QRectF &value);
     QColor floorColor() const;
     void setFloorColor(const QColor &value);
     QColor readoutPlateColor() const;
@@ -493,6 +498,7 @@ signals:
     void crosshairReadoutChanged();
     void showCrosshairTimeChanged();
     void laneHeadBoundsChanged();
+    void laneLabelBoundsChanged();
     void readoutColorsChanged();
     void floorColorChanged();
     void markerSecondsChanged();
@@ -1225,6 +1231,7 @@ private:
     QRect m_crosshairHorizontalLineRect;
     bool m_showCrosshairTime{true};
     QRectF m_laneHeadBounds;
+    QRectF m_laneLabelBounds;
     // UiPalette's spectrogramPlot plates, until QML sets them.
     // floorColor, under the state mutex.
     QColor m_floorColor{0, 0, 0};
