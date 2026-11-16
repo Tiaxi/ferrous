@@ -1249,10 +1249,13 @@ Item {
     // in the font of `metrics` and elided on the last, is broken within a
     // word all the same: where a word is wider than the line, or where the
     // last line is cut off and its first word does not fit before the
-    // ellipsis. Breaking it anywhere then fills the first line (#373 H29
-    // W3: at 24 pt in the narrow window "A Remarkably Long …" took "A"
-    // alone on the first line, as "A Remarkably" did not fit it, and was
-    // cut off at "Remarka…" on the second, as "Remarkably…" did not).
+    // ellipsis (#373 H29 W3: at 24 pt in the narrow window "A Remarkably
+    // Long …" took "A" alone on the first line, as "A Remarkably" did not
+    // fit it, and was cut off at "Remarka…" on the second, as "Remarkably…"
+    // did not). Such a title steps down a size (FadingLine's
+    // `wordsPointSize`), and where it is cut within a word at that size
+    // too, it is hyphenated (_hyphenated) rather than broken anywhere
+    // (#373 H30: "A Remarka / bly Long …" split the word with no mark).
     function _cutWithinAWord(text, width, lines, metrics) {
         // Read the font, for the answer to follow it.
         metrics.font
@@ -1279,6 +1282,83 @@ Item {
             }
         }
         return false
+    }
+
+    // The hyphen a word broken between lines ends its first part with:
+    // U+2010, which is never a minus, nor a place to break again.
+    readonly property string wordBreakHyphen: "\u2010"
+    // The least of a word on either side of its hyphen, in characters.
+    readonly property int hyphenatedHead: 4
+    readonly property int hyphenatedTail: 3
+
+    // `text` as laid out onto `lines` lines `width` wide in the font of
+    // `metrics`, the last elided, where it is cut within a word
+    // (_cutWithinAWord): the words of the lines before the last as Text
+    // wraps them, but the word that would be cut, which breaks with a
+    // hyphen where its first part fills the line, at least hyphenatedHead
+    // characters of it before the hyphen and hyphenatedTail after it, the
+    // line ending there ("\n"). The rest, on the last line, is elided as
+    // usual. `text` as it is where it is not cut within a word, or where
+    // its word has no such break.
+    function _hyphenated(text, width, lines, metrics) {
+        // Read the font, for the answer to follow it.
+        metrics.font
+        if (!root._cutWithinAWord(text, width, lines, metrics))
+            return text
+        const fits = line => metrics.advanceWidth(line) <= width
+        const words = text.split(/\s+/).filter(word => word.length > 0)
+        const laid = []
+        let current = ""
+        let index = 0
+        let broken = false
+        while (index < words.length && laid.length < lines - 1) {
+            const word = words[index]
+            const joined = current.length > 0 ? current + " " + word : word
+            if (fits(joined)) {
+                current = joined
+                ++index
+                continue
+            }
+            // The word goes past the line: on the next one it is cut too
+            // where it is wider than a line, or where that line is the last
+            // and is cut off before the word with the ellipsis fits.
+            const nextIsLast = laid.length + 1 === lines - 1
+            const cut = !fits(word)
+                || (nextIsLast && !fits(words.slice(index).join(" ")) && !fits(word + "…"))
+            const at = cut ? root._hyphenPoint(word, current, fits) : 0
+            if (at > 0) {
+                laid.push((current.length > 0 ? current + " " : "") + word.slice(0, at) + root.wordBreakHyphen)
+                words[index] = word.slice(at)
+                current = ""
+                broken = true
+            } else if (current.length > 0) {
+                laid.push(current)
+                current = ""
+            } else {
+                // A word wider than a line with no break of its own.
+                return text
+            }
+        }
+        if (!broken)
+            return text
+        const rest = [current].concat(words.slice(index)).filter(part => part.length > 0)
+        return laid.concat(rest.length > 0 ? [rest.join(" ")] : []).join("\n")
+    }
+
+    // Where `word` breaks with a hyphen after `before`, the start of its
+    // line, so that the line fills (`fits`): the most characters of it
+    // that fit with the hyphen, at least hyphenatedHead and leaving at least
+    // hyphenatedTail, never within a surrogate pair; 0 for none.
+    function _hyphenPoint(word, before, fits) {
+        const start = before.length > 0 ? before + " " : ""
+        for (let at = word.length - root.hyphenatedTail; at >= root.hyphenatedHead; --at) {
+            const code = word.charCodeAt(at)
+            if (code >= 0xDC00 && code <= 0xDFFF)
+                continue
+            if (fits(start + word.slice(0, at) + root.wordBreakHyphen))
+                return at
+        }
+        return 0
     }
 
     // A text of a line (`wholeText`), as each of its layers draws it:
@@ -1315,7 +1395,19 @@ Item {
         // The height the tail adds on a line of its own.
         readonly property real tailLineHeight: lineText.tailOnItsOwnLine ? tailText.implicitHeight : 0
 
-        text: lineText.parts[0]
+        // The text without its tail, before any hyphen (_hyphenated).
+        readonly property string bodyText: lineText.parts[0]
+        // A line that keeps its words whole (FadingLine's
+        // `wordsPointSize`): a text the line's own size would cut within a
+        // word steps down to that size, each text on its own, so a text
+        // going out in a fade keeps the size it showed at.
+        readonly property bool stepsDown: lineText.owner.wordsPointSize > 0
+            && root._cutWithinAWord(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount,
+                                    ownSizeMetrics)
+        // Where it is cut within a word anyway, it breaks with a hyphen.
+        text: lineText.owner.breaksLongWords
+            ? root._hyphenated(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
+            : lineText.bodyText
         width: owner.width
         // On the foot of the line's seat, where it has one (see FadingLine's
         // seatHeight): each text by its own height, so a layer that fades
@@ -1325,16 +1417,10 @@ Item {
         y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
-        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap
-            : lineText.wrapsAnywhere ? Text.WrapAnywhere : Text.Wrap
-        // Where the text is broken within a word anyway, it breaks
-        // anywhere, so that the first line fills; otherwise between words
-        // (see _cutWithinAWord).
-        readonly property bool wrapsAnywhere: lineText.owner.breaksLongWords
-            && root._cutWithinAWord(lineText.text, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
+        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap : Text.Wrap
         textFormat: Text.PlainText
         font.family: root.uiPalette.baseFont.family
-        font.pointSize: owner.pointSize
+        font.pointSize: lineText.stepsDown ? owner.wordsPointSize : owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
         color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
@@ -1357,6 +1443,14 @@ Item {
         FontMetrics {
             id: tailMetrics
             font: lineText.font
+        }
+        // The line's own size, which the text steps down from.
+        FontMetrics {
+            id: ownSizeMetrics
+            font.family: lineText.font.family
+            font.pointSize: lineText.owner.pointSize
+            font.weight: lineText.owner.weight
+            font.features: lineText.owner.features
         }
 
         Text {
@@ -1411,9 +1505,13 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
-        // Whether a text that is broken within a word anyway breaks
-        // anywhere, rather than between words (see _cutWithinAWord).
+        // Whether a text that is broken within a word anyway breaks with a
+        // hyphen rather than anywhere (see _hyphenated).
         property bool breaksLongWords: false
+        // The size a text that the line's own size would cut within a word
+        // takes, so that its words stay whole; 0 for none (see
+        // _cutWithinAWord).
+        property real wordsPointSize: 0
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
         // line on the cover's foot (#373 H29 W1).
@@ -1867,6 +1965,12 @@ Item {
                 weight: Font.DemiBold
                 maximumLineCount: 2
                 breaksLongWords: true
+                // In the large-font header, a title the heading's size
+                // would cut within a word in its two lines takes the base
+                // size instead, DemiBold, with its words whole: "A
+                // Remarkably / Long Track Ti…" rather than "A Remarka / bly
+                // Long …" (#373 H30). Its seat stays as it is.
+                wordsPointSize: root.largeHeader ? root.uiPalette.basePointSize : 0
                 // In the large-font header, a title on one line on the
                 // cover's foot, where a title on two ends, so the header
                 // reads as one stack down to the lines under it (#373 H29
