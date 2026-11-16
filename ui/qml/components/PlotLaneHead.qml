@@ -68,9 +68,13 @@ Item {
         ? root.uiPalette.compactPointSize
         : root.uiPalette.smallPointSize
 
-    // The label's box; the buttons' plate, taller, has its top on one line
-    // with the label's, as the mode switch's is (#373 H16 I5), and runs
-    // below it.
+    // The label's box; the buttons' plate, taller, is centred on it, so
+    // that the label's letters and M and S stand on one centre line (#373
+    // H18 C4: with the plates' tops on one line, H16 I5, they stood 6 px
+    // apart). It reaches `plateReach` above the label, which the plot layer
+    // insets the head by, so that the plate's top is on one line with the
+    // mode switch's, and its centre line with the label's is the switch's.
+    readonly property real plateReach: Math.max(0, -buttons.y)
     implicitWidth: buttons.visible ? buttons.x + buttons.width : labelPlate.width
     implicitHeight: labelPlate.height
     // What the head takes of its lane, from its own top left, with the
@@ -100,7 +104,7 @@ Item {
         id: buttons
         objectName: "plotLaneButtons"
         x: labelPlate.width + 8
-        y: 0
+        y: Math.round((labelPlate.height - buttons.height) / 2)
         // 4 px around the buttons and between them, as on the mode switch,
         // so a button's focus ring, 3 px out from it, keeps 1 px of the
         // plate outside it (#373 H16 I5).

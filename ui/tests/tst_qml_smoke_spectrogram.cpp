@@ -2310,6 +2310,15 @@ void SpectrogramSmokeTest::shortLanesHaveCompactHeadsAndAReadoutClearOfTheSwitch
         QCOMPARE(head.mute->height(), head.label->height() + 4);
         // Mute and Solo hidden until the pointer is on the lane.
         QVERIFY(!head.buttons->property("revealed").toBool());
+        // Their plate centred on the label, inside the lane (#373 H18 C4).
+        const QRectF labelRect = head.label->mapRectToItem(layer, QRectF(0, 0, head.label->width(), head.label->height()));
+        const QRectF plateRect = head.buttons->mapRectToItem(layer, QRectF(0, 0, head.buttons->width(), head.buttons->height()));
+        QVERIFY2(std::abs(labelRect.center().y() - plateRect.center().y()) <= 0.5,
+                 qPrintable(QStringLiteral("label centre %1, plate centre %2")
+                                .arg(labelRect.center().y()).arg(plateRect.center().y())));
+        const int lane = static_cast<int>(std::floor((labelRect.top() + 1.0) / laneHeight));
+        QVERIFY2(plateRect.top() >= lane * laneHeight + 4.0 && plateRect.bottom() <= (lane + 1) * laneHeight,
+                 qPrintable(QStringLiteral("plate %1 to %2 in lane %3").arg(plateRect.top()).arg(plateRect.bottom()).arg(lane)));
     }
     // Back to stereo: the full heads again.
     showChannels(2, {QStringLiteral("L"), QStringLiteral("R")});
