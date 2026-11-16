@@ -42,7 +42,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   over moveDuration, InOutQuad, uncovering the cover, which lies at its
 //   full size in place all along (#373 H14 G5: a cover scaled up from a
 //   square in the middle of the band read as a zoom, with empty flanks),
-//   fading in over the first half, the lines and the library moving down
+//   fading in once the row has gone, from 12 % to 57 % of the move
+//   (#373 H15 H5), the lines and the library moving down
 //   with its foot, so nothing jumps (#373 H5); the lines fade in once the
 //   move is nearly done, so no text slides over the moving rows (#373 H12
 //   Z7). Going back to nothing
@@ -164,9 +165,12 @@ Item {
         const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
         return root._eased((root._moveTime(root.presence) * root.moveDuration - start) / length)
     }
-    // The cover's opacity as the layout grows: in over the first half of
-    // the move, whole for the rest of it.
-    readonly property real coverOpacity: Math.min(1, root.presence / 0.5)
+    // The compact row of nothing loaded is gone by idleGoneAt of the move,
+    // and only then does the cover start to show, in over the next 45 %
+    // of it, whole for the rest (#373 H15 H5: the row's "Nothing playing",
+    // at 0.8 to 0.2 as the cover came in, was drawn across the art).
+    readonly property real idleGoneAt: 0.12
+    readonly property real coverOpacity: Math.min(1, Math.max(0, (root.presence - root.idleGoneAt) / 0.45))
     // How far into the move, from 0 to 1, it is `presence` of the way:
     // InOutQuad's inverse.
     function _moveTime(presence) {
@@ -191,11 +195,12 @@ Item {
     // How far the playing track's layout has grown from the compact row:
     // 0 with nothing loaded, 1 with a track, between while it grows or
     // shrinks. The cover's place, the panel's height and the cover's
-    // opacity follow it; the compact row fades out over its first half and
-    // in over the same half going back, so its text and the lines do not
+    // opacity follow it; the compact row fades out over its first
+    // idleGoneAt and in over the same going back, before the cover shows
+    // and after it has gone, so its text and the cover or the lines do not
     // show in one place at once.
     property real presence: 0
-    readonly property real idleRowOpacity: Math.max(0, 1 - 2 * root.presence)
+    readonly property real idleRowOpacity: Math.max(0, 1 - root.presence / root.idleGoneAt)
     // The full layout's height as it showed when the track went: the
     // height the panel shrinks from, which its lines, gone with the
     // track, no longer give.
