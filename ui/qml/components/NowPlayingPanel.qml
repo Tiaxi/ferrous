@@ -45,8 +45,8 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   over moveDuration, InOutQuad, uncovering the cover, which lies at its
 //   full size in place all along (#373 H14 G5: a cover scaled up from a
 //   square in the middle of the band read as a zoom, with empty flanks),
-//   fading in once the row has gone, from 12 % to 57 % of the move
-//   (#373 H15 H5), the lines and the library moving down
+//   fading in as the row goes, by the move's time (see idleOut), the
+//   lines and the library moving down
 //   with its foot, so nothing jumps (#373 H5); the lines fade in once the
 //   move is nearly done, so no text slides over the moving rows (#373 H12
 //   Z7). Going back to nothing
@@ -168,12 +168,29 @@ Item {
         const length = Math.max(1, Math.min(Kirigami.Units.shortDuration, root.moveDuration - start))
         return root._eased((root._moveTime(root.presence) * root.moveDuration - start) / length)
     }
-    // The compact row of nothing loaded is gone by idleGoneAt of the move,
-    // and only then does the cover start to show, in over the next 45 %
-    // of it, whole for the rest (#373 H15 H5: the row's "Nothing playing",
-    // at 0.8 to 0.2 as the cover came in, was drawn across the art).
-    readonly property real idleGoneAt: 0.12
-    readonly property real coverOpacity: Math.min(1, Math.max(0, (root.presence - root.idleGoneAt) / 0.45))
+    // The compact row of nothing loaded and the cover hand over by the
+    // move's time, not by how far it has come, so they take the same
+    // milliseconds over any move: the row goes over idleOut, linear, the
+    // cover comes in over coverIn, OutCubic, whole for the rest; they
+    // overlap only where each is near half, so the band never shows
+    // neither, nor "Nothing playing" across the art for long (#373 H15 H5:
+    // the row's text, at 0.8 to 0.2, was drawn across the incoming art;
+    // H16 I2: on InOutQuad's slow start the row was gone by 12 % of the
+    // way and the cover still faint, so the band was empty for some 60 to
+    // 140 ms). As fractions of shortDuration, [start, end]: the row from
+    // 20 to 50 ms, the cover from 12 to 112 ms, with Kirigami's own. Going
+    // back to nothing loaded runs the same backwards.
+    readonly property var idleOut: [0.2, 0.5]
+    readonly property var coverIn: [0.12, 1.12]
+    // How long the move has run at `presence`, in ms.
+    readonly property real moveElapsed: root._moveTime(root.presence) * root.moveDuration
+    function _handoverProgress(span) {
+        const short = Math.max(1, Kirigami.Units.shortDuration)
+        return Math.min(1, Math.max(0, (root.moveElapsed - span[0] * short) / ((span[1] - span[0]) * short)))
+    }
+    readonly property bool moveEnded: root.presence >= 1 || root.moveDuration <= 0
+    readonly property real coverOpacity: root.presence <= 0 ? 0
+        : root.moveEnded ? 1 : root._eased(root._handoverProgress(root.coverIn))
     // How far into the move, from 0 to 1, it is `presence` of the way:
     // InOutQuad's inverse.
     function _moveTime(presence) {
@@ -197,13 +214,12 @@ Item {
     readonly property real coverSize: root.wideRoom ? root.width : root.narrowLayoutCoverSize
     // How far the playing track's layout has grown from the compact row:
     // 0 with nothing loaded, 1 with a track, between while it grows or
-    // shrinks. The cover's place, the panel's height and the cover's
-    // opacity follow it; the compact row fades out over its first
-    // idleGoneAt and in over the same going back, before the cover shows
-    // and after it has gone, so its text and the cover or the lines do not
-    // show in one place at once.
+    // shrinks. The cover's place, the panel's height and, by the move's
+    // time, the cover's opacity and the compact row's follow it (see
+    // idleOut).
     property real presence: 0
-    readonly property real idleRowOpacity: Math.max(0, 1 - root.presence / root.idleGoneAt)
+    readonly property real idleRowOpacity: root.presence <= 0 ? 1
+        : root.moveEnded ? 0 : 1 - root._handoverProgress(root.idleOut)
     // The full layout's height as it showed when the track went: the
     // height the panel shrinks from, which its lines, gone with the
     // track, no longer give.
