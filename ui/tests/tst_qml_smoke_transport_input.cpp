@@ -1131,6 +1131,12 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QVERIFY(std::abs((upper.bottom() + lower.top()) / 2 - pane.center().y()) <= 1.0);
     QQuickItem *seams = itemsNamed(spectrogram, QStringLiteral("spectrogramLaneSeams")).value(0);
     QVERIFY(seams != nullptr && seams->isVisible());
+    // The seam at rest in the floor's violet, over the rest lines (#373
+    // H15 H7); playing, the neutral one.
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    QObject *spectrogramPlot = qvariant_cast<QObject *>(palette->property("spectrogramPlot"));
+    QCOMPARE(seams->property("color").value<QColor>(), palette->property("plotRestLaneSeam").value<QColor>());
     QTRY_VERIFY2(restProblem(false).isEmpty(), qPrintable(restProblem(false)));
     // The scale shown: its labels too.
     QVERIFY(bridge->setProperty("showSpectrogramScale", true));
@@ -1154,6 +1160,7 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QVERIFY(QMetaObject::invokeMethod(bridge, "precomputedSpectrogramChannelsReady",
                                       Q_ARG(int, 2), Q_ARG(bool, true)));
     QCOMPARE(panes(), before);
+    QTRY_COMPARE(seams->property("color").value<QColor>(), spectrogramPlot->property("plotLaneSeam").value<QColor>());
     QCOMPARE(sceneRectOf(panes().at(0)), upper);
     QCOMPARE(sceneRectOf(panes().at(1)), lower);
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()

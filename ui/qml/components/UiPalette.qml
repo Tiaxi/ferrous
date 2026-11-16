@@ -242,6 +242,14 @@ QtObject {
     // icon's rim, as the icon's tile has one, so it reads as a cover rather
     // than a hole.
     readonly property color plotFloorEdge: ColorUtils.mixColor(root.plotFloor, Qt.color("#6a4ad0"), 0.45)
+    // The seam between the lanes at rest, never played: the floor's violet
+    // lightened, white over it, the least in whole percent that is 1.45:1
+    // on it (15 %, #372b4d), so it reads in the plot's own hue and above
+    // the rest lines' 1.3:1 (#373 H15 H7: the playing seam's neutral grey
+    // stood apart from the violet floor and its lines). Playing, the seam
+    // is plotLaneSeam's neutral one.
+    readonly property color plotRestLaneSeam: ColorUtils.drawnOver(
+        root._tintOf(Qt.color("#ffffff"), root.plotFloor, 1.45), root.plotFloor)
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed, on the plot's floor. Silence within a track is still

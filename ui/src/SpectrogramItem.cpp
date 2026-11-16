@@ -140,9 +140,10 @@ const QColor kScaleOutlineColor(0, 0, 0);
 // plotTick.
 const QColor kScaleTickColor(236, 236, 236, 191);
 // The lane at rest, before it has columns: a line across it at each of the
-// scale's ticks in white 8%, and while the scale shows, the scale's text
-// in plotTextSecondary.
-const QColor kRestGridLineColor(255, 255, 255, 20);
+// scale's ticks in white 11%, 1.3:1 on the floor (#373 H15 H7: 8% was 1.19:1
+// and faint), under the lane seam at rest, and while the scale shows, the
+// scale's text in plotTextSecondary.
+const QColor kRestGridLineColor(255, 255, 255, 28);
 const QColor kRestScaleTextColor(236, 236, 236, 184);
 // The playhead: a 1 px light core cased in 1 px of black 60% on each side.
 // The core is all but opaque, as the playhead has always been translucent:
@@ -6293,8 +6294,13 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     const std::vector<int> rowBins = frequencyRowBins(height, bins, binHz, m_logScale, nullptr);
     const double scale = m_canvasScale;
     const int lineWidth = deviceLineWidth(scale);
+    // With the scale hidden there are no labels to keep clear of the lane's
+    // head and the mode switch: every tick has its line, so the lines are
+    // evenly spaced (#373 H15 H7: the top one left out, the lane's top band
+    // was some 80 px to the others' 45).
+    const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
-             rowBins, bins, binHz, width, height, scale, frequencyScaleTopClearanceLocked())) {
+             rowBins, bins, binHz, width, height, scale, topClearance)) {
         // Across the lane, where the scale's tick is, with the scale hidden
         // too: the pane at rest is an instrument waiting, not a hole
         // (#373 H14 F3, P23; H10 P18 left the floor plain). The label over

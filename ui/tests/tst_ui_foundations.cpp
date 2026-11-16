@@ -582,6 +582,22 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
     QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
     QVERIFY(seamContrast > contrastRatio(fromHex(QStringLiteral("#261a3e")), colorOf(spectrogram, "plotBg")) + 0.1);
+    // At rest (#373 H15 H7): the rest lines white at 28 of 255 on the floor,
+    // 1.3:1; the seam between lanes at rest in the floor's violet, a white
+    // tint of it, 1.45:1 or more and above the lines.
+    {
+        const QColor floor = colorOf(spectrogram, "plotBg");
+        const QColor restLine = drawnOver(QColor(255, 255, 255, 28), floor);
+        const double lines = contrastRatio(restLine, floor);
+        QVERIFY2(lines >= 1.27 && lines <= 1.33, qPrintable(QString::number(lines)));
+        const QColor restSeam = colorOf(tokens, "plotRestLaneSeam");
+        QCOMPARE(restSeam.alphaF(), 1.0f);
+        const double seam = contrastRatio(restSeam, floor);
+        QVERIFY2(seam >= 1.45 && seam <= 1.6, qPrintable(restSeam.name() + QStringLiteral(" ") + QString::number(seam)));
+        QVERIFY(seam > lines + 0.1);
+        // In the floor's hue, not the playing seam's grey.
+        QVERIFY2(restSeam.blue() > restSeam.green() + 20 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
+    }
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
