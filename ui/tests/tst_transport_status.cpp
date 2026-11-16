@@ -1853,8 +1853,10 @@ void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
 }
 
 // A mute leaves the thumb at the volume it put aside (#373 H5: it threw the
-// thumb to 0), dims the filled groove to the unfilled colour and shows the
-// muted glyph; the tooltip says so. Unmuting brings the fill back.
+// thumb to 0), dims the filled groove and the thumb at rest to the unfilled
+// colour together, over the same fade (#373 H34 AB3: the thumb stayed
+// bright), and shows the muted glyph; the tooltip says so. A hover still
+// shows the thumb in the text colour. Unmuting brings both back.
 void TransportStatusTest::volumeMuteKeepsTheThumb() {
     QFETCH(bool, dark);
     Harness harness;
@@ -1875,24 +1877,54 @@ void TransportStatusTest::volumeMuteKeepsTheThumb() {
     const qreal fillWidth = fill->width();
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume.svg")));
 
+    const QColor unfilled = groove->property("color").value<QColor>();
+    QVERIFY(sameColor(thumb->property("color").value<QColor>(), played));
+    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
+    const auto colorOf = [](QQuickItem *item) { return item->property("color").value<QColor>(); };
+    // The fill and the thumb fade as one: the same colour at every frame
+    // of the fade, which takes the short duration.
+    const auto fadeTogether = [&](const QColor &to) {
+        QElapsedTimer fading;
+        fading.start();
+        bool between = false;
+        while (!(sameColor(colorOf(fill), to) && sameColor(colorOf(thumb), to)) && fading.elapsed() < 2000) {
+            QVERIFY2(sameColor(colorOf(fill), colorOf(thumb)),
+                     qPrintable(QStringLiteral("fill %1, thumb %2 at %3 ms")
+                                    .arg(colorOf(fill).name(), colorOf(thumb).name())
+                                    .arg(fading.elapsed())));
+            between = between || (!sameColor(colorOf(fill), played) && !sameColor(colorOf(fill), unfilled));
+            QTest::qWait(5);
+        }
+        QVERIFY(sameColor(colorOf(fill), to) && sameColor(colorOf(thumb), to));
+        QVERIFY2(between, "no fade");
+    };
+
+    // Away from the slider, so the thumb is at rest.
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
     QTRY_VERIFY(harness.root->property("muted").toBool());
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.0);
     QVERIFY(muteGlyph->property("source").toString().endsWith(QStringLiteral("/volume-muted.svg")));
-    // The thumb and the fill stay; the fill dims to the groove's colour.
+    // The thumb and the fill stay; both dim to the groove's colour.
     QCOMPARE(volume->property("value").toDouble(), 0.8);
     QCOMPARE(thumb->x(), thumbX);
     QCOMPARE(fill->width(), fillWidth);
-    QVERIFY(sameColor(fill->property("color").value<QColor>(), groove->property("color").value<QColor>()));
-    QVERIFY(sameColor(thumb->property("color").value<QColor>(), played));
+    fadeTogether(unfilled);
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%, muted"));
     QCOMPARE(accessibleText(volume, QAccessible::Description), QStringLiteral("80%"));
+
+    // A hover shows the thumb in the text colour while muted too, and the
+    // fill stays dim.
+    QTest::mouseMove(harness.window, sceneCentre(thumb));
+    QTRY_VERIFY(sameColor(colorOf(thumb), harness.token("text")));
+    QVERIFY(sameColor(colorOf(fill), unfilled));
+    QTest::mouseMove(harness.window, sceneCentre(mute));
+    QTRY_VERIFY(sameColor(colorOf(thumb), unfilled));
 
     QTest::mouseClick(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(mute));
     QTRY_VERIFY(!harness.root->property("muted").toBool());
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.8);
     QCOMPARE(thumb->x(), thumbX);
-    QVERIFY(sameColor(fill->property("color").value<QColor>(), played));
+    fadeTogether(played);
     QCOMPARE(tip->property("text").toString(), QStringLiteral("Volume 80%"));
 }
 

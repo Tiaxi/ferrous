@@ -101,8 +101,9 @@ ToolBar {
     // The volume slider, in the seek bar's language (#373 H5): its groove
     // filled up to the thumb in the played colour and the rest in the
     // unplayed one, opaque, and a solid thumb in the played colour. While
-    // muted, the filled part dims to the unplayed colour and the thumb
-    // stays at the volume a mute put aside.
+    // muted, the filled part and the thumb at rest dim to the unplayed
+    // colour together (#373 H34 AB3), and the thumb stays at the volume a
+    // mute put aside.
     readonly property color volumeFilledColor: root.seekPlayedColor
     readonly property color volumeUnfilledColor: ColorUtils.mixColor(
         root.chromeColor, root.seekPlayedColor, root.seekUnplayedOpacity)
@@ -1067,11 +1068,21 @@ ToolBar {
                     height: volumeSlider.grooveHeight
                     radius: height / 2
                     color: root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor
+
+                    // As the thumb's, so a mute dims both together.
+                    Behavior on color {
+                        enabled: Kirigami.Units.shortDuration > 0
+                        ColorAnimation {
+                            duration: Kirigami.Units.shortDuration
+                            easing.type: Easing.OutCubic
+                        }
+                    }
                 }
             }
 
-            // The solid thumb: the played colour, and the text colour while
-            // hovered or dragged. Keyboard focus draws a 2 px ring around it.
+            // The solid thumb: the played colour, the unplayed one at rest
+            // while muted, as the fill, and the text colour while hovered
+            // or dragged. Keyboard focus draws a 2 px ring around it.
             handle: Rectangle {
                 objectName: "volumeThumb"
                 readonly property bool tinted: volumeSlider.hovered || volumeSlider.pressed
@@ -1081,7 +1092,9 @@ ToolBar {
                 implicitWidth: volumeSlider.thumbSize
                 implicitHeight: volumeSlider.thumbSize
                 radius: width / 2
-                color: tinted ? root.uiPalette.text : root.volumeFilledColor
+                color: tinted
+                    ? root.uiPalette.text
+                    : (root.volumeMuted ? root.volumeUnfilledColor : root.volumeFilledColor)
                 border.width: 0
 
                 Behavior on color {
