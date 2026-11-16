@@ -166,10 +166,17 @@ ToolBar {
     implicitWidth: contentItem.implicitWidth + leftPadding + rightPadding
     // 48 px, or the buttons and 8 px above and below them.
     implicitHeight: Math.max(48, root.buttonSize + 16)
-    // The content's inset, on both sides: Previous starts where the
-    // library's rows and the status bar's text do.
+    // The content's inset, on both sides, measured to what is drawn, as
+    // the transport's other gaps are (#373 H8): Previous's glyph starts
+    // where the library's rows and the status bar's text do, with its
+    // button's clear space in the inset (#373 H34 AB6: its ink was at 20
+    // px), and the volume groove ends at it. The button's focus ring, 3 px
+    // outside it, stays in the window: at a large font, whose wider clear
+    // space leaves less than that, the glyph starts a pixel or two further
+    // in. On whole pixels, as the clear space can be a half.
     readonly property int edgeInset: 12
-    leftPadding: root.edgeInset
+    readonly property int buttonFocusRingOutset: 3
+    leftPadding: Math.max(root.buttonFocusRingOutset, Math.round(root.edgeInset - root.smallGlyphInset))
     rightPadding: root.edgeInset
     topPadding: 0
     bottomPadding: 0
@@ -262,7 +269,7 @@ ToolBar {
             objectName: "transportButtonFocusRing"
             visible: buttonBackground.button.visualFocus
             anchors.fill: parent
-            anchors.margins: -3
+            anchors.margins: -root.buttonFocusRingOutset
             radius: 6
             color: "transparent"
             border.width: 2

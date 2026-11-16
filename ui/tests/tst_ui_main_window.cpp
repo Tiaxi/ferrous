@@ -5895,9 +5895,10 @@ void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     QQuickItem *previous = named(window, "transportButton_previous");
     QQuickItem *volume = named(window, "volumeSlider");
     QQuickItem *chevron = itemNamed(artist, QStringLiteral("libraryRowChevron"));
-    QVERIFY(previous && volume && chevron);
-    QTRY_COMPARE(sceneRect(previous).left(), 12.0);
-    QCOMPARE(sceneRect(chevron).left(), sceneRect(previous).left());
+    QQuickItem *previousGlyph = previous != nullptr ? itemNamed(previous, QStringLiteral("transportButtonGlyph")) : nullptr;
+    QVERIFY(previous && previousGlyph && volume && chevron);
+    QTRY_COMPARE(sceneRect(previousGlyph).left(), 12.0);
+    QCOMPARE(sceneRect(chevron).left(), sceneRect(previousGlyph).left());
     QCOMPARE(sceneRect(volume).right(), window->width() - 12.0);
 }
 
