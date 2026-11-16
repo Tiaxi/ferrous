@@ -42,6 +42,17 @@ Item {
     property var toggleSolo: function() {}
     property var pointerActivity: null
     readonly property bool focusInside: muteButton.activeFocus || soloButton.activeFocus
+    // Where the pointer is over the plot, in the head's parent's
+    // coordinates, while `pointerKnown`: the label takes no hover of its
+    // own, which would take it from the plot under it and its crosshair.
+    property point pointerPosition: Qt.point(0, 0)
+    property bool pointerKnown: false
+    readonly property bool labelHovered: root.pointerKnown
+        && root.pointerPosition.x >= root.x && root.pointerPosition.x < root.x + labelPlate.width
+        && root.pointerPosition.y >= root.y && root.pointerPosition.y < root.y + labelPlate.height
+    // Whether the pointer is on the label's plate or the buttons': the
+    // plot's crosshair gives way there (PlotLayer's crosshairLevel).
+    readonly property bool plateHovered: root.labelHovered || buttonsHover.hovered
     // Whether the buttons show by their own rule; the viewer's controls
     // hiding fades them through `controlsLevel` instead, on its curve.
     readonly property bool buttonsRevealed: root.buttonsVisibility === 2
@@ -82,6 +93,7 @@ Item {
         uiPalette: root.uiPalette
         text: root.label
         compact: root.compact
+
     }
 
     Components.PlotPlate {

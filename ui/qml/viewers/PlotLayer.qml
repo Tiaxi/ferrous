@@ -92,6 +92,34 @@ Item {
     // The plates' inset from the plot's corners: the lane heads' and the
     // mode switch's.
     readonly property int plateInset: 5
+    // Where the pointer is on the plot, in this layer's coordinates, while
+    // `pointerKnown`: for the lane labels, which take no hover.
+    property point pointerPosition: Qt.point(0, 0)
+    property bool pointerKnown: false
+    // Whether the pointer is on one of the plot's plates: a lane's label or
+    // its buttons, the mode switch or the zoom.
+    readonly property bool plateHovered: {
+        if (modeSwitch.pointerHovered || (zoomPlate.visible && zoomPlate.pointerHovered))
+            return true
+        for (let i = 0; i < laneHeads.count; ++i) {
+            const head = laneHeads.itemAt(i)
+            if (head && head.plateHovered)
+                return true
+        }
+        return false
+    }
+    // How much of the plot's crosshair and its readout show: none while the
+    // pointer is on a plate, where they ran under it and through it (#373
+    // H16 I9), fading over shortDuration, OutCubic; at once with
+    // animations off.
+    property real crosshairLevel: root.plateHovered ? 0 : 1
+    Behavior on crosshairLevel {
+        enabled: Kirigami.Units.shortDuration > 0
+        NumberAnimation {
+            duration: Kirigami.Units.shortDuration
+            easing.type: Easing.OutCubic
+        }
+    }
 
     function laneTop(index) { return PlotLanes.top(index, root.laneCount, root.height) }
     function laneHeight(index) { return PlotLanes.laneHeight(index, root.laneCount, root.height) }
@@ -196,6 +224,8 @@ Item {
             controlsLevel: root.controlsLevel
             revealedWithControls: root.controlsAutoHide
             laneHovered: root.hoveredLane === index
+            pointerPosition: root.pointerPosition
+            pointerKnown: root.pointerKnown
             pointerActivity: root.pointerActivity
             toggleMute: function() { root.uiBridge.toggleChannelMute(index) }
             toggleSolo: function() { root.uiBridge.soloChannel(index) }

@@ -39,6 +39,8 @@ Item {
         return labels
     }
     property int hoveredLane: -1
+    // Where the pointer is on the plot, in the scene, while a lane has it.
+    property point pointerScenePosition: Qt.point(0, 0)
     // Whether the plot waits for the track's first columns.
     readonly property bool awaitingData: {
         const first = spectrogramRepeater.count > 0 ? spectrogramRepeater.itemAt(0) : null
@@ -64,6 +66,9 @@ Item {
     // the crosshair shows until they have faded out. Without a level of
     // the viewer's, they show and hide at once.
     property real interactiveOverlaysLevel: root.interactiveOverlaysVisible ? 1 : 0
+    // How much of the crosshair shows besides that: none while the pointer
+    // is on a plate of the plot (PlotLayer's crosshairLevel).
+    property real crosshairLevel: 1
     // Whether the lanes draw the playhead; see Main.qml's mode switch.
     property bool playheadVisible: true
     property var pointerActivity: null
@@ -386,7 +391,7 @@ Item {
                     displayMode: root.uiBridge.spectrogramDisplayMode
                     crosshairEnabled: root.uiBridge.showSpectrogramCrosshair
                         && (root.interactiveOverlaysVisible || root.interactiveOverlaysLevel > 0)
-                    crosshairOpacity: root.interactiveOverlaysLevel
+                    crosshairOpacity: root.interactiveOverlaysLevel * root.crosshairLevel
                     // The crosshair's readout is drawn on the plot: the time
                     // on the bottom edge of the lowest lane.
                     showCrosshairTime: index === spectrogramRepeater.count - 1
@@ -475,8 +480,12 @@ Item {
                                 root.hoveredLane = -1
                             }
                         }
-                        onPointChanged: root.notePointerActivity(
-                            point.scenePosition.x, point.scenePosition.y)
+                        onPointChanged: {
+                            if (paneHover.hovered) {
+                                root.pointerScenePosition = point.scenePosition
+                            }
+                            root.notePointerActivity(point.scenePosition.x, point.scenePosition.y)
+                        }
                     }
                 }
             }

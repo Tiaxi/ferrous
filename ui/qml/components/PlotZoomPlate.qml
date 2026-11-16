@@ -26,7 +26,10 @@ Components.PlotPlate {
     takesPointer: true
     Accessible.name: I18n.i18nc("@label", "Zoom")
 
+    readonly property bool pointerHovered: zoomHover.hovered
+
     HoverHandler {
+        id: zoomHover
         onPointChanged: {
             if (root.pointerActivity) {
                 root.pointerActivity(point.scenePosition.x, point.scenePosition.y)

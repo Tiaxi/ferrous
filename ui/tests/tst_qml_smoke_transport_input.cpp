@@ -25,6 +25,7 @@ private slots:
     void visualizationModeSwitchShowsBeforeAnyAudio();
     void paneAtRestIsAStereoInstrument();
     void visualizationModeSwitchLeavesTheCornerToTheView();
+    void crosshairGivesWayToThePlotsPlates();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
     void fullscreenStripHidesWhatTheViewDrawsUnderIt();
     void viewerModeSwitchStaysWhileThePointerIsOnTheViewersControls();
@@ -1200,6 +1201,68 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     viewer->setProperty("visualizationMode", 1);
     QTRY_VERIFY(waveformSurface->isVisible());
     QTRY_VERIFY(restLines().isEmpty());
+}
+
+// The crosshair and its readout give way to the plot's plates: on a lane's
+// label or its buttons, or on the mode switch, they fade out over
+// shortDuration, and come back off them (#373 H16 I9: its line ran under
+// the plates and through them), in both modes.
+void TransportInputSmokeTest::crosshairGivesWayToThePlotsPlates() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *layer = window->findChild<QQuickItem *>(QStringLiteral("plotLayer"));
+    auto *spectrogramSurface = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    auto *waveformSurface = window->findChild<QQuickItem *>(QStringLiteral("mainWaveformSurface"));
+    QVERIFY(bridge && viewer && layer && spectrogramSurface && waveformSurface);
+    bridge->setProperty("showSpectrogramCrosshair", true);
+    bridge->setProperty("spectrogramViewMode", 1);
+    QQuickItem *modeSwitch = firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_VERIFY(!visibleItemsNamed(layer, QStringLiteral("plotLaneLabel")).isEmpty());
+    QQuickItem *label = visibleItemsNamed(layer, QStringLiteral("plotLaneLabel")).first();
+    const auto opacities = [&](int mode) {
+        if (mode == 0) {
+            QList<double> values;
+            for (QQuickItem *pane : visibleItemsNamed(spectrogramSurface, QStringLiteral("spectrogramPaneItem"))) {
+                values.push_back(pane->property("crosshairOpacity").toDouble());
+            }
+            return values;
+        }
+        auto *waveform = waveformSurface->property("waveformItem").value<QObject *>();
+        return QList<double>{waveform->property("crosshairOpacity").toDouble()};
+    };
+    const auto all = [&](int mode, double value) {
+        const QList<double> values = opacities(mode);
+        return !values.isEmpty()
+            && std::all_of(values.begin(), values.end(), [&](double each) { return std::abs(each - value) < 1e-6; });
+    };
+    for (const int mode : {0, 1}) {
+        viewer->setProperty("visualizationMode", mode);
+        QTRY_VERIFY((mode == 0 ? spectrogramSurface : waveformSurface)->isVisible());
+        const QPoint onPlot = sceneRectOf(layer).center().toPoint();
+        QTest::mouseMove(window, onPlot);
+        QTRY_VERIFY(all(mode, 1.0));
+        QCOMPARE(layer->property("crosshairLevel").toDouble(), 1.0);
+        for (QQuickItem *plate : {label, modeSwitch}) {
+            QTest::mouseMove(window, sceneRectOf(plate).center().toPoint());
+            QTRY_VERIFY(layer->property("plateHovered").toBool());
+            QTRY_VERIFY2(all(mode, 0.0), qPrintable(QStringLiteral("mode %1 on %2").arg(mode).arg(plate->objectName())));
+            QTest::mouseMove(window, onPlot);
+            QTRY_VERIFY(!layer->property("plateHovered").toBool());
+            QTRY_VERIFY(all(mode, 1.0));
+        }
+    }
+    // Over shortDuration, OutCubic.
+    QTest::mouseMove(window, sceneRectOf(modeSwitch).center().toPoint());
+    QTRY_VERIFY(layer->property("plateHovered").toBool());
+    QTest::qWait(16);
+    const double during = layer->property("crosshairLevel").toDouble();
+    QVERIFY2(during < 1.0, qPrintable(QString::number(during)));
+    QTRY_COMPARE(layer->property("crosshairLevel").toDouble(), 0.0);
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {
