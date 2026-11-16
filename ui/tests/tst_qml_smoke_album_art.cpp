@@ -1519,6 +1519,8 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QTest::keyClick(shownIn, Qt::Key_I);
     QTRY_VERIFY(viewer->property("albumArtInfoVisible").toBool());
     QTRY_VERIFY(column->isVisible() && seam->isVisible());
+    // They slide in, and rest at the view's right edge.
+    QTRY_COMPARE(sceneRectOf(column).right(), viewRect.right());
     QCOMPARE(sceneRectOf(viewport), viewRect);
     const QRectF columnRect = sceneRectOf(column);
     const QRectF seamRect = sceneRectOf(seam);
@@ -1736,15 +1738,17 @@ bool isWithin(const QQuickItem *item, const QQuickItem *ancestor) {
 
 // Clicks the preview's button `objectName` in `host` once it is enabled and
 // sits whole inside the image's details, at the same place on two looks in
-// a row: where the user sees it, not where the viewer opening might still
-// move it from. No popup is still fading in or out, such as the dialog that
-// opened the preview, which takes the click until it has gone.
+// a row, with the details slid in whole: where the user sees it, not where
+// the viewer opening or the details sliding in might still move it from.
+// No popup is still fading in or out, such as the dialog that opened the
+// preview, which takes the click until it has gone.
 bool clickPreviewButton(QQuickWindow *host, const QString &objectName) {
     QRectF last;
     const bool settled = QTest::qWaitFor([&]() {
         QQuickItem *column = visibleItemNamed(host, QStringLiteral("albumArtInfoColumn"));
         QQuickItem *button = visibleItemNamed(host, objectName);
-        if (column == nullptr || button == nullptr || !button->isEnabled() || !isWithin(button, column)) {
+        if (column == nullptr || button == nullptr || !button->isEnabled() || !isWithin(button, column)
+            || column->parentItem()->property("infoReveal").toReal() < 1.0) {
             last = QRectF();
             return false;
         }
@@ -1773,11 +1777,12 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     const auto rectOf = [](QQuickItem *item) {
         return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
     };
-    // The viewer can still be taking its size, as its window shows.
+    // The viewer can still be taking its size, as its window shows, and
+    // the details sliding in.
     const auto settled = [&]() {
         const QRectF rect = rectOf(column);
-        return rect.contains(rectOf(label)) && rect.contains(rectOf(back))
-            && rect.contains(rectOf(apply));
+        return column->parentItem()->property("infoReveal").toReal() >= 1.0 && rect.contains(rectOf(label))
+            && rect.contains(rectOf(back)) && rect.contains(rectOf(apply));
     };
     QTRY_VERIFY2(settled(), at.constData());
     const QRectF columnRect = rectOf(column);

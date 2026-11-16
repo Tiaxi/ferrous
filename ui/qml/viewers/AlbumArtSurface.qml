@@ -21,7 +21,8 @@ import "../logic/WheelUtils.js" as WheelUtils
 // Over the whole screen, the details are a step larger, read from further
 // away. While they show, the art fits the space left of their seam, centred
 // there (#373 H8: it stayed centred in the whole view, off-centre in what
-// the details leave of it), and keeps its zoom and pan.
+// the details leave of it), and keeps its zoom and pan; it glides there as
+// they slide in, and back as they slide out.
 // During a preview from Replace from iTunes, the details go on with what the
 // preview shows, and a footer at their bottom holds its buttons, as a
 // dialog's: Back to Results and, for a candidate, Apply. The art then keeps
@@ -92,14 +93,31 @@ Item {
     property var applyPreview: null
     readonly property alias imageStatus: albumArtImageFull.status
     readonly property bool zoomed: root.zoom > 1.0
+    // How far the details are shown: 0 hidden, 1 shown. Showing or hiding
+    // them eases it over 120 ms, OutCubic, and at once with Plasma's
+    // animations off (#373 H38: the art jumped aside in one frame). The
+    // space they take, their reserve, follows it: the column slides in
+    // over the view's right edge, whole, as wide as it rests, and the art
+    // glides with it. Only showing or hiding them is eased: the reserve
+    // follows the view's size at once, as the zoom and the pan are.
+    readonly property int infoRevealDuration: Math.round(Kirigami.Units.shortDuration * 1.2)
+    property real infoReveal: root.infoVisible ? 1 : 0
+    Behavior on infoReveal {
+        enabled: root.infoRevealDuration > 0
+        NumberAnimation {
+            duration: root.infoRevealDuration
+            easing.type: Easing.OutCubic
+        }
+    }
+    // The details' width with their seam, in whole pixels, times how far
+    // they are shown.
+    readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
     // The space the art fits in, across: the whole view, or while the
     // details show the space left of their seam, during a preview less 24 px
     // on each side.
-    readonly property real artMargin: root.previewActive && root.infoVisible ? 24 : 0
+    readonly property real artMargin: root.previewActive ? 24 * root.infoReveal : 0
     readonly property real fitLeft: root.artMargin
-    readonly property real fitWidth: root.infoVisible
-        ? Math.max(1, infoColumn.x - 1 - 2 * root.artMargin)
-        : albumArtViewport.width
+    readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
     onFitWidthChanged: root.clampPan()
 
@@ -531,7 +549,7 @@ Item {
 
     Rectangle {
         objectName: "albumArtInfoSeam"
-        visible: root.infoVisible
+        visible: infoColumn.visible
         x: infoColumn.x - 1
         width: 1
         height: parent.height
@@ -568,8 +586,10 @@ Item {
         // the view's width wider in a wide one, as the column.
         readonly property real fortyCharacters: Math.max(infoColumn.minimumWidth,
             Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * (root.fullscreen ? 1 : infoColumn.widthScale)) - 1)
-        visible: root.infoVisible
-        anchors.right: parent.right
+        visible: root.infoReserve > 0
+        // At the view's right edge once shown; past it, sliding in, while
+        // they show or hide.
+        x: root.width - root.infoReserve + 1
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: root.previewActive
