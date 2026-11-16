@@ -605,8 +605,9 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 // Why the now-playing panel does not show the stand-in for a cover, or ""
 // (#373 H11, H14 F2): the cover's place as for a cover, whole, in the
 // plot's floor colour, #14062e in both themes, with one static mark at its
-// centre, two thirds of the tile wide and half as high, the wide tile's of
-// three curves and the small one's of two, and no text at all (H12's album
+// centre, 0.55 of the tile wide and as high as the app icon's aspect makes
+// it (H19: H14 to H18 stretched the icon's curves to 2:1), the wide tile's
+// of three curves and the small one's of two, and no text at all (H12's album
 // title is gone: the lines under it say it); a 1 px edge in a light theme
 // only. No disc glyph, and no cover. As drawn, the mark's middle third is
 // not all floor.
@@ -659,12 +660,17 @@ QString standInProblem(QQuickWindow *window) {
     if (!shown(standIn) || shown(glyph) || cover->property("hasCover").toBool()) {
         return QStringLiteral("the stand-in does not show, or the disc or a cover does");
     }
-    // The mark: centred, two thirds wide, half as high, the small tile's
-    // of two curves.
+    // The mark: centred, 0.55 of the tile wide, at the icon's aspect, its
+    // paths' box; the small tile's of two curves. Its paths run on past its
+    // right side, cut flush there (standInMarkRunsOut).
     const QRectF tile = sceneRect(cover);
     const QRectF markRect = sceneRect(mark);
-    if (!shown(mark) || std::abs(mark->width() - std::round(side * 2 / 3)) > 0.01
-        || std::abs(mark->height() - std::round(mark->width() / 2)) > 0.01
+    const QSizeF box = mark->property("box").toSizeF();
+    if (box != QSizeF(240, 212)) {
+        return QStringLiteral("the mark's paths in a %1 by %2 box").arg(box.width()).arg(box.height());
+    }
+    if (!shown(mark) || !mark->clip() || std::abs(mark->width() - std::round(side * 0.55)) > 0.01
+        || std::abs(mark->height() - std::round(mark->width() * box.height() / box.width())) > 0.01
         || (markRect.center() - tile.center()).manhattanLength() > 1.0) {
         return QStringLiteral("the mark %1 by %2, %3 px off centre").arg(mark->width()).arg(mark->height())
             .arg((markRect.center() - tile.center()).manhattanLength());
@@ -672,10 +678,6 @@ QString standInProblem(QQuickWindow *window) {
     const bool small = cover->property("standInCompact").toBool();
     if (small != (side < 180)) {
         return QStringLiteral("a %1 px tile has the %2 mark").arg(side).arg(small ? "small" : "wide");
-    }
-    const QSizeF box = mark->property("box").toSizeF();
-    if (box != (small ? QSizeF(64, 32) : QSizeF(240, 120))) {
-        return QStringLiteral("the mark's paths in a %1 by %2 box").arg(box.width()).arg(box.height());
     }
     if (mark->property("status").toInt() != 1 /* Shape.Ready */) {
         return QStringLiteral("the mark has not drawn");
@@ -744,6 +746,48 @@ qreal standInMarkInk(QQuickWindow *window) {
         }
     }
     return static_cast<qreal>(ink) / std::max(1, rect.width() * rect.height());
+}
+
+// Why the stand-in's mark does not run out to its right side, cut flush
+// there, as the app icon's traces run out to its tile's edge, or "" (#373
+// H19: three series ending in round caps inside the mark read as a line
+// chart): as grabbed, the column just inside its right side crosses each
+// of its curves, three or the small mark's two, and the column just past
+// it is floor.
+QString standInMarkRunsOut(QQuickWindow *window) {
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *mark = cover ? itemNamed(cover, QStringLiteral("albumArtStandInMark")) : nullptr;
+    if (mark == nullptr) {
+        return QStringLiteral("no mark");
+    }
+    const QImage image = window->grabWindow();
+    const qreal scale = static_cast<qreal>(image.width()) / window->width();
+    const QRectF rect = sceneRect(mark);
+    const int top = static_cast<int>(std::floor(rect.top() * scale));
+    const int bottom = static_cast<int>(std::ceil(rect.bottom() * scale));
+    const int right = static_cast<int>(std::ceil(rect.right() * scale));
+    const QColor floor(QStringLiteral("#14062e"));
+    const auto runs = [&](int x) {
+        int count = 0;
+        bool in = false;
+        for (int y = top; y < bottom; ++y) {
+            const QColor pixel = image.pixelColor(x, y);
+            const bool ink = std::max({std::abs(pixel.red() - floor.red()), std::abs(pixel.green() - floor.green()),
+                                       std::abs(pixel.blue() - floor.blue())})
+                             > 24;
+            count += ink && !in ? 1 : 0;
+            in = ink;
+        }
+        return count;
+    };
+    const int curves = cover->property("standInCompact").toBool() ? 2 : 3;
+    if (runs(right - 2) != curves) {
+        return QStringLiteral("%1 curves at the mark's right side, not %2").arg(runs(right - 2)).arg(curves);
+    }
+    if (runs(right + 1) != 0) {
+        return QStringLiteral("%1 curves past the mark's right side").arg(runs(right + 1));
+    }
+    return {};
 }
 
 } // namespace
@@ -1783,6 +1827,7 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QTRY_VERIFY(!handover->property("running").toBool());
     const qreal ink = standInMarkInk(window);
     QVERIFY2(ink > 0.02 && ink < 0.5, qPrintable(QString::number(ink)));
+    QVERIFY2(standInMarkRunsOut(window).isEmpty(), qPrintable(standInMarkRunsOut(window)));
 
     // A long album, an album named as the track, and none: the same mark
     // for every one, and never text.
