@@ -203,16 +203,15 @@ int capColumns(int size) {
 
 // The tile's rim, lighter than itself, so that it holds the tile's edge on
 // Breeze Dark (#373 hill climb, H9, H11: at H10 only 16 to 32 px had it): a
-// hairline, 1 px up to 64 px and 2 px at 128 and 256 (H18: H13's 32nd of the
-// icon, 4 and 8 px at 128 and 256, framed the large sizes in a thick band).
-int rimWidth(int size) {
-    return size <= 64 ? 1 : 2;
-}
+// hairline, 1 device px at every size (H18: H13's 32nd of the icon, 4 and 8
+// px at 128 and 256, framed the large sizes in a thick band; H21: H18's 2 px
+// at 128 and 256 read as a halo on Breeze Light). The scalable drawing keeps
+// a 64th of the icon (scalableDrawingHasTheRimInProportion).
+constexpr int kRimWidth = 1;
 
 // The tile inside its rim.
-QRect insideRim(const QRect &tile, int size) {
-    const int rim = rimWidth(size);
-    return tile.adjusted(rim, rim, -rim, -rim);
+QRect insideRim(const QRect &tile) {
+    return tile.adjusted(kRimWidth, kRimWidth, -kRimWidth, -kRimWidth);
 }
 
 // How much of a pixel a trace of a colour covers over the tile, 0 to 1, from
@@ -532,7 +531,7 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
     const QRect tile = tileOf(image);
     const QPoint middle = tile.center();
-    const int rim = rimWidth(size);
+    const int rim = kRimWidth;
     // Across each edge's middle, inwards: the rim's colour for its width,
     // then no longer (the tile's, or at 16 px a trace's end on the right).
     const QPoint inwards[] = {QPoint(0, 1), QPoint(0, -1), QPoint(1, 0), QPoint(-1, 0)};
@@ -556,7 +555,7 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     // corners: no trace or mark on the tile. The magenta harmonic's faint
     // antialiased edge over the tile comes within 24 of the mid-violet rim in
     // each channel, though never within 12.
-    const QRect inside = insideRim(tile, size);
+    const QRect inside = insideRim(tile);
     const int corner = size / 16 + 1;
     for (const QRect &band : {inside.adjusted(corner, 0, -corner, 0), inside.adjusted(0, corner, 0, -corner)}) {
         QCOMPARE(countWhere(image, band, [](QRgb p) { return near(p, kRim, 12); }), 0);
@@ -625,7 +624,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
     }
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
-    const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile, size).bottom() - top + 1);
+    const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
     QVERIFY2(below.height() >= (size > 22 ? 2 : 1), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
@@ -640,7 +639,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
 
     // Every trace is inside the tile's rim.
     for (const Trace &trace : traces) {
-        QVERIFY2(insideRim(tile, size).contains(trace.bounds), qPrintable(QStringLiteral("%1,%2 %3x%4")
+        QVERIFY2(insideRim(tile).contains(trace.bounds), qPrintable(QStringLiteral("%1,%2 %3x%4")
                                                                           .arg(trace.bounds.x())
                                                                           .arg(trace.bounds.y())
                                                                           .arg(trace.bounds.width())
@@ -719,7 +718,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         end = std::min(end, trace.bounds.right() - 1);
     }
     QVERIFY(traces.front().bounds.left() <= tile.left() + tile.width() / 5);
-    QCOMPARE(traces.front().bounds.right(), insideRim(tile, size).right());
+    QCOMPARE(traces.front().bounds.right(), insideRim(tile).right());
 
     // The harmonic numbers of the traces, lowest first.
     const std::vector<double> numbers = traces.size() == 3 ? std::vector<double>{1, 2, 3} : std::vector<double>{1, 3};
@@ -776,7 +775,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
             QVERIFY2(centre(n, x) <= centre(n, x - 1) + 0.25, qPrintable(QStringLiteral("trace %1 at %2").arg(n).arg(x)));
         }
     }
-    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile, size).height() / 3.0,
+    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile).height() / 3.0,
              qPrintable(QString::number(centre(top, start) - centre(top, end))));
 
     // The strokes taper from the fundamental up, as a harmonic's energy
@@ -877,7 +876,7 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     // Rendered: inside the rim, away from its rounded corners, every pixel
     // is the tile or the tile under one trace, so no two touch.
     const QImage image = render(path, size);
-    const QRect inside = insideRim(tileOf(image), size);
+    const QRect inside = insideRim(tileOf(image));
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     const int corner = std::max(2, size / 8);
     const std::vector<QRgb> colours = traceColours(size);
@@ -960,7 +959,7 @@ void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim_data() {
 void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
-    const QRect inside = insideRim(tileOf(render(path, size)), size);
+    const QRect inside = insideRim(tileOf(render(path, size)));
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     const QStringList ids = traceIds(size);
     std::vector<QImage> traces;
@@ -1041,7 +1040,7 @@ void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
     const QRect tile = tileOf(render(path, size));
-    const QRect inside = insideRim(tile, size);
+    const QRect inside = insideRim(tile);
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     QCOMPARE(cover.size(), static_cast<qsizetype>(traceIds(size).size()));
     const QStringList ids = traceIds(size);
@@ -1110,7 +1109,7 @@ void AppIconTest::largeSizesTaperFromARoundStart() {
     QCOMPARE(ids, traceIds(size));
 
     const QImage image = render(path, size);
-    const QRect inside = insideRim(tileOf(image), size);
+    const QRect inside = insideRim(tileOf(image));
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     std::vector<QImage> traces;
     for (auto id = ids.crbegin(); id != ids.crend(); ++id) {
@@ -1163,7 +1162,7 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows_data() {
 void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
-    const QRect inside = insideRim(tileOf(render(path, size)), size);
+    const QRect inside = insideRim(tileOf(render(path, size)));
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     const QStringList ids = traceIds(size);
     // Each trace's end, its top and bottom on the inner edge, lowest first.
@@ -1243,7 +1242,7 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     double before = -1;
     for (const int size : FerrousAppIcon::kSizes) {
         const QString path = FerrousAppIcon::resourcePath(size);
-        const QRect inside = insideRim(tileOf(render(path, size)), size);
+        const QRect inside = insideRim(tileOf(render(path, size)));
         const QImage fundamental = traceCoverage(path, size).value(QStringLiteral("fundamental"));
         const auto [first, last] = columnsOf(fundamental);
         const double share = widthAcross(fundamental, first + capColumns(size), last - 1) / inside.width();
@@ -1273,7 +1272,7 @@ void AppIconTest::topTraceClearsTheCornerFrom64px() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
     const double unit = size / 64.0;
-    const QRect inside = insideRim(tileOf(render(path, size)), size);
+    const QRect inside = insideRim(tileOf(render(path, size)));
     const QHash<QString, QImage> cover = traceCoverage(path, size);
     const QStringList ids = traceIds(size);
     for (qsizetype n = 0; n < ids.size(); ++n) {
