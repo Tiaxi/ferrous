@@ -239,15 +239,15 @@ int strokeHeightAt(int size, size_t trace, int offset) {
 // 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px). At
 // 32 px 3 / 2.5 / 2, as at 48 (#373 hill climb, H24: H23's 3 / 2 / 2.25 drew
 // the rose, the middle trace, as the thinnest and dimmest), the rose eased to
-// 2 px into its end (easedWidth); at 48 px the top trace 2.25 px over its
-// start (topTraceWidths).
+// 2 px into its end (easedWidth); at 48 px the top trace 2.25 px over most of
+// its run, eased to 2 px into its end (topTraceWidths).
 std::vector<double> strokeWidths(int size) {
     switch (drawnAs(size)) {
     case 32:
     case 36:
         return {3.0, 2.5, 2.0};
     case 48:
-        return {3.0, 2.5, 2.0};
+        return {3.0, 2.5, 2.25};
     default: {
         const double fundamental = size == 64 ? 3.8 : 3.4;
         const double unit = size / 64.0;
@@ -258,11 +258,15 @@ std::vector<double> strokeWidths(int size) {
 
 // The top trace's width across at 48 px, at its start and at its end (#373
 // hill climb, H23: a 2 px stroke read as the thinnest and dimmest trace, and
-// beaded over its steep start): 2.25 px over its steep start, eased to 2 by
-// x 20.
+// beaded over its steep start): 2.25 px to x 38, eased to 2 over its last
+// 5 px only, into its end's whole rows (H24: eased by x 20, it thinned to
+// 2 px over most of its run).
 std::pair<double, double> topTraceWidths() {
     return {2.25, 2.0};
 }
+
+// Where the 48 px top trace starts to ease to its end's width.
+constexpr int kTopTraceHeldTo = 38;
 
 // A trace's width across as drawn at `x`, lowest first, `edge` the tile's
 // inner edge: its width (strokeWidths), but at 32 and 36 px the rose's, 2.5 px, eased
@@ -1428,16 +1432,23 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
         // is within an eighth of its width as drawn there (easedWidth), which
         // is 2 px or more; no beads. At 48 px the top trace from its start's
         // 2.25 px to its end's 2, never wider than the column before by more
-        // than a rendering's few hundredths, and its start's width over its
-        // first three columns.
+        // than a rendering's few hundredths, and its start's width to x 38
+        // (topTraceWidths). Every column of every trace past the caps has a
+        // pixel of its whole colour, 0.9 of it or more: no dip in its
+        // contrast along its run.
         QVERIFY(widths[n] >= 2.0);
         const bool top = n + 1 == traces.size() && size == 48;
         const auto [startWidth, endWidth] = topTraceWidths();
         double before = startWidth + 0.15;
         for (int x = body; x < last; ++x) {
+            double peak = 0;
+            for (int y = inside.top(); y <= inside.bottom(); ++y) {
+                peak = std::max(peak, alphaAt(trace, x, y));
+            }
+            QVERIFY2(peak >= 0.9, qPrintable(QStringLiteral("%1, column %2: %3 of a pixel at most").arg(id).arg(x).arg(peak)));
             const double across = widthAcross(trace, x, x);
             if (top) {
-                QVERIFY2(across >= endWidth - 0.1 && across <= before + 0.05 && (x >= body + 3 || across >= startWidth - 0.1),
+                QVERIFY2(across >= endWidth - 0.1 && across <= before + 0.05 && (x + 1 > kTopTraceHeldTo || across >= startWidth - 0.1),
                          qPrintable(QStringLiteral("%1, column %2: %3 px across after %4").arg(id).arg(x).arg(across).arg(before)));
                 before = across;
                 continue;
