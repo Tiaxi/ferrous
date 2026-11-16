@@ -649,10 +649,12 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(sameColor(colorOf(waveform, "checkedGlyph"), dark ? view : QColor(Qt::white)));
     QVERIFY(sameColor(colorOf(waveform, "plotFocusRing"), colorOf(tokens, "focusRing")));
     // A chosen choice on a plate, as the mode switch's segment and a
-    // viewer's info toggle: the plot's text at 18 % inside a 1 px edge that
-    // is 3:1 or more on the plate, over the floor, and on that fill
-    // (#373 H14 F4): the dark theme's tertiary text on the spectrogram's
-    // dark plot in both themes, and the theme's on the waveform's.
+    // viewer's info toggle: the plot's text at 18 % or more inside a 1 px
+    // edge that is 3:1 or more on the plate, over the floor, and on an 18 %
+    // fill (#373 H14 F4): the dark theme's tertiary text on the
+    // spectrogram's dark plot in both themes, and the theme's on the
+    // waveform's. The mode switch's fuller fill takes the edge further where
+    // it needs it (PlotToolButton's segmentEdgeColor, #373 H15 H4).
     QVERIFY(sameColor(colorOf(spectrogram, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(media, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(waveform, "segmentEdge"), colorOf(tokens, "textTertiary")));
@@ -1287,9 +1289,13 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    QVERIFY2(std::abs(wash.alphaF() - 0.14) < 0.005, qPrintable(QString::number(wash.alphaF())));
+    // From 10 % and 24 % up, as the plate needs (#373 H15 H4: 14 % and
+    // 18 % were 1.14:1 apart in dark, 1.08:1 in light).
+    QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
+    QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
+             qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
-    QVERIFY2(std::abs(plateFill.alphaF() - 0.18) < 0.005, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(plateFill.alphaF() >= 0.235 && plateFill.alphaF() <= 0.34, qPrintable(QString::number(plateFill.alphaF())));
     QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
     // As drawn: the plate around the buttons, the chosen one's plate and
@@ -1314,8 +1320,12 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const qreal hoverStep = contrastRatio(drawnHover, plate);
     QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
-    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.05,
+    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.4,
              qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
+    // The chosen one's edge, as drawn, 3:1 on the plate and on its fill.
+    const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
+    QVERIFY2(contrastRatio(edge, plate) >= 3.0 && contrastRatio(edge, drawnChosen) >= 3.0,
+             qPrintable(QStringLiteral("edge %1 on plate %2 and fill %3").arg(edge.name(), plate.name(), drawnChosen.name())));
 
     // Pressed, its glyph is whole.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());
