@@ -600,11 +600,12 @@ double widthAcross(const QImage &trace, int start, int end) {
 }
 
 
-// The sizes with a drawing of their own for their slot at 2x scaling: 16 and
-// 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
-// climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
-// rim where the 16 and 22 px slots had 2); 36 px the same in twice its own
-// tile (H24), and 64 px its drawing doubled (H22). None for 24 px, whose slot at 2x
+// The sizes with a drawing of their own for their slot at 2x scaling: 16, 22,
+// 32 and 36 px doubled (#373 hill climb, H26: 32 and 36 px had the 64 px
+// composition, lighter than their 1x drawings), 48 px with the 64 px
+// composition (H21: Qt's theme took the scalable drawing there, with a 1
+// device px rim where the 16 and 22 px slots had 2), and 64 px its drawing
+// doubled (H22). None for 24 px, whose slot at 2x
 // takes the 22 px slot's (hicolorsOwnIndexPicksTheSlotsDrawings; H23: H22's
 // 24x24@2 was never chosen).
 constexpr std::array<int, 6> kDoubledSizes{16, 22, 32, 36, 48, 64};
@@ -617,7 +618,7 @@ QString doubledPath(int size) {
 // The fundamental's width in a 2x slot's drawing, in the 64-unit composition's
 // units, and how far its centre sits under the series' centre line, half its
 // added weight: the focal stroke, as at 1x (#373 hill climb, H25), 4.7 units
-// over the 48 px slot's 3.6 and 5 over the 3.8 of the others'.
+// over the 48 px slot's 3.6 and 5 over the 64 px slot's 3.8.
 std::pair<double, double> doubledFundamental(int size) {
     return size == 48 ? std::pair<double, double>{4.7, (4.7 - 3.6) / 2} : std::pair<double, double>{5.0, (5.0 - 3.8) / 2};
 }
@@ -665,8 +666,10 @@ private slots:
     void detailTierAddsAFaint4thHarmonic();
     void doubledSlotsDrawTheSmallCompositionsAtTwice_data();
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
-    void doubledSlotsFrom32pxDrawThe64pxComposition_data();
-    void doubledSlotsFrom32pxDrawThe64pxComposition();
+    void doubledTaskManagerSlotsDoubleTheir1xDrawings_data();
+    void doubledTaskManagerSlotsDoubleTheir1xDrawings();
+    void doubledSlotsFrom48pxDrawThe64pxComposition_data();
+    void doubledSlotsFrom48pxDrawThe64pxComposition();
     void sizesDrawnAsASmallerSize_data();
     void sizesDrawnAsASmallerSize();
     void windowIconHasEachSizesDrawing();
@@ -2012,24 +2015,147 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
     }
 }
 
-void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
+void AppIconTest::doubledTaskManagerSlotsDoubleTheir1xDrawings_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("32px@2") << 32;
     QTest::addRow("36px@2") << 36;
+}
+
+// The numbers of an SVG path's data, each with the command it belongs to and
+// its place among that command's numbers.
+struct PathNumber {
+    QChar command;
+    int place = 0;
+    double value = 0;
+};
+
+std::vector<PathNumber> pathNumbers(const QString &data) {
+    static const QRegularExpression token(QStringLiteral("[A-Za-z]|-?[0-9]+(?:\\.[0-9]+)?"));
+    std::vector<PathNumber> numbers;
+    QChar command;
+    int place = 0;
+    for (const QRegularExpressionMatch &match : token.globalMatch(data)) {
+        const QString text = match.captured(0);
+        if (text.front().isLetter()) {
+            command = text.front();
+            place = 0;
+            continue;
+        }
+        numbers.push_back({command, place++, text.toDouble()});
+    }
+    return numbers;
+}
+
+// Each shape of a drawing, in order, by its element and id: a rect's
+// numbers, or a path's data's.
+QList<std::pair<QString, std::vector<PathNumber>>> shapesOf(const QString &path) {
+    QList<std::pair<QString, std::vector<PathNumber>>> shapes;
+    QXmlStreamReader svg(contentsOf(path));
+    while (!svg.atEnd()) {
+        if (svg.readNext() != QXmlStreamReader::StartElement) {
+            continue;
+        }
+        const QXmlStreamAttributes attributes = svg.attributes();
+        const QString id = svg.name().toString() + QLatin1Char('#') + attributes.value(QLatin1String("id")).toString();
+        if (svg.name() == QLatin1String("rect")) {
+            std::vector<PathNumber> numbers;
+            for (const char *name : {"x", "y", "width", "height", "rx"}) {
+                numbers.push_back({QLatin1Char('R'), 0, attributes.value(QLatin1String(name)).toDouble()});
+            }
+            shapes.push_back({id, numbers});
+        } else if (svg.name() == QLatin1String("path")) {
+            shapes.push_back({id, pathNumbers(attributes.value(QLatin1String("d")).toString())});
+        }
+    }
+    return shapes;
+}
+
+// A 32 or 36 px slot at 2x scaling, the task manager's at 2x, shows its 1x
+// drawing doubled, as the 16 and 22 px slots do (#373 hill climb, H26: it
+// had the 64 px composition, some 35 % lighter than the 1x drawing, so a
+// slot's weight changed with the scale): every coordinate and width of the
+// file twice the 1x file's, to within the files' rounding, the arcs' flags
+// kept, its rim 2 px; rendered, each trace from twice its 1x start to the
+// tile's inner edge, ending on twice its 1x end's rows, and twice as wide
+// across.
+void AppIconTest::doubledTaskManagerSlotsDoubleTheir1xDrawings() {
+    QFETCH(int, size);
+    const QString path = doubledPath(size);
+    const QString single = FerrousAppIcon::resourcePath(size);
+    const int doubled = 2 * size;
+    QVERIFY2(QFile::exists(path), qPrintable(path));
+    QCOMPARE(QImageReader(path).size(), QSize(doubled, doubled));
+
+    const auto shapes = shapesOf(path);
+    const auto singleShapes = shapesOf(single);
+    QCOMPARE(shapes.size(), singleShapes.size());
+    for (qsizetype n = 0; n < shapes.size(); ++n) {
+        const auto &[id, numbers] = shapes[n];
+        const auto &[singleId, singleNumbers] = singleShapes[n];
+        QCOMPARE(id, singleId);
+        QCOMPARE(numbers.size(), singleNumbers.size());
+        for (size_t i = 0; i < numbers.size(); ++i) {
+            QCOMPARE(numbers[i].command, singleNumbers[i].command);
+            // An arc's rotation and flags, its 3rd to 5th numbers, are kept.
+            const bool flag = numbers[i].command == QLatin1Char('A') && numbers[i].place >= 2 && numbers[i].place <= 4;
+            const double wanted = flag ? singleNumbers[i].value : 2 * singleNumbers[i].value;
+            QVERIFY2(std::abs(numbers[i].value - wanted) <= 0.0025,
+                     qPrintable(QStringLiteral("%1, number %2: %3, not %4").arg(id).arg(i).arg(numbers[i].value).arg(wanted)));
+        }
+    }
+
+    // Rendered: twice the 1x tile, in a 2 px rim.
+    const QImage image = render(path, doubled);
+    const QRect tile = tileOf(image);
+    const QRect singleTile = tileOf(render(single, size));
+    QCOMPARE(tile, QRect(singleTile.topLeft() * 2, singleTile.size() * 2));
+    const QPoint middle = tile.center();
+    for (int step = 0; step <= 2; ++step) {
+        QCOMPARE(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2), step < 2);
+    }
+    const QRect inside = tile.adjusted(2, 2, -2, -2);
+    QCOMPARE(tracesOf(image).size(), static_cast<size_t>(3));
+    const QHash<QString, QImage> cover = traceCoverage(path, doubled);
+    const QHash<QString, QImage> singleCover = traceCoverage(single, size);
+    for (const QString &id : seriesIds(size)) {
+        const QImage &trace = cover.value(id);
+        const QImage &singleTrace = singleCover.value(id);
+        const auto [first, last] = columnsOf(trace);
+        const auto [singleFirst, singleLast] = columnsOf(singleTrace);
+        QVERIFY2(std::abs(first - 2 * singleFirst) <= 1, qPrintable(QStringLiteral("%1 from %2, the 1x from %3").arg(id).arg(first).arg(singleFirst)));
+        QCOMPARE(last, inside.right());
+        QCOMPARE(last + 1, 2 * (singleLast + 1));
+        const Column end = columnOf(trace, last);
+        const Column singleEnd = columnOf(singleTrace, singleLast);
+        QVERIFY2(std::abs(end.centre - 2 * singleEnd.centre) <= 0.3,
+                 qPrintable(QStringLiteral("%1 ends at %2, the 1x at %3").arg(id).arg(end.centre).arg(singleEnd.centre)));
+        // As wide across over the middle of its run as twice the 1x's.
+        const int from = singleFirst + 2 * capColumns(size);
+        const int to = singleLast - 5;
+        const double width = widthAcross(trace, 2 * from, 2 * to + 1);
+        const double singleWidth = widthAcross(singleTrace, from, to);
+        QVERIFY2(std::abs(width - 2 * singleWidth) <= 0.05 * 2 * singleWidth,
+                 qPrintable(QStringLiteral("%1: %2 px across, the 1x %3").arg(id).arg(width).arg(singleWidth)));
+    }
+}
+
+void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition_data() {
+    QTest::addColumn<int>("size");
     QTest::addRow("48px@2") << 48;
     QTest::addRow("64px@2") << 64;
 }
 
-// A 32 or 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
+// A 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
 // H21: the theme gave it the scalable drawing, with a 1 device px rim beside
 // the 16 and 22 px slots' 2): the 64 px composition, three smooth traces
 // rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
 // rim, its traces where the 64 px drawing has them, in proportion to the
-// tile inside the rim, and tapering as it does, from 3.8 units at 64 device
-// px and 3.6 at 96. The 64 px slot's (H22: the theme gave it the 128 or 256
-// px drawing, with the 4th harmonic, or the scalable one) is the 64 px
-// drawing doubled, 3.8 units at 128 device px, without the 4th harmonic.
-void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
+// tile inside the rim, and tapering as it does, from 3.6 units at 96 device
+// px. The 64 px slot's (H22: the theme gave it the 128 or 256 px drawing,
+// with the 4th harmonic, or the scalable one) is the 64 px drawing doubled,
+// 3.8 units at 128 device px, without the 4th harmonic. (The 32 and 36 px
+// slots' double their 1x drawings: doubledTaskManagerSlotsDoubleTheir1xDrawings.)
+void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
     const int doubled = 2 * size;
@@ -2091,20 +2217,12 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
                  qPrintable(QStringLiteral("%1 ends at %2 of the tile, the 64 px drawing's at %3")
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
         // Its width across: the harmonics tapering 0.8 and 0.65 from the
-        // composition's 3.8 units (3.6 in the 48 px slot's); in the 32 px
-        // slot's 2.5 and 2 thirds of it, as at 1x (#373 hill climb, H24), the
-        // rose eased to the magenta's width over its last 8 px; the
-        // fundamental heavier (doubledFundamental).
-        const bool asAt1x = taskManagerSize(size);
-        const double taper[] = {asAt1x ? 2.0 / 3 : 0.65, asAt1x ? 2.5 / 3 : 0.8, 1.0};
+        // composition's 3.8 units (3.6 in the 48 px slot's); the fundamental
+        // heavier (doubledFundamental).
+        const double taper[] = {0.65, 0.8, 1.0};
         const double wanted = (isFundamental ? doubledFundamental(size).first : fundamental[size == 48 ? 1 : 0] * taper[n]) * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
-        if (asAt1x && ids[n] == QLatin1String("h2")) {
-            const double magenta = fundamental[0] * taper[0] * unit;
-            const double end = widthAcross(trace, last - 2, last - 1);
-            QVERIFY2(std::abs(end - magenta) <= 0.1 * magenta, qPrintable(QStringLiteral("the rose's end %1 px across, not %2").arg(end).arg(magenta)));
-        }
     }
 }
 
