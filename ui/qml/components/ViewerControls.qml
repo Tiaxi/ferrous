@@ -30,6 +30,10 @@ Item {
     property string closeButtonName: "viewerCloseButton"
     // The viewer's own button before Close, if it has one.
     default property alias viewerControls: viewerControlsRow.data
+    // On the windowed viewer's corner plate, the zoom is set off from the
+    // viewer's controls by a 1 px divider with the controls' 4 px either
+    // side, as on the visualization viewer's (#373 H37).
+    property bool dividers: false
 
     readonly property bool zoomed: Math.abs(root.zoomLevel - 1.0) > 0.001
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
@@ -70,10 +74,27 @@ Item {
         onClicked: root.resetView()
     }
 
+    // Where the zoom ends, and what follows it starts.
+    readonly property real _zoomEnd: root.resetShown ? resetButton.x + resetButton.width
+                                                     : readout.x + readout.width
+    readonly property bool _zoomDivided: root.dividers && root.readoutShown
+    readonly property real _afterZoom: !root.readoutShown ? 0
+        : root._zoomEnd + root.spacing + (root._zoomDivided ? 1 + root.spacing : 0)
+
+    Rectangle {
+        objectName: "viewerControlsDivider"
+        visible: root._zoomDivided
+        x: root._zoomEnd + root.spacing
+        y: 4
+        width: 1
+        height: Math.max(0, root.height - 8)
+        color: root.plotColors ? root.plotColors.plotPlateEdge : root.uiPalette.seam
+    }
+
     Components.ViewerToolButton {
         id: issuesButton
         objectName: "viewerIssuesButton"
-        x: resetButton.x + (root.resetShown ? resetButton.width + root.spacing : 0)
+        x: root._afterZoom
         visible: root.issuesShown
         uiPalette: root.uiPalette
         plotColors: root.plotColors

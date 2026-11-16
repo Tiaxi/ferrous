@@ -103,11 +103,11 @@ Item {
         ? Qt.size(0, 0)
         : Qt.size(popupControls.width + root.cornerGap,
                   popupControls.anchors.topMargin + popupControls.height + 1)
-    // Between what belongs to the plot, its zoom and its mode, 4 px apart,
-    // and Close, which belongs to the viewer: 8 px, so the corner reads as
-    // the plot's controls and the window's (#373 H11: all 4 px apart, the
-    // three plates read as one row of unlike controls).
-    readonly property int cornerGap: 2 * Kirigami.Units.smallSpacing
+    // Between the plot's mode switch and the viewer's controls: the 1 px
+    // divider of the corner's one plate, which the plot layer draws under
+    // both (#373 H37: as a row of plates, 8 px apart since H11, the corner
+    // read as four controls rather than one).
+    readonly property int cornerGap: 1
     // How far the visualization's controls, such as its mode switch and the
     // first lane's Mute and Solo, keep below its top edge: over the whole
     // screen, the title strip's height while it can show. They show only
@@ -346,6 +346,8 @@ Item {
                 plotColors: root.uiPalette.plotColors(root.visualizationMode)
                 uiPalette: root.uiPalette
                 closeButtonName: "spectrogramPopupCloseButton"
+                // On the plot layer's corner plate.
+                bare: true
                 controlsVisible: root.fullscreenControlsVisible
                 controlsLevel: root.fullscreenControlsLevel
                 pointerActivity: root.noteFullscreenPointerActivity

@@ -2516,8 +2516,11 @@ void TransportInputSmokeTest::viewerZoomShowsAReadoutAndAResetButton() {
             // Laid out: the readout, Reset, the mode switch 4 px right of
             // them, and Close right of that on the plate in the corner, or
             // over the whole screen on the strip above them.
+            // On the windowed viewer's one plate, the divider's 1 px apart
+            // (#373 H37).
             QTRY_VERIFY(sceneRectOf(readout).right() <= sceneRectOf(reset).left()
-                        && sceneRectOf(zoomPlate).right() + 4 == sceneRectOf(modeSwitch).left());
+                        && sceneRectOf(zoomPlate).right() + (fullscreenMode == 1 ? 4 : 1)
+                               == sceneRectOf(modeSwitch).left());
             if (fullscreenMode == 1) {
                 QVERIFY(sceneRectOf(close).bottom() <= sceneRectOf(modeSwitch).top());
                 QVERIFY(sceneRectOf(close).right() >= sceneRectOf(modeSwitch).right());
@@ -2643,15 +2646,61 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
     QVERIFY(controls != nullptr);
     QTRY_VERIFY(plate->isVisible());
     QVERIFY(itemsNamed(controls, QStringLiteral("viewerZoomReadout")).isEmpty());
-    QTRY_COMPARE(sceneRectOf(plate).right() + 4, sceneRectOf(modeSwitch).left());
 
-    // One row of plates in the corner (#373 H6): the zoom's, the mode
-    // switch's and the viewer's Close on the one plot plate, in its fill and
-    // edge, as tall and on one top: the plot's own, its zoom and its mode,
-    // 4 px apart, and the viewer's Close 8 px from them (#373 H11).
+    // One plate in the windowed viewer's corner (#373 H37: a row of three
+    // plates read as unlike controls): the zoom, the mode switch and the
+    // viewer's Close on the plot layer's one plate, each group 1 px apart
+    // with a divider there, the groups' own plates bare.
     QQuickItem *cornerPlate = itemNamed(controls, QStringLiteral("viewerCornerPlate"));
-    QVERIFY(cornerPlate != nullptr);
-    QTRY_COMPARE(sceneRectOf(modeSwitch).right() + 8, sceneRectOf(cornerPlate).left());
+    QQuickItem *joined = itemNamed(layer, QStringLiteral("plotCornerPlate"));
+    QVERIFY(cornerPlate != nullptr && joined != nullptr);
+    QTRY_COMPARE(sceneRectOf(plate).right() + 1, sceneRectOf(modeSwitch).left());
+    QCOMPARE(sceneRectOf(modeSwitch).right() + 1, sceneRectOf(cornerPlate).left());
+    QVERIFY(joined->isVisible());
+    QCOMPARE(sceneRectOf(joined).left(), sceneRectOf(plate).left());
+    QCOMPARE(sceneRectOf(joined).right(), sceneRectOf(cornerPlate).right());
+    for (QQuickItem *bare : {plate, modeSwitch, cornerPlate}) {
+        QVERIFY(bare->property("bare").toBool());
+        for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {
+            QVERIFY(!itemNamed(bare, QString::fromLatin1(part))->isVisible());
+        }
+    }
+    {
+        QList<QQuickItem *> dividers;
+        for (QQuickItem *divider : itemsNamed(joined, QStringLiteral("plotCornerDivider"))) {
+            if (divider->isVisible()) {
+                dividers << divider;
+            }
+        }
+        QCOMPARE(dividers.size(), 2);
+        QCOMPARE(sceneRectOf(dividers[0]).left(), sceneRectOf(plate).right());
+        QCOMPARE(sceneRectOf(dividers[1]).left(), sceneRectOf(modeSwitch).right());
+        for (QQuickItem *divider : dividers) {
+            QCOMPARE(divider->width(), 1.0);
+            QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(joined).top(), 6.0);
+            QCOMPARE(sceneRectOf(joined).bottom() - sceneRectOf(divider).bottom(), 6.0);
+            QCOMPARE(divider->property("color").value<QColor>(),
+                     itemNamed(joined, QStringLiteral("plotPlateEdge"))->property("border").value<QObject *>()
+                         ->property("color").value<QColor>());
+        }
+        // A focus ring, 3 px out from a mode button, stays clear of them.
+        for (int mode = 0; mode < 2; ++mode) {
+            QQuickItem *button = itemNamed(modeSwitch, QStringLiteral("visualizationModeButton%1").arg(mode));
+            QVERIFY(sceneRectOf(button).left() - 3 > sceneRectOf(dividers[0]).right());
+            QVERIFY(sceneRectOf(button).right() + 3 < sceneRectOf(dividers[1]).left());
+        }
+    }
+    // The pointer between the groups is on the plate: the viewer's
+    // controls stay and the plot's crosshair hides.
+    QTest::mouseMove(window, sceneRectOf(modeSwitch).topRight().toPoint() + QPoint(0, 2));
+    QTRY_VERIFY(layer->property("plateHovered").toBool());
+    // Without a zoom, the plate starts at the mode switch, with one divider.
+    spectrogramSurface->setProperty("_viewerZoomLevel", 1.0);
+    QTRY_VERIFY(!plate->isVisible());
+    QTRY_COMPARE(sceneRectOf(joined).left(), sceneRectOf(modeSwitch).left());
+    spectrogramSurface->setProperty("_viewerZoomLevel", 2.0);
+    QTRY_VERIFY(plate->isVisible());
+    QTRY_COMPARE(sceneRectOf(joined).left(), sceneRectOf(plate).left());
     // The readout is plain text in the plot's secondary colour, and Reset
     // and the modes glyph buttons, none in the accent at rest.
     {
@@ -2673,7 +2722,9 @@ void TransportInputSmokeTest::mainPaneZoomShowsAReadoutBesideTheModeSwitch() {
                     != palette->property("accent").value<QColor>().rgba());
         }
     }
-    for (QQuickItem *other : {modeSwitch, cornerPlate}) {
+    // The one plate is the plot's plate, in its fill and edge, as tall as
+    // each group and on one top.
+    for (QQuickItem *other : {modeSwitch, cornerPlate, joined}) {
         QCOMPARE(sceneRectOf(other).top(), sceneRectOf(plate).top());
         QCOMPARE(sceneRectOf(other).height(), sceneRectOf(plate).height());
         for (const char *part : {"plotPlateFill", "plotPlateEdge"}) {

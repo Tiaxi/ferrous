@@ -6,8 +6,9 @@ import FerrousUi 1.0
 import "." as Components
 
 // The controls of the visualization viewer in the main window, which has
-// no title strip: one plate in the top right corner, in the plot's colours,
-// right of the plot's mode switch. The new issues while there are any, and
+// no title strip: in the top right corner, in the plot's colours, right of
+// the plot's mode switch, on the one plate the plot layer draws under both
+// with `bare` (#373 H37), or on a plate of their own. The new issues while there are any, and
 // Close: 24 px tool buttons, 4 px apart with 3 px around, as the mode
 // switch's beside it, so a focus ring stays inside the plate and clear of
 // the other button (#373 H14 G4). The zoom is on the
@@ -31,6 +32,9 @@ Item {
     property var pointerActivity: null
     property var errorController: null
     property string closeButtonName: "viewerCloseButton"
+    // Without a plate of its own, on one the plot layer draws under it and
+    // the mode switch (#373 H37).
+    property bool bare: false
 
     readonly property int unseenIssueCount: root.errorController ? root.errorController.unseenCount : 0
     // As the mode switch's: a focus ring stays 1 px inside the plate.
@@ -65,6 +69,7 @@ Item {
     Components.PlotPlate {
         objectName: "viewerCornerPlate"
         anchors.fill: parent
+        bare: root.bare
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         takesPointer: true

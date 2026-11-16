@@ -57,6 +57,14 @@ Item {
     // main pane and in both viewers alike: [Zoom ↺] [mode] [✕ of a viewer].
     property real zoomLevel: 1.0
     property var resetZoom: null
+    // In the windowed viewer, whose Close is right of the mode switch, the
+    // corner is one plate: the zoom, the mode switch and the viewer's own
+    // controls on it, each group set off by a 1 px divider, rather than a
+    // row of plates (#373 H37). The viewer keeps its controls bare on it.
+    readonly property bool cornerJoined: root.trailingInset > 0
+    // The divider's inset from the plate's top and bottom: the buttons'
+    // 4 px of plate and 2 px more, so it is shorter than the glyphs' boxes.
+    readonly property real dividerInset: 6
 
     // The mode's plot colours, also while the plot is bare, before any
     // audio and while it waits for its data: the floor is the mode's own
@@ -99,7 +107,8 @@ Item {
     // Whether the pointer is on one of the plot's plates: a lane's label or
     // its buttons, the mode switch or the zoom.
     readonly property bool plateHovered: {
-        if (modeSwitch.pointerHovered || (zoomPlate.visible && zoomPlate.pointerHovered))
+        if (modeSwitch.pointerHovered || (zoomPlate.visible && zoomPlate.pointerHovered)
+                || (cornerPlate.visible && cornerHover.hovered))
             return true
         for (let i = 0; i < laneHeads.count; ++i) {
             const head = laneHeads.itemAt(i)
@@ -135,6 +144,65 @@ Item {
             : minutes + ":" + secs
     }
 
+    // The windowed viewer's corner, under its controls: from the zoom, or
+    // the mode switch, out to the viewer's Close, at the mode switch's
+    // height, which the zoom and the viewer's controls share.
+    Item {
+        id: cornerPlate
+        objectName: "plotCornerPlate"
+        z: 2
+        visible: root.cornerJoined && modeSwitch.visible
+        x: zoomPlate.visible ? zoomPlate.x : modeSwitch.x
+        y: modeSwitch.y
+        width: modeSwitch.x + modeSwitch.width + root.trailingInset - x
+        height: modeSwitch.height
+
+        Components.PlotPlate {
+            id: cornerPlateFill
+            anchors.fill: parent
+            revealed: modeSwitch.revealed
+            fadeLevel: root.controlsLevel
+            plotColors: root.plotColors
+            uiPalette: root.uiPalette
+            // Presses between the groups stay on it.
+            takesPointer: true
+            Accessible.ignored: true
+        }
+
+        HoverHandler {
+            id: cornerHover
+            onPointChanged: {
+                if (root.pointerActivity) {
+                    root.pointerActivity(point.scenePosition.x, point.scenePosition.y)
+                }
+            }
+        }
+
+        // Between the zoom and the mode switch, while the zoom shows, and
+        // between the mode switch and the viewer's controls: in the 1 px
+        // the groups leave between them, 4 px of plate from each group's
+        // buttons, so a focus ring 3 px out never meets it.
+        Rectangle {
+            objectName: "plotCornerDivider"
+            visible: zoomPlate.visible
+            x: modeSwitch.x - 1 - cornerPlate.x
+            y: root.dividerInset
+            width: 1
+            height: Math.max(0, cornerPlate.height - 2 * root.dividerInset)
+            opacity: cornerPlateFill.opacity
+            color: root.plotColors.plotPlateEdge
+        }
+        Rectangle {
+            objectName: "plotCornerDivider"
+            x: modeSwitch.x + modeSwitch.width - cornerPlate.x
+            y: root.dividerInset
+            width: 1
+            height: Math.max(0, cornerPlate.height - 2 * root.dividerInset)
+            opacity: cornerPlateFill.opacity
+            color: root.plotColors.plotPlateEdge
+        }
+    }
+
     // The mode switch comes first in the Tab order, then each lane's Mute
     // and Solo. It shows while the pointer is over the pane or keyboard
     // focus is on it, as Mute and Solo do: in rolling mode, its corner is
@@ -156,6 +224,7 @@ Item {
         revealed: root.controlsAutoHide || root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
             || modeSwitch.pointerHovered || modeSwitch.focusInside
         fadeLevel: root.controlsLevel
+        bare: root.cornerJoined
         plotColors: root.plotColors
         uiPalette: root.uiPalette
         selectedMode: root.visualizationMode
@@ -174,7 +243,9 @@ Item {
         z: 2
         anchors.top: modeSwitch.top
         anchors.right: modeSwitch.left
-        anchors.rightMargin: 4
+        // On the windowed viewer's one plate, the divider's 1 px apart.
+        anchors.rightMargin: root.cornerJoined ? 1 : 4
+        bare: root.cornerJoined
         available: root.controlsVisible || root.controlsLevel > 0
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors

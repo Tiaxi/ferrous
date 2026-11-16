@@ -43,6 +43,7 @@ private slots:
     void albumArtDetailsAreOnTheTypeScale();
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtInfoButtonIsTintedOnlyWhileChecked();
+    void windowedViewerCornerSetsTheZoomOffWithADivider();
     void albumArtFitsLeftOfTheDetails_data();
     void albumArtFitsLeftOfTheDetails();
     void albumArtViewerIsBlackAroundTheArtInALightTheme_data();
@@ -1290,6 +1291,58 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QTRY_VERIFY(!readout->isVisible());
 
     QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+// The windowed viewer's corner plate: zoomed, the readout and Reset are set
+// off from the viewer's buttons by a 1 px divider in the plot plate's edge
+// colour, with the buttons' 4 px either side and 6 px of plate above and
+// below it, as on the visualization viewer's (#373 H37). Not zoomed, none.
+void AlbumArtSmokeTest::windowedViewerCornerSetsTheZoomOffWithADivider() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && palette != nullptr && surface != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 0);
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(viewer->property("albumArtViewerOpen").toBool());
+    QQuickItem *controls = nullptr;
+    QTRY_VERIFY((controls = visibleItemNamed(window, QStringLiteral("albumArtPopupControls"))) != nullptr);
+    QQuickItem *divider = itemNamed(controls, QStringLiteral("viewerControlsDivider"));
+    QQuickItem *reset = itemNamed(controls, QStringLiteral("viewerResetButton"));
+    QQuickItem *info = itemNamed(controls, QStringLiteral("albumArtPopupInfoButton"));
+    QVERIFY(divider != nullptr && reset != nullptr && info != nullptr);
+    QVERIFY(!divider->isVisible());
+
+    surface->setProperty("zoom", 2.5);
+    QTRY_VERIFY(divider->isVisible() && reset->isVisible());
+    QCOMPARE(divider->width(), 1.0);
+    QCOMPARE(sceneRectOf(divider).left() - sceneRectOf(reset).right(), 4.0);
+    QCOMPARE(sceneRectOf(info).left() - sceneRectOf(divider).right(), 4.0);
+    QCOMPARE(sceneRectOf(divider).top() - sceneRectOf(controls).top(), 6.0);
+    QCOMPARE(sceneRectOf(controls).bottom() - sceneRectOf(divider).bottom(), 6.0);
+    QObject *media = qvariant_cast<QObject *>(palette->property("mediaPlot"));
+    QVERIFY(media != nullptr);
+    QCOMPARE(divider->property("color").value<QColor>(), media->property("plotPlateEdge").value<QColor>());
+    // The plate holds it all, Close ending 2 px in from its edge.
+    QQuickItem *close = itemNamed(controls, QStringLiteral("albumArtPopupCloseButton"));
+    QVERIFY(close != nullptr);
+    QTRY_COMPARE(sceneRectOf(controls).right() - sceneRectOf(close).right(), 2.0);
+
+    surface->setProperty("zoom", 1.0);
+    QTRY_VERIFY(!divider->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 

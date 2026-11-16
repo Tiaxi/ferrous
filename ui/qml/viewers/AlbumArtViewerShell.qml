@@ -336,6 +336,7 @@ Item {
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
                 plotColors: root.uiPalette.mediaPlot
+                dividers: true
                 zoomLevel: root.zoomLevel
                 resetView: root.resetView
                 resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Window")
