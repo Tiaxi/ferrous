@@ -1,16 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- The visualization mode switch's Spectrogram glyph (#373 H14 G7), drawn for 16 px at 1x: the app
-     icon's small-size pair of traces, a glide and its 3rd harmonic, from a common start at the lower
-     left (#373 H22: a middle trace, as the icon has from 32 px, crowded the two at 16 px). The lower
-     is the icon's fundamental, a 1.5 px stroke from x 2 to 14 that rises 1 px along its length and
-     bends over as a glide does (#373 H20: level at y 14.5 it read as a chart's baseline; H16 I7:
-     without it the other read as "/"). The harmonic, the icon's top trace, starts with it and leaves
-     it at some 62 degrees, bending over to 29 (#373 H19: it rose at 81 degrees, a hook beside the
-     icon's curve), some 4 px clear of it half way across and 7 px at the end. A 1.75 px stroke with
-     round caps, a weight beside Breeze's waveform glyph (#373 H15 H8). A one-colour mask, drawn in
-     the plot's text colour. -->
+     icon's small-size pair of traces, a glide and its 3rd harmonic, each starting on its own at the
+     left (#373 H23: from one vertex the two read as an angle sign, where the icon's traces start
+     apart; H22: a middle trace, as the icon has from 32 px, crowded the two at 16 px). The lower is
+     the icon's fundamental, a 1.5 px stroke from x 2 to 14 that rises 1 px along its length and
+     bends over as a glide does (#373 H20: level it read as a chart's baseline; H16 I7: without it
+     the other read as "/"). The harmonic, the icon's top trace, starts 3.5 px above it and rises at
+     45 degrees, bending over to 24 (#373 H19: it rose at 81 degrees, a hook beside the icon's
+     curve), some 5 px clear of it half way across and 7 px at the end. A 1.75 px stroke with round
+     caps, a weight beside Breeze's waveform glyph (#373 H15 H8). A one-colour mask, drawn in the
+     plot's text colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
-<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 14.75C5.5 14.25 9.25 13.75 13.25 13.75"/>
-<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M2.75 14.75C5 10.5 8.25 7.5 13.25 4.75"/>
+<path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 13.75C5.5 13.4 9.25 13 13.25 12.75"/>
+<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M2.75 10.25C5 8 8.25 6 13.25 3.75"/>
 </svg>
