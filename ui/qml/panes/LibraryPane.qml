@@ -528,6 +528,7 @@ Rectangle {
                                 uiPalette: root.uiPalette
                                 opaque: true
                                 hovered: libraryRowMouseArea.containsMouse
+                                hoverColor: root.uiPalette.rowHover
                                 selected: libraryRow.rowSelected
                                 active: libraryAlbumView.activeFocus
                                 focused: libraryRow.rowCurrent
@@ -671,7 +672,8 @@ Rectangle {
                                 font.family: root.uiPalette.baseFont.family
                                 font.pointSize: root.uiPalette.basePointSize
                                 font.features: root.uiPalette.tabularFigures
-                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
+                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected,
+                                    libraryRowMouseArea.containsMouse)
                             }
 
                             Text {
@@ -736,7 +738,8 @@ Rectangle {
                                 font.family: root.uiPalette.baseFont.family
                                 font.pointSize: root.uiPalette.smallPointSize
                                 font.features: root.uiPalette.tabularFigures
-                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected)
+                                color: root.uiPalette.textTertiaryOn(libraryRow.rowSelected,
+                                    libraryRowMouseArea.containsMouse)
                             }
                         }
                     }

@@ -235,7 +235,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     }
 
     // Listening, being sent and scrobbled look apart by shape (#373 H8): a
-    // 2 px bar filling its trough, the trough full, and neither under the
+    // 3 px bar (#373 H13) filling its trough, the trough full, and neither under the
     // glyph. The bar is the secondary colour, the glyph's, over an opaque
     // trough 3:1 on the status bar (#373 H11, H12). The glyph is the same in
     // all three.
@@ -250,17 +250,17 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
     QTRY_VERIFY(bar->isVisible());
     // Half of the glyph's 16 px.
-    QCOMPARE(trough->size(), QSizeF(16, 2));
+    QCOMPARE(trough->size(), QSizeF(16, 3));
     QCOMPARE(trough->property("color").value<QColor>().alphaF(), 1.0F);
     QVERIFY(contrastRatioOf(trough->property("color").value<QColor>(), chrome) >= 3.0);
-    QCOMPARE(bar->height(), 2.0);
+    QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->width(), 8.0);
     QCOMPARE(bar->opacity(), 1.0);
     QCOMPARE(bar->property("color").value<QColor>(), secondary);
     bridge->setProperty("lastFmScrobbleState", 2);
     QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("scrobbled"));
     QVERIFY(bar->isVisible() && trough->isVisible());
-    QCOMPARE(bar->height(), 2.0);
+    QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->width(), 16.0);
     QCOMPARE(bar->opacity(), 1.0);
     QCOMPARE(bar->property("color").value<QColor>(), secondary);
@@ -285,9 +285,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
         bridge->setProperty("lastFmScrobbleState", 1);
         QTRY_COMPARE(indicator->property("look").toString(), QStringLiteral("listening"));
         QTRY_VERIFY(trough->isVisible());
-        QCOMPARE(trough->size(), QSizeF(16, 2));
+        QCOMPARE(trough->size(), QSizeF(16, 3));
         QVERIFY(bar->isVisible());
-        QCOMPARE(bar->height(), 2.0);
+        QCOMPARE(bar->height(), 3.0);
         QCOMPARE(bar->width(), width);
         QCOMPARE(bar->position(), QPointF(0, 0));
         bridge->setProperty("lastFmScrobbleState", 3);
@@ -298,7 +298,7 @@ void ScrobbleSmokeTest::scrobbleIndicatorShowsEveryState() {
 // The glyph's ink, as drawn in device pixels, is centred on its block, the
 // slot, both ways, and the slot on the status bar under its seam (#373
 // H10: the glyph sat 2.5 px above the middle, over the bar's place). The
-// bar under it is 2 px thick and, a second into a 2 min scrobble point, a
+// bar under it is 3 px thick and, a second into a 2 min scrobble point, a
 // 6 px dash from the ink's left edge, not a speck. The ctest runs this at
 // 1x and at 2x.
 void ScrobbleSmokeTest::scrobbleIndicatorGlyphIsCentredOnItsBlock() {
@@ -384,9 +384,9 @@ void ScrobbleSmokeTest::scrobbleIndicatorGlyphIsCentredOnItsBlock() {
     // And the slot's middle is the status bar's, under its 1 px seam.
     const QRectF bar = QRectF(statusBar->mapToScene(QPointF(0, 1)), QSizeF(statusBar->width(), statusBar->height() - 1));
     QCOMPARE(slotRect.center().y(), bar.center().y());
-    // The bar's trough: 2 px thick, 2 px under the ink, and the glyph's
+    // The bar's trough: 3 px thick, 2 px under the ink, and the glyph's
     // 16 px wide, 1 px past its ink on either side.
-    QVERIFY2(barBottom - barTop + 1 == int(std::round(2 * scale)), qPrintable(where));
+    QVERIFY2(barBottom - barTop + 1 == int(std::round(3 * scale)), qPrintable(where));
     QVERIFY2(barTop - glyphBottom - 1 == int(std::round(2 * scale)), qPrintable(where));
     QVERIFY2(barLeft == glyphLeft - int(std::round(scale)), qPrintable(where));
     QVERIFY2(barRight - barLeft + 1 == int(std::round(16 * scale)), qPrintable(where));

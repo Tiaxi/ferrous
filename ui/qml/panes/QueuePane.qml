@@ -466,9 +466,16 @@ Rectangle {
             implicitHeight: root.uiPalette.rowHeight
 
             Components.RegionHeader {
+                objectName: "queueRegionHeader"
                 anchors.fill: parent
                 uiPalette: root.uiPalette
-                leftInset: queueHeaderRow.x + titleHeader.x
+                // Over the Title column, or with no rows to align with, at
+                // the panes' 12 px inset, where "Library" is beside it
+                // (#373 H13: an empty queue's name stood alone at the
+                // Title column's 66 px).
+                leftInset: root.uiBridge.queueLength > 0
+                    ? queueHeaderRow.x + titleHeader.x
+                    : Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 rightInset: Math.max(0, parent.width - (queueHeaderRow.x + titleHeader.x + titleHeader.width))
                 title: I18n.i18nc("@title queue region", "Queue")
                 totals: root.totalsText
@@ -747,6 +754,7 @@ Rectangle {
                         uiPalette: root.uiPalette
                         opaque: true
                         hovered: playlistRowMouseArea.containsMouse
+                        hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
@@ -821,7 +829,8 @@ Rectangle {
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         text: root.playlistOrderText(index)
-                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected)
+                        color: root.uiPalette.textTertiaryOn(playlistRow.rowSelected,
+                            playlistRowMouseArea.containsMouse)
                     }
 
                     Text {

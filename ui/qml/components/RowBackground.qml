@@ -9,7 +9,8 @@ import org.kde.kirigami 2.20 as Kirigami
 // list's overlay scrollbar draws its thumb over it (#373 H6). A list whose
 // scrollbar is not an overlay leaves its lane with scrollbarLane.
 //
-// - hovered: the hover tint, which fades in and out;
+// - hovered: the hover tint, which fades in and out: the main window's
+//   library and queue set the stronger rowHover;
 // - selected: the selection tint, or the inactive one while the list has
 //   no keyboard focus;
 // - focused (the current row of a list with keyboard focus, while the
@@ -28,6 +29,8 @@ Item {
 
     required property var uiPalette
     property bool hovered: false
+    // The hover tint: the window's, or a list's own.
+    property color hoverColor: root.uiPalette.hover
     property bool selected: false
     // Whether the list has keyboard focus: its selection is the inactive
     // tint otherwise.
@@ -60,7 +63,7 @@ Item {
         id: hoverTint
         objectName: "rowBackgroundHover"
         anchors.fill: parent
-        color: root.uiPalette.hover
+        color: root.hoverColor
         opacity: root.hovered ? 1 : 0
         visible: opacity > 0
 

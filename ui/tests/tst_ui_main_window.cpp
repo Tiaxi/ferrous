@@ -23,6 +23,7 @@
 #include <QQmlComponent>
 #include <QQmlListReference>
 #include <QQmlContext>
+#include <QQmlExpression>
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -955,10 +956,14 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
+    void queueRowHoverIsTheListsTint();
+    void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
+    void emptyQueueNamesItselfAtThePanesInset_data();
+    void emptyQueueNamesItselfAtThePanesInset();
     void narrowQueueDropsAlbumBeforeTitle();
     void queueColumnsGiveTheirSlackToTheTitle();
     void narrowWindowAtALargeFontFitsTheQueue();
@@ -4124,7 +4129,7 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     bridge->setProperty("libraryScanTotal", 120);
     bridge->setProperty("libraryScanInProgress", true);
     QTRY_VERIFY(shown(scanCount));
-    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("41 / 120"));
+    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("34%"));
     QCOMPARE(libraryTotals->property("text").toString(),
              QStringLiteral("1 artist · 28 albums · 176 tracks"));
     bridge->setProperty("libraryScanInProgress", false);
@@ -4642,10 +4647,12 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     // At rest: neither tint.
     QVERIFY(!tint->isVisible());
     QVERIFY(!hover->isVisible());
-    // Hover: the hover tint.
+    // Hover: the lists' hover tint (#373 H13: about 1.45:1), and the year
+    // stepped up to stay 4.6:1 on it.
     QTest::mouseMove(window, sceneRect(album).center().toPoint());
     QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
-    QCOMPARE(colorOf(hover), tokenHex(window, "hover"));
+    QCOMPARE(colorOf(hover), tokenHex(window, "rowHover"));
+    QCOMPARE(colorOf(itemNamed(album, QStringLiteral("libraryRowYear"))), tokenHex(window, "textTertiaryHovered"));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     QTRY_VERIFY(!hover->isVisible());
 
@@ -4674,6 +4681,98 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// A queue row under the pointer takes the lists' hover tint, about 1.45:1
+// on the view (#373 H13: at 1.3:1 it was faint), as drawn, with its number
+// stepped up to stay 4.6:1 on it; a selected row keeps its selection tint
+// over it, and the playing row its amber title.
+void UiMainWindowTest::queueRowHoverIsTheListsTint() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView != nullptr && queue != nullptr);
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_COMPARE(queueView->property("count").toInt(), 3);
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = viewRowAt(queueView, 0)) != nullptr);
+    QQuickItem *hover = itemNamed(row, QStringLiteral("rowBackgroundHover"));
+    QQuickItem *number = itemNamed(row, QStringLiteral("queueCell_order"));
+    QVERIFY(hover != nullptr && number != nullptr);
+    QVERIFY(!hover->isVisible());
+    QCOMPARE(colorOf(number), tokenHex(window, "textTertiary"));
+
+    QTest::mouseMove(window, sceneRect(row).center().toPoint());
+    QTRY_VERIFY(hover->isVisible() && hover->opacity() == 1.0);
+    QCOMPARE(colorOf(hover), tokenHex(window, "rowHover"));
+    QCOMPARE(colorOf(number), tokenHex(window, "textTertiaryHovered"));
+    // As drawn, at the row's left end, where it has no text.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = image.width() / qreal(window->width());
+    const QPointF corner = sceneRect(row).topLeft() + QPointF(2.5, 2.5);
+    const QColor drawn = image.pixelColor(int(std::floor(corner.x() * scale)), int(std::floor(corner.y() * scale)));
+    const QColor hovered = tokenOf(window, "hoveredRow");
+    QVERIFY2(std::abs(drawn.red() - hovered.red()) <= 2 && std::abs(drawn.green() - hovered.green()) <= 2
+                 && std::abs(drawn.blue() - hovered.blue()) <= 2,
+             qPrintable(drawn.name() + QStringLiteral(" for ") + hovered.name()));
+
+    // Selected under the pointer: the selection tint over the hover's.
+    QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 0)));
+    QTRY_VERIFY(rowTinted(queueView, 0));
+    QQuickItem *tint = itemNamed(row, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(tint != nullptr && shown(tint));
+    QVERIFY(tint->z() >= hover->z());
+    QCOMPARE(tint->property("color").value<QColor>().alpha(), 255);
+    QCOMPARE(colorOf(number), tokenHex(window, "textSecondary"));
+    QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
+    QTRY_VERIFY(!hover->isVisible());
+}
+
+// The transport is window chrome in the theme's Header colour set, as
+// Breeze's toolbars and the menu bar above it are (#373 H13 P24): its
+// background, and the seek bar's and waveform's, are the menu bar's, from
+// the platform theme rather than a fixed colour.
+void UiMainWindowTest::transportIsWindowChromeInTheHeaderColours() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *transport = named(window, "transportBar");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QQuickItem *background = named(window, "transportBackground");
+    QQuickItem *seekBackground = named(window, "seekBackground");
+    QVERIFY(transport && menuBar && background && seekBackground);
+    QQmlExpression colorSet(qmlContext(transport), transport,
+                            QStringLiteral("Kirigami.Theme.colorSet === Kirigami.Theme.Header && !Kirigami.Theme.inherit"));
+    bool undefined = false;
+    const QVariant inHeader = colorSet.evaluate(&undefined);
+    QVERIFY2(!colorSet.hasError() && !undefined, qPrintable(colorSet.error().toString()));
+    QVERIFY(inHeader.toBool());
+
+    auto *menuBackground = menuBar->property("background").value<QQuickItem *>();
+    QVERIFY(menuBackground != nullptr);
+    const QColor header = menuBackground->property("color").value<QColor>();
+    QCOMPARE(transport->property("chromeColor").value<QColor>(), header);
+    QCOMPARE(background->property("color").value<QColor>(), header);
+    QCOMPARE(seekBackground->property("color").value<QColor>(), header);
+    QCOMPARE(named(window, "seekWaveform")->property("bgColor").value<QColor>(), header);
+    // As drawn: one band from the menu bar through the transport.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = image.width() / qreal(window->width());
+    const auto pixel = [&](const QPointF &at) {
+        return image.pixelColor(int(std::floor(at.x() * scale)), int(std::floor(at.y() * scale)));
+    };
+    const QRectF menuRect = sceneRect(menuBar);
+    const QRectF transportRect = sceneRect(transport);
+    QCOMPARE(pixel(QPointF(menuRect.right() - 4.5, menuRect.center().y())).rgb(), header.rgb());
+    QCOMPARE(pixel(QPointF(transportRect.center().x(), transportRect.top() + 2.5)).rgb(), header.rgb());
 }
 
 // The queue's selection tint runs to the pane's right edge, with no
@@ -5033,6 +5132,61 @@ void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     QCOMPARE(sceneRect(line).top(), sceneRect(queueHeader).top());
     QCOMPARE(sceneRect(line).height(), sceneRect(queueHeader).height());
     QCOMPARE(sceneRect(line).height(), sceneRect(handle).height());
+}
+
+void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("height");
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("1600x1000") << 1600 << 1000 << 10.0;
+    QTest::newRow("1000x720") << 1000 << 720 << 10.0;
+    QTest::newRow("1600x1000, 24 pt") << 1600 << 1000 << 24.0;
+    QTest::newRow("1000x720, 24 pt") << 1000 << 720 << 24.0;
+}
+
+// An empty queue's name has no rows to align with: it sits at the panes'
+// 12 px inset, where "Library" is beside it (#373 H13: it stood alone at
+// the Title column's 66 px). With tracks, it is over the Title column, and
+// back at 12 px once they are gone.
+void UiMainWindowTest::emptyQueueNamesItselfAtThePanesInset() {
+    QFETCH(int, width);
+    QFETCH(int, height);
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, width, height);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queue = named(window, "mainQueuePane");
+    QQuickItem *library = named(window, "libraryPane");
+    QQuickItem *queueHeader = named(window, "queueHeader");
+    QQuickItem *libraryHeader = named(window, "libraryHeader");
+    QVERIFY(queue && library && queueHeader && libraryHeader);
+    QQuickItem *name = itemNamed(queueHeader, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *libraryName = itemNamed(libraryHeader, QStringLiteral("regionHeaderTitle"));
+    QQuickItem *title = itemNamed(queueHeader, QStringLiteral("queueHeader_title"));
+    QVERIFY(name && libraryName && title);
+    QCOMPARE(bridge->property("queueLength").toInt(), 0);
+    const auto inset = [](QQuickItem *item, QQuickItem *pane) {
+        return item->mapToScene(QPointF()).x() - pane->mapToScene(QPointF()).x();
+    };
+    QTRY_COMPARE(inset(name, queue), 12.0);
+    QCOMPARE(inset(libraryName, library), 12.0);
+    QVERIFY(!name->property("truncated").toBool());
+
+    bridge->setProperty("queueRows", sampleQueueRows(3));
+    bridge->setProperty("queueLength", 3);
+    QTRY_COMPARE(name->mapToScene(QPointF()).x(), title->mapToScene(QPointF()).x());
+    QVERIFY(inset(name, queue) > 12.0);
+
+    bridge->setProperty("queueRows", QVariantList{});
+    bridge->setProperty("queueLength", 0);
+    QTRY_COMPARE(inset(name, queue), 12.0);
 }
 
 void UiMainWindowTest::narrowQueueDropsAlbumBeforeTitle() {

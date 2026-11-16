@@ -123,13 +123,25 @@ ToolBar {
         const name = String(entry.name || "").trim()
         return name.length > 0 ? name : FormatUtils.basenameFromPath(String(entry.path || ""))
     }
+    // The share of the files to scan that are scanned, in whole percent,
+    // rounded down: 100 only once the scan is done.
+    readonly property int scanPercent: root.scanTotalKnown
+        ? Math.floor(Math.min(1, root.scanProcessed / root.scanTotal) * 100)
+        : 0
+    // The scan's progress beside its label: its percent once it has a
+    // total, and the files scanned so far until then. The files to scan
+    // and those scanned are in the tooltip.
     readonly property string scanCountText: root.scanTotalKnown
-        ? I18n.i18nc("@info:status files scanned of files to scan", "%1 / %2",
-            root.formatCount(root.scanProcessed), root.formatCount(root.scanTotal))
+        ? root.percentText(root.scanPercent)
         : root.scanProcessed > 0
             ? I18n.i18ncp("@info:status %2 is the files scanned so far", "%2 file", "%2 files",
                 root.scanProcessed, root.formatCount(root.scanProcessed))
             : ""
+
+    // A percent as the status bar shows it: "42%".
+    function percentText(percent) {
+        return I18n.i18nc("@info:status percent of the library scanned", "%1%", percent)
+    }
 
     // A count with the locale's digit grouping: "1,204".
     function formatCount(count) {
@@ -368,11 +380,14 @@ ToolBar {
             }
         }
 
-        // The library scan: "Scanning “Music” 412 / 1,204" and a bar that
-        // moves with the scan's batches; narrow: "Scanning 412 / 1,204".
-        // Without a total: "Scanning “Music” 412 files", the count being
-        // the progress; the bar shows once there is a total to fill it
-        // against. Nothing in it moves on its own (#373: no indeterminate
+        // The library scan: "Scanning “Music”… 34%" and a bar that moves
+        // with the scan's batches; narrow: "Scanning… 34%". Its words say
+        // what the bar is (#373 H13: a bare bar read as a twin of the
+        // Last.fm slot's). Without a total: "Scanning “Music”… 412 files",
+        // the count being the progress; the bar shows once there is a total
+        // to fill it against. The percent keeps the width of "100%", in
+        // tabular figures, so nothing in the status bar moves as it counts.
+        // Nothing in it moves on its own (#373: no indeterminate
         // animation), so it is still with the desktop's animations off.
         Row {
             id: scanGroup
@@ -389,16 +404,32 @@ ToolBar {
             StatusLabel {
                 objectName: "statusBarScanLabel"
                 anchors.verticalCenter: parent.verticalCenter
-                text: !root.narrow && root.scanFolderName.length > 0
-                    ? I18n.i18nc("@info:status %1 is a library folder", "Scanning “%1”", root.scanFolderName)
-                    : I18n.i18nc("@info:status", "Scanning")
+                text: root.narrow
+                    ? I18n.i18nc("@info:status library scan in progress", "Scanning…")
+                    : root.scanFolderName.length > 0
+                        ? I18n.i18nc("@info:status %1 is a library folder", "Scanning “%1”…",
+                            root.scanFolderName)
+                        : I18n.i18nc("@info:status", "Scanning library…")
             }
 
             StatusLabel {
+                id: scanCount
                 objectName: "statusBarScanCount"
                 anchors.verticalCenter: parent.verticalCenter
                 visible: text.length > 0
                 text: root.scanCountText
+                // A percent keeps the room of the widest, on the right of
+                // it, beside the bar.
+                width: root.scanTotalKnown
+                    ? Math.max(Math.ceil(implicitWidth), Math.ceil(fullPercentMetrics.advanceWidth))
+                    : implicitWidth
+                horizontalAlignment: Text.AlignRight
+
+                TextMetrics {
+                    id: fullPercentMetrics
+                    font: scanCount.font
+                    text: root.percentText(100)
+                }
             }
 
             Rectangle {
