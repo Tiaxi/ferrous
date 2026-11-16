@@ -469,7 +469,17 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
         QVERIFY(heading != nullptr && messageItem != nullptr);
         QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
         const QString headingText = heading->property("text").toString();
-        QVERIFY2(headingText.contains(QStringLiteral("could not be saved")), qPrintable(headingText));
+        // It says so once, on one line; what the changes can be is in
+        // the text below (#373 H38).
+        QCOMPARE(headingText, QStringLiteral("Some recent changes could not be saved."));
+        QCOMPARE(heading->property("lineCount").toInt(), 1);
+        auto *details = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedDetails"));
+        QVERIFY(details != nullptr);
+        QCOMPARE(details->property("text").toString(),
+                 QStringLiteral("They can include settings, queue changes and Last.fm scrobbles. Retry saves "
+                                "again, for example after freeing disk space. Quit Anyway closes Ferrous and "
+                                "loses them."));
+        QVERIFY(details->mapToScene(QPointF(0, 0)).y() >= messageItem->mapToScene(QPointF(0, messageItem->height())).y());
         QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
         QVERIFY(messageItem->mapToScene(QPointF(0, 0)).y()
                 >= heading->mapToScene(QPointF(0, heading->height())).y());

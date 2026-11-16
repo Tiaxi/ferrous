@@ -19,6 +19,8 @@ Components.CompactDialogWindow {
     objectName: "quitSaveFailedDialog"
     title: I18n.i18nc("@title:window", "Couldn\u2019t Save Before Quitting")
     // Escape and the title bar's close button keep Ferrous open.
+    // At least as wide as the heading, which is one line in any font.
+    contentWidth: quitSaveFailedHeading.implicitWidth
 
     footer: Components.DialogFooter {
         id: dialogButtons
@@ -56,10 +58,14 @@ Components.CompactDialogWindow {
         spacing: 2
 
         Label {
+            id: quitSaveFailedHeading
             objectName: "quitSaveFailedHeading"
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
-            text: I18n.i18nc("@info", "Some settings, queue changes, or Last.fm scrobbles could not be saved.")
+            // Short enough for one line: what it can be is in the text
+            // below (#373 H38: the list in it left "saved." alone on a
+            // second line).
+            text: I18n.i18nc("@info", "Some recent changes could not be saved.")
         }
 
         Label {
@@ -79,7 +85,7 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        text: I18n.i18nc("@info", "Retry saves again, for example after freeing disk space. Quit Anyway "
-            + "closes Ferrous, and what could not be saved is lost.")
+        text: I18n.i18nc("@info", "They can include settings, queue changes and Last.fm scrobbles. Retry "
+            + "saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
     }
 }
