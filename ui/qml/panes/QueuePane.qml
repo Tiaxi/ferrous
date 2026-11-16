@@ -1256,7 +1256,9 @@ Rectangle {
                     const contentLineY = playlistView.originY + insertIndex * rowHeight
                     const lineY = playlistDropArea.mapFromItem(content, 0, contentLineY).y
                     const top = playlistDropArea.mapFromItem(playlistView, 0, 0).y
-                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY))
+                    // One pixel up, so the 2 px line straddles the
+                    // boundary; inside the view at its ends.
+                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY - 1))
                 }
 
                 function finishDrop() {
@@ -1310,12 +1312,15 @@ Rectangle {
                 }
             }
 
-            // Where a drop lands: a 2 px line in the focus colour between
-            // the rows, as wide as their tint.
+            // Where a drop lands: a 2 px line in the focus colour, centred
+            // on the boundary between the rows, which runs to the
+            // scrollbar's lane while it shows, as the focus ring does
+            // (#373 H35 AC4).
             Rectangle {
                 objectName: "queueDropIndicator"
                 x: playlistView.x
-                width: Math.max(0, playlistView.width - Kirigami.Units.largeSpacing)
+                width: Math.max(0, playlistView.width
+                    - (playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0))
                 height: 2
                 y: playlistDropArea.queueDropIndicatorY
                 color: root.uiPalette.focusRing

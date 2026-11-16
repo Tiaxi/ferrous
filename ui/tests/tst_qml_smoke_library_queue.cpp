@@ -41,6 +41,7 @@ private slots:
     void queueStateGlyphGrowsWithTheFont_data();
     void queueStateGlyphGrowsWithTheFont();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
+    void queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
     void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
@@ -3415,18 +3416,77 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     QCOMPARE(rows.rowAt(topIndex)->title, QStringLiteral("Track 20"));
 
     // A drop in the top row's upper half goes before it, one in the lower
-    // half of the row three down after that row, and the line is there.
+    // half of the row three down after that row, and the line is there:
+    // its 2 px straddle the boundary, one above it, inside the view at
+    // its top (#373 H35 AC4: it lay in the lower row).
     const auto dropAt = [&](double y) {
         QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator", Q_ARG(QVariant, y)));
     };
     dropAt(topRowY + rowHeight * 0.25);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - std::max(viewTop, topRowY)) < 0.5);
+                     - std::max(viewTop, topRowY - 1)) < 0.5);
     dropAt(topRowY + rowHeight * 2.75);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex + 3);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - (topRowY + rowHeight * 3)) < 0.5);
+                     - (topRowY + rowHeight * 3 - 1)) < 0.5);
+}
+
+// The drop line runs to the scrollbar's lane while the scrollbar shows,
+// and to the queue's edge when it does not, as the focus ring does (#373
+// H35 AC4: it stopped 8 px short with no scrollbar).
+void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows() {
+    QueueRowsModel rows;
+    loadQueueRows(rows, 4);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    auto *scrollBar = root->findChild<QQuickItem *>(QStringLiteral("queueScrollBar"));
+    auto *dropArea = root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(indicator != nullptr && scrollBar != nullptr && dropArea != nullptr && bridge != nullptr);
+    QTRY_VERIFY(view->height() > 0);
+    const double rowHeight = view->property("rowHeight").toDouble();
+    const double lane = scrollBar->property("lane").toDouble();
+    QVERIFY(lane > 0);
+
+    // A short queue: no scrollbar, and the line runs to the edge.
+    QTRY_VERIFY(view->property("count").toInt() == 4);
+    QVERIFY(!scrollBar->isVisible());
+    QCOMPARE(indicator->x(), dropArea->mapFromItem(view, QPointF(0, 0)).x());
+    QCOMPARE(indicator->width(), view->width());
+    QCOMPARE(indicator->height(), 2.0);
+    // Between rows 2 and 3: one pixel above the boundary and one below.
+    QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator",
+                                      Q_ARG(QVariant, dropArea->mapFromItem(view, QPointF(0, rowHeight * 2.75)).y())));
+    QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), 3);
+    const double boundary = dropArea->mapFromItem(view, QPointF(0, rowHeight * 3)).y();
+    QCOMPARE(indicator->y(), boundary - 1);
+    QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
+
+    // A long one: the scrollbar shows, and the line stops at its lane.
+    QVector<QueueRowData> more;
+    for (int number = 4; number < 60; ++number) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(number);
+        data.path = QStringLiteral("/music/%1.flac").arg(number);
+        data.lengthText = QStringLiteral("1:00");
+        more.push_back(data);
+    }
+    QVERIFY(rows.insertRowsAt(4, more));
+    bridge->setProperty("queueLength", 60);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QCOMPARE(indicator->width(), view->width() - lane);
 }
 
 namespace {
