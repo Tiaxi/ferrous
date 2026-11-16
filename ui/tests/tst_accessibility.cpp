@@ -32,6 +32,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <tuple>
 
@@ -3657,7 +3658,10 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         // icon's floor, both starting on it (#373 H16 I7: without it the
         // strokes read as "//"); 1.5 px or more clear of each other
         // everywhere, their ends 1.5 px or more clear of the baseline and
-        // each other; all inside the 16 px square with their caps.
+        // each other; all inside the 16 px square with their caps. The top
+        // one is the app icon's top harmonic, a glide (#373 H19: it rose
+        // from the baseline at 81 degrees and read as a hook): it leaves the
+        // baseline at 55 to 70 degrees and bends over to under 35.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
@@ -3670,12 +3674,14 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         const QRegularExpression path(QStringLiteral(
             "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
         QList<QList<QPointF>> curves;
+        QList<QList<QPointF>> controlPoints;
         for (auto match = path.globalMatch(svg); match.hasNext();) {
             const QRegularExpressionMatch each = match.next();
             QList<QPointF> controls;
             for (int i = 1; i <= 8; i += 2) {
                 controls.push_back(QPointF(each.captured(i).toDouble(), each.captured(i + 1).toDouble()));
             }
+            controlPoints.push_back(controls);
             QList<QPointF> points;
             for (int step = 0; step <= 200; ++step) {
                 const double t = step / 200.0;
@@ -3686,6 +3692,16 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             curves.push_back(points);
         }
         QCOMPARE(curves.size(), 2);
+        {
+            const QList<QPointF> &top = controlPoints.first();
+            const auto degrees = [](QPointF from, QPointF to) {
+                return std::atan2(from.y() - to.y(), to.x() - from.x()) * 180.0 / std::numbers::pi;
+            };
+            const double start = degrees(top[0], top[1]);
+            const double end = degrees(top[2], top[3]);
+            QVERIFY2(start >= 55 && start <= 70, qPrintable(QString::number(start)));
+            QVERIFY2(end > 0 && end < 35, qPrintable(QString::number(end)));
+        }
         const auto clear = [](const QList<QPointF> &a, const QList<QPointF> &b) {
             double least = 1e9;
             for (const QPointF &p : a) {

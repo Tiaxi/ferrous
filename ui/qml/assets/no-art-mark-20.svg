@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The library's mark for an album without a cover, on its 20 px tile, drawn on the pixel grid inside the tile's 1 px edge: the glide, a 2 px stair, under its 3rd harmonic, a 1 px line, 2 clear rows apart at their common start and 6 at the end, the harmonic rising three rows for each of the glide's (the now-playing stand-in's mark, AlbumArtTile.qml, as the icon's 16 px size draws it; #373 hill climb, H14 F2) -->
+<!-- The library's mark for an album without a cover, on its 20 px tile, drawn on the pixel grid inside the tile's 1 px edge as the app icon draws its 16 and 22 px sizes: the glide in amber under its 3rd harmonic in magenta, each 2 px tall, a closed shape with every vertex on a whole pixel, crisp flats and climbs of a row a column, one edge a column behind the other where it climbs; from a common start at the lower left 2 clear rows apart, the harmonic rising about three rows for each of the glide's, both running out to the tile's inner edge on the right (the now-playing stand-in's mark, AlbumArtTile.qml; #373 hill climb, H14 F2; H19: the icon's idiom, run out to the edge) -->
 <svg width="20" height="20" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-  <path id="h3" fill="#e055b4" d="M3 11h1v1h-1z M4 10h1v1h-1z M5 9h1v1h-1z M6 8h2v1h-2z M8 7h2v1h-2z M10 6h3v1h-3z M13 5h4v1h-4z"/>
-  <path id="fundamental" fill="#f2b035" d="M3 14h3v2h-3z M6 13h5v2h-5z M11 12h6v2h-6z"/>
+  <path id="h3" fill="#e055b4" d="M3 10 5 8 6 8 8 6 10 6 11 5 12 5 13 4 16 4 17 3 19 3 19 5 18 5 17 6 14 6 13 7 12 7 11 8 9 8 7 10 6 10 3 13Z"/>
+  <path id="fundamental" fill="#f2b035" d="M3 15 4 15 5 14 7 14 8 13 14 13 15 12 19 12 19 14 16 14 15 15 9 15 8 16 6 16 5 17 3 17Z"/>
 </svg>

@@ -3,6 +3,7 @@
 // The app icon (#373): a drawing of its own for each size, built in for the
 // window icon and installed in the hicolor icon theme with the desktop file.
 
+#include <QBuffer>
 #include <QColor>
 #include <QDir>
 #include <QFile>
@@ -135,18 +136,13 @@ int breezeMargin(int size) {
     }
 }
 
-// The sizes drawn on the pixel grid, every edge and vertex on a whole pixel:
-// there a freely antialiased stroke broke into dashes and dots. At 32 px in
-// whole-pixel stairs with no antialiasing (H10); at 16 and 22 px as two
-// strokes whose flats are crisp and whose climbs slant across a column each
-// (H18: a 1 px stair climbing a row a column read as dotted stairs).
+// The sizes drawn on the pixel grid, 16 to 48 px: each trace a closed shape
+// with every vertex on a whole pixel, so that its flats are crisp and only
+// its climbs, a row a column at most, are antialiased (#373 hill climb, H18
+// at 16 and 22 px; H19: one drawing from 16 to 48 px, where 32 px was 1 px
+// stair rows and 48 px free curves with a 1 px harmonic mid-span).
 bool onPixelGrid(int size) {
-    return size <= 32;
-}
-
-// The sizes drawn in stairs, with no antialiasing at all.
-bool inStairs(int size) {
-    return size == 32;
+    return size <= 48;
 }
 
 // The traces' colours, lowest first: the fundamental and two harmonics from
@@ -159,11 +155,17 @@ std::vector<QRgb> traceColours(int size) {
     return {kGlide, kThirdHarmonic};
 }
 
-// How tall each trace is in every column, lowest first: at 32 px stairs of a
-// 3 px fundamental and 2 px harmonics, the whole-pixel taper nearest
-// 1 : 0.8 : 0.65 (H10); at 16 and 22 px two 2 px strokes, the amber
-// fundamental and the magenta harmonic, which reads lighter where it climbs
-// (H18: a 1 px harmonic climbing a row a column broke into dots).
+// The traces' ids in the file, in drawing order: the top harmonic first.
+QStringList traceIds(int size) {
+    if (size >= 32) {
+        return {QStringLiteral("h3"), QStringLiteral("h2"), QStringLiteral("fundamental")};
+    }
+    return {QStringLiteral("h3"), QStringLiteral("fundamental")};
+}
+
+// How tall each trace is at least in every column on the pixel grid, lowest
+// first: a 3 px fundamental and 2 px harmonics from 32 px (H10), two 2 px
+// strokes at 16 and 22 px (H18: a 1 px harmonic broke into dots).
 std::vector<int> strokeHeights(int size) {
     if (size >= 32) {
         return {3, 2, 2};
@@ -171,11 +173,16 @@ std::vector<int> strokeHeights(int size) {
     return {2, 2};
 }
 
-// The columns a trace's end takes before its full width: at the pixel grid
-// one, its end column; from 48 px its round cap, as far as the fundamental's
-// half width (1.7 of the drawing's 64 units), rounded up.
+// The columns a trace's start takes before its full width: none at 16 and
+// 22 px, where it starts square; at 32 and 48 px one, its cut corners; from
+// 64 px its round cap, as far as the fundamental's half width (1.9 of the
+// drawing's 64 units), rounded up. The other end has no cap: the traces run
+// out to the tile's edge.
 int capColumns(int size) {
-    return onPixelGrid(size) ? 1 : (size * 2 + 63) / 64;
+    if (onPixelGrid(size)) {
+        return size >= 32 ? 1 : 0;
+    }
+    return (size * 2 + 63) / 64;
 }
 
 // The tile's rim, lighter than itself, so that it holds the tile's edge on
@@ -311,18 +318,13 @@ std::vector<Trace> tracesOf(const QImage &image) {
 }
 
 // A trace's weight over the columns from `start` to `end`: its coverage in
-// each, across the stroke. In stairs every stair is its height in each
-// column whatever its slope; a slanting stroke covers more of a column the
-// steeper it runs, so there its coverage is taken across its slope.
+// each, across the stroke. A slanting stroke covers more of a column the
+// steeper it runs, so its coverage is taken across its slope.
 double strokeWeight(const QImage &image, const Trace &trace, QRgb colour, int start, int end) {
     double sum = 0;
     for (int x = start; x <= end; ++x) {
-        double across = 1;
-        if (!inStairs(image.width())) {
-            const double slope = (trace.centreIn(image, x + 1) - trace.centreIn(image, x - 1)) / 2;
-            across = 1 / std::hypot(1.0, slope);
-        }
-        sum += trace.coverageIn(image, x, colour) * across;
+        const double slope = (trace.centreIn(image, x + 1) - trace.centreIn(image, x - 1)) / 2;
+        sum += trace.coverageIn(image, x, colour) / std::hypot(1.0, slope);
     }
     return sum;
 }
@@ -339,6 +341,92 @@ QByteArray contentsOf(const QString &path) {
     QFile file(path);
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
+
+// Each trace of a drawing alone, by its id: the drawing without its tile,
+// its rim or its other traces, rendered at a size, so that each pixel's
+// alpha is how much of it the trace covers.
+QHash<QString, QImage> traceCoverage(const QString &path, int size) {
+    const QStringList lines = QString::fromUtf8(contentsOf(path)).split(QLatin1Char('\n'));
+    static const QRegularExpression pathId(QStringLiteral("<path id=\"(\\w+)\""));
+    QHash<QString, QImage> traces;
+    for (const QString &line : lines) {
+        const QRegularExpressionMatch match = pathId.match(line);
+        if (!match.hasMatch()) {
+            continue;
+        }
+        QStringList alone;
+        for (const QString &other : lines) {
+            if (!other.contains(QLatin1String("<rect")) && (other == line || !other.contains(QLatin1String("<path ")))) {
+                alone << other;
+            }
+        }
+        QByteArray bytes = alone.join(QLatin1Char('\n')).toUtf8();
+        QBuffer buffer(&bytes);
+        QImageReader reader(&buffer, "svg");
+        reader.setScaledSize(QSize(size, size));
+        traces.insert(match.captured(1), reader.read().convertToFormat(QImage::Format_ARGB32));
+    }
+    return traces;
+}
+
+// How much of a pixel a trace drawn alone covers, 0 to 1.
+double alphaAt(const QImage &trace, int x, int y) {
+    return qAlpha(trace.pixel(x, y)) / 255.0;
+}
+
+// A pixel a trace touches, past its faintest antialiasing.
+constexpr double kTouched = 0.04;
+
+// A trace drawn alone, column by column: how much of the column it covers,
+// the rows it touches and the height of its centre.
+struct Column {
+    double sum = 0;
+    int top = -1;
+    int bottom = -1;
+    double centre = -1;
+};
+
+Column columnOf(const QImage &trace, int x) {
+    Column column;
+    double moment = 0;
+    for (int y = 0; y < trace.height(); ++y) {
+        const double c = alphaAt(trace, x, y);
+        if (c > kTouched) {
+            column.top = column.top < 0 ? y : column.top;
+            column.bottom = y;
+        }
+        column.sum += c;
+        moment += c * (y + 0.5);
+    }
+    column.centre = column.sum > 0 ? moment / column.sum : -1;
+    return column;
+}
+
+// The columns a trace drawn alone touches.
+std::pair<int, int> columnsOf(const QImage &trace) {
+    int first = -1;
+    int last = -1;
+    for (int x = 0; x < trace.width(); ++x) {
+        if (columnOf(trace, x).top >= 0) {
+            first = first < 0 ? x : first;
+            last = x;
+        }
+    }
+    return {first, last};
+}
+
+// A trace's width across its stroke, in device pixels, on average over the
+// columns from `start` to `end`: its coverage of each column across its
+// slope there.
+double widthAcross(const QImage &trace, int start, int end) {
+    double sum = 0;
+    for (int x = start; x <= end; ++x) {
+        const double slope = (columnOf(trace, x + 1).centre - columnOf(trace, x - 1).centre) / 2;
+        sum += columnOf(trace, x).sum / std::hypot(1.0, slope);
+    }
+    return sum / (end - start + 1);
+}
+
 
 void addSizeRows() {
     QTest::addColumn<int>("size");
@@ -362,12 +450,15 @@ private slots:
     void tracesStandOnThePlainTile();
     void harmonicsFanOutFromOneStart_data() { addSizeRows(); }
     void harmonicsFanOutFromOneStart();
-    void smallSizesAreDrawnOnThePixelGrid_data();
-    void smallSizesAreDrawnOnThePixelGrid();
-    void smallestSizesHaveTwoStrokesApart_data();
-    void smallestSizesHaveTwoStrokesApart();
-    void largeSizesTaperWithRoundCaps_data();
-    void largeSizesTaperWithRoundCaps();
+    void hintedSizesAreClosedShapesOnThePixelGrid_data();
+    void hintedSizesAreClosedShapesOnThePixelGrid();
+    void hintedTracesKeepClearOfEachOtherAndTheRim_data();
+    void hintedTracesKeepClearOfEachOtherAndTheRim();
+    void tracesRunOutFlushToTheTilesInnerEdge_data();
+    void tracesRunOutFlushToTheTilesInnerEdge();
+    void largeSizesTaperFromARoundStart_data();
+    void largeSizesTaperFromARoundStart();
+    void fundamentalThinsSmoothlyWithSize();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
@@ -497,10 +588,10 @@ void AppIconTest::tracesStandOnThePlainTile() {
     QVERIFY(!traces.empty());
 
     // Nothing but the tile under the lowest trace, down to the tile's rim:
-    // no band, no line. From 48 px up the fundamental's antialiased edge
-    // reaches a row below its ink; the stairs at 16 to 32 px have none; at
-    // 22 px a row of the tile is left above the rim, and at 16 px they fill
-    // the tile to its rim.
+    // no band, no line. From 64 px up the fundamental's antialiased edge
+    // reaches a row below its ink; on the pixel grid it has none; a row of
+    // the tile or more is left above the rim (H19: at 16 px the fundamental
+    // sat on it).
     int lowest = 0;
     for (const Trace &trace : traces) {
         lowest = std::max(lowest, trace.bounds.bottom());
@@ -508,7 +599,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
     const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile, size).bottom() - top + 1);
-    QVERIFY2(below.height() >= (size > 22 ? 2 : size > 16 ? 1 : 0), qPrintable(QString::number(lowest)));
+    QVERIFY2(below.height() >= (size > 22 ? 2 : 1), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
     // Every mark rises: none is a flat band or line under the traces.
@@ -529,13 +620,13 @@ void AppIconTest::tracesStandOnThePlainTile() {
                                                                           .arg(trace.bounds.height())));
     }
 
-    // The traces sit in the middle of the tile, to within a pixel or so.
+    // The traces sit in the middle of the tile's height, to within a pixel
+    // or so; across it they start in its left part and run out to its edge
+    // (tracesRunOutFlushToTheTilesInnerEdge).
     const QRect ink = boundsWhere(image, traceInk);
     const double slack = std::max(1.0, size / 32.0);
-    const double dx = (ink.left() + ink.right()) / 2.0 - (tile.left() + tile.right()) / 2.0;
     const double dy = (ink.top() + ink.bottom()) / 2.0 - (tile.top() + tile.bottom()) / 2.0;
-    QVERIFY2(std::abs(dx) <= slack && std::abs(dy) <= slack,
-             qPrintable(QStringLiteral("off centre by %1, %2").arg(dx).arg(dy)));
+    QVERIFY2(std::abs(dy) <= slack, qPrintable(QStringLiteral("off centre by %1").arg(dy)));
 }
 
 // Icon B (#373 hill climb, H7 vote P9, drawn in H8; a fan since H13): a
@@ -544,9 +635,9 @@ void AppIconTest::tracesStandOnThePlainTile() {
 // left the three rise 1 : 2 : 3 and fan out across the tile's diagonal (H12
 // drew the same curve shifted up a log axis: three parallel strokes that
 // read as swooshes or a trend line). They are measured traces: they start
-// and end on one time line, each at least 3:1 on the tile, in strokes
-// tapering from the fundamental up (H10), bending over as a glide does, and
-// fill the plate.
+// on one time line and run out to the tile's edge (H19), each at least 3:1
+// on the tile, in strokes tapering from the fundamental up (H10), bending
+// over as a glide does, and fill the plate.
 void AppIconTest::harmonicsFanOutFromOneStart() {
     QFETCH(int, size);
     const QImage image = render(FerrousAppIcon::resourcePath(size), size);
@@ -574,10 +665,10 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(contrastRatio(colour, kTile) >= 3.0, qPrintable(QString::number(colour, 16)));
     }
 
-    // One time line at either end: the traces start in one column and end
-    // in one column, in the tile's left and right fifths. From 48 px their
-    // round caps reach past the time lines by half their tapered widths, so
-    // the fundamental's a little further than its harmonics'.
+    // One time line at the start: the traces start in one column, in the
+    // tile's left fifth. From 64 px their round caps reach past it by half
+    // their tapered widths, so the fundamental's a little further than its
+    // harmonics'. They end in one column, the tile's edge.
     const int capSlack = onPixelGrid(size) ? 0 : 1 + size / 64;
     for (const Trace &trace : traces) {
         QVERIFY2(std::abs(trace.bounds.left() - traces.front().bounds.left()) <= capSlack,
@@ -590,12 +681,10 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     int end = size;
     for (const Trace &trace : traces) {
         start = std::max(start, trace.bounds.left() + capColumns(size));
-        end = std::min(end, trace.bounds.right() - capColumns(size));
+        end = std::min(end, trace.bounds.right() - 1);
     }
-    // At 16 px the fifth is the column of the tile left clear inside the rim
-    // at either end (H18), and the traces start and end next to it.
     QVERIFY(traces.front().bounds.left() <= tile.left() + tile.width() / 5);
-    QVERIFY(traces.front().bounds.right() >= tile.right() - tile.width() / 5);
+    QCOMPARE(traces.front().bounds.right(), insideRim(tile, size).right());
 
     // The harmonic numbers of the traces, lowest first.
     const std::vector<double> numbers = traces.size() == 3 ? std::vector<double>{1, 2, 3} : std::vector<double>{1, 3};
@@ -656,15 +745,17 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // The strokes taper from the fundamental up, as a harmonic's energy
     // falls with its number: none heavier than the one below it, and from
     // 32 px the fundamental heavier than the top harmonic (H10; H8 and H9
-    // drew three equal strokes; at 16 and 22 px two 2 px strokes since H18,
-    // the harmonic lighter only where it climbs). The ratios at the smooth
-    // sizes are checked in largeSizesTaperWithRoundCaps.
+    // drew three equal strokes). At 16 and 22 px two 2 px strokes since H18,
+    // as wide across where they climb as on a flat since H19, so the steeper
+    // harmonic, the longer one, comes within a twentieth of the
+    // fundamental's weight. The ratios at the smooth sizes are checked in
+    // largeSizesTaperFromARoundStart.
     std::vector<double> weights;
     for (size_t n = 0; n < traces.size(); ++n) {
         weights.push_back(strokeWeight(image, traces[n], colours[n], start, end));
     }
     for (size_t n = 1; n < weights.size(); ++n) {
-        QVERIFY2(weights[n] <= weights[n - 1] * 1.02,
+        QVERIFY2(weights[n] <= weights[n - 1] * (size >= 32 ? 1.02 : 1.05),
                  qPrintable(QStringLiteral("trace %1: %2 against %3").arg(n).arg(weights[n]).arg(weights[n - 1])));
     }
     if (size >= 32) {
@@ -690,29 +781,35 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     QCOMPARE(countWhere(image, corner, [](QRgb p) { return near(p, kGlide, 48); }), 0);
 }
 
-void AppIconTest::smallSizesAreDrawnOnThePixelGrid_data() {
+void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid_data() {
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
-        if (inStairs(size)) {
+        if (onPixelGrid(size)) {
             QTest::addRow("%dpx", size) << size;
         }
     }
 }
 
-// At 32 px antialiased harmonics broke into dots. It is a drawing of its own
-// on the pixel grid: filled whole-pixel stairs of a height of their own in
-// every column (strokeHeights), with clear rows between neighbours along
-// their whole length, more of them towards the end as the harmonics fan out
-// (H13), and no two touching even at a corner (#373 hill climb, H6, H8, H9,
-// H10, H13). 16 and 22 px are in smallestSizesHaveTwoStrokesApart.
-void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
+// From 16 to 48 px one drawing (#373 hill climb, H19): at 32 px antialiased
+// harmonics broke into dots (H6 to H9) and its 1 px stair rows were another
+// idiom than 16 and 22 px's two strokes (H18), and 48 px's free curves thinned
+// to 1 px. Each trace is a closed shape with every vertex on a whole pixel and
+// every edge level, upright or at 45 degrees: crisp flats, and climbs of a
+// row a column at most, antialiased only there. Each covers its full height
+// in every column (strokeHeights), at most a row more where it climbs, as a
+// broad nib does, so that from 32 px none is under 2 px across, the
+// fundamental 3 px: the harmonics a row a column steeper are no thinner
+// across than on a flat.
+void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
 
-    // The file: the tile and one filled path a trace, every coordinate whole.
+    // The file: one filled closed path a trace, every coordinate whole and
+    // every edge level, upright or at 45 degrees.
     QXmlStreamReader svg(contentsOf(path));
     QStringList ids;
     const QRegularExpression number(QStringLiteral("-?[0-9]*\\.?[0-9]+"));
+    const QRegularExpression otherCommand(QStringLiteral("[A-LN-Ya-z]"));
     while (!svg.atEnd()) {
         if (svg.readNext() != QXmlStreamReader::StartElement || svg.name() != QLatin1String("path")) {
             continue;
@@ -721,265 +818,241 @@ void AppIconTest::smallSizesAreDrawnOnThePixelGrid() {
         ids << attributes.value(QLatin1String("id")).toString();
         QVERIFY2(!attributes.hasAttribute(QLatin1String("stroke")), qPrintable(ids.last()));
         QVERIFY(!attributes.value(QLatin1String("fill")).isEmpty());
+        QVERIFY(attributes.value(QLatin1String("fill")) != QLatin1String("none"));
         const QString d = attributes.value(QLatin1String("d")).toString();
-        QVERIFY(!d.isEmpty());
-        auto numbers = number.globalMatch(d);
-        while (numbers.hasNext()) {
+        // A polygon: a move, its vertices, closed.
+        QVERIFY2(d.startsWith(QLatin1Char('M')) && d.endsWith(QLatin1Char('Z')) && !d.contains(otherCommand),
+                 qPrintable(d));
+        std::vector<int> values;
+        for (auto numbers = number.globalMatch(d); numbers.hasNext();) {
             const QString value = numbers.next().captured();
             QVERIFY2(!value.contains(QLatin1Char('.')), qPrintable(QStringLiteral("%1: %2").arg(ids.last(), value)));
+            values.push_back(value.toInt());
+        }
+        QVERIFY(values.size() >= 8 && values.size() % 2 == 0);
+        const size_t vertices = values.size() / 2;
+        for (size_t i = 0; i < vertices; ++i) {
+            const size_t j = (i + 1) % vertices;
+            const int dx = std::abs(values[2 * j] - values[2 * i]);
+            const int dy = std::abs(values[2 * j + 1] - values[2 * i + 1]);
+            QVERIFY2(dx == 0 || dy == 0 || dx == dy,
+                     qPrintable(QStringLiteral("%1: an edge %2 by %3").arg(ids.last()).arg(dx).arg(dy)));
         }
     }
     QVERIFY2(!svg.hasError(), qPrintable(svg.errorString()));
-    const QStringList expected{QStringLiteral("h3"), QStringLiteral("h2"), QStringLiteral("fundamental")};
-    QCOMPARE(ids, expected);
+    QCOMPARE(ids, traceIds(size));
 
-    // Rendered: away from the tile's rounded corners, every pixel is the
-    // tile's colour, its rim's or a trace's, with no antialiased edge
-    // between.
-    const QImage image = render(path, size);
-    const QRect tile = tileOf(image);
-    const int corner = std::max(2, size / 8);
-    const QRgb colours[] = {kTile, kRim, kGlide, kHarmonic, kThirdHarmonic};
-    for (int y = tile.top(); y <= tile.bottom(); ++y) {
-        for (int x = tile.left(); x <= tile.right(); ++x) {
-            const bool inCorner = (x < tile.left() + corner || x > tile.right() - corner)
-                                  && (y < tile.top() + corner || y > tile.bottom() - corner);
-            if (inCorner) {
-                continue;
-            }
-            const QRgb pixel = image.pixel(x, y);
-            QVERIFY2(std::any_of(std::begin(colours), std::end(colours), [pixel](QRgb c) { return near(pixel, c, 1); }),
-                     qPrintable(QStringLiteral("#%1 at %2, %3").arg(pixel & 0xffffff, 6, 16, QLatin1Char('0')).arg(x).arg(y)));
-        }
-    }
-
-    // Each trace as tall as its stair in every column, and a clear row of
-    // the tile between neighbours in every column. That they are found as separate
-    // traces at all means no two touch, even at a corner.
-    const std::vector<Trace> traces = tracesOf(image);
-    QCOMPARE(traces.size(), static_cast<size_t>(expected.size()));
-    for (const Trace &trace : traces) {
-        QCOMPARE(trace.bounds.left(), traces.front().bounds.left());
-        QCOMPARE(trace.bounds.right(), traces.front().bounds.right());
-    }
-    std::vector<std::vector<int>> tops(traces.size());
-    std::vector<int> gaps(traces.size(), -1);
-    std::vector<int> firstGaps(traces.size(), -1);
-    for (int x = traces.front().bounds.left(); x <= traces.front().bounds.right(); ++x) {
-        int below = image.height();
-        for (size_t n = 0; n < traces.size(); ++n) {
-            const Trace &trace = traces[n];
-            int top = image.height();
-            int bottom = -1;
-            int count = 0;
-            for (const QPoint &p : trace.pixels) {
-                if (p.x() == x) {
-                    top = std::min(top, p.y());
-                    bottom = std::max(bottom, p.y());
-                    ++count;
-                }
-            }
-            QVERIFY2(count == strokeHeights(size)[n] && bottom == top + count - 1,
-                     qPrintable(QStringLiteral("column %1: %2 px").arg(x).arg(count)));
-            // The clear rows under each trace: some in every column, never
-            // fewer than a row less than in the column before, and more at
-            // the end than at the start: the harmonics fan out.
-            if (n > 0) {
-                const int gap = below - bottom - 1;
-                QVERIFY2(gap >= 1, qPrintable(QStringLiteral("column %1: no clear row").arg(x)));
-                QVERIFY2(gaps[n] < 0 || gap >= gaps[n] - 1,
-                         qPrintable(QStringLiteral("column %1: %2 clear rows after %3").arg(x).arg(gap).arg(gaps[n])));
-                firstGaps[n] = firstGaps[n] < 0 ? gap : firstGaps[n];
-                gaps[n] = gap;
-            }
-            below = top;
-            tops[n].push_back(top);
-        }
-    }
-    for (size_t n = 1; n < traces.size(); ++n) {
-        QVERIFY2(gaps[n] >= 2 * firstGaps[n],
-                 qPrintable(QStringLiteral("trace %1: %2 clear rows at the start, %3 at the end").arg(n).arg(firstGaps[n]).arg(gaps[n])));
-    }
-    // A pixel glide: each stair climbs a row a column at most, never two
-    // (where a stair would break at its corners), and its runs on one row
-    // only lengthen as it bends over, apart from the last, which the time
-    // line cuts. The top harmonic, which rises furthest, climbs a row a
-    // column at first, in seven runs or more; the fundamental rises a third
-    // as far.
-    for (size_t n = 0; n < tops.size(); ++n) {
-        const std::vector<int> &stair = tops[n];
-        const bool top = n + 1 == tops.size();
-        std::vector<int> runs{1};
-        for (size_t c = 1; c < stair.size(); ++c) {
-            const int rise = stair[c - 1] - stair[c];
-            QVERIFY2(rise == 0 || rise == 1, qPrintable(QStringLiteral("column %1: %2 rows").arg(c).arg(rise)));
-            if (rise == 0) {
-                ++runs.back();
-            } else {
-                runs.push_back(1);
-            }
-        }
-        QVERIFY2(runs.size() >= 3u, qPrintable(QString::number(runs.size())));
-        for (size_t r = 1; r + 1 < runs.size(); ++r) {
-            QVERIFY2(runs[r] >= runs[r - 1], qPrintable(QStringLiteral("run %1: %2 after %3").arg(r).arg(runs[r]).arg(runs[r - 1])));
-        }
-        if (top) {
-            QCOMPARE(runs.front(), 1);
-            QVERIFY2(runs.size() >= 7u, qPrintable(QString::number(runs.size())));
-            QVERIFY2(runs[runs.size() - 2] >= 2, qPrintable(QString::number(runs[runs.size() - 2])));
-        }
-    }
-}
-
-void AppIconTest::smallestSizesHaveTwoStrokesApart_data() {
-    QTest::addColumn<int>("size");
-    QTest::addRow("16px") << 16;
-    QTest::addRow("22px") << 22;
-}
-
-// At 16 and 22 px H9's two upper strokes fused into one pink slab (#373 hill
-// climb, H9), and H10 to H13's harmonic, a 1 px stair climbing a row a
-// column, read as dotted stairs beside a stepped amber bar. Each is a
-// deliberate two-stroke drawing (H18): the amber fundamental and the magenta
-// 3rd harmonic, no middle trace, each a band 2 px tall in every column with
-// every vertex on a whole pixel, so that its flats are crisp and only its
-// climbs are antialiased, each a row over one column; a clear row of the tile
-// or more between the two in every column, and more towards the end, where
-// they fan apart.
-void AppIconTest::smallestSizesHaveTwoStrokesApart() {
-    QFETCH(int, size);
-    const QString path = FerrousAppIcon::resourcePath(size);
-
-    // The file: two filled paths, the harmonic and the fundamental, every
-    // coordinate whole.
-    QXmlStreamReader svg(contentsOf(path));
-    QStringList ids;
-    const QRegularExpression number(QStringLiteral("-?[0-9]*\\.?[0-9]+"));
-    while (!svg.atEnd()) {
-        if (svg.readNext() != QXmlStreamReader::StartElement || svg.name() != QLatin1String("path")) {
-            continue;
-        }
-        const QXmlStreamAttributes attributes = svg.attributes();
-        ids << attributes.value(QLatin1String("id")).toString();
-        QVERIFY2(!attributes.hasAttribute(QLatin1String("stroke")), qPrintable(ids.last()));
-        auto numbers = number.globalMatch(attributes.value(QLatin1String("d")).toString());
-        QVERIFY(numbers.hasNext());
-        while (numbers.hasNext()) {
-            const QString value = numbers.next().captured();
-            QVERIFY2(!value.contains(QLatin1Char('.')), qPrintable(QStringLiteral("%1: %2").arg(ids.last(), value)));
-        }
-    }
-    QVERIFY2(!svg.hasError(), qPrintable(svg.errorString()));
-    QCOMPARE(ids, (QStringList{QStringLiteral("h3"), QStringLiteral("fundamental")}));
-
+    // Rendered: inside the rim, away from its rounded corners, every pixel
+    // is the tile or the tile under one trace, so no two touch.
     const QImage image = render(path, size);
     const QRect inside = insideRim(tileOf(image), size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
     const int corner = std::max(2, size / 8);
-
-    // Inside the rim, away from its rounded corners, every pixel is the tile
-    // or the tile under one of the two strokes: no third colour, and no pixel
-    // where the two meet. A stroke's coverage of each pixel, 0 to 1.
-    const auto mix = [](QRgb colour, double amount) {
-        return qRgb(qRound(qRed(kTile) + amount * (qRed(colour) - qRed(kTile))),
-                    qRound(qGreen(kTile) + amount * (qGreen(colour) - qGreen(kTile))),
-                    qRound(qBlue(kTile) + amount * (qBlue(colour) - qBlue(kTile))));
-    };
-    const auto coverOf = [&](QRgb pixel, QRgb colour) {
-        const double amount = coverage(pixel, colour);
-        return near(pixel, mix(colour, amount), 4) ? amount : -1.0;
-    };
-    constexpr double kTouched = 0.04;
-    QList<QPoint> magentaPixels;
-    QList<QPoint> amberPixels;
+    const std::vector<QRgb> colours = traceColours(size);
+    std::vector<QImage> traces;
+    for (auto id = ids.crbegin(); id != ids.crend(); ++id) {
+        traces.push_back(cover.value(*id));
+    }
     for (int y = inside.top(); y <= inside.bottom(); ++y) {
         for (int x = inside.left(); x <= inside.right(); ++x) {
             const bool inCorner = (x < inside.left() + corner || x > inside.right() - corner)
                                   && (y < inside.top() + corner || y > inside.bottom() - corner);
-            const QRgb pixel = image.pixel(x, y);
-            const double amber = coverOf(pixel, kGlide);
-            const double magenta = coverOf(pixel, kThirdHarmonic);
-            QVERIFY2(inCorner || amber >= 0 || magenta >= 0,
-                     qPrintable(QStringLiteral("#%1 at %2, %3").arg(pixel & 0xffffff, 6, 16, QLatin1Char('0')).arg(x).arg(y)));
-            if (magenta > kTouched) {
-                magentaPixels.push_back(QPoint(x, y));
-            } else if (amber > kTouched) {
-                amberPixels.push_back(QPoint(x, y));
-            }
-        }
-    }
-    QVERIFY(!amberPixels.isEmpty());
-    QVERIFY(!magentaPixels.isEmpty());
-
-    // Column by column: both strokes, the magenta above the amber, each 2 px
-    // tall, and either crisp (two whole pixels) or a slant a row over the
-    // column (half, whole, half); never climbing more than a row a column.
-    const QRect ink = boundsWhere(image, traceInk);
-    int firstGap = -1;
-    int lastGap = -1;
-    std::vector<int> slants(2, 0);
-    std::vector<double> lastCentre(2, -1);
-    for (int x = ink.left(); x <= ink.right(); ++x) {
-        int magentaBottom = -1;
-        int amberTop = size;
-        for (size_t n = 0; n < 2; ++n) {
-            const QRgb colour = n == 0 ? kGlide : kThirdHarmonic;
-            std::vector<double> cover;
-            int top = -1;
-            double sum = 0;
-            double moment = 0;
-            for (int y = inside.top(); y <= inside.bottom(); ++y) {
-                const double c = coverOf(image.pixel(x, y), colour);
-                if (c > kTouched) {
-                    top = top < 0 ? y : top;
-                    QVERIFY2(y - top == static_cast<int>(cover.size()),
-                             qPrintable(QStringLiteral("stroke %1, column %2: broken").arg(n).arg(x)));
-                    cover.push_back(c);
-                    sum += c;
-                    moment += c * (y + 0.5);
+            int touching = 0;
+            QRgb expected = kTile;
+            for (size_t n = 0; n < traces.size(); ++n) {
+                const double c = alphaAt(traces[n], x, y);
+                if (c > 0) {
+                    ++touching;
+                    expected = qRgb(qRound(qRed(kTile) + c * (qRed(colours[n]) - qRed(kTile))),
+                                    qRound(qGreen(kTile) + c * (qGreen(colours[n]) - qGreen(kTile))),
+                                    qRound(qBlue(kTile) + c * (qBlue(colours[n]) - qBlue(kTile))));
                 }
             }
-            QVERIFY2(std::abs(sum - 2.0) <= 0.1,
-                     qPrintable(QStringLiteral("stroke %1, column %2: %3 px tall").arg(n).arg(x).arg(sum)));
-            const bool crisp = cover.size() == 2 && cover[0] > 0.97 && cover[1] > 0.97;
-            const bool slant = cover.size() == 3 && std::abs(cover[0] - 0.5) <= 0.1 && cover[1] > 0.97
-                               && std::abs(cover[2] - 0.5) <= 0.1;
-            QVERIFY2(crisp || slant, qPrintable(QStringLiteral("stroke %1, column %2: %3 px").arg(n).arg(x).arg(cover.size())));
-            slants[n] += slant ? 1 : 0;
-            const double centre = moment / sum;
-            QVERIFY2(lastCentre[n] < 0 || (centre <= lastCentre[n] + 0.01 && lastCentre[n] - centre <= 1.01),
-                     qPrintable(QStringLiteral("stroke %1, column %2: from %3 to %4").arg(n).arg(x).arg(lastCentre[n]).arg(centre)));
-            lastCentre[n] = centre;
-            if (n == 0) {
-                amberTop = top;
-            } else {
-                magentaBottom = top + static_cast<int>(cover.size()) - 1;
+            QVERIFY2(touching <= 1, qPrintable(QStringLiteral("traces meet at %1, %2").arg(x).arg(y)));
+            QVERIFY2(inCorner || near(image.pixel(x, y), expected, 4),
+                     qPrintable(QStringLiteral("#%1 at %2, %3")
+                                    .arg(image.pixel(x, y) & 0xffffff, 6, 16, QLatin1Char('0'))
+                                    .arg(x)
+                                    .arg(y)));
+        }
+    }
+
+    // Column by column, from the common start to the tile's inner edge:
+    // each trace one run of rows, its height or a row more, whole pixels but
+    // where an edge climbs across the column, and climbing a row a column at
+    // most.
+    const int start = columnsOf(traces.front()).first;
+    const std::vector<int> heights = strokeHeights(size);
+    for (size_t n = 0; n < traces.size(); ++n) {
+        const auto [first, last] = columnsOf(traces[n]);
+        QCOMPARE(first, start);
+        QCOMPARE(last, inside.right());
+        int crisp = 0;
+        double before = -1;
+        for (int x = first; x <= last; ++x) {
+            const Column column = columnOf(traces[n], x);
+            bool whole = true;
+            for (int y = column.top; y <= column.bottom; ++y) {
+                const double c = alphaAt(traces[n], x, y);
+                QVERIFY2(c > kTouched, qPrintable(QStringLiteral("trace %1, column %2: broken").arg(n).arg(x)));
+                const bool edge = y == column.top || y == column.bottom;
+                QVERIFY2(c > 0.97 || (edge && std::abs(c - 0.5) <= 0.1),
+                         qPrintable(QStringLiteral("trace %1 at %2, %3: %4").arg(n).arg(x).arg(y).arg(c)));
+                whole = whole && c > 0.97;
+            }
+            crisp += whole ? 1 : 0;
+            // The start's cut corners are a column a row short.
+            const double least = heights[n] - (x < first + capColumns(size) ? 1.05 : 0.05);
+            QVERIFY2(column.sum >= least && column.sum <= heights[n] + 1.05,
+                     qPrintable(QStringLiteral("trace %1, column %2: %3 px tall").arg(n).arg(x).arg(column.sum)));
+            QVERIFY2(before < 0 || (column.centre <= before + 0.01 && before - column.centre <= 1.01),
+                     qPrintable(QStringLiteral("trace %1, column %2: from %3 to %4").arg(n).arg(x).arg(before).arg(column.centre)));
+            before = column.centre;
+        }
+        // Crisp, every pixel whole, in a third of the fundamental's columns
+        // or more, and in the flats of a harmonic, which climbs over most
+        // of its length.
+        QVERIFY2(crisp >= (n == 0 ? (last - first + 1) / 3 : 3),
+                 qPrintable(QStringLiteral("trace %1: %2 crisp columns").arg(n).arg(crisp)));
+        // From 32 px no stroke is under 2 px across, the fundamental 3 px,
+        // past the start's cap, to within a tenth of the stroke, where a
+        // flat meets a climb.
+        if (size >= 32) {
+            for (int x = first + capColumns(size); x < last; ++x) {
+                const double across = widthAcross(traces[n], x, x);
+                QVERIFY2(across >= heights[n] * 0.95,
+                         qPrintable(QStringLiteral("trace %1, column %2: %3 px across").arg(n).arg(x).arg(across)));
             }
         }
-        const int gap = amberTop - magentaBottom - 1;
-        QVERIFY2(gap >= 1, qPrintable(QStringLiteral("column %1: %2 rows between").arg(x).arg(gap)));
-        firstGap = firstGap < 0 ? gap : firstGap;
-        lastGap = gap;
     }
-    // Crisp more than slanted: the fundamental mostly flat, and both climb.
-    QVERIFY2(slants[0] >= 2 && slants[0] * 2 < ink.width(), qPrintable(QString::number(slants[0])));
-    QVERIFY2(slants[1] >= 5, qPrintable(QString::number(slants[1])));
-    // They fan apart: 4 rows more between them at the end than at the start.
-    QVERIFY2(lastGap >= firstGap + 4, qPrintable(QStringLiteral("%1 rows, then %2").arg(firstGap).arg(lastGap)));
-
-    // The nearest the two come, from any pixel of one to any of the other,
-    // across columns as well: a device pixel or more, so that they never
-    // touch, even at an antialiased corner.
-    double nearest = size;
-    for (const QPoint &m : std::as_const(magentaPixels)) {
-        for (const QPoint &a : std::as_const(amberPixels)) {
-            nearest = std::min(nearest, std::hypot(std::max(0, std::abs(m.x() - a.x()) - 1),
-                                                   std::max(0, std::abs(m.y() - a.y()) - 1)));
-        }
-    }
-    QVERIFY2(nearest >= 1.0, qPrintable(QStringLiteral("%1 px between them").arg(nearest)));
 }
 
-void AppIconTest::largeSizesTaperWithRoundCaps_data() {
+void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim_data() {
+    hintedSizesAreClosedShapesOnThePixelGrid_data();
+}
+
+// On the pixel grid a clear device pixel or more between the traces
+// everywhere, more towards the end as they fan out, and the tile around
+// them: a clear row of it above the top trace and below the lowest, and a
+// clear column before their start (#373 hill climb, H19: at 16 px the amber
+// start sat on the rim). The fundamental's start lifted off the rim at 16 px
+// left a row between the two strokes there.
+void AppIconTest::hintedTracesKeepClearOfEachOtherAndTheRim() {
+    QFETCH(int, size);
+    const QString path = FerrousAppIcon::resourcePath(size);
+    const QRect inside = insideRim(tileOf(render(path, size)), size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
+    const QStringList ids = traceIds(size);
+    std::vector<QImage> traces;
+    for (auto id = ids.crbegin(); id != ids.crend(); ++id) {
+        traces.push_back(cover.value(*id));
+    }
+    const auto [first, last] = columnsOf(traces.front());
+
+    // In every column a clear row between neighbours, never a row fewer than
+    // in the column before, and at the end twice as many as at the start or
+    // more, and three rows more.
+    for (size_t n = 1; n < traces.size(); ++n) {
+        int firstGap = -1;
+        int gap = -1;
+        for (int x = first; x <= last; ++x) {
+            const int between = columnOf(traces[n - 1], x).top - columnOf(traces[n], x).bottom - 1;
+            QVERIFY2(between >= 1, qPrintable(QStringLiteral("trace %1, column %2: %3 clear rows").arg(n).arg(x).arg(between)));
+            QVERIFY2(gap < 0 || between >= gap - 1,
+                     qPrintable(QStringLiteral("trace %1, column %2: %3 clear rows after %4").arg(n).arg(x).arg(between).arg(gap)));
+            firstGap = firstGap < 0 ? between : firstGap;
+            gap = between;
+        }
+        QVERIFY2(gap >= 2 * firstGap && gap >= firstGap + 3,
+                 qPrintable(QStringLiteral("trace %1: %2 clear rows, then %3").arg(n).arg(firstGap).arg(gap)));
+    }
+
+    // The nearest two neighbours come, from any pixel one touches to any the
+    // other does, across columns too: a device pixel or more, even at an
+    // antialiased corner.
+    for (size_t n = 1; n < traces.size(); ++n) {
+        double nearest = size;
+        for (int y = inside.top(); y <= inside.bottom(); ++y) {
+            for (int x = inside.left(); x <= inside.right(); ++x) {
+                if (alphaAt(traces[n], x, y) <= kTouched) {
+                    continue;
+                }
+                for (int v = inside.top(); v <= inside.bottom(); ++v) {
+                    for (int u = inside.left(); u <= inside.right(); ++u) {
+                        if (alphaAt(traces[n - 1], u, v) > kTouched) {
+                            nearest = std::min(nearest, std::hypot(std::max(0, std::abs(x - u) - 1),
+                                                                   std::max(0, std::abs(y - v) - 1)));
+                        }
+                    }
+                }
+            }
+        }
+        QVERIFY2(nearest >= 1.0, qPrintable(QStringLiteral("trace %1: %2 px from the one below").arg(n).arg(nearest)));
+    }
+
+    // The tile around them: a clear row above and below, inside the rim,
+    // and a clear column before the start.
+    int top = size;
+    int bottom = -1;
+    for (const QImage &trace : traces) {
+        for (int x = first; x <= last; ++x) {
+            const Column column = columnOf(trace, x);
+            top = std::min(top, column.top);
+            bottom = std::max(bottom, column.bottom);
+        }
+    }
+    QVERIFY2(top > inside.top() && bottom < inside.bottom() && first > inside.left(),
+             qPrintable(QStringLiteral("rows %1 to %2 from column %3 inside %4 to %5, from %6")
+                            .arg(top).arg(bottom).arg(first).arg(inside.top()).arg(inside.bottom()).arg(inside.left())));
+}
+
+void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge_data() {
+    addSizeRows();
+}
+
+// The traces run out to the tile's inner edge on the right, cut flush on it
+// with the rim intact, so that the tile reads as a crop of an endless
+// spectrogram (#373 hill climb, H19: three series ending at a common x in
+// round caps inside the tile read as a line chart). Each trace's last column
+// is the one inside the rim, with no cap there: on the pixel grid whole
+// pixels of the stroke's height, and from 64 px as covered as the column
+// before it. Nothing of a trace is under the rim.
+void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge() {
+    QFETCH(int, size);
+    const QString path = FerrousAppIcon::resourcePath(size);
+    const QRect tile = tileOf(render(path, size));
+    const QRect inside = insideRim(tile, size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
+    QCOMPARE(cover.size(), static_cast<qsizetype>(traceIds(size).size()));
+    const QStringList ids = traceIds(size);
+    for (qsizetype n = 0; n < ids.size(); ++n) {
+        const QString &id = ids[n];
+        const QImage &trace = cover.value(id);
+        const auto [first, last] = columnsOf(trace);
+        QVERIFY2(last == inside.right(), qPrintable(QStringLiteral("%1 ends at column %2").arg(id).arg(last)));
+        const Column end = columnOf(trace, last);
+        if (onPixelGrid(size)) {
+            const int height = strokeHeights(size)[static_cast<size_t>(ids.size() - 1 - n)];
+            QVERIFY2(end.bottom - end.top + 1 == height && std::abs(end.sum - height) <= 0.05,
+                     qPrintable(QStringLiteral("%1: %2 px at its end").arg(id).arg(end.sum)));
+        } else {
+            const double before = columnOf(trace, last - 1).sum;
+            QVERIFY2(end.sum >= 0.9 * before,
+                     qPrintable(QStringLiteral("%1: %2 px at its end, %3 before").arg(id).arg(end.sum).arg(before)));
+        }
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                QVERIFY2(inside.contains(x, y) || alphaAt(trace, x, y) <= 0.01,
+                         qPrintable(QStringLiteral("%1 at %2, %3").arg(id).arg(x).arg(y)));
+            }
+        }
+        // It starts in the tile's left fifth, clear of the rim.
+        QVERIFY2(first > inside.left() && first <= tile.left() + tile.width() / 5,
+                 qPrintable(QStringLiteral("%1 starts at column %2").arg(id).arg(first)));
+    }
+}
+
+void AppIconTest::largeSizesTaperFromARoundStart_data() {
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
         if (!onPixelGrid(size)) {
@@ -988,81 +1061,100 @@ void AppIconTest::largeSizesTaperWithRoundCaps_data() {
     }
 }
 
-// From 48 px the traces are a deliberate drawing (#373 hill climb, H10): the
-// strokes taper from the fundamental up, 1 : 0.8 : 0.65, as a harmonic's
-// energy falls with its number, and end in round caps, not the flat cuts on
-// the time lines that read as clipped in H9.
-void AppIconTest::largeSizesTaperWithRoundCaps() {
+// From 64 px the traces are smooth (#373 hill climb, H10): strokes tapering
+// from the fundamental up, 1 : 0.8 : 0.65, as a harmonic's energy falls with
+// its number, drawn as filled outlines with a round cap at the start, where
+// H9's flat cut read as clipped, and none at the end, where they run out to
+// the tile's edge (H19). Lighter as the icon grows (H19: at 256 px 3.4
+// units clotted at the start): the fundamental 3.8 units wide at 64 px, 3.4
+// at 128 and 3.0 at 256.
+void AppIconTest::largeSizesTaperFromARoundStart() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
 
-    // The file: each trace a stroke with round caps, its width tapering
-    // from the fundamental's.
+    // The file: each trace a filled outline, closed, with one arc, its start's
+    // round cap.
     QXmlStreamReader svg(contentsOf(path));
-    QHash<QString, double> widths;
+    QStringList ids;
     while (!svg.atEnd()) {
         if (svg.readNext() != QXmlStreamReader::StartElement || svg.name() != QLatin1String("path")) {
             continue;
         }
         const QXmlStreamAttributes attributes = svg.attributes();
-        const QString id = attributes.value(QLatin1String("id")).toString();
-        QCOMPARE(attributes.value(QLatin1String("fill")).toString(), QStringLiteral("none"));
-        QCOMPARE(attributes.value(QLatin1String("stroke-linecap")).toString(), QStringLiteral("round"));
-        widths.insert(id, attributes.value(QLatin1String("stroke-width")).toDouble());
+        ids << attributes.value(QLatin1String("id")).toString();
+        QVERIFY2(!attributes.hasAttribute(QLatin1String("stroke")), qPrintable(ids.last()));
+        QVERIFY(attributes.value(QLatin1String("fill")) != QLatin1String("none"));
+        const QString d = attributes.value(QLatin1String("d")).toString();
+        QCOMPARE(d.count(QLatin1Char('A')), 1);
+        QVERIFY(d.endsWith(QLatin1Char('Z')));
     }
     QVERIFY2(!svg.hasError(), qPrintable(svg.errorString()));
-    QCOMPARE(widths.size(), 3);
-    QVERIFY(widths.value(QStringLiteral("fundamental")) > 0);
-    QVERIFY(std::abs(widths.value(QStringLiteral("h2")) / widths.value(QStringLiteral("fundamental")) - 0.8) < 0.01);
-    QVERIFY(std::abs(widths.value(QStringLiteral("h3")) / widths.value(QStringLiteral("fundamental")) - 0.65) < 0.01);
+    QCOMPARE(ids, traceIds(size));
 
-    // Rendered: three traces, in their colours.
     const QImage image = render(path, size);
-    const std::vector<Trace> traces = tracesOf(image);
-    QCOMPARE(traces.size(), static_cast<size_t>(3));
-    const std::vector<QRgb> colours = traceColours(size);
+    const QRect inside = insideRim(tileOf(image), size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
+    std::vector<QImage> traces;
+    for (auto id = ids.crbegin(); id != ids.crend(); ++id) {
+        traces.push_back(cover.value(*id));
+    }
+    QCOMPARE(tracesOf(image).size(), static_cast<size_t>(3));
 
-    // No flat cut on the time line, at 256 px, where a cap is pixels enough
-    // across to tell: a trace's end column holds the tip of its cap and the
-    // column inside it less than the stroke's height, both short of a column
-    // of the stroke's body just inside the cap (its height at that end's
-    // slope). A vertical cut, as in H9, has the stroke's whole height in the
-    // column inside its end, whatever pixel the cut falls in.
+    // A round start, at 256 px, where a cap is pixels enough across to
+    // tell: a trace's first column holds the tip of its cap and the column
+    // after it less than the stroke's height, both short of a column of the
+    // stroke's body just past the cap. A cut, as in H9, has the stroke's
+    // whole height in the column after its end.
     if (size == 256) {
-        const int inward = 2 * capColumns(size);
         for (size_t n = 0; n < traces.size(); ++n) {
-            const Trace &trace = traces[n];
-            for (const int step : {1, -1}) {
-                const int tip = step > 0 ? trace.bounds.left() : trace.bounds.right();
-                const double body = trace.coverageIn(image, tip + step * inward, colours[n]);
-                const double last = trace.coverageIn(image, tip, colours[n]);
-                const double next = trace.coverageIn(image, tip + step, colours[n]);
-                QVERIFY2(last < 0.6 * body && next < 0.85 * body,
-                         qPrintable(QStringLiteral("trace %1 at column %2: %3, then %4, against %5")
-                                        .arg(n).arg(tip).arg(last).arg(next).arg(body)));
-            }
+            const int tip = columnsOf(traces[n]).first;
+            const double body = columnOf(traces[n], tip + 2 * capColumns(size)).sum;
+            const double last = columnOf(traces[n], tip).sum;
+            const double next = columnOf(traces[n], tip + 1).sum;
+            QVERIFY2(last < 0.6 * body && next < 0.85 * body,
+                     qPrintable(QStringLiteral("trace %1 at column %2: %3, then %4, against %5")
+                                    .arg(n).arg(tip).arg(last).arg(next).arg(body)));
         }
     }
 
-    // The taper as drawn: each trace's coverage across its stroke, summed
-    // over the columns every trace crosses at its full width.
-    int start = 0;
-    int end = size;
-    for (const Trace &trace : traces) {
-        start = std::max(start, trace.bounds.left() + capColumns(size));
-        end = std::min(end, trace.bounds.right() - capColumns(size));
-    }
-    std::vector<double> weights;
-    for (size_t n = 0; n < traces.size(); ++n) {
-        weights.push_back(strokeWeight(image, traces[n], colours[n], start, end));
+    // The taper as drawn, across each stroke, over the columns every trace
+    // crosses at its full width, and the fundamental's width.
+    const int start = columnsOf(traces.front()).first + capColumns(size);
+    const int end = inside.right() - 1;
+    std::vector<double> widths;
+    for (const QImage &trace : traces) {
+        widths.push_back(widthAcross(trace, start, end));
     }
     const double expected[] = {1.0, 0.8, 0.65};
-    for (size_t n = 1; n < weights.size(); ++n) {
-        const double ratio = weights[n] / weights[0];
+    for (size_t n = 1; n < widths.size(); ++n) {
+        const double ratio = widths[n] / widths[0];
         QVERIFY2(std::abs(ratio - expected[n]) <= 0.07,
                  qPrintable(QStringLiteral("trace %1: %2 of the fundamental").arg(n).arg(ratio)));
     }
+    const double units = size == 64 ? 3.8 : size == 128 ? 3.4 : 3.0;
+    const double drawn = units * size / 64.0;
+    QVERIFY2(std::abs(widths[0] - drawn) <= 0.08 * drawn,
+             qPrintable(QStringLiteral("the fundamental %1 px across, not %2").arg(widths[0]).arg(drawn)));
 }
+
+// The ink thins smoothly as the icon grows: the fundamental's width across,
+// a share of the tile inside the rim, falls from each size to the next
+// (#373 hill climb, H19: at 48 px it dipped below 64 px's, and 32 px read
+// bolder than 48).
+void AppIconTest::fundamentalThinsSmoothlyWithSize() {
+    double before = -1;
+    for (const int size : FerrousAppIcon::kSizes) {
+        const QString path = FerrousAppIcon::resourcePath(size);
+        const QRect inside = insideRim(tileOf(render(path, size)), size);
+        const QImage fundamental = traceCoverage(path, size).value(QStringLiteral("fundamental"));
+        const auto [first, last] = columnsOf(fundamental);
+        const double share = widthAcross(fundamental, first + capColumns(size), last - 1) / inside.width();
+        QVERIFY2(before < 0 || (share < before && share > before * 0.6),
+                 qPrintable(QStringLiteral("%1 px: %2 of the tile after %3").arg(size).arg(share).arg(before)));
+        before = share;
+    }
+}
+
 
 void AppIconTest::windowIconHasEachSizesDrawing() {
     const QIcon icon = FerrousAppIcon::icon();

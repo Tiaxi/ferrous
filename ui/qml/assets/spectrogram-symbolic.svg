@@ -4,11 +4,13 @@
      icon's harmonic, a steep rise, and its glide, a gentle one, as traces over a time axis, the
      icon's floor, a 1.5 px baseline at y 14.5 from x 2 to 14, both strokes starting on it, the
      harmonic at its start and the glide a third of the way along (#373 H16 I7: without the axis the
-     two strokes read as "//"). The strokes are some 1.9 px clear of each other everywhere, and end
-     2.5 px or more clear of the baseline. 1.75 px strokes with round caps, a weight beside Breeze's
-     waveform glyph (#373 H15 H8). A one-colour mask, drawn in the plot's text colour. -->
+     two strokes read as "//"). The harmonic follows the icon's top trace, a glide on its log curve:
+     it leaves the baseline at some 62 degrees and bends over to 29 (#373 H19: it rose at 81 degrees,
+     a hook beside the icon's curve). The strokes are some 1.7 px clear of each other everywhere, and
+     end 2.5 px or more clear of the baseline. 1.75 px strokes with round caps, a weight beside
+     Breeze's waveform glyph (#373 H15 H8). A one-colour mask, drawn in the plot's text colour. -->
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
 <path fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round" d="M2.75 14.5H13.25"/>
-<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M2.75 14.5C3.5 9.75 7.25 4.75 13.25 3.25"/>
-<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M6.5 14.5C8.25 12.25 10.25 10.75 13.25 10.25"/>
+<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M2.75 14.5C5 10.25 8.25 7.25 13.25 4.5"/>
+<path fill="none" stroke="#000" stroke-width="1.75" stroke-linecap="round" d="M6.75 14.5C8.5 12.5 10.5 11 13.25 10.5"/>
 </svg>

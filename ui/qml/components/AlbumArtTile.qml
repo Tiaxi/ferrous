@@ -14,9 +14,9 @@ import FerrousUi 1.0
 // floor colour with one static mark at its centre, the same for every
 // track without a cover (#373 H14 F2: a stand-in of text repeated the
 // lines under it, and without an album it was blank): the app icon's glide
-// and its harmonics, two thirds of the tile wide, at a cover mark's
-// strength rather than data's. A small tile, as the narrow layout's 96 px
-// one, has the mark of two curves. In a light theme a 1 px edge
+// and its harmonics, at the icon's own aspect, at a cover mark's strength
+// rather than data's. A small tile, as the narrow layout's 96 px one, has
+// the mark of two curves. In a light theme a 1 px edge
 // (`standInEdgeColor`) keeps the dark tile from reading as a hole in the
 // sidebar. With nothing playing (`idle`) it shows only the placeholder
 // colour with Breeze's audio disc mark at its centre (#373 H1, H3): the
@@ -62,7 +62,7 @@ Rectangle {
     // at each size nor changed for the small one on the way.
     property real layoutSize: Math.min(root.width, root.height)
     // A tile under ten grid units, such as the narrow layout's 96 px, has
-    // the mark of two curves, drawn for its size.
+    // the mark of two curves.
     readonly property bool standInCompact: root.layoutSize < 10 * Kirigami.Units.gridUnit
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
@@ -141,29 +141,35 @@ Rectangle {
         visible: root.idle
     }
 
-    // The stand-in's mark, centred, two thirds of the tile wide and half
-    // as high, and its edge: the app icon's glide and its 2nd and 3rd
-    // harmonics (ferrous.svg's own curves, stretched to 2:1), rising
-    // 1 : 2 : 3 from a common start at the lower left, or in a small tile
-    // the glide and its 3rd harmonic, as the icon's small sizes draw them
-    // (#373 H14 F2); drawn as shapes, so their strokes keep the width set
-    // for the tile's size (standInStroke) as the curves scale to it.
-    // Assistive technology hears "No album art" from the keyboard stop over
-    // it.
+    // The stand-in's mark, centred, 0.55 of the tile wide and as high as
+    // the icon's aspect makes it, and its edge: the app icon's glide and its
+    // 2nd and 3rd harmonics (ferrous.svg's own curves, #373 H19: H14 to H18
+    // stretched them to 2:1), rising 1 : 2 : 3 from a common start at the
+    // lower left, or in a small tile the glide and its 3rd harmonic, as the
+    // icon's small sizes draw them (#373 H14 F2). As in the icon they run
+    // out to the mark's right bound, cut flush there, a crop of a
+    // spectrogram rather than a chart's series ending in round caps (H19).
+    // Drawn as shapes, so their strokes keep the width set for the tile's
+    // size (standInStroke) as the curves scale to it. Assistive technology
+    // hears "No album art" from the keyboard stop over it.
     component StandInMark: Item {
         id: standIn
 
         Shape {
             id: mark
             objectName: "albumArtStandInMark"
-            // The paths' own box: 240 by 120, or the small mark's 64 by 32.
-            readonly property size box: root.standInCompact ? Qt.size(64, 32) : Qt.size(240, 120)
+            // The paths' own box, at the icon's aspect: the icon's 64-unit
+            // drawing from its traces' start to the tile's inner edge, with
+            // 1.25 units around their centre lines, 240 units wide. The
+            // paths run on past its right side, and the clip cuts them there.
+            readonly property size box: Qt.size(240, 212)
             readonly property real glideStroke: root.standInStroke
             readonly property real harmonicStroke: root.standInStroke * 0.8
             readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 0.75 : 0.65)
             anchors.centerIn: parent
-            width: Math.round(standIn.width * 2 / 3)
-            height: Math.round(width / 2)
+            width: Math.round(standIn.width * 0.55)
+            height: Math.round(width * mark.box.height / mark.box.width)
+            clip: true
             preferredRendererType: Shape.CurveRenderer
             antialiasing: true
             Accessible.ignored: true
@@ -179,9 +185,7 @@ Rectangle {
                 strokeColor: root.standInHighHarmonicColor
                 strokeWidth: mark.highHarmonicStroke
                 PathSvg {
-                    path: root.standInCompact
-                        ? "M1.50 21.88 C1.91 21.54 2.31 21.22 2.72 20.91 C3.33 20.44 3.94 19.99 4.55 19.57 C5.57 18.87 6.58 18.22 7.60 17.61 C9.02 16.78 10.45 16.02 11.87 15.31 C13.90 14.31 15.94 13.41 17.97 12.61 C20.61 11.55 23.26 10.62 25.90 9.78 C29.15 8.74 32.41 7.83 35.66 6.99 C39.73 5.95 43.79 5.03 47.86 4.20 C52.74 3.19 57.62 2.31 62.50 1.50"
-                        : "M2.00 83.51 C3.59 82.17 5.13 80.88 6.72 79.63 C9.08 77.74 11.44 75.96 13.80 74.26 C17.75 71.47 21.65 68.87 25.60 66.46 C31.09 63.10 36.63 60.06 42.12 57.24 C49.97 53.23 57.87 49.65 65.72 46.42 C75.93 42.19 86.19 38.49 96.40 35.11 C108.97 30.97 121.59 27.30 134.16 23.98 C149.91 19.81 165.61 16.14 181.36 12.78 C200.24 8.77 219.12 5.23 238.00 2.00"
+                    path: "M6.70 146.15 C8.26 143.83 9.81 141.62 11.37 139.48 C13.70 136.27 16.04 133.24 18.37 130.35 C22.26 125.54 26.15 121.12 30.03 116.99 C35.48 111.22 40.92 106.01 46.36 101.20 C54.14 94.32 61.92 88.25 69.69 82.69 C79.80 75.47 89.91 69.14 100.02 63.36 C112.46 56.25 124.91 50.00 137.35 44.29 C152.90 37.16 168.46 30.89 184.01 25.17 C202.67 18.31 221.34 12.25 240.00 6.70 C246.22 4.86 252.44 3.07 258.66 1.33"
                 }
             }
             ShapePath {
@@ -192,7 +196,7 @@ Rectangle {
                 strokeColor: root.standInCompact ? "transparent" : root.standInHarmonicColor
                 strokeWidth: mark.harmonicStroke
                 PathSvg {
-                    path: "M2.00 100.76 C3.59 99.85 5.13 99.00 6.72 98.15 C9.08 96.90 11.44 95.74 13.80 94.61 C17.75 92.73 21.65 91.01 25.60 89.41 C31.09 87.15 36.63 85.11 42.12 83.23 C49.97 80.57 57.87 78.18 65.72 76.02 C75.93 73.23 86.19 70.75 96.40 68.50 C108.97 65.74 121.59 63.29 134.16 61.07 C149.91 58.28 165.61 55.83 181.36 53.60 C200.24 50.94 219.12 48.59 238.00 46.42"
+                    path: "M6.70 175.64 C8.26 174.10 9.81 172.62 11.37 171.20 C13.70 169.06 16.04 167.04 18.37 165.11 C22.26 161.90 26.15 158.96 30.03 156.21 C35.48 152.36 40.92 148.89 46.36 145.68 C54.14 141.09 61.92 137.04 69.69 133.34 C79.80 128.53 89.91 124.30 100.02 120.45 C112.46 115.71 124.91 111.54 137.35 107.74 C152.90 102.99 168.46 98.81 184.01 95.00 C202.67 90.42 221.34 86.38 240.00 82.68 C246.22 81.45 252.44 80.26 258.66 79.10"
                 }
             }
             ShapePath {
@@ -203,9 +207,7 @@ Rectangle {
                 strokeColor: root.standInGlideColor
                 strokeWidth: mark.glideStroke
                 PathSvg {
-                    path: root.standInCompact
-                        ? "M1.50 30.50 C1.91 30.39 2.31 30.28 2.72 30.18 C3.33 30.02 3.94 29.87 4.55 29.73 C5.57 29.50 6.58 29.28 7.60 29.08 C9.02 28.80 10.45 28.55 11.87 28.31 C13.90 27.98 15.94 27.68 17.97 27.41 C20.61 27.06 23.26 26.75 25.90 26.46 C29.15 26.12 32.41 25.81 35.66 25.54 C39.73 25.19 43.79 24.89 47.86 24.61 C52.74 24.27 57.62 23.98 62.50 23.70"
-                        : "M2.00 118.00 C3.59 117.56 5.13 117.12 6.72 116.71 C9.08 116.09 11.44 115.49 13.80 114.93 C17.75 113.99 21.65 113.11 25.60 112.33 C31.09 111.20 36.63 110.19 42.12 109.25 C49.97 107.90 57.87 106.71 65.72 105.65 C75.93 104.24 86.19 102.98 96.40 101.85 C108.97 100.47 121.59 99.25 134.16 98.15 C149.91 96.78 165.61 95.55 181.36 94.42 C200.24 93.08 219.12 91.92 238.00 90.82"
+                    path: "M6.70 205.14 C8.26 204.37 9.81 203.63 11.37 202.92 C13.70 201.85 16.04 200.84 18.37 199.87 C22.26 198.27 26.15 196.80 30.03 195.42 C35.48 193.50 40.92 191.76 46.36 190.16 C54.14 187.86 61.92 185.84 69.69 183.99 C79.80 181.58 89.91 179.47 100.02 177.54 C112.46 175.17 124.91 173.09 137.35 171.19 C152.90 168.81 168.46 166.72 184.01 164.82 C202.67 162.53 221.34 160.51 240.00 158.66 C246.22 158.04 252.44 157.45 258.66 156.87"
                 }
             }
         }
