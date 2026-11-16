@@ -2313,22 +2313,23 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QTRY_VERIFY(slot->isVisible());
     QVERIFY(!label->isVisible());
     // A 16 px glyph (#373 H6: 10 px inside a ring was a smudge at 1x), and
-    // a 16 by 2 px trough 2 px under its ink (#373 H10: the bar under the
-    // glyph's cell pushed the glyph 2.5 px above the middle), which the
-    // bar fills from the left by whole pixels.
+    // a 16 by 3 px trough 2 px under its ink (#373 H10: the bar under the
+    // glyph's cell pushed the glyph 2.5 px above the middle; H13: at 2 px
+    // its proportions did not read at 1x), which the bar fills from the
+    // left by whole pixels.
     QCOMPARE(box->size(), QSizeF(16, 16));
     QCOMPARE(glyph->size(), QSizeF(16, 16));
     QCOMPARE(glyph->position(), QPointF(0, 0));
     QVERIFY(trough->isVisible());
     QCOMPARE(trough->position(), QPointF(0, 15));
-    QCOMPARE(trough->size(), QSizeF(16, 2));
+    QCOMPARE(trough->size(), QSizeF(16, 3));
     const QColor troughColor = trough->property("color").value<QColor>();
     QCOMPARE(troughColor.alphaF(), 1.0F);
     QVERIFY2(contrastRatio(troughColor, harness.token("chrome")) >= 3.0,
              qPrintable(describe(QStringLiteral("trough"), troughColor, harness.token("chrome"))));
     QVERIFY(bar->isVisible());
     QCOMPARE(bar->position(), QPointF(0, 0));
-    QCOMPARE(bar->height(), 2.0);
+    QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->opacity(), 1.0);
     QCOMPARE(slot->property("barWidth").toInt(), 16);
     QCOMPARE(progress(), std::floor(77.0 / 115.0 * 16) / 16);
@@ -2382,7 +2383,7 @@ void TransportStatusTest::lastFmSlotShowsEachState() {
     QVERIFY(bar->isVisible());
     QCOMPARE(progress(), 1.0);
     QCOMPARE(bar->width(), 16.0);
-    QCOMPARE(bar->height(), 2.0);
+    QCOMPARE(bar->height(), 3.0);
     QCOMPARE(bar->opacity(), 1.0);
     QVERIFY(sameColor(bar->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(sameColor(glyph->property("color").value<QColor>(), harness.token("textSecondary")));
@@ -2577,9 +2578,10 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough_data() {
     QTest::newRow("breeze light") << false;
 }
 
-// The bar under the glyph, as drawn at 1x (#373 H11): a trough 16 by 2 px,
-// the glyph's width, 2 px under its ink, opaque and 3:1 or more on the
-// chrome (#373 H12: the text at 20% was 1.9:1 dark and 1.5:1 light), and in
+// The bar under the glyph, as drawn at 1x (#373 H11): a trough 16 by 3 px
+// (#373 H13), the glyph's width, 2 px under its ink, the text at 35% in
+// the chrome, or nearer the text where that is under 3:1 on the chrome
+// (#373 H12: the text at 20% was 1.9:1 dark and 1.5:1 light), and in
 // it from the left the listening done, in the secondary text colour: 3:1
 // or more on the chrome and well apart from its trough, so that it reads as
 // a share of a whole (H10's bar had no trough, started 6 px long and was
@@ -2609,16 +2611,23 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     QCOMPARE(trough.alphaF(), 1.0F);
     QVERIFY2(contrastRatio(fill, chrome) >= 3.0, qPrintable(describe(QStringLiteral("bar"), fill, chrome)));
     QVERIFY2(contrastRatio(trough, chrome) >= 3.0, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+    const QColor thirtyFive = mixed(chrome, harness.token("text"), 0.35);
+    if (contrastRatio(thirtyFive, chrome) >= 3.1) {
+        QVERIFY2(channelDistance(trough, thirtyFive) <= 1, qPrintable(trough.name() + QStringLiteral(" vs ") + thirtyFive.name()));
+    } else {
+        // Only as much nearer the text as 3:1 takes.
+        QVERIFY2(contrastRatio(trough, chrome) < 3.3, qPrintable(describe(QStringLiteral("trough"), trough, chrome)));
+    }
     // The bar stands out from the trough as clearly as the trough from the
     // chrome, and is further from the chrome.
     QVERIFY2(contrastRatio(fill, trough) >= 1.9, qPrintable(describe(QStringLiteral("bar on trough"), fill, trough)));
     QVERIFY(contrastRatio(fill, chrome) > contrastRatio(trough, chrome) * 1.9);
 
-    // The 2 px gap under the glyph's ink and the trough's 2 px rows across
-    // the glyph's width: the pixels drawn as the bar, which must start at
-    // the left and run on, those drawn as the trough, after them, and those
-    // drawn as neither where one of them belongs, or as anything but the
-    // chrome in the gap.
+    // The 2 px gap under the glyph's ink, the trough's 3 px rows across the
+    // glyph's width and the row under them: the pixels drawn as the bar,
+    // which must start at the left and run on, those drawn as the trough,
+    // after them, and those drawn as neither where one of them belongs, or
+    // as anything but the chrome in the gap and under the trough.
     struct Drawn {
         int bar = 0;
         int trough = 0;
@@ -2630,11 +2639,11 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
         const QImage image = grabbed(harness.window, &scale);
         const QPointF topLeft = sceneRect(box).topLeft();
         Drawn result;
-        for (int y = 13; y < 17; ++y) {
+        for (int y = 13; y < 19; ++y) {
             bool ended = false;
             for (int x = 0; x < 16; ++x) {
                 const QColor pixel = pixelAt(image, topLeft + QPointF(x + 0.5, y + 0.5), scale);
-                if (y < 15 || !shown) {
+                if (y < 15 || y > 17 || !shown) {
                     result.stray += channelDistance(pixel, chrome) <= 2 ? 0 : 1;
                 } else if (channelDistance(pixel, fill) <= 2) {
                     result.bar += 1;
@@ -2655,9 +2664,9 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
         // Never less than the 3 px mark.
         const int drawnColumns = std::max(3, columns);
         Drawn now;
-        QTRY_VERIFY2((now = drawn(true), now.bar == 2 * drawnColumns),
+        QTRY_VERIFY2((now = drawn(true), now.bar == 3 * drawnColumns),
                      qPrintable(QStringLiteral("%1 done drew %2 px of the bar").arg(done).arg(now.bar)));
-        QVERIFY2(now.trough == 2 * (16 - drawnColumns),
+        QVERIFY2(now.trough == 3 * (16 - drawnColumns),
                  qPrintable(QStringLiteral("%1 done drew %2 px of the trough").arg(done).arg(now.trough)));
         QVERIFY2(now.stray == 0, qPrintable(QStringLiteral("%1 done: %2 px of something else").arg(done).arg(now.stray)));
         QVERIFY(now.fromTheLeft);
@@ -2666,7 +2675,7 @@ void TransportStatusTest::lastFmSlotBarFillsItsTrough() {
     // Being sent: full. Scrobbled and failed: the chrome alone.
     bridge->setProperty("lastFmScrobbleState", 2);
     Drawn sending;
-    QTRY_VERIFY2((sending = drawn(true), sending.bar == 32 && sending.trough == 0 && sending.stray == 0),
+    QTRY_VERIFY2((sending = drawn(true), sending.bar == 48 && sending.trough == 0 && sending.stray == 0),
                  qPrintable(QStringLiteral("%1 px, %2 stray").arg(sending.bar).arg(sending.stray)));
     for (const int state : {3, 4}) {
         bridge->setProperty("lastFmScrobbleState", state);
@@ -2782,7 +2791,7 @@ void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock_data() {
 // The Last.fm glyph's ink, as drawn, is centred on its block, the slot,
 // both ways and on whole pixels, and the slot on the status bar under its
 // seam (#373 H10: the glyph sat 2.5 px above the middle, over the bar's
-// place). The trough under it is 2 px thick at the default font, a little
+// place). The trough under it is 3 px thick at the default font, a little
 // more at a larger one, and as wide as the glyph (#373 H11).
 void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
     QFETCH(bool, dark);
@@ -2865,9 +2874,9 @@ void TransportStatusTest::lastFmGlyphIsCentredOnItsBlock() {
     const QRectF barRect = QRectF(drawnBar).translated(barArea.topLeft());
     const int thickness = slot->property("barHeight").toInt();
     if (pointSize == 10.0) {
-        QCOMPARE(thickness, 2);
+        QCOMPARE(thickness, 3);
     }
-    QVERIFY(thickness >= 2);
+    QVERIFY(thickness >= 3);
     QCOMPARE(barRect.height(), qreal(thickness));
     QVERIFY2(barRect.top() - inkRect.bottom() >= 2.0, qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
     QVERIFY2(barRect.bottom() <= slotRect.bottom(), qPrintable(describeRect(barRect) + QLatin1Char(' ') + where));
@@ -3074,9 +3083,14 @@ void TransportStatusTest::lastFmBarReadsApartFromTheScanBar() {
     QCOMPARE(slot->property("barWidth").toReal(), glyphRect.width());
     QCOMPARE(barRect.width(), glyphRect.width() / 2);
     QVERIFY2(glyphRect.width() * 4 < scanBar->width(), qPrintable(QString::number(scanBar->width())));
-    // 2 px to the scan bar's 4, as thin as the glyph's strokes (#373 H10).
-    QCOMPARE(bar->height(), 2.0);
-    QCOMPARE(trough->height(), 2.0);
+    // 3 px to the scan bar's 4 (#373 H13: at 2 px its proportions did not
+    // read at 1x), with square ends to the scan bar's round ones, and the
+    // scan bar has its percent beside it.
+    QCOMPARE(bar->height(), 3.0);
+    QCOMPARE(trough->height(), 3.0);
+    QQuickItem *scanCount = harness.item(QStringLiteral("statusBarScanCount"));
+    QVERIFY(scanCount != nullptr && scanCount->isVisible());
+    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("34%"));
     QVERIFY2(bar->height() < scanBar->height(), qPrintable(QString::number(scanBar->height())));
     QCOMPARE(bar->property("radius").toReal(), 0.0);
     QCOMPARE(trough->property("radius").toReal(), 0.0);

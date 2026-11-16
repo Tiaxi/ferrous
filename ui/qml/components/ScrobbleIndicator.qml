@@ -18,14 +18,16 @@ import "../logic/KeyUtils.js" as KeyUtils
 // "as", a staircase for its strike and thin antialiased strokes for
 // offline read as three hands): outlines drawn for 16 px with their
 // straight edges on whole pixels and their corners as arcs, all 16 px.
-// The bar is the glyph's: as wide as the glyph, 2 px tall and 2 px under
-// its ink, with square ends. It is the listening done towards the
+// The bar is the glyph's: as wide as the glyph, 3 px tall and 2 px under
+// its ink, with square ends (#373 H13: at 2 px its proportions did not read
+// at 1x). It is the listening done towards the
 // scrobble, in the glyph's colour, the secondary text colour (at least 3:1
 // on the status bar), over an opaque trough at 3:1 on the status bar, so
 // that it reads as a share of a whole (#373 H11: a bar alone, 6 to 14 px long and
 // brighter than its glyph, did not read as progress). It is a fifth of the
-// scan bar's length and half its height (the scan bar is 72 by 4 px, with
-// round ends), so that it does not read as a second scan or a download.
+// scan bar's length, with square ends where the scan bar's are round, and
+// the scan bar has its percent beside it (the scan bar is 72 by 4 px), so
+// that it does not read as a second scan or a download.
 // - Listening: the glyph in the secondary colour, and the bar filling its
 //   trough with the listening done towards the scrobble, from a short mark
 //   at the left; the tooltip says how much is left. Both come from the scrobbler's listened
@@ -119,12 +121,12 @@ AbstractButton {
     // The glyph's ink, in its 16 px drawing: columns 1 to 14 and rows 3 to
     // 12, centred in it.
     readonly property int inkBottom: Math.round(root.glyphSize * 13 / 16)
-    // The bar's trough under it: the glyph's width, 2 px tall and 2 px
+    // The bar's trough under it: the glyph's width, 3 px tall and 2 px
     // below the ink at the default font, a little more with a larger one,
     // within the status bar's height: the status bar grows with the small
     // font's line, which grows more slowly than the glyph.
     readonly property int barWidth: root.glyphSize
-    readonly property int barHeight: Math.max(2, Math.round(root.glyphSize / 10))
+    readonly property int barHeight: Math.max(3, Math.round(root.glyphSize * 3 / 20))
     readonly property int barGap: Math.max(2, Math.round(root.glyphSize / 10))
     // The bar's top, from the glyph's.
     readonly property int barY: root.inkBottom + root.barGap
@@ -153,12 +155,13 @@ AbstractButton {
         return Math.floor(Math.min(1, root.listenedSeconds / root.thresholdSeconds) * steps) / steps
     }
     // The bar: the secondary text colour, the glyph's. Its trough: the text
-    // mixed into the status bar, opaque and at least 3:1 on it, so that the
-    // whole reads as a whole (#373 H12: the text at 20% was 1.9:1 / 1.5:1),
-    // and still well short of the bar: #6e7173 / #86888b in Breeze.
+    // at 35% in the status bar (#373 H13), opaque, and darkened or lightened
+    // where that is under 3:1 on it, so that the whole reads as a whole
+    // (#373 H12: the text at 20% was 1.9:1 / 1.5:1), and still well short
+    // of the bar: #6e7173 / #86888b in Breeze.
     readonly property color barColor: root.uiPalette.textSecondary
     readonly property color troughColor: root.uiPalette.readableOn(
-        ColorUtils.mixColor(root.uiPalette.chrome, root.uiPalette.text, 0.3),
+        ColorUtils.mixColor(root.uiPalette.chrome, root.uiPalette.text, 0.35),
         [root.uiPalette.chrome], 3.1)
     // While listening, the bar is never less than a short mark from the
     // left, so that listening that has just started reads apart from a
