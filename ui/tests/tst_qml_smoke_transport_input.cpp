@@ -24,6 +24,8 @@ private slots:
     void visualizationModeSwitchShowsOnlyWithThePointerOrFocus();
     void visualizationModeSwitchShowsBeforeAnyAudio();
     void paneAtRestIsAStereoInstrument();
+    void paneAtRestKeepsItsLinesClearOfThePlates_data();
+    void paneAtRestKeepsItsLinesClearOfThePlates();
     void visualizationModeSwitchLeavesTheCornerToTheView();
     void crosshairGivesWayToThePlotsPlates();
     void viewersShowTheTrackInATitleStripOverTheWholeScreen();
@@ -1068,6 +1070,171 @@ void TransportInputSmokeTest::visualizationModeSwitchShowsBeforeAnyAudio() {
     QTRY_VERIFY(waveform->isVisible());
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneHead")).isEmpty());
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty());
+}
+
+void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
+    QTest::addColumn<QSize>("windowSize");
+    QTest::addColumn<int>("viewMode");
+    for (const QSize &size : {QSize(1600, 1000), QSize(1000, 720)}) {
+        for (const int mode : {0, 1}) {
+            QTest::addRow("%dx%d, %s", size.width(), size.height(), mode == 0 ? "mixed" : "per channel")
+                << size << mode;
+        }
+    }
+}
+
+// The never-played pane's rest lines keep clear of the plates over it: a
+// line on a row beside the mode switch, or within 4 px under or over it,
+// ends 6 px before the switch, and one beside a lane's label starts 6 px
+// after it, rather than run along a plate's edge (#373 H29 W4: per channel
+// the first line ran along the switch's foot, 1 px under it). Every tick
+// keeps its line. The seam between the lanes at rest is a 3 px groove in
+// the plot's deep violet, centred on the 1 px seam and drawn over the
+// lanes, whose heights stay; playing, the seam is 1 px again.
+void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
+    QFETCH(QSize, windowSize);
+    QFETCH(int, viewMode);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(windowSize);
+    QTRY_COMPARE(window->size(), windowSize);
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    auto *spectrogram = window->findChild<QQuickItem *>(QStringLiteral("mainSpectrogramSurface"));
+    QVERIFY(bridge && spectrogram);
+    QCOMPARE(bridge->property("currentTrackPath").toString(), QString());
+    QVERIFY(bridge->setProperty("showSpectrogramScale", false));
+    QVERIFY(bridge->setProperty("spectrogramViewMode", viewMode));
+    const int laneCount = viewMode == 0 ? 1 : 2;
+    const auto panes = [&]() {
+        QList<SpectrogramItem *> found;
+        for (QQuickItem *item : itemsNamed(spectrogram, QStringLiteral("spectrogramPaneItem"))) {
+            found.push_back(qobject_cast<SpectrogramItem *>(item));
+        }
+        return found;
+    };
+    QTRY_COMPARE(panes().size(), laneCount);
+    QTRY_COMPARE(visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel")).size(),
+                 viewMode == 0 ? 0 : 2);
+    // Each lane's lines, in the scene, once laid out for its size.
+    const auto linesOf = [&](SpectrogramItem *pane) {
+        QList<QRectF> lines;
+        QMutexLocker lock(&pane->m_stateMutex);
+        if (!pane->m_restGrid.valid || pane->m_restGrid.size.width() != qRound(pane->width() * pane->m_canvasScale)) {
+            return lines;
+        }
+        const QRectF rect = sceneRectOf(pane);
+        const double scale = pane->m_canvasScale;
+        for (const QRect &line : std::as_const(pane->m_restGrid.lines)) {
+            lines.push_back(QRectF(rect.left() + line.x() / scale, rect.top() + line.y() / scale,
+                                   line.width() / scale, line.height() / scale));
+        }
+        return lines;
+    };
+    // Laid out for the window's size, and drawn.
+    for (SpectrogramItem *pane : panes()) {
+        QTRY_VERIFY(!linesOf(pane).isEmpty());
+    }
+    QTRY_VERIFY(sceneRectOf(spectrogram).right() <= windowSize.width());
+    QTest::qWait(50);
+    QQuickItem *modeSwitch = firstVisibleItemNamed(window->contentItem(), QStringLiteral("visualizationModeSwitch"));
+    QVERIFY(modeSwitch != nullptr);
+    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    // The plates with their 1 px edges.
+    const QRectF switchPlate = sceneRectOf(modeSwitch).adjusted(-1, -1, 1, 1);
+    QList<QRectF> labels;
+    for (QQuickItem *label : visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneLabel"))) {
+        labels.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
+    }
+    int shortened = 0;
+    for (SpectrogramItem *pane : panes()) {
+        QTRY_VERIFY(!linesOf(pane).isEmpty());
+        const QRectF lane = sceneRectOf(pane);
+        const QList<QRectF> lines = linesOf(pane);
+        // Every tick keeps its line, most of the lane wide.
+        QVERIFY2(lines.size() >= 3, qPrintable(QString::number(lines.size())));
+        for (const QRectF &line : lines) {
+            QVERIFY2(line.width() >= lane.width() / 2,
+                     qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
+            const auto beside = [&](const QRectF &plate) {
+                return line.bottom() > plate.top() - 4 && line.top() < plate.bottom() + 4
+                    && plate.left() < lane.right() && plate.right() > lane.left();
+            };
+            if (beside(switchPlate)) {
+                QVERIFY2(line.right() <= switchPlate.left() - 6 + 0.01,
+                         qPrintable(QStringLiteral("a line at y %1 ends at %2, the switch from %3 (to y %4)")
+                                        .arg(line.top()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.bottom())));
+                ++shortened;
+            } else {
+                QVERIFY2(line.right() == lane.right(),
+                         qPrintable(QStringLiteral("a line at y %1 to %2 ends at %3, the switch %4,%5 %6x%7, corner %8x%9, lane %10 to %11")
+                                        .arg(line.top()).arg(line.bottom()).arg(line.right()).arg(switchPlate.left()).arg(switchPlate.top())
+                                        .arg(switchPlate.width()).arg(switchPlate.height()).arg(pane->reservedCorner().width())
+                                        .arg(pane->reservedCorner().height()).arg(lane.top()).arg(lane.bottom())));
+            }
+            bool besideLabel = false;
+            for (const QRectF &label : std::as_const(labels)) {
+                if (beside(label) && label.top() >= lane.top() - 4 && label.top() < lane.bottom()) {
+                    besideLabel = true;
+                    QVERIFY2(line.left() >= label.right() + 6 - 0.01,
+                             qPrintable(QStringLiteral("a line at y %1 starts at %2, the label to %3")
+                                            .arg(line.top()).arg(line.left()).arg(label.right())));
+                }
+            }
+            if (!besideLabel) {
+                QCOMPARE(line.left(), lane.left());
+            }
+        }
+    }
+    // Per channel at 1600x1000, the first line is under the switch's foot.
+    if (viewMode == 1 && windowSize == QSize(1600, 1000)) {
+        QVERIFY(shortened > 0);
+    }
+
+    // The groove between the lanes at rest, per channel.
+    const auto grooves = [&]() {
+        return visibleItemsNamed(spectrogram, QStringLiteral("spectrogramRestSeamGroove"));
+    };
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const QColor restSeam = palette->property("plotRestLaneSeam").value<QColor>();
+    QCOMPARE(restSeam.rgb(), QColor(QStringLiteral("#0a0318")).rgb());
+    if (viewMode == 0) {
+        QCOMPARE(grooves().size(), 0);
+        return;
+    }
+    QTRY_COMPARE(grooves().size(), 1);
+    const QRectF upper = sceneRectOf(panes().at(0));
+    const QRectF lower = sceneRectOf(panes().at(1));
+    const QRectF pane = sceneRectOf(spectrogram);
+    // The lanes keep their heights, with the 1 px seam between them.
+    QCOMPARE(lower.top() - upper.bottom(), 1.0);
+    QCOMPARE(upper.top(), pane.top());
+    QCOMPARE(upper.height(), double(qRound(pane.height() / 2)));
+    QCOMPARE(lower.bottom(), pane.bottom());
+    const QRectF groove = sceneRectOf(grooves().first());
+    QCOMPARE(groove.height(), 3.0);
+    QCOMPARE(groove.left(), upper.left());
+    QCOMPARE(groove.width(), upper.width());
+    QCOMPARE(groove.center().y(), upper.bottom() + 0.5);
+    QCOMPARE(grooves().first()->property("color").value<QColor>().rgb(), restSeam.rgb());
+    // Drawn over the lanes: their rows beside the seam show it.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    QVERIFY(!image.isNull());
+    const double scale = double(image.width()) / window->width();
+    for (const double row : {upper.bottom() - 0.5, upper.bottom() + 0.5, lower.top() + 0.5}) {
+        const QColor drawn = image.pixelColor(int(pane.center().x() * scale), int(row * scale));
+        QVERIFY2(drawn.rgb() == restSeam.rgb(),
+                 qPrintable(QStringLiteral("row %1: %2").arg(row).arg(drawn.name())));
+    }
+    const QColor beyond = image.pixelColor(int(pane.center().x() * scale), int((lower.top() + 2.5) * scale));
+    QVERIFY2(beyond.rgb() != restSeam.rgb(), qPrintable(beyond.name()));
+
+    // Playing: no groove, the seam 1 px.
+    setPlayingTrack(bridge);
+    QTRY_COMPARE(grooves().size(), 0);
 }
 
 // The pane at rest, before any audio, is an instrument waiting (#373 H14

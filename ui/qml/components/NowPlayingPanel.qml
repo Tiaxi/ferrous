@@ -8,6 +8,7 @@ import FerrousUi 1.0
 import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/PathUtils.js" as PathUtils
 
 // The top of the sidebar: the playing track, on the view colour with no
 // card, and a seam at its foot, where the library starts.
@@ -345,6 +346,26 @@ Item {
     }
     readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
                                                              root.lineSeparators.narrowDetails)
+    // A file without tags, with its file name for a title and no artist,
+    // album or details, says where it is instead: the name of its folder,
+    // in the artist's row, in textSecondary, as a fact of the file rather
+    // than a tag (#373 H29 W2: at 24 pt "track07" stood alone beside the
+    // cover over some 140 px of empty rows). Never for a track with any
+    // tag the lines show, as an album or a track number alone.
+    readonly property bool untagged: root._trimmed(root.uiBridge.currentTrackTitle).length === 0
+        && root.artistText.length === 0 && root.albumText.length === 0 && root.detailsText.length === 0
+    readonly property string folderText: root.untagged
+        ? PathUtils.containingFolderName(root._trimmed(root.uiBridge.currentTrackPath)) : ""
+    // The mark that starts a line's text where it is the folder's rather
+    // than a tag's: the line draws it in textSecondary, without the mark
+    // (LineText), and it fades whole, as nothing of it stays in place.
+    readonly property string folderMark: "\u0001"
+    function _isFolderLine(text) {
+        return text.startsWith(root.folderMark)
+    }
+    function _folderLine(tagText) {
+        return root.folderText.length > 0 ? root.folderMark + root.folderText : tagText
+    }
     // The details as the lines show them: all of them where the line has
     // room, and otherwise without what matters least, rather than cut off
     // (#373 H11: at 24 pt, "Classical · Track 2 o…"): first the album's
@@ -392,9 +413,9 @@ Item {
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({
         title: root.titleText,
-        artistAlbum: root.artistAlbumText,
+        artistAlbum: root._folderLine(root.artistAlbumText),
         details: root.shownDetailsText,
-        artist: root.artistText,
+        artist: root._folderLine(root.artistText),
         narrowAlbum: root.narrowAlbumText,
         narrowDetails: root.shownNarrowDetailsText
     })
@@ -651,7 +672,7 @@ Item {
     }
 
     function _stillRunsOf(key, before, after) {
-        if (root.wrappingLines[key] === true)
+        if (root.wrappingLines[key] === true || root._isFolderLine(before) || root._isFolderLine(after))
             return []
         return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
     }
@@ -1048,7 +1069,8 @@ Item {
     // on a row, some 264 px of it empty beside it, and the compact one cut
     // the artist off beside a 152 px cover): the cover at the top left, as
     // high as two lines of the title (headerCoverSize), and beside it,
-    // 12 px after it and from its top, the title, on up to two lines; then,
+    // 12 px after it, the title, on up to two lines, which end on the
+    // cover's foot, a title on one line too (#373 H29 W1); then,
     // footGap under the cover, at the panel's inset and on its whole width,
     // the artist, "Album (Year)", the album cut off before its year, in
     // textSecondary, and the details, a line each, elided, stackedLineGap
@@ -1219,6 +1241,42 @@ Item {
         return parts.filter(part => part.length > 0).join(separator)
     }
 
+    // Whether `text`, wrapped between words onto `lines` lines `width` wide
+    // in the font of `metrics` and elided on the last, is broken within a
+    // word all the same: where a word is wider than the line, or where the
+    // last line is cut off and its first word does not fit before the
+    // ellipsis. Breaking it anywhere then fills the first line (#373 H29
+    // W3: at 24 pt in the narrow window "A Remarkably Long …" took "A"
+    // alone on the first line, as "A Remarkably" did not fit it, and was
+    // cut off at "Remarka…" on the second, as "Remarkably…" did not).
+    function _cutWithinAWord(text, width, lines, metrics) {
+        // Read the font, for the answer to follow it.
+        metrics.font
+        const words = text.split(/\s+/).filter(word => word.length > 0)
+        if (width <= 0 || lines < 2 || words.length === 0)
+            return false
+        if (words.some(word => metrics.advanceWidth(word) > width))
+            return true
+        let line = 1
+        let current = ""
+        for (let index = 0; index < words.length; ++index) {
+            const next = current.length > 0 ? current + " " + words[index] : words[index]
+            if (metrics.advanceWidth(next) <= width) {
+                current = next
+                continue
+            }
+            current = words[index]
+            if (++line === lines) {
+                // The last line, from this word on: cut off within it
+                // where the rest does not fit and the word with the
+                // ellipsis does not either.
+                return metrics.advanceWidth(words.slice(index).join(" ")) > width
+                    && metrics.advanceWidth(words[index] + "…") > width
+            }
+        }
+        return false
+    }
+
     // A text of a line (`wholeText`), as each of its layers draws it:
     // elided, on the whole width of the line, so the layers lay it out
     // alike. Where the line keeps a tail of its text whole, as the album's
@@ -1231,8 +1289,13 @@ Item {
 
         required property var owner
         required property string wholeText
+        // A file's folder rather than a tag (see folderText): without its
+        // mark, in textSecondary.
+        readonly property bool folderLine: root._isFolderLine(lineText.wholeText)
+        readonly property string shownText: lineText.folderLine
+            ? lineText.wholeText.slice(root.folderMark.length) : lineText.wholeText
         readonly property var parts: lineText.owner.keepsTail
-            ? root._albumAndYear(lineText.wholeText) : [lineText.wholeText, ""]
+            ? root._albumAndYear(lineText.shownText) : [lineText.shownText, ""]
         readonly property string tail: lineText.parts[1]
         readonly property real tailWidth: lineText.tail.length > 0
             ? Math.ceil(tailMetrics.advanceWidth(lineText.tail)) : 0
@@ -1250,15 +1313,27 @@ Item {
 
         text: lineText.parts[0]
         width: owner.width
+        // On the foot of the line's seat, where it has one (see FadingLine's
+        // seatHeight): each text by its own height, so a layer that fades
+        // out stays where it showed. By the height of the laid-out text:
+        // reading implicitHeight here would lay it out from within this
+        // binding, a binding loop.
+        y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
-        wrapMode: owner.maximumLineCount > 1 ? Text.Wrap : Text.NoWrap
+        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap
+            : lineText.wrapsAnywhere ? Text.WrapAnywhere : Text.Wrap
+        // Where the text is broken within a word anyway, it breaks
+        // anywhere, so that the first line fills; otherwise between words
+        // (see _cutWithinAWord).
+        readonly property bool wrapsAnywhere: lineText.owner.breaksLongWords
+            && root._cutWithinAWord(lineText.text, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
         textFormat: Text.PlainText
         font.family: root.uiPalette.baseFont.family
         font.pointSize: owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
-        color: owner.color
+        color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
 
         // Each line in turn, on the line's width, which a text with this
         // handler is elided on only where it is set; the last call is for
@@ -1332,6 +1407,13 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
+        // Whether a text that is broken within a word anyway breaks
+        // anywhere, rather than between words (see _cutWithinAWord).
+        property bool breaksLongWords: false
+        // The height of the box at whose foot each text of the line sits,
+        // or 0 for its top: the large-font header's title seats a single
+        // line on the cover's foot (#373 H29 W1).
+        property real seatHeight: 0
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.truncated
         // The lines the playing track's text takes.
@@ -1487,8 +1569,8 @@ Item {
                 owner: line
                 wholeText: line.text
                 Accessible.role: Accessible.StaticText
-                Accessible.name: wholeText
-                Accessible.ignored: wholeText.length === 0
+                Accessible.name: stillText.shownText
+                Accessible.ignored: stillText.shownText.length === 0
             }
         }
 
@@ -1780,6 +1862,13 @@ Item {
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
+                breaksLongWords: true
+                // In the large-font header, a title on one line on the
+                // cover's foot, where a title on two ends, so the header
+                // reads as one stack down to the lines under it (#373 H29
+                // W1: at the cover's top it left some 54 px empty beside
+                // the cover's lower half).
+                seatHeight: root.largeHeader ? root.headerCoverSize : 0
                 width: narrowColumn.width
                 // In the large-font header, the cover's height and footGap
                 // with the column's spacing under it, so the lines under the
@@ -1880,8 +1969,8 @@ Item {
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
         text: root.wideRoom
-            ? root._joined([root.titleText, root.artistAlbumText, root.detailsText], "\n")
-            : root._joined([root.titleText, root.artistText, root.narrowAlbumText,
+            ? root._joined([root.titleText, root.artistAlbumText, root.folderText, root.detailsText], "\n")
+            : root._joined([root.titleText, root.artistText, root.folderText, root.narrowAlbumText,
                             root.narrowDetailsText], "\n")
     }
 }

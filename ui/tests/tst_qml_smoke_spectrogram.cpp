@@ -2,6 +2,7 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QtMath>
 #include <QSGOpacityNode>
 
 // The spectrogram's controls and overlays, its crosshair and readout,
@@ -58,6 +59,8 @@ private slots:
     void spectrogramAtRestDrawsItsScaleFaintly_data();
     void spectrogramAtRestDrawsItsScaleFaintly();
     void spectrogramAtRestFollowsTheScaleSetting();
+    void spectrogramAtRestKeepsItsLinesClearOfThePlates_data();
+    void spectrogramAtRestKeepsItsLinesClearOfThePlates();
     void spectrogramAtRestDrawsLabelsOnlyWithTheScale();
     void spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty();
     void spectrogramRollingViewFillsUpToThePlayhead();
@@ -2774,6 +2777,72 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
         QCOMPARE(rest.images.at(i).text, scaleShown.images.at(i).text);
         QCOMPARE(rest.images.at(i).rect, scaleShown.images.at(i).rect);
     }
+}
+
+void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates_data() {
+    QTest::addColumn<double>("scale");
+    QTest::newRow("1x") << 1.0;
+    QTest::newRow("2x") << 2.0;
+}
+
+// A line at rest on a row beside a plate, the mode switch's corner or the
+// lane's label, or within 4 px under or over it, ends 6 px before the
+// corner and starts 6 px after the label (#373 H29 W4: the first line ran
+// along the switch's foot); every tick keeps its line, and a line clear of
+// both runs the lane's width.
+void SpectrogramSmokeTest::spectrogramAtRestKeepsItsLinesClearOfThePlates() {
+    QFETCH(double, scale);
+    SpectrogramItem item;
+    item.setSampleRateHz(48'000);
+    item.setGridEnabled(false);
+    const int width = qRound(600 * scale);
+    const int height = qRound(240 * scale);
+    const auto layOut = [&]() {
+        QMutexLocker lock(&item.m_stateMutex);
+        item.m_canvasScale = scale;
+        item.updateRestGridOverlayLocked(width, height);
+        return item.m_restGrid;
+    };
+    const SpectrogramOverlayLayout plain = layOut();
+    QVERIFY(plain.lines.size() >= 3);
+    for (const QRect &line : plain.lines) {
+        QCOMPARE(line.x(), 0);
+        QCOMPARE(line.width(), width);
+    }
+    // Plates around the second line from the top: the corner's foot 1 px
+    // over it, the label's top 3 px under it; the top line is beside the
+    // corner alone.
+    QList<int> rows;
+    for (const QRect &line : plain.lines) {
+        rows.push_back(line.y());
+    }
+    std::sort(rows.begin(), rows.end());
+    const double row = rows.at(1) / scale;
+    QVERIFY(row > 8);
+    item.setReservedCorner(QSizeF(70, row - 1));
+    item.setLaneLabelBounds(QRectF(4, row + 3, 20, 18));
+    const SpectrogramOverlayLayout clear = layOut();
+    QCOMPARE(clear.lines.size(), plain.lines.size());
+    int cornerOnly = 0;
+    int both = 0;
+    int neither = 0;
+    for (qsizetype i = 0; i < clear.lines.size(); ++i) {
+        const QRect line = clear.lines.at(i);
+        QCOMPARE(line.y(), plain.lines.at(i).y());
+        QCOMPARE(line.height(), plain.lines.at(i).height());
+        const double top = line.y() / scale;
+        const double bottom = (line.y() + line.height()) / scale;
+        const bool besideCorner = top < row - 1 + 4;
+        const bool besideLabel = bottom > row + 3 - 4 && top < row + 21 + 4;
+        QCOMPARE(line.x(), besideLabel ? qCeil((24 + 6) * scale) : 0);
+        QCOMPARE(line.x() + line.width(), besideCorner ? qFloor((600 - 70 - 6) * scale) : width);
+        cornerOnly += besideCorner && !besideLabel ? 1 : 0;
+        both += besideCorner && besideLabel ? 1 : 0;
+        neither += !besideCorner && !besideLabel ? 1 : 0;
+    }
+    QCOMPARE(cornerOnly, 1);
+    QCOMPARE(both, 1);
+    QVERIFY(neither >= 1);
 }
 
 // With the scale hidden (Preferences), the lane at rest keeps its lines,

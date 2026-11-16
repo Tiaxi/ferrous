@@ -2519,6 +2519,23 @@ void SpectrogramItem::setLaneHeadBounds(const QRectF &value) {
     update();
 }
 
+QRectF SpectrogramItem::laneLabelBounds() const {
+    QMutexLocker lock(&m_stateMutex);
+    return m_laneLabelBounds;
+}
+
+void SpectrogramItem::setLaneLabelBounds(const QRectF &value) {
+    {
+        QMutexLocker lock(&m_stateMutex);
+        if (m_laneLabelBounds == value) {
+            return;
+        }
+        m_laneLabelBounds = value;
+    }
+    emit laneLabelBoundsChanged();
+    update();
+}
+
 QColor SpectrogramItem::floorColor() const {
     QMutexLocker lock(&m_stateMutex);
     return m_floorColor;
@@ -6301,13 +6318,36 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // evenly spaced (#373 H15 H7: the top one left out, the lane's top band
     // was some 80 px to the others' 45).
     const int topClearance = m_gridEnabled ? frequencyScaleTopClearanceLocked() : 0;
+    // A line on a row beside a plate, the mode switch's in the corner or the
+    // lane's label, or within kPlateReach under or over it, ends, or
+    // starts, kPlateGap clear of it, rather than run along its edge (#373
+    // H29 W4: the first line ran along the switch's foot, 1 px under it).
+    // Every tick keeps its line. The plates' rects are logical, with their
+    // 1 px edges.
+    constexpr double kPlateGap = 6.0;
+    constexpr double kPlateReach = 4.0;
+    const double logicalWidth = static_cast<double>(width) / scale;
+    const QRectF corner = m_reservedCorner.isEmpty()
+        ? QRectF()
+        : QRectF(logicalWidth - m_reservedCorner.width(), 0.0, m_reservedCorner.width(), m_reservedCorner.height());
+    const auto besidePlate = [&](const QRectF &plate, double row, double rowHeight) {
+        return !plate.isEmpty() && row + rowHeight > plate.top() - kPlateReach && row < plate.bottom() + kPlateReach;
+    };
     for (const FrequencyScaleTick &tick : frequencyScaleTicks(
              rowBins, bins, binHz, width, height, scale, topClearance)) {
         // Across the lane, where the scale's tick is, with the scale hidden
         // too: the pane at rest is an instrument waiting, not a hole
         // (#373 H14 F3, P23; H10 P18 left the floor plain). The label over
         // it, where the scale's goes, only with the scale shown.
-        m_restGrid.lines.push_back(QRect(0, tick.pixelY, width, lineWidth));
+        const double row = static_cast<double>(tick.pixelY) / scale;
+        const double rowHeight = static_cast<double>(lineWidth) / scale;
+        const int left = besidePlate(m_laneLabelBounds, row, rowHeight)
+            ? std::clamp(static_cast<int>(std::ceil((m_laneLabelBounds.right() + kPlateGap) * scale)), 0, width)
+            : 0;
+        const int right = besidePlate(corner, row, rowHeight)
+            ? std::clamp(static_cast<int>(std::floor((corner.left() - kPlateGap) * scale)), 0, width)
+            : width;
+        m_restGrid.lines.push_back(QRect(left, tick.pixelY, std::max(0, right - left), lineWidth));
         if (m_gridEnabled) {
             m_restGrid.images.push_back(
                 {SpectrogramOverlayImage::RestScaleLabel, tick.label, 0, tick.labelRect, QString()});

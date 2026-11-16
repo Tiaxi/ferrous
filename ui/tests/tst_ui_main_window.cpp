@@ -6,8 +6,10 @@
 // queue, the one-step library tree with its playing marks, the queue's
 // columns, and the first run.
 
+#include <QAccessible>
 #include <QApplication>
 #include <QColor>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -37,6 +39,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <tuple>
 #include <initializer_list>
 
 #include "../src/InputModality.h"
@@ -909,6 +912,7 @@ private slots:
     void nowPlayingCompactKeepsTheAlbumAndItsYear();
     void nowPlayingLargeFontCompactIsAHeaderRow_data();
     void nowPlayingLargeFontCompactIsAHeaderRow();
+    void nowPlayingLongTitleFillsItsFirstLine();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
     void nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange_data();
@@ -2002,6 +2006,20 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft());
     QTRY_COMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
     QVERIFY(sceneRect(title).right() <= panelRect.right() - 12);
+    // A text of the title, on one line or two, ends on the cover's foot
+    // (#373 H29 W1: a title on one line sat at the cover's top, with some
+    // 54 px empty beside the cover's lower half).
+    const auto seatedProblem = [&](QQuickItem *text) -> QString {
+        const QRectF rect = sceneRect(text);
+        if (rect.left() != coverRect.right() + 12 || std::abs(rect.bottom() - coverRect.bottom()) > 1.0
+            || rect.top() < coverRect.top()) {
+            return QStringLiteral("\"%1\" on %2 line(s) at %3,%4 to %5, the cover %6 to %7")
+                .arg(text->property("text").toString()).arg(text->property("lineCount").toInt())
+                .arg(rect.left()).arg(rect.top()).arg(rect.bottom()).arg(coverRect.top()).arg(coverRect.bottom());
+        }
+        return {};
+    };
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     // At least a dozen characters beside the cover.
     QVERIFY2(title->width() >= panel->property("narrowLineMinimum").toReal(), qPrintable(QString::number(title->width())));
     // Under the cover, 8 px down, at the inset and on the whole width.
@@ -2071,9 +2089,44 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_VERIFY(artist->property("truncated").toBool());
     QCOMPARE(artist->property("lineCount").toInt(), 1);
     QTRY_VERIFY(settled());
-    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
+    QVERIFY(sceneRect(title).top() > coverRect.top() + side / 3);
     QCOMPARE(geometry(), before);
     checkFootLines();
+
+    // A track change between a title on one line and one on two fades each
+    // where it showed: the one going out keeps its place, so nothing in
+    // the fade jumps (#373 H29 W1).
+    {
+        QObject *animation = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+        const auto incomingTitle = [&]() -> QQuickItem * {
+            QQuickItem *window = itemNamed(panel, QStringLiteral("nowPlayingIncomingNarrowTitleWindow"));
+            return window != nullptr && !window->childItems().isEmpty() ? window->childItems().first() : nullptr;
+        };
+        const QString twoLines = QStringLiteral("Lantern Signal Over The Harbour At Night");
+        for (const auto &[path, next, was] :
+             {std::tuple{QStringLiteral("/music/Artist A/Album A/03.flac"), twoLines, QStringLiteral("Dusk")},
+              std::tuple{kTrackPath, QStringLiteral("Dusk"), twoLines}}) {
+            bridge->setProperty("currentTrackPath", path);
+            bridge->setProperty("currentTrackTitle", next);
+            QTRY_VERIFY(animation->property("running").toBool());
+            QVERIFY(QMetaObject::invokeMethod(animation, "pause"));
+            panel->setProperty("handover", 0.2);
+            QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowTitle"));
+            QQuickItem *incoming = incomingTitle();
+            QVERIFY(outgoing != nullptr && incoming != nullptr);
+            QCOMPARE(outgoing->property("text").toString(), was);
+            QCOMPARE(incoming->property("text").toString(), next);
+            QCOMPARE(outgoing->property("lineCount").toInt(), was == twoLines ? 2 : 1);
+            QCOMPARE(incoming->property("lineCount").toInt(), next == twoLines ? 2 : 1);
+            QVERIFY2(seatedProblem(outgoing).isEmpty(), qPrintable(seatedProblem(outgoing)));
+            QVERIFY2(seatedProblem(incoming).isEmpty(), qPrintable(seatedProblem(incoming)));
+            QVERIFY(QMetaObject::invokeMethod(animation, "resume"));
+            QTRY_VERIFY(settled());
+            QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
+            QCOMPARE(geometry(), before);
+        }
+    }
 
     // A title alone, a short title, and none of the tags: the same block.
     bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
@@ -2085,7 +2138,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_COMPARE(panel->property("narrowAlbumText").toString(), QString());
     QTRY_VERIFY(settled());
     QCOMPARE(geometry(), before);
-    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QTRY_VERIFY(settled());
@@ -2094,6 +2147,103 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     playTrack(bridge);
     QTRY_VERIFY(settled());
     QCOMPARE(geometry(), before);
+}
+
+// A title that is broken within a word anyway, as where its last line is
+// cut off before a word that does not fit with the ellipsis, breaks
+// anywhere, so its first line fills; any other breaks between words (#373
+// H29 W3: at 24 pt in the narrow window, "A" stood alone on the first line
+// and the title was cut off at "Remarka…"). The line going out in a fade
+// keeps its own way of breaking.
+void UiMainWindowTest::nowPlayingLongTitleFillsItsFirstLine() {
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(24.0);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1000, 720);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *title = named(window, "nowPlayingNarrowTitle");
+    QVERIFY(panel && title);
+    playTrack(bridge);
+    QVERIFY(grown(window));
+    QVERIFY(panel->property("largeHeader").toBool());
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+    const auto settled = [&]() { return !handover->property("running").toBool(); };
+    constexpr int kWrap = 4;          // Text.Wrap
+    constexpr int kWrapAnywhere = 3;  // Text.WrapAnywhere
+    const QFontMetricsF metrics(title->property("font").value<QFont>());
+    // How far the first line's ink reaches from the title's left edge.
+    const auto firstLineInk = [&]() {
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal scale = qreal(image.width()) / window->width();
+        const QRectF rect = sceneRect(title);
+        const qreal lineHeight = title->height() / std::max(1, title->property("lineCount").toInt());
+        const QColor background = image.pixelColor(int((rect.right() + 4) * scale), int(rect.top() * scale) + 2);
+        int right = -1;
+        for (int y = int(rect.top() * scale); y < int((rect.top() + lineHeight) * scale); ++y) {
+            for (int x = int(rect.left() * scale); x < int((rect.right() + 1) * scale) && x < image.width(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                if (std::max({std::abs(pixel.red() - background.red()), std::abs(pixel.green() - background.green()),
+                              std::abs(pixel.blue() - background.blue())}) > 60) {
+                    right = std::max(right, x);
+                }
+            }
+        }
+        return right < 0 ? 0.0 : (right + 1) / scale - rect.left();
+    };
+
+    // Cut within a word anyway: anywhere, the first line full.
+    const QString longTitle = QStringLiteral("A Remarkably Long Title For The Evening Tide");
+    bridge->setProperty("currentTrackTitle", longTitle);
+    QTRY_COMPARE(title->property("text").toString(), longTitle);
+    QTRY_VERIFY(settled());
+    // "A Remarkably" does not fit the first line, nor "Remarkably…" the
+    // second, which is cut off: between words, "A" stood alone on the
+    // first line and the second was cut at "Remarka…".
+    QVERIFY2(metrics.horizontalAdvance(QStringLiteral("A Remarkably")) > title->width()
+                 && metrics.horizontalAdvance(QStringLiteral("Remarkably…")) > title->width(),
+             qPrintable(QStringLiteral("the column %1 px").arg(title->width())));
+    QVERIFY(title->property("truncated").toBool());
+    QCOMPARE(title->property("wrapMode").toInt(), kWrapAnywhere);
+    QCOMPARE(title->property("lineCount").toInt(), 2);
+    QTRY_VERIFY2(firstLineInk() >= 0.8 * title->width(),
+                 qPrintable(QStringLiteral("line 0 %1 px of %2").arg(firstLineInk()).arg(title->width())));
+
+    // Words that fit: between them, "Lantern" alone on the first line.
+    const QString shortTitle = QStringLiteral("Lantern Signal");
+    QVERIFY(metrics.horizontalAdvance(shortTitle) > title->width());
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/03.flac"));
+    bridge->setProperty("currentTrackTitle", shortTitle);
+    QTRY_VERIFY(handover->property("running").toBool());
+    QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+    panel->setProperty("handover", 0.2);
+    // In the fade, the title going out still breaks anywhere, the one
+    // coming in between words.
+    {
+        QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowTitle"));
+        QQuickItem *incomingWindow = itemNamed(panel, QStringLiteral("nowPlayingIncomingNarrowTitleWindow"));
+        QVERIFY(outgoing != nullptr && incomingWindow != nullptr && !incomingWindow->childItems().isEmpty());
+        QQuickItem *incoming = incomingWindow->childItems().first();
+        QCOMPARE(outgoing->property("text").toString(), longTitle);
+        QCOMPARE(outgoing->property("wrapMode").toInt(), kWrapAnywhere);
+        QCOMPARE(incoming->property("text").toString(), shortTitle);
+        QCOMPARE(incoming->property("wrapMode").toInt(), kWrap);
+    }
+    QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+    QTRY_VERIFY(settled());
+    QCOMPARE(title->property("text").toString(), shortTitle);
+    QCOMPARE(title->property("wrapMode").toInt(), kWrap);
+    QCOMPARE(title->property("lineCount").toInt(), 2);
+    QVERIFY(!title->property("truncated").toBool());
+    const qreal lantern = metrics.horizontalAdvance(QStringLiteral("Lantern"));
+    QTRY_VERIFY2(std::abs(firstLineInk() - lantern) <= 4.0,
+                 qPrintable(QStringLiteral("line 0 %1 px, \"Lantern\" %2").arg(firstLineInk()).arg(lantern)));
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {
@@ -2195,17 +2345,29 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         QCOMPARE(standInMarkInk(window), ink);
     }
 
-    // No tags: the file name, alone, for a title, one line; the same mark.
+    // No tags: the file name for a title, one line, and under it, in the
+    // artist's row, the name of its folder, in textSecondary, as a fact of
+    // the file rather than a tag (#373 H29 W2: at 24 pt the file name stood
+    // alone beside the cover); the same mark.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QCOMPARE(panel->property("detailsText").toString(), QString());
     const QString fileName = QFileInfo(kTrackPath).fileName();
+    const QString folderName = QFileInfo(kTrackPath).dir().dirName();
+    QCOMPARE(folderName, QStringLiteral("Album A"));
     QTRY_VERIFY2(standIn().isEmpty(), qPrintable(standIn()));
     QTRY_VERIFY(!handover->property("running").toBool());
     QCOMPARE(standInMarkInk(window), ink);
     const QList<QQuickItem *> lines = shownLines(window);
-    QCOMPARE(lines.size(), 1);
+    QCOMPARE(lines.size(), 2);
     QTRY_COMPARE(lines.first()->property("text").toString(), fileName);
+    QCOMPARE(panel->property("folderText").toString(), folderName);
+    QQuickItem *folderLine = lines.at(1);
+    QCOMPARE(folderLine->objectName(), artLayout == QStringLiteral("wide") ? QStringLiteral("nowPlayingArtistAlbum")
+                                                                           : QStringLiteral("nowPlayingNarrowArtist"));
+    QCOMPARE(folderLine->property("text").toString(), folderName);
+    QCOMPARE(colorOf(folderLine), tokenHex(window, "textSecondary"));
+    QCOMPARE(QAccessible::queryAccessibleInterface(folderLine)->text(QAccessible::Name), folderName);
     QCOMPARE(sceneRect(cover), withCover.at(2));
     if (artLayout == QStringLiteral("wide")) {
         // Under the cover, the block keeps its height, the empty lines
@@ -2222,6 +2384,66 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         // Beside it, never shorter than the cover and the space under it.
         QVERIFY(panel->height() <= withCover.at(0).height());
         QVERIFY(panel->height() >= cover->height());
+    }
+
+    // A track with any tag the lines show never shows its folder: an album
+    // alone, a genre alone, a track number alone, a year alone, a title
+    // alone.
+    const auto noFolderShown = [&]() -> QString {
+        if (!panel->property("folderText").toString().isEmpty()) {
+            return QStringLiteral("folder text %1").arg(panel->property("folderText").toString());
+        }
+        for (QQuickItem *line : shownLines(window)) {
+            const bool secondary = colorOf(line) == tokenHex(window, "textSecondary")
+                && line->objectName() != QStringLiteral("nowPlayingNarrowAlbum");
+            if (line->property("text").toString() == folderName || secondary) {
+                return QStringLiteral("%1 shows \"%2\"").arg(line->objectName(), line->property("text").toString());
+            }
+        }
+        return {};
+    };
+    const std::pair<const char *, QVariant> singleTags[] = {
+        {"currentTrackAlbum", QStringLiteral("Small Hours")}, {"currentTrackGenre", QStringLiteral("Classical")},
+        {"currentTrackNumber", 3}, {"currentTrackYear", 2005}, {"currentTrackTitle", QStringLiteral("Dusk")}};
+    for (const auto &[property, value] : singleTags) {
+        clearTrackTags(bridge);
+        QTRY_COMPARE(panel->property("folderText").toString(), folderName);
+        bridge->setProperty(property, value);
+        QTRY_VERIFY2(noFolderShown().isEmpty(), qPrintable(QStringLiteral("%1: %2").arg(property, noFolderShown())));
+        QTRY_VERIFY(!handover->property("running").toBool());
+        QVERIFY2(noFolderShown().isEmpty(), qPrintable(QStringLiteral("%1: %2").arg(property, noFolderShown())));
+        QCOMPARE(sceneRect(panel), withCover.at(0));
+        QCOMPARE(sceneRect(header), withCover.at(1));
+    }
+
+    // A track change from a tagged track to a file without tags fades each
+    // text in its own colour: the artist goes out in the text colour as
+    // the folder comes in in textSecondary.
+    {
+        playTrack(bridge);
+        QTRY_VERIFY(!handover->property("running").toBool());
+        const QString line = artLayout == QStringLiteral("wide") ? QStringLiteral("ArtistAlbum")
+                                                                 : QStringLiteral("NarrowArtist");
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/Loose Files/track07.flac"));
+        clearTrackTags(bridge);
+        QTRY_COMPARE(panel->property("folderText").toString(), QStringLiteral("Loose Files"));
+        QTRY_VERIFY(handover->property("running").toBool());
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        panel->setProperty("handover", 0.2);
+        QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoing") + line);
+        QQuickItem *incomingWindow = itemNamed(panel, QStringLiteral("nowPlayingIncoming%1Window").arg(line));
+        QVERIFY(outgoing != nullptr && incomingWindow != nullptr && !incomingWindow->childItems().isEmpty());
+        QQuickItem *incoming = incomingWindow->childItems().first();
+        QVERIFY(outgoing->property("text").toString().startsWith(QStringLiteral("The Quiet Meridian")));
+        QCOMPARE(colorOf(outgoing), tokenHex(window, "text"));
+        QCOMPARE(incoming->property("text").toString(), QStringLiteral("Loose Files"));
+        QCOMPARE(colorOf(incoming), tokenHex(window, "textSecondary"));
+        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+        QTRY_VERIFY(!handover->property("running").toBool());
+        QCOMPARE(named(window, qPrintable(QStringLiteral("nowPlaying") + line))->property("text").toString(),
+                 QStringLiteral("Loose Files"));
+        QCOMPARE(sceneRect(panel), withCover.at(0));
+        bridge->setProperty("currentTrackPath", kTrackPath);
     }
 
     // The tags back, then the cover: all as it was with it.
@@ -2846,13 +3068,15 @@ void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack() {
     }
     QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
 
-    // Untagged: the file name for a title, the other rows empty, kept.
+    // Untagged: the file name for a title, its folder in the artist's row
+    // (#373 H29 W2), the details' row empty, kept.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QTRY_COMPARE(panel->property("detailsText").toString(), QString());
     QTRY_VERIFY(!handover->property("running").toBool());
     QVERIFY(shown(artistAlbum) && shown(details));
-    QCOMPARE(artistAlbum->property("text").toString(), QString());
+    QCOMPARE(artistAlbum->property("text").toString(), QFileInfo(kTrackPath).dir().dirName());
+    QCOMPARE(details->property("text").toString(), QString());
     QCOMPARE(geometry(), tagged);
 
     // A long album: one line, elided, with the whole in the tooltip.
@@ -3134,9 +3358,15 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
         lowest = std::max(lowest, sceneRect(line).bottom());
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
-    // Beside the large-font header's cover, from its top.
-    QCOMPARE(sceneRect(narrowTitle).top(),
-             sceneRect(panel).top() + (pointSize > 0 ? 0.0 : panel->property("narrowTextTop").toReal()));
+    // Beside the large-font header's cover, ending on its foot, a title on
+    // one line too (#373 H29 W1); beside the narrow cover, from its top.
+    if (pointSize > 0) {
+        QVERIFY(sceneRect(narrowTitle).top() >= sceneRect(panel).top());
+        QVERIFY2(std::abs(sceneRect(narrowTitle).bottom() - tile.bottom()) <= 1.0,
+                 qPrintable(QStringLiteral("%1 to %2").arg(sceneRect(narrowTitle).bottom()).arg(tile.bottom())));
+    } else {
+        QCOMPARE(sceneRect(narrowTitle).top(), sceneRect(panel).top() + panel->property("narrowTextTop").toReal());
+    }
     QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
     QCOMPARE(tile.topLeft(), sceneRect(panel).topLeft());
     QVERIFY(!panel->property("insetCover").isValid());

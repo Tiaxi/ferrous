@@ -198,6 +198,24 @@ Item {
                        bounds.width, bounds.height)
     }
 
+    // What each lane's head takes of its lane, from the lane's top left,
+    // by the lane's index; empty for a lane that shows none. The lines of
+    // a lane at rest keep clear of it.
+    readonly property var laneHeadBoundsByLane: {
+        const bounds = []
+        for (let index = 0; index < laneHeads.count; ++index) {
+            const head = laneHeads.itemAt(index)
+            if (!head || !head.visible) {
+                bounds.push(Qt.rect(0, 0, 0, 0))
+                continue
+            }
+            const occupied = head.occupiedBounds
+            bounds.push(Qt.rect(head.x + occupied.x, head.y - root.laneTop(index) + occupied.y,
+                                occupied.width, occupied.height))
+        }
+        return bounds
+    }
+
     // The lane labels, with Mute and Solo.
     Repeater {
         id: laneHeads

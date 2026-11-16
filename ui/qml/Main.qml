@@ -1783,6 +1783,7 @@ ApplicationWindow {
             pointerActivity: spectrogramViewerShell.noteFullscreenPointerActivity
             reservedCorner: visualizationSurface.reservedCorner
             laneHeadBounds: plotLayer.lowestLaneHeadBounds
+            laneHeadBoundsByLane: plotLayer.laneHeadBoundsByLane
             markerSeconds: plotLayer.cutSeconds
             crosshairLevel: plotLayer.crosshairLevel
             uiBridge: root.uiBridge
