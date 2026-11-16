@@ -3,7 +3,6 @@
 #include "LevelMeterItem.h"
 #include "FerrousBridgeFfi.h"
 #include "PlaybackClock.h"
-#include "SpectrogramColorMap.h"
 #include "WindowPresence.h"
 
 #include <QFutureWatcher>
@@ -47,16 +46,14 @@ struct MeterNode : QSGNode {
 
 // The fill: a column of texels, one per device pixel of the lane's scale,
 // of which the fill shows the rows from the bottom up to its level. Its
-// rungs are in the fill's colour, or along the colour map each in the
-// map's colour of its level; the gaps between them are clear, so the
+// rungs are in the fill's colour; the gaps between them are clear, so the
 // trough under the fill shows in them.
 struct RampNode : QSGSimpleTextureNode {
     std::unique_ptr<QSGTexture> ramp;
     // What the ramp is drawn for: the scale's device pixels, the device
-    // pixel ratio, the range, and the fill's colour, or none for the map.
+    // pixel ratio and the fill's colour.
     double scalePixels{-1.0};
     double devicePixelRatio{0.0};
-    double dbRange{0.0};
     QColor color;
 };
 
@@ -110,27 +107,19 @@ void setRect(QSGNode *node, const QRectF &rect, const QColor &color) {
 }
 
 // The ramp of a scale `scalePixels` device pixels tall at `dpr` device
-// pixels to the logical one, from its top row down: rungs of `color`, or,
-// for an invalid one, along the map in a view of `dbRange` dB; drawn again
-// only when any of them changes.
-void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double dpr, double dbRange,
-                const QColor &color) {
-    if (node->ramp && node->scalePixels == scalePixels && node->devicePixelRatio == dpr
-        && node->dbRange == dbRange && node->color == color) {
+// pixels to the logical one, from its top row down: rungs of `color`;
+// drawn again only when any of them changes.
+void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double dpr, const QColor &color) {
+    if (node->ramp && node->scalePixels == scalePixels && node->devicePixelRatio == dpr && node->color == color) {
         return;
     }
+    const QRgb rung = qPremultiply(color.rgba());
     const int rows = std::max(1, static_cast<int>(std::ceil(scalePixels)));
     QImage image(1, rows, QImage::Format_ARGB32_Premultiplied);
     for (int row = 0; row < rows; ++row) {
         // The row's middle, in device pixels up from the scale's foot.
         const double fromFoot = rows - row - 0.5;
-        if (!Self::isRung(fromFoot / dpr)) {
-            image.setPixel(0, row, qRgba(0, 0, 0, 0));
-            continue;
-        }
-        // The colour of the level at the middle of the row's pixel.
-        const QColor rung = color.isValid() ? color : Self::colorMapColor(levelAt(fromFoot, scalePixels), dbRange);
-        image.setPixel(0, row, qPremultiply(rung.rgba()));
+        image.setPixel(0, row, Self::isRung(fromFoot / dpr) ? rung : qRgba(0, 0, 0, 0));
     }
     // The old texture goes once the node no longer draws it.
     std::unique_ptr<QSGTexture> texture(window->createTextureFromImage(image));
@@ -138,7 +127,6 @@ void updateRamp(RampNode *node, QQuickWindow *window, double scalePixels, double
     node->ramp = std::move(texture);
     node->scalePixels = scalePixels;
     node->devicePixelRatio = dpr;
-    node->dbRange = dbRange;
     node->color = color;
 }
 }
@@ -149,24 +137,9 @@ std::vector<double> LevelMeterItem::ticksDb(double laneHeight) {
         : std::vector<double>(std::begin(kTicksDb), std::end(kTicksDb));
 }
 
-double LevelMeterItem::lightness(const QColor &color) {
-    return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF();
-}
-
 bool LevelMeterItem::isRung(double fromFoot) {
     if (fromFoot < 0.0) return false;
     return std::fmod(std::floor(fromFoot), kRungPitch) < kRungHeight;
-}
-
-QColor LevelMeterItem::colorMapColor(double db, double dbRange) {
-    // Along the ramp: a level whose colour is over the cap takes the colour
-    // of the cap, the map's own, unscaled.
-    const double position = std::min(SpectrogramColorMap::position(db, dbRange), kFillCapPosition);
-    return QColor::fromRgb(SpectrogramColorMap::colorAt(position));
-}
-
-QColor LevelMeterItem::rampColor() const {
-    return m_colorMapFill ? QColor() : m_fillColor;
 }
 
 double LevelMeterItem::meterPosition(double db, double height) {
@@ -340,20 +313,6 @@ void LevelMeterItem::setActive(bool value) {
     update();
     // An inactive meter reads nothing: its readers hear of it.
     noteReadout();
-}
-
-void LevelMeterItem::setColorMapFill(bool value) {
-    if (m_colorMapFill == value) return;
-    m_colorMapFill = value;
-    emit colorsChanged();
-    update();
-}
-
-void LevelMeterItem::setDbRange(double value) {
-    if (!std::isfinite(value) || m_dbRange == value) return;
-    m_dbRange = value;
-    emit colorsChanged();
-    update();
 }
 
 void LevelMeterItem::setScaleShown(bool value) {
@@ -726,7 +685,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
                 // In the tree, a texture node has a texture to draw: the
                 // software renderer looks at it as soon as it is added.
                 updateRamp(ramp, window(), scalePixels(i / kNodesPerLane), window()->effectiveDevicePixelRatio(),
-                           m_dbRange, rampColor());
+                           m_fillColor);
                 node->appendChildNode(ramp);
             } else {
                 node->appendChildNode(new QSGSimpleRectNode);
@@ -748,7 +707,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
     // The fill, showing `rows` device pixels of its ramp.
     const auto nextRamp = [&child, dpr, this](const QRectF &rect, double scalePixels, int rows) {
         auto *ramp = static_cast<RampNode *>(child);
-        updateRamp(ramp, window(), scalePixels, dpr, m_dbRange, rampColor());
+        updateRamp(ramp, window(), scalePixels, dpr, m_fillColor);
         const int height = ramp->ramp->textureSize().height();
         rows = std::clamp(rows, 0, height);
         const QRectF source(0, height - rows, 1, rows);
@@ -779,9 +738,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         next(track(meterTop + kLampHeight, 1.0), m_gapColor);
         // The fill and the tick end on device pixels; frames are drawn only
         // when these change. The fill is a ladder of rungs from the scale's
-        // foot (#373 H14 G3); on the colour map, each row of it takes the
-        // map's colour of its own level, a ramp from the floor up to the
-        // level (#373 H10 V2), and otherwise it is of one colour.
+        // foot (#373 H14 G3), of one colour.
         const double fill = shown.fill / dpr;
         nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
         // The scale's ticks, while the plot shows its scale.

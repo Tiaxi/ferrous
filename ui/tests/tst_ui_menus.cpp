@@ -1122,9 +1122,9 @@ void UiMenusTest::scaleItemIsOffInWaveformMode() {
 // out to the pane's edge, which is the window's and the right edge of the
 // queue's scrollbar above the pane, with no strip of the plot's floor
 // beside it; its bar is far wider than the scrollbar's thumb, and nothing
-// of either overlaps the other. On the spectrogram its fill takes the
-// colour map's colour of its level, in the plot's dB range, and its ticks
-// show with the plot's scale.
+// of either overlaps the other. Its fill is the plot set's meterFill, the
+// app icon's magenta on the spectrogram (#373 H15 H2), and on the
+// spectrogram its ticks show with the plot's scale.
 void UiMenusTest::levelMeterIsPartOfThePlot() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -1175,20 +1175,23 @@ void UiMenusTest::levelMeterIsPartOfThePlot() {
                             .arg(laneRect.bottom()).arg(laneRect.left()).arg(thumbRect.bottom())));
     QVERIFY(thumbRect.bottom() <= meterRect.top());
 
-    // The spectrogram: the colour map's fill, in the plot's range; the
-    // ticks with the scale.
-    QVERIFY(meter->colorMapFill());
+    // The spectrogram: the set's fill; the ticks with the scale.
+    QObject *palette = qvariant_cast<QObject *>(window->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const auto fillOf = [&](const char *set) {
+        return qvariant_cast<QObject *>(palette->property(set))->property("meterFill").value<QColor>();
+    };
+    QCOMPARE(meter->property("fillColor").value<QColor>(), fillOf("spectrogramPlot"));
+    QCOMPARE(fillOf("spectrogramPlot"), QColor(QStringLiteral("#c149a0")));
     QVERIFY(!meter->scaleShown());
     bridge->setProperty("showSpectrogramScale", true);
     QTRY_VERIFY(meter->scaleShown());
-    bridge->setProperty("dbRange", 90.0);
-    QTRY_COMPARE(meter->dbRange(), 90.0);
-    // The waveform has no colour map and no scale.
+    // The waveform: its own fill and no scale.
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 1));
-    QTRY_VERIFY(!meter->colorMapFill());
+    QTRY_COMPARE(meter->property("fillColor").value<QColor>(), fillOf("waveformPlot"));
     QVERIFY(!meter->scaleShown());
     QMetaObject::invokeMethod(viewer, "setVisualizationMode", Q_ARG(QVariant, 0));
-    QTRY_VERIFY(meter->colorMapFill() && meter->scaleShown());
+    QTRY_VERIFY(meter->property("fillColor").value<QColor>() == fillOf("spectrogramPlot") && meter->scaleShown());
 }
 
 void UiMenusTest::editMenuNamesItsUndoAndClearsTheQueue() {

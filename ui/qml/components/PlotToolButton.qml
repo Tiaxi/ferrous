@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/KeyUtils.js" as KeyUtils
 
 // A 24 px tool button on a PlotPlate, larger with a larger font: a theme
@@ -14,15 +15,18 @@ import "../logic/KeyUtils.js" as KeyUtils
 // A `segment`, one of a plate's choices of which one is always checked,
 // as the visualization's mode switch, shows the chosen one as a neutral
 // plate instead (#373 H11: the accent's solid blue read as keyboard focus,
-// and as the loudest thing on the plot): the plot's text colour at 18 %
-// over the plate inside a 1 px edge of the plot's segmentEdge, at least
-// 3:1 on the plate (#373 H14 F4), with its glyph in the text colour whole; the others'
-// glyphs are at 72 %, whole only while pressed. Under the pointer one of
-// the others has a wash of the text colour at 14 % and its glyph at 85 %,
+// and as the loudest thing on the plot): the plot's text colour at 24 %
+// or more over the plate inside a 1 px edge of the plot's segmentEdge, at
+// least 3:1 on the plate and on the fill (#373 H14 F4), with its glyph in
+// the text colour whole; the others' glyphs are at 72 %, whole only while
+// pressed. Under the pointer one of the others has a wash of the text
+// colour at 10 % or more, 1.25:1 on the plate, and its glyph at 85 %,
 // which show (#373 H14 G4: 8 % and 60 % were 1.2:1, nearly invisible),
-// under the chosen one's plate and its edge, so a hovered choice never
-// reads as the chosen one (#373 H12 Z4: the 12 % hover with a whole glyph
-// came to the plate's brightness). The accent is left to the focus ring. A segment is a
+// fading in and out over shortDuration, OutCubic; the chosen one's plate
+// is 1.45:1 on that wash, more on a light plate where the same tints are
+// closer, so a hovered choice never reads as the chosen one (#373 H12 Z4:
+// the 12 % hover with a whole glyph came to the plate's brightness; H15
+// H4: 18 % on 14 % was 1.14:1). The accent is left to the focus ring. A segment is a
 // checkable, auto-exclusive button, so it is a radio button to assistive
 // technology, checkable and checked as chosen (#373 H12: as a plain button
 // it told of its checked state changing but not that it could be checked),
@@ -42,12 +46,31 @@ ToolButton {
     property real glyphPointSize: root.uiPalette.smallPointSize
     // One of a plate's choices rather than a state that is on or off.
     property bool segment: false
-    readonly property real segmentFillOpacity: 0.18
+    // The plate under the button, opaque.
+    readonly property color plateColor: Qt.tint(root.plotColors.plotBg, root.plotColors.plotPlate)
+    // The least opacity of the plot's text colour, from `least` up in whole
+    // percent, whose tint on the plate is `ratio` on `over`, itself drawn
+    // on the plate.
+    function _tintFor(least, over, ratio) {
+        for (let percent = Math.round(least * 100); percent < 60; ++percent) {
+            const tint = ColorUtils.drawnOver(ColorUtils.withAlpha(root.plotColors.plotText, percent / 100),
+                                              root.plateColor)
+            if (ColorUtils.contrastRatio(tint, over) >= ratio)
+                return percent / 100
+        }
+        return 0.6
+    }
+    readonly property real segmentHoverOpacity: root._tintFor(0.10, root.plateColor, 1.25)
+    readonly property real segmentFillOpacity: root._tintFor(0.24, ColorUtils.drawnOver(
+        ColorUtils.withAlpha(root.plotColors.plotText, root.segmentHoverOpacity), root.plateColor), 1.45)
     readonly property real segmentRestOpacity: 0.72
     readonly property real segmentHoverGlyphOpacity: 0.85
+    // The chosen segment's edge: the plot's, or lighter on a dark plate and
+    // darker on a light one where it is under 3:1 on the plate or the fill.
+    readonly property color segmentEdgeColor: root.uiPalette.readableOn(root.plotColors.segmentEdge,
+        [root.plateColor, ColorUtils.drawnOver(root.checkedColor, root.plateColor)], 3.1)
     // The pointer's wash: a segment's, under its chosen plate, and a
     // button's, which checked turns into a solid fill.
-    readonly property real segmentHoverOpacity: 0.14
     readonly property real hoverOpacity: root.segment ? root.segmentHoverOpacity : 0.12
     readonly property color hoverColor: Qt.rgba(root.plotColors.plotText.r, root.plotColors.plotText.g,
                                                 root.plotColors.plotText.b, root.hoverOpacity)
@@ -165,7 +188,7 @@ ToolButton {
             visible: root.checked && root.segment
             color: "transparent"
             border.width: 1
-            border.color: root.plotColors.segmentEdge
+            border.color: root.segmentEdgeColor
         }
 
         // The gap between the button and its focus ring: the plate, opaque.

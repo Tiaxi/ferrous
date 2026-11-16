@@ -344,10 +344,7 @@ Item {
         tickColor: root.plotColors.meterTick
         topSeamColor: root.plotColors.meterTopSeam
         // Part of the instrument (#373 H7 P11): on the spectrogram, the
-        // fill takes the colour map's colour of its level, and the scale's
-        // ticks show with the plot's own.
-        colorMapFill: root.visualizationMode === 0
-        dbRange: root.uiBridge.dbRange || 132
+        // scale's ticks show with the plot's own.
         scaleShown: root.visualizationMode === 0 && root.uiBridge.showSpectrogramScale === true
         // Out to the pane's edge, in the main window and in the viewers
         // alike: its bar is far wider than the queue's scrollbar above it.

@@ -389,14 +389,15 @@ Item {
     QTRY_COMPARE(waveform->channelCount(), 2);
     // The scale is the spectrogram's: none on the waveform.
     QVERIFY(!waveform->gridEnabled());
-    // The waveform's plot set: on the view colour, in the seek bar's wave
-    // colour, with the theme's seams; no green on black.
+    // The waveform's plot set: on the view colour, in the pane's wave
+    // colour (the seek bar's, quieter in a dark theme), with the theme's
+    // seams; no green on black.
     QObject *plotColors = surface->property("plotColors").value<QObject *>();
     QObject *palette = surface->property("uiPalette").value<QObject *>();
     QVERIFY(plotColors != nullptr && palette != nullptr);
     QCOMPARE(waveform->backgroundColor(), plotColors->property("plotBg").value<QColor>());
     QCOMPARE(waveform->backgroundColor(), palette->property("view").value<QColor>());
-    QCOMPARE(waveform->waveformColor(), palette->property("wave").value<QColor>());
+    QCOMPARE(waveform->waveformColor(), palette->property("paneWave").value<QColor>());
     QCOMPARE(waveform->laneSeamColor(), plotColors->property("plotLaneSeam").value<QColor>());
     QCOMPARE(waveform->playheadColor().alpha(), 255);
     QTRY_VERIFY(waveform->crosshairEnabled());

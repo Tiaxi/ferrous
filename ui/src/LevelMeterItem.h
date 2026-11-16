@@ -29,12 +29,11 @@
 // reads as an instrument, with some 40 % of a solid bar's ink (#373 H14
 // G3: a 15 px solid bar was louder than the data, and in the view's
 // colours read as the thumb of the queue's scrollbar above the pane, whose
-// right edge it shares; H8, H7). While `colorMapFill` is set, the rungs
-// are a ramp of the spectrogram's colours: each of their rows takes the
-// map's colour of its own level, along the map up to kFillCapPosition, its
-// magenta, never its red, orange or yellow, so that the meter reads as the
-// plot's own scale rather than as its loudest highlight, or as the amber
-// of the playhead (#373 H10 V2, H14 G3). While `scaleShown`,
+// right edge it shares; H8, H7). The rungs are of one colour, fillColor:
+// on the spectrogram the app icon's harmonic magenta, at 3:1 on the trough
+// (#373 H15 H2: the colour map's capped magenta, which with a ladder's
+// rungs was one colour at nearly every level, was 2.3:1 on it). While
+// `scaleShown`,
 // 1 px ticks cross the track at 0, -12, -24 and -48 dB (only -12 and -24
 // in a lane under 64 px), and a 2 px peak tick, at full brightness, with a
 // 1 px gap under it where it is on the fill. Without a track, stopped, it
@@ -65,10 +64,6 @@ class LevelMeterItem : public QQuickItem {
     Q_PROPERTY(QColor tickColor MEMBER m_tickColor WRITE setTickColor NOTIFY colorsChanged)
     // The line across the column's top; none while transparent.
     Q_PROPERTY(QColor topSeamColor MEMBER m_topSeamColor WRITE setTopSeamColor NOTIFY colorsChanged)
-    // Whether the fill is a ramp of the spectrogram's colours, each row in
-    // that of its level in a view of `dbRange` dB, rather than fillColor.
-    Q_PROPERTY(bool colorMapFill READ colorMapFill WRITE setColorMapFill NOTIFY colorsChanged)
-    Q_PROPERTY(double dbRange READ dbRange WRITE setDbRange NOTIFY colorsChanged)
     // Whether the plot shows its scale: the meter then shows its ticks.
     Q_PROPERTY(bool scaleShown READ scaleShown WRITE setScaleShown NOTIFY scaleShownChanged)
     // Whether something reads the levels, such as a tooltip: then
@@ -116,17 +111,6 @@ public:
     static bool isRung(double fromFoot);
     // The ticks of the scale, in dB, as a lane of `laneHeight` shows them.
     static std::vector<double> ticksDb(double laneHeight);
-    // The highest place on the spectrogram's map, from 0 to 1, the colour-
-    // map fill takes: its magenta, under its red, orange and yellow.
-    static constexpr double kFillCapPosition = 0.46;
-    // A colour's lightness, from 0 to 1: its luma, the Rec. 709 weights of
-    // its gamma-encoded components, as a picture's brightness is measured.
-    static double lightness(const QColor &color);
-    // The ramp's colour of a level of `db` dBFS on the spectrogram's map in
-    // a view of `dbRange` dB: the map's colour, up to that of
-    // kFillCapPosition, so that loud levels top out in the map's own
-    // magenta rather than in its orange or yellow (#373 H9 T2, H14 G3).
-    static QColor colorMapColor(double db, double dbRange);
 
     explicit LevelMeterItem(QQuickItem *parent = nullptr);
     ~LevelMeterItem() override;
@@ -158,10 +142,6 @@ public:
     void setClipOffColor(const QColor &value) { setColor(m_clipOffColor, value); }
     void setClipColor(const QColor &value) { setColor(m_clipColor, value); }
     void setTickColor(const QColor &value) { setColor(m_tickColor, value); }
-    bool colorMapFill() const { return m_colorMapFill; }
-    void setColorMapFill(bool value);
-    double dbRange() const { return m_dbRange; }
-    void setDbRange(double value);
     bool scaleShown() const { return m_scaleShown; }
     void setScaleShown(bool value);
 
@@ -240,8 +220,6 @@ private:
     double advanceTo(Clock::time_point now);
     void showCurrent();
     void setColor(QColor &member, const QColor &value);
-    // The rungs' one colour, or an invalid one for the colour map.
-    QColor rampColor() const;
     // The channel `lane` shows: one channel, or the loudest of all.
     Channel laneChannel(const std::vector<Channel> &channels, int lane) const;
     // The device pixels of the scale of `lane`.
@@ -291,8 +269,6 @@ private:
     QColor m_clipColor{QStringLiteral("#ed5a6a")};
     QColor m_tickColor{QColor::fromRgbF(1, 1, 1, 0.4)};
     QColor m_topSeamColor{Qt::transparent};
-    bool m_colorMapFill{false};
-    double m_dbRange{132.0};
     bool m_scaleShown{false};
     // Tells readers of the levels of new ones, at most every 250 ms.
     QTimer m_readoutTimer;

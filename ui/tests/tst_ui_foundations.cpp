@@ -552,7 +552,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#30244a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#8f87a3"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#8f87a3")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#c149a0"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs #c149a0")));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterPeak"), fromHex(QStringLiteral("#f4f4f6"))), qPrintable(colorOf(spectrogram, "meterPeak").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#f4f4f6")).name(QColor::HexArgb)));
     // A checked button: the accent, its glyph the floor; focus: the dark
     // theme's focus ring.
@@ -582,10 +582,38 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
     QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
     QVERIFY(seamContrast > contrastRatio(fromHex(QStringLiteral("#261a3e")), colorOf(spectrogram, "plotBg")) + 0.1);
+    // At rest (#373 H15 H7): the rest lines white at 28 of 255 on the floor,
+    // 1.3:1; the seam between lanes at rest in the floor's violet, a white
+    // tint of it, 1.45:1 or more and above the lines.
+    {
+        const QColor floor = colorOf(spectrogram, "plotBg");
+        const QColor restLine = drawnOver(QColor(255, 255, 255, 28), floor);
+        const double lines = contrastRatio(restLine, floor);
+        QVERIFY2(lines >= 1.27 && lines <= 1.33, qPrintable(QString::number(lines)));
+        const QColor restSeam = colorOf(tokens, "plotRestLaneSeam");
+        QCOMPARE(restSeam.alphaF(), 1.0f);
+        const double seam = contrastRatio(restSeam, floor);
+        QVERIFY2(seam >= 1.45 && seam <= 1.6, qPrintable(restSeam.name() + QStringLiteral(" ") + QString::number(seam)));
+        QVERIFY(seam > lines + 0.1);
+        // In the floor's hue, not the playing seam's grey.
+        QVERIFY2(restSeam.blue() > restSeam.green() + 20 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
+    }
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
             < contrastRatio(colorOf(spectrogram, "plotText"), colorOf(spectrogram, "plotBg")));
+    // The meter's rungs, the app icon's harmonic magenta, read on their
+    // trough, at 3:1 (#373 H15 H2: the colour map's #c20055 was 2.32:1),
+    // and are not the clip lamp's red: some 30 degrees of hue apart.
+    {
+        const double rungs = contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "meterTrough"));
+        QVERIFY2(rungs >= 3.0, qPrintable(QString::number(rungs)));
+        const QColor clip = colorOf(tokens, "negative");
+        const int hueApart = std::abs(colorOf(spectrogram, "meterFill").hslHue() - clip.hslHue());
+        QVERIFY2(std::min(hueApart, 360 - hueApart) >= 30,
+                 qPrintable(QStringLiteral("%1 against the clip lamp's %2")
+                                .arg(colorOf(spectrogram, "meterFill").name(), clip.name())));
+    }
     // A viewer's title strip is opaque (#373 H5: the playhead showed through
     // it): the plate on black, neutral as the plate is, and the view on the
     // waveform.
@@ -620,10 +648,26 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // the trough; the trough faint, the text at 6 %; a seam across its top
     // in the seam colour. The spectrogram's meter has no such seam.
     {
-        const QColor wave = colorOf(tokens, "wave");
+        const QColor wave = colorOf(tokens, "paneWave");
         const double amount = dark ? 0.35 : 0.30;
         QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
                  qPrintable(colorOf(waveform, "meterFill").name()));
+        // Its rungs 3:1 on their trough, as drawn on the view.
+        const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
+        QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
+                 qPrintable(describe(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
+        // The pane's waveform (#373 H15 H6): the seek bar's in light; in
+        // dark a quieter tone of the same blue, #87bad4, some 8.6:1 on the
+        // view rather than the seek bar's 13:1.
+        if (dark) {
+            QVERIFY2(channelDistance(wave, fromHex(QStringLiteral("#87bad4"))) <= 3, qPrintable(wave.name()));
+            QVERIFY(!sameColor(wave, colorOf(tokens, "wave")));
+            const double onView = contrastRatio(wave, view);
+            QVERIFY2(onView >= 8.0 && onView <= 9.2, qPrintable(QString::number(onView)));
+            QVERIFY(onView < contrastRatio(colorOf(tokens, "wave"), view));
+        } else {
+            QVERIFY(sameColor(wave, colorOf(tokens, "wave")));
+        }
         QVERIFY(std::abs(colorOf(waveform, "meterTrough").alphaF() - 0.06) < 0.003);
         QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
         QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);
@@ -637,10 +681,12 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(sameColor(colorOf(waveform, "checkedGlyph"), dark ? view : QColor(Qt::white)));
     QVERIFY(sameColor(colorOf(waveform, "plotFocusRing"), colorOf(tokens, "focusRing")));
     // A chosen choice on a plate, as the mode switch's segment and a
-    // viewer's info toggle: the plot's text at 18 % inside a 1 px edge that
-    // is 3:1 or more on the plate, over the floor, and on that fill
-    // (#373 H14 F4): the dark theme's tertiary text on the spectrogram's
-    // dark plot in both themes, and the theme's on the waveform's.
+    // viewer's info toggle: the plot's text at 18 % or more inside a 1 px
+    // edge that is 3:1 or more on the plate, over the floor, and on an 18 %
+    // fill (#373 H14 F4): the dark theme's tertiary text on the
+    // spectrogram's dark plot in both themes, and the theme's on the
+    // waveform's. The mode switch's fuller fill takes the edge further where
+    // it needs it (PlotToolButton's segmentEdgeColor, #373 H15 H4).
     QVERIFY(sameColor(colorOf(spectrogram, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(media, "segmentEdge"), fromHex(QStringLiteral("#8f959a"))));
     QVERIFY(sameColor(colorOf(waveform, "segmentEdge"), colorOf(tokens, "textTertiary")));
@@ -1275,9 +1321,13 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    QVERIFY2(std::abs(wash.alphaF() - 0.14) < 0.005, qPrintable(QString::number(wash.alphaF())));
+    // From 10 % and 24 % up, as the plate needs (#373 H15 H4: 14 % and
+    // 18 % were 1.14:1 apart in dark, 1.08:1 in light).
+    QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
+    QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
+             qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
-    QVERIFY2(std::abs(plateFill.alphaF() - 0.18) < 0.005, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(plateFill.alphaF() >= 0.235 && plateFill.alphaF() <= 0.34, qPrintable(QString::number(plateFill.alphaF())));
     QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
     // As drawn: the plate around the buttons, the chosen one's plate and
@@ -1302,8 +1352,12 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const qreal hoverStep = contrastRatio(drawnHover, plate);
     QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
-    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.05,
+    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.4,
              qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
+    // The chosen one's edge, as drawn, 3:1 on the plate and on its fill.
+    const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
+    QVERIFY2(contrastRatio(edge, plate) >= 3.0 && contrastRatio(edge, drawnChosen) >= 3.0,
+             qPrintable(QStringLiteral("edge %1 on plate %2 and fill %3").arg(edge.name(), plate.name(), drawnChosen.name())));
 
     // Pressed, its glyph is whole.
     QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, other->mapToScene(QPointF(12, 12)).toPoint());

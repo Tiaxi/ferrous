@@ -21,6 +21,7 @@
 #include <QQuickRenderTarget>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QWheelEvent>
 #include <QtEndian>
@@ -3650,17 +3651,36 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         }
     }
     {
-        // The glyph's 16 px source: two strokes, 1.5 px, round caps.
+        // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
+        // px read lighter than Breeze's waveform glyph beside it), round
+        // caps, at least 2 px clear between them where they start, inside
+        // the 16 px square with their caps.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
         QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
-        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\"")), 2);
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
         QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
+        const QRegularExpression path(QStringLiteral("d=\"M([0-9.]+) ([0-9.]+)C[^\"]* ([0-9.]+) ([0-9.]+)\""));
+        QList<QPointF> starts;
+        QList<QPointF> ends;
+        for (auto match = path.globalMatch(svg); match.hasNext();) {
+            const QRegularExpressionMatch each = match.next();
+            starts.push_back(QPointF(each.captured(1).toDouble(), each.captured(2).toDouble()));
+            ends.push_back(QPointF(each.captured(3).toDouble(), each.captured(4).toDouble()));
+        }
+        QCOMPARE(starts.size(), 2);
+        QCOMPARE(starts.at(0).x(), starts.at(1).x());
+        QVERIFY2(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75 >= 2.0,
+                 qPrintable(QStringLiteral("%1 px clear").arg(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75)));
+        for (const QPointF &point : starts + ends) {
+            QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
+            QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
+        }
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
-    // at 18 % over the switch's plate, with its glyph in the text colour
+    // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
     // whole; the other's glyph is at 72 % but while pressed (#373 H11: the
     // accent's solid fill read as keyboard focus; H12 Z4: whole under the
     // pointer, it rivalled the chosen one). Nothing of the switch is in the
@@ -3687,7 +3707,8 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             return QStringLiteral("the chosen one's plate does not show, or the other's does");
         }
         if (fill.red() != text.red() || fill.green() != text.green() || fill.blue() != text.blue()
-            || std::abs(fill.alphaF() - 0.18f) > 0.005f) {
+            || fill.alphaF() < 0.235f || fill.alphaF() > 0.345f
+            || std::abs(fill.alphaF() - chosen->property("segmentFillOpacity").toFloat()) > 0.005f) {
             return QStringLiteral("the plate is %1").arg(fill.name(QColor::HexArgb));
         }
         if (fill == accent || fill == plot->property("checkedFill").value<QColor>()) {
@@ -3856,8 +3877,9 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QCOMPARE(chosenGlyph->opacity(), 1.0);
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.72) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
 
-    // Under the pointer: a 14 % wash, its glyph at 85 %; as drawn, it
-    // shows on the plate, under the chosen one's plate.
+    // Under the pointer: a wash of 10 % or so, its glyph at 85 %; as drawn,
+    // it shows on the plate, under the chosen one's plate, which is 1.4:1
+    // or more on it (#373 H15 H4).
     QTest::mouseMove(window, rectOf(other).center().toPoint() + QPoint(0, 1));
     QTest::mouseMove(window, rectOf(other).center().toPoint());
     QTRY_VERIFY(other->property("hovered").toBool());
@@ -3868,7 +3890,7 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY2(std::abs(otherGlyph->opacity() - 0.85) < 0.005, qPrintable(QString::number(otherGlyph->opacity())));
     const QColor washColor = wash->property("color").value<QColor>();
     const QColor fillColor = fill->property("color").value<QColor>();
-    QVERIFY2(std::abs(washColor.alphaF() - 0.14) < 0.005, qPrintable(QString::number(washColor.alphaF())));
+    QVERIFY2(washColor.alphaF() >= 0.095 && washColor.alphaF() <= 0.135, qPrintable(QString::number(washColor.alphaF())));
     QVERIFY(washColor.alphaF() < fillColor.alphaF());
     // The plate whole, as the pointer on it reveals it.
     const auto shownWhole = [&]() {
@@ -3891,6 +3913,8 @@ void AccessibilityTest::modeSwitchStatesStayApart() {
     QVERIFY2(washStep >= 1.25 && washStep < fillStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1 (%3, %4 on %5)").arg(washStep).arg(fillStep)
                             .arg(drawnWash.name(), drawnFill.name(), drawnPlate.name())));
+    QVERIFY2(contrastRatio(drawnFill, drawnWash) >= 1.4,
+             qPrintable(QStringLiteral("chosen %1 on hovered %2").arg(drawnFill.name(), drawnWash.name())));
 }
 
 void AccessibilityTest::visualizationsHaveAccessibleRoles() {

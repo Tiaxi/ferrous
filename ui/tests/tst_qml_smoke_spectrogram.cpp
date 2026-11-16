@@ -637,7 +637,8 @@ ApplicationWindow {
     QCOMPARE(drawn(160, 0.5), floor);
     QCOMPARE(drawn(160, 50), floor);
     QCOMPARE(drawn(160, 150), floor);
-    QCOMPARE(drawn(160, 100.5), plot->property("plotLaneSeam").value<QColor>());
+    // Never played: the seam at rest, in the floor's violet (#373 H15 H7).
+    QCOMPARE(drawn(160, 100.5).rgb(), tokens->property("plotRestLaneSeam").value<QColor>().rgb());
 }
 
 void SpectrogramSmokeTest::emptyPaneIsTheModesFloor_data() {
@@ -2747,7 +2748,10 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsItsScaleFaintly() {
 
 // With the scale hidden (Preferences), the lane at rest keeps its lines,
 // without the labels: an instrument at rest rather than a hole (#373 H14
-// F3, P23; H10 P18 left it the plain floor).
+// F3, P23; H10 P18 left it the plain floor). Without labels to keep clear
+// of the lane's head and the mode switch, it has a line at every tick, the
+// top one too, so they are evenly spaced (#373 H15 H7: with the top one
+// left out the lane's top band was some 80 px to the others' 45).
 void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     SpectrogramItem item;
     item.setSampleRateHz(48'000);
@@ -2765,10 +2769,31 @@ void SpectrogramSmokeTest::spectrogramAtRestFollowsTheScaleSetting() {
     const SpectrogramOverlayLayout hidden = layOut();
     QVERIFY(hidden.valid);
     QVERIFY(hidden.images.isEmpty());
-    QCOMPARE(hidden.lines, shown.lines);
+    // Every line of the scale's, and the one at the top it leaves out.
+    for (const QRect &line : std::as_const(shown.lines)) {
+        QVERIFY(hidden.lines.contains(line));
+    }
+    QCOMPARE(hidden.lines.size(), shown.lines.size() + 1);
+    QVERIFY(hidden.lines.constLast().y() < shown.lines.constLast().y());
+    // Evenly spaced, within a pixel, and the band over the top one no
+    // taller than the bands between them.
+    QList<int> rows;
+    for (const QRect &line : std::as_const(hidden.lines)) {
+        rows.push_back(line.y());
+    }
+    std::sort(rows.begin(), rows.end());
+    QVERIFY(rows.size() >= 3);
+    int least = 240;
+    int most = 0;
+    for (qsizetype i = 1; i < rows.size(); ++i) {
+        least = std::min(least, rows.at(i) - rows.at(i - 1));
+        most = std::max(most, rows.at(i) - rows.at(i - 1));
+    }
+    QVERIFY2(most - least <= 1, qPrintable(QStringLiteral("bands %1 to %2 px").arg(least).arg(most)));
+    QVERIFY2(rows.first() <= most, qPrintable(QStringLiteral("top band %1 px").arg(rows.first())));
 }
 
-// As drawn: the lane at rest has its lines in white 8% on the floor with
+// As drawn: the lane at rest has its lines in white 11% on the floor with
 // the scale hidden or shown, and the scale's labels only while it shows
 // (#373 H14 F3; H10 P18: black all the way down without the scale).
 void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
@@ -2789,7 +2814,7 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QVERIFY(rest.images.isEmpty());
     const auto grab = [&window]() { return window.grabWindow().convertToFormat(QImage::Format_RGB32); };
     const QColor black(0, 0, 0);
-    const QColor line(20, 20, 20);
+    const QColor line(28, 28, 28);
     // The rows of the column at x that are not the floor, and the
     // brightest pixel of them.
     const auto litRows = [&black](const QImage &image, int x) {
@@ -2813,20 +2838,20 @@ void SpectrogramSmokeTest::spectrogramAtRestDrawsLabelsOnlyWithTheScale() {
     QCOMPARE(linesOnly.height(), 200);
     QCOMPARE(litRows(linesOnly, 100), rest.lines.size());
     // No labels: nothing brighter than the lines.
-    QCOMPARE(brightest(linesOnly), 20);
+    QCOMPARE(brightest(linesOnly), 28);
 
-    // The scale shown: the same lines, and its labels.
+    // The scale shown: its lines, all but the top one, and its labels.
     item->setGridEnabled(true);
     QTRY_VERIFY(brightest(grab()) > 100);
     QCOMPARE(grab().pixelColor(100, rest.lines.constFirst().y()), line);
 
     // Hidden again, the lines alone again.
     item->setGridEnabled(false);
-    QTRY_COMPARE(brightest(grab()), 20);
+    QTRY_COMPARE(brightest(grab()), 28);
     QCOMPARE(litRows(grab(), 100), rest.lines.size());
 }
 
-// As drawn: in white 8% on the black floor, with labels in plotTextSecondary,
+// As drawn: in white 11% on the black floor, with labels in plotTextSecondary,
 // only while the lane has no columns to show.
 void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     QQuickWindow window;
@@ -2848,7 +2873,7 @@ void SpectrogramSmokeTest::spectrogramRestGridShowsOnlyWhileTheLaneIsEmpty() {
     const QImage atRest = grab();
     QCOMPARE(atRest.width(), 400);
     const QColor black(0, 0, 0);
-    const QColor line(20, 20, 20);
+    const QColor line(28, 28, 28);
     for (const QRect &rule : std::as_const(rest.lines)) {
         QCOMPARE(atRest.pixelColor(100, rule.y()), line);
         QCOMPARE(atRest.pixelColor(100, rule.y() - 3), black);
