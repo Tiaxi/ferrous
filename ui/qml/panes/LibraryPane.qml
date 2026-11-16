@@ -71,6 +71,11 @@ Rectangle {
     // text's right end (#373 H11), clear of the scrollbar.
     readonly property int yearInset: Kirigami.Units.smallSpacing
     readonly property int stateGlyphSize: root.uiPalette.scaledSize(12)
+    // An unreadable track's mark: the status bar's warning sign, at its
+    // size, in the negative colour, as the queue's (#373 H35 AC1). It fills
+    // the chevron column it is centred in.
+    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
+    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
     // A library folder's glyph, in the thumbnail's column.
     readonly property int folderGlyphSize: root.uiPalette.scaledSize(16)
 
@@ -434,13 +439,14 @@ Rectangle {
                     }
                     // As the queue's: an unreadable file's warning before
                     // the stop mark of a track that failed to play.
+                    readonly property bool showsWarning: !isNow && unreadableReason.length > 0
                     readonly property string stateGlyph: {
                         if (isNow) {
                             return root.playbackState === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                         }
-                        if (unreadableReason.length > 0) {
-                            return "dialog-warning"
+                        if (showsWarning) {
+                            return root.warningGlyph
                         }
                         return isCurrentTrack ? "media-playback-stop" : ""
                     }
@@ -565,11 +571,15 @@ Rectangle {
                                 visible: glyph.length > 0
                                 x: Math.round(libraryRow.stateX + (root.chevronSize - width) / 2)
                                 y: Math.round((libraryRow.height - height) / 2)
-                                width: root.stateGlyphSize
-                                height: root.stateGlyphSize
+                                width: libraryRow.showsWarning ? root.warningGlyphSize : root.stateGlyphSize
+                                height: width
+                                // At its size, which grows with the font.
+                                roundToIconSize: false
                                 source: glyph
                                 isMask: true
-                                color: libraryRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
+                                color: libraryRow.isNow
+                                    ? root.uiPalette.now
+                                    : (libraryRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
 
                                 ToolTip.visible: stateHover.hovered && libraryRow.unreadableReason.length > 0
                                 ToolTip.delay: Kirigami.Units.toolTipDelay

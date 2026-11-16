@@ -3169,12 +3169,24 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(weight(cell(2, "title")), QFont::Normal);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // An unreadable file: a neutral warning glyph and a quieter title.
+    // An unreadable file: the status bar's warning sign, at its size and
+    // in its negative colour, and a quieter title (#373 H35 AC1: Breeze's
+    // dialog-warning as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
-    QTRY_COMPARE(glyphName(3), QStringLiteral("dialog-warning"));
-    QCOMPARE(color(glyph(3)), paletteColor("textSecondary"));
+    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-warning.svg")));
+    QCOMPARE(color(glyph(3)), paletteColor("negative"));
+    QVERIFY(glyph(3)->property("isMask").toBool());
+    QVariant warningSize;
+    QVERIFY(QMetaObject::invokeMethod(palette, "scaledSize", Q_RETURN_ARG(QVariant, warningSize), Q_ARG(QVariant, 16)));
+    QCOMPARE(glyph(3)->width(), warningSize.toReal());
+    QCOMPARE(glyph(3)->height(), warningSize.toReal());
+    QQuickItem *indicatorCell = cell(3, "indicator");
+    const QPointF warningCentre = glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width() / 2, glyph(3)->height() / 2));
+    QVERIFY(std::abs(warningCentre.x() - (indicatorCell->x() + indicatorCell->width() / 2)) <= 0.5);
+    QVERIFY(std::abs(warningCentre.y() - row(3)->height() / 2) <= 0.5);
+    QVERIFY(glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width(), 0)).x() <= cell(3, "order")->x());
     QCOMPARE(color(cell(3, "title")), paletteColor("textSecondary"));
     QCOMPARE(row(3)->property("unreadableReason").toString(), QStringLiteral("Cannot read the file"));
     QVERIFY(errors->setProperty("unreadablePaths", QVariantMap{}));

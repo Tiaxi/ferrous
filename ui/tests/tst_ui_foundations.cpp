@@ -297,6 +297,8 @@ private slots:
     void selectionOutweighsRowHover();
     void hoverAndPressedTintsOnAnotherBackground_data();
     void hoverAndPressedTintsOnAnotherBackground();
+    void unreadableMarkReadsOnEveryRowBackground_data();
+    void unreadableMarkReadsOnEveryRowBackground();
     void rowBackgroundShowsEachState_data();
     void rowBackgroundShowsEachState();
     void rowBackgroundDrawsTheRingAndTintAsOneRectangle();
@@ -986,6 +988,33 @@ void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground() {
     QCOMPARE(std::lround(pressed.alphaF() * 100), long(pressedPercent));
     QVERIFY(contrastRatio(drawnOver(hover, under), under) >= 1.3);
     QVERIFY(contrastRatio(drawnOver(pressed, under), under) >= 1.65);
+}
+
+void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// An unreadable row's warning sign, in the negative colour as the status
+// bar's, reads at 3:1 or more, a graphic's minimum, on every background a
+// row of the library or the queue can have (#373 H35 AC1).
+void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    const QColor negative = colorOf(tokens, "negative");
+    for (const char *background :
+         {"view", "hoveredRow", "selection", "selectionInactive"}) {
+        const QColor under = colorOf(tokens, background);
+        QVERIFY2(contrastRatio(negative, under) >= 3.0,
+                 qPrintable(describe(QLatin1String(background), negative, under)));
+    }
 }
 
 void UiFoundationsTest::rowBackgroundShowsEachState_data() {
