@@ -477,6 +477,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void configureAndAboutAreWindowsOfTheirOwn();
     void configureIsAPageListWithKdesCaptionAndButtons();
+    void configurePageIconsFollowTheFont_data();
+    void configurePageIconsFollowTheFont();
     void configurePagesMoveByKeyboardAndTabReachesEveryControl();
     void configureAppliesOnOkOrApplyAndCancelDropsTheChanges();
     void configureDefaultsSetsThePagesBackToBeApplied();
@@ -742,6 +744,79 @@ void UiDialogsTest::configureIsAPageListWithKdesCaptionAndButtons() {
     QVERIFY(!apply->property("enabled").toBool());
     QTest::keyClick(prefs, Qt::Key_Escape);
     QTRY_VERIFY(!dialog->property("visible").toBool());
+}
+
+void UiDialogsTest::configurePageIconsFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The page list's icons are as large as their titles' font calls for,
+// Kirigami's size for labels: 16 px with the default font, larger at 24 pt
+// (#373 H38: they stayed 16 px beside 24 pt titles), and drawn in the
+// text's colour at either size. The list is as wide
+// as a row with its icon and its longest title needs, centred on the row.
+void UiDialogsTest::configurePageIconsFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = openPreferences(window);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = visibleNamed(prefs, QStringLiteral("preferencesPageList"));
+    QVERIFY(list != nullptr);
+    const qreal forLabels = evaluate(dialog, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal();
+    if (pointSize > 0) {
+        QVERIFY2(forLabels > 16, qPrintable(QString::number(forLabels)));
+    } else {
+        QCOMPARE(forLabels, 16.0);
+        QCOMPARE(list->width(), 176.0);
+    }
+    for (int index = 0; index < 4; ++index) {
+        QQuickItem *row = visibleNamed(prefs, QStringLiteral("preferencesPage_%1").arg(index));
+        QVERIFY(row != nullptr);
+        QQuickItem *icon = itemsNamed(row, QStringLiteral("preferencesPageIcon")).value(0);
+        QVERIFY(icon != nullptr);
+        QTRY_VERIFY(!layoutPending(row));
+        QCOMPARE(icon->width(), forLabels);
+        QCOMPARE(icon->height(), forLabels);
+        QVERIFY2(within(sceneRect(icon), sceneRect(row)), qPrintable(describeItem(icon)));
+        // The title is whole beside it.
+        QQuickItem *title = nullptr;
+        for (QQuickItem *child : icon->parentItem()->childItems()) {
+            if (child != icon && child->property("text").isValid()) {
+                title = child;
+            }
+        }
+        QVERIFY(title != nullptr);
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(describeItem(title)));
+        QVERIFY(sceneRect(title).left() > sceneRect(icon).right());
+        // Drawn in the text's colour alone, at either size: no full-colour
+        // icon in the list.
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRect iconPixels = QRectF(sceneRect(icon).topLeft() * dpr, sceneRect(icon).size() * dpr).toRect();
+        int saturated = 0;
+        for (int y = iconPixels.top(); y <= iconPixels.bottom(); ++y) {
+            for (int x = iconPixels.left(); x <= iconPixels.right(); ++x) {
+                saturated += QColor(shown.pixel(x, y)).hsvSaturation() > 80;
+            }
+        }
+        QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1: %2 coloured pixels")
+                                                .arg(row->property("text").toString()).arg(saturated)));
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
 }
 
 void UiDialogsTest::configurePagesMoveByKeyboardAndTabReachesEveryControl() {
