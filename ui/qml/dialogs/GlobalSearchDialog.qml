@@ -62,6 +62,14 @@ Dialog {
     readonly property real footerHeight: Math.max(28, footerHints.implicitHeight + 8)
     // The line under the no-results title.
     readonly property real hintHeight: Math.max(20, Math.round(smallMetrics.height) + 4)
+    // The footer's gaps: between a key and its action, half again a word
+    // space, so "Ctrl+Enter Add to Queue" reads as a key and an action, not
+    // as one phrase; between pairs three times that, so the pairs read
+    // apart (#373 H37: 4 px, a word space, and 22 px). 6 and 18 px at
+    // 10 pt; they grow with the font.
+    readonly property real hintKeyGap: Math.max(Kirigami.Units.mediumSpacing,
+                                                Math.round(1.5 * smallMetrics.advanceWidth(" ")))
+    readonly property real hintPairGap: 3 * root.hintKeyGap
     readonly property real sideInset: 16
     // The glyphs, the lead and the field's buttons are sized for the
     // default font and grow with a larger one, as the transport's do
@@ -991,7 +999,7 @@ Dialog {
                         readonly property string keyText: modelData.key
                         readonly property string actionText: modelData.action
                         height: root.footerLineHeight
-                        spacing: 4
+                        spacing: root.hintKeyGap
                         Text {
                             objectName: "globalSearchKeyHintKey"
                             height: parent.height
@@ -1010,12 +1018,11 @@ Dialog {
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
                         }
-                        // 22 px to the next pair (#373 H11: at 18 px the
-                        // pairs ran together); a Flow's spacing would put
-                        // it between the lines too.
+                        // The gap to the next pair; a Flow's spacing
+                        // would put it between the lines too.
                         Item {
                             visible: index < root.keyHints.length - 1
-                            width: 22 - parent.spacing
+                            width: root.hintPairGap - parent.spacing
                             height: 1
                         }
                     }
