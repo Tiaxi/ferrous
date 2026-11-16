@@ -3214,6 +3214,9 @@ fn encode_settings_section(snapshot: &BridgeSnapshot) -> Vec<u8> {
         &mut out,
         u8::from(snapshot.settings.display.stretch_short_tracks),
     );
+    // The volume requests taken, last: see
+    // `BridgeSnapshot::volume_requests_taken`.
+    push_u64(&mut out, snapshot.volume_requests_taken);
     out
 }
 
@@ -3810,6 +3813,7 @@ mod tests {
                 unknown_lines: Vec::new(),
             },
             queue_column_widths_generation: 0,
+            volume_requests_taken: 0,
             lastfm: crate::lastfm::RuntimeState {
                 enabled: true,
                 build_configured: true,
@@ -5568,12 +5572,17 @@ mod tests {
     /// latest ones the UI sent.
     const SETTINGS_QUEUE_COLUMNS_BYTES: usize = 10;
 
+    /// The bytes of the count of volume requests the bridge took, which
+    /// ends the settings section.
+    const SETTINGS_VOLUME_REQUESTS_BYTES: usize = 8;
+
     /// The bytes that end the settings section: the queue's column widths
     /// and their generation, then the spectrogram's frequency cap, whether
     /// the scrobble progress indicator is shown, whether a viewer over the
-    /// whole screen shows its title strip, and whether short tracks are
-    /// stretched to the spectrogram's width.
-    const SETTINGS_TAIL_BYTES: usize = SETTINGS_QUEUE_COLUMNS_BYTES + 4;
+    /// whole screen shows its title strip, whether short tracks are
+    /// stretched to the spectrogram's width, and the volume requests taken.
+    const SETTINGS_TAIL_BYTES: usize =
+        SETTINGS_QUEUE_COLUMNS_BYTES + 4 + SETTINGS_VOLUME_REQUESTS_BYTES;
 
     #[test]
     fn frequency_cap_setting_command_and_snapshot_share_protocol() {
@@ -5589,7 +5598,10 @@ mod tests {
             let settings = encode_settings_section(&snapshot);
             // Followed by the scrobble progress indicator's setting, the
             // title strip's and the stretch's.
-            assert_eq!(settings[settings.len() - 4], u8::from(enabled));
+            assert_eq!(
+                settings[settings.len() - 4 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                u8::from(enabled)
+            );
         }
         assert!(parse_binary_command(&encode_command(73, &[])).is_err());
         assert!(parse_binary_command(&encode_command(73, &[1, 0])).is_err());
@@ -5608,7 +5620,10 @@ mod tests {
             snapshot.settings.integrations.lastfm_show_scrobble_progress = show;
             let settings = encode_settings_section(&snapshot);
             // Followed by the title strip's setting and the stretch's.
-            assert_eq!(settings[settings.len() - 3], u8::from(show));
+            assert_eq!(
+                settings[settings.len() - 3 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                u8::from(show)
+            );
         }
         assert!(parse_binary_command(&encode_command(75, &[])).is_err());
         assert!(parse_binary_command(&encode_command(75, &[1, 0])).is_err());
@@ -5627,7 +5642,10 @@ mod tests {
             snapshot.settings.display.show_fullscreen_title_strip = show;
             let settings = encode_settings_section(&snapshot);
             // Followed by the stretch's setting.
-            assert_eq!(settings[settings.len() - 2], u8::from(show));
+            assert_eq!(
+                settings[settings.len() - 2 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                u8::from(show)
+            );
         }
         assert!(parse_binary_command(&encode_command(76, &[])).is_err());
         assert!(parse_binary_command(&encode_command(76, &[1, 0])).is_err());
@@ -5646,7 +5664,10 @@ mod tests {
             snapshot.settings.display.stretch_short_tracks = stretch;
             let settings = encode_settings_section(&snapshot);
             // The last byte of the section.
-            assert_eq!(settings[settings.len() - 1], u8::from(stretch));
+            assert_eq!(
+                settings[settings.len() - 1 - SETTINGS_VOLUME_REQUESTS_BYTES],
+                u8::from(stretch)
+            );
         }
         assert!(parse_binary_command(&encode_command(77, &[])).is_err());
         assert!(parse_binary_command(&encode_command(77, &[1, 0])).is_err());
@@ -5723,12 +5744,26 @@ mod tests {
             .other_entries
             .push("genre:90".to_string());
         let settings = encode_settings_section(&snapshot);
-        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES..settings.len() - 4];
+        let tail = &settings[settings.len() - SETTINGS_TAIL_BYTES
+            ..settings.len() - 4 - SETTINGS_VOLUME_REQUESTS_BYTES];
         assert_eq!(tail, queue_column_widths_payload(170, 0, 76, 9).as_slice());
         let mut reader = BinaryReader::new(tail);
         assert_eq!(read_queue_column_widths(&mut reader).expect("read"), widths);
         assert_eq!(reader.read_u32().expect("the generation"), 9);
         reader.expect_done().expect("the whole tail");
+    }
+
+    #[test]
+    fn settings_section_ends_with_the_volume_requests_taken() {
+        for taken in [0, 1, 7, u64::MAX] {
+            let mut snapshot = sample_snapshot();
+            snapshot.volume_requests_taken = taken;
+            let settings = encode_settings_section(&snapshot);
+            let mut reader =
+                BinaryReader::new(&settings[settings.len() - SETTINGS_VOLUME_REQUESTS_BYTES..]);
+            assert_eq!(reader.read_u64().expect("the count"), taken);
+            reader.expect_done().expect("the whole tail");
+        }
     }
 
     #[test]

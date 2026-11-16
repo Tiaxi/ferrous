@@ -559,6 +559,12 @@ pub struct BridgeSnapshot {
     /// The generation of the latest queue column widths the UI sent; see
     /// [`BridgeSettingsCommand::SetQueueColumnWidths`].
     pub queue_column_widths_generation: u32,
+    /// How many volume requests from the UI the bridge has taken: a
+    /// `SetVolume` command, of playback or of the settings. The UI shows a
+    /// volume it asked for at once, and takes the snapshot's again once the
+    /// bridge has taken all it sent, so that a snapshot built before then
+    /// does not show the volume from before a request for a moment.
+    pub volume_requests_taken: u64,
     pub lastfm: LastFmRuntimeState,
     /// Whether scrobbling is paused for this run of the app.
     pub lastfm_scrobbling_paused: bool,
@@ -794,6 +800,8 @@ pub(super) struct BridgeState {
     settings: BridgeSettings,
     /// See [`BridgeSnapshot::queue_column_widths_generation`].
     queue_column_widths_generation: u32,
+    /// See [`BridgeSnapshot::volume_requests_taken`].
+    volume_requests_taken: u64,
     lastfm: LastFmRuntimeState,
     /// Whether scrobbling is paused. Never saved: a restart resumes it.
     lastfm_scrobbling_paused: bool,
@@ -1000,6 +1008,7 @@ impl BridgeState {
             queue_undo: self.queue_undo.state(),
             settings: self.settings.clone(),
             queue_column_widths_generation: self.queue_column_widths_generation,
+            volume_requests_taken: self.volume_requests_taken,
             lastfm: self.lastfm.clone(),
             lastfm_scrobbling_paused: self.lastfm_scrobbling_paused,
             scrobble_indicator: self.scrobble_indicator.clone(),
@@ -3743,6 +3752,39 @@ mod tests {
             assert_eq!(runtime.state.settings.window, layout);
             assert_eq!(runtime.flags.settings_dirty, dirty);
         }
+    }
+
+    #[test]
+    fn snapshots_count_the_volume_requests_the_ui_sent() {
+        let _guard = test_guard();
+        // Reading the settings again reads a config of the test's own.
+        let _config = crate::paths::TestConfigDir::new();
+        let mut runtime = BridgeLoopRuntime::new(BridgeRuntimeOptions::default(), None);
+        let (event_tx, _event_rx) = bounded::<BridgeEvent>(32);
+        let start = runtime.state.snapshot(false).volume_requests_taken;
+        // Each request counts, of playback or of the settings, also one that
+        // sends the volume there is already, so the UI can tell the snapshot
+        // that reflects its latest request.
+        for (taken, command) in (1..).zip([
+            BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(0.0)),
+            BridgeCommand::Playback(BridgePlaybackCommand::SetVolume(0.0)),
+            BridgeCommand::Settings(BridgeSettingsCommand::SetVolume(0.6)),
+        ]) {
+            runtime.handle_command(command, &event_tx);
+            let snapshot = runtime.state.snapshot(false);
+            assert_eq!(snapshot.volume_requests_taken, start + taken);
+        }
+        assert!((runtime.state.snapshot(false).settings.volume - 0.6).abs() < 1e-6);
+        // The bridge's own volume commands, as when it reads the settings
+        // again, are no request of the UI's.
+        runtime.handle_command(
+            BridgeCommand::Settings(BridgeSettingsCommand::LoadFromDisk),
+            &event_tx,
+        );
+        assert_eq!(
+            runtime.state.snapshot(false).volume_requests_taken,
+            start + 3
+        );
     }
 
     #[test]

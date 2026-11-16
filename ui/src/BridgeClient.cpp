@@ -2363,10 +2363,26 @@ void BridgeClient::seek(double seconds) {
     m_playbackClock->holdAt(target);
 }
 
+// The volume shows what was asked for from the time it is asked for, as
+// the other settings do, rather than a round trip later: the mute button's
+// unmute showed the slider at 0 and the muted glyph for some 50 ms, until a
+// snapshot brought the restored volume (#373 H34 AA4). Snapshots that the
+// backend built before it took the request leave it as it is; see
+// applySnapshot.
 void BridgeClient::setVolume(double value) {
-    sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(
-        BinaryBridgeCodec::CmdSetVolume,
-        std::clamp(value, 0.0, 1.0)));
+    if (!std::isfinite(value)) {
+        return;
+    }
+    const double volume = std::clamp(value, 0.0, 1.0);
+    if (!sendBinaryCommand(BinaryBridgeCodec::encodeCommandF64(BinaryBridgeCodec::CmdSetVolume, volume))) {
+        return;
+    }
+    ++m_volumeRequestsSent;
+    if (m_volume != volume) {
+        m_volume = volume;
+        emit volumeChanged();
+        scheduleSnapshotChanged();
+    }
 }
 
 void BridgeClient::setFftSize(int value) {
@@ -5718,13 +5734,21 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
         playbackSignalChanged = true;
     }
 
-    const double settingsVolume = snapshot.settings.present
+    // The backend's volume, once it has taken every volume request sent to
+    // it: until then, the latest request shows.
+    if (snapshot.settings.present && snapshot.settings.hasVolumeRequestsTaken) {
+        m_volumeRequestsTaken = snapshot.settings.volumeRequestsTaken;
+    }
+    const bool volumeRequestsTaken = !snapshot.settings.hasVolumeRequestsTaken
+        || snapshot.settings.volumeRequestsTaken >= m_volumeRequestsSent;
+    const double settingsVolume = snapshot.settings.present && volumeRequestsTaken
         ? static_cast<double>(snapshot.settings.volume)
         : m_volume;
     if (std::abs(m_volume - settingsVolume) > 0.0005) {
         m_volume = settingsVolume;
         changed = true;
         snapshotSignalChanged = true;
+        emit volumeChanged();
     }
 
     finishSnapshotSection(snapshotPlaybackMs);
