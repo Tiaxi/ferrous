@@ -1290,11 +1290,13 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate_data() {
 // A segment of a plate's choices, as the visualization's mode switch,
 // under the pointer while another is the chosen one (#373 H12 Z4: the
 // 12 % hover with its glyph whole came to the chosen plate's brightness):
-// a wash of the plot's text colour at 14 %, against the chosen plate's
-// 18 % and its edge, with its glyph at 85 %, whole only while pressed
-// (#373 H14 G4: 8 % with the glyph at 60 % was 1.2:1, nearly invisible).
-// As drawn, in both themes and on both plots, the hovered one shows on the
-// plate and stands off it less than the chosen one does.
+// a wash of the plot's text colour at 10 % or more, against the chosen
+// plate's fill and its edge, with its glyph at 85 %, whole only while
+// pressed (#373 H14 G4: 8 % with the glyph at 60 % was 1.2:1, nearly
+// invisible). As drawn, in both themes and on both plots, the hovered one
+// shows on the plate; the chosen one's fill is 3:1 on the plate, so the
+// choice reads by its fill rather than its edge alone, and 2:1 on the
+// hovered one's wash (#373 H28 V3: at 2:1 on the plate it read by its edge).
 void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     QFETCH(bool, dark);
     QFETCH(int, plotMode);
@@ -1334,13 +1336,17 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const QColor wash = colorOf(hover, "color");
     const QColor plateFill = colorOf(fill, "color");
     QCOMPARE(wash.rgb(), text.rgb());
-    // From 10 % and 24 % up, as the plate needs (#373 H15 H4: 14 % and
-    // 18 % were 1.14:1 apart in dark, 1.08:1 in light).
+    // The wash from 10 % up, as the plate needs (#373 H15 H4: 14 % and 18 %
+    // were 1.14:1 apart in dark, 1.08:1 in light); the chosen fill some
+    // 35 % on the dark plates, 44 % on the light one, where the same tint
+    // steps less.
     QVERIFY2(wash.alphaF() >= 0.095 && wash.alphaF() <= 0.135, qPrintable(QString::number(wash.alphaF())));
     QVERIFY2(std::abs(wash.alphaF() - other->property("segmentHoverOpacity").toReal()) < 0.005,
              qPrintable(QString::number(wash.alphaF())));
     QCOMPARE(plateFill.rgb(), text.rgb());
-    QVERIFY2(plateFill.alphaF() >= 0.235 && plateFill.alphaF() <= 0.34, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(plateFill.alphaF() >= 0.3 && plateFill.alphaF() <= 0.55, qPrintable(QString::number(plateFill.alphaF())));
+    QVERIFY2(std::abs(plateFill.alphaF() - chosen->property("segmentFillOpacity").toReal()) < 0.005,
+             qPrintable(QString::number(plateFill.alphaF())));
     QVERIFY2(std::abs(letter->opacity() - 0.85) < 0.005, qPrintable(QString::number(letter->opacity())));
 
     // As drawn: the plate around the buttons, the chosen one's plate and
@@ -1365,7 +1371,13 @@ void UiFoundationsTest::plotSegmentHoverStaysUnderTheChosenPlate() {
     const qreal hoverStep = contrastRatio(drawnHover, plate);
     QVERIFY2(hoverStep >= 1.25 && hoverStep < chosenStep,
              qPrintable(QStringLiteral("hovered %1:1, chosen %2:1").arg(hoverStep).arg(chosenStep)));
-    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.4,
+    // The chosen fill reads on its own: 2:1 on the hovered wash, and on a
+    // dark plate 3:1 on the plate, within a step of rounding (#373 H28 V3);
+    // on a light one some 2.5:1, where its dark glyph keeps 4.5:1 on it.
+    const bool lightPlate = relativeLuminance(plate) > 0.5;
+    QVERIFY2(chosenStep >= (lightPlate ? 2.4 : 2.97),
+             qPrintable(describe(QStringLiteral("the chosen plate on the plate"), drawnChosen, plate)));
+    QVERIFY2(contrastRatio(drawnChosen, drawnHover) >= 1.98,
              qPrintable(describe(QStringLiteral("the chosen plate on the hovered one"), drawnChosen, drawnHover)));
     // The chosen one's edge, as drawn, 3:1 on the plate and on its fill.
     const QColor edge = at(chosen, QPointF(chosen->width() / 2, 0.5));
