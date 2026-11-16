@@ -2038,10 +2038,15 @@ void AppIconTest::everySizeInstalls() {
 // hicolor theme's 22 px directories serve 20 to 24 px and come first, so a
 // 24 px slot at 2x takes 22x22@2 (hicolorsOwnIndexPicksTheSlotsDrawings), and
 // the window icon has 1x pixmaps only. The 24 px drawing stays, for the
-// window icon's 24 px slot (windowIconHasEachSizesDrawing).
+// window icon's 24 px slot (windowIconHasEachSizesDrawing), and says so, so
+// that no one takes it for what the icon theme shows at 24 px (#373 hill
+// climb, H24).
 void AppIconTest::noDrawingForA24pxSlotAt2x() {
     QVERIFY(!QFile::exists(doubledPath(24)));
     QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(24)));
+    const QString note = QString::fromUtf8(contentsOf(FerrousAppIcon::resourcePath(24))).section(QStringLiteral("-->"), 0, 0);
+    QVERIFY(note.contains(QLatin1String("serves only the built-in window icon's 24 px pixmap")));
+    QVERIFY(note.contains(QLatin1String("hicolor's 22 px directories serve the 24 px slot")));
     QVERIFY(std::find(FerrousAppIcon::kSizes.cbegin(), FerrousAppIcon::kSizes.cend(), 24) != FerrousAppIcon::kSizes.cend());
     if (installPrefix().isEmpty()) {
         QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
