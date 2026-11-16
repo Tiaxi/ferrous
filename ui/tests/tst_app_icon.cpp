@@ -215,16 +215,21 @@ QStringList traceIds(int size) {
     return ids;
 }
 
-// How tall each trace is in every column on the pixel grid, lowest first:
-// two 2 px strokes at 16 and 22 px (H18: a 1 px harmonic broke into dots),
-// the fundamental 3 px at 22 px, so that the amber outweighs the magenta
-// harmonic that rises across more of the tile (#373 hill climb, H21), and
-// so at 24 px, the 22 px drawing.
-std::vector<int> strokeHeights(int size) {
-    if (drawnAs(size) == 22) {
-        return {3, 2};
-    }
-    return {2, 2};
+// How tall each trace is on the pixel grid, lowest first: two 2 px strokes
+// at 16 and 22 px (H18: a 1 px harmonic broke into dots), the fundamental
+// 3 px at 22 px, so that the amber outweighs the magenta harmonic that rises
+// across more of the tile (#373 hill climb, H21), and so at 24 px, the 22 px
+// drawing, and at 16 px from its 4th column (H23: at 2 px the amber read
+// lighter than the magenta over it; hintedSizesAreClosedShapesOnThePixelGrid).
+std::vector<int> strokeHeights() {
+    return {3, 2};
+}
+
+// How tall a trace is in a column on the pixel grid, `offset` columns from
+// its start: its height (strokeHeights), but at 16 px the fundamental's
+// first three columns, which start it at 2 px, a row clear of the harmonic.
+int strokeHeightAt(int size, size_t trace, int offset) {
+    return size == 16 && trace == 0 && offset < 3 ? 2 : strokeHeights()[trace];
 }
 
 // The smooth strokes' widths across, in device pixels, lowest first: tapering
@@ -857,8 +862,10 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
 
     // A harmonic series of one glide: each trace rises its harmonic number
     // times as far as the fundamental, to within the pixel grid's rounding.
+    // (At 16 px the fundamental's centre rises 1.5 px: its top edge climbs
+    // two rows and its bottom one, as it grows from 2 to 3 px; H23.)
     const double fundamentalRise = centre(0, start) - centre(0, end);
-    QVERIFY2(fundamentalRise >= 2.0, qPrintable(QString::number(fundamentalRise)));
+    QVERIFY2(fundamentalRise >= (size == 16 ? 1.5 : 2.0), qPrintable(QString::number(fundamentalRise)));
     for (size_t n = 1; n < traces.size(); ++n) {
         const double rise = centre(n, start) - centre(n, end);
         QVERIFY2(std::abs(rise / numbers[n] - fundamentalRise) <= slack,
@@ -1052,7 +1059,7 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     // where an edge climbs across the column, and climbing a row a column at
     // most.
     const int start = columnsOf(traces.front()).first;
-    const std::vector<int> heights = strokeHeights(size);
+    const std::vector<int> heights = strokeHeights();
     for (size_t n = 0; n < traces.size(); ++n) {
         const auto [first, last] = columnsOf(traces[n]);
         QCOMPARE(first, start);
@@ -1071,7 +1078,8 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
                 whole = whole && c > 0.97;
             }
             crisp += whole ? 1 : 0;
-            QVERIFY2(column.sum >= heights[n] - 0.05 && column.sum <= heights[n] + 1.05,
+            const int height = strokeHeightAt(size, n, x - first);
+            QVERIFY2(column.sum >= height - 0.05 && column.sum <= height + 1.05,
                      qPrintable(QStringLiteral("trace %1, column %2: %3 px tall").arg(n).arg(x).arg(column.sum)));
             QVERIFY2(before < 0 || (column.centre <= before + 0.01 && before - column.centre <= 1.01),
                      qPrintable(QStringLiteral("trace %1, column %2: from %3 to %4").arg(n).arg(x).arg(before).arg(column.centre)));
@@ -1090,15 +1098,21 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
         const double tall = columnOf(traces.back(), x).sum;
         QVERIFY2(std::abs(tall - heights.back()) <= 0.05, qPrintable(QStringLiteral("the harmonic's column %1: %2 px tall").arg(x).arg(tall)));
     }
-    // At 16 px the fundamental's too, over its first climb: its top and
-    // bottom edges climb in one column, so that no column of its start is
-    // more than its 2 px (#373 hill climb, H22: they climbed a column apart,
-    // and the start read as a block three rows tall).
+    // At 16 px the fundamental starts at 2 px, a clear row under the
+    // harmonic's start, for two columns, and from its 4th column on it is
+    // 3 px, its height, or a half row more where an edge climbs, to the
+    // tile's edge, with a row of the tile under it (#373 hill climb, H23: at
+    // 2 px all along the amber read lighter than the magenta over it; H22: a
+    // block three rows tall at its start).
     if (size == 16) {
-        for (int x = start; x < start + 4; ++x) {
+        for (int x = start; x < start + 2; ++x) {
             const double tall = columnOf(traces.front(), x).sum;
-            QVERIFY2(std::abs(tall - heights.front()) <= 0.05,
-                     qPrintable(QStringLiteral("the fundamental's column %1: %2 px tall").arg(x).arg(tall)));
+            QVERIFY2(std::abs(tall - 2) <= 0.05, qPrintable(QStringLiteral("the fundamental's column %1: %2 px tall").arg(x).arg(tall)));
+        }
+        for (int x = start + 3; x <= inside.right(); ++x) {
+            const Column column = columnOf(traces.front(), x);
+            QVERIFY2(column.sum >= 2.95 && column.sum <= 3.55 && column.bottom < inside.bottom(),
+                     qPrintable(QStringLiteral("the fundamental's column %1: %2 px tall, to row %3").arg(x).arg(column.sum).arg(column.bottom)));
         }
     }
 }
@@ -1210,7 +1224,7 @@ void AppIconTest::tracesRunOutFlushToTheTilesInnerEdge() {
         QVERIFY2(last == inside.right(), qPrintable(QStringLiteral("%1 ends at column %2").arg(id).arg(last)));
         const Column end = columnOf(trace, last);
         if (onPixelGrid(size)) {
-            const int height = strokeHeights(size)[static_cast<size_t>(ids.size() - 1 - n)];
+            const int height = strokeHeights()[static_cast<size_t>(ids.size() - 1 - n)];
             QVERIFY2(end.bottom - end.top + 1 == height && std::abs(end.sum - height) <= 0.05,
                      qPrintable(QStringLiteral("%1: %2 px at its end").arg(id).arg(end.sum)));
         } else {
@@ -1739,7 +1753,7 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
     const QHash<QString, QImage> cover = traceCoverage(path, doubled);
     const QHash<QString, QImage> singleCover = traceCoverage(FerrousAppIcon::resourcePath(size), size);
     for (const QString &id : ids) {
-        const double wide = 2.0 * strokeHeights(size)[id == QLatin1String("fundamental") ? 0 : 1];
+        const double wide = 2.0 * strokeHeights()[id == QLatin1String("fundamental") ? 0 : 1];
         const QImage &trace = cover.value(id);
         const QImage &singleTrace = singleCover.value(id);
         const auto [first, last] = columnsOf(trace);
@@ -1763,8 +1777,16 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
         QVERIFY2(std::abs(start - singleStart) <= 1.5,
                  qPrintable(QStringLiteral("%1 starts at %2, the 1x at %3").arg(id).arg(start).arg(singleStart)));
         // Twice the 1x height across, evenly, past the cap, and smooth: no
-        // step from column to column.
-        for (int x = first + static_cast<int>(wide) - 1; x < last; ++x) {
+        // step from column to column. At 16 px the fundamental from its 1x
+        // 4th column, doubled, and before it twice the 1x start's 2 px.
+        int full = first + static_cast<int>(wide) - 1;
+        if (strokeHeightAt(size, 0, 0) != strokeHeights().front() && id == QLatin1String("fundamental")) {
+            full = 2 * (singleFirst + 3) + 1;
+            const double startWidth = widthAcross(trace, first + 3, first + 3);
+            QVERIFY2(std::abs(startWidth - 2.0 * strokeHeightAt(size, 0, 0)) <= 0.5,
+                     qPrintable(QStringLiteral("%1 px across at its start").arg(startWidth)));
+        }
+        for (int x = full; x < last; ++x) {
             const double across = widthAcross(trace, x, x);
             QVERIFY2(std::abs(across - wide) <= 0.5, qPrintable(QStringLiteral("%1, column %2: %3 px across").arg(id).arg(x).arg(across)));
             const double bend = columnOf(trace, x + 1).centre - 2 * columnOf(trace, x).centre + columnOf(trace, x - 1).centre;
