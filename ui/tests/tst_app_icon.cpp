@@ -53,6 +53,10 @@ constexpr QRgb kBreezeLightView = 0xffffff;
 constexpr QRgb kGlide = 0xf2b035;
 constexpr QRgb kHarmonic = 0xf87089;
 constexpr QRgb kThirdHarmonic = 0xe055b4;
+// At 32 and 48 px, and their 2x drawings, the 3rd harmonic a deeper magenta,
+// so that it holds apart from the rose in greyscale there, where the traces
+// are 2 to 2.5 px (#373 hill climb, H22): still 3:1 on the tile.
+constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 // The faint 4th harmonic of the 128 and 256 px drawings, a violet a step
 // darker again (#373 hill climb, H21).
 constexpr QRgb kFourthHarmonic = 0x9a4bd0;
@@ -124,13 +128,33 @@ QRect tileOf(const QImage &image) {
     return tile;
 }
 
+// The sizes drawn as a smaller size's drawing in a larger canvas, as Breeze
+// draws its 24 px icons: 24 px the 22 px drawing moved a pixel in (#373 hill
+// climb, H22), and 36 px the 32 px one moved two. The size whose drawing a
+// size has: its own, or that one.
+int drawnAs(int size) {
+    switch (size) {
+    case 24:
+        return 22;
+    case 36:
+        return 32;
+    default:
+        return size;
+    }
+}
+
 // Breeze's app-icon margin around the tile at each size: 1 px at 16, 2 px at
 // 22 and 32, 4 px at 48 and 6 px at 64, as Breeze's own app icons sit, and in
-// proportion above.
+// proportion above; 3 px at 24 and 4 at 36, the 22 and 32 px drawings' 2
+// and the pixels they move in.
 int breezeMargin(int size) {
     switch (size) {
     case 16:
         return 1;
+    case 24:
+        return 3;
+    case 36:
+        return 4;
     case 22:
     case 32:
         return 2;
@@ -141,20 +165,23 @@ int breezeMargin(int size) {
     }
 }
 
-// The sizes drawn on the pixel grid, 16 and 22 px: each trace a closed shape
+// The sizes drawn on the pixel grid, 16, 22 and 24 px: each trace a closed shape
 // with every vertex on a whole pixel, so that its flats are crisp and only
 // its climbs, a row a column at most, are antialiased (#373 hill climb,
 // H18). From 32 px, where the third trace comes in, the traces are smooth
 // curves (H20: H19's whole-pixel stairs at 32 and 48 px read as aliased
 // beside Breeze's icons, and changed idiom between 48 and 64 px).
 bool onPixelGrid(int size) {
-    return size <= 22;
+    return size <= 24;
 }
 
 // The traces' colours, lowest first: the fundamental and two harmonics from
 // 32 px up, the fundamental and the magenta 3rd harmonic at 16 and 22 px,
 // where a middle trace fused with its neighbours (#373 hill climb, H10, H18).
 std::vector<QRgb> traceColours(int size) {
+    if (drawnAs(size) == 32 || size == 48) {
+        return {kGlide, kHarmonic, kDeepThirdHarmonic};
+    }
     if (size >= 32) {
         return {kGlide, kHarmonic, kThirdHarmonic};
     }
@@ -164,7 +191,7 @@ std::vector<QRgb> traceColours(int size) {
 // The sizes with a detail tier: at 128 and 256 px a faint 4th harmonic over
 // the three traces (#373 hill climb, H21: the 64 px drawing enlarged left the
 // tile's upper left half empty beside Breeze's large icons). 64 px and the
-// scalable drawing, which serves 40 to 96 device px, keep three.
+// scalable drawing, which serves 40 to 60 device px, keep three.
 bool hasDetailTier(int size) {
     return size == 128 || size == 256;
 }
@@ -192,9 +219,10 @@ QStringList traceIds(int size) {
 // How tall each trace is in every column on the pixel grid, lowest first:
 // two 2 px strokes at 16 and 22 px (H18: a 1 px harmonic broke into dots),
 // the fundamental 3 px at 22 px, so that the amber outweighs the magenta
-// harmonic that rises across more of the tile (#373 hill climb, H21).
+// harmonic that rises across more of the tile (#373 hill climb, H21), and
+// so at 24 px, the 22 px drawing.
 std::vector<int> strokeHeights(int size) {
-    if (size == 22) {
+    if (drawnAs(size) == 22) {
         return {3, 2};
     }
     return {2, 2};
@@ -206,7 +234,7 @@ std::vector<int> strokeHeights(int size) {
 // 3 / 2.5 / 2; from 64 px 1 : 0.8 : 0.65 of the fundamental's 3.8 units at
 // 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px).
 std::vector<double> strokeWidths(int size) {
-    switch (size) {
+    switch (drawnAs(size)) {
     case 32:
         return {3.0, 2.0, 2.0};
     case 48:
@@ -234,8 +262,8 @@ int capColumns(int size) {
 // Breeze Dark (#373 hill climb, H9, H11: at H10 only 16 to 32 px had it): a
 // hairline, 1 device px at every size (H18: H13's 32nd of the icon, 4 and 8
 // px at 128 and 256, framed the large sizes in a thick band; H21: H18's 2 px
-// at 128 and 256 read as a halo on Breeze Light). The scalable drawing keeps
-// a 64th of the icon (scalableDrawingHasTheRimInProportion).
+// at 128 and 256 read as a halo on Breeze Light). The scalable drawing's is
+// 1.5 units of its 64 (scalableDrawingKeepsADevicePixelRim).
 constexpr int kRimWidth = 1;
 
 // The tile inside its rim.
@@ -488,8 +516,9 @@ double widthAcross(const QImage &trace, int start, int end) {
 // The sizes with a drawing of their own for their slot at 2x scaling: 16 and
 // 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
 // climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
-// rim where the 16 and 22 px slots had 2).
-constexpr std::array<int, 4> kDoubledSizes{16, 22, 32, 48};
+// rim where the 16 and 22 px slots had 2); 24 and 36 px the 22 and 32 px
+// slots' moved in, and 64 px its drawing doubled (H22).
+constexpr std::array<int, 7> kDoubledSizes{16, 22, 24, 32, 36, 48, 64};
 
 // The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
@@ -513,7 +542,7 @@ private slots:
     void everySizeIsBuiltIn();
     void tileHasTheSameLighterRimAtEverySize_data() { addSizeRows(); }
     void tileHasTheSameLighterRimAtEverySize();
-    void scalableDrawingHasTheRimInProportion();
+    void scalableDrawingKeepsADevicePixelRim();
     void tracesStandOnThePlainTile_data() { addSizeRows(); }
     void tracesStandOnThePlainTile();
     void harmonicsFanOutFromOneStart_data() { addSizeRows(); }
@@ -529,6 +558,8 @@ private slots:
     void smallCurvesAreEvenAndEndOnWholeRows_data();
     void smallCurvesAreEvenAndEndOnWholeRows();
     void fundamentalThinsSmoothlyWithSize();
+    void magentaDeepensAt32And48px_data();
+    void magentaDeepensAt32And48px();
     void topTraceClearsTheCornerFrom64px_data();
     void topTraceClearsTheCornerFrom64px();
     void detailTierAddsAFaint4thHarmonic_data();
@@ -537,11 +568,15 @@ private slots:
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
     void doubledSlotsFrom32pxDrawThe64pxComposition_data();
     void doubledSlotsFrom32pxDrawThe64pxComposition();
+    void sizesDrawnAsASmallerSize_data();
+    void sizesDrawnAsASmallerSize();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
     void iconThemeGivesEachSizeItsDrawing_data();
     void iconThemeGivesEachSizeItsDrawing();
+    void hicolorsOwnIndexPicksTheSlotsDrawings_data();
+    void hicolorsOwnIndexPicksTheSlotsDrawings();
     void desktopFileNamesTheIcon();
 };
 
@@ -570,7 +605,7 @@ void AppIconTest::everySizeIsBuiltIn() {
     QCOMPARE(tile.top(), all.bottom() - tile.bottom());
 
     QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(0)));
-    QCOMPARE(FerrousAppIcon::resourcePath(24), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
+    QCOMPARE(FerrousAppIcon::resourcePath(40), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
 }
 
 // The tile has a rim lighter than itself just inside its edge, so that it
@@ -630,28 +665,58 @@ void AppIconTest::tileHasTheSameLighterRimAtEverySize() {
     // icon then, and quieter on the tile than any trace.
     QVERIFY2(contrastRatio(kRim, kTile) <= 1.75, qPrintable(QString::number(contrastRatio(kRim, kTile))));
     QVERIFY(contrastRatio(kRim, kTile) < contrastRatio(kLoudRim, kTile));
-    for (const QRgb trace : {kGlide, kHarmonic, kThirdHarmonic}) {
+    for (const QRgb trace : {kGlide, kHarmonic, kThirdHarmonic, kDeepThirdHarmonic}) {
         QVERIFY(contrastRatio(kRim, kTile) < contrastRatio(trace, kTile));
     }
     QVERIFY(!traceInk(qRgba(qRed(kRim), qGreen(kRim), qBlue(kRim), 255)));
 }
 
-// The scalable drawing, which serves every size without a drawing of its
-// own, has the rim at a 64th of the icon: 1 px at 64 px and 2 px at 128,
-// as the drawings of those sizes have.
-void AppIconTest::scalableDrawingHasTheRimInProportion() {
+// The scalable drawing serves the slots no drawing of the theme's matches,
+// 40 to 60 device px or so: there its rim is 1.5 units of its 64, about a
+// device pixel, where a 64th of the icon, H21's, was 0.6 to 0.9 px, a
+// grey-violet smudge rather than an edge (#373 hill climb, H22). The tile
+// inside the rim, 1.5 units in from it all round.
+void AppIconTest::scalableDrawingKeepsADevicePixelRim() {
     const QString path = FerrousAppIcon::resourcePath(96);
     QCOMPARE(path, QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
-    for (const int size : {64, 128}) {
+    const QString source = QString::fromUtf8(contentsOf(path));
+    QVERIFY(source.contains(QLatin1String("<rect id=\"rim\" fill=\"#5a3fb0\" x=\"6\" y=\"6\" width=\"52\" height=\"52\" rx=\"5\"/>")));
+    QVERIFY(source.contains(QLatin1String("<rect id=\"tile\" fill=\"#3a1490\" x=\"7.5\" y=\"7.5\" width=\"49\" height=\"49\" rx=\"3.5\"/>")));
+    // At 128 and 256 px whole device pixels of it, 3 and 6, then the tile.
+    for (const int size : {128, 256}) {
         const QImage image = render(path, size);
         const QRect tile = tileOf(image);
         const QPoint middle = tile.center();
-        const int rim = size / 64;
-        for (int step = 0; step < rim; ++step) {
-            QVERIFY2(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2),
+        const int rim = size * 3 / 128;
+        for (int step = 0; step <= rim; ++step) {
+            QVERIFY2(near(image.pixel(middle.x(), tile.bottom() - step), step < rim ? kRim : kTile, 2),
                      qPrintable(QStringLiteral("%1 px: %2").arg(size).arg(step)));
         }
-        QVERIFY(near(image.pixel(middle.x(), tile.bottom() - rim), kTile, 2));
+    }
+    // From 40 px about a device pixel of it: the rim drawn alone covers
+    // that much more of a column across the bottom edge than the tile does.
+    const QStringList lines = source.split(QLatin1Char('\n'));
+    const auto alone = [&](const QString &id, int size) {
+        QStringList kept;
+        for (const QString &line : lines) {
+            if (!line.contains(QLatin1String("<rect")) && !line.contains(QLatin1String("<path"))) {
+                kept << line;
+            } else if (line.contains(QStringLiteral("id=\"%1\"").arg(id))) {
+                kept << line;
+            }
+        }
+        QByteArray bytes = kept.join(QLatin1Char('\n')).toUtf8();
+        QBuffer buffer(&bytes);
+        QImageReader reader(&buffer, "svg");
+        reader.setScaledSize(QSize(size, size));
+        return reader.read().convertToFormat(QImage::Format_ARGB32);
+    };
+    for (const int size : {40, 44, 56}) {
+        const Column rim = columnOf(alone(QStringLiteral("rim"), size), size / 2);
+        const Column tile = columnOf(alone(QStringLiteral("tile"), size), size / 2);
+        const double width = (rim.sum - tile.sum) / 2;
+        QVERIFY2(width >= 0.9 && std::abs(width - 1.5 * size / 64) <= 0.05,
+                 qPrintable(QStringLiteral("%1 px: a %2 px rim").arg(size).arg(width)));
     }
 }
 
@@ -677,7 +742,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
     const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
-    QVERIFY2(below.height() >= (size > 22 ? 2 : 1), qPrintable(QString::number(lowest)));
+    QVERIFY2(below.height() >= (onPixelGrid(size) ? 1 : 2), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
     // Every mark rises: none is a flat band or line under the traces.
@@ -739,7 +804,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(contrastRatio(strongest, kTile) >= 3.0,
                  qPrintable(QStringLiteral("trace %1: %2:1").arg(i).arg(contrastRatio(strongest, kTile))));
     }
-    for (const QRgb colour : {kGlide, kHarmonic, kThirdHarmonic}) {
+    for (const QRgb colour : {kGlide, kHarmonic, kThirdHarmonic, kDeepThirdHarmonic}) {
         QVERIFY2(contrastRatio(colour, kTile) >= 3.0, qPrintable(QString::number(colour, 16)));
     }
     // A step of value from each trace to the one above it, so that the
@@ -762,11 +827,13 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         QVERIFY2(std::abs(trace.bounds.right() - traces.front().bounds.right()) <= capSlack,
                  qPrintable(QStringLiteral("ends at %1, not %2").arg(trace.bounds.right()).arg(traces.front().bounds.right())));
     }
-    // The columns every trace crosses at its full width, past the caps.
-    int start = 0;
+    // The columns every trace crosses at its full width, past the caps: the
+    // caps share a centre, and the fundamental's, the widest, reaches
+    // furthest back from it. (A harmonic's faint cap tip, as ink, depends on
+    // its colour: at 32 px the deeper magenta's first column is too faint.)
+    const int start = traces.front().bounds.left() + capColumns(size);
     int end = size;
     for (const Trace &trace : traces) {
-        start = std::max(start, trace.bounds.left() + capColumns(size));
         end = std::min(end, trace.bounds.right() - 1);
     }
     QVERIFY(traces.front().bounds.left() <= tile.left() + tile.width() / 5);
@@ -795,7 +862,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // under the top inner edge, as at 64 px) and the 2 px between the rose
     // and the amber near the start (smallCurvesAreEvenAndEndOnWholeRows) set
     // the heights.
-    const double fan = size == 32 ? 1.3 : 1.5;
+    const double fan = drawnAs(size) == 32 ? 1.3 : 1.5;
     for (size_t n = 1; n < traces.size(); ++n) {
         const auto apart = [&](int x) { return centre(n - 1, x) - centre(n, x); };
         QVERIFY2(apart(end) >= fan * apart(start),
@@ -826,13 +893,13 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     const int third = (end - start) / 3;
     const double first = centre(top, start) - centre(top, start + third);
     const double last = centre(top, end - third) - centre(top, end);
-    QVERIFY2(last > 0 && first >= (size == 32 ? 1.75 : 2.0) * last, qPrintable(QStringLiteral("%1 then %2").arg(first).arg(last)));
+    QVERIFY2(last > 0 && first >= (drawnAs(size) == 32 ? 1.75 : 2.0) * last, qPrintable(QStringLiteral("%1 then %2").arg(first).arg(last)));
     for (size_t n = 0; n < traces.size(); ++n) {
         for (int x = start + 1; x <= end; ++x) {
             QVERIFY2(centre(n, x) <= centre(n, x - 1) + 0.25, qPrintable(QStringLiteral("trace %1 at %2").arg(n).arg(x)));
         }
     }
-    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile).height() / (size == 32 ? 4.0 : 3.0),
+    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile).height() / (drawnAs(size) == 32 ? 4.0 : 3.0),
              qPrintable(QString::number(centre(top, start) - centre(top, end))));
 
     // The strokes taper from the fundamental up, as a harmonic's energy
@@ -862,7 +929,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // bottom-left quarter, with ink in its top-left quarter (A left that
     // empty) and its top-right one.
     const QRect ink = boundsWhere(image, traceInk);
-    QVERIFY2(ink.width() >= tile.width() * 0.7 && ink.height() >= tile.height() * (size == 32 ? 0.66 : 0.7),
+    QVERIFY2(ink.width() >= tile.width() * 0.7 && ink.height() >= tile.height() * (drawnAs(size) == 32 ? 0.66 : 0.7),
              qPrintable(QStringLiteral("%1x%2 of %3").arg(ink.width()).arg(ink.height()).arg(tile.width())));
     const int half = tile.width() / 2;
     QVERIFY(countWhere(image, QRect(tile.left(), tile.top(), half, half), traceInk) > 0);
@@ -1009,6 +1076,17 @@ void AppIconTest::hintedSizesAreClosedShapesOnThePixelGrid() {
     for (int x = start; x < start + 3; ++x) {
         const double tall = columnOf(traces.back(), x).sum;
         QVERIFY2(std::abs(tall - heights.back()) <= 0.05, qPrintable(QStringLiteral("the harmonic's column %1: %2 px tall").arg(x).arg(tall)));
+    }
+    // At 16 px the fundamental's too, over its first climb: its top and
+    // bottom edges climb in one column, so that no column of its start is
+    // more than its 2 px (#373 hill climb, H22: they climbed a column apart,
+    // and the start read as a block three rows tall).
+    if (size == 16) {
+        for (int x = start; x < start + 4; ++x) {
+            const double tall = columnOf(traces.front(), x).sum;
+            QVERIFY2(std::abs(tall - heights.front()) <= 0.05,
+                     qPrintable(QStringLiteral("the fundamental's column %1: %2 px tall").arg(x).arg(tall)));
+        }
     }
 }
 
@@ -1330,11 +1408,12 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
 // a share of the tile inside the rim, falls from each size to the next
 // (#373 hill climb, H19: at 48 px it dipped below 64 px's, and 32 px read
 // bolder than 48). From 22 px: at 16 px the grid's 2 px is the least a
-// stroke can be, and 22 px's 3 px is a larger share (H21).
+// stroke can be, and 22 px's 3 px is a larger share (H21). A size drawn as a
+// smaller size's drawing, moved in, has that one's (sizesDrawnAsASmallerSize).
 void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     double before = -1;
     for (const int size : FerrousAppIcon::kSizes) {
-        if (size == 16) {
+        if (size == 16 || drawnAs(size) != size) {
             continue;
         }
         const QString path = FerrousAppIcon::resourcePath(size);
@@ -1346,6 +1425,61 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
                  qPrintable(QStringLiteral("%1 px: %2 of the tile after %3").arg(size).arg(share).arg(before)));
         before = share;
     }
+}
+
+void AppIconTest::magentaDeepensAt32And48px_data() {
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<int>("size");
+    QTest::addColumn<bool>("deep");
+    for (const int size : FerrousAppIcon::kSizes) {
+        if (!onPixelGrid(size)) {
+            QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size << (drawnAs(size) == 32 || size == 48);
+        }
+    }
+    QTest::addRow("32px@2") << doubledPath(32) << 64 << true;
+    QTest::addRow("36px@2") << doubledPath(36) << 72 << true;
+    QTest::addRow("48px@2") << doubledPath(48) << 96 << true;
+}
+
+// At 32 and 48 px (and 36, the 32 px drawing), and in their 2x drawings, the 3rd harmonic is a deeper
+// magenta than elsewhere (#373 hill climb, H22: there the magenta and the
+// rose, 2 to 2.5 px strokes, were some 24 grey levels apart and read as one
+// in greyscale): some 38 levels below the rose in Rec. 709 luma at its full
+// colour, against 21 for the magenta of the other sizes, and 3:1 or more on
+// the tile still. Rendered, the traces' centres at half way across are as
+// far apart in grey.
+void AppIconTest::magentaDeepensAt32And48px() {
+    QFETCH(QString, path);
+    QFETCH(int, size);
+    QFETCH(bool, deep);
+    const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
+    QVERIFY(luma(kHarmonic) - luma(kDeepThirdHarmonic) >= 35);
+    QVERIFY(luma(kHarmonic) - luma(kThirdHarmonic) <= 25);
+    QVERIFY(contrastRatio(kDeepThirdHarmonic, kTile) >= 3.0);
+    const QRgb magenta = deep ? kDeepThirdHarmonic : kThirdHarmonic;
+    const QString fill = QStringLiteral("<path id=\"h3\" fill=\"#%1\"").arg(magenta & 0xffffff, 6, 16, QLatin1Char('0'));
+    QVERIFY2(QString::fromUtf8(contentsOf(path)).contains(fill), qPrintable(fill));
+    if (!deep) {
+        return;
+    }
+    // Rendered: down the middle column, each trace's centre row in grey.
+    const QImage image = renderSeries(path, size);
+    const int x = size / 2;
+    std::vector<double> greys;
+    for (int y = 0; y < size;) {
+        if (!traceInk(image.pixel(x, y))) {
+            ++y;
+            continue;
+        }
+        const int top = y;
+        while (y < size && traceInk(image.pixel(x, y))) {
+            ++y;
+        }
+        greys.push_back(luma(image.pixel(x, (top + y) / 2)));
+    }
+    QCOMPARE(greys.size(), static_cast<size_t>(3));
+    QVERIFY2(greys[1] - greys[0] >= 32 && greys[2] - greys[1] >= 32,
+             qPrintable(QStringLiteral("%1, %2, %3").arg(greys[0]).arg(greys[1]).arg(greys[2])));
 }
 
 void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
@@ -1402,9 +1536,11 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // large icons): the faint 4th harmonic of the same glide, in violet, half
 // the fundamental's width, from the common start, rising 4/3 as far as the
 // 3rd harmonic over the same columns, give or take the few hundredths that
-// keep its cut clear of the badge, and cut flush on the tile's top inner
-// edge between x 40 and 46 of the 64-unit drawing, so that nothing of it is
-// in the corner where Plasma draws a task's badge (x over 48, y under 20).
+// keep its cut clear of the badge, and cut square across its stroke where
+// its upper edge meets the tile's top inner edge, between x 40 and 46 of
+// the 64-unit drawing (H22: cut along the edge, its end ran into the 1 px
+// rim for some device pixels), so that nothing of it is in the corner where
+// Plasma draws a task's badge (x over 48, y under 20).
 // Below 128 px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
@@ -1446,23 +1582,35 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double above = centre(third, start) - centre(fourth, start);
     QVERIFY2(std::abs(above - step) <= unit, qPrintable(QStringLiteral("%1 above the 3rd, which is %2 above the 2nd").arg(above).arg(step)));
 
-    // Cut flush on the top inner edge: its ink reaches the edge's row, and
-    // there it is as wide as in the row under it, not a rounded end.
-    int cutFirst = -1;
-    int cutLast = -1;
-    double cutRow = 0;
-    double rowUnder = 0;
+    // Cut square across the stroke: in the file, the outline's end runs
+    // from its upper corner, on the top inner edge, straight to its lower
+    // one, at right angles to the stroke's edge there.
+    static const QRegularExpression endCut(QStringLiteral(
+        "<path id=\"h4\"[^>]* C[0-9.]+ [0-9.]+ ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) L([0-9.]+) ([0-9.]+) C"));
+    const QRegularExpressionMatch cut = endCut.match(source);
+    QVERIFY(cut.hasMatch());
+    const QPointF control(cut.captured(1).toDouble(), cut.captured(2).toDouble());
+    const QPointF upper(cut.captured(3).toDouble(), cut.captured(4).toDouble());
+    const QPointF lower(cut.captured(5).toDouble(), cut.captured(6).toDouble());
+    // The tile inside a rim of one device pixel.
+    const double edge = 6 + 64.0 / size;
+    QVERIFY2(std::abs(upper.y() - edge) <= 0.001, qPrintable(QString::number(upper.y())));
+    const QPointF along = upper - control;
+    const QPointF across = lower - upper;
+    const double cosine = (along.x() * across.x() + along.y() * across.y())
+                          / (std::hypot(along.x(), along.y()) * std::hypot(across.x(), across.y()));
+    QVERIFY2(std::abs(cosine) <= 0.03, qPrintable(QString::number(cosine)));
+    QVERIFY2(upper.x() >= 40 && lower.x() <= 46, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
+    // Rendered, it meets the rim at a corner, not along it: the corner's
+    // sliver in the tile's top row inside the rim, some 1.2 device px of
+    // ink where the cut along the edge left 7, and it reaches up to that
+    // row.
+    double topRow = 0;
     for (int x = inside.left(); x <= inside.right(); ++x) {
-        cutRow += alphaAt(fourth, x, inside.top());
-        rowUnder += alphaAt(fourth, x, inside.top() + 1);
-        if (alphaAt(fourth, x, inside.top()) > 0.5) {
-            cutFirst = cutFirst < 0 ? x : cutFirst;
-            cutLast = x;
-        }
+        topRow += alphaAt(fourth, x, inside.top());
     }
-    QVERIFY2(cutFirst >= 0 && cutRow >= 0.85 * rowUnder, qPrintable(QStringLiteral("%1 at the edge, %2 under it").arg(cutRow).arg(rowUnder)));
-    QVERIFY2(cutFirst >= 40 * unit && cutLast + 1 <= 46 * unit,
-             qPrintable(QStringLiteral("cut from %1 to %2 units").arg(cutFirst / unit).arg((cutLast + 1) / unit)));
+    QVERIFY2(topRow > 0 && topRow <= 1.5, qPrintable(QStringLiteral("%1 px of it in the top row").arg(topRow)));
+    QVERIFY(columnOf(fourth, static_cast<int>(upper.x() * unit)).top <= inside.top() + 1);
     // Nothing in the badge's corner.
     for (int y = 0; y < 20 * unit; ++y) {
         for (int x = static_cast<int>(48 * unit); x < size; ++x) {
@@ -1472,7 +1620,7 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
 
     // 4/3 as steep as the 3rd harmonic: their rises over two thirds of the
     // way from the start to the cut.
-    const int middle = start + (cutFirst - start) * 2 / 3;
+    const int middle = start + (static_cast<int>(upper.x() * unit) - start) * 2 / 3;
     const double rises = (centre(fourth, start) - centre(fourth, middle)) / (centre(third, start) - centre(third, middle));
     QVERIFY2(rises >= 1.3 && rises <= 1.45, qPrintable(QString::number(rises)));
     // Half the fundamental's width across, over the same columns.
@@ -1495,6 +1643,7 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("16px@2") << 16;
     QTest::addRow("22px@2") << 22;
+    QTest::addRow("24px@2") << 24;
 }
 
 // A 16 or 22 px slot at 2x scaling shows the drawing it shows at 1x, doubled
@@ -1579,7 +1728,9 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
 void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("32px@2") << 32;
+    QTest::addRow("36px@2") << 36;
     QTest::addRow("48px@2") << 48;
+    QTest::addRow("64px@2") << 64;
 }
 
 // A 32 or 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
@@ -1588,7 +1739,9 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
 // rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
 // rim, its traces where the 64 px drawing has them, in proportion to the
 // tile inside the rim, and tapering as it does, from 3.8 units at 64 device
-// px and 3.6 at 96.
+// px and 3.6 at 96. The 64 px slot's (H22: the theme gave it the 128 or 256
+// px drawing, with the 4th harmonic, or the scalable one) is the 64 px
+// drawing doubled, 3.8 units at 128 device px, without the 4th harmonic.
 void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
@@ -1647,10 +1800,56 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
         // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental.
         const double taper[] = {0.65, 0.8, 1.0};
-        const double wanted = fundamental[size == 32 ? 0 : 1] * taper[n] * unit;
+        const double wanted = fundamental[size == 48 ? 1 : 0] * taper[n] * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
     }
+}
+
+void AppIconTest::sizesDrawnAsASmallerSize_data() {
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<QString>("from");
+    QTest::addColumn<int>("size");
+    QTest::addColumn<int>("smaller");
+    QTest::addRow("24px") << FerrousAppIcon::resourcePath(24) << FerrousAppIcon::resourcePath(22) << 24 << 22;
+    QTest::addRow("24px@2") << doubledPath(24) << doubledPath(22) << 48 << 44;
+    QTest::addRow("36px") << FerrousAppIcon::resourcePath(36) << FerrousAppIcon::resourcePath(32) << 36 << 32;
+    QTest::addRow("36px@2") << doubledPath(36) << doubledPath(32) << 72 << 64;
+}
+
+// The 24 px drawing is the 22 px one moved a pixel in on a 24 px canvas, as
+// Breeze draws its 24 px icons, and its 2x the 22 px slot's 2x moved two
+// (#373 hill climb, H22: the slot took the 32 px drawing scaled down, three
+// thin traces, or the 22 px one scaled up); the 36 px drawing the 32 px one
+// moved two, its exits on whole rows still, and its 2x the 32 px slot's
+// moved four (H22: the slot took the 48 px drawing scaled down, or the
+// scalable one with a rim of half a device px): pixel for pixel the same,
+// moved, with nothing else on the canvas.
+void AppIconTest::sizesDrawnAsASmallerSize() {
+    QFETCH(QString, path);
+    QFETCH(QString, from);
+    QFETCH(int, size);
+    QFETCH(int, smaller);
+    QCOMPARE(QImageReader(path).size(), QSize(size, size));
+    const QImage image = render(path, size);
+    const QImage source = render(from, smaller);
+    const int offset = (size - smaller) / 2;
+    int largest = 0;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const QPoint at(x - offset, y - offset);
+            const QRgb expected = source.rect().contains(at) ? source.pixel(at) : qRgba(0, 0, 0, 0);
+            const QRgb shown = image.pixel(x, y);
+            if (qAlpha(expected) == 0 && qAlpha(shown) == 0) {
+                continue;
+            }
+            largest = std::max({largest, std::abs(qRed(shown) - qRed(expected)), std::abs(qGreen(shown) - qGreen(expected)),
+                                std::abs(qBlue(shown) - qBlue(expected)), std::abs(qAlpha(shown) - qAlpha(expected))});
+        }
+    }
+    QVERIFY2(largest <= 2, qPrintable(QString::number(largest)));
+    // Its tile in the canvas's middle, the margin the moved pixels wider.
+    QCOMPARE(tileOf(image), tileOf(source).translated(offset, offset));
 }
 
 void AppIconTest::windowIconHasEachSizesDrawing() {
@@ -1754,6 +1953,93 @@ void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
     const QImage shown = icon.pixmap(QSize(size, size), scale).toImage().convertToFormat(QImage::Format_ARGB32);
     const QString directory = scale == 1 ? QStringLiteral("%1x%1").arg(size) : QStringLiteral("%1x%1@2").arg(size);
     const QImage expected = render(installedIcon(directory), size * scale);
+    QVERIFY2(maxDifference(shown, expected) <= 2, qPrintable(QString::number(maxDifference(shown, expected))));
+}
+
+void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings_data() {
+    QTest::addColumn<int>("size");
+    QTest::addColumn<qreal>("scale");
+    QTest::addColumn<QString>("directory");
+    for (const int size : {16, 22, 32, 48}) {
+        QTest::addRow("%dpx", size) << size << 1.0 << QStringLiteral("%1x%1").arg(size);
+        QTest::addRow("%dpx@2", size) << size << 2.0 << QStringLiteral("%1x%1@2").arg(size);
+        QTest::addRow("%dpx@1.5", size) << size << 1.5 << QStringLiteral("%1x%1@2").arg(size);
+    }
+    // The 22 px directories reach to 24 px, and come first.
+    QTest::addRow("24px") << 24 << 1.0 << QStringLiteral("22x22");
+    QTest::addRow("24px@2") << 24 << 2.0 << QStringLiteral("22x22@2");
+    // 36 px, between the 32 and 48 px directories' reach, its own.
+    QTest::addRow("36px") << 36 << 1.0 << QStringLiteral("36x36");
+    QTest::addRow("36px@2") << 36 << 2.0 << QStringLiteral("36x36@2");
+    QTest::addRow("36px@1.5") << 36 << 1.5 << QStringLiteral("36x36@2");
+    // 64 px at 1.25x to 2x, where KDE's lookup took the 256 px drawing and
+    // Qt's the scalable one. (At 1x Qt's own lookup, unlike KDE's, takes
+    // the 256 px directory before the 64 px one.)
+    QTest::addRow("64px@2") << 64 << 2.0 << QStringLiteral("64x64@2");
+    QTest::addRow("64px@1.5") << 64 << 1.5 << QStringLiteral("64x64@2");
+    QTest::addRow("64px@1.25") << 64 << 1.25 << QStringLiteral("64x64@2");
+    QTest::addRow("128px") << 128 << 1.0 << QStringLiteral("128x128");
+}
+
+// The hicolor theme's own index, as the hicolor-icon-theme package has it
+// (0.18): its application directories are "Threshold" ones, each serving
+// its size and 2 px either side, and its 256 and 512 px ones scalable from
+// 64 px. Qt's theme lookup, and KDE's, which a Plasma session uses (the
+// same slots, checked by hand), take the first directory that serves a
+// size, at the scale rounded up: so a slot at 1.25x or 1.5x takes the 2x
+// drawing. A 24 px slot takes the 22 px drawing (#373 hill climb, H22: the
+// 24 px directories come after it), as Breeze's own application icons,
+// which have no 24 px drawing, show theirs.
+void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings() {
+    if (installPrefix().isEmpty()) {
+        QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
+    }
+    QFETCH(int, size);
+    QFETCH(qreal, scale);
+    QFETCH(QString, directory);
+    QTemporaryDir index;
+    QVERIFY(index.isValid());
+    QVERIFY(QDir(index.path()).mkpath(QStringLiteral("hicolor")));
+    {
+        QString text;
+        QStringList directories;
+        for (const int fixed : {16, 22, 24, 32, 36, 48, 64, 72, 96, 128, 192, 256, 512}) {
+            for (const int dirScale : {1, 2}) {
+                const QString name = QStringLiteral("%1x%1%2/apps").arg(fixed).arg(dirScale == 2 ? QStringLiteral("@2") : QString());
+                directories << name;
+                text += QStringLiteral("[%1]\n").arg(name);
+                if (fixed >= 256) {
+                    text += QStringLiteral("MinSize=64\nSize=%1\nMaxSize=%1\n").arg(fixed);
+                } else {
+                    text += QStringLiteral("Size=%1\n").arg(fixed);
+                }
+                if (dirScale == 2) {
+                    text += QStringLiteral("Scale=2\n");
+                }
+                text += QStringLiteral("Context=Applications\nType=%1\n\n").arg(fixed >= 256 ? QStringLiteral("Scalable") : QStringLiteral("Threshold"));
+            }
+        }
+        directories << QStringLiteral("scalable/apps");
+        text += QStringLiteral("[scalable/apps]\nMinSize=1\nSize=128\nMaxSize=256\nContext=Applications\nType=Scalable\n");
+        text.prepend(QStringLiteral("[Icon Theme]\nName=Hicolor\nDirectories=%1\n\n").arg(directories.join(QLatin1Char(','))));
+        QFile theme(index.filePath(QStringLiteral("hicolor/index.theme")));
+        QVERIFY(theme.open(QIODevice::WriteOnly));
+        QVERIFY(theme.write(text.toUtf8()) > 0);
+    }
+    const QStringList searchPaths = QIcon::themeSearchPaths();
+    const QString themeName = QIcon::themeName();
+    const auto restoreTheme = qScopeGuard([&]() {
+        QIcon::setThemeName(themeName);
+        QIcon::setThemeSearchPaths(searchPaths);
+    });
+    QIcon::setThemeSearchPaths({index.path(), QDir(installPrefix()).filePath(QStringLiteral("share/icons"))});
+    QIcon::setThemeName(QStringLiteral("hicolor"));
+    const QIcon icon = QIcon::fromTheme(QStringLiteral("ferrous"));
+    QVERIFY(!icon.isNull());
+    const QImage shown = icon.pixmap(QSize(size, size), scale).toImage().convertToFormat(QImage::Format_ARGB32);
+    const int device = qRound(size * scale);
+    QCOMPARE(shown.size(), QSize(device, device));
+    const QImage expected = render(installedIcon(directory), device);
     QVERIFY2(maxDifference(shown, expected) <= 2, qPrintable(QString::number(maxDifference(shown, expected))));
 }
 
