@@ -2242,6 +2242,24 @@ ApplicationWindow {
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("removed").toStringList(), QStringList{});
 
+    // Removing takes the folder's tracks out of the library, so Cancel is
+    // the default button, as KDE's guidelines ask (#373 H37): Enter as the
+    // question shows keeps the folder.
+    QVERIFY(confirm->property("destructive").toBool());
+    QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
+    QTRY_VERIFY(confirm->property("opened").toBool());
+    QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
+    {
+        auto *footer = qvariant_cast<QQuickItem *>(confirm->property("footer"));
+        QQuickItem *cancelButton = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
+        QVERIFY(footer != nullptr && cancelButton != nullptr);
+        QCOMPARE(qvariant_cast<QQuickItem *>(footer->property("primary")), cancelButton);
+    }
+    QVERIFY(keyboardInPopupContent(confirm));
+    QTest::keyClick(confirmWindow, Qt::Key_Return);
+    QTRY_VERIFY(!confirm->property("visible").toBool());
+    QCOMPARE(root->property("removed").toStringList(), QStringList{});
+
     QVERIFY(clickVisibleButton(window, QStringLiteral("libraryRootRemoveButton")));
     QTRY_VERIFY(confirm->property("opened").toBool());
     QVERIFY(QTest::qWaitForWindowExposed(confirmWindow));
