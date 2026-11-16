@@ -121,7 +121,8 @@ Components.DialogWindow {
 
         Button {
             objectName: "aboutCopyVersionButton"
-            Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+            Layout.leftMargin: dialogButtons.inset
+            Layout.bottomMargin: dialogButtons.bottomPadding
             icon.name: "edit-copy"
             text: I18n.i18nc("@action:button", "Copy Version Information")
             onClicked: root.copyVersionInformation()

@@ -3,16 +3,48 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import "../logic/KeyUtils.js" as KeyUtils
 
 // The button row of a dialog, in KDE's order whatever the desktop: the
 // affirmative button, Apply, a destructive one and Cancel. Give each button
 // its role with DialogButtonBox.buttonRole, and name the default one, which
 // Breeze draws as such and Enter presses, as `primary`.
+//
+// The buttons sit on the dialogs' content inset, a grid unit from the
+// window's sides and bottom, as the content is from its sides and top;
+// the content's own inset under it is the room above them (#373 H38).
+// Buttons that share the row with the box, such as Defaults, take its
+// `inset` as their side margin and its bottomPadding under them.
 DialogButtonBox {
     id: root
 
     property Item primary: null
+    readonly property real inset: Kirigami.Units.gridUnit
+
+    leftPadding: root.inset
+    rightPadding: root.inset
+    bottomPadding: root.inset
+    topPadding: 0
+
+    // The row is as tall as its buttons: the style's list is 32 px tall
+    // whatever they are, which left the room under them larger than the
+    // inset where they are shorter.
+    Binding {
+        target: root.contentItem
+        property: "implicitHeight"
+        value: {
+            let tallest = 0
+            for (let i = 0; i < root.contentChildren.length; ++i) {
+                const button = root.contentChildren[i]
+                if (button && button.visible) {
+                    tallest = Math.max(tallest, button.implicitHeight)
+                }
+            }
+            return tallest
+        }
+        when: root.contentItem !== null && root.contentChildren.length > 0
+    }
 
     function _indexOfButton(button) {
         for (let i = 0; i < root.count; ++i) {

@@ -215,7 +215,13 @@ Components.DialogWindow {
     footer: Control {
         id: preferencesFooter
         objectName: "preferencesButtons"
-        padding: 0
+        // Each side, which the style's Control sets to its layout margins
+        // otherwise; the buttons have the dialogs' inset. As far below the
+        // seam as they are above the window's edge.
+        leftPadding: 0
+        rightPadding: 0
+        topPadding: dialogButtons.inset
+        bottomPadding: 0
         background: Item {
             Rectangle {
                 anchors.left: parent.left
@@ -242,7 +248,8 @@ Components.DialogWindow {
             Button {
                 id: defaultsButton
                 objectName: "preferencesDefaultsButton"
-                Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+                Layout.leftMargin: dialogButtons.inset
+                Layout.bottomMargin: dialogButtons.bottomPadding
                 text: I18n.i18nc("@action:button", "Defaults")
                 icon.name: "document-revert"
                 enabled: !settingsState.atDefaults

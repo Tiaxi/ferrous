@@ -966,6 +966,8 @@ Components.DialogWindow {
         }
     }
 
+    // Tools, Reload and the status share the row with the buttons, on
+    // their inset from the window's edges.
     footer: RowLayout {
         id: tagEditorFooter
         spacing: Kirigami.Units.largeSpacing
@@ -973,7 +975,8 @@ Components.DialogWindow {
         Button {
             id: toolsButton
             objectName: "tagEditorToolsButton"
-            Layout.leftMargin: Kirigami.Units.largeSpacing * 2
+            Layout.leftMargin: dialogButtons.inset
+            Layout.bottomMargin: dialogButtons.bottomPadding
             text: I18n.i18nc("@action:button", "Tools")
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
             // A menu button, which Breeze draws with its arrow.
@@ -1039,6 +1042,7 @@ Components.DialogWindow {
 
         Button {
             objectName: "tagEditorReloadButton"
+            Layout.bottomMargin: dialogButtons.bottomPadding
             text: I18n.i18nc("@action:button", "Reload")
             icon.name: "view-refresh"
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving
@@ -1048,6 +1052,7 @@ Components.DialogWindow {
         BusyIndicator {
             running: root.busy
             visible: running
+            Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.preferredWidth: Kirigami.Units.iconSizes.small
             Layout.preferredHeight: Kirigami.Units.iconSizes.small
         }
@@ -1055,6 +1060,7 @@ Components.DialogWindow {
         Label {
             objectName: "tagEditorStatusLabel"
             Layout.fillWidth: true
+            Layout.bottomMargin: dialogButtons.bottomPadding
             Layout.leftMargin: Kirigami.Units.smallSpacing
             text: root.statusLine()
             font.pointSize: root.uiPalette.smallPointSize
@@ -1065,6 +1071,7 @@ Components.DialogWindow {
 
         Button {
             objectName: "tagEditorDetailsButton"
+            Layout.bottomMargin: dialogButtons.bottomPadding
             visible: !root.busy && root.tagEditorApi.statusDetails.length > 0
             text: I18n.i18nc("@action:button", "Details…")
             onClicked: tagEditorStatusDetailsDialog.open()

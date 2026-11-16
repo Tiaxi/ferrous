@@ -523,6 +523,7 @@ private slots:
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
+    void dialogsPutTheirButtonsOnTheContentInset();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
@@ -3699,6 +3700,110 @@ void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
         QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
     }
+}
+
+// A dialog's buttons sit on its content's inset, a grid unit from the
+// window's sides and bottom, as the content is from its sides and top
+// (#373 H38: the compact dialogs' buttons were 9 px from the edges, their
+// content 19 px). Buttons that share the row, such as Configure's
+// Defaults, start on the inset too, on the same line.
+void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(2); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    editor.selectAllRows();
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+    // A grid unit: the compact dialogs' content inset.
+    const qreal inset = object(window, QStringLiteral("quitSaveFailedDialog"))->property("contentPadding").toReal();
+    QVERIFY(inset > 0);
+
+    // The footer's buttons that show, left to right.
+    const auto buttonsOf = [](QObject *dialog) {
+        QList<QQuickItem *> buttons;
+        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
+        if (footer == nullptr) {
+            return buttons;
+        }
+        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+            for (QQuickItem *child : item->childItems()) {
+                if (!child->isVisible()) {
+                    continue;
+                }
+                if (child->inherits("QQuickAbstractButton")) {
+                    buttons.push_back(child);
+                } else {
+                    collect(child);
+                }
+            }
+        };
+        collect(footer);
+        std::sort(buttons.begin(), buttons.end(), [](QQuickItem *a, QQuickItem *b) {
+            return sceneRect(a).left() < sceneRect(b).left();
+        });
+        return buttons;
+    };
+    struct Case { const char *name; bool opened; bool leftButton; };
+    for (const Case &test : {Case{"quitSaveFailedDialog", false, false}, Case{"libraryRootNameDialog", false, false},
+                             Case{"removeLibraryRootConfirmDialog", false, false},
+                             Case{"tagEditorCloseConfirmDialog", false, false},
+                             Case{"autoNumberDialog", false, false}, Case{"renamePreviewDialog", false, false},
+                             Case{"tagEditorStatusDetailsDialog", false, false},
+                             Case{"clearDiagnosticsConfirmDialog", false, false},
+                             Case{"itunesArtworkDialog", false, false}, Case{"aboutDialog", false, true},
+                             Case{"diagnosticsDialog", true, false}, Case{"preferencesDialog", true, true},
+                             Case{"tagEditorDialog", true, true}}) {
+        const QString name = QString::fromLatin1(test.name);
+        QObject *dialog = object(window, name);
+        QVERIFY2(dialog != nullptr, test.name);
+        if (!test.opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        }
+        QVERIFY2(waitForDialogWindow(dialog), test.name);
+        QQuickWindow *dialogWindow = windowOf(dialog);
+        QTRY_VERIFY2(!buttonsOf(dialog).isEmpty(), test.name);
+        QTRY_VERIFY(!layoutPending(qvariant_cast<QQuickItem *>(dialog->property("footer"))));
+        const QList<QQuickItem *> buttons = buttonsOf(dialog);
+        const QRectF last = sceneRect(buttons.constLast());
+        const QString where = QStringLiteral("%1: %2 buttons, the last at %3,%4 %5x%6 in a window %7x%8")
+            .arg(name).arg(buttons.size()).arg(last.x()).arg(last.y()).arg(last.width()).arg(last.height())
+            .arg(dialogWindow->width()).arg(dialogWindow->height());
+        QVERIFY2(qAbs(dialogWindow->width() - last.right() - inset) <= 1.0, qPrintable(where));
+        QVERIFY2(qAbs(dialogWindow->height() - last.bottom() - inset) <= 1.0, qPrintable(where));
+        for (QQuickItem *button : buttons) {
+            QVERIFY2(qAbs(sceneRect(button).top() - last.top()) <= 1.0, qPrintable(where));
+        }
+        if (test.leftButton) {
+            QVERIFY2(qAbs(sceneRect(buttons.constFirst()).left() - inset) <= 1.0,
+                     qPrintable(where + QStringLiteral(", the first at %1").arg(sceneRect(buttons.constFirst()).left())));
+        }
+        // A compact dialog's content starts on the same inset.
+        if (QQuickItem *body = visibleNamed(dialogWindow, QStringLiteral("dialogBody"))) {
+            QCOMPARE(sceneRect(body).left(), inset);
+            QCOMPARE(sceneRect(body).top(), inset);
+            QVERIFY2(qAbs(last.top() - sceneRect(body).bottom() - inset) <= 1.0,
+                     qPrintable(where + QStringLiteral(", the content ends at %1").arg(sceneRect(body).bottom())));
+        }
+        if (!test.opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY2(!dialogWindow->isVisible(), test.name);
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+    editor.close();
 }
 
 void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {
