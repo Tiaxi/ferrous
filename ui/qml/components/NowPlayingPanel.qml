@@ -6,7 +6,6 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
-import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/PathUtils.js" as PathUtils
 
@@ -56,7 +55,11 @@ import "../logic/PathUtils.js" as PathUtils
 //   move's last part, once it is past its fastest, so no text slides over
 //   the moving rows (#373 H12 Z7) nor pops in at its end (#373 H28 V6).
 //   Going back to nothing
-//   loaded, as when the queue is cleared, shrinks it back. With
+//   loaded, as when the queue is cleared or runs out, is the same backwards
+//   (#373 H30: the cover and lines went in one frame, the tile's own disc
+//   mark alone in the band as it shrank): the track that showed stays, its
+//   cover or stand-in and its lines (heldTrack), while it shrinks, the lines
+//   fading out as they faded in and the row back over the move's end. With
 //   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
 //   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour,
@@ -245,6 +248,23 @@ Item {
     // height the panel shrinks from, which its lines, gone with the
     // track, no longer give.
     property real heldLayoutHeight: 0
+    // The track as it last showed, {coverPath, lines} (see followTrack):
+    // what the panel shows while it shrinks into the compact row, as the
+    // bridge tells nothing of the track any more, before or after the
+    // panel is idle (#373 H30). Kept while a track plays, so that it is the
+    // one that showed whichever the bridge clears first; gone once the
+    // panel has shrunk.
+    property var heldTrack: null
+    // Whether the panel shows the track that went, as it shrinks.
+    readonly property bool holdsTrack: root.idle && root.presence > 0 && root.heldTrack !== null
+    // The lines and the cover the panel shows: the playing track's, or the
+    // one's that went while the panel shrinks.
+    readonly property var shownLines: root.holdsTrack ? root.heldTrack.lines : root.trackLines
+    readonly property string shownCoverPath: root.holdsTrack ? root.heldTrack.coverPath : root.coverPath
+    onPresenceChanged: {
+        if (root.idle && root.presence <= 0)
+            root.heldTrack = null
+    }
     readonly property NumberAnimation presenceAnimation: NumberAnimation {
         objectName: "nowPlayingPresenceAnimation"
         target: root
@@ -901,6 +921,10 @@ Item {
         }
         const was = root.shown
         root.shown = next
+        // A track, as it shows, for the panel to hold as it shrinks: only
+        // one with a path, as the bridge clears the path with the rest.
+        if (next.trackKey.length > 0)
+            root.heldTrack = { coverPath: next.coverPath, lines: next.lines }
         if (was === null || was.trackKey.length === 0 || next.trackKey.length === 0) {
             // Into or out of "Nothing playing": at once, as the idle
             // placeholder is not a cover nor its lines a track's.
@@ -1181,21 +1205,10 @@ Item {
         font.pointSize: root.uiPalette.smallPointSize
     }
 
-    // The tile's own mark, which shows only while the tile grows from the
-    // compact row before the cover is known, or shrinks into it: a third
-    // of the tile, and never over 48 px, more with a larger font. Even, so
-    // that it sits on whole pixels at the centre of the tile.
-    readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
-        root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)) / 2)
-    // The tile with no cover in it: the sidebar's view colour, as
-    // one surface with it (#373 H6: a lighter tile read as a broken image),
-    // and its mark, the tertiary text colour mixed into the view, neutral,
-    // at 3:1 on it, the least for a graphic to read (#373 H7: at 38% it was
-    // 2:1 and faint), with a margin rendering cannot round away.
+    // The tile with nothing in it, at rest under the compact row: the
+    // sidebar's view colour, as one surface with it (#373 H6: a lighter
+    // tile read as a broken image).
     readonly property color placeholderColor: root.uiPalette.view
-    readonly property color placeholderMarkColor: root.uiPalette.readableOn(
-        ColorUtils.mixColor(root.uiPalette.view, root.uiPalette.textTertiary, 0.38),
-        [root.uiPalette.view], 3.1)
 
     // The room the narrow lines keep, beside the cover or under it,
     // whatever the track has text for, from the fonts alone (#373 H28: it
@@ -1249,10 +1262,13 @@ Item {
     // in the font of `metrics` and elided on the last, is broken within a
     // word all the same: where a word is wider than the line, or where the
     // last line is cut off and its first word does not fit before the
-    // ellipsis. Breaking it anywhere then fills the first line (#373 H29
-    // W3: at 24 pt in the narrow window "A Remarkably Long …" took "A"
-    // alone on the first line, as "A Remarkably" did not fit it, and was
-    // cut off at "Remarka…" on the second, as "Remarkably…" did not).
+    // ellipsis (#373 H29 W3: at 24 pt in the narrow window "A Remarkably
+    // Long …" took "A" alone on the first line, as "A Remarkably" did not
+    // fit it, and was cut off at "Remarka…" on the second, as "Remarkably…"
+    // did not). Such a title steps down a size (FadingLine's
+    // `wordsPointSize`), and where it is cut within a word at that size
+    // too, it is hyphenated (_hyphenated) rather than broken anywhere
+    // (#373 H30: "A Remarka / bly Long …" split the word with no mark).
     function _cutWithinAWord(text, width, lines, metrics) {
         // Read the font, for the answer to follow it.
         metrics.font
@@ -1279,6 +1295,83 @@ Item {
             }
         }
         return false
+    }
+
+    // The hyphen a word broken between lines ends its first part with:
+    // U+2010, which is never a minus, nor a place to break again.
+    readonly property string wordBreakHyphen: "\u2010"
+    // The least of a word on either side of its hyphen, in characters.
+    readonly property int hyphenatedHead: 4
+    readonly property int hyphenatedTail: 3
+
+    // `text` as laid out onto `lines` lines `width` wide in the font of
+    // `metrics`, the last elided, where it is cut within a word
+    // (_cutWithinAWord): the words of the lines before the last as Text
+    // wraps them, but the word that would be cut, which breaks with a
+    // hyphen where its first part fills the line, at least hyphenatedHead
+    // characters of it before the hyphen and hyphenatedTail after it, the
+    // line ending there ("\n"). The rest, on the last line, is elided as
+    // usual. `text` as it is where it is not cut within a word, or where
+    // its word has no such break.
+    function _hyphenated(text, width, lines, metrics) {
+        // Read the font, for the answer to follow it.
+        metrics.font
+        if (!root._cutWithinAWord(text, width, lines, metrics))
+            return text
+        const fits = line => metrics.advanceWidth(line) <= width
+        const words = text.split(/\s+/).filter(word => word.length > 0)
+        const laid = []
+        let current = ""
+        let index = 0
+        let broken = false
+        while (index < words.length && laid.length < lines - 1) {
+            const word = words[index]
+            const joined = current.length > 0 ? current + " " + word : word
+            if (fits(joined)) {
+                current = joined
+                ++index
+                continue
+            }
+            // The word goes past the line: on the next one it is cut too
+            // where it is wider than a line, or where that line is the last
+            // and is cut off before the word with the ellipsis fits.
+            const nextIsLast = laid.length + 1 === lines - 1
+            const cut = !fits(word)
+                || (nextIsLast && !fits(words.slice(index).join(" ")) && !fits(word + "…"))
+            const at = cut ? root._hyphenPoint(word, current, fits) : 0
+            if (at > 0) {
+                laid.push((current.length > 0 ? current + " " : "") + word.slice(0, at) + root.wordBreakHyphen)
+                words[index] = word.slice(at)
+                current = ""
+                broken = true
+            } else if (current.length > 0) {
+                laid.push(current)
+                current = ""
+            } else {
+                // A word wider than a line with no break of its own.
+                return text
+            }
+        }
+        if (!broken)
+            return text
+        const rest = [current].concat(words.slice(index)).filter(part => part.length > 0)
+        return laid.concat(rest.length > 0 ? [rest.join(" ")] : []).join("\n")
+    }
+
+    // Where `word` breaks with a hyphen after `before`, the start of its
+    // line, so that the line fills (`fits`): the most characters of it
+    // that fit with the hyphen, at least hyphenatedHead and leaving at least
+    // hyphenatedTail, never within a surrogate pair; 0 for none.
+    function _hyphenPoint(word, before, fits) {
+        const start = before.length > 0 ? before + " " : ""
+        for (let at = word.length - root.hyphenatedTail; at >= root.hyphenatedHead; --at) {
+            const code = word.charCodeAt(at)
+            if (code >= 0xDC00 && code <= 0xDFFF)
+                continue
+            if (fits(start + word.slice(0, at) + root.wordBreakHyphen))
+                return at
+        }
+        return 0
     }
 
     // A text of a line (`wholeText`), as each of its layers draws it:
@@ -1315,7 +1408,19 @@ Item {
         // The height the tail adds on a line of its own.
         readonly property real tailLineHeight: lineText.tailOnItsOwnLine ? tailText.implicitHeight : 0
 
-        text: lineText.parts[0]
+        // The text without its tail, before any hyphen (_hyphenated).
+        readonly property string bodyText: lineText.parts[0]
+        // A line that keeps its words whole (FadingLine's
+        // `wordsPointSize`): a text the line's own size would cut within a
+        // word steps down to that size, each text on its own, so a text
+        // going out in a fade keeps the size it showed at.
+        readonly property bool stepsDown: lineText.owner.wordsPointSize > 0
+            && root._cutWithinAWord(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount,
+                                    ownSizeMetrics)
+        // Where it is cut within a word anyway, it breaks with a hyphen.
+        text: lineText.owner.breaksLongWords
+            ? root._hyphenated(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
+            : lineText.bodyText
         width: owner.width
         // On the foot of the line's seat, where it has one (see FadingLine's
         // seatHeight): each text by its own height, so a layer that fades
@@ -1325,16 +1430,10 @@ Item {
         y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
-        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap
-            : lineText.wrapsAnywhere ? Text.WrapAnywhere : Text.Wrap
-        // Where the text is broken within a word anyway, it breaks
-        // anywhere, so that the first line fills; otherwise between words
-        // (see _cutWithinAWord).
-        readonly property bool wrapsAnywhere: lineText.owner.breaksLongWords
-            && root._cutWithinAWord(lineText.text, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
+        wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap : Text.Wrap
         textFormat: Text.PlainText
         font.family: root.uiPalette.baseFont.family
-        font.pointSize: owner.pointSize
+        font.pointSize: lineText.stepsDown ? owner.wordsPointSize : owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
         color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
@@ -1357,6 +1456,14 @@ Item {
         FontMetrics {
             id: tailMetrics
             font: lineText.font
+        }
+        // The line's own size, which the text steps down from.
+        FontMetrics {
+            id: ownSizeMetrics
+            font.family: lineText.font.family
+            font.pointSize: lineText.owner.pointSize
+            font.weight: lineText.owner.weight
+            font.features: lineText.owner.features
         }
 
         Text {
@@ -1411,9 +1518,13 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
-        // Whether a text that is broken within a word anyway breaks
-        // anywhere, rather than between words (see _cutWithinAWord).
+        // Whether a text that is broken within a word anyway breaks with a
+        // hyphen rather than anywhere (see _hyphenated).
         property bool breaksLongWords: false
+        // The size a text that the line's own size would cut within a word
+        // takes, so that its words stay whole; 0 for none (see
+        // _cutWithinAWord).
+        property real wordsPointSize: 0
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
         // line on the cover's foot (#373 H29 W1).
@@ -1704,8 +1815,11 @@ Item {
             layoutSize: root.coverSize
             opacity: root.coverOpacity
             uiBridge: root.uiBridge
-            idle: root.idle
-            coverPath: root.coverPath
+            // While the panel shrinks into the compact row, the track that
+            // went, its cover or stand-in, and nothing to open or focus.
+            idle: root.idle && root.presence <= 0
+            enabled: !root.idle
+            coverPath: root.shownCoverPath
             // The size it loads its image at, whatever the place's size.
             coverSourceSize: Math.max(256, root.width)
             // No cover: the stand-in, its mark on the plot's floor, and in
@@ -1715,8 +1829,6 @@ Item {
             standInEdgeColor: root.uiPalette.themeIsDark ? "transparent" : root.uiPalette.plotFloorEdge
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
-            placeholderGlyphColor: root.placeholderMarkColor
-            placeholderGlyphSize: root.coverMarkSize
             hoverVeilColor: root.uiPalette.hover
             focusRingColor: root.uiPalette.focusRing
             // The sidebar's, which shows around the cover.
@@ -1796,7 +1908,7 @@ Item {
         ColumnLayout {
             id: wideColumn
             objectName: "nowPlayingWideText"
-            visible: root.wideRoom && !root.idle
+            visible: root.wideRoom && (!root.idle || root.holdsTrack)
             x: root.textInset
             // Under the cover's place, with which it moves while that grows.
             y: root._whileGrowing(root.footTop + root.wideTextTop)
@@ -1811,7 +1923,7 @@ Item {
                 id: wideTitle
                 lineKey: "title"
                 name: "Title"
-                text: root.trackLines.title
+                text: root.shownLines.title
                 pointSize: root.wideTitlePointSize
                 weight: Font.DemiBold
                 keepsRow: true
@@ -1820,14 +1932,14 @@ Item {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
-                text: root.trackLines.artistAlbum
+                text: root.shownLines.artistAlbum
                 keepsRow: true
             }
             FadingLine {
                 id: wideDetails
                 lineKey: "details"
                 name: "Details"
-                text: root.trackLines.details
+                text: root.shownLines.details
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
                 keepsRow: true
@@ -1841,7 +1953,7 @@ Item {
         Column {
             id: narrowColumn
             objectName: "nowPlayingNarrowText"
-            visible: !root.wideRoom && !root.idle
+            visible: !root.wideRoom && (!root.idle || root.holdsTrack)
             // Beside the cover or under it; in the large-font header, the
             // title beside it and the rest under it.
             x: root.narrowStacked ? root.textInset : root.narrowLayoutCoverSize + root.textInset
@@ -1862,11 +1974,17 @@ Item {
                 id: narrowTitle
                 lineKey: "title"
                 name: "NarrowTitle"
-                text: root.trackLines.title
+                text: root.shownLines.title
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
                 breaksLongWords: true
+                // In the large-font header, a title the heading's size
+                // would cut within a word in its two lines takes the base
+                // size instead, DemiBold, with its words whole: "A
+                // Remarkably / Long Track Ti…" rather than "A Remarka / bly
+                // Long …" (#373 H30). Its seat stays as it is.
+                wordsPointSize: root.largeHeader ? root.uiPalette.basePointSize : 0
                 // In the large-font header, a title on one line on the
                 // cover's foot, where a title on two ends, so the header
                 // reads as one stack down to the lines under it (#373 H29
@@ -1896,7 +2014,7 @@ Item {
                 id: narrowArtist
                 lineKey: "artist"
                 name: "NarrowArtist"
-                text: root.trackLines.artist
+                text: root.shownLines.artist
                 pointSize: root.uiPalette.smallPointSize
                 // One line, elided, with the whole of it in the tooltip.
                 // Under the cover the title and the artist share their room:
@@ -1913,7 +2031,7 @@ Item {
                 id: narrowAlbum
                 lineKey: "narrowAlbum"
                 name: "NarrowAlbum"
-                text: root.trackLines.narrowAlbum
+                text: root.shownLines.narrowAlbum
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
                 // Under the large-font header, a step below the artist and
@@ -1939,7 +2057,7 @@ Item {
                 id: narrowDetails
                 lineKey: "narrowDetails"
                 name: "NarrowDetails"
-                text: root.trackLines.narrowDetails
+                text: root.shownLines.narrowDetails
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0

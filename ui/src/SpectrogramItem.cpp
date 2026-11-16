@@ -6322,10 +6322,12 @@ void SpectrogramItem::updateRestGridOverlayLocked(int width, int height) {
     // lane's label, or within kPlateReach under or over it, ends, or
     // starts, kPlateGap clear of it, rather than run along its edge (#373
     // H29 W4: the first line ran along the switch's foot, 1 px under it).
-    // Every tick keeps its line. The plates' rects are logical, with their
-    // 1 px edges.
+    // One rule for every lane: within 8 px rather than 4 (#373 H30: at
+    // 1600x1000 the first lane's top line, 4 px under its label, ran on
+    // while the second's, 3 px under its, was cut). Every tick keeps its
+    // line. The plates' rects are logical, with their 1 px edges.
     constexpr double kPlateGap = 6.0;
-    constexpr double kPlateReach = 4.0;
+    constexpr double kPlateReach = 8.0;
     const double logicalWidth = static_cast<double>(width) / scale;
     const QRectF corner = m_reservedCorner.isEmpty()
         ? QRectF()

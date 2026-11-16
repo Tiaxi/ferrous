@@ -749,11 +749,25 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         const Painted &shown = m_painted[static_cast<std::size_t>(lane)];
         const double scaleTop = meterTop + kLampHeight + 1.0;
         const double scaleHeight = std::max(0.0, meterBottom - scaleTop);
-        if (!m_active || scaleHeight <= 0.0) {
-            for (int i = 2; i < kNodesPerLane; ++i) {
-                if (i == kRampNode) nextRamp(QRectF(), scaleHeight * dpr, 0);
-                else next(QRectF(), m_backgroundColor);
+        // The marks' ticks, across the track, each in the upper row of its
+        // gap in the ladder.
+        const auto nextMarks = [&]() {
+            const std::vector<int> gaps = scaleHeight > 0.0 ? markGaps(scaleHeight) : std::vector<int>{};
+            for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
+                const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
+                next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
             }
+        };
+        if (!m_active || scaleHeight <= 0.0) {
+            // At rest the marks alone, where they are while playing, with
+            // no lamp, fill or peak: a meter waiting rather than a blank
+            // trough (#373 H30: at the first run it read as a scrollbar's).
+            next(QRectF(), m_backgroundColor);
+            next(QRectF(), m_backgroundColor);
+            nextRamp(QRectF(), scaleHeight * dpr, 0);
+            nextMarks();
+            next(QRectF(), m_backgroundColor);
+            next(QRectF(), m_backgroundColor);
             continue;
         }
         next(bar(meterTop, kLampHeight), shown.clip ? m_clipColor : m_clipOffColor);
@@ -763,13 +777,7 @@ QSGNode *LevelMeterItem::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *
         // foot (#373 H14 G3), of one colour.
         const double fill = shown.fill / dpr;
         nextRamp(bar(meterBottom - fill, fill), scaleHeight * dpr, shown.fill);
-        // The marks' ticks, across the track, each in the upper row of its
-        // gap in the ladder.
-        const std::vector<int> gaps = markGaps(scaleHeight);
-        for (std::size_t i = 0; i < std::size(kMarksDb); ++i) {
-            const double y = i < gaps.size() ? std::max(scaleTop, meterBottom - gaps[i] - kMarkGap) : 0.0;
-            next(i < gaps.size() ? track(y, 1.0) : QRectF(), m_tickColor);
-        }
+        nextMarks();
         // The 2 px tick is centred on its level, inside the scale. On the
         // fill, a 1 px gap under it keeps it a mark of its own, whatever
         // the fill's colour.

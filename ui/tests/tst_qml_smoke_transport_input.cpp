@@ -1084,11 +1084,15 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates_data() {
 }
 
 // The never-played pane's rest lines keep clear of the plates over it: a
-// line on a row beside the mode switch, or within 4 px under or over it,
+// line on a row beside the mode switch, or within 8 px under or over it,
 // ends 6 px before the switch, and one beside a lane's label starts 6 px
 // after it, rather than run along a plate's edge (#373 H29 W4: per channel
-// the first line ran along the switch's foot, 1 px under it). Every tick
-// keeps its line. The seam between the lanes at rest is a 3 px groove in
+// the first line ran along the switch's foot, 1 px under it). One rule for
+// both lanes (#373 H30: at 1600x1000 the first lane's top line, 4 px under
+// its label, ran on, while the second's, 3 px under its, was cut): per
+// channel at 1600x1000 each lane's top line starts after its label; at
+// 1000x720 no line is within 4 to 8 px of a plate, so nothing there
+// changed. Every tick keeps its line. The seam between the lanes at rest is a 3 px groove in
 // the plot's deep violet, centred on the 1 px seam and drawn over the
 // lanes, whose heights stay; playing, the seam is 1 px again.
 void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
@@ -1148,19 +1152,33 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
         labels.push_back(sceneRectOf(label).adjusted(-1, -1, 1, 1));
     }
     int shortened = 0;
+    // The lanes whose top line starts after their label.
+    int topLinesAfterALabel = 0;
     for (SpectrogramItem *pane : panes()) {
         QTRY_VERIFY(!linesOf(pane).isEmpty());
         const QRectF lane = sceneRectOf(pane);
         const QList<QRectF> lines = linesOf(pane);
         // Every tick keeps its line, most of the lane wide.
         QVERIFY2(lines.size() >= 3, qPrintable(QString::number(lines.size())));
+        double topLine = lane.bottom();
+        for (const QRectF &line : lines) {
+            topLine = std::min(topLine, line.top());
+        }
         for (const QRectF &line : lines) {
             QVERIFY2(line.width() >= lane.width() / 2,
                      qPrintable(QStringLiteral("a line %1 px of %2").arg(line.width()).arg(lane.width())));
-            const auto beside = [&](const QRectF &plate) {
-                return line.bottom() > plate.top() - 4 && line.top() < plate.bottom() + 4
+            const auto within = [&](const QRectF &plate, double reach) {
+                return line.bottom() > plate.top() - reach && line.top() < plate.bottom() + reach
                     && plate.left() < lane.right() && plate.right() > lane.left();
             };
+            const auto beside = [&](const QRectF &plate) { return within(plate, 8); };
+            if (windowSize == QSize(1000, 720)) {
+                for (const QRectF &plate : QList<QRectF>{switchPlate} + labels) {
+                    QVERIFY2(within(plate, 8) == within(plate, 4),
+                             qPrintable(QStringLiteral("a line at y %1, 4 to 8 px from a plate %2 to %3")
+                                            .arg(line.top()).arg(plate.top()).arg(plate.bottom())));
+                }
+            }
             if (beside(switchPlate)) {
                 QVERIFY2(line.right() <= switchPlate.left() - 6 + 0.01,
                          qPrintable(QStringLiteral("a line at y %1 ends at %2, the switch from %3 (to y %4)")
@@ -1180,6 +1198,7 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
                     QVERIFY2(line.left() >= label.right() + 6 - 0.01,
                              qPrintable(QStringLiteral("a line at y %1 starts at %2, the label to %3")
                                             .arg(line.top()).arg(line.left()).arg(label.right())));
+                    topLinesAfterALabel += line.top() == topLine ? 1 : 0;
                 }
             }
             if (!besideLabel) {
@@ -1187,9 +1206,11 @@ void TransportInputSmokeTest::paneAtRestKeepsItsLinesClearOfThePlates() {
             }
         }
     }
-    // Per channel at 1600x1000, the first line is under the switch's foot.
+    // Per channel at 1600x1000, the first line is under the switch's foot,
+    // and each lane's top line under its label, the first lane's too.
     if (viewMode == 1 && windowSize == QSize(1600, 1000)) {
         QVERIFY(shortened > 0);
+        QCOMPARE(topLinesAfterALabel, laneCount);
     }
 
     // The groove between the lanes at rest, per channel.

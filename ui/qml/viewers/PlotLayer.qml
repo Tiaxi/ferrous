@@ -378,8 +378,8 @@ Item {
         width: implicitWidth
         visible: root.meterShown
         laneCount: root.laneCount
-        // Playing: paused or stopped, the column is an empty trough, still
-        // reserved.
+        // Playing: paused, stopped or with no track, the column is a trough
+        // with the marks' ticks alone, still reserved.
         active: root.trackLoaded && root.uiBridge.connected
             && root.uiBridge.playbackState === "Playing"
         sourcePath: visible && root.trackLoaded ? root.uiBridge.currentTrackPath : ""

@@ -39,8 +39,9 @@
 // mode; only the colours, and the frame, differ. The rungs are of one
 // colour, fillColor: on the spectrogram the app icon's harmonic magenta,
 // at 3:1 on the trough (#373 H15 H2). A 2 px peak tick, at full
-// brightness, with a 1 px gap under it where it is on the fill. Without a
-// track, stopped, it is an empty track. A `topSeamColor` that is not transparent draws a 1 px
+// brightness, with a 1 px gap under it where it is on the fill. At rest,
+// without a track or stopped, it is the track with its marks' ticks alone
+// (#373 H30: an empty track read as a scrollbar's). A `topSeamColor` that is not transparent draws a 1 px
 // line across the column's top, which sets it apart from what is above
 // it, as the queue's scrollbar lane over the waveform's meter (#373 H12
 // Z5: in the view's greys the bar read as a piece of that scrollbar).
@@ -50,8 +51,8 @@ class LevelMeterItem : public QQuickItem {
     // The lanes of the visualization, each with its column: one per channel,
     // or one for all of them, which shows the loudest.
     Q_PROPERTY(int laneCount READ laneCount WRITE setLaneCount NOTIFY laneCountChanged)
-    // Whether a track is playing or paused: otherwise the columns are empty
-    // troughs, with no fill, scale or lamp.
+    // Whether the meter reads levels: otherwise the columns are troughs
+    // with the marks' ticks, and no fill, peak or lamp.
     Q_PROPERTY(bool active READ active WRITE setActive NOTIFY activeChanged)
     // The plot's colours (UiPalette's PlotColors).
     Q_PROPERTY(QColor backgroundColor MEMBER m_backgroundColor WRITE setBackgroundColor NOTIFY colorsChanged)
