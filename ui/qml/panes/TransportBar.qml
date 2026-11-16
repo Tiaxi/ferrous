@@ -877,7 +877,10 @@ ToolBar {
         }
 
         // "1:17 / 3:49": the position in the text colour, the length in the
-        // secondary one; "–:––" with nothing playing.
+        // secondary one; "–:–– / –:––" in the secondary colour with nothing
+        // playing, which fills the box as a time does, so the volume keeps
+        // its distance from what is drawn (#373 H33 AA3: "–:––" alone left
+        // a hole of some 45 px before it).
         Item {
             id: transportTime
             objectName: "transportTime"
@@ -930,12 +933,12 @@ ToolBar {
                 Label {
                     id: timeLength
                     objectName: "transportTimeLength"
-                    visible: !transportTime.empty
                     font.features: root.uiPalette.tabularFigures
                     color: root.uiPalette.textSecondary
-                    text: transportTime.empty ? ""
-                        : I18n.i18nc("@info:status the track's length after its position", " / %1",
-                            transportTime.lengthText)
+                    text: I18n.i18nc("@info:status the track's length after its position", " / %1",
+                        transportTime.empty
+                            ? I18n.i18nc("@info:status no time", "–:––")
+                            : transportTime.lengthText)
                 }
             }
         }

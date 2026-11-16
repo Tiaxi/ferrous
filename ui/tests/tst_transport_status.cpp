@@ -631,11 +631,22 @@ void TransportStatusTest::transportLaysOutFlatButtonsSeekTimeAndVolume() {
     QVERIFY(groove != nullptr);
     QCOMPARE(sceneRect(groove).left() - muteGlyphRect.right(), 8.0);
     QCOMPARE(volumeRect.width(), 96.0);
-    // Stopped, "–:––" leaves the box as wide, and the volume where it is.
+    // Stopped, "–:–– / –:––" leaves the box as wide, and the volume where
+    // it is; it fills the box as a time does, in the secondary colour and
+    // tabular figures, rather than leaving a hole before the volume (#373
+    // H33 AA3: "–:––" alone ended some 45 px short of the box's end).
     harness.bridge->setProperty("playbackState", QStringLiteral("Stopped"));
-    QTRY_VERIFY(!length->isVisible());
+    QTRY_COMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
+    QVERIFY(position->isVisible() && length->isVisible());
     QCOMPARE(sceneRect(time), timeRect);
     QCOMPARE(sceneRect(muteGlyph), muteGlyphRect);
+    for (QQuickItem *part : {position, length}) {
+        QVERIFY(sameColor(part->property("color").value<QColor>(), harness.token("textSecondary")));
+        QVERIFY(part->property("font").value<QFont>().featureTags().contains(QFont::Tag("tnum")));
+    }
+    const qreal stoppedRight = sceneRect(length).left() + length->implicitWidth();
+    QVERIFY2(stoppedRight <= timeRect.right() + 0.5 && stoppedRight >= timeRect.right() - 0.15 * timeRect.width(),
+             qPrintable(QStringLiteral("ends at %1, the box at %2").arg(stoppedRight).arg(timeRect.right())));
     harness.bridge->setProperty("playbackState", QStringLiteral("Playing"));
     QCOMPARE(sceneRect(transport).right() - volumeRect.right(), 12.0);
 }
@@ -1473,7 +1484,7 @@ void TransportStatusTest::seekWithoutATrackIsALineAndNoTime() {
     for (const char *name : {"seekPlayhead", "seekUnplayed", "seekWaveform"}) {
         QVERIFY2(!harness.item(QString::fromLatin1(name))->isVisible(), name);
     }
-    QCOMPARE(time->property("text").toString(), QStringLiteral("–:––"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
     QVERIFY(sameColor(position->property("color").value<QColor>(), harness.token("textSecondary")));
     QVERIFY(!seek->isEnabled());
 }
@@ -1715,7 +1726,7 @@ void TransportStatusTest::seekPlayheadThroughAZeroLengthFileThatFails() {
         QVERIFY2(!harness.item(QString::fromLatin1(name))->isVisible(), name);
     }
     QVERIFY(emptyLine->isVisible());
-    QCOMPARE(time->property("text").toString(), QStringLiteral("–:––"));
+    QCOMPARE(time->property("text").toString(), QStringLiteral("–:–– / –:––"));
 
     // The next track, a second long, half played.
     harness.bridge->setProperty("durationSeconds", 1.0);
