@@ -57,6 +57,12 @@ constexpr QRgb kBreezeLightView = 0xffffff;
 constexpr QRgb kGlide = 0xf2b035;
 constexpr QRgb kHarmonic = 0xff7a92;
 constexpr QRgb kThirdHarmonic = 0xe055b4;
+// The magenta of the drawings on the pixel grid, 16 to 24 px at 1x, a step
+// lighter: their 45 degree climbs cover a row and two half rows a column, so
+// that they render as bright as the magenta of the other drawings (#373 hill
+// climb, H27: in kThirdHarmonic they rendered some 2.9:1 on the tile, the
+// 2x drawings' climbs 3.5:1; pixelGridMagentaRendersAsBrightAsAt2x).
+constexpr QRgb kPixelGridThirdHarmonic = 0xea6cc2;
 // H22's deeper magenta at 32 to 48 px, and its rose: no file has them now.
 constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 constexpr QRgb kDarkerHarmonic = 0xf87089;
@@ -184,12 +190,13 @@ bool onPixelGrid(int size) {
 
 // The traces' colours, lowest first: the fundamental and two harmonics from
 // 32 px up, the fundamental and the magenta 3rd harmonic at 16 and 22 px,
-// where a middle trace fused with its neighbours (#373 hill climb, H10, H18).
+// where a middle trace fused with its neighbours (#373 hill climb, H10, H18),
+// its magenta there the pixel grid's (kPixelGridThirdHarmonic).
 std::vector<QRgb> traceColours(int size) {
     if (size >= 32) {
         return {kGlide, kHarmonic, kThirdHarmonic};
     }
-    return {kGlide, kThirdHarmonic};
+    return {kGlide, kPixelGridThirdHarmonic};
 }
 
 // The sizes with a detail tier: at 128 and 256 px a faint 4th harmonic over
@@ -660,6 +667,8 @@ private slots:
     void fundamentalLeadsTheHarmonics();
     void oneMagentaAtEverySize_data();
     void oneMagentaAtEverySize();
+    void pixelGridMagentaRendersAsBrightAsAt2x_data();
+    void pixelGridMagentaRendersAsBrightAsAt2x();
     void topTraceClearsTheCornerFrom64px_data();
     void topTraceClearsTheCornerFrom64px();
     void detailTierAddsAFaint4thHarmonic_data();
@@ -1666,7 +1675,8 @@ void AppIconTest::oneMagentaAtEverySize_data() {
     QTest::addRow("scalable") << FerrousAppIcon::resourcePath(0) << 48;
 }
 
-// The 3rd harmonic is one magenta in every file (#373 hill climb, H23: H22
+// The 3rd harmonic is one magenta in every file, but on the pixel grid at 1x
+// a step lighter (kPixelGridThirdHarmonic) (#373 hill climb, H23: H22
 // deepened it at 32 to 48 px and in their 2x drawings, so that it held apart
 // from the rose in greyscale, and there the top trace was the thinnest and
 // dimmest trace, 2.6:1 as drawn, its hue changing from 48 to 64 px). The
@@ -1689,8 +1699,10 @@ void AppIconTest::oneMagentaAtEverySize() {
     QVERIFY(std::abs(QColor(kHarmonic).hue() - QColor(kDarkerHarmonic).hue()) <= 3);
     const QString source = QString::fromUtf8(contentsOf(path));
     const auto fill = [](QRgb colour) { return QStringLiteral("fill=\"#%1\"").arg(colour & 0xffffff, 6, 16, QLatin1Char('0')); };
-    const QString magenta = QStringLiteral("<path id=\"h3\" ") + fill(kThirdHarmonic);
+    const bool pixelGrid = onPixelGrid(size) && !path.contains(QLatin1String("@2"));
+    const QString magenta = QStringLiteral("<path id=\"h3\" ") + fill(pixelGrid ? kPixelGridThirdHarmonic : kThirdHarmonic);
     QVERIFY2(source.contains(magenta), qPrintable(magenta));
+    QVERIFY(pixelGrid || !source.contains(fill(kPixelGridThirdHarmonic)));
     QVERIFY(!source.contains(fill(kDeepThirdHarmonic)));
     QVERIFY(!source.contains(fill(kDarkerHarmonic)));
     // Rendered where there are three traces: from 32 px, and in the 2x
@@ -1723,6 +1735,77 @@ void AppIconTest::oneMagentaAtEverySize() {
     QVERIFY2(magentaToRose >= 24 && roseToAmber >= 28,
              qPrintable(QStringLiteral("%1, %2, %3").arg(luma(centres[0])).arg(luma(centres[1])).arg(luma(centres[2]))));
     QVERIFY2(contrastRatio(centres[0], kTile) >= 3.0, qPrintable(QString::number(contrastRatio(centres[0], kTile))));
+}
+
+void AppIconTest::pixelGridMagentaRendersAsBrightAsAt2x_data() {
+    QTest::addColumn<int>("size");
+    QTest::addColumn<int>("doubled");
+    QTest::addRow("16px") << 16 << 16;
+    QTest::addRow("22px") << 22 << 22;
+    // The 24 px drawing is the 22 px one moved in; hicolor's 22x22@2 serves
+    // a 24 px slot at 2x.
+    QTest::addRow("24px") << 24 << 22;
+}
+
+// How bright a 3rd harmonic renders on the tile where it climbs and where it
+// runs flat, as contrast ratios on the tile: in each column it crosses, the
+// colour of its brightest run of rows as tall as its ink there (the sum of
+// its coverage, rounded), the file's magenta over the tile in that run's
+// mean coverage; the median over the columns where its top row moves from
+// the column before, and over those where it stays.
+std::pair<double, double> magentaBrightness(const QString &path, int size) {
+    static const QRegularExpression fillOf(QStringLiteral("<path id=\"h3\" fill=\"#([0-9a-f]{6})\""));
+    const QRegularExpressionMatch match = fillOf.match(QString::fromUtf8(contentsOf(path)));
+    const QRgb colour = match.captured(1).toUInt(nullptr, 16);
+    const QImage trace = traceCoverage(path, size).value(QStringLiteral("h3"));
+    std::vector<double> climbs;
+    std::vector<double> flats;
+    int previousTop = -1;
+    for (int x = 0; x < size; ++x) {
+        const Column column = columnOf(trace, x);
+        if (column.sum < 1) {
+            previousTop = -1;
+            continue;
+        }
+        const int rows = std::max(1, static_cast<int>(std::lround(column.sum)));
+        double best = 0;
+        for (int y = 0; y + rows <= size; ++y) {
+            double run = 0;
+            for (int r = 0; r < rows; ++r) {
+                run += alphaAt(trace, x, y + r);
+            }
+            best = std::max(best, run / rows);
+        }
+        const auto channel = [&](int c, int t) { return static_cast<int>(std::lround(best * c + (1 - best) * t)); };
+        const QRgb shown = qRgb(channel(qRed(colour), qRed(kTile)), channel(qGreen(colour), qGreen(kTile)),
+                                channel(qBlue(colour), qBlue(kTile)));
+        (previousTop >= 0 && column.top != previousTop ? climbs : flats).push_back(contrastRatio(shown, kTile));
+        previousTop = column.top;
+    }
+    const auto median = [](std::vector<double> values) {
+        std::sort(values.begin(), values.end());
+        return values.empty() ? 0.0 : values[values.size() / 2];
+    };
+    return {median(climbs), median(flats)};
+}
+
+// On the pixel grid the magenta's 45 degree climbs cover, column by column,
+// a row and two half rows, so that drawn in the other drawings' magenta they
+// rendered dimmer than the 2x drawing's smooth curves, 2.8 to 2.9:1 on the
+// tile against 3.5:1 (#373 hill climb, H27): in its lighter magenta its
+// climbs render within a quarter of a step of its 2x drawing's, some 3.3 to
+// 3.5:1, and its flats, which take the colour whole, still well under the
+// amber, so that the glide leads.
+void AppIconTest::pixelGridMagentaRendersAsBrightAsAt2x() {
+    QFETCH(int, size);
+    QFETCH(int, doubled);
+    const auto [climbs, flats] = magentaBrightness(FerrousAppIcon::resourcePath(size), size);
+    const auto [doubledClimbs, doubledFlats] = magentaBrightness(doubledPath(doubled), 2 * doubled);
+    QVERIFY2(climbs >= doubledClimbs - 0.3 && climbs <= doubledClimbs + 0.1,
+             qPrintable(QStringLiteral("its climbs at %1:1, at 2x %2:1").arg(climbs).arg(doubledClimbs)));
+    QVERIFY2(climbs >= 3.25, qPrintable(QString::number(climbs)));
+    QVERIFY2(flats <= contrastRatio(kGlide, kTile) - 2.0 && flats >= doubledFlats,
+             qPrintable(QStringLiteral("its flats at %1:1, the amber %2:1").arg(flats).arg(contrastRatio(kGlide, kTile))));
 }
 
 void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
