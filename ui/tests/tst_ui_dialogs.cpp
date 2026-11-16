@@ -490,6 +490,8 @@ private slots:
     void configureGroupsItsSettingsOnFourPages();
     void configureFitsTheVisualizationPageAtTheDefaultFont();
     void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
+    void libraryFolderNameDialogShowsItsPath_data();
+    void libraryFolderNameDialogShowsItsPath();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void lastFmPageShowsOnlyTheButtonsThatApply();
@@ -1059,8 +1061,9 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QCOMPARE(nameWindow->transientParent(), window);
     QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
     QTRY_VERIFY(name->hasActiveFocus());
-    // Its placeholder reads at AA, like the tag editor's (#373 H7).
-    QCOMPARE(hex(name->property("placeholderTextColor").value<QColor>()), hex(tokenOf(window, "placeholderText")));
+    // No placeholder, which read as a prompt to type a path (#373 H38):
+    // the help under it says what an empty name does.
+    QCOMPARE(name->property("placeholderText").toString(), QString());
     QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
     QTest::keyClick(nameWindow, Qt::Key_J);
     QTest::keyClick(nameWindow, Qt::Key_Return);
@@ -1605,6 +1608,67 @@ void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
     QTRY_VERIFY(!nameDialog->property("visible").toBool());
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderNameDialogShowsItsPath_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Add and Rename Library Folder show a typical folder's path whole, in a
+// path 24 grid units wide, with the help under the name on one line
+// (#373 H38: a 16-unit path elided a short one beside wide gutters). The
+// name has no placeholder, which read as a prompt to type a path; the
+// help says what an empty name does, which the library does
+// (LibraryRoot::display_name).
+void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const QString path = QStringLiteral("/home/listener/Music/Collection/Library");
+    QObject *dialog = object(window, QStringLiteral("libraryRootNameDialog"));
+    for (const QString &mode : {QStringLiteral("add"), QStringLiteral("rename")}) {
+        QVERIFY(QMetaObject::invokeMethod(window, "openLibraryRootNameDialog", Q_ARG(QVariant, mode),
+                                          Q_ARG(QVariant, path), Q_ARG(QVariant, QStringLiteral("Library"))));
+        QVERIFY(waitForDialogWindow(dialog));
+        QQuickWindow *nameWindow = windowOf(dialog);
+        QQuickItem *body = visibleNamed(nameWindow, QStringLiteral("dialogBody"));
+        QTRY_VERIFY(!layoutPending(body));
+        QQuickItem *pathLabel = visibleNamed(nameWindow, QStringLiteral("libraryRootPathField"));
+        QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
+        QVERIFY(pathLabel != nullptr && name != nullptr);
+        const QString where = QStringLiteral("%1: path %2 wide, window %3 wide")
+            .arg(mode).arg(pathLabel->width()).arg(nameWindow->width());
+        QVERIFY2(!pathLabel->property("truncated").toBool(), qPrintable(where));
+        const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+        const qreal inset = dialog->property("contentPadding").toReal();
+        QVERIFY2(pathLabel->width() + 0.5 >= 24 * gridUnit, qPrintable(where));
+        QVERIFY2(sceneRect(pathLabel).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        QCOMPARE(name->property("placeholderText").toString(), QString());
+        QQuickItem *help = nullptr;
+        for (QQuickItem *candidate : itemsNamed(body, QStringLiteral("formHelpTextLabel"))) {
+            if (candidate->isVisible()) {
+                help = candidate;
+            }
+        }
+        QVERIFY(help != nullptr);
+        QCOMPARE(help->property("text").toString(),
+                 QStringLiteral("Optional. Without a name, the library shows the folder’s path."));
+        if (pointSize <= 10) {
+            QCOMPARE(help->property("lineCount").toInt(), 1);
+        }
+        QVERIFY2(sceneRect(help).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        QTest::keyClick(nameWindow, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+    }
 }
 
 void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {

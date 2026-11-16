@@ -22,7 +22,9 @@ Components.CompactDialogWindow {
     title: root.dialogMode === "rename"
         ? I18n.i18nc("@title:window", "Rename Library Folder")
         : I18n.i18nc("@title:window", "Add Library Folder")
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 30, root.minimumWidth)
+    // As wide as its form, whose path shows a typical folder whole.
+    contentWidth: libraryRootNameForm.implicitWidth
+    defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
     initialFocusItem: libraryRootNameField
 
     onAboutToShow: libraryRootNameField.selectAll()
@@ -65,6 +67,8 @@ Components.CompactDialogWindow {
     }
 
     Kirigami.FormLayout {
+        id: libraryRootNameForm
+        objectName: "libraryRootNameForm"
         Layout.fillWidth: true
 
         // The folder is chosen already: its path to read, not to edit.
@@ -72,8 +76,10 @@ Components.CompactDialogWindow {
             objectName: "libraryRootPathField"
             Kirigami.FormData.label: I18n.i18nc("@label", "Folder:")
             Layout.fillWidth: true
-            // Not as wide as a long path: the form keeps its two columns.
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+            // Wide enough for a typical folder's path whole, and for the
+            // help under the name on one line; a longer path is elided in
+            // the middle (#373 H38). In grid units of the font it is in.
+            Layout.preferredWidth: root.uiPalette.gridUnit * 24
             path: root.pathValue || ""
         }
 
@@ -83,15 +89,13 @@ Components.CompactDialogWindow {
             Kirigami.FormData.label: I18n.i18nc("@label:textbox", "Name:")
             Layout.fillWidth: true
             text: root.nameValue || ""
-            placeholderText: I18n.i18nc("@info:placeholder", "The folder’s path")
-            placeholderTextColor: root.uiPalette.placeholderText
             selectByMouse: true
             onAccepted: root.accept()
         }
 
         Components.FormHelpText {
             uiPalette: root.uiPalette
-            text: I18n.i18nc("@info", "Optional. The library shows the folder by this name.")
+            text: I18n.i18nc("@info", "Optional. Without a name, the library shows the folder’s path.")
         }
     }
 }
