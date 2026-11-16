@@ -84,7 +84,9 @@ import "../logic/PathUtils.js" as PathUtils
 //   line of that room to the artist, or else to the album, to wrap into.
 //
 // The title is over the rest: DemiBold, and a Kirigami heading's size,
-// level 1 under the wide cover and level 2 beside the narrow one; the
+// level 1 under the wide cover and level 2 beside the narrow one, but the
+// base size in a large-font header with little room beside its cover
+// (headerTitleSmall), one size for every track of a layout; the
 // artist and the album are in the text colour, and the details, one line
 // in one colour, in the tertiary one. Details that do not fit leave out
 // what matters least rather than be cut off: the track total, then the
@@ -123,9 +125,29 @@ Item {
     readonly property int narrowCoverSize: 96
     // The large-font header's cover (see largeHeader): as high as two lines
     // of the title beside it, from the fonts alone, so that it spans them,
-    // and never under the narrow 96 px (#373 H28 V1: 108 px at 24 pt).
-    readonly property real headerCoverSize: Math.max(root.narrowCoverSize,
-                                                     Math.round(narrowTitleProbe.implicitHeight))
+    // and never under the narrow 96 px (#373 H28 V1: 108 px at 24 pt; 96 px
+    // where its title is at the base size, headerTitleSmall).
+    readonly property real headerCoverSize: root.headerTitleSmall
+        ? Math.max(root.narrowCoverSize, Math.round(headerSmallTitleProbe.implicitHeight))
+        : root.headingHeaderCoverSize
+    // The header's cover beside a title at the heading's size.
+    readonly property real headingHeaderCoverSize: Math.max(root.narrowCoverSize,
+                                                            Math.round(narrowTitleProbe.implicitHeight))
+    // Whether the large-font header's title is at the base size rather than
+    // the heading's, DemiBold, for every track: where the room beside the
+    // heading-size header's cover is under a dozen characters of the
+    // heading-size title, the panel's own narrowLineMinimum in the title's
+    // font, as at 24 pt in the 360 px sidebar of a 1000 px window, but not
+    // in the 408 px one of a 1600 px window. From the fonts and the width
+    // alone, so every title of a layout is one size (#373 H31 Y1: a long
+    // title stepped down a size on its own, and ranked over the artist by
+    // weight alone on that track).
+    readonly property bool headerTitleSmall: root._roomBeside(root.headingHeaderCoverSize)
+        < 12 * narrowTitleMetrics.averageCharacterWidth
+    // The size of the narrow layout's title: the base size in a large-font
+    // header with a small title, and a level 2 heading's otherwise.
+    readonly property real narrowTitlePointSize: root.largeHeader && root.headerTitleSmall
+        ? root.uiPalette.basePointSize : root.titlePointSize
     // The cover beside the narrow lines (narrowBeside): the block's whole
     // height, flush with its top and with the seam, rather than 96 px with
     // a band of the view under it (#373 H28 V2: 25 px at 10 pt); 96 px
@@ -1195,6 +1217,14 @@ Item {
         font.pointSize: root.titlePointSize
         font.weight: Font.DemiBold
     }
+    // Two lines of the large-font header's title at the base size, which
+    // its cover then spans (headerTitleSmall).
+    LineProbe {
+        id: headerSmallTitleProbe
+        text: "X\nX"
+        font.pointSize: root.uiPalette.basePointSize
+        font.weight: Font.DemiBold
+    }
     LineProbe {
         id: narrowTwoLinesProbe
         text: "X\nX"
@@ -1259,42 +1289,17 @@ Item {
     }
 
     // Whether `text`, wrapped between words onto `lines` lines `width` wide
-    // in the font of `metrics` and elided on the last, is broken within a
-    // word all the same: where a word is wider than the line, or where the
-    // last line is cut off and its first word does not fit before the
-    // ellipsis (#373 H29 W3: at 24 pt in the narrow window "A Remarkably
-    // Long …" took "A" alone on the first line, as "A Remarkably" did not
-    // fit it, and was cut off at "Remarka…" on the second, as "Remarkably…"
-    // did not). Such a title steps down a size (FadingLine's
-    // `wordsPointSize`), and where it is cut within a word at that size
-    // too, it is hyphenated (_hyphenated) rather than broken anywhere
-    // (#373 H30: "A Remarka / bly Long …" split the word with no mark).
-    function _cutWithinAWord(text, width, lines, metrics) {
+    // in the font of `metrics`, has a word wider than the line, which Text
+    // would break anywhere; such a word is hyphenated (_hyphenated)
+    // instead (#373 H30: "A Remarka / bly Long …" split the word with no
+    // mark). A word that only the ellipsis cuts is cut as any line's last
+    // word is: the title is one size for every track (#373 H31 Y1), not a
+    // size down to keep the word whole.
+    function _hasWordWiderThanTheLine(text, width, lines, metrics) {
         // Read the font, for the answer to follow it.
         metrics.font
-        const words = text.split(/\s+/).filter(word => word.length > 0)
-        if (width <= 0 || lines < 2 || words.length === 0)
-            return false
-        if (words.some(word => metrics.advanceWidth(word) > width))
-            return true
-        let line = 1
-        let current = ""
-        for (let index = 0; index < words.length; ++index) {
-            const next = current.length > 0 ? current + " " + words[index] : words[index]
-            if (metrics.advanceWidth(next) <= width) {
-                current = next
-                continue
-            }
-            current = words[index]
-            if (++line === lines) {
-                // The last line, from this word on: cut off within it
-                // where the rest does not fit and the word with the
-                // ellipsis does not either.
-                return metrics.advanceWidth(words.slice(index).join(" ")) > width
-                    && metrics.advanceWidth(words[index] + "…") > width
-            }
-        }
-        return false
+        return width > 0 && lines >= 2
+            && text.split(/\s+/).some(word => word.length > 0 && metrics.advanceWidth(word) > width)
     }
 
     // The hyphen a word broken between lines ends its first part with:
@@ -1305,18 +1310,18 @@ Item {
     readonly property int hyphenatedTail: 3
 
     // `text` as laid out onto `lines` lines `width` wide in the font of
-    // `metrics`, the last elided, where it is cut within a word
-    // (_cutWithinAWord): the words of the lines before the last as Text
-    // wraps them, but the word that would be cut, which breaks with a
+    // `metrics`, the last elided, where it has a word wider than the line
+    // (_hasWordWiderThanTheLine): the words of the lines before the last as
+    // Text wraps them, but a word wider than the line, which breaks with a
     // hyphen where its first part fills the line, at least hyphenatedHead
     // characters of it before the hyphen and hyphenatedTail after it, the
     // line ending there ("\n"). The rest, on the last line, is elided as
-    // usual. `text` as it is where it is not cut within a word, or where
-    // its word has no such break.
+    // usual. `text` as it is where it has no such word, or where its word
+    // has no such break.
     function _hyphenated(text, width, lines, metrics) {
         // Read the font, for the answer to follow it.
         metrics.font
-        if (!root._cutWithinAWord(text, width, lines, metrics))
+        if (!root._hasWordWiderThanTheLine(text, width, lines, metrics))
             return text
         const fits = line => metrics.advanceWidth(line) <= width
         const words = text.split(/\s+/).filter(word => word.length > 0)
@@ -1332,13 +1337,9 @@ Item {
                 ++index
                 continue
             }
-            // The word goes past the line: on the next one it is cut too
-            // where it is wider than a line, or where that line is the last
-            // and is cut off before the word with the ellipsis fits.
-            const nextIsLast = laid.length + 1 === lines - 1
-            const cut = !fits(word)
-                || (nextIsLast && !fits(words.slice(index).join(" ")) && !fits(word + "…"))
-            const at = cut ? root._hyphenPoint(word, current, fits) : 0
+            // The word goes past the line: where it is wider than a line, it
+            // is cut on the next one too.
+            const at = fits(word) ? 0 : root._hyphenPoint(word, current, fits)
             if (at > 0) {
                 laid.push((current.length > 0 ? current + " " : "") + word.slice(0, at) + root.wordBreakHyphen)
                 words[index] = word.slice(at)
@@ -1410,14 +1411,7 @@ Item {
 
         // The text without its tail, before any hyphen (_hyphenated).
         readonly property string bodyText: lineText.parts[0]
-        // A line that keeps its words whole (FadingLine's
-        // `wordsPointSize`): a text the line's own size would cut within a
-        // word steps down to that size, each text on its own, so a text
-        // going out in a fade keeps the size it showed at.
-        readonly property bool stepsDown: lineText.owner.wordsPointSize > 0
-            && root._cutWithinAWord(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount,
-                                    ownSizeMetrics)
-        // Where it is cut within a word anyway, it breaks with a hyphen.
+        // A word wider than the line breaks with a hyphen.
         text: lineText.owner.breaksLongWords
             ? root._hyphenated(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
             : lineText.bodyText
@@ -1433,7 +1427,7 @@ Item {
         wrapMode: owner.maximumLineCount <= 1 ? Text.NoWrap : Text.Wrap
         textFormat: Text.PlainText
         font.family: root.uiPalette.baseFont.family
-        font.pointSize: lineText.stepsDown ? owner.wordsPointSize : owner.pointSize
+        font.pointSize: owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
         color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
@@ -1456,14 +1450,6 @@ Item {
         FontMetrics {
             id: tailMetrics
             font: lineText.font
-        }
-        // The line's own size, which the text steps down from.
-        FontMetrics {
-            id: ownSizeMetrics
-            font.family: lineText.font.family
-            font.pointSize: lineText.owner.pointSize
-            font.weight: lineText.owner.weight
-            font.features: lineText.owner.features
         }
 
         Text {
@@ -1521,10 +1507,6 @@ Item {
         // Whether a text that is broken within a word anyway breaks with a
         // hyphen rather than anywhere (see _hyphenated).
         property bool breaksLongWords: false
-        // The size a text that the line's own size would cut within a word
-        // takes, so that its words stay whole; 0 for none (see
-        // _cutWithinAWord).
-        property real wordsPointSize: 0
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
         // line on the cover's foot (#373 H29 W1).
@@ -1975,16 +1957,11 @@ Item {
                 lineKey: "title"
                 name: "NarrowTitle"
                 text: root.shownLines.title
-                pointSize: root.titlePointSize
+                // One size for every title of the layout (headerTitleSmall).
+                pointSize: root.narrowTitlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
                 breaksLongWords: true
-                // In the large-font header, a title the heading's size
-                // would cut within a word in its two lines takes the base
-                // size instead, DemiBold, with its words whole: "A
-                // Remarkably / Long Track Ti…" rather than "A Remarka / bly
-                // Long …" (#373 H30). Its seat stays as it is.
-                wordsPointSize: root.largeHeader ? root.uiPalette.basePointSize : 0
                 // In the large-font header, a title on one line on the
                 // cover's foot, where a title on two ends, so the header
                 // reads as one stack down to the lines under it (#373 H29
