@@ -59,10 +59,11 @@ Rectangle {
     property color standInFourthHarmonicColor: "#723b9f"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the
-    // glide's 2 px up to a 152 px tile, rising to 4 px at 360 as the mark
-    // grew to the tile's edge (H20); the harmonics 0.8 and 0.65 of it on
-    // the wide mark, as the app icon tapers them, 0.75 on the small.
-    readonly property real standInStroke: Math.min(4.5, 2 + Math.max(0, root.layoutSize - 152) / 104)
+    // glide's 3 px up to a 152 px tile, rising to 6.5 px at 360 (H21: H20's
+    // 2 and 4 px read faint); the harmonics 0.8, 0.65 and 0.5 of it on the
+    // wide mark, as the app icon tapers them, the small mark's upper trace
+    // 2.5 px.
+    readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
     // the tile grows or shrinks, so that the mark is neither drawn again
@@ -175,7 +176,7 @@ Rectangle {
             readonly property size box: Qt.size(1000, 1000)
             readonly property real glideStroke: root.standInStroke
             readonly property real harmonicStroke: root.standInStroke * 0.8
-            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 0.75 : 0.65)
+            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 2.5 / 3 : 0.65)
             readonly property real fourthHarmonicStroke: root.standInStroke * 0.5
             anchors.fill: parent
             clip: true

@@ -685,16 +685,17 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
     }
     // Its strokes by the tile's size, not scaled with it (#373 H16 I6): the
-    // glide 2 px up to 152 px, 4 px at 360 (H20); the harmonics tapering as
-    // the app icon's, 0.8 and 0.65 of it, the small mark's 0.75.
+    // glide 3 px up to 152 px, 6.5 px at 360 (H20: 2 and 4 px; H21: they read
+    // faint); the harmonics tapering as the app icon's, 0.8 and 0.65 of it,
+    // the small mark's upper trace 2.5 px.
     const qreal glide = mark->property("glideStroke").toReal();
-    const qreal wanted = std::min(4.5, 2.0 + std::max(0.0, side - 152.0) / 104.0);
-    if (std::abs(glide - wanted) > 0.01 || (side <= 152 && glide != 2.0) || (side >= 360 && glide < 4.0)) {
+    const qreal wanted = std::min(6.5, 3.0 + std::max(0.0, side - 152.0) * 3.5 / 208.0);
+    if (std::abs(glide - wanted) > 0.01 || (side <= 152 && glide != 3.0) || (side >= 360 && glide < 6.5)) {
         return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
     }
     const qreal high = mark->property("highHarmonicStroke").toReal();
     if (std::abs(mark->property("harmonicStroke").toReal() - 0.8 * glide) > 0.01
-        || std::abs(high - (small ? 0.75 : 0.65) * glide) > 0.01) {
+        || std::abs(high - (small ? 2.5 / 3.0 : 0.65) * glide) > 0.01 || (side <= 152 && std::abs(high - 2.5) > 0.01)) {
         return QStringLiteral("the harmonics %1 and %2 px beside the glide's %3").arg(mark->property("harmonicStroke").toReal())
             .arg(high).arg(glide);
     }
