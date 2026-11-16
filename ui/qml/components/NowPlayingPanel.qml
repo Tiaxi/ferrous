@@ -1288,20 +1288,6 @@ Item {
         return parts.filter(part => part.length > 0).join(separator)
     }
 
-    // Whether `text`, wrapped between words onto `lines` lines `width` wide
-    // in the font of `metrics`, has a word wider than the line, which Text
-    // would break anywhere; such a word is hyphenated (_hyphenated)
-    // instead (#373 H30: "A Remarka / bly Long …" split the word with no
-    // mark). A word that only the ellipsis cuts is cut as any line's last
-    // word is: the title is one size for every track (#373 H31 Y1), not a
-    // size down to keep the word whole.
-    function _hasWordWiderThanTheLine(text, width, lines, metrics) {
-        // Read the font, for the answer to follow it.
-        metrics.font
-        return width > 0 && lines >= 2
-            && text.split(/\s+/).some(word => word.length > 0 && metrics.advanceWidth(word) > width)
-    }
-
     // The hyphen a word broken between lines ends its first part with:
     // U+2010, which is never a minus, nor a place to break again.
     readonly property string wordBreakHyphen: "\u2010"
@@ -1309,21 +1295,29 @@ Item {
     readonly property int hyphenatedHead: 4
     readonly property int hyphenatedTail: 3
 
-    // `text` as laid out onto `lines` lines `width` wide in the font of
-    // `metrics`, the last elided, where it has a word wider than the line
-    // (_hasWordWiderThanTheLine): the words of the lines before the last as
-    // Text wraps them, but a word wider than the line, which breaks with a
+    // `text` as a line lays it out onto `lines` lines `width` wide in the
+    // font of `metrics`, the last `lastWidth` wide, {text, elided}. A word
+    // wider than the line, where the line `breaksLongWords`, breaks with a
     // hyphen where its first part fills the line, at least hyphenatedHead
     // characters of it before the hyphen and hyphenatedTail after it, the
-    // line ending there ("\n"). The rest, on the last line, is elided as
-    // usual. `text` as it is where it has no such word, or where its word
-    // has no such break.
-    function _hyphenated(text, width, lines, metrics) {
+    // line ending there ("\n"), rather than anywhere (#373 H30: "A Remarka
+    // / bly Long …" split the word with no mark); the lines before the last
+    // as Text wraps them. A word only the ellipsis cuts is cut as any
+    // line's last word is (#373 H31 Y1). Where Text would elide the last
+    // line after a space, "Title That …", the panel elides it instead,
+    // without the space, the lines before it ending in "\n", and `elided`
+    // is set (#373 H31 Y6); otherwise Text elides it. `text` as it is where
+    // nothing of this applies, and where a word wider than the line has no
+    // such break, which Text then breaks anywhere.
+    function _laidOut(text, width, lines, lastWidth, breaksLongWords, metrics) {
         // Read the font, for the answer to follow it.
         metrics.font
-        if (!root._hasWordWiderThanTheLine(text, width, lines, metrics))
-            return text
-        const fits = line => metrics.advanceWidth(line) <= width
+        const whole = { text: text, elided: false }
+        if (width <= 0 || lastWidth <= 0 || text.length === 0)
+            return whole
+        const fits = (line, room) => metrics.advanceWidth(line) <= room
+        if (lines <= 1)
+            return fits(text, lastWidth) ? whole : root._elidedWithoutSpace(text, [], lastWidth, metrics) || whole
         const words = text.split(/\s+/).filter(word => word.length > 0)
         const laid = []
         let current = ""
@@ -1332,31 +1326,49 @@ Item {
         while (index < words.length && laid.length < lines - 1) {
             const word = words[index]
             const joined = current.length > 0 ? current + " " + word : word
-            if (fits(joined)) {
+            if (fits(joined, width)) {
                 current = joined
                 ++index
                 continue
             }
-            // The word goes past the line: where it is wider than a line, it
-            // is cut on the next one too.
-            const at = fits(word) ? 0 : root._hyphenPoint(word, current, fits)
-            if (at > 0) {
-                laid.push((current.length > 0 ? current + " " : "") + word.slice(0, at) + root.wordBreakHyphen)
-                words[index] = word.slice(at)
-                current = ""
-                broken = true
-            } else if (current.length > 0) {
+            if (fits(word, width)) {
+                // The word goes onto the next line.
                 laid.push(current)
                 current = ""
-            } else {
-                // A word wider than a line with no break of its own.
-                return text
+                continue
             }
+            // A word wider than a line, cut on this one or the next.
+            const at = breaksLongWords ? root._hyphenPoint(word, current, line => fits(line, width)) : 0
+            if (at <= 0)
+                return whole
+            laid.push((current.length > 0 ? current + " " : "") + word.slice(0, at) + root.wordBreakHyphen)
+            words[index] = word.slice(at)
+            current = ""
+            broken = true
         }
-        if (!broken)
-            return text
-        const rest = [current].concat(words.slice(index)).filter(part => part.length > 0)
-        return laid.concat(rest.length > 0 ? [rest.join(" ")] : []).join("\n")
+        const rest = [current].concat(words.slice(index)).filter(part => part.length > 0).join(" ")
+        const brokenText = { text: laid.concat(rest.length > 0 ? [rest] : []).join("\n"), elided: false }
+        // Ending on a line before the last, at the line's whole width, or
+        // fitting the last.
+        if (laid.length < lines - 1 || fits(rest, lastWidth))
+            return broken ? brokenText : whole
+        return root._elidedWithoutSpace(rest, laid, lastWidth, metrics) || (broken ? brokenText : whole)
+    }
+
+    // `text`, elided on the right to `width` in the font of `metrics` after
+    // the lines `before`, as {text, elided}, where Text would leave a space
+    // before the ellipsis: "Long Track T…", "Title That…" rather than "Title
+    // That …"; null where it would not.
+    function _elidedWithoutSpace(text, before, width, metrics) {
+        const elided = metrics.elidedText(text, Qt.ElideRight, width)
+        let kept = 0
+        while (kept < elided.length && kept < text.length && elided[kept] === text[kept])
+            ++kept
+        const head = elided.slice(0, kept)
+        const trimmed = head.replace(/\s+$/, "")
+        if (kept >= elided.length || trimmed === head)
+            return null
+        return { text: before.concat([trimmed + elided.slice(kept)]).join("\n"), elided: true }
     }
 
     // Where `word` breaks with a hyphen after `before`, the start of its
@@ -1409,12 +1421,16 @@ Item {
         // The height the tail adds on a line of its own.
         readonly property real tailLineHeight: lineText.tailOnItsOwnLine ? tailText.implicitHeight : 0
 
-        // The text without its tail, before any hyphen (_hyphenated).
+        // The text without its tail, before any hyphen or ellipsis.
         readonly property string bodyText: lineText.parts[0]
-        // A word wider than the line breaks with a hyphen.
-        text: lineText.owner.breaksLongWords
-            ? root._hyphenated(lineText.bodyText, lineText.width, lineText.owner.maximumLineCount, tailMetrics)
-            : lineText.bodyText
+        // Laid out by the panel where it is cut off or breaks a word
+        // (_laidOut), the last line as long as the tail leaves it.
+        readonly property var laidOut: root._laidOut(lineText.bodyText, lineText.width,
+            lineText.owner.maximumLineCount, Math.max(0, lineText.width - lineText.tailWidth),
+            lineText.owner.breaksLongWords, tailMetrics)
+        // Whether the text is cut off: by the panel, or by Text itself.
+        readonly property bool elided: lineText.laidOut.elided || lineText.truncated
+        text: lineText.laidOut.text
         width: owner.width
         // On the foot of the line's seat, where it has one (see FadingLine's
         // seatHeight): each text by its own height, so a layer that fades
@@ -1504,15 +1520,15 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
-        // Whether a text that is broken within a word anyway breaks with a
-        // hyphen rather than anywhere (see _hyphenated).
+        // Whether a word wider than the line breaks with a hyphen rather
+        // than anywhere (see _laidOut).
         property bool breaksLongWords: false
         // The height of the box at whose foot each text of the line sits,
         // or 0 for its top: the large-font header's title seats a single
         // line on the cover's foot (#373 H29 W1).
         property real seatHeight: 0
         readonly property bool wraps: line.maximumLineCount > 1
-        readonly property bool truncated: stillText.truncated
+        readonly property bool truncated: stillText.elided
         // The lines the playing track's text takes.
         readonly property int textLineCount: stillText.lineCount
 
