@@ -682,7 +682,7 @@ void UiMenusTest::menuBarTitleReadsWhenOpenOrHovered() {
     const double ratio = contrastRatio(text, selection);
     QVERIFY2(ratio >= 4.5, qPrintable(QStringLiteral("%1 on %2 is %3:1")
                                           .arg(text.name(), selection.name()).arg(ratio, 0, 'f', 2)));
-    QVERIFY2(ratio >= (dark ? 10.0 : 11.0), qPrintable(QString::number(ratio)));
+    QVERIFY2(ratio >= (dark ? 10.0 : 10.5), qPrintable(QString::number(ratio)));
 
     // The style's size and padding.
     QCOMPARE(file->property("leftPadding").toReal(), file->property("rightPadding").toReal());

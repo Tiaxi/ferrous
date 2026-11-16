@@ -8,7 +8,7 @@ import org.kde.kirigami 2.20 as Kirigami
 // show a selection: open, hovered or reached with the keyboard, it takes
 // the selection tint with the text colour on it. The style draws white on
 // a translucent accent there, 2.08:1 in Breeze Light, so the menu the user
-// is in was the hardest word to read (#373 H4); this is 12.5:1 and 11:1.
+// is in was the hardest word to read (#373 H4); this is 10.9:1 and 11:1.
 //
 // Only the label and the background are the app's. The style's item keeps
 // its size and padding, its Alt mnemonics and its keyboard and pointer
