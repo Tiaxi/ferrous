@@ -55,9 +55,10 @@ Rectangle {
     property color standInHighHarmonicColor: "#b04698"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the
-    // glide's 2 px up to a 132 px tile, rising to 3 px at 360 and on; the
-    // harmonics 0.8 and 0.65 of it on the wide mark, 0.75 on the small.
-    readonly property real standInStroke: Math.min(3.5, 2 + Math.max(0, root.layoutSize - 132) / 228)
+    // glide's 2 px up to a 152 px tile, rising to 4 px at 360 as the mark
+    // grew to the tile's edge (H20); the harmonics 0.8 and 0.65 of it on
+    // the wide mark, as the app icon tapers them, 0.75 on the small.
+    readonly property real standInStroke: Math.min(4.5, 2 + Math.max(0, root.layoutSize - 152) / 104)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
     // the tile grows or shrinks, so that the mark is neither drawn again
@@ -143,34 +144,33 @@ Rectangle {
         visible: root.idle
     }
 
-    // The stand-in's mark, centred, 0.55 of the tile wide and as high as
-    // the icon's aspect makes it, and its edge: the app icon's glide and its
-    // 2nd and 3rd harmonics (ferrous.svg's own curves, #373 H19: H14 to H18
+    // The stand-in's mark and its edge: the app icon's glide and its 2nd and
+    // 3rd harmonics (ferrous.svg's own curves, #373 H19: H14 to H18
     // stretched them to 2:1), rising 1 : 2 : 3 from a common start at the
     // lower left, or in a small tile the glide and its 3rd harmonic, as the
-    // icon's small sizes draw them (#373 H14 F2). As in the icon they run
-    // out to the mark's right bound, cut flush there, a crop of a
-    // spectrogram rather than a chart's series ending in round caps (H19).
+    // icon's small sizes draw them (#373 H14 F2). They start a quarter of
+    // the way in and, as in the icon, run out to the tile's right edge, cut
+    // flush there: a crop of a spectrogram, not a chart's series ending in
+    // round caps (H19), nor ending in the tile's free air (H20: they ended
+    // at three quarters of its width).
     // Drawn as shapes, so their strokes keep the width set for the tile's
     // size (standInStroke) as the curves scale to it. Assistive technology
     // hears "No album art" from the keyboard stop over it.
     component StandInMark: Item {
-        id: standIn
 
         Shape {
             id: mark
             objectName: "albumArtStandInMark"
-            // The paths' own box, at the icon's aspect: the icon's 64-unit
-            // drawing from its traces' start to the tile's inner edge, with
-            // 1.25 units around their centre lines, 240 units wide. The
-            // paths run on past its right side, and the clip cuts them there.
-            readonly property size box: Qt.size(240, 212)
+            // The paths' own box, the whole tile, 1000 units a side: the
+            // icon's 64-unit drawing at 12.3 units to the icon's one, from a
+            // start 240 units in, its ink centred on the tile's height. The
+            // paths run on past the tile's right side, and the clip cuts
+            // them there.
+            readonly property size box: Qt.size(1000, 1000)
             readonly property real glideStroke: root.standInStroke
             readonly property real harmonicStroke: root.standInStroke * 0.8
             readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 0.75 : 0.65)
-            anchors.centerIn: parent
-            width: Math.round(standIn.width * 0.55)
-            height: Math.round(width * mark.box.height / mark.box.width)
+            anchors.fill: parent
             clip: true
             preferredRendererType: Shape.CurveRenderer
             antialiasing: true
@@ -187,7 +187,7 @@ Rectangle {
                 strokeColor: root.standInHighHarmonicColor
                 strokeWidth: mark.highHarmonicStroke
                 PathSvg {
-                    path: "M6.70 146.15 C8.26 143.83 9.81 141.62 11.37 139.48 C13.70 136.27 16.04 133.24 18.37 130.35 C22.26 125.54 26.15 121.12 30.03 116.99 C35.48 111.22 40.92 106.01 46.36 101.20 C54.14 94.32 61.92 88.25 69.69 82.69 C79.80 75.47 89.91 69.14 100.02 63.36 C112.46 56.25 124.91 50.00 137.35 44.29 C152.90 37.16 168.46 30.89 184.01 25.17 C202.67 18.31 221.34 12.25 240.00 6.70 C246.22 4.86 252.44 3.07 258.66 1.33"
+                    path: "M240.35 602.49 C243.92 597.72 247.48 593.13 251.05 588.71 C256.39 582.08 261.74 575.81 267.09 569.84 C276.00 559.89 284.91 550.77 293.82 542.24 C306.29 530.30 318.77 519.54 331.24 509.59 C347.28 496.80 363.32 485.36 379.36 474.82 C400.74 460.78 422.13 448.35 443.51 436.98 C468.46 423.72 493.41 411.90 518.36 401.05 C550.44 387.09 582.51 374.74 614.59 363.43 C650.23 350.86 685.87 339.60 721.52 329.22 C766.07 316.24 810.62 304.65 855.17 293.99 C913.45 280.05 971.72 267.70 1030.00 256.40"
                 }
             }
             ShapePath {
@@ -198,7 +198,7 @@ Rectangle {
                 strokeColor: root.standInCompact ? "transparent" : root.standInHarmonicColor
                 strokeWidth: mark.harmonicStroke
                 PathSvg {
-                    path: "M6.70 175.64 C8.26 174.10 9.81 172.62 11.37 171.20 C13.70 169.06 16.04 167.04 18.37 165.11 C22.26 161.90 26.15 158.96 30.03 156.21 C35.48 152.36 40.92 148.89 46.36 145.68 C54.14 141.09 61.92 137.04 69.69 133.34 C79.80 128.53 89.91 124.30 100.02 120.45 C112.46 115.71 124.91 111.54 137.35 107.74 C152.90 102.99 168.46 98.81 184.01 95.00 C202.67 90.42 221.34 86.38 240.00 82.68 C246.22 81.45 252.44 80.26 258.66 79.10"
+                    path: "M240.35 670.09 C243.92 666.90 247.48 663.85 251.05 660.90 C256.39 656.48 261.74 652.30 267.09 648.32 C276.00 641.69 284.91 635.60 293.82 629.92 C306.29 621.96 318.77 614.79 331.24 608.15 C347.28 599.63 363.32 592.00 379.36 584.97 C400.74 575.61 422.13 567.33 443.51 559.75 C468.46 550.91 493.41 543.03 518.36 535.79 C550.44 526.49 582.51 518.25 614.59 510.71 C650.23 502.34 685.87 494.83 721.52 487.90 C766.07 479.25 810.62 471.53 855.17 464.42 C913.45 455.13 971.72 446.90 1030.00 439.36"
                 }
             }
             ShapePath {
@@ -209,7 +209,7 @@ Rectangle {
                 strokeColor: root.standInGlideColor
                 strokeWidth: mark.glideStroke
                 PathSvg {
-                    path: "M6.70 205.14 C8.26 204.37 9.81 203.63 11.37 202.92 C13.70 201.85 16.04 200.84 18.37 199.87 C22.26 198.27 26.15 196.80 30.03 195.42 C35.48 193.50 40.92 191.76 46.36 190.16 C54.14 187.86 61.92 185.84 69.69 183.99 C79.80 181.58 89.91 179.47 100.02 177.54 C112.46 175.17 124.91 173.09 137.35 171.19 C152.90 168.81 168.46 166.72 184.01 164.82 C202.67 162.53 221.34 160.51 240.00 158.66 C246.22 158.04 252.44 157.45 258.66 156.87"
+                    path: "M240.35 737.68 C243.92 736.09 247.48 734.56 251.05 733.09 C256.39 730.88 261.74 728.79 267.09 726.80 C276.00 723.48 284.91 720.44 293.82 717.60 C306.29 713.62 318.77 710.03 331.24 706.72 C347.28 702.45 363.32 698.64 379.36 695.13 C400.74 690.45 422.13 686.30 443.51 682.51 C468.46 678.09 493.41 674.15 518.36 670.54 C550.44 665.88 582.51 661.77 614.59 658.00 C650.23 653.81 685.87 650.05 721.52 646.59 C766.07 642.27 810.62 638.40 855.17 634.85 C913.45 630.20 971.72 626.09 1030.00 622.32"
                 }
             }
         }
