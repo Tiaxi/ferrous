@@ -1151,6 +1151,36 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(waveformSurface->property("laneCount").toInt(), 2);
     QCOMPARE(waveformSurface->property("laneLabels").toStringList(),
              (QStringList{QStringLiteral("L"), QStringLiteral("R")}));
+    // Each lane with its rest lines at half of full scale over and under
+    // its centre, 1 px, faint, about 1.3:1 on the view (#373 H16 I8).
+    const auto restLines = [&]() { return visibleItemsNamed(waveformSurface, QStringLiteral("waveformRestLine")); };
+    QTRY_COMPARE(restLines().size(), 4);
+    {
+        const QColor view = palette->property("view").value<QColor>();
+        const QColor line = palette->property("waveformRestLine").value<QColor>();
+        const auto luminance = [](const QColor &color) {
+            const auto channel = [](double value) {
+                return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+            };
+            return 0.2126 * channel(color.redF()) + 0.7152 * channel(color.greenF()) + 0.0722 * channel(color.blueF());
+        };
+        const double ratio = (std::max(luminance(view), luminance(line)) + 0.05)
+            / (std::min(luminance(view), luminance(line)) + 0.05);
+        QVERIFY2(ratio >= 1.25 && ratio <= 1.45, qPrintable(QString::number(ratio)));
+        const QRectF plot = sceneRectOf(waveformSurface);
+        const double laneHeight = plot.height() / 2;
+        for (int lane = 0; lane < 2; ++lane) {
+            const double centre = plot.top() + std::floor(lane * laneHeight + laneHeight / 2);
+            const double quarter = (laneHeight / 2 - 1) / 2;
+            QList<double> wanted{std::round(centre - quarter), std::round(centre + quarter)};
+            for (QQuickItem *rest : restLines()) {
+                QCOMPARE(rest->height(), 1.0);
+                QCOMPARE(rest->property("color").value<QColor>(), line);
+                wanted.removeIf([&](double y) { return std::abs(sceneRectOf(rest).top() - y) <= 1.0; });
+            }
+            QVERIFY2(wanted.isEmpty(), qPrintable(QStringLiteral("lane %1 lacks a line at %2").arg(lane).arg(wanted.value(0))));
+        }
+    }
     viewer->setProperty("visualizationMode", 0);
     QTRY_VERIFY(spectrogram->isVisible() && spectrogram->opacity() == 1.0);
 
@@ -1166,6 +1196,10 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
     QCOMPARE(sceneRectOf(panes().at(1)), lower);
     QTRY_VERIFY(!visibleItemsNamed(window->contentItem(), QStringLiteral("plotLaneButtons")).isEmpty()
                 || bridge->property("channelButtonsVisibility").toInt() == 0);
+    // The waveform's rest lines gone with the first track.
+    viewer->setProperty("visualizationMode", 1);
+    QTRY_VERIFY(waveformSurface->isVisible());
+    QTRY_VERIFY(restLines().isEmpty());
 }
 
 void TransportInputSmokeTest::visualizationModeSwitchLeavesTheCornerToTheView() {

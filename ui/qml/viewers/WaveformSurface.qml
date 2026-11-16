@@ -130,6 +130,32 @@ Item {
             }
         }
 
+        // Before any audio, each lane's rest lines at half of full scale
+        // over and under its centre line, which the item draws, so the
+        // pane waits as an instrument, as the spectrogram's does with its
+        // rest lines (#373 H16 I8). Gone with the first track, whose lanes
+        // they are in.
+        Repeater {
+            model: root.atRest ? root.laneCount * 2 : 0
+
+            delegate: Rectangle {
+                required property int index
+                // The item's lane: the centre line between its top and
+                // foot, its full scale a pixel inside them.
+                readonly property int lane: Math.floor(index / 2)
+                readonly property real laneTop: lane * waveform.height / root.laneCount
+                readonly property real laneBottom: (lane + 1) * waveform.height / root.laneCount
+                readonly property real centre: Math.floor((laneTop + laneBottom) / 2)
+                readonly property real fullScale: (laneBottom - laneTop) / 2 - 1
+                objectName: "waveformRestLine"
+                x: 0
+                y: Math.round(centre + (index % 2 === 0 ? -1 : 1) * fullScale / 2)
+                width: waveform.width
+                height: 1
+                color: root.uiPalette.waveformRestLine
+            }
+        }
+
         // The only hover handler over the waveform, and on the item itself.
         // The item takes hover for its crosshair, so a handler on a parent
         // never hears of the pointer. A hovered handler on an item above,

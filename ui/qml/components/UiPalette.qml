@@ -250,6 +250,12 @@ QtObject {
     // is plotLaneSeam's neutral one.
     readonly property color plotRestLaneSeam: ColorUtils.drawnOver(
         root._tintOf(Qt.color("#ffffff"), root.plotFloor, 1.45), root.plotFloor)
+    // The never-played waveform's rest lines, at half of full scale over
+    // and under each lane's centre line: the text over the view, the
+    // least in whole percent that is 1.3:1 on it, as the spectrogram's rest
+    // lines are faint on its floor (#373 H16 I8).
+    readonly property color waveformRestLine: ColorUtils.drawnOver(
+        root._tintOf(root.text, root.view, 1.3), root.view)
 
     // The spectrogram is the same dark colour map in both themes, so its
     // set is fixed, on the plot's floor. Silence within a track is still
