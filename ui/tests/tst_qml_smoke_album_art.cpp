@@ -1872,6 +1872,18 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
     QVERIFY2(clickPreviewButton(window, QStringLiteral("albumArtPreviewApplyButton")), at.constData());
     QTRY_VERIFY2(replaceQuestionButton(window, window, QStringLiteral("confirmDialogConfirmButton")) != nullptr,
                  at.constData());
+    // Asked from the preview, the question has its heading: it names the
+    // album, above the details, never a blank line (#373 H37: opened alone,
+    // with no message, it showed one).
+    {
+        QQuickItem *message = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogMessage"));
+        QQuickItem *details = visibleItemNamed(replaceQuestion(window), QStringLiteral("confirmDialogDetails"));
+        QVERIFY2(message != nullptr && details != nullptr, at.constData());
+        const QString text = message->property("text").toString();
+        QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
+                 qPrintable(text));
+        QVERIFY(sceneRectOf(message).bottom() <= sceneRectOf(details).top());
+    }
     QVERIFY(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogConfirmButton")));
     QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{index}));
     QTRY_VERIFY2(!dialog->property("visible").toBool(), at.constData());
