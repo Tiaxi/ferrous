@@ -54,8 +54,11 @@ QtObject {
     // view, a margin over 4.5:1. #a1a9b1 / #697582 (Breeze Light's own is
     // 4.2:1 on white).
     readonly property color placeholderText: root.readableOn(root._inactiveText, [root.view], 4.6)
-    // The artist and album cells of the queue. #c2c2c3 / #5a5c5e.
-    readonly property color textColumn: ColorUtils.mixColor(root.text, root.view, 0.25)
+    // The artist and album cells of the queue: darkened or lightened where
+    // they fall short of 4.5:1 on a selected row under the pointer, as on
+    // light (#373 H35 AC3). #c2c2c3 / #555759 (#5a5c5e as mixed).
+    readonly property color textColumn: root.readableOn(ColorUtils.mixColor(root.text, root.view, 0.25),
+        [root.view, root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered], 4.5)
     // The 1 px line where two regions meet. #383b40 / #d6d9dc.
     readonly property color seam: ColorUtils.mixColor(
         root.chrome, root._inactiveText, root.themeIsDark ? 0.18 : 0.20)
@@ -97,9 +100,19 @@ QtObject {
     // 1.34:1 on the view, between rowHover's 1.45:1 / 1.31:1 and the
     // selection's 1.6:1 / 1.4:1 (#373 H34 AB2: at 20 % and 27 %, #1c3442
     // and #cbe9f9, it was 1.40:1 / 1.27:1, under the hover). The playing
-    // amber is 6.3:1 / 4.9:1 on it. #1e3a4a / #bfe4f8.
+    // amber is 6.3:1 / 5.4:1 on it. #1e3a4a / #bfe4f8.
     readonly property color selectionInactive: ColorUtils.mixColor(
         root.view, root.accent, root.themeIsDark ? 0.24 : 0.33)
+    // A selected queue row under the pointer: the text colour over the
+    // selection, active or inactive, so a selected row answers the pointer
+    // as the others do (#373 H35 AC3: hover changed nothing on it). See
+    // _selectionHoverShare: 4 % / 6 % in Breeze, #284555 / #acd5eb; 6 % on
+    // dark took the warning mark under 3:1. The column text and the amber
+    // are made readable on it.
+    readonly property color selectionHovered: ColorUtils.mixColor(
+        root.selection, root.text, root._selectionHoverShare)
+    readonly property color selectionInactiveHovered: ColorUtils.mixColor(
+        root.selectionInactive, root.text, root._selectionHoverShare)
     // The 1 px ring on the focused row: the accent, lighter on dark and
     // darker on light, to stand out from the selection tint. #6cc5f2 / #1a74a8.
     readonly property color focusRing: root.themeIsDark
@@ -128,10 +141,12 @@ QtObject {
     // playing: the playing row's glyph and title, the playing tree row, the
     // name of a collapsed tree row that holds it, and the seek playhead.
     // The light one is darkened to be 4.5:1 on a hovered and a selected
-    // row as well. #f2b035 / #8b4f00.
+    // row as well, and on a selected queue row under the pointer.
+    // #f2b035 / #814900.
     readonly property color now: root.themeIsDark
         ? "#f2b035"
-        : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection], 4.5)
+        : root.readableOn(root._nowLight, [root.view, root.hoveredRow, root.selection,
+                                           root.selectionHovered, root.selectionInactiveHovered], 4.5)
     readonly property color _nowLight: "#955500"
     // The opacity of the amber name of a collapsed tree row that holds the
     // playing track while it is paused: 70%, or more where that is under
@@ -204,6 +219,32 @@ QtObject {
             }
         }
         return ColorUtils.withAlpha(color, 0.3)
+    }
+
+    // The share of the text colour over the selection, active or inactive,
+    // under the pointer: the most, in whole percent up to 6 %, that leaves
+    // the text and the secondary text 4.5:1 on both and an unreadable row's
+    // warning mark, in the negative colour as the status bar's, 3:1, so the
+    // step never costs what the row says. One share for both, so they step
+    // alike. The column text and the playing amber are made readable on
+    // them in turn (`textColumn`, `now`).
+    readonly property real _selectionHoverShare: {
+        const texts = [root.text, root.textSecondary]
+        const selections = [root.selection, root.selectionInactive]
+        for (let percent = 6; percent > 0; --percent) {
+            let readable = true
+            for (let s = 0; readable && s < selections.length; ++s) {
+                const candidate = ColorUtils.mixColor(selections[s], root.text, percent / 100)
+                readable = ColorUtils.contrastRatio(root.negative, candidate) >= 3
+                for (let i = 0; readable && i < texts.length; ++i) {
+                    readable = ColorUtils.contrastRatio(texts[i], candidate) >= 4.5
+                }
+            }
+            if (readable) {
+                return percent / 100
+            }
+        }
+        return 0
     }
 
     // Tertiary text steps up to secondary on a selected row, and to the

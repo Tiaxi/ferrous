@@ -297,6 +297,10 @@ private slots:
     void selectionOutweighsRowHover();
     void hoverAndPressedTintsOnAnotherBackground_data();
     void hoverAndPressedTintsOnAnotherBackground();
+    void selectedQueueRowAnswersHover_data();
+    void selectedQueueRowAnswersHover();
+    void unreadableMarkReadsOnEveryRowBackground_data();
+    void unreadableMarkReadsOnEveryRowBackground();
     void rowBackgroundShowsEachState_data();
     void rowBackgroundShowsEachState();
     void rowBackgroundDrawsTheRingAndTintAsOneRectangle();
@@ -361,7 +365,9 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"textSecondary", QStringLiteral("#aeb7bd"), QStringLiteral("#4f5a63")},
         // Lightened or darkened from the mix to be 4.6:1 on a hovered row.
         {"textTertiary", QStringLiteral("#91989f"), QStringLiteral("#59626d")},
-        {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#5a5c5e")},
+        // Light: darkened from #5a5c5e to be 4.5:1 on a selected queue row
+        // under the pointer (#373 H35 AC3).
+        {"textColumn", QStringLiteral("#c2c2c3"), QStringLiteral("#555759")},
         // The theme's placeholder colour, darkened on light to be 4.6:1 on
         // the view, which Breeze Light's 4.2:1 was not (#373 H6).
         {"placeholderText", QStringLiteral("#a1a9b1"), QStringLiteral("#697582")},
@@ -374,9 +380,10 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
         {"link", QStringLiteral("#3daee9"), QStringLiteral("#1b73a1")},
         {"negative", QStringLiteral("#ed5a6a"), QStringLiteral("#c4293b")},
         {"wave", QStringLiteral("#b9e1f5"), QStringLiteral("#2c566c")},
-        // Light: darkened from #955500 to be 4.5:1 on a hovered list row
-        // and on the selection (#373 H33 AA1: #864c00 on the 1.44:1 hover).
-        {"now", QStringLiteral("#f2b035"), QStringLiteral("#8b4f00")},
+        // Light: darkened from #955500 to be 4.5:1 on a hovered list row,
+        // on the selection (#373 H33 AA1: #864c00 on the 1.44:1 hover), and
+        // on a selected queue row under the pointer (#373 H35 AC3).
+        {"now", QStringLiteral("#f2b035"), QStringLiteral("#814900")},
     };
     for (const Expected &entry : expected) {
         const QColor actual = colorOf(tokens, entry.token);
@@ -986,6 +993,141 @@ void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground() {
     QCOMPARE(std::lround(pressed.alphaF() * 100), long(pressedPercent));
     QVERIFY(contrastRatio(drawnOver(hover, under), under) >= 1.3);
     QVERIFY(contrastRatio(drawnOver(pressed, under), under) >= 1.65);
+}
+
+void UiFoundationsTest::selectedQueueRowAnswersHover_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// A selected queue row under the pointer steps its selection tint toward
+// the text colour, with the hover tint's own fade, active or not; the
+// library's does not (#373 H35 AC3: hover changed nothing on a selected
+// row). The step is the most text, in whole percent up to 6 %, that the
+// text and the secondary text keep 4.5:1 on, and the warning mark 3:1:
+// 4 % on dark, where 5 % took the mark under it, and 6 % on light. It is
+// visible yet under the hover's from the view, and every text a selected
+// row draws, the column text and the playing amber made readable on it,
+// stays 4.5:1 on it.
+void UiFoundationsTest::selectedQueueRowAnswersHover() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, kRowItems), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QQuickItem *background = itemNamed(root.get(), QStringLiteral("rowBackground"));
+    QVERIFY(tokens != nullptr && background != nullptr);
+    QQuickItem *hoverTint = childNamed(background, QStringLiteral("rowBackgroundHover"));
+    QQuickItem *tintRect = childNamed(background, QStringLiteral("rowBackgroundTint"));
+    QVERIFY(hoverTint != nullptr && tintRect != nullptr);
+
+    const QColor view = colorOf(tokens, "view");
+    const QColor text = colorOf(tokens, "text");
+    const QColor hovered = colorOf(tokens, "hoveredRow");
+    const QList<std::pair<const char *, const char *>> selections{{"selection", "selectionHovered"},
+                                                                  {"selectionInactive", "selectionInactiveHovered"}};
+    QVariant number;
+    QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, number),
+                                      Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(true))));
+    const QList<std::pair<QString, QColor>> texts{
+        {QStringLiteral("text"), text},
+        {QStringLiteral("secondary"), colorOf(tokens, "textSecondary")},
+        {QStringLiteral("column"), colorOf(tokens, "textColumn")},
+        {QStringLiteral("now"), colorOf(tokens, "now")},
+        {QStringLiteral("selected number"), number.value<QColor>()},
+    };
+    const double share = tokens->property("_selectionHoverShare").toDouble();
+    QVERIFY2(std::abs(share - (dark ? 0.04 : 0.06)) < 1e-9, qPrintable(QString::number(share)));
+    for (const auto &[selectionToken, hoveredToken] : selections) {
+        const QColor selected = colorOf(tokens, selectionToken);
+        const QColor selectedHovered = colorOf(tokens, hoveredToken);
+        QVERIFY2(channelDistance(selectedHovered, mixed(selected, text, share)) <= 1,
+                 qPrintable(QLatin1String(hoveredToken) + QStringLiteral(" is ") + selectedHovered.name()));
+        // A visible step, toward the text, yet less than the hover's.
+        QVERIFY2(labDistance(selectedHovered, selected) >= 2.0
+                     && labDistance(selectedHovered, selected) < labDistance(hovered, view),
+                 qPrintable(QStringLiteral("%1 is %2 from %3; the hover %4 from the view")
+                                .arg(selectedHovered.name())
+                                .arg(labDistance(selectedHovered, selected))
+                                .arg(selected.name())
+                                .arg(labDistance(hovered, view))));
+        QVERIFY(contrastRatio(selectedHovered, text) < contrastRatio(selected, text));
+        for (const auto &[what, color] : texts) {
+            QVERIFY2(contrastRatio(color, selectedHovered) >= 4.5, qPrintable(describe(what, color, selectedHovered)));
+        }
+    }
+
+    // Under 6 %, a percent more would cost the text or the secondary text
+    // its 4.5:1, or the mark its 3:1, on one of them.
+    if (share < 0.06) {
+        bool costs = false;
+        for (const char *selectionToken : {"selection", "selectionInactive"}) {
+            const QColor more = mixed(colorOf(tokens, selectionToken), text, share + 0.01);
+            costs = costs || contrastRatio(colorOf(tokens, "negative"), more) < 3.0
+                || contrastRatio(text, more) < 4.5 || contrastRatio(colorOf(tokens, "textSecondary"), more) < 4.5;
+        }
+        QVERIFY(costs);
+    }
+
+    // The library's rows: a selected row keeps its tint under the pointer.
+    background->setProperty("selected", true);
+    background->setProperty("hovered", true);
+    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
+
+    // The queue's: it steps to the hovered selection with the hover's fade,
+    // and back.
+    background->setProperty("hovered", false);
+    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    background->setProperty("selectedHover", true);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selection")));
+    background->setProperty("hovered", true);
+    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    QCOMPARE(background->property("selectionHoverLevel").toReal(), 1.0);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionHovered")));
+    background->setProperty("active", false);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactiveHovered")));
+    background->setProperty("hovered", false);
+    QTRY_COMPARE(hoverTint->opacity(), 0.0);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionInactive")));
+    // Selection still changes at once, hovered or not.
+    background->setProperty("active", true);
+    background->setProperty("hovered", true);
+    QTRY_COMPARE(hoverTint->opacity(), 1.0);
+    background->setProperty("selected", false);
+    QCOMPARE(colorOf(tintRect, "color").alphaF(), 0.0f);
+    background->setProperty("selected", true);
+    QVERIFY(sameColor(colorOf(tintRect, "color"), colorOf(tokens, "selectionHovered")));
+}
+
+void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("breeze dark") << true;
+    QTest::newRow("breeze light") << false;
+}
+
+// An unreadable row's warning sign, in the negative colour as the status
+// bar's, reads at 3:1 or more, a graphic's minimum, on every background a
+// row of the library or the queue can have (#373 H35 AC1).
+void UiFoundationsTest::unreadableMarkReadsOnEveryRowBackground() {
+    QFETCH(bool, dark);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    const QColor negative = colorOf(tokens, "negative");
+    for (const char *background :
+         {"view", "hoveredRow", "selection", "selectionInactive", "selectionHovered", "selectionInactiveHovered"}) {
+        const QColor under = colorOf(tokens, background);
+        QVERIFY2(contrastRatio(negative, under) >= 3.0,
+                 qPrintable(describe(QLatin1String(background), negative, under)));
+    }
 }
 
 void UiFoundationsTest::rowBackgroundShowsEachState_data() {

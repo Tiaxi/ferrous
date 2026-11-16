@@ -41,6 +41,7 @@ private slots:
     void queueStateGlyphGrowsWithTheFont_data();
     void queueStateGlyphGrowsWithTheFont();
     void queueDropsFollowTheRowsAfterRowsAboveAreRemoved();
+    void queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows();
     void aRevealDuringTheSavedViewRestoreKeepsSavingTheView();
     void escapeCancelsAQueueRowDrag();
     void aRevealBeforeTheFirstTreeWinsOverTheSavedViewRestore();
@@ -3037,8 +3038,19 @@ QList<int> queueSelection(QObject *controller) {
 } // namespace
 
 void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
+    // A length that is not known, as the transport writes it: en dashes
+    // (#373 H35 AC2), from the bridge and in the row's own fallback.
+    QCOMPARE(formatQueueDuration(-1.0), QStringLiteral("\u2013:\u2013\u2013"));
+    QCOMPARE(formatQueueDuration(std::numeric_limits<double>::infinity()), QStringLiteral("\u2013:\u2013\u2013"));
+    BinaryBridgeCodec::DecodedQueueTrack unknownTrack;
+    unknownTrack.path = QStringLiteral("/music/unknown.flac");
+    unknownTrack.lengthSeconds = -1.0f;
+    QCOMPARE(queueRowFromTrack(unknownTrack).lengthText, QStringLiteral("\u2013:\u2013\u2013"));
     QueueRowsModel rows;
     loadQueueRows(rows, 6);
+    QueueRowData unknownLength = *rows.rowAt(5);
+    unknownLength.lengthText.clear();
+    QVERIFY(rows.updateRow(5, unknownLength));
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
     const QUrl baseUrl = QUrl::fromLocalFile(
@@ -3120,6 +3132,7 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(cell(3, "order")->property("text").toString(), QStringLiteral("4"));
     QCOMPARE(cell(3, "length")->property("text").toString(), QStringLiteral("1:00"));
     QCOMPARE(cell(3, "artist")->property("text").toString(), QString());
+    QCOMPARE(cell(5, "length")->property("text").toString(), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(glyphName(0), QString());
     QCOMPARE(tint(0), QStringLiteral("#00000000"));
     QCOMPARE(tint(1), QStringLiteral("#00000000"));
@@ -3156,12 +3169,24 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(weight(cell(2, "title")), QFont::Normal);
     bridge->setProperty("playbackState", QStringLiteral("Playing"));
 
-    // An unreadable file: a neutral warning glyph and a quieter title.
+    // An unreadable file: the status bar's warning sign, at its size and
+    // in its negative colour, and a quieter title (#373 H35 AC1: Breeze's
+    // dialog-warning as a mask was a solid grey triangle).
     QVERIFY(errors->setProperty("unreadablePaths",
                                 QVariantMap{{QStringLiteral("/music/3.flac"),
                                              QStringLiteral("Cannot read the file")}}));
-    QTRY_COMPARE(glyphName(3), QStringLiteral("dialog-warning"));
-    QCOMPARE(color(glyph(3)), paletteColor("textSecondary"));
+    QTRY_VERIFY(glyphName(3).endsWith(QStringLiteral("/assets/status-warning.svg")));
+    QCOMPARE(color(glyph(3)), paletteColor("negative"));
+    QVERIFY(glyph(3)->property("isMask").toBool());
+    QVariant warningSize;
+    QVERIFY(QMetaObject::invokeMethod(palette, "scaledSize", Q_RETURN_ARG(QVariant, warningSize), Q_ARG(QVariant, 16)));
+    QCOMPARE(glyph(3)->width(), warningSize.toReal());
+    QCOMPARE(glyph(3)->height(), warningSize.toReal());
+    QQuickItem *indicatorCell = cell(3, "indicator");
+    const QPointF warningCentre = glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width() / 2, glyph(3)->height() / 2));
+    QVERIFY(std::abs(warningCentre.x() - (indicatorCell->x() + indicatorCell->width() / 2)) <= 0.5);
+    QVERIFY(std::abs(warningCentre.y() - row(3)->height() / 2) <= 0.5);
+    QVERIFY(glyph(3)->mapToItem(row(3), QPointF(glyph(3)->width(), 0)).x() <= cell(3, "order")->x());
     QCOMPARE(color(cell(3, "title")), paletteColor("textSecondary"));
     QCOMPARE(row(3)->property("unreadableReason").toString(), QStringLiteral("Cannot read the file"));
     QVERIFY(errors->setProperty("unreadablePaths", QVariantMap{}));
@@ -3193,6 +3218,16 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(tint(2), paletteColor("selection"));
     QVERIFY(ring(4));
     QVERIFY(!ring(2));
+    // The pointer over a selected row steps its tint toward the text, with
+    // the hover's fade, and back; the other selected row keeps its own
+    // (#373 H35 AC3).
+    QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
+    QCOMPARE(tint(2), paletteColor("selection"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QTest::mouseMove(window, queueRowPoint(view, 3, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selection"));
+    QCOMPARE(tint(3), QStringLiteral("#00000000"));
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{4}))));
     QTRY_COMPARE(tint(2), QStringLiteral("#00000000"));
@@ -3403,18 +3438,77 @@ void LibraryQueueSmokeTest::queueDropsFollowTheRowsAfterRowsAboveAreRemoved() {
     QCOMPARE(rows.rowAt(topIndex)->title, QStringLiteral("Track 20"));
 
     // A drop in the top row's upper half goes before it, one in the lower
-    // half of the row three down after that row, and the line is there.
+    // half of the row three down after that row, and the line is there:
+    // its 2 px straddle the boundary, one above it, inside the view at
+    // its top (#373 H35 AC4: it lay in the lower row).
     const auto dropAt = [&](double y) {
         QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator", Q_ARG(QVariant, y)));
     };
     dropAt(topRowY + rowHeight * 0.25);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - std::max(viewTop, topRowY)) < 0.5);
+                     - std::max(viewTop, topRowY - 1)) < 0.5);
     dropAt(topRowY + rowHeight * 2.75);
     QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), topIndex + 3);
     QVERIFY(std::abs(dropArea->property("queueDropIndicatorY").toDouble()
-                     - (topRowY + rowHeight * 3)) < 0.5);
+                     - (topRowY + rowHeight * 3 - 1)) < 0.5);
+}
+
+// The drop line runs to the scrollbar's lane while the scrollbar shows,
+// and to the queue's edge when it does not, as the focus ring does (#373
+// H35 AC4: it stopped 8 px short with no scrollbar).
+void LibraryQueueSmokeTest::queueDropLineKeepsTheScrollbarLaneOnlyWhileItShows() {
+    QueueRowsModel rows;
+    loadQueueRows(rows, 4);
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("queueRowsModel"), &rows);
+    const QUrl baseUrl = QUrl::fromLocalFile(
+        QStringLiteral(FERROUS_UI_SOURCE_DIR) + QStringLiteral("/qml/QmlSmokeHarness.qml"));
+    QString errorText;
+    QScopedPointer<QObject> root(createQmlObjectFromSource(engine, kQueuePaneHarness, baseUrl, &errorText));
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    auto *window = qobject_cast<QQuickWindow *>(root.get());
+    QVERIFY(window != nullptr && QTest::qWaitForWindowExposed(window));
+    QObject *controller = root->property("controller").value<QObject *>();
+    QTRY_VERIFY(controller->property("view").value<QObject *>() != nullptr);
+    auto *view = qobject_cast<QQuickItem *>(controller->property("view").value<QObject *>());
+    auto *indicator = root->findChild<QQuickItem *>(QStringLiteral("queueDropIndicator"));
+    auto *scrollBar = root->findChild<QQuickItem *>(QStringLiteral("queueScrollBar"));
+    auto *dropArea = root->findChild<QQuickItem *>(QStringLiteral("playlistDropArea"));
+    QObject *bridge = root->findChild<QObject *>(QStringLiteral("bridge"));
+    QVERIFY(indicator != nullptr && scrollBar != nullptr && dropArea != nullptr && bridge != nullptr);
+    QTRY_VERIFY(view->height() > 0);
+    const double rowHeight = view->property("rowHeight").toDouble();
+    const double lane = scrollBar->property("lane").toDouble();
+    QVERIFY(lane > 0);
+
+    // A short queue: no scrollbar, and the line runs to the edge.
+    QTRY_VERIFY(view->property("count").toInt() == 4);
+    QVERIFY(!scrollBar->isVisible());
+    QCOMPARE(indicator->x(), dropArea->mapFromItem(view, QPointF(0, 0)).x());
+    QCOMPARE(indicator->width(), view->width());
+    QCOMPARE(indicator->height(), 2.0);
+    // Between rows 2 and 3: one pixel above the boundary and one below.
+    QVERIFY(QMetaObject::invokeMethod(dropArea, "updateQueueDropIndicator",
+                                      Q_ARG(QVariant, dropArea->mapFromItem(view, QPointF(0, rowHeight * 2.75)).y())));
+    QCOMPARE(dropArea->property("queueDropInsertIndex").toInt(), 3);
+    const double boundary = dropArea->mapFromItem(view, QPointF(0, rowHeight * 3)).y();
+    QCOMPARE(indicator->y(), boundary - 1);
+    QCOMPARE(indicator->y() + indicator->height() / 2, boundary);
+
+    // A long one: the scrollbar shows, and the line stops at its lane.
+    QVector<QueueRowData> more;
+    for (int number = 4; number < 60; ++number) {
+        QueueRowData data;
+        data.title = QStringLiteral("Track %1").arg(number);
+        data.path = QStringLiteral("/music/%1.flac").arg(number);
+        data.lengthText = QStringLiteral("1:00");
+        more.push_back(data);
+    }
+    QVERIFY(rows.insertRowsAt(4, more));
+    bridge->setProperty("queueLength", 60);
+    QTRY_VERIFY(scrollBar->isVisible());
+    QCOMPARE(indicator->width(), view->width() - lane);
 }
 
 namespace {

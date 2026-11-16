@@ -55,6 +55,12 @@ Rectangle {
     // gaps between the columns come on top. Sizes are those of the design
     // at the default font, and grow with it as the rows do.
     readonly property real sizeScale: root.uiPalette.rowHeight / 26
+    // An unreadable row's mark: the status bar's warning sign, at its
+    // size, in the negative colour, as the status bar marks the same
+    // failure (#373 H35 AC1: Breeze's dialog-warning as a mask was a solid
+    // triangle that read as a transport glyph).
+    readonly property string warningGlyph: Qt.resolvedUrl("../assets/status-warning.svg")
+    readonly property int warningGlyphSize: root.uiPalette.scaledSize(16)
     // Between the number and the title, and between the other columns.
     readonly property real titleGap: Math.round(12 * root.sizeScale)
     readonly property real columnGap: Math.round(16 * root.sizeScale)
@@ -685,7 +691,8 @@ Rectangle {
                     readonly property string titleValue: rowValues.title || ""
                     readonly property string artistValue: rowValues.artist || ""
                     readonly property string albumValue: rowValues.album || ""
-                    readonly property string lengthTextValue: rowValues.lengthText || "--:--"
+                    readonly property string lengthTextValue: rowValues.lengthText
+                        || I18n.i18nc("@info:status no time", "–:––")
                     readonly property string pathValue: rowValues.path || ""
                     readonly property bool isCurrentQueueRow: index === root.uiBridge.playingQueueIndex
                     // Playing or paused: amber marks only what is playing now.
@@ -730,11 +737,12 @@ Rectangle {
                     // current row, stopped, and the warning says why
                     // (#373 H35 AB7: it showed the stop mark, with the
                     // error as its tooltip, until another row played).
+                    readonly property bool showsWarning: !isNow && unreadable
                     readonly property string stateGlyph: isNow
                         ? (root.uiBridge.playbackState === "Paused"
                             ? "media-playback-pause" : "media-playback-start")
-                        : (unreadable
-                            ? "dialog-warning"
+                        : (showsWarning
+                            ? root.warningGlyph
                             : (isCurrentQueueRow ? "media-playback-stop" : ""))
 
                     width: ListView.view.width
@@ -762,6 +770,8 @@ Rectangle {
                         hovered: playlistRowMouseArea.containsMouse
                         hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
+                        // A selected row answers the pointer too.
+                        selectedHover: true
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
                         // The ring stops at the scrollbar's lane while it
@@ -789,15 +799,19 @@ Rectangle {
                             readonly property string glyph: playlistRow.stateGlyph
                             visible: glyph.length > 0
                             anchors.centerIn: parent
-                            width: root.uiPalette.scaledSize(12)
-                            height: root.uiPalette.scaledSize(12)
+                            // The warning at the status bar's size, the
+                            // transport's marks smaller.
+                            width: playlistRow.showsWarning ? root.warningGlyphSize : root.uiPalette.scaledSize(12)
+                            height: width
                             // At its size, which grows with the font
                             // (#373 H9: Kirigami drew the 29 px glyph of a
                             // 24 pt font at 22 px).
                             roundToIconSize: false
                             source: glyph
                             isMask: true
-                            color: playlistRow.isNow ? root.uiPalette.now : root.uiPalette.textSecondary
+                            color: playlistRow.isNow
+                                ? root.uiPalette.now
+                                : (playlistRow.showsWarning ? root.uiPalette.negative : root.uiPalette.textSecondary)
                             // The amber glyph fades in as the old row's
                             // fades out.
                             opacity: playlistRow.isNow ? playlistRow.amberIn : 1
@@ -1255,7 +1269,9 @@ Rectangle {
                     const contentLineY = playlistView.originY + insertIndex * rowHeight
                     const lineY = playlistDropArea.mapFromItem(content, 0, contentLineY).y
                     const top = playlistDropArea.mapFromItem(playlistView, 0, 0).y
-                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY))
+                    // One pixel up, so the 2 px line straddles the
+                    // boundary; inside the view at its ends.
+                    queueDropIndicatorY = Math.max(top, Math.min(top + playlistView.height - 2, lineY - 1))
                 }
 
                 function finishDrop() {
@@ -1309,12 +1325,15 @@ Rectangle {
                 }
             }
 
-            // Where a drop lands: a 2 px line in the focus colour between
-            // the rows, as wide as their tint.
+            // Where a drop lands: a 2 px line in the focus colour, centred
+            // on the boundary between the rows, which runs to the
+            // scrollbar's lane while it shows, as the focus ring does
+            // (#373 H35 AC4).
             Rectangle {
                 objectName: "queueDropIndicator"
                 x: playlistView.x
-                width: Math.max(0, playlistView.width - Kirigami.Units.largeSpacing)
+                width: Math.max(0, playlistView.width
+                    - (playlistVerticalScrollBar.visible ? playlistVerticalScrollBar.lane : 0))
                 height: 2
                 y: playlistDropArea.queueDropIndicatorY
                 color: root.uiPalette.focusRing

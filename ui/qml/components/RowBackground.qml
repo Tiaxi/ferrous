@@ -2,6 +2,7 @@
 
 import QtQuick 2.15
 import org.kde.kirigami 2.20 as Kirigami
+import "../logic/ColorUtils.js" as ColorUtils
 
 // The background of a list row, shared by the library tree and the queue.
 // Put it first in a row delegate, which it fills to the list's right edge,
@@ -21,6 +22,10 @@ import org.kde.kirigami 2.20 as Kirigami
 //   short of it, so the thumb never runs over the ring (#373 H12 Z12);
 //   the tint goes on under the lane.
 // Selection and focus change at once.
+//
+// - selectedHover (the queue's): a selected row under the pointer steps
+//   its selection tint toward the text colour, with the hover tint's own
+//   fade, so it answers the pointer as the other rows do.
 //
 // - opaque: the row also paints the view colour under its tints, so a row
 //   that slides over another while its list moves rows hides it.
@@ -44,10 +49,20 @@ Item {
     // scrollbar's lane while it shows.
     property real focusRingLane: 0
     readonly property real ringLane: root.focused ? root.focusRingLane : 0
+    property bool selectedHover: false
 
-    readonly property color tintColor: root.selected
-        ? (root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive)
-        : "transparent"
+    readonly property color selectionColor: root.active ? root.uiPalette.selection : root.uiPalette.selectionInactive
+    // How far the selection has stepped toward its hovered colour: the
+    // hover tint's opacity, which fades in and out.
+    readonly property real selectionHoverLevel: root.selectedHover ? hoverTint.opacity : 0
+    readonly property color tintColor: !root.selected
+        ? "transparent"
+        : (root.selectionHoverLevel > 0
+            ? ColorUtils.mixColor(root.selectionColor,
+                                  root.active ? root.uiPalette.selectionHovered
+                                              : root.uiPalette.selectionInactiveHovered,
+                                  root.selectionHoverLevel)
+            : root.selectionColor)
 
     anchors.fill: parent
     anchors.rightMargin: root.scrollbarLane
