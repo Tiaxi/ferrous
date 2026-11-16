@@ -4358,15 +4358,28 @@ void AccessibilityTest::plotLayerDrawsWithContrast() {
         // mid-fade, and so did a wait for its fill alone, which reads on its
         // plate early in the mode switch's fade (#373 H28 V3): the chosen
         // fill and the switch's plate the same in two grabs in a row.
+        // The glyphs too: the other segment's glyph was caught mid-fade
+        // under a loaded run, after the fill and the plate had settled.
+        QQuickItem *settleGlyphs[] = {checked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon")),
+                                      unchecked->findChild<QQuickItem *>(QStringLiteral("plotToolButtonIcon"))};
+        QVERIFY(settleGlyphs[0] != nullptr && settleGlyphs[1] != nullptr);
         QColor lastFill;
         QColor lastPlate;
+        QColor lastInk[2];
         const auto settledFill = [&]() {
             const QImage grab = window->grabWindow();
             const QColor fill = drawnAt(grab, window, checked, QPointF(checked->width() / 2, 2.5));
             const QColor plate = drawnAt(grab, window, switchPlate, plateSpot);
-            const bool same = fill == lastFill && plate == lastPlate;
+            bool same = fill == lastFill && plate == lastPlate;
             lastFill = fill;
             lastPlate = plate;
+            for (int i = 0; i < 2; ++i) {
+                QQuickItem *glyph = settleGlyphs[i];
+                const QColor ink = mostContrasting(grab, window, glyph, QRectF(0, 0, glyph->width(), glyph->height()),
+                                                   i == 0 ? fill : plate);
+                same = same && ink == lastInk[i];
+                lastInk[i] = ink;
+            }
             return same && contrastRatio(fill, plate) >= 1.4;
         };
         QTRY_VERIFY_WITH_TIMEOUT(settledFill(), 3000);
