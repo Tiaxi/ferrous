@@ -21,6 +21,7 @@
 #include <QtTest/QtTest>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <utility>
@@ -479,7 +480,13 @@ double widthAcross(const QImage &trace, int start, int end) {
 }
 
 
-// The 16 and 22 px drawings at 2x, for a 16 or 22 px slot at 2x scaling.
+// The sizes with a drawing of their own for their slot at 2x scaling: 16 and
+// 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
+// climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
+// rim where the 16 and 22 px slots had 2).
+constexpr std::array<int, 4> kDoubledSizes{16, 22, 32, 48};
+
+// The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
     return QStringLiteral(":/icons/hicolor/%1x%1@2/apps/ferrous.svg").arg(size);
 }
@@ -523,6 +530,8 @@ private slots:
     void detailTierAddsAFaint4thHarmonic();
     void doubledSlotsDrawTheSmallCompositionsAtTwice_data();
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
+    void doubledSlotsFrom32pxDrawThe64pxComposition_data();
+    void doubledSlotsFrom32pxDrawThe64pxComposition();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
@@ -1549,6 +1558,83 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
     }
 }
 
+void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
+    QTest::addColumn<int>("size");
+    QTest::addRow("32px@2") << 32;
+    QTest::addRow("48px@2") << 48;
+}
+
+// A 32 or 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
+// H21: the theme gave it the scalable drawing, with a 1 device px rim beside
+// the 16 and 22 px slots' 2): the 64 px composition, three smooth traces
+// rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
+// rim, its traces where the 64 px drawing has them, in proportion to the
+// tile inside the rim, and tapering as it does, from 3.8 units at 64 device
+// px and 3.6 at 96.
+void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
+    QFETCH(int, size);
+    const QString path = doubledPath(size);
+    const int doubled = 2 * size;
+    QVERIFY2(QFile::exists(path), qPrintable(path));
+    QCOMPARE(QImageReader(path).size(), QSize(doubled, doubled));
+    const QImage image = render(path, doubled);
+
+    // Twice the 1x tile, its margin and a 2 px rim.
+    const QRect tile = tileOf(image);
+    const QRect singleTile = tileOf(render(FerrousAppIcon::resourcePath(size), size));
+    QCOMPARE(tile, QRect(singleTile.topLeft() * 2, singleTile.size() * 2));
+    const QPoint middle = tile.center();
+    for (int step = 0; step <= 2; ++step) {
+        QCOMPARE(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2), step < 2);
+        QCOMPARE(near(image.pixel(tile.left() + step, middle.y()), kRim, 2), step < 2);
+    }
+    const QRect inside = tile.adjusted(2, 2, -2, -2);
+
+    // The three traces, each a filled outline with its start's round cap.
+    QXmlStreamReader svg(contentsOf(path));
+    QStringList ids;
+    while (!svg.atEnd()) {
+        if (svg.readNext() == QXmlStreamReader::StartElement && svg.name() == QLatin1String("path")) {
+            ids << svg.attributes().value(QLatin1String("id")).toString();
+            QCOMPARE(svg.attributes().value(QLatin1String("d")).toString().count(QLatin1Char('A')), 1);
+        }
+    }
+    QCOMPARE(ids, seriesIds(size));
+    QCOMPARE(tracesOf(image).size(), static_cast<size_t>(3));
+
+    // Where the 64 px drawing has them, in proportion to the tile inside the
+    // rim: each trace's start and end within a hundredth of its height.
+    const QString reference = FerrousAppIcon::resourcePath(64);
+    const QRect referenceInside = insideRim(tileOf(render(reference, 64)));
+    const QHash<QString, QImage> cover = traceCoverage(path, doubled);
+    const QHash<QString, QImage> referenceCover = traceCoverage(reference, 64);
+    const std::vector<double> fundamental{3.8, 3.6};
+    const double unit = inside.width() / 50.0;
+    for (qsizetype n = 0; n < ids.size(); ++n) {
+        const QImage &trace = cover.value(ids[n]);
+        const QImage &referenceTrace = referenceCover.value(ids[n]);
+        const auto [first, last] = columnsOf(trace);
+        QCOMPARE(last, inside.right());
+        const auto at = [](const QImage &t, int x, const QRect &in) {
+            return (columnOf(t, x).centre - in.top()) / in.height();
+        };
+        const int referenceFirst = columnsOf(referenceTrace).first;
+        const double startShare = (referenceFirst + 3 - referenceInside.left() + 0.5) / referenceInside.width();
+        const int start = inside.left() + static_cast<int>(std::lround(startShare * inside.width() - 0.5));
+        QVERIFY2(std::abs(at(trace, start, inside) - at(referenceTrace, referenceFirst + 3, referenceInside)) <= 0.015,
+                 qPrintable(QStringLiteral("%1 starts at %2 of the tile, the 64 px drawing's at %3")
+                                .arg(ids[n]).arg(at(trace, start, inside)).arg(at(referenceTrace, referenceFirst + 3, referenceInside))));
+        QVERIFY2(std::abs(at(trace, last, inside) - at(referenceTrace, referenceInside.right(), referenceInside)) <= 0.01,
+                 qPrintable(QStringLiteral("%1 ends at %2 of the tile, the 64 px drawing's at %3")
+                                .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
+        // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental.
+        const double taper[] = {0.65, 0.8, 1.0};
+        const double wanted = fundamental[size == 32 ? 0 : 1] * taper[n] * unit;
+        const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
+        QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
+    }
+}
+
 void AppIconTest::windowIconHasEachSizesDrawing() {
     const QIcon icon = FerrousAppIcon::icon();
     QVERIFY(!icon.isNull());
@@ -1569,7 +1655,7 @@ void AppIconTest::everySizeInstalls_data() {
     for (const int size : FerrousAppIcon::kSizes) {
         QTest::addRow("%dpx", size) << QStringLiteral("%1x%1").arg(size) << FerrousAppIcon::resourcePath(size) << size;
     }
-    for (const int size : {16, 22}) {
+    for (const int size : kDoubledSizes) {
         QTest::addRow("%dpx@2", size) << QStringLiteral("%1x%1@2").arg(size) << doubledPath(size) << 2 * size;
     }
     QTest::addRow("scalable") << QStringLiteral("scalable") << FerrousAppIcon::resourcePath(0) << 0;
@@ -1600,13 +1686,13 @@ void AppIconTest::iconThemeGivesEachSizeItsDrawing_data() {
     for (const int size : FerrousAppIcon::kSizes) {
         QTest::addRow("%dpx", size) << size << 1;
     }
-    for (const int size : {16, 22}) {
+    for (const int size : kDoubledSizes) {
         QTest::addRow("%dpx@2", size) << size << 2;
     }
 }
 
-// At 1x each size's drawing, and at 2x in a 16 or 22 px slot that size's
-// drawing doubled.
+// At 1x each size's drawing, and at 2x in a 16 to 48 px slot that slot's
+// drawing at 2x.
 void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
     if (installPrefix().isEmpty()) {
         QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
