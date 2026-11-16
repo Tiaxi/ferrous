@@ -62,12 +62,11 @@ import "../logic/PathUtils.js" as PathUtils
 //   fading out as they faded in and the row back over the move's end. With
 //   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
-//   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour,
-//   with the album at its top left, at the lines' inset, as a display
-//   title; never the artist, nor what the lines would say alone, so
-//   without an album, or with one named as the track, the plain colour
-//   (#373 H12 Z1: the album and artist at its foot, or the file's name,
-//   said again what the lines under it say). So the panel
+//   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour
+//   with the app icon's harmonic traces (StandInMark), the same for every
+//   track and never text (#373 H14 F2: an album title in it said again
+//   what the lines under it say, and left the slot blank without one).
+//   So the panel
 //   changes its geometry only between nothing loaded and a track (#373
 //   H9 to H11: a track without a cover had a layout of its own, a mark
 //   beside the title and no cover's place, and a track change between one
