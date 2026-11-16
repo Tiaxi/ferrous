@@ -130,11 +130,14 @@ QRect tileOf(const QImage &image) {
 
 // The sizes drawn as a smaller size's drawing in a larger canvas, as Breeze
 // draws its 24 px icons: 24 px the 22 px drawing moved a pixel in (#373 hill
-// climb, H22). The size whose drawing a size has: its own, or that one.
+// climb, H22), and 36 px the 32 px one moved two. The size whose drawing a
+// size has: its own, or that one.
 int drawnAs(int size) {
     switch (size) {
     case 24:
         return 22;
+    case 36:
+        return 32;
     default:
         return size;
     }
@@ -142,14 +145,16 @@ int drawnAs(int size) {
 
 // Breeze's app-icon margin around the tile at each size: 1 px at 16, 2 px at
 // 22 and 32, 4 px at 48 and 6 px at 64, as Breeze's own app icons sit, and in
-// proportion above; 3 px at 24, the 22 px drawing's 2 and the pixel it moves
-// in.
+// proportion above; 3 px at 24 and 4 at 36, the 22 and 32 px drawings' 2
+// and the pixels they move in.
 int breezeMargin(int size) {
     switch (size) {
     case 16:
         return 1;
     case 24:
         return 3;
+    case 36:
+        return 4;
     case 22:
     case 32:
         return 2;
@@ -174,7 +179,7 @@ bool onPixelGrid(int size) {
 // 32 px up, the fundamental and the magenta 3rd harmonic at 16 and 22 px,
 // where a middle trace fused with its neighbours (#373 hill climb, H10, H18).
 std::vector<QRgb> traceColours(int size) {
-    if (size == 32 || size == 48) {
+    if (drawnAs(size) == 32 || size == 48) {
         return {kGlide, kHarmonic, kDeepThirdHarmonic};
     }
     if (size >= 32) {
@@ -229,7 +234,7 @@ std::vector<int> strokeHeights(int size) {
 // 3 / 2.5 / 2; from 64 px 1 : 0.8 : 0.65 of the fundamental's 3.8 units at
 // 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px).
 std::vector<double> strokeWidths(int size) {
-    switch (size) {
+    switch (drawnAs(size)) {
     case 32:
         return {3.0, 2.0, 2.0};
     case 48:
@@ -511,9 +516,9 @@ double widthAcross(const QImage &trace, int start, int end) {
 // The sizes with a drawing of their own for their slot at 2x scaling: 16 and
 // 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
 // climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
-// rim where the 16 and 22 px slots had 2); 24 px the 22 px slot's moved in
-// (H22).
-constexpr std::array<int, 5> kDoubledSizes{16, 22, 24, 32, 48};
+// rim where the 16 and 22 px slots had 2); 24 and 36 px the 22 and 32 px
+// slots' moved in (H22).
+constexpr std::array<int, 6> kDoubledSizes{16, 22, 24, 32, 36, 48};
 
 // The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
@@ -857,7 +862,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // under the top inner edge, as at 64 px) and the 2 px between the rose
     // and the amber near the start (smallCurvesAreEvenAndEndOnWholeRows) set
     // the heights.
-    const double fan = size == 32 ? 1.3 : 1.5;
+    const double fan = drawnAs(size) == 32 ? 1.3 : 1.5;
     for (size_t n = 1; n < traces.size(); ++n) {
         const auto apart = [&](int x) { return centre(n - 1, x) - centre(n, x); };
         QVERIFY2(apart(end) >= fan * apart(start),
@@ -888,13 +893,13 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     const int third = (end - start) / 3;
     const double first = centre(top, start) - centre(top, start + third);
     const double last = centre(top, end - third) - centre(top, end);
-    QVERIFY2(last > 0 && first >= (size == 32 ? 1.75 : 2.0) * last, qPrintable(QStringLiteral("%1 then %2").arg(first).arg(last)));
+    QVERIFY2(last > 0 && first >= (drawnAs(size) == 32 ? 1.75 : 2.0) * last, qPrintable(QStringLiteral("%1 then %2").arg(first).arg(last)));
     for (size_t n = 0; n < traces.size(); ++n) {
         for (int x = start + 1; x <= end; ++x) {
             QVERIFY2(centre(n, x) <= centre(n, x - 1) + 0.25, qPrintable(QStringLiteral("trace %1 at %2").arg(n).arg(x)));
         }
     }
-    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile).height() / (size == 32 ? 4.0 : 3.0),
+    QVERIFY2(centre(top, start) - centre(top, end) >= insideRim(tile).height() / (drawnAs(size) == 32 ? 4.0 : 3.0),
              qPrintable(QString::number(centre(top, start) - centre(top, end))));
 
     // The strokes taper from the fundamental up, as a harmonic's energy
@@ -924,7 +929,7 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // bottom-left quarter, with ink in its top-left quarter (A left that
     // empty) and its top-right one.
     const QRect ink = boundsWhere(image, traceInk);
-    QVERIFY2(ink.width() >= tile.width() * 0.7 && ink.height() >= tile.height() * (size == 32 ? 0.66 : 0.7),
+    QVERIFY2(ink.width() >= tile.width() * 0.7 && ink.height() >= tile.height() * (drawnAs(size) == 32 ? 0.66 : 0.7),
              qPrintable(QStringLiteral("%1x%2 of %3").arg(ink.width()).arg(ink.height()).arg(tile.width())));
     const int half = tile.width() / 2;
     QVERIFY(countWhere(image, QRect(tile.left(), tile.top(), half, half), traceInk) > 0);
@@ -1428,14 +1433,15 @@ void AppIconTest::magentaDeepensAt32And48px_data() {
     QTest::addColumn<bool>("deep");
     for (const int size : FerrousAppIcon::kSizes) {
         if (!onPixelGrid(size)) {
-            QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size << (size == 32 || size == 48);
+            QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size << (drawnAs(size) == 32 || size == 48);
         }
     }
     QTest::addRow("32px@2") << doubledPath(32) << 64 << true;
+    QTest::addRow("36px@2") << doubledPath(36) << 72 << true;
     QTest::addRow("48px@2") << doubledPath(48) << 96 << true;
 }
 
-// At 32 and 48 px, and in their 2x drawings, the 3rd harmonic is a deeper
+// At 32 and 48 px (and 36, the 32 px drawing), and in their 2x drawings, the 3rd harmonic is a deeper
 // magenta than elsewhere (#373 hill climb, H22: there the magenta and the
 // rose, 2 to 2.5 px strokes, were some 24 grey levels apart and read as one
 // in greyscale): some 38 levels below the rose in Rec. 709 luma at its full
@@ -1722,6 +1728,7 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
 void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("32px@2") << 32;
+    QTest::addRow("36px@2") << 36;
     QTest::addRow("48px@2") << 48;
 }
 
@@ -1790,7 +1797,7 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
         // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental.
         const double taper[] = {0.65, 0.8, 1.0};
-        const double wanted = fundamental[size == 32 ? 0 : 1] * taper[n] * unit;
+        const double wanted = fundamental[size == 48 ? 1 : 0] * taper[n] * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
     }
@@ -1803,12 +1810,17 @@ void AppIconTest::sizesDrawnAsASmallerSize_data() {
     QTest::addColumn<int>("smaller");
     QTest::addRow("24px") << FerrousAppIcon::resourcePath(24) << FerrousAppIcon::resourcePath(22) << 24 << 22;
     QTest::addRow("24px@2") << doubledPath(24) << doubledPath(22) << 48 << 44;
+    QTest::addRow("36px") << FerrousAppIcon::resourcePath(36) << FerrousAppIcon::resourcePath(32) << 36 << 32;
+    QTest::addRow("36px@2") << doubledPath(36) << doubledPath(32) << 72 << 64;
 }
 
 // The 24 px drawing is the 22 px one moved a pixel in on a 24 px canvas, as
 // Breeze draws its 24 px icons, and its 2x the 22 px slot's 2x moved two
 // (#373 hill climb, H22: the slot took the 32 px drawing scaled down, three
-// thin traces, or the 22 px one scaled up): pixel for pixel the same,
+// thin traces, or the 22 px one scaled up); the 36 px drawing the 32 px one
+// moved two, its exits on whole rows still, and its 2x the 32 px slot's
+// moved four (H22: the slot took the 48 px drawing scaled down, or the
+// scalable one with a rim of half a device px): pixel for pixel the same,
 // moved, with nothing else on the canvas.
 void AppIconTest::sizesDrawnAsASmallerSize() {
     QFETCH(QString, path);
@@ -1953,6 +1965,10 @@ void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings_data() {
     // The 22 px directories reach to 24 px, and come first.
     QTest::addRow("24px") << 24 << 1.0 << QStringLiteral("22x22");
     QTest::addRow("24px@2") << 24 << 2.0 << QStringLiteral("22x22@2");
+    // 36 px, between the 32 and 48 px directories' reach, its own.
+    QTest::addRow("36px") << 36 << 1.0 << QStringLiteral("36x36");
+    QTest::addRow("36px@2") << 36 << 2.0 << QStringLiteral("36x36@2");
+    QTest::addRow("36px@1.5") << 36 << 1.5 << QStringLiteral("36x36@2");
     QTest::addRow("128px") << 128 << 1.0 << QStringLiteral("128x128");
 }
 

@@ -123,6 +123,8 @@ update-desktop-database %{_datadir}/applications >/dev/null 2>&1 || :
 %{_datadir}/icons/hicolor/24x24@2/apps/ferrous.svg
 %{_datadir}/icons/hicolor/32x32/apps/ferrous.svg
 %{_datadir}/icons/hicolor/32x32@2/apps/ferrous.svg
+%{_datadir}/icons/hicolor/36x36/apps/ferrous.svg
+%{_datadir}/icons/hicolor/36x36@2/apps/ferrous.svg
 %{_datadir}/icons/hicolor/48x48/apps/ferrous.svg
 %{_datadir}/icons/hicolor/48x48@2/apps/ferrous.svg
 %{_datadir}/icons/hicolor/64x64/apps/ferrous.svg
