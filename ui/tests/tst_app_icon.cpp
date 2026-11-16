@@ -234,28 +234,57 @@ int strokeHeightAt(int size, size_t trace, int offset) {
     return size == 16 && trace == 0 && offset < 3 ? 2 : strokeHeights()[trace];
 }
 
-// The smooth strokes' widths across, in device pixels, lowest first: tapering
-// from the fundamental up, as a harmonic's energy falls with its number, and
-// never under 2 px (H20: at 32 and 48 px a stroke's own widths, 3 / 2 / 2 and
-// 3 / 2.5 / 2; from 64 px 1 : 0.8 : 0.65 of the fundamental's 3.8 units at
-// 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px). At
-// 32 px 3 / 2.5 / 2, as at 48 (#373 hill climb, H24: H23's 3 / 2 / 2.25 drew
-// the rose, the middle trace, as the thinnest and dimmest), the rose eased to
-// 2 px into its end (easedWidth); at 48 px the top trace 2.25 px over most of
-// its run, eased to 2 px into its end (topTraceWidths).
+// The width the 64-unit drawing's harmonics taper from, in its units: 3.8 at
+// 64 px and 3.4 from 128 px (H19's 3.0 read thin beside 128 px icons), the
+// rose 0.8 of it and the magenta 0.65, as a harmonic's energy falls with its
+// number. The fundamental is heavier (fundamentalWidth).
+double taperReference(int size) {
+    return size == 64 ? 3.8 : 3.4;
+}
+
+// The fundamental's width in the 64-unit drawing's units: the focal stroke,
+// clearly heavier than the harmonics over it, 5 units at 64 px and 4.5 from
+// 128 (#373 hill climb, H25: at 3.8 and 3.4, 1 : 0.8 : 0.65 read as three
+// near-equal stripes). Its added weight is on its underside: its top edge is
+// where the series puts it (fundamentalUnderside).
+double fundamentalWidth(int size) {
+    return size == 64 ? 5.0 : 4.5;
+}
+
+// How far the fundamental's centre sits under the series' centre line, in
+// the 64-unit drawing's units: half its added weight.
+double fundamentalUnderside(int size) {
+    return (fundamentalWidth(size) - taperReference(size)) / 2;
+}
+
+// The smooth strokes' widths across, in device pixels, lowest first: the
+// fundamental the heaviest, the harmonics tapering above it, and never under
+// 2 px (H20). At 32 and 36 px 3 / 2.5 / 2 (#373 hill climb, H24), the rose
+// eased to 2 px into its end (easedWidth); at 48 px 4 / 2.5 / 2.25 (H25: the
+// fundamental 3 px read as one of three equal stripes), the top trace 2.25 px
+// over most of its run, eased to 2 px into its end (topTraceWidths); from
+// 64 px the fundamental's fundamentalWidth and the harmonics 0.8 and 0.65 of
+// taperReference.
 std::vector<double> strokeWidths(int size) {
     switch (drawnAs(size)) {
     case 32:
     case 36:
         return {3.0, 2.5, 2.0};
     case 48:
-        return {3.0, 2.5, 2.25};
+        return {4.0, 2.5, 2.25};
     default: {
-        const double fundamental = size == 64 ? 3.8 : 3.4;
         const double unit = size / 64.0;
-        return {fundamental * unit, fundamental * 0.8 * unit, fundamental * 0.65 * unit};
+        const double reference = taperReference(size);
+        return {fundamentalWidth(size) * unit, reference * 0.8 * unit, reference * 0.65 * unit};
     }
     }
+}
+
+// The 4th harmonic's width across at 128 and 256 px, in device pixels: half
+// the 3.4 unit stroke the harmonics taper from (H21), faint beside the
+// fundamental.
+double fourthWidth(int size) {
+    return taperReference(size) / 2 * size / 64.0;
 }
 
 // The top trace's width across at 48 px, at its start and at its end (#373
@@ -563,6 +592,22 @@ QString doubledPath(int size) {
     return QStringLiteral(":/icons/hicolor/%1x%1@2/apps/ferrous.svg").arg(size);
 }
 
+// The fundamental's width in a 2x slot's drawing, in the 64-unit composition's
+// units, and how far its centre sits under the series' centre line, half its
+// added weight: from the 48 px slot's the focal stroke, as at 1x (#373 hill
+// climb, H25), 4.7 units over the 48 px slot's 3.6 and 5 over the 64 px
+// drawing's 3.8.
+std::pair<double, double> doubledFundamental(int size) {
+    switch (size) {
+    case 48:
+        return {4.7, (4.7 - 3.6) / 2};
+    case 64:
+        return {5.0, (5.0 - 3.8) / 2};
+    default:
+        return {3.8, 0};
+    }
+}
+
 void addSizeRows() {
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
@@ -596,6 +641,8 @@ private slots:
     void smallCurvesAreEvenAndEndOnWholeRows_data();
     void smallCurvesAreEvenAndEndOnWholeRows();
     void fundamentalThinsSmoothlyWithSize();
+    void fundamentalLeadsTheHarmonics_data();
+    void fundamentalLeadsTheHarmonics();
     void oneMagentaAtEverySize_data();
     void oneMagentaAtEverySize();
     void topTraceClearsTheCornerFrom64px_data();
@@ -1376,10 +1423,11 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     const QStringList ids = traceIds(size);
     // Each trace's end, its top and bottom on the inner edge, lowest first.
     using Ends = std::vector<std::pair<double, double>>;
-    const Ends ends = size == 48 ? Ends{{30, 33}, {20, 22.5}, {10, 12}}
+    const Ends ends = size == 48 ? Ends{{30, 34}, {20, 22.5}, {10, 12}}
                                  : (size == 36 ? Ends{{22, 25}, {14, 16}, {6, 8}} : Ends{{19, 22}, {12, 14}, {5, 7}});
-    // The start caps' centres, lowest first: at 48 px a pixel above H20's.
-    const std::vector<double> starts = size == 48 ? std::vector<double>{36.75, 31.75, 26.75}
+    // The start caps' centres, lowest first: at 48 px a pixel above H20's,
+    // the fundamental's half a pixel lower, its added weight on its underside.
+    const std::vector<double> starts = size == 48 ? std::vector<double>{37.25, 31.75, 26.75}
                                                   : (size == 36 ? std::vector<double>{27.25, 22.75, 18.25}
                                                                 : std::vector<double>{24.75, 20.25, 15.75});
     const std::vector<double> widths = strokeWidths(size);
@@ -1527,6 +1575,41 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     }
 }
 
+void AppIconTest::fundamentalLeadsTheHarmonics_data() {
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<int>("size");
+    for (const int size : FerrousAppIcon::kSizes) {
+        if (size >= 48) {
+            QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size;
+        }
+    }
+    for (const int size : {48, 64}) {
+        QTest::addRow("%dpx@2", size) << doubledPath(size) << 2 * size;
+    }
+    QTest::addRow("scalable") << FerrousAppIcon::resourcePath(0) << 64;
+}
+
+// The fundamental is the focal stroke, as it is at 16 and 22 px: half as
+// heavy again as the rose over it, or more, and three quarters again as the
+// magenta, across their strokes over the columns all three cross at their
+// full widths (#373 hill climb, H25: from 48 px they tapered 1 : 0.8 : 0.65
+// and read as three near-equal stripes).
+void AppIconTest::fundamentalLeadsTheHarmonics() {
+    QFETCH(QString, path);
+    QFETCH(int, size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
+    const QImage &fundamental = cover.value(QStringLiteral("fundamental"));
+    const QImage &second = cover.value(QStringLiteral("h2"));
+    const QImage &third = cover.value(QStringLiteral("h3"));
+    const auto [first, last] = columnsOf(fundamental);
+    const int start = first + static_cast<int>(std::ceil(widthAcross(fundamental, last - 2, last - 1)));
+    const double heavy = widthAcross(fundamental, start, last - 1);
+    const double rose = widthAcross(second, start, last - 1);
+    const double magenta = widthAcross(third, start, last - 1);
+    QVERIFY2(heavy >= 1.5 * rose && heavy >= 1.75 * magenta,
+             qPrintable(QStringLiteral("%1, %2 and %3 px across").arg(heavy).arg(rose).arg(magenta)));
+}
+
 void AppIconTest::oneMagentaAtEverySize_data() {
     QTest::addColumn<QString>("path");
     QTest::addColumn<int>("size");
@@ -1606,7 +1689,8 @@ void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
 // baseline, y 55.5, as in H19, their starts where they were, so that the top
 // trace runs out to the tile's edge some 3 units below its rounded corner
 // rather than into it (#373 hill climb, H20): at the edge their centres are
-// at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline, and the top
+// at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline (the
+// fundamental's lower by its fundamentalUnderside), and the top
 // trace's ink starts 2.5 units or more below the corner's arc, which ends 4
 // units below the tile's inner edge.
 void AppIconTest::topTraceClearsTheCornerFrom64px() {
@@ -1621,7 +1705,7 @@ void AppIconTest::topTraceClearsTheCornerFrom64px() {
         const QImage &trace = cover.value(ids[n]);
         const Column end = columnOf(trace, inside.right());
         const double centre = end.centre / unit;
-        const double expected = 55.5 - 0.94 * k * (55.5 - 13) / 3;
+        const double expected = 55.5 - 0.94 * k * (55.5 - 13) / 3 + (k == 1 ? fundamentalUnderside(size) : 0);
         QVERIFY2(std::abs(centre - expected) <= 0.4,
                  qPrintable(QStringLiteral("%1 ends at %2 units, not %3").arg(ids[n]).arg(centre).arg(expected)));
     }
@@ -1645,7 +1729,7 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // At 128 and 256 px a detail tier (#373 hill climb, H21, P29 amended: the 64
 // px drawing enlarged left the upper left of the tile empty beside Breeze's
 // large icons): the faint 4th harmonic of the same glide, in violet, half
-// the fundamental's width, from the common start, rising 4/3 as far as the
+// the width the harmonics taper from (fourthWidth), from the common start, rising 4/3 as far as the
 // 3rd harmonic over the same columns, give or take the few hundredths that
 // keep its cut clear of the badge, and cropped by the tile's top inner edge
 // as the others are by its right one: from where its upper edge meets that
@@ -1723,7 +1807,7 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QVERIFY2(upper.x() >= 40 && lower.x() <= 46, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
     const QPointF along = upper - control;
     const double slant = std::abs(along.y()) / std::hypot(along.x(), along.y());
-    const double across = (strokeWidths(size).front() / 2) / unit;
+    const double across = fourthWidth(size) / unit;
     QVERIFY2(std::abs((lower.x() - upper.x()) * slant - across) <= 0.1 * across,
              qPrintable(QStringLiteral("a %1 unit cut, a %2 unit stroke").arg(lower.x() - upper.x()).arg(across)));
     // Rendered, it reaches the tile's top row inside the rim in every column
@@ -1752,9 +1836,9 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const int middle = start + (static_cast<int>(upper.x() * unit) - start) * 2 / 3;
     const double rises = (centre(fourth, start) - centre(fourth, middle)) / (centre(third, start) - centre(third, middle));
     QVERIFY2(rises >= 1.3 && rises <= 1.45, qPrintable(QString::number(rises)));
-    // Half the fundamental's width across, over the same columns.
+    // Half the width the harmonics taper from, over the same columns.
     const double width = widthAcross(fourth, start, middle);
-    const double wanted = strokeWidths(size).front() / 2;
+    const double wanted = fourthWidth(size);
     QVERIFY2(std::abs(width - wanted) <= 0.12 * wanted, qPrintable(QStringLiteral("%1 px across, not %2").arg(width).arg(wanted)));
 
     // Clear of the 3rd harmonic everywhere: in every column both cross, a
@@ -1922,24 +2006,31 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
         const QImage &referenceTrace = referenceCover.value(ids[n]);
         const auto [first, last] = columnsOf(trace);
         QCOMPARE(last, inside.right());
+        // The fundamental's centre as the series puts it: less its added
+        // weight's half on its underside, in each drawing's own units.
+        const bool isFundamental = ids[n] == QLatin1String("fundamental");
+        const double shift = isFundamental ? doubledFundamental(size).second / 50 : 0;
+        const double referenceShift = isFundamental ? fundamentalUnderside(64) / 50 : 0;
         const auto at = [](const QImage &t, int x, const QRect &in) {
             return (columnOf(t, x).centre - in.top()) / in.height();
         };
         const int referenceFirst = columnsOf(referenceTrace).first;
         const double startShare = (referenceFirst + 3 - referenceInside.left() + 0.5) / referenceInside.width();
         const int start = inside.left() + static_cast<int>(std::lround(startShare * inside.width() - 0.5));
-        QVERIFY2(std::abs(at(trace, start, inside) - at(referenceTrace, referenceFirst + 3, referenceInside)) <= 0.015,
+        QVERIFY2(std::abs(at(trace, start, inside) - shift - at(referenceTrace, referenceFirst + 3, referenceInside) + referenceShift) <= 0.015,
                  qPrintable(QStringLiteral("%1 starts at %2 of the tile, the 64 px drawing's at %3")
                                 .arg(ids[n]).arg(at(trace, start, inside)).arg(at(referenceTrace, referenceFirst + 3, referenceInside))));
-        QVERIFY2(std::abs(at(trace, last, inside) - at(referenceTrace, referenceInside.right(), referenceInside)) <= 0.01,
+        QVERIFY2(std::abs(at(trace, last, inside) - shift - at(referenceTrace, referenceInside.right(), referenceInside) + referenceShift) <= 0.01,
                  qPrintable(QStringLiteral("%1 ends at %2 of the tile, the 64 px drawing's at %3")
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
-        // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental; in
-        // the 32 px slot's 3 : 2.5 : 2, as at 1x (#373 hill climb, H24), the
-        // rose eased to the magenta's width over its last 8 px.
+        // Its width across: the harmonics tapering 0.8 and 0.65 from the
+        // composition's 3.8 units (3.6 in the 48 px slot's); in the 32 px
+        // slot's 2.5 and 2 thirds of it, as at 1x (#373 hill climb, H24), the
+        // rose eased to the magenta's width over its last 8 px; the
+        // fundamental heavier (doubledFundamental).
         const bool asAt1x = taskManagerSize(size);
         const double taper[] = {asAt1x ? 2.0 / 3 : 0.65, asAt1x ? 2.5 / 3 : 0.8, 1.0};
-        const double wanted = fundamental[size == 48 ? 1 : 0] * taper[n] * unit;
+        const double wanted = (isFundamental ? doubledFundamental(size).first : fundamental[size == 48 ? 1 : 0] * taper[n]) * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
         if (asAt1x && ids[n] == QLatin1String("h2")) {

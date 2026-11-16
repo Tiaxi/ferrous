@@ -60,10 +60,12 @@ Rectangle {
     property color standInFourthHarmonicColor: "#7944a4"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): on
-    // the wide mark the glide's 3.5 px at a 180 px tile, rising to 6.5 px at
-    // 360 (H21: H20's 2 and 4 px read faint), and the harmonics 0.8, 0.65
-    // and 0.5 of it, as the app icon tapers them; on the small mark 4, 3.5
-    // and 3 px (H22: its 3 and 2.5 px read as hairlines at 152 px).
+    // the wide mark a stroke of 3.5 px at a 180 px tile, rising to 6.5 px at
+    // 360 (H21: H20's 2 and 4 px read faint), the harmonics 0.8, 0.65 and 0.5
+    // of it, as the app icon tapers them; on the small mark 4, 3.5 and 3 px
+    // (H22: its 3 and 2.5 px read as hairlines at 152 px). The glide 1.3
+    // times that stroke, the focal one, as in the app icon (H25: at the
+    // harmonics' taper the curves read as near-equal stripes).
     readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
@@ -180,10 +182,12 @@ Rectangle {
             // past the tile's right side, the 4th's past its top, and the clip
             // cuts them there.
             readonly property size box: Qt.size(1000, 1000)
-            readonly property real glideStroke: root.standInCompact ? 4 : root.standInStroke
+            // The stroke the harmonics taper from.
+            readonly property real baseStroke: root.standInCompact ? 4 : root.standInStroke
+            readonly property real glideStroke: mark.baseStroke * 1.3
             readonly property real harmonicStroke: root.standInCompact ? 3.5 : root.standInStroke * 0.8
             readonly property real highHarmonicStroke: root.standInCompact ? 3 : root.standInStroke * 0.65
-            readonly property real fourthHarmonicStroke: mark.glideStroke * 0.5
+            readonly property real fourthHarmonicStroke: mark.baseStroke * 0.5
             anchors.fill: parent
             clip: true
             preferredRendererType: Shape.CurveRenderer

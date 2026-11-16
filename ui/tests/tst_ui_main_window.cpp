@@ -685,24 +685,28 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
     }
     // Its strokes by the tile's size, not scaled with it (#373 H16 I6): on
-    // the wide mark the glide 3 px at 152 px rising to 6.5 px at 360 (H20: 2
-    // and 4 px; H21: they read faint), the harmonics tapering as the app
+    // the wide mark a stroke of 3 px at 152 px rising to 6.5 px at 360 (H20:
+    // 2 and 4 px; H21: they read faint), the harmonics tapering as the app
     // icon's, 0.8 and 0.65 of it; on the small mark, the 96 and 152 px
     // tiles', 4, 3.5 and 3 px (H22: its two 3 and 2.5 px strokes read as
-    // hairlines).
+    // hairlines). The glide 1.3 times the stroke, the focal one, as in the
+    // app icon (H25: at the harmonics' taper the curves read as near-equal
+    // stripes).
+    const qreal base = small ? 4.0 : std::min(6.5, 3.0 + std::max(0.0, side - 152.0) * 3.5 / 208.0);
     const qreal glide = mark->property("glideStroke").toReal();
-    const qreal wanted = small ? 4.0 : std::min(6.5, 3.0 + std::max(0.0, side - 152.0) * 3.5 / 208.0);
-    if (std::abs(glide - wanted) > 0.01 || (side >= 360 && glide < 6.5)) {
+    if (std::abs(glide - 1.3 * base) > 0.01 || (side >= 360 && glide < 1.3 * 6.5)) {
         return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
     }
     const qreal high = mark->property("highHarmonicStroke").toReal();
     const qreal harmonic = mark->property("harmonicStroke").toReal();
-    if (std::abs(harmonic - (small ? 3.5 : 0.8 * glide)) > 0.01 || std::abs(high - (small ? 3.0 : 0.65 * glide)) > 0.01) {
+    if (std::abs(harmonic - (small ? 3.5 : 0.8 * base)) > 0.01 || std::abs(high - (small ? 3.0 : 0.65 * base)) > 0.01
+        || glide < 1.45 * harmonic) {
         return QStringLiteral("the harmonics %1 and %2 px beside the glide's %3").arg(mark->property("harmonicStroke").toReal())
             .arg(high).arg(glide);
     }
-    // The wide mark's 4th harmonic half the glide's width, as in the icon.
-    if (std::abs(mark->property("fourthHarmonicStroke").toReal() - 0.5 * glide) > 0.01) {
+    // The wide mark's 4th harmonic half the stroke the harmonics taper from,
+    // as in the icon.
+    if (std::abs(mark->property("fourthHarmonicStroke").toReal() - 0.5 * base) > 0.01) {
         return QStringLiteral("the 4th harmonic %1 px beside the glide's %2").arg(mark->property("fourthHarmonicStroke").toReal())
             .arg(glide);
     }
