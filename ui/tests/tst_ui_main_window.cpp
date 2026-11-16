@@ -958,6 +958,8 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
+    void queueFocusRingStopsAtTheScrollBarLane_data();
+    void queueFocusRingStopsAtTheScrollBarLane();
     void queueRowHoverIsTheListsTint();
     void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
@@ -4904,6 +4906,88 @@ void UiMainWindowTest::queueRowTintsRunToThePaneEdgeUnderTheScrollBar() {
         QVERIFY2(sameAsTint(pixel(right - 16)), qPrintable(pixel(right - 16).name()));
         // The thumb, 4 px wide, 2 px from the edge, over the tint.
         QCOMPARE(!sameAsTint(pixel(right - 4)), count > 3);
+    }
+}
+
+void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::newRow("light") << false;
+    QTest::newRow("dark") << true;
+}
+
+// The queue's focus ring stops at the scrollbar's lane while the scrollbar
+// shows, as the library's does, so its thumb never runs over the ring
+// (#373 H34 AB1: it ran under the thumb); the selection tint goes on under
+// the lane to the pane's edge. A short queue, with no scrollbar, keeps the
+// ring to the edge.
+void UiMainWindowTest::queueFocusRingStopsAtTheScrollBarLane() {
+    QFETCH(bool, dark);
+    const auto restorePalette = useDarkPalette(dark);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(QTest::qWaitForWindowExposed(window));
+    QCOMPARE(paletteOf(window)->property("themeIsDark").toBool(), dark);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *queueView = named(window, "playlistView");
+    QQuickItem *scrollBar = named(window, "queueScrollBar");
+    QObject *queue = window->findChild<QObject *>(QStringLiteral("queueController"));
+    QVERIFY(queueView && scrollBar && queue);
+    QCOMPARE(scrollBar->property("lane").toReal(), 8.0);
+
+    for (const int count : {80, 3}) {
+        const bool scrolls = count > 3;
+        bridge->setProperty("queueRows", sampleQueueRows(count));
+        bridge->setProperty("queueLength", count);
+        QTRY_COMPARE(queueView->property("count").toInt(), count);
+        QTRY_COMPARE(scrollBar->isVisible(), scrolls);
+        named(window, "transportButton_playPause")->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(!queueView->hasActiveFocus());
+        queueView->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(queueView->hasActiveFocus());
+        // The second row, beside the thumb.
+        QVERIFY(QMetaObject::invokeMethod(queue, "setSingleSelection", Q_ARG(QVariant, 1)));
+        QQuickItem *row = nullptr;
+        QQuickItem *tint = nullptr;
+        QTRY_VERIFY((row = viewRowAt(queueView, 1)) != nullptr
+                    && (tint = itemNamed(row, QStringLiteral("rowBackgroundTint"))) && shown(tint)
+                    && QQmlProperty(tint, QStringLiteral("border.width")).read().toReal() == 1.0
+                    && colorOf(tint) == tokenHex(window, "selection"));
+        QQuickItem *laneTint = itemNamed(row, QStringLiteral("rowBackgroundTintLane"));
+        QVERIFY(laneTint != nullptr);
+        const qreal edge = sceneRect(queueView).right();
+        const qreal lane = scrolls ? 8.0 : 0.0;
+        QVERIFY2(sceneRect(tint).right() <= edge - lane,
+                 qPrintable(QStringLiteral("ring to %1, edge %2").arg(sceneRect(tint).right()).arg(edge)));
+        QCOMPARE(sceneRect(tint).right(), edge - lane);
+        QCOMPARE(shown(laneTint), scrolls);
+        if (scrolls) {
+            QCOMPARE(sceneRect(laneTint).left(), edge - lane);
+            QCOMPARE(sceneRect(laneTint).right(), edge);
+            QCOMPARE(colorOf(laneTint), tokenHex(window, "selection"));
+        }
+        // As drawn, on the row's middle: the ring's right side just inside
+        // the lane with the scrollbar, at the edge without it; past it, in
+        // the lane, the thumb or the tint, never the ring.
+        QTest::qWait(50);
+        const QImage image = window->grabWindow();
+        const qreal scale = image.width() / qreal(window->width());
+        const qreal y = sceneRect(row).center().y();
+        const auto pixel = [&](qreal x) {
+            return image.pixelColor(int(std::floor(x * scale)), int(std::floor(y * scale)));
+        };
+        const auto near = [](const QColor &a, const QColor &b) {
+            return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
+                && std::abs(a.blue() - b.blue()) <= 2;
+        };
+        const QColor ring = tokenOf(window, "focusRing");
+        QVERIFY2(near(pixel(edge - lane - 0.5), ring), qPrintable(pixel(edge - lane - 0.5).name()));
+        if (scrolls) {
+            for (qreal x = edge - lane + 0.5; x < edge; x += 1.0) {
+                QVERIFY2(!near(pixel(x), ring), qPrintable(QStringLiteral("the ring at %1 of %2").arg(x).arg(edge)));
+            }
+        }
     }
 }
 
