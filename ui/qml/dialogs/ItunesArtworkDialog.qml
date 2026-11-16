@@ -694,21 +694,31 @@ Components.DialogWindow {
                 }
             }
 
-            // Searching, or nothing found: what the search says, centred
-            // where the results would be, with a busy indicator above it
-            // while it searches. Quiet, as the queue's empty state: the base
-            // font in the secondary colour, with no glyph, for finding
-            // nothing is a routine outcome (#373 H7, H8). Built from its
-            // parts: Kirigami.PlaceholderMessage's selectable text brings
-            // Copy and Select All actions that would take Ctrl+C and Ctrl+A
-            // from the Edit menu's.
+            // Searching, or nothing found: what the search says, a little
+            // above the middle of where the results would be (#373 H38),
+            // with a busy indicator above it while it searches. Quiet, as
+            // the queue's empty state: the base font, with no glyph, for
+            // finding nothing is a routine outcome (#373 H7, H8); searching
+            // is in the secondary colour, what it found in the text's. A
+            // search that failed says so in a semibold heading, with the
+            // system's words under it in the secondary colour (#373 H38: it
+            // read as finding nothing). Built from its parts:
+            // Kirigami.PlaceholderMessage's selectable text brings Copy and
+            // Select All actions that would take Ctrl+C and Ctrl+A from the
+            // Edit menu's.
             ColumnLayout {
+                id: placeholder
                 objectName: "itunesArtworkPlaceholder"
+                readonly property bool searching: root.uiBridge.itunesArtworkLoading === true
+                readonly property bool failed: !placeholder.searching && root.uiBridge.itunesArtworkFailed === true
                 anchors.centerIn: parent
+                // 3 grid units above the middle, room permitting.
+                anchors.verticalCenterOffset: -Math.min(3 * Kirigami.Units.gridUnit,
+                    Math.max(0, (parent.height - placeholder.height) / 2))
                 width: Math.min(parent.width - 4 * Kirigami.Units.gridUnit, Kirigami.Units.gridUnit * 24)
                 spacing: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                 visible: itunesArtworkResultsView.count === 0
-                    && (root.uiBridge.itunesArtworkLoading || placeholderMessage.text.length > 0)
+                    && (placeholder.searching || placeholderMessage.text.length > 0)
 
                 // The style's spinner, 32 px: the state's one glyph.
                 BusyIndicator {
@@ -716,19 +726,40 @@ Components.DialogWindow {
                     Layout.alignment: Qt.AlignHCenter
                     Layout.preferredWidth: Kirigami.Units.iconSizes.medium
                     Layout.preferredHeight: Kirigami.Units.iconSizes.medium
-                    running: root.uiBridge.itunesArtworkLoading
+                    running: placeholder.searching
                     visible: running
                 }
 
-                Label {
-                    id: placeholderMessage
-                    objectName: "itunesArtworkPlaceholderMessage"
+                ColumnLayout {
                     Layout.fillWidth: true
-                    visible: text.length > 0
-                    text: root.uiBridge.itunesArtworkStatusText || ""
-                    color: root.uiPalette.textSecondary
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Label {
+                        objectName: "itunesArtworkFailureHeading"
+                        Layout.fillWidth: true
+                        visible: placeholder.failed
+                        text: I18n.i18nc("@info", "Couldn\u2019t search iTunes")
+                        font.weight: Font.DemiBold
+                        color: root.uiPalette.text
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        // The status in a sentence, as the bridge has it.
+                        Accessible.description: root.uiBridge.itunesArtworkStatusText || ""
+                    }
+
+                    Label {
+                        id: placeholderMessage
+                        objectName: "itunesArtworkPlaceholderMessage"
+                        Layout.fillWidth: true
+                        visible: text.length > 0
+                        text: placeholder.failed
+                            ? (root.uiBridge.itunesArtworkErrorText || "")
+                            : (root.uiBridge.itunesArtworkStatusText || "")
+                        color: placeholder.searching || placeholder.failed
+                            ? root.uiPalette.textSecondary : root.uiPalette.text
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                    }
                 }
             }
         }

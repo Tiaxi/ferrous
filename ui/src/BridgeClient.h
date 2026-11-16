@@ -196,6 +196,11 @@ class BridgeClient : public QObject {
     Q_PROPERTY(QVariantList itunesArtworkResults READ itunesArtworkResults NOTIFY itunesArtworkChanged)
     Q_PROPERTY(bool itunesArtworkLoading READ itunesArtworkLoading NOTIFY itunesArtworkChanged)
     Q_PROPERTY(QString itunesArtworkStatusText READ itunesArtworkStatusText NOTIFY itunesArtworkChanged)
+    // Whether the last search failed, as opposed to finding nothing, and
+    // the system's words for why, such as "Connection refused"; the status
+    // text says it in a sentence.
+    Q_PROPERTY(bool itunesArtworkFailed READ itunesArtworkFailed NOTIFY itunesArtworkChanged)
+    Q_PROPERTY(QString itunesArtworkErrorText READ itunesArtworkErrorText NOTIFY itunesArtworkChanged)
     // The track the suggestions were searched for, which applying one
     // changes: its trackPath, album, artist and the coverPath it had then
     // (empty without art). It stays that track while playback moves on.
@@ -360,6 +365,8 @@ public:
     QVariantList itunesArtworkResults() const;
     bool itunesArtworkLoading() const;
     QString itunesArtworkStatusText() const;
+    bool itunesArtworkFailed() const;
+    QString itunesArtworkErrorText() const;
     QVariantMap itunesArtworkTarget() const;
     QString diagnosticsText() const;
     QString diagnosticsLogPath() const;
@@ -1024,6 +1031,8 @@ private:
     QVariantList m_itunesArtworkResults;
     bool m_itunesArtworkLoading{false};
     QString m_itunesArtworkStatusText;
+    // The system's error of a search that failed, empty otherwise.
+    QString m_itunesArtworkErrorText;
     // What itunesArtworkTarget describes.
     QVariantMap m_itunesArtworkTarget;
     quint64 m_itunesArtworkGeneration{0};

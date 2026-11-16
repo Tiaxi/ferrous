@@ -356,6 +356,8 @@ ApplicationWindow {
         property var itunesArtworkTarget: ({})
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
+        property bool itunesArtworkFailed: false
+        property string itunesArtworkErrorText: ""
         property string diagnosticsText: ""
         property string diagnosticsLogPath: ""
         property bool diagnosticsLoading: false

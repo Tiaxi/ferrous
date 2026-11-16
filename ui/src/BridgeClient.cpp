@@ -2225,6 +2225,14 @@ QString BridgeClient::itunesArtworkStatusText() const {
     return m_itunesArtworkStatusText;
 }
 
+bool BridgeClient::itunesArtworkFailed() const {
+    return !m_itunesArtworkErrorText.isEmpty();
+}
+
+QString BridgeClient::itunesArtworkErrorText() const {
+    return m_itunesArtworkErrorText;
+}
+
 QString BridgeClient::diagnosticsText() const {
     return m_diagnosticsText;
 }
@@ -3711,6 +3719,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
     captureItunesArtworkTargetIdentity(m_itunesArtworkGeneration);
     m_itunesArtworkCandidates.clear();
     m_itunesArtworkResults.clear();
+    m_itunesArtworkErrorText.clear();
 
     if (album.isEmpty() || artist.isEmpty()) {
         m_itunesArtworkLoading = false;
@@ -3732,6 +3741,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
         int pendingRequests{0};
         int successfulRequests{0};
         QString firstError;
+        // The system's words for the first error.
+        QString firstErrorDetail;
     };
 
     QStringList searchTerms;
@@ -3845,6 +3856,8 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
             m_itunesArtworkLoading = false;
             if (aggregation->successfulRequests <= 0 && !aggregation->firstError.isEmpty()) {
                 m_itunesArtworkStatusText = aggregation->firstError;
+                m_itunesArtworkErrorText = aggregation->firstErrorDetail.isEmpty()
+                    ? aggregation->firstError : aggregation->firstErrorDetail;
             } else {
                 m_itunesArtworkStatusText = i18nc("@info:status", "No iTunes artwork suggestions found.");
             }
@@ -3960,6 +3973,7 @@ void BridgeClient::searchCurrentTrackArtworkSuggestions() {
                 if (aggregation->firstError.isEmpty()) {
                     aggregation->firstError =
                         i18nc("@info:status", "iTunes search failed: %1", errorText);
+                    aggregation->firstErrorDetail = errorText;
                 }
             } else {
                 aggregation->successfulRequests += 1;
@@ -3998,6 +4012,7 @@ void BridgeClient::clearItunesArtworkSuggestions() {
     m_itunesArtworkResults.clear();
     m_itunesArtworkLoading = false;
     m_itunesArtworkStatusText.clear();
+    m_itunesArtworkErrorText.clear();
     emit itunesArtworkChanged();
 }
 

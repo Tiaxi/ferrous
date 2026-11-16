@@ -1653,6 +1653,8 @@ QtObject {
     property var itunesArtworkTarget: ({})
     property bool itunesArtworkLoading: false
     property string itunesArtworkStatusText: ""
+    property bool itunesArtworkFailed: false
+    property string itunesArtworkErrorText: ""
     property var preparedItunesArtwork: []
     property var appliedItunesArtwork: []
     readonly property string currentTrackPath: fake.real.currentTrackPath
@@ -1995,6 +1997,8 @@ ApplicationWindow {
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
+        property bool itunesArtworkFailed: false
+        property string itunesArtworkErrorText: ""
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal snapshotChanged()
@@ -2238,10 +2242,13 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
 }
 
 void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound() {
-    // While it searches, and when it found nothing, a placeholder message
-    // where the results would be, with no frame or well around it (#373
-    // H8), and a running busy indicator above it while searching, under
-    // the current art, which stays the dialog's first line.
+    // While it searches, when it found nothing, and when the search failed,
+    // a placeholder message where the results would be, a little above
+    // their middle (#373 H38), with no frame or well around it (#373 H8),
+    // and a running busy indicator above it while searching, under the
+    // current art, which stays the dialog's first line. A failed search
+    // says so in a semibold heading, with the system's words under it, so
+    // it does not read as finding nothing (#373 H38).
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2269,13 +2276,17 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *busy = itemNamed(content, QStringLiteral("itunesArtworkBusyIndicator"));
     QQuickItem *results = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
     QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkFailureHeading"));
     QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
-            && results != nullptr && currentRow != nullptr);
+            && results != nullptr && currentRow != nullptr && heading != nullptr);
     QObject *palette = qvariant_cast<QObject *>(dialog->property("uiPalette"));
     QVERIFY(palette != nullptr);
 
-    const auto checkState = [&](bool searching, const QString &text) {
-        const QByteArray at = searching ? "searching" : "nothing found";
+    enum class State { Searching, NothingFound, Failed };
+    const auto checkState = [&](State state, const QString &text) {
+        const bool searching = state == State::Searching;
+        const bool failed = state == State::Failed;
+        const QByteArray at = searching ? "searching" : (failed ? "failed" : "nothing found");
         QTRY_VERIFY2(placeholder->isVisible(), at.constData());
         QVERIFY2(!results->isVisible(), at.constData());
         QCOMPARE(message->property("text").toString(), text);
@@ -2298,10 +2309,21 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                      qPrintable(rect->objectName()));
         }
         // A quiet placeholder, as the queue's empty state (#373 H7, H8): a
-        // centred line in the base font, regular, in the secondary colour,
-        // with no glyph.
+        // centred line in the base font, regular, with no glyph; searching
+        // and the system's words in the secondary colour, what the search
+        // found in the text's (#373 H38).
         QCOMPARE(message->property("color").value<QColor>().rgba(),
-                 palette->property("textSecondary").value<QColor>().rgba());
+                 palette->property(searching || failed ? "textSecondary" : "text").value<QColor>().rgba());
+        QCOMPARE(heading->isVisible(), failed);
+        if (failed) {
+            QCOMPARE(heading->property("text").toString(), QStringLiteral("Couldn\u2019t search iTunes"));
+            QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
+            QCOMPARE(heading->property("color").value<QColor>().rgba(),
+                     palette->property("text").value<QColor>().rgba());
+            QCOMPARE(heading->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
+            // Laid out once it shows.
+            QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
+        }
         // The only glyph: the busy indicator's, while searching.
         int glyphs = 0;
         const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
@@ -2322,10 +2344,15 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QCOMPARE(font.weight(), QFont::Normal);
         QCOMPARE(font.pointSizeF(), QGuiApplication::font().pointSizeF());
         QCOMPARE(message->property("opacity").toReal(), 1.0);
-        // Where the results would be, centred there.
+        // Where the results would be, 3 grid units above their middle.
         QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
-        QVERIFY2(qAbs(sceneRectOf(placeholder).center().y() - sceneRectOf(frame).center().y()) <= 1.0,
-                 at.constData());
+        const qreal raise = qMin(3 * dialog->property("contentPadding").toReal(),
+                                 (sceneRectOf(frame).height() - placeholder->height()) / 2);
+        QTRY_VERIFY2(qAbs(sceneRectOf(placeholder).center().y() - (sceneRectOf(frame).center().y() - raise)) <= 1.0,
+                 qPrintable(QStringLiteral("%1: at %2, the frame's middle %3")
+                                .arg(QString::fromLatin1(at)).arg(sceneRectOf(placeholder).center().y())
+                                .arg(sceneRectOf(frame).center().y())));
+        QVERIFY2(raise > 0, at.constData());
         if (searching) {
             QVERIFY2(sceneRectOf(busy).bottom() <= sceneRectOf(message).top(), at.constData());
         }
@@ -2337,11 +2364,19 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         texts.removeAll(QString());
         QCOMPARE(texts.count(text), 1);
     };
-    checkState(true, QStringLiteral("Searching iTunes…"));
+    checkState(State::Searching, QStringLiteral("Searching iTunes…"));
 
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
-    checkState(false, QStringLiteral("No iTunes artwork suggestions found."));
+    checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
+
+    // As BridgeClient tells a failed search (BridgeClientTest::
+    // aFailedArtworkSearchSaysSoApartFromFindingNothing).
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes search failed: Connection refused"));
+    bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
+    bridge->setProperty("itunesArtworkFailed", true);
+    checkState(State::Failed, QStringLiteral("Connection refused"));
+
 }
 
 namespace {
