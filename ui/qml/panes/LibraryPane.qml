@@ -432,15 +432,17 @@ Rectangle {
                             && fading.keys.indexOf(key || "") >= 0
                             ? treeNowFade.level : 0
                     }
+                    // As the queue's: an unreadable file's warning before
+                    // the stop mark of a track that failed to play.
                     readonly property string stateGlyph: {
                         if (isNow) {
                             return root.playbackState === "Paused"
                                 ? "media-playback-pause" : "media-playback-start"
                         }
-                        if (isCurrentTrack) {
-                            return "media-playback-stop"
+                        if (unreadableReason.length > 0) {
+                            return "dialog-warning"
                         }
-                        return unreadableReason.length > 0 ? "dialog-warning" : ""
+                        return isCurrentTrack ? "media-playback-stop" : ""
                     }
 
                     // Where the chevron of this row's level is; a track's

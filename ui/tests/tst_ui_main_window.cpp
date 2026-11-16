@@ -965,6 +965,7 @@ private slots:
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
+    void aTrackThatFailsToPlayShowsTheWarningWhileCurrent();
     void queueHeaderLabelsOnlyArtistAlbumAndLength();
     void emptyQueueNamesItselfAtThePanesInset_data();
     void emptyQueueNamesItselfAtThePanesInset();
@@ -5242,6 +5243,98 @@ void UiMainWindowTest::unreadableTracksAreMarkedFromTheIssueHistory() {
     QCOMPARE(colorOf(itemNamed(queueRow, QStringLiteral("queueCell_artist"))), tokenHex(window, "textColumn"));
 }
 
+// A file that fails to play stays the current row, stopped, as the backend
+// leaves it when it was the queue's last: the queue's row and the tree's
+// show the unreadable warning, whose tooltip gives the reason, not the stop
+// mark (#373 H35 AB7: the warning came only once another row played).
+// Played again, the row shows what the playback does; a readable track
+// that stops keeps the stop mark.
+void UiMainWindowTest::aTrackThatFailsToPlayShowsTheWarningWhileCurrent() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QObject *errors = window->findChild<QObject *>(QStringLiteral("errorController"));
+    QQuickItem *queueView = named(window, "playlistView");
+    QVERIFY(bridge && errors && queueView);
+    showTree(libraryModel, kAllExpanded);
+    QVariantList rows = sampleQueueRows(4);
+    QVariantMap last = rows.at(3).toMap();
+    last.insert(QStringLiteral("path"), kTrackPath);
+    rows[3] = last;
+    bridge->setProperty("queueRows", rows);
+    bridge->setProperty("queueLength", 4);
+    QQuickItem *track = nullptr;
+    QTRY_VERIFY((track = libraryRow(window, QStringLiteral("track"))) != nullptr);
+    QTRY_COMPARE(queueView->property("count").toInt(), 4);
+    const auto queueGlyph = [queueView](int index) {
+        QQuickItem *row = viewRowAt(queueView, index);
+        QQuickItem *glyph = row != nullptr ? itemNamed(row, QStringLiteral("queueRowState")) : nullptr;
+        return shown(glyph) ? glyph->property("source").toString() : QString();
+    };
+    QQuickItem *treeGlyph = itemNamed(track, QStringLiteral("libraryRowState"));
+    QVERIFY(treeGlyph != nullptr);
+    const auto treeGlyphName = [treeGlyph]() {
+        return shown(treeGlyph) ? treeGlyph->property("source").toString() : QString();
+    };
+
+    // The last row starts to play, and fails: the bridge's playback error
+    // about the file, and playback stops with the row still current.
+    bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-start"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-start"));
+    const QString reason = QStringLiteral("Couldn't play \u201c02.flac\u201d (No valid frames found before end of "
+                                          "stream); playback stopped.");
+    QVERIFY(QMetaObject::invokeMethod(bridge, "bridgeError", Q_ARG(QString, reason), Q_ARG(int, 1), Q_ARG(int, 1),
+                                      Q_ARG(QString, kTrackPath)));
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("dialog-warning"));
+    QQuickItem *row = viewRowAt(queueView, 3);
+    QVERIFY(row != nullptr && row->property("isCurrentQueueRow").toBool());
+    QQuickItem *glyph = itemNamed(row, QStringLiteral("queueRowState"));
+    QCOMPARE(colorOf(glyph), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(itemNamed(row, QStringLiteral("queueCell_title"))), tokenHex(window, "textSecondary"));
+    QCOMPARE(row->property("unreadableReason").toString(), reason);
+    QCOMPARE(colorOf(treeGlyph), tokenHex(window, "textSecondary"));
+    // The other rows show nothing.
+    for (int index = 0; index < 3; ++index) {
+        QCOMPARE(queueGlyph(index), QString());
+    }
+
+    // Another row plays: the failed one keeps its warning.
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/2.flac"));
+    bridge->setProperty("playingQueueIndex", 2);
+    bridge->setProperty("playbackState", QStringLiteral("Playing"));
+    QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-start"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QCOMPARE(treeGlyphName(), QStringLiteral("dialog-warning"));
+    // A readable track that stops shows the stop mark.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(2), QStringLiteral("media-playback-stop"));
+    QCOMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+
+    // Played again, say once the file is fixed, the row shows the playback
+    // until it stops.
+    bridge->setProperty("currentTrackPath", kTrackPath);
+    bridge->setProperty("playingQueueIndex", 3);
+    bridge->setProperty("playbackState", QStringLiteral("Paused"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-pause"));
+    QCOMPARE(colorOf(itemNamed(viewRowAt(queueView, 3), QStringLiteral("queueRowState"))), tokenHex(window, "now"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-pause"));
+    QCOMPARE(queueGlyph(2), QString());
+
+    // With the issue cleared, a stopped current row is the stop mark again.
+    bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("dialog-warning"));
+    QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
+    QTRY_COMPARE(queueGlyph(3), QStringLiteral("media-playback-stop"));
+    QTRY_COMPARE(treeGlyphName(), QStringLiteral("media-playback-stop"));
+}
+
 void UiMainWindowTest::queueHeaderLabelsOnlyArtistAlbumAndLength() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
@@ -5879,9 +5972,10 @@ void UiMainWindowTest::tabGoesFromTheLibraryToTheQueueRowsBeforeItsHandles() {
     QTRY_VERIFY(library->hasActiveFocus());
 }
 
-// The transport's first button starts at the content's 12 px inset, where
+// The transport's first glyph starts at the content's 12 px inset, where
 // the library's chevrons and the status bar's text do, and its volume ends
-// the same 12 px from the right edge.
+// the same 12 px from the right edge: both measured to what is drawn
+// (#373 H34 AB6: the first button's frame was at 12 px, its glyph at 20).
 void UiMainWindowTest::transportStartsAndEndsAtTheContentInset() {
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;

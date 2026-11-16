@@ -724,12 +724,18 @@ Rectangle {
                             : (root.uiBridge.playbackState === "Stopped"
                                 ? I18n.i18nc("@info accessible state of the current queue row", "stopped")
                                 : I18n.i18nc("@info accessible state of the current queue row", "playing")))
-                    readonly property string stateGlyph: isCurrentQueueRow
+                    // Playing or paused, what the playback does; otherwise
+                    // the warning of an unreadable file before the stop
+                    // mark, as a file that fails to play stays the
+                    // current row, stopped, and the warning says why
+                    // (#373 H35 AB7: it showed the stop mark, with the
+                    // error as its tooltip, until another row played).
+                    readonly property string stateGlyph: isNow
                         ? (root.uiBridge.playbackState === "Paused"
-                            ? "media-playback-pause"
-                            : (root.uiBridge.playbackState === "Stopped"
-                                ? "media-playback-stop" : "media-playback-start"))
-                        : (unreadable ? "dialog-warning" : "")
+                            ? "media-playback-pause" : "media-playback-start")
+                        : (unreadable
+                            ? "dialog-warning"
+                            : (isCurrentQueueRow ? "media-playback-stop" : ""))
 
                     width: ListView.view.width
                     height: playlistView.rowHeight
