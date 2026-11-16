@@ -855,6 +855,7 @@ if(BUILD_TESTING)
         Qt6::Network
         Qt6::Widgets
         Qt6::Test
+        Qt6::QuickTest
         KF6::Kirigami
         KF6::I18n
         KF6::I18nQml
@@ -1002,6 +1003,7 @@ if(BUILD_TESTING)
         Qt6::Network
         Qt6::Widgets
         Qt6::Test
+        Qt6::QuickTest
         KF6::Kirigami
         KF6::KirigamiPlatform
         KF6::I18n

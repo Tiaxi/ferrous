@@ -26,6 +26,7 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QtEndian>
+#include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
 #include <qqml.h>
 
@@ -887,11 +888,26 @@ QString lookChange(const PanelLook &before, const PanelLook &after, const QStrin
     return {};
 }
 
+// Whether `item` or an item it sits in still waits for its polish, where
+// layouts place their children.
+bool layoutPending(const QQuickItem *item) {
+    for (; item != nullptr; item = item->parentItem()) {
+        if (QQuickTest::qIsPolishScheduled(item)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Whether the panel shows the playing track's layout whole: the first
 // track grows it from the compact row of nothing playing (#373 H7), which
-// this waits out.
+// this waits out, and the sidebar has laid it out at its whole height,
+// which the growth's last step reaches only at the frame after it (#373
+// H24, see tst_ui_main_window's grown()).
 bool grown(QQuickItem *panel) {
-    return QTest::qWaitFor([&]() { return panel->property("presence").toDouble() == 1.0; }, 5000);
+    return QTest::qWaitFor([&]() {
+        return panel->property("presence").toDouble() == 1.0 && !layoutPending(panel);
+    }, 5000);
 }
 
 // Whether the panel shows the playing track alone: every line whole and

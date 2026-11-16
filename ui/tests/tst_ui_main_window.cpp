@@ -30,6 +30,7 @@
 #include <QTemporaryDir>
 #include <QUrl>
 #include <QtEndian>
+#include <QtQuickTest/quicktest.h>
 #include <QtTest/QtTest>
 #include <qqml.h>
 
@@ -451,13 +452,29 @@ void clearPlayback(QObject *bridge) {
     }
 }
 
+// Whether `item` or an item it sits in still waits for its polish, where
+// layouts place their children.
+bool layoutPending(const QQuickItem *item) {
+    for (; item != nullptr; item = item->parentItem()) {
+        if (QQuickTest::qIsPolishScheduled(item)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Whether the now-playing panel shows the playing track's layout whole: the
 // first track grows it from the compact row of nothing loaded (#373 H7),
-// which this waits out.
+// which this waits out, and the sidebar has laid it out at its whole
+// height. The growth's last step sets `presence` to 1 after the polish of
+// its frame, so the panel's whole height reaches the sidebar's layout only
+// at the next one: until then the panel, and the library under it, are
+// where the last step put them, as at 456 px of 457 (#373 H24).
 bool grown(QQuickWindow *window) {
     QQuickItem *panel = named(window, "nowPlayingPanel");
-    return panel != nullptr
-        && QTest::qWaitFor([&]() { return panel->property("presence").toDouble() == 1.0; }, 5000);
+    return panel != nullptr && QTest::qWaitFor([&]() {
+               return panel->property("presence").toDouble() == 1.0 && !layoutPending(panel);
+           }, 5000);
 }
 
 // Why the now-playing panel is not the compact row of nothing loaded, or ""
@@ -873,6 +890,8 @@ private slots:
     void nowPlayingLargeFontCompactIsAHeaderRow();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
     void nowPlayingWithoutCoverOrTagsLeavesNoBlankLines();
+    void nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange_data();
+    void nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort_data();
     void nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort();
     void nowPlayingKeepsTheArtistAndTheAlbumAtAnyFontSize();
@@ -1935,6 +1954,112 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QTRY_VERIFY(cover->property("hasCover").toBool());
     QVERIFY(!shown(itemNamed(cover, QStringLiteral("albumArtStandIn"))));
     QCOMPARE(geometry(), withCover);
+}
+
+void UiMainWindowTest::nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange_data() {
+    nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data();
+}
+
+// The now-playing panel is one height, and the library under it in one
+// place, on every frame drawn while a cover goes or comes, as the stand-in
+// and the cover cross-fade: for the playing track and for a track without
+// one after a track with one, and back (#373 H11), in the wide layout and
+// the narrow one, at any font size. Once grown, the panel is as high as its
+// layout (#373 H24: the growth's last step reached the sidebar a frame
+// late, and a panel read in between was 1 px short of it).
+void UiMainWindowTest::nowPlayingHoldsItsHeightOnEveryFrameOfACoverChange() {
+    QFETCH(bool, narrow);
+    QFETCH(bool, dark);
+    QFETCH(qreal, pointSize);
+    const auto restorePalette = useDarkPalette(dark);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, narrow ? 1000 : 1600, narrow ? 720 : 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *cover = named(window, "nowPlayingCover");
+    QQuickItem *header = named(window, "libraryHeader");
+    QVERIFY(panel && cover && header);
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    QVERIFY(handover != nullptr);
+
+    // Grown, the panel is as high as its layout, and the library under it.
+    // The growth ends here between two frames, as its last step does after
+    // its frame's polish: the sidebar lays the whole height out only at
+    // the next one, which grown() waits for.
+    QObject *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(growth != nullptr);
+    playTrack(bridge);
+    QTRY_VERIFY(panel->property("presence").toDouble() > 0.0);
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(QMetaObject::invokeMethod(growth, "complete"));
+    QCOMPARE(panel->property("presence").toDouble(), 1.0);
+    QVERIFY(grown(window));
+    QCOMPARE(panel->height(), panel->property("layoutHeight").toReal());
+    const QRectF panelRect = sceneRect(panel);
+    const qreal headerTop = sceneRect(header).top();
+    QCOMPARE(headerTop, panelRect.bottom());
+    QTRY_VERIFY(cover->property("hasCover").toBool());
+    QTRY_VERIFY(!handover->property("running").toBool());
+    QCOMPARE(sceneRect(panel), panelRect);
+
+    int frames = 0;
+    QStringList moved;
+    const QMetaObject::Connection sampler = QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+        ++frames;
+        const QRectF now = sceneRect(panel);
+        const qreal top = sceneRect(header).top();
+        if (now != panelRect || top != headerTop) {
+            moved.push_back(QStringLiteral("frame %1: the panel %2 px high at %3, the library's header at %4")
+                                .arg(frames).arg(now.height()).arg(now.top()).arg(top));
+        }
+    });
+    const auto stopSampling = qScopeGuard([&] { QObject::disconnect(sampler); });
+    // Each change cross-fades over frames of its own, every one sampled.
+    const auto crossFaded = [&](int before) {
+        return QTest::qWaitFor([&]() { return !handover->property("running").toBool() && frames > before + 2; },
+                               5000);
+    };
+
+    // The cover gone: its stand-in.
+    int before = frames;
+    bridge->setProperty("currentTrackCoverPath", QString());
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(crossFaded(before));
+    QVERIFY(!cover->property("hasCover").toBool());
+    // The cover back.
+    before = frames;
+    bridge->setProperty("currentTrackCoverPath", testCoverUrl());
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(crossFaded(before));
+    QVERIFY(cover->property("hasCover").toBool());
+    // Another track, without a cover, after the one with it. Its tags are
+    // the same: the narrow layout's height follows the lines' text (#373
+    // H6), which this leaves out.
+    before = frames;
+    bridge->setProperty("currentTrackPath", QStringLiteral("/music/Artist A/Album A/03.flac"));
+    bridge->setProperty("currentTrackCoverPath", QString());
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(crossFaded(before));
+    QVERIFY(!cover->property("hasCover").toBool());
+    // And the track with the cover after it.
+    before = frames;
+    playTrack(bridge);
+    QVERIFY(handover->property("running").toBool());
+    QVERIFY(crossFaded(before));
+    QVERIFY(cover->property("hasCover").toBool());
+
+    QVERIFY2(moved.isEmpty(), qPrintable(moved.join(QLatin1Char('\n'))));
+    QCOMPARE(sceneRect(panel), panelRect);
+    QCOMPARE(sceneRect(header).top(), headerTop);
 }
 
 void UiMainWindowTest::showInLibraryBringsThePlayingRowIntoView_data() {
