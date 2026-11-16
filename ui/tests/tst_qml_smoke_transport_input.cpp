@@ -1385,12 +1385,18 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
             return (std::max(luminance(a), luminance(b)) + 0.05) / (std::min(luminance(a), luminance(b)) + 0.05);
         };
         const QColor floor = palette->property("plotFloor").value<QColor>();
+        // A line of the lane's own colour, and one in a plate's band, which
+        // is quieter (#373 H31 Y4).
         QRect line;
+        QRect quietLine;
         {
             SpectrogramItem *pane = panes().at(0);
             QMutexLocker lock(&pane->m_stateMutex);
             QVERIFY(!pane->m_restGrid.lines.isEmpty());
-            line = pane->m_restGrid.lines.constLast();
+            for (qsizetype i = 0; i < pane->m_restGrid.lines.size(); ++i) {
+                (pane->m_restGrid.lineColors.value(i).isValid() ? quietLine : line) = pane->m_restGrid.lines.at(i);
+            }
+            QVERIFY(!line.isNull());
         }
         QTest::qWait(50);
         const QImage image = window->grabWindow();
@@ -1401,6 +1407,14 @@ void TransportInputSmokeTest::paneAtRestIsAStereoInstrument() {
         const double lineContrast = contrast(drawnLine, floor);
         QVERIFY2(lineContrast >= 1.72 && lineContrast <= 1.84,
                  qPrintable(QStringLiteral("rest line %1, %2:1 on the floor").arg(drawnLine.name()).arg(lineContrast)));
+        if (!quietLine.isNull()) {
+            const QColor drawnQuiet = image.pixelColor(int(origin.x()) + quietLine.center().x(),
+                                                       int(origin.y()) + quietLine.top());
+            const double quietContrast = contrast(drawnQuiet, floor);
+            QVERIFY2(quietContrast >= 1.2 && quietContrast <= 1.4,
+                     qPrintable(QStringLiteral("quiet rest line %1, %2:1 on the floor")
+                                    .arg(drawnQuiet.name()).arg(quietContrast)));
+        }
         const QColor drawnSeam = image.pixelColor(int((pane.center().x()) * scale), int((upper.bottom() + 0.5) * scale));
         QCOMPARE(drawnSeam.rgb(), palette->property("plotRestLaneSeam").value<QColor>().rgb());
         QVERIFY2(luminance(drawnSeam) < luminance(floor), qPrintable(drawnSeam.name()));
