@@ -356,17 +356,18 @@ Item {
     })
 
     // A track change fades (#373 Motion), line by line: a line that differs
-    // for the next track cross-fades, in place, the one before going out as
-    // the next track's comes in, on one progress, so the line never drops
-    // below about 0.6 of its ink (#373 H6: out, then in, left each line
-    // under half for up to 50 ms; the overlap does not read at speed); where
+    // for the next track cross-fades, in place, the one before going out
+    // over the first 40 % of the fade as the next track's comes in over all
+    // of it (see _linesOutLevel), so the line never drops below half of its
+    // ink (#373 H6: out, then in, left each line under half for up to 50
+    // ms) and the two texts hardly show together (#373 H15 H3); where
     // only a word or a number of it changes, its fields, and the words of a
     // field in which only a number changes, that are the same for both and
     // do not move stay still (#537), and otherwise it fades whole (see
     // `_fadesWhole`, #373 H2); a line that is the same stays still. The next
     // track of the same album fades over shortDuration; a track of another
     // album, or with another cover, fades the cover and the lines together
-    // over longDuration, all of them cross-fading over all of it. A line
+    // over longDuration, the cover cross-fading over all of it. A line
     // that comes to differ while the track change fades (the metadata
     // comes after the path) joins the fade from full opacity, and the
     // lines already fading go on from theirs. A cover that changes later
@@ -404,7 +405,7 @@ Item {
     // another cover or another album, even when the two look alike.
     property var outgoing: null
     // How far the fade has come in its time: 0 when it starts, 1 once the
-    // playing track alone shows. Every layer eases on it, over all of it.
+    // playing track alone shows. Every layer eases on it (see _linesOutLevel).
     property real handover: 1
     readonly property NumberAnimation handoverAnimation: NumberAnimation {
         objectName: "nowPlayingHandoverAnimation"
@@ -422,12 +423,19 @@ Item {
         return 1 - rest * rest * rest
     }
     // At `at` of the fade, how much of their opacity the lines before keep
-    // and how far the playing track's lines have come in: one progress,
-    // over all of it, so that what goes out and what comes in add up to a
-    // whole line in every frame; and how much of their opacity the covers
-    // before keep, going out over all of it too.
+    // and how far the playing track's lines have come in; and how much of
+    // their opacity the covers before keep, going out over all of it. The
+    // lines before go out over the first linesOutSpan of it, OutCubic, 80
+    // ms of a 200 ms fade, as the playing track's come in over all of it,
+    // OutCubic, so the two texts are both over 0.3 for some 4 ms of it
+    // rather than 50 (#373 H15 H3: two titles read superimposed), and
+    // between them a line keeps over half of a text's ink in every frame,
+    // so it does not blink (#373 H6). The incoming lines start with the
+    // fade: held back any longer, as to 60 ms, the line would drop under
+    // half its ink for up to 70 ms, a blink.
+    readonly property real linesOutSpan: 0.4
     function _linesOutLevel(at) {
-        return 1 - root._eased(at)
+        return 1 - root._eased(at / root.linesOutSpan)
     }
     function _linesInLevel(at) {
         return root._eased(at)
