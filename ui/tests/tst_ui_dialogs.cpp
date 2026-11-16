@@ -516,7 +516,8 @@ private slots:
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsOpensNoWiderThanTheMainWindow();
-    void autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts();
+    void autoNumberIsOneFormInReadingOrder_data();
+    void autoNumberIsOneFormInReadingOrder();
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
@@ -3185,16 +3186,28 @@ void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
     }
 }
 
-// Auto Number opens wide enough for its form and its check boxes, which do
-// not wrap, in the font they are in: at 24 pt, its fixed 26 grid units
-// left them running up to 435 px past the window (#373 H10). Its
-// description wraps within that width.
-void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
+void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Auto Number is one form in reading order (#373 H38): the tracks' start;
+// Write disc numbers, then the disc's start it enables, then totals; then
+// when numbering starts over. The check boxes have no labels and start
+// where the fields do, the description too, so the dialog has one left
+// edge; it had two, with Write disc numbers under the field it enables.
+// The start fields hold four digits, 5 grid units, and their errors wrap
+// at 14. The window is as wide as the form, in the font it is in: at
+// 24 pt, a fixed 26 grid units left the check boxes running up to 435 px
+// past it (#373 H10).
+void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
+    QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont large = applicationFont;
-    large.setPointSizeF(24);
-    QGuiApplication::setFont(large);
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
                                    const TagEditorController::RenameGate &) { return tagRows(4); };
@@ -3214,39 +3227,80 @@ void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
     QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
     QVERIFY(body != nullptr);
     QTRY_VERIFY(!layoutPending(body));
+    const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+    QVERIFY(gridUnit > 0);
     const qreal padding = dialog->property("contentPadding").toReal();
     const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
-    int checked = 0;
-    for (const QString &name : {QStringLiteral("autoNumberForm"), QStringLiteral("autoNumberStartingTrackField"),
-                                QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberWriteTotalsCheck"),
-                                QStringLiteral("autoNumberResetOnFolderCheck"),
-                                QStringLiteral("autoNumberResetOnDiscCheck")}) {
+
+    // Every row within the window, whole, top to bottom in reading order.
+    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteDiscCheck"),
+                            QStringLiteral("autoNumberStartingDiscField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                            QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+    QQuickItem *form = visibleNamed(numbers, QStringLiteral("autoNumberForm"));
+    QVERIFY(form != nullptr);
+    qreal top = -1;
+    qreal fieldsLeft = -1;
+    for (const QString &name : order) {
         QQuickItem *item = visibleNamed(numbers, name);
         QVERIFY2(item != nullptr, qPrintable(name));
+        QVERIFY2(form->isAncestorOf(item), qPrintable(name));
         const QRectF rect = sceneRect(item);
-        const QString where = QStringLiteral("%1 at %2..%3 (implicit %4), window %5 wide")
-            .arg(name).arg(rect.left()).arg(rect.right()).arg(item->implicitWidth()).arg(numbers->width());
+        const QString where = QStringLiteral("%1 at %2..%3, %4 (implicit %5), window %6 wide")
+            .arg(name).arg(rect.left()).arg(rect.right()).arg(rect.top()).arg(item->implicitWidth())
+            .arg(numbers->width());
         QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
-        QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
-        ++checked;
+        QVERIFY2(rect.top() > top, qPrintable(where));
+        top = rect.top();
+        // One left edge: the fields' and the check boxes'.
+        if (fieldsLeft < 0) {
+            fieldsLeft = rect.left();
+        }
+        QVERIFY2(qAbs(rect.left() - fieldsLeft) <= 0.5, qPrintable(where));
+        if (name.endsWith(QStringLiteral("Field"))) {
+            QCOMPARE(item->width(), 5 * gridUnit);
+        } else {
+            QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
+            // The check boxes are the form's rows, with no labels.
+            QVERIFY2(evaluate(item, QStringLiteral("Kirigami.FormData.label")).toString().isEmpty(), qPrintable(where));
+        }
     }
-    QCOMPARE(checked, 6);
+    QCOMPARE(evaluate(visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck")), QStringLiteral("text")).toString(),
+             QStringLiteral("Reset track numbers at each new disc"));
+    // The description starts where the form's labels do and is no wider.
+    QQuickItem *description = visibleNamed(numbers, QStringLiteral("autoNumberDescription"));
+    QVERIFY(description != nullptr);
+    QCOMPARE(sceneRect(description).left(), sceneRect(form).left() + (form->width() - form->implicitWidth()) / 2);
+    QVERIFY(sceneRect(description).width() <= form->implicitWidth() + 0.5);
+    // Write disc numbers enables the disc's start and its reset.
+    QQuickItem *writeDisc = visibleNamed(numbers, QStringLiteral("autoNumberWriteDiscCheck"));
+    QVERIFY(!visibleNamed(numbers, QStringLiteral("autoNumberStartingDiscField"))->isEnabled());
+    QVERIFY(!visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck"))->isEnabled());
+    writeDisc->setProperty("checked", true);
+    QTRY_VERIFY(visibleNamed(numbers, QStringLiteral("autoNumberStartingDiscField"))->isEnabled());
+    QVERIFY(visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck"))->isEnabled());
+    writeDisc->setProperty("checked", false);
+
     // A start that is not valid says so under its field, wrapped within
-    // the window.
+    // 14 grid units.
     QQuickItem *trackField = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
     trackField->setProperty("text", QStringLiteral("0"));
     QQuickItem *trackError = nullptr;
     QTRY_VERIFY((trackError = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackError"))) != nullptr);
     QTRY_VERIFY(!layoutPending(body));
+    // The form places a row it shows on its next layout.
+    QTRY_VERIFY2(qAbs(sceneRect(trackError).left() - fieldsLeft) <= 0.5,
+                 qPrintable(QStringLiteral("error at %1, fields at %2").arg(sceneRect(trackError).left()).arg(fieldsLeft)));
     const QRectF errorRect = sceneRect(trackError);
     QVERIFY2(errorRect.left() >= inside.left() - 0.5 && errorRect.right() <= inside.right() + 0.5,
              qPrintable(QStringLiteral("error at %1..%2, window %3 wide")
                             .arg(errorRect.left()).arg(errorRect.right()).arg(numbers->width())));
+    QVERIFY(errorRect.width() <= 14 * gridUnit + 0.5);
     QVERIFY(!trackError->property("truncated").toBool());
     trackField->setProperty("text", QStringLiteral("1"));
     // The window is no wider than its widest line needs, and the screen.
     QVERIFY2(numbers->width() <= qMax(qCeil(dialog->property("defaultWidth").toReal()), numbers->minimumWidth()),
              qPrintable(QString::number(numbers->width())));
+    QVERIFY(numbers->width() <= qCeil(form->implicitWidth() + 2 * padding) || numbers->width() == numbers->minimumWidth());
     QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     editor.close();
