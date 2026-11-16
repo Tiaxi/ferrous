@@ -632,10 +632,26 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     // the trough; the trough faint, the text at 6 %; a seam across its top
     // in the seam colour. The spectrogram's meter has no such seam.
     {
-        const QColor wave = colorOf(tokens, "wave");
+        const QColor wave = colorOf(tokens, "paneWave");
         const double amount = dark ? 0.35 : 0.30;
         QVERIFY2(channelDistance(colorOf(waveform, "meterFill"), mixed(wave, view, amount)) <= 1,
                  qPrintable(colorOf(waveform, "meterFill").name()));
+        // Its rungs 3:1 on their trough, as drawn on the view.
+        const QColor trough = drawnOver(colorOf(waveform, "meterTrough"), view);
+        QVERIFY2(contrastRatio(colorOf(waveform, "meterFill"), trough) >= 3.0,
+                 qPrintable(describe(QStringLiteral("rungs on the trough"), colorOf(waveform, "meterFill"), trough)));
+        // The pane's waveform (#373 H15 H6): the seek bar's in light; in
+        // dark a quieter tone of the same blue, #87bad4, some 8.6:1 on the
+        // view rather than the seek bar's 13:1.
+        if (dark) {
+            QVERIFY2(channelDistance(wave, fromHex(QStringLiteral("#87bad4"))) <= 3, qPrintable(wave.name()));
+            QVERIFY(!sameColor(wave, colorOf(tokens, "wave")));
+            const double onView = contrastRatio(wave, view);
+            QVERIFY2(onView >= 8.0 && onView <= 9.2, qPrintable(QString::number(onView)));
+            QVERIFY(onView < contrastRatio(colorOf(tokens, "wave"), view));
+        } else {
+            QVERIFY(sameColor(wave, colorOf(tokens, "wave")));
+        }
         QVERIFY(std::abs(colorOf(waveform, "meterTrough").alphaF() - 0.06) < 0.003);
         QVERIFY(sameColor(colorOf(waveform, "meterTopSeam"), colorOf(tokens, "seam")));
         QCOMPARE(colorOf(spectrogram, "meterTopSeam").alpha(), 0);

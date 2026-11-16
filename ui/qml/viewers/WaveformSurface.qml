@@ -112,11 +112,11 @@ Item {
         // Per channel: a 64-bit mask loses its low bits as a QML number.
         mutedChannels: root.uiBridge.mutedChannels || []
         soloedChannels: root.uiBridge.soloedChannels || []
-        // The waveform plot set: on the view colour, in the seek bar's
-        // waveform colour.
+        // The waveform plot set: on the view colour, in the pane's waveform
+        // colour, the seek bar's in a light theme and quieter in a dark one.
         backgroundColor: root.plotColors.plotBg
-        waveformColor: root.uiPalette.wave
-        mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.wave, root.plotColors.plotBg, 0.65)
+        waveformColor: root.uiPalette.paneWave
+        mutedWaveformColor: ColorUtils.mixColor(root.uiPalette.paneWave, root.plotColors.plotBg, 0.65)
         centerLineColor: ColorUtils.withAlpha(root.uiPalette.text, 0.08)
         laneSeamColor: root.plotColors.plotLaneSeam
         // Dark: a light core in a black casing; light: a dark core in white.

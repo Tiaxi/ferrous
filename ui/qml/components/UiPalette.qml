@@ -92,6 +92,12 @@ QtObject {
         : root._withHslLightness(Kirigami.Theme.negativeTextColor, 0.96, 0.465)
     // The seek bar's waveform. #b9e1f5 / #2c566c.
     readonly property color wave: ColorUtils.mixColor(root.text, root.accent, 0.35)
+    // The visualization pane's waveform: in a light theme the seek bar's;
+    // in a dark one quieter, the accent's hue at 60 % of its saturation and
+    // 68 % lightness, #87bad4, some 8.6:1 on the view (#373 H15 H6: the seek
+    // bar's #b9e1f5, 13:1 over some 29 % of the pane, was the brightest
+    // mass of the dark window). One tone: no played part apart.
+    readonly property color paneWave: root.themeIsDark ? root._withHslLightness(root.accent, 0.6, 0.68) : root.wave
     // Fixed: the spectrogram colour map's amber. It marks only what is
     // playing: the playing row's glyph and title, the playing tree row, the
     // name of a collapsed tree row that holds it, and the seek playhead.
@@ -298,7 +304,8 @@ QtObject {
         // it, whose greys it had (#373 H12 Z5): a faint trough, the
         // waveform's colour mixed about 35 % toward the view, less where
         // that would be under 3:1 on the trough (the light theme's 30 %),
-        // and a seam across its top.
+        // and a seam across its top. From the pane's waveform colour, so it
+        // stays the plot's own (#373 H15 H6).
         meterTrough: ColorUtils.withAlpha(root.text, 0.06)
         meterFill: root._waveformMeterFill(ColorUtils.drawnOver(waveformColors.meterTrough, root.view))
         meterTopSeam: root.seam
@@ -319,11 +326,11 @@ QtObject {
     // the most of it that is 3:1 on `trough`.
     function _waveformMeterFill(trough) {
         for (let amount = 0.35; amount > 0; amount -= 0.05) {
-            const fill = ColorUtils.mixColor(root.wave, root.view, amount)
+            const fill = ColorUtils.mixColor(root.paneWave, root.view, amount)
             if (ColorUtils.contrastRatio(fill, trough) >= 3)
                 return fill
         }
-        return root.wave
+        return root.paneWave
     }
 
     // The plot set for a visualization mode: 0 is the spectrogram, 1 the
