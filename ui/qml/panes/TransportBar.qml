@@ -169,10 +169,6 @@ ToolBar {
     // The content's inset, on both sides: Previous starts where the
     // library's rows and the status bar's text do.
     readonly property int edgeInset: 12
-    // Where the titles of a menu bar right above the transport end, in the
-    // transport's coordinates, or 0 for none: the seek bar's time, which
-    // shows above the bar, keeps right of them.
-    property real menuTitlesEnd: 0
     leftPadding: root.edgeInset
     rightPadding: root.edgeInset
     topPadding: 0
@@ -813,17 +809,13 @@ ToolBar {
                         : seekHover.hovered ? seekSlider.hoverX : seekTimeBox.anchorX
                     restoreMode: Binding.RestoreNone
                 }
-                // Where the band above the bar is free of the menu bar's
-                // titles, in the slider's coordinates.
-                readonly property real menuClearX: root.menuTitlesEnd > 0
-                    ? root.menuTitlesEnd + Kirigami.Units.smallSpacing - root.leftPadding - seekSlider.x
-                    : 0
-                // Centred on the line, within the bar at either end; and
-                // where the bar starts under the menu bar's titles, right
-                // of them, so it covers no title, even if it then hangs
-                // past the bar's end.
+                // Centred on the line, within the bar at either end. Near
+                // the bar's start it may cover a menu bar's titles above
+                // it for a moment, which costs less than a time away from
+                // its line (#373 H34 AB4: kept right of them, it was up to
+                // 350 px from it).
                 readonly property real centredX: anchorX - width / 2
-                readonly property real placedX: root.snapped(Math.max(menuClearX, 0,
+                readonly property real placedX: root.snapped(Math.max(0,
                     Math.min(seekSlider.width - width, centredX)))
                 x: placedX
                 // Its bottom edge on the bar's top. It may reach the

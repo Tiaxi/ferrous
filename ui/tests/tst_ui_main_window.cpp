@@ -900,8 +900,8 @@ private slots:
     void cleanup();
     void cleanupTestCase();
     void drawsOffscreenUnlessAPlatformIsChosen();
-    void seekTimeKeepsClearOfTheMenuTitles_data();
-    void seekTimeKeepsClearOfTheMenuTitles();
+    void seekTimeStaysOverItsLine_data();
+    void seekTimeStaysOverItsLine();
     void contentIsOneSheetWithFourSeams();
     void sidebarWidthFollowsTheWindowAndTheFont_data();
     void sidebarWidthFollowsTheWindowAndTheFont();
@@ -1067,7 +1067,7 @@ void UiMainWindowTest::contentIsOneSheetWithFourSeams() {
     QVERIFY(columnSeam->contains(columnSeam->mapFromScene(QPointF(columnRect.left() + 3, 300))));
 }
 
-void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles_data() {
+void UiMainWindowTest::seekTimeStaysOverItsLine_data() {
     QTest::addColumn<qreal>("pointSize");
     QTest::addColumn<int>("windowWidth");
     QTest::addColumn<int>("windowHeight");
@@ -1077,12 +1077,13 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles_data() {
     QTest::newRow("24 pt, 1000 by 720") << 24.0 << 1000 << 720;
 }
 
-// The seek bar's time shows above the bar, in the menu bar's band, so
-// where the bar starts under the menu's titles it keeps right of them: it
-// covers no title, however near the bar's start the pointer is, and none
-// of the waveform (#373 H33 AA2). Past the titles, it is centred on the
-// pointer.
-void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
+// The seek bar's time shows above the bar, in the menu bar's band, centred
+// on the line it reads, wherever the pointer is on the bar, and within the
+// bar at either end, so it stays in the window; it covers none of the
+// waveform (#373 H33 AA2). Near the bar's start it may cover a menu title
+// for a moment (#373 H34 AB4: kept right of the titles, it was up to 350 px
+// from its line).
+void UiMainWindowTest::seekTimeStaysOverItsLine() {
     QFETCH(qreal, pointSize);
     QFETCH(int, windowWidth);
     QFETCH(int, windowHeight);
@@ -1103,22 +1104,16 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
     playTrack(bridge);
     QQuickItem *seek = named(window, "seekSlider");
     QQuickItem *waveform = named(window, "seekWaveform");
-    QQuickItem *menuBar = named(window, "mainMenuBar");
     QObject *tip = window->findChild<QObject *>(QStringLiteral("seekTimeBox"));
-    QVERIFY(seek && waveform && menuBar && tip);
+    QVERIFY(seek && waveform && tip);
     QTRY_VERIFY(seek->isEnabled());
     // Laid out in the window's width.
     QTRY_VERIFY(sceneRect(named(window, "transportBar")).right() <= windowWidth);
-    const QList<QQuickItem *> labels = itemsNamed(menuBar, QStringLiteral("menuBarItemLabel"));
-    QVERIFY(labels.size() >= 6);
     auto *tipBox = tip->property("background").value<QQuickItem *>();
     QVERIFY(tipBox != nullptr);
     const QRectF bar = sceneRect(seek);
-    // The bar starts under the titles, so the clearing is put to the test.
-    QVERIFY2(bar.left() < sceneRect(labels.constLast()).right(),
-             qPrintable(QStringLiteral("the bar starts at %1, past the titles").arg(bar.left())));
 
-    for (const qreal fraction : {0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.9, 1.0}) {
+    for (const qreal fraction : {0.0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.9, 0.98, 1.0}) {
         const QPoint at = QPointF(std::min(bar.left() + bar.width() * fraction, bar.right() - 1),
                                   bar.center().y()).toPoint();
         QTest::mouseMove(window, at);
@@ -1133,14 +1128,21 @@ void UiMainWindowTest::seekTimeKeepsClearOfTheMenuTitles() {
                                   .arg(bar.x()).arg(bar.y()).arg(bar.width()).arg(bar.height());
         QVERIFY2(std::abs(box.bottom() - bar.top()) <= 0.5, qPrintable(where));
         QVERIFY2(!box.intersects(sceneRect(waveform)), qPrintable(where));
-        for (QQuickItem *label : labels) {
-            QVERIFY2(!box.intersects(sceneRect(label)),
-                     qPrintable(where + QStringLiteral(" covers ") + label->property("text").toString()));
+        // In the window.
+        QVERIFY2(box.left() >= 0.0 && box.right() <= windowWidth && box.top() >= 0.0, qPrintable(where));
+        // Centred on its line, or, where that would hang past the bar's
+        // end, flush with that end and still over the line.
+        const qreal half = box.width() / 2;
+        const bool nearStart = at.x() - bar.left() < half;
+        const bool nearEnd = bar.right() - at.x() < half;
+        if (nearStart) {
+            QVERIFY2(std::abs(box.left() - bar.left()) <= 0.5, qPrintable(where));
+        } else if (nearEnd) {
+            QVERIFY2(std::abs(box.right() - bar.right()) <= 0.5, qPrintable(where));
+        } else {
+            QVERIFY2(std::abs(box.center().x() - at.x()) <= 1.0, qPrintable(where));
         }
-        // Over its line, or right of the titles where they keep it from it.
-        const bool centred = std::abs(box.center().x() - at.x()) <= 1.0;
-        const bool clearOfTitles = box.left() >= sceneRect(labels.constLast()).right();
-        QVERIFY2(centred || clearOfTitles || std::abs(box.right() - bar.right()) <= 0.5, qPrintable(where));
+        QVERIFY2(box.left() <= at.x() && box.right() >= at.x(), qPrintable(where));
     }
 }
 

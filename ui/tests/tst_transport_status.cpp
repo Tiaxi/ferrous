@@ -1016,30 +1016,15 @@ void TransportStatusTest::seekHoverDrawsALineAndANativeToolTip() {
     tipRect = sceneRect(tipBox);
     expectAbove(tipRect);
     QCOMPARE(tipRect.right(), bar.right());
-
-    // A menu bar's titles above the bar's start: the box keeps right of
-    // them, where it would reach over them, and is centred again past them.
-    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
-    QVERIFY(transport != nullptr);
-    const qreal titlesEnd = bar.left() - sceneRect(transport).left() + 120;
-    transport->setProperty("menuTitlesEnd", titlesEnd);
-    const qreal clearOfTitles = sceneRect(transport).left() + titlesEnd
-        + evaluateOn(seek, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
-    for (const qreal offset : {3.0, 60.0, 119.0}) {
-        const QPointF under(bar.left() + offset, bar.center().y());
-        QTest::mouseMove(harness.window, under.toPoint());
-        QTRY_COMPARE(sceneRect(hoverLine).left(), under.x());
-        tipRect = sceneRect(tipBox);
-        expectAbove(tipRect);
-        QVERIFY2(tipRect.left() >= clearOfTitles - 0.5 && tipRect.left() <= clearOfTitles + 1.0,
-                 qPrintable(QStringLiteral("at %1: %2").arg(offset).arg(describeRect(tipRect))));
-    }
-    const QPointF pastTitles(clearOfTitles + 200, bar.center().y());
-    QTest::mouseMove(harness.window, pastTitles.toPoint());
-    QTRY_COMPARE(sceneRect(hoverLine).left(), pastTitles.x());
+    // Nothing else moves it: a little way in from the start, it is centred
+    // on its line again (#373 H34 AB4: a menu bar's titles kept it right of
+    // them, up to 350 px from its line).
+    const QPointF nearStart(bar.left() + tipRect.width() / 2 + 20, bar.center().y());
+    QTest::mouseMove(harness.window, nearStart.toPoint());
+    QTRY_COMPARE(sceneRect(hoverLine).left(), std::floor(nearStart.x()));
     tipRect = sceneRect(tipBox);
-    QVERIFY2(std::abs(tipRect.center().x() - pastTitles.x()) <= 1.0, qPrintable(describeRect(tipRect)));
-    transport->setProperty("menuTitlesEnd", 0);
+    expectAbove(tipRect);
+    QVERIFY2(std::abs(tipRect.center().x() - nearStart.x()) <= 1.0, qPrintable(describeRect(tipRect)));
 
     // Away from the bar, both go.
     QTest::mouseMove(harness.window, QPoint(static_cast<int>(at.x()), static_cast<int>(bar.bottom() + 60)));
