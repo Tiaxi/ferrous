@@ -503,6 +503,8 @@ private slots:
     void statusBarShowsTheScanWithItsBar();
     void statusBarScanBarFillsOnlyOnceTheRescanEnds();
     void statusBarScanWithoutATotalIsStill();
+    void statusBarScanKeepsItsPlaceWhileItCounts_data();
+    void statusBarScanKeepsItsPlaceWhileItCounts();
     void lastFmSlotShowsEachState();
     void lastFmSlotCountsTheTimeLeftFromTheListenedTime();
     void lastFmSlotPausedLooksStruckThrough_data();
@@ -2089,26 +2091,35 @@ void TransportStatusTest::statusBarShowsTheScanWithItsBar() {
         harness.bridge->setProperty("libraryScanTotal", 1204);
         harness.bridge->setProperty("libraryScanInProgress", true);
         QTRY_VERIFY(scan->isVisible());
-        // The files processed of those to scan, not of those found so far.
-        QCOMPARE(count->property("text").toString(), QStringLiteral("412 / 1,204"));
+        // Words that say what the progress is, and its percent of the files
+        // to scan, not of those found so far (#373 H13: the bar alone read
+        // as a twin of the Last.fm slot's); the files in the tooltip.
+        QCOMPARE(count->property("text").toString(), QStringLiteral("34%"));
+        QCOMPARE(accessibleText(scan, QAccessible::Name), QStringLiteral("Scanning “Music”: 412 of 1,204 files"));
         if (width == 1000) {
-            QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning"));
+            QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning…"));
             QVERIFY(!bar->isVisible());
             continue;
         }
-        QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning “Music”"));
+        QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning “Music”…"));
         QVERIFY(bar->isVisible());
         QCOMPARE(bar->size(), QSizeF(72, 4));
+        // The percent beside the bar, and the bar after it.
+        QTRY_VERIFY2(sceneRect(label).right() <= sceneRect(count).left(),
+                     qPrintable(describeRect(sceneRect(label)) + QStringLiteral(" / ") + describeRect(sceneRect(count))));
+        QVERIFY2(sceneRect(count).right() <= sceneRect(bar).left(),
+                 qPrintable(describeRect(sceneRect(count)) + QStringLiteral(" / ") + describeRect(sceneRect(bar))));
         // The bar moves with the batches, by whole pixels.
         QCOMPARE(fill->width(), std::floor(72.0 * 412 / 1204));
         harness.bridge->setProperty("libraryScanProcessed", 602);
         QCOMPARE(fill->width(), 36.0);
+        QCOMPARE(count->property("text").toString(), QStringLiteral("50%"));
         // Two folders: no name.
         harness.bridge->setProperty(
             "libraryRootEntries",
             QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("Music")}},
                          QVariantMap{{QStringLiteral("name"), QStringLiteral("More")}}});
-        QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning"));
+        QCOMPARE(label->property("text").toString(), QStringLiteral("Scanning library…"));
         harness.bridge->setProperty("libraryScanInProgress", false);
         QTRY_VERIFY(!scan->isVisible());
     }
@@ -2130,7 +2141,7 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
     harness.bridge->setProperty("libraryScanInProgress", true);
     QTRY_VERIFY(fill->isVisible());
     QCOMPARE(fill->width(), 0.0);
-    QCOMPARE(count->property("text").toString(), QStringLiteral("0 / 1,000"));
+    QCOMPARE(count->property("text").toString(), QStringLiteral("0%"));
 
     double previous = 0.0;
     for (int processed = 1; processed < 1000; ++processed) {
@@ -2139,13 +2150,68 @@ void TransportStatusTest::statusBarScanBarFillsOnlyOnceTheRescanEnds() {
         const double width = fill->width();
         QVERIFY2(width >= previous, qPrintable(QString::number(processed)));
         QVERIFY2(width < 72.0, qPrintable(QStringLiteral("full at %1 of 1000").arg(processed)));
+        QVERIFY2(count->property("text").toString() != QStringLiteral("100%"),
+                 qPrintable(QStringLiteral("100% at %1 of 1000").arg(processed)));
         previous = width;
     }
-    QCOMPARE(count->property("text").toString(), QStringLiteral("999 / 1,000"));
+    QCOMPARE(count->property("text").toString(), QStringLiteral("99%"));
     QCOMPARE(fill->width(), 71.0);
     harness.bridge->setProperty("libraryScanProcessed", 1000);
     QCOMPARE(fill->width(), 72.0);
-    QCOMPARE(count->property("text").toString(), QStringLiteral("1,000 / 1,000"));
+    QCOMPARE(count->property("text").toString(), QStringLiteral("100%"));
+}
+
+// The scan's words and its bar keep their places while it counts (#373
+// H13): the percent keeps the room of "100%", in tabular figures, so the
+// status bar's groups do not move as it goes from 0% to 9% to 10% to
+// 100%, at 10 and at 24 pt, wide and narrow.
+void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts_data() {
+    QTest::addColumn<int>("width");
+    QTest::addColumn<int>("pointSize");
+    QTest::newRow("1600, 10 pt") << 1600 << 10;
+    QTest::newRow("1000, 10 pt") << 1000 << 10;
+    QTest::newRow("1600, 24 pt") << 1600 << 24;
+    QTest::newRow("1000, 24 pt") << 1000 << 24;
+}
+
+void TransportStatusTest::statusBarScanKeepsItsPlaceWhileItCounts() {
+    QFETCH(int, width);
+    QFETCH(int, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSize(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, width, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), qreal(pointSize));
+    QQuickItem *scan = harness.item(QStringLiteral("statusBarScan"));
+    QQuickItem *label = harness.item(QStringLiteral("statusBarScanLabel"));
+    QQuickItem *count = harness.item(QStringLiteral("statusBarScanCount"));
+    QVERIFY(scan && label && count);
+    harness.bridge->setProperty("libraryRootEntries",
+                                QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("Music")}}});
+    harness.bridge->setProperty("libraryScanTotal", 1000);
+    harness.bridge->setProperty("libraryScanProcessed", 0);
+    harness.bridge->setProperty("libraryScanInProgress", true);
+    QTRY_VERIFY(scan->isVisible());
+    QTRY_VERIFY(scan->width() > 0);
+    const QRectF scanRect = sceneRect(scan);
+    const QRectF labelRect = sceneRect(label);
+    const QRectF countRect = sceneRect(count);
+    // The percent is in tabular figures.
+    QVERIFY(count->property("font").value<QFont>().featureValue(QFont::Tag("tnum")) == 1);
+    for (const int processed : {5, 90, 100, 555, 999, 1000}) {
+        harness.bridge->setProperty("libraryScanProcessed", processed);
+        QTRY_COMPARE(count->property("text").toString(), QStringLiteral("%1%").arg(processed / 10));
+        // The percent is whole, never cut.
+        QVERIFY2(count->property("implicitWidth").toReal() <= count->width() + 0.01,
+                 qPrintable(QString::number(count->property("implicitWidth").toReal())));
+        QCOMPARE(sceneRect(scan), scanRect);
+        QCOMPARE(sceneRect(label), labelRect);
+        QCOMPARE(sceneRect(count), countRect);
+    }
 }
 
 // The first scan of a folder cannot tell its total: the files scanned so
@@ -2217,7 +2283,7 @@ void TransportStatusTest::statusBarScanWithoutATotalIsStill() {
         harness.bridge->setProperty("libraryScanTotal", 1500);
         QVERIFY(bar->isVisible());
         QVERIFY(fill->isVisible());
-        QCOMPARE(count->property("text").toString(), QStringLiteral("1,204 / 1,500"));
+        QCOMPARE(count->property("text").toString(), QStringLiteral("80%"));
         QCOMPARE(fill->width(), std::floor(72.0 * 1204 / 1500));
     }
 }

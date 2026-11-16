@@ -4129,7 +4129,7 @@ void UiMainWindowTest::regionHeadersNameTheRegionAndItsTotals() {
     bridge->setProperty("libraryScanTotal", 120);
     bridge->setProperty("libraryScanInProgress", true);
     QTRY_VERIFY(shown(scanCount));
-    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("41 / 120"));
+    QCOMPARE(scanCount->property("text").toString(), QStringLiteral("34%"));
     QCOMPARE(libraryTotals->property("text").toString(),
              QStringLiteral("1 artist · 28 albums · 176 tracks"));
     bridge->setProperty("libraryScanInProgress", false);
