@@ -920,8 +920,9 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
 
-    // The popup fits the window; the list scrolls. The newest entry's
-    // action has the keyboard, so no focus frame wraps the whole list; the
+    // The popup fits the window; the list scrolls. Opened with the
+    // pointer, its content has the keyboard, not a control, which would
+    // show no ring (#373 H38), so no focus frame wraps the whole list; the
     // list's keys scroll it from there.
     QVERIFY(shownInsideItsWindow(content));
     QVERIFY(shownInsideItsWindow(diagnostics));
@@ -932,13 +933,13 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTRY_VERIFY(flickable->property("contentHeight").toReal() > view->height());
     QList<QQuickItem *> actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QCOMPARE(actions.size(), limit);
-    QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QTRY_COMPARE(window->activeFocusItem(), content);
     QVERIFY(!view->property("framed").toBool());
     QQuickItem *frame = itemNamed(view, QStringLiteral("keyScrollViewFrame"));
     QVERIFY(frame != nullptr);
     QCOMPARE(QQmlProperty(frame, QStringLiteral("border.color")).read().value<QColor>().alpha(), 0);
-    // Nor a ring on the action: the keyboard has not been used.
-    QVERIFY(!actions.first()->property("visualFocus").toBool());
+    // Nor a ring on the action: it does not have the keyboard.
+    QVERIFY(!actions.first()->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_Down);
     QTRY_VERIFY(flickable->property("contentY").toReal() > 0.0);
     QTest::keyClick(window, Qt::Key_End);
@@ -963,7 +964,7 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QCOMPARE(flickable->property("contentY").toReal(), 0.0);
-    QTRY_VERIFY(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->hasActiveFocus());
+    QTRY_COMPARE(window->activeFocusItem(), content);
     // The keys scroll the list from the header's and the footer's
     // controls too.
     clearAll->forceActiveFocus(Qt::TabFocusReason);
@@ -1021,25 +1022,35 @@ void ErrorsSmokeTest::recentErrorsWorkByKeyboardAtTheSmallestWindow() {
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_COMPARE(toggled.count(), 1);
 
-    // Space presses a focused action rather than playing or pausing.
+    // Opened with the pointer, Space neither plays nor pauses nor presses
+    // an action; Tab marks the first one, and Space presses that.
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
     actions = itemsNamed(content, QStringLiteral("errorHistoryActionButton"));
     QVERIFY(!actions.isEmpty());
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCoreApplication::processEvents();
+    QVERIFY(dialog->property("visible").toBool());
+    QCOMPARE(toggled.count(), 1);
+    QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(actions.first()->hasActiveFocus());
+    QVERIFY(actions.first()->property("visualFocus").toBool());
     QTest::keyClick(window, Qt::Key_Space);
     QTRY_VERIFY(!dialog->property("visible").toBool());
     QCOMPARE(toggled.count(), 1);
     QCOMPARE(bridge->property("shownInLibrary").toStringList(), QStringList{QStringLiteral("/music/track 0.flac")});
 
-    // With no entry that has an action, Open Diagnostics has the keyboard,
-    // never Clear All.
+    // With no entry that has an action, Tab takes the keyboard to Open
+    // Diagnostics, never Clear All.
     QVERIFY(QMetaObject::invokeMethod(errors, "clear"));
     QTRY_COMPARE(errors->property("count").toInt(), 0);
     QVERIFY(sendBridgeError(bridge, QStringLiteral("Playback stopped unexpectedly"), 1, 1));
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(statusButton));
     QTRY_VERIFY(dialog->property("opened").toBool());
     QCOMPARE(itemsNamed(content, QStringLiteral("errorHistoryActionButton")).first()->isVisible(), false);
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QTest::keyClick(window, Qt::Key_Tab);
     QTRY_VERIFY(diagnostics->hasActiveFocus());
     QVERIFY(!view->property("framed").toBool());
     QTest::keyClick(window, Qt::Key_Escape);
@@ -1123,7 +1134,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         QTest::mouseClick(host, Qt::LeftButton, Qt::NoModifier, centerInWindow(historyButton));
         QTRY_VERIFY2(dialog->property("opened").toBool(), name.constData());
         QVERIFY(viewer->property(shown.openProperty).toBool());
-        QTRY_VERIFY2(view->hasActiveFocus(), name.constData());
+        QTRY_VERIFY2(content->hasActiveFocus(), name.constData());
 
         // In the window the user is looking at, and on top of it. A press
         // outside closes it alone: the viewer stays open.
@@ -1141,7 +1152,7 @@ void ErrorsSmokeTest::viewerIssuesButtonsOpenRecentErrorsAboveTheViewer() {
         // is open, and Escape closes the dialog alone.
         QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
         QTRY_VERIFY(dialog->property("opened").toBool());
-        QTRY_VERIFY2(view->hasActiveFocus(), name.constData());
+        QTRY_VERIFY2(content->hasActiveFocus(), name.constData());
         const int toggles = toggled.count();
         QTest::keyClick(host, Qt::Key_Space);
         QCoreApplication::processEvents();

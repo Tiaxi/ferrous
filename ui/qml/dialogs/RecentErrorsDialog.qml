@@ -130,10 +130,11 @@ Popup {
         historyView.contentItem.contentY = 0
     }
 
-    // The control that has the keyboard as the popup opens: the newest
-    // entry's action, otherwise Open Diagnostics; not Clear All, which a
-    // stray Space would press. The list keeps no frame around it then,
-    // and its scroll keys still work from either (see the content's keys).
+    // The control that has the keyboard as the popup opens from the
+    // keyboard: the newest entry's action, otherwise Open Diagnostics; not
+    // Clear All, which a stray Space would press. The list keeps no frame
+    // around it then, and its scroll keys still work from either (see the
+    // content's keys).
     function initialFocusItem() {
         for (let i = 0; i < historyList.count; ++i) {
             const row = historyList.itemAt(i)
@@ -176,7 +177,23 @@ Popup {
     }
     onVisibleChanged: root.refreshQueuedSubjects()
     // Over a viewer the keyboard would otherwise stay with the viewer.
-    onOpened: root.initialFocusItem().forceActiveFocus(Qt.PopupFocusReason)
+    // Opened from the keyboard, the first action has it, with its focus
+    // ring, as Tab would give it. Opened with the pointer, no control
+    // shows a ring, so none has the keyboard, and Enter presses no button
+    // the user cannot see marked (#373 H38: a popup's focus reason drew no
+    // ring on the action Enter pressed); the content does, whose keys
+    // scroll the list, and Tab goes on to the controls. The control is
+    // the list's focus within it all the same, which Tab into the list
+    // gives the keyboard, rather than the list itself.
+    onOpened: {
+        const first = root.initialFocusItem()
+        if (InputModality.keyboard) {
+            first.forceActiveFocus(Qt.TabFocusReason)
+        } else {
+            first.focus = true
+            popupContent.forceActiveFocus(Qt.PopupFocusReason)
+        }
+    }
     // Issues that arrived while it was open have been seen too.
     onClosed: {
         root.errorController.markSeen()
@@ -230,6 +247,8 @@ Popup {
     }
 
     contentItem: ColumnLayout {
+        id: popupContent
+        objectName: "errorHistoryContent"
         spacing: 0
         Accessible.role: Accessible.Dialog
         Accessible.name: I18n.i18nc("@title:window", "Recent Issues")
@@ -244,6 +263,14 @@ Popup {
         // list itself, and one from the header or the footer arrives here.
         Keys.onPressed: function(event) {
             historyView.scrollForKey(event)
+        }
+        // Opened with the pointer, the content has the keyboard: Tab goes
+        // to the control the keyboard would have opened it on.
+        Keys.onTabPressed: function(event) {
+            event.accepted = popupContent.Window.activeFocusItem === popupContent
+            if (event.accepted) {
+                root.initialFocusItem().forceActiveFocus(Qt.TabFocusReason)
+            }
         }
 
         RowLayout {

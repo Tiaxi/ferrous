@@ -506,6 +506,7 @@ private slots:
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
+    void recentIssuesOpenWithTheirFocusShown();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
@@ -2460,10 +2461,9 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
     QVERIFY(openIssues(window));
-    // The list takes the keyboard first; Tab goes on to the actions, Clear
-    // All and Open Diagnostics.
-    QQuickItem *view = visibleNamed(window, QStringLiteral("errorHistoryView"));
-    QTRY_VERIFY(view->hasActiveFocus());
+    // Opened other than from the keyboard, the content takes it, and Tab
+    // goes on to the actions, Open Diagnostics and Clear All.
+    QTRY_COMPARE(window->activeFocusItem(), visibleNamed(window, QStringLiteral("errorHistoryContent")));
     QList<QQuickItem *> actions;
     for (QQuickItem *item : itemsNamed(window->contentItem(), QStringLiteral("errorHistoryActionButton"))) {
         if (item->isVisible()) {
@@ -2510,6 +2510,68 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QTRY_VERIFY(copyWithoutPaths->isEnabled());
     click(diagnosticsWindow, copyWithoutPaths);
     QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
+}
+
+// Recent Issues has the keyboard where it shows it (#373 H38): opened
+// with the pointer, it gave the newest action the keyboard for a popup's
+// reason, which draws no focus ring, and Enter pressed that unmarked
+// action. Opened from the status bar's button with the pointer, no control
+// has the keyboard, Enter and Space press nothing, and Tab marks the first
+// action. Opened from the button with the keyboard, the first action has
+// it, with its ring, and Space presses it.
+void UiDialogsTest::recentIssuesOpenWithTheirFocusShown() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 2, 0, QStringLiteral("Fixtures"), QStringLiteral("Could not read 2 files during the scan"));
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QObject *preferences = object(window, QStringLiteral("preferencesDialog"));
+    QQuickItem *button = nullptr;
+    QTRY_VERIFY((button = visibleNamed(window, QStringLiteral("statusBarErrorsButton"))) != nullptr);
+    const auto anyFocusShown = [&]() {
+        QQuickItem *focused = window->activeFocusItem();
+        return focused != nullptr && focused->property("visualFocus").toBool();
+    };
+
+    // With the pointer.
+    click(window, button);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QQuickItem *content = visibleNamed(window, QStringLiteral("errorHistoryContent"));
+    QVERIFY(content != nullptr);
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QVERIFY(!anyFocusShown());
+    // Neither key that presses a button (Space, and Enter where the
+    // platform's theme says so) presses one.
+    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCoreApplication::processEvents();
+    QVERIFY(popup->property("visible").toBool());
+    QVERIFY(!preferences->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Tab);
+    QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
+    QVERIFY(action != nullptr);
+    QTRY_VERIFY(action->hasActiveFocus());
+    QVERIFY(action->property("visualFocus").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // With the keyboard: Tab to the button, which presses it. (Space on
+    // it is the window's Play/Pause shortcut today, so the test presses
+    // it as its accessible action would, with the keyboard in use.)
+    QVERIFY(tabTo(window, button, 80));
+    QVERIFY(button->property("visualFocus").toBool());
+    QVERIFY(QMetaObject::invokeMethod(button, "click"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
+    QTRY_VERIFY(action->hasActiveFocus());
+    QVERIFY(action->property("visualFocus").toBool());
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Library Settings\u2026"));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(preferences->property("opened").toBool());
+    QCOMPARE(preferences->property("pageIndex").toInt(), 0);
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!preferences->property("visible").toBool());
 }
 
 void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {
