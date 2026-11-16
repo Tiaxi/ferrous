@@ -16,7 +16,7 @@ import FerrousUi 1.0
 // lines under it, and without an album it was blank): the app icon's glide
 // and its harmonics, at the icon's own aspect, at a cover mark's strength
 // rather than data's. A small tile, as the narrow layout's 96 px one, has
-// the mark of two curves. In a light theme a 1 px edge
+// the mark of three curves, without the 4th harmonic. In a light theme a 1 px edge
 // (`standInEdgeColor`) keeps the dark tile from reading as a hole in the
 // sidebar. With nothing playing (`idle`) it shows only the placeholder
 // colour with Breeze's audio disc mark at its centre (#373 H1, H3): the
@@ -58,11 +58,11 @@ Rectangle {
     // (#373 H21 N1).
     property color standInFourthHarmonicColor: "#723b9f"
     // The mark's strokes, by the tile's size, so they weigh alike at every
-    // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the
-    // glide's 3 px up to a 152 px tile, rising to 6.5 px at 360 (H21: H20's
-    // 2 and 4 px read faint); the harmonics 0.8, 0.65 and 0.5 of it on the
-    // wide mark, as the app icon tapers them, the small mark's upper trace
-    // 2.5 px.
+    // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): on
+    // the wide mark the glide's 3.5 px at a 180 px tile, rising to 6.5 px at
+    // 360 (H21: H20's 2 and 4 px read faint), and the harmonics 0.8, 0.65
+    // and 0.5 of it, as the app icon tapers them; on the small mark 4, 3.5
+    // and 3 px (H22: its 3 and 2.5 px read as hairlines at 152 px).
     readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
@@ -70,7 +70,7 @@ Rectangle {
     // at each size nor changed for the small one on the way.
     property real layoutSize: Math.min(root.width, root.height)
     // A tile under ten grid units, such as the narrow layout's 96 px, has
-    // the mark of two curves.
+    // the small mark, of three curves.
     readonly property bool standInCompact: root.layoutSize < 10 * Kirigami.Units.gridUnit
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
@@ -153,8 +153,9 @@ Rectangle {
     // 3rd and faint 4th harmonics (ferrous.svg's own curves, #373 H19: H14
     // to H18 stretched them to 2:1; H21: the 4th, as the icon's 128 and 256
     // px drawings have it), rising 1 : 2 : 3 : 4 from a common start at the
-    // lower left, or in a small tile the glide and its 3rd harmonic, as the
-    // icon's small sizes draw them (#373 H14 F2). They start a quarter of
+    // lower left, or in a small tile the glide and its 2nd and 3rd
+    // harmonics, as the icon's 32 to 64 px drawings have them (#373 H22:
+    // H14 F2's glide and 3rd harmonic alone read as two hairlines). They start a quarter of
     // the way in and, as in the icon, run out to the tile's right edge, cut
     // flush there: a crop of a spectrogram, not a chart's series ending in
     // round caps (H19), nor ending in the tile's free air (H20: they ended
@@ -170,14 +171,14 @@ Rectangle {
             // The paths' own box, the whole tile, 1000 units a side: the
             // icon's 64-unit drawing at 12.3 units to the icon's one, from a
             // start 240 units in, the ink of its lower three traces centred
-            // on the tile's height, so that the small mark's two stay
-            // centred, the 4th harmonic above them. The paths run on past
+            // on the tile's height, the small mark's three too, the 4th
+            // harmonic above them. The paths run on past
             // the tile's right side, and the clip cuts them there.
             readonly property size box: Qt.size(1000, 1000)
-            readonly property real glideStroke: root.standInStroke
-            readonly property real harmonicStroke: root.standInStroke * 0.8
-            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 2.5 / 3 : 0.65)
-            readonly property real fourthHarmonicStroke: root.standInStroke * 0.5
+            readonly property real glideStroke: root.standInCompact ? 4 : root.standInStroke
+            readonly property real harmonicStroke: root.standInCompact ? 3.5 : root.standInStroke * 0.8
+            readonly property real highHarmonicStroke: root.standInCompact ? 3 : root.standInStroke * 0.65
+            readonly property real fourthHarmonicStroke: mark.glideStroke * 0.5
             anchors.fill: parent
             clip: true
             preferredRendererType: Shape.CurveRenderer
@@ -214,7 +215,7 @@ Rectangle {
                 capStyle: ShapePath.RoundCap
                 joinStyle: ShapePath.RoundJoin
                 scale: mark.pathScale
-                strokeColor: root.standInCompact ? "transparent" : root.standInHarmonicColor
+                strokeColor: root.standInHarmonicColor
                 strokeWidth: mark.harmonicStroke
                 PathSvg {
                     path: "M240.35 670.09 C243.92 666.90 247.48 663.85 251.05 660.90 C256.39 656.48 261.74 652.30 267.09 648.32 C276.00 641.69 284.91 635.60 293.82 629.92 C306.29 621.96 318.77 614.79 331.24 608.15 C347.28 599.63 363.32 592.00 379.36 584.97 C400.74 575.61 422.13 567.33 443.51 559.75 C468.46 550.91 493.41 543.03 518.36 535.79 C550.44 526.49 582.51 518.25 614.59 510.71 C650.23 502.34 685.87 494.83 721.52 487.90 C766.07 479.25 810.62 471.53 855.17 464.42 C913.45 455.13 971.72 446.90 1030.00 439.36"
