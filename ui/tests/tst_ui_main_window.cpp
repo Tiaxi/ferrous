@@ -6,8 +6,10 @@
 // queue, the one-step library tree with its playing marks, the queue's
 // columns, and the first run.
 
+#include <QAccessible>
 #include <QApplication>
 #include <QColor>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -2343,17 +2345,29 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         QCOMPARE(standInMarkInk(window), ink);
     }
 
-    // No tags: the file name, alone, for a title, one line; the same mark.
+    // No tags: the file name for a title, one line, and under it, in the
+    // artist's row, the name of its folder, in textSecondary, as a fact of
+    // the file rather than a tag (#373 H29 W2: at 24 pt the file name stood
+    // alone beside the cover); the same mark.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QCOMPARE(panel->property("detailsText").toString(), QString());
     const QString fileName = QFileInfo(kTrackPath).fileName();
+    const QString folderName = QFileInfo(kTrackPath).dir().dirName();
+    QCOMPARE(folderName, QStringLiteral("Album A"));
     QTRY_VERIFY2(standIn().isEmpty(), qPrintable(standIn()));
     QTRY_VERIFY(!handover->property("running").toBool());
     QCOMPARE(standInMarkInk(window), ink);
     const QList<QQuickItem *> lines = shownLines(window);
-    QCOMPARE(lines.size(), 1);
+    QCOMPARE(lines.size(), 2);
     QTRY_COMPARE(lines.first()->property("text").toString(), fileName);
+    QCOMPARE(panel->property("folderText").toString(), folderName);
+    QQuickItem *folderLine = lines.at(1);
+    QCOMPARE(folderLine->objectName(), artLayout == QStringLiteral("wide") ? QStringLiteral("nowPlayingArtistAlbum")
+                                                                           : QStringLiteral("nowPlayingNarrowArtist"));
+    QCOMPARE(folderLine->property("text").toString(), folderName);
+    QCOMPARE(colorOf(folderLine), tokenHex(window, "textSecondary"));
+    QCOMPARE(QAccessible::queryAccessibleInterface(folderLine)->text(QAccessible::Name), folderName);
     QCOMPARE(sceneRect(cover), withCover.at(2));
     if (artLayout == QStringLiteral("wide")) {
         // Under the cover, the block keeps its height, the empty lines
@@ -2370,6 +2384,66 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
         // Beside it, never shorter than the cover and the space under it.
         QVERIFY(panel->height() <= withCover.at(0).height());
         QVERIFY(panel->height() >= cover->height());
+    }
+
+    // A track with any tag the lines show never shows its folder: an album
+    // alone, a genre alone, a track number alone, a year alone, a title
+    // alone.
+    const auto noFolderShown = [&]() -> QString {
+        if (!panel->property("folderText").toString().isEmpty()) {
+            return QStringLiteral("folder text %1").arg(panel->property("folderText").toString());
+        }
+        for (QQuickItem *line : shownLines(window)) {
+            const bool secondary = colorOf(line) == tokenHex(window, "textSecondary")
+                && line->objectName() != QStringLiteral("nowPlayingNarrowAlbum");
+            if (line->property("text").toString() == folderName || secondary) {
+                return QStringLiteral("%1 shows \"%2\"").arg(line->objectName(), line->property("text").toString());
+            }
+        }
+        return {};
+    };
+    const std::pair<const char *, QVariant> singleTags[] = {
+        {"currentTrackAlbum", QStringLiteral("Small Hours")}, {"currentTrackGenre", QStringLiteral("Classical")},
+        {"currentTrackNumber", 3}, {"currentTrackYear", 2005}, {"currentTrackTitle", QStringLiteral("Dusk")}};
+    for (const auto &[property, value] : singleTags) {
+        clearTrackTags(bridge);
+        QTRY_COMPARE(panel->property("folderText").toString(), folderName);
+        bridge->setProperty(property, value);
+        QTRY_VERIFY2(noFolderShown().isEmpty(), qPrintable(QStringLiteral("%1: %2").arg(property, noFolderShown())));
+        QTRY_VERIFY(!handover->property("running").toBool());
+        QVERIFY2(noFolderShown().isEmpty(), qPrintable(QStringLiteral("%1: %2").arg(property, noFolderShown())));
+        QCOMPARE(sceneRect(panel), withCover.at(0));
+        QCOMPARE(sceneRect(header), withCover.at(1));
+    }
+
+    // A track change from a tagged track to a file without tags fades each
+    // text in its own colour: the artist goes out in the text colour as
+    // the folder comes in in textSecondary.
+    {
+        playTrack(bridge);
+        QTRY_VERIFY(!handover->property("running").toBool());
+        const QString line = artLayout == QStringLiteral("wide") ? QStringLiteral("ArtistAlbum")
+                                                                 : QStringLiteral("NarrowArtist");
+        bridge->setProperty("currentTrackPath", QStringLiteral("/music/Loose Files/track07.flac"));
+        clearTrackTags(bridge);
+        QTRY_COMPARE(panel->property("folderText").toString(), QStringLiteral("Loose Files"));
+        QTRY_VERIFY(handover->property("running").toBool());
+        QVERIFY(QMetaObject::invokeMethod(handover, "pause"));
+        panel->setProperty("handover", 0.2);
+        QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoing") + line);
+        QQuickItem *incomingWindow = itemNamed(panel, QStringLiteral("nowPlayingIncoming%1Window").arg(line));
+        QVERIFY(outgoing != nullptr && incomingWindow != nullptr && !incomingWindow->childItems().isEmpty());
+        QQuickItem *incoming = incomingWindow->childItems().first();
+        QVERIFY(outgoing->property("text").toString().startsWith(QStringLiteral("The Quiet Meridian")));
+        QCOMPARE(colorOf(outgoing), tokenHex(window, "text"));
+        QCOMPARE(incoming->property("text").toString(), QStringLiteral("Loose Files"));
+        QCOMPARE(colorOf(incoming), tokenHex(window, "textSecondary"));
+        QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
+        QTRY_VERIFY(!handover->property("running").toBool());
+        QCOMPARE(named(window, qPrintable(QStringLiteral("nowPlaying") + line))->property("text").toString(),
+                 QStringLiteral("Loose Files"));
+        QCOMPARE(sceneRect(panel), withCover.at(0));
+        bridge->setProperty("currentTrackPath", kTrackPath);
     }
 
     // The tags back, then the cover: all as it was with it.
@@ -2994,13 +3068,15 @@ void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack() {
     }
     QTRY_VERIFY2(wideBlockProblem(window).isEmpty(), qPrintable(wideBlockProblem(window)));
 
-    // Untagged: the file name for a title, the other rows empty, kept.
+    // Untagged: the file name for a title, its folder in the artist's row
+    // (#373 H29 W2), the details' row empty, kept.
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QTRY_COMPARE(panel->property("detailsText").toString(), QString());
     QTRY_VERIFY(!handover->property("running").toBool());
     QVERIFY(shown(artistAlbum) && shown(details));
-    QCOMPARE(artistAlbum->property("text").toString(), QString());
+    QCOMPARE(artistAlbum->property("text").toString(), QFileInfo(kTrackPath).dir().dirName());
+    QCOMPARE(details->property("text").toString(), QString());
     QCOMPARE(geometry(), tagged);
 
     // A long album: one line, elided, with the whole in the tooltip.

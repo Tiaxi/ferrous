@@ -8,6 +8,7 @@ import FerrousUi 1.0
 import "." as Components
 import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
+import "../logic/PathUtils.js" as PathUtils
 
 // The top of the sidebar: the playing track, on the view colour with no
 // card, and a seam at its foot, where the library starts.
@@ -345,6 +346,26 @@ Item {
     }
     readonly property string narrowDetailsText: root._joined([root.genreText, root.trackNumberText],
                                                              root.lineSeparators.narrowDetails)
+    // A file without tags, with its file name for a title and no artist,
+    // album or details, says where it is instead: the name of its folder,
+    // in the artist's row, in textSecondary, as a fact of the file rather
+    // than a tag (#373 H29 W2: at 24 pt "track07" stood alone beside the
+    // cover over some 140 px of empty rows). Never for a track with any
+    // tag the lines show, as an album or a track number alone.
+    readonly property bool untagged: root._trimmed(root.uiBridge.currentTrackTitle).length === 0
+        && root.artistText.length === 0 && root.albumText.length === 0 && root.detailsText.length === 0
+    readonly property string folderText: root.untagged
+        ? PathUtils.containingFolderName(root._trimmed(root.uiBridge.currentTrackPath)) : ""
+    // The mark that starts a line's text where it is the folder's rather
+    // than a tag's: the line draws it in textSecondary, without the mark
+    // (LineText), and it fades whole, as nothing of it stays in place.
+    readonly property string folderMark: "\u0001"
+    function _isFolderLine(text) {
+        return text.startsWith(root.folderMark)
+    }
+    function _folderLine(tagText) {
+        return root.folderText.length > 0 ? root.folderMark + root.folderText : tagText
+    }
     // The details as the lines show them: all of them where the line has
     // room, and otherwise without what matters least, rather than cut off
     // (#373 H11: at 24 pt, "Classical · Track 2 o…"): first the album's
@@ -392,9 +413,9 @@ Item {
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({
         title: root.titleText,
-        artistAlbum: root.artistAlbumText,
+        artistAlbum: root._folderLine(root.artistAlbumText),
         details: root.shownDetailsText,
-        artist: root.artistText,
+        artist: root._folderLine(root.artistText),
         narrowAlbum: root.narrowAlbumText,
         narrowDetails: root.shownNarrowDetailsText
     })
@@ -651,7 +672,7 @@ Item {
     }
 
     function _stillRunsOf(key, before, after) {
-        if (root.wrappingLines[key] === true)
+        if (root.wrappingLines[key] === true || root._isFolderLine(before) || root._isFolderLine(after))
             return []
         return root._stillRuns(before, after, root.lineSeparators[key] || "", root.tabularLines[key] === true)
     }
@@ -1268,8 +1289,13 @@ Item {
 
         required property var owner
         required property string wholeText
+        // A file's folder rather than a tag (see folderText): without its
+        // mark, in textSecondary.
+        readonly property bool folderLine: root._isFolderLine(lineText.wholeText)
+        readonly property string shownText: lineText.folderLine
+            ? lineText.wholeText.slice(root.folderMark.length) : lineText.wholeText
         readonly property var parts: lineText.owner.keepsTail
-            ? root._albumAndYear(lineText.wholeText) : [lineText.wholeText, ""]
+            ? root._albumAndYear(lineText.shownText) : [lineText.shownText, ""]
         readonly property string tail: lineText.parts[1]
         readonly property real tailWidth: lineText.tail.length > 0
             ? Math.ceil(tailMetrics.advanceWidth(lineText.tail)) : 0
@@ -1307,7 +1333,7 @@ Item {
         font.pointSize: owner.pointSize
         font.weight: owner.weight
         font.features: owner.features
-        color: owner.color
+        color: lineText.folderLine ? root.uiPalette.textSecondary : owner.color
 
         // Each line in turn, on the line's width, which a text with this
         // handler is elided on only where it is set; the last call is for
@@ -1543,8 +1569,8 @@ Item {
                 owner: line
                 wholeText: line.text
                 Accessible.role: Accessible.StaticText
-                Accessible.name: wholeText
-                Accessible.ignored: wholeText.length === 0
+                Accessible.name: stillText.shownText
+                Accessible.ignored: stillText.shownText.length === 0
             }
         }
 
@@ -1943,8 +1969,8 @@ Item {
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
         text: root.wideRoom
-            ? root._joined([root.titleText, root.artistAlbumText, root.detailsText], "\n")
-            : root._joined([root.titleText, root.artistText, root.narrowAlbumText,
+            ? root._joined([root.titleText, root.artistAlbumText, root.folderText, root.detailsText], "\n")
+            : root._joined([root.titleText, root.artistText, root.folderText, root.narrowAlbumText,
                             root.narrowDetailsText], "\n")
     }
 }

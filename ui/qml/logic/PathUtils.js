@@ -131,3 +131,12 @@ function droppedExternalPaths(drop) {
     }
     return paths
 }
+
+// The name of the folder that holds the file at `pathValue`, a local path
+// or a file URL: "Album A" for "/music/Artist A/Album A/02.flac"; empty
+// for a file at the root or a path without a folder.
+function containingFolderName(pathValue) {
+    const parts = urlToLocalPath(String(pathValue || "").trim()).replace(/\\/g, "/").split("/")
+        .filter(part => part.length > 0)
+    return parts.length >= 2 ? parts[parts.length - 2] : ""
+}
