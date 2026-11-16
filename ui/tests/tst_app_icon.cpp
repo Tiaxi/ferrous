@@ -18,6 +18,7 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QXmlStreamReader>
+#include <QtMath>
 #include <QtTest/QtTest>
 
 #include <algorithm>
@@ -60,10 +61,12 @@ constexpr QRgb kThirdHarmonic = 0xe055b4;
 constexpr QRgb kDeepThirdHarmonic = 0xd442ab;
 constexpr QRgb kDarkerHarmonic = 0xf87089;
 // The faint 4th harmonic of the 128 and 256 px drawings, a violet a step
-// darker again (#373 hill climb, H21), and H21's, darker still, whose cut on
-// the tile's top inner edge fused with the rim (H24).
-constexpr QRgb kFourthHarmonic = 0xa456d6;
+// darker again (#373 hill climb, H21); H21's, darker still, whose cut on the
+// tile's top inner edge fused with the rim (H24); and H24's, 2.9:1 on the
+// tile, with little reserve over the tile (H25).
+constexpr QRgb kFourthHarmonic = 0xab55df;
 constexpr QRgb kDarkerFourthHarmonic = 0x9a4bd0;
+constexpr QRgb kH24FourthHarmonic = 0xa456d6;
 
 QImage render(const QString &path, int size) {
     QImageReader reader(path);
@@ -1729,11 +1732,12 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // 3rd harmonic over the same columns, give or take the few hundredths that
 // keep its cut clear of the badge, and cropped by the tile's top inner edge
 // as the others are by its right one: from where its upper edge meets that
-// edge, x 40 or more of the 64-unit drawing, its lower edge runs on along its
-// curve to the same row, by 46, and the cut runs along the edge between
+// edge, x 38 or more of the 64-unit drawing, its lower edge runs on along its
+// curve to the same row, by 44, and the cut runs along the edge between
 // them (H23: H22 cut it square across the stroke, a corner on the rim with a
 // wedge of the tile under the cut), so that nothing of it is in the corner
-// where Plasma draws a task's badge (x over 48, y under 20).
+// where Plasma draws a task's badge (x over 48, y under 20). Its last
+// stretch bends up, so that it meets the edge at 38 degrees or more (H25).
 // Below 128 px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
@@ -1743,21 +1747,25 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     if (!hasDetailTier(size)) {
         return;
     }
-    QVERIFY(source.contains(QLatin1String("<path id=\"h4\" fill=\"#a456d6\"")));
+    QVERIFY(source.contains(QLatin1String("<path id=\"h4\" fill=\"#ab55df\"")));
     // Faint: a step of value below the 3rd harmonic, as each trace is below
-    // the one under it, and fainter than any of the three, some 2.9:1 on the
-    // tile, 8 grey levels or more under the magenta in Rec. 709 luma. Yet
-    // light enough that its cut on the top inner edge reads against the rim,
-    // 1.7:1 or more on it (#373 hill climb, H24: H21's #9a4bd0, 2.55:1 on the
-    // tile, was 1.55:1 on the rim, and the cut fused with it); the hue kept.
+    // the one under it, and fainter than any of the three, 3:1 on the tile
+    // (#373 hill climb, H25: H24's 2.9:1 had little reserve), 8 grey levels or
+    // more under the magenta in Rec. 709 luma. Yet light enough that its cut
+    // on the top inner edge reads against the rim, 1.7:1 or more on it (H24:
+    // H21's #9a4bd0, 2.55:1 on the tile, was 1.55:1 on the rim, and the cut
+    // fused with it); the hue kept.
     const double ratio = contrastRatio(kFourthHarmonic, kTile);
-    QVERIFY2(ratio >= 2.8 && ratio <= 3.0, qPrintable(QString::number(ratio)));
+    QVERIFY2(ratio >= 3.0 && ratio <= 3.1, qPrintable(QString::number(ratio)));
+    QVERIFY(contrastRatio(kH24FourthHarmonic, kTile) < 3.0);
+    QVERIFY(!source.contains(QLatin1String("#a456d6")));
     QVERIFY(contrastRatio(kThirdHarmonic, kTile) >= ratio + 0.6);
     const auto luma = [](QRgb c) { return 0.2126 * qRed(c) + 0.7152 * qGreen(c) + 0.0722 * qBlue(c); };
     QVERIFY2(luma(kThirdHarmonic) - luma(kFourthHarmonic) >= 8, qPrintable(QString::number(luma(kFourthHarmonic))));
     QVERIFY2(contrastRatio(kFourthHarmonic, kRim) >= 1.7, qPrintable(QString::number(contrastRatio(kFourthHarmonic, kRim))));
     QVERIFY(contrastRatio(kDarkerFourthHarmonic, kRim) < 1.6);
     QVERIFY(std::abs(QColor(kFourthHarmonic).hue() - QColor(kDarkerFourthHarmonic).hue()) <= 3);
+    QVERIFY(std::abs(QColor(kFourthHarmonic).hue() - QColor(kH24FourthHarmonic).hue()) <= 3);
     QVERIFY(!source.contains(QLatin1String("#9a4bd0")));
 
     const double unit = size / 64.0;
@@ -1800,9 +1808,18 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double edge = 6 + 64.0 / size;
     QVERIFY2(std::abs(upper.y() - edge) <= 0.001 && std::abs(lower.y() - edge) <= 0.001,
              qPrintable(QStringLiteral("%1, %2").arg(upper.y()).arg(lower.y())));
-    QVERIFY2(upper.x() >= 40 && lower.x() <= 46, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
+    // Clear of the badge's corner: the cut ends by x 44 (88 of 128 px).
+    QVERIFY2(upper.x() >= 38 && lower.x() <= 44, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
     const QPointF along = upper - control;
     const double slant = std::abs(along.y()) / std::hypot(along.x(), along.y());
+    // Steep where it leaves, 38 degrees or more to the edge, so that its cut
+    // is a short one, some 5.5 px at 128 px and 11 at 256, rather than a run
+    // along the rim (#373 hill climb, H25: at 27 degrees it ran 7.5 and 15 px
+    // along it): its last stretch bends up, the rest on the harmonic series.
+    const double angle = qRadiansToDegrees(std::asin(slant));
+    QVERIFY2(angle >= 38 && angle <= 45, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
+    QVERIFY2((lower.x() - upper.x()) * unit <= 5.8 * size / 128,
+             qPrintable(QStringLiteral("a %1 px cut").arg((lower.x() - upper.x()) * unit)));
     const double across = fourthWidth(size) / unit;
     QVERIFY2(std::abs((lower.x() - upper.x()) * slant - across) <= 0.1 * across,
              qPrintable(QStringLiteral("a %1 unit cut, a %2 unit stroke").arg(lower.x() - upper.x()).arg(across)));

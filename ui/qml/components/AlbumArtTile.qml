@@ -176,11 +176,14 @@ Rectangle {
             // icon's 64-unit drawing at 16 units to the icon's one, from a
             // start 240 units in, the ink of its lower three traces centred
             // on the tile's height, the small mark's three too, the 4th
-            // harmonic above them, rising 1.06 times its share as in the icon
-            // (#373 H23: at 12.3 units it ran out under the top right corner,
-            // where the icon's leaves through the top edge). The paths run on
-            // past the tile's right side, the 4th's past its top, and the clip
-            // cuts them there.
+            // harmonic above them (#373 H23: at 12.3 units it ran out under
+            // the top right corner, where the icon's leaves through the top
+            // edge). The 4th rises 1.25 times its share and bends up over its
+            // last stretch, so that it leaves through the top edge some 70 %
+            // across at about 40 degrees, as the icon's does (H25: at 1.06
+            // times it grazed the edge out at 90 %). The paths run on past the
+            // tile's right side, the 4th's past its top, and the clip cuts
+            // them there.
             readonly property size box: Qt.size(1000, 1000)
             // The stroke the harmonics taper from.
             readonly property real baseStroke: root.standInCompact ? 4 : root.standInStroke
@@ -205,7 +208,7 @@ Rectangle {
                 strokeColor: root.standInCompact ? "transparent" : root.standInFourthHarmonicColor
                 strokeWidth: mark.fourthHarmonicStroke
                 PathSvg {
-                    path: "M240.35 519.94 C244.99 511.16 249.62 502.74 254.25 494.61 C261.20 482.43 268.15 470.92 275.10 459.95 C286.69 441.67 298.27 424.90 309.86 409.23 C326.07 387.30 342.29 367.52 358.51 349.25 C379.36 325.74 400.21 304.72 421.06 285.37 C448.86 259.56 476.66 236.73 504.46 215.84 C536.89 191.47 569.33 169.76 601.76 149.82 C643.46 124.18 685.16 101.48 726.86 80.70 C773.20 57.61 819.53 36.91 865.86 17.84 C907.56 0.67 949.27 -15.16 990.97 -30.00"
+                    path: "M240.35 519.94 C244.99 509.59 249.62 499.66 254.25 490.08 C261.20 475.71 268.15 462.13 275.10 449.20 C286.69 427.64 298.27 407.86 309.86 389.39 C326.07 363.52 342.29 340.20 358.51 318.65 C379.36 290.94 400.21 266.14 421.06 243.32 C448.86 212.89 476.66 185.97 504.46 161.33 C520.68 146.96 536.89 133.39 553.11 120.45 C569.33 107.52 585.54 95.23 601.76 83.15 C620.29 69.33 638.83 55.79 657.36 41.89 C671.26 31.47 685.16 20.85 699.06 9.78 C714.86 -2.79 730.66 -15.94 746.46 -30.02"
                 }
             }
             ShapePath {
