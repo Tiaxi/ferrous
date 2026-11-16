@@ -231,11 +231,13 @@ std::vector<int> strokeHeights(int size) {
 // from the fundamental up, as a harmonic's energy falls with its number, and
 // never under 2 px (H20: at 32 and 48 px a stroke's own widths, 3 / 2 / 2 and
 // 3 / 2.5 / 2; from 64 px 1 : 0.8 : 0.65 of the fundamental's 3.8 units at
-// 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px).
+// 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px). The
+// top trace at 32 px 2.25 px (#373 hill climb, H23: at 2 px it read as the
+// thinnest and faintest), and at 48 px over its start (topTraceWidths).
 std::vector<double> strokeWidths(int size) {
     switch (drawnAs(size)) {
     case 32:
-        return {3.0, 2.0, 2.0};
+        return {3.0, 2.0, 2.25};
     case 48:
         return {3.0, 2.5, 2.0};
     default: {
@@ -244,6 +246,15 @@ std::vector<double> strokeWidths(int size) {
         return {fundamental * unit, fundamental * 0.8 * unit, fundamental * 0.65 * unit};
     }
     }
+}
+
+// The top trace's width across at 32 and 48 px, at its start and at its end
+// (#373 hill climb, H23: a 2 px stroke read as the thinnest and dimmest
+// trace, and beaded over its steep start): 2.25 px, at 32 px eased to 2 into
+// its end's whole rows over the last third, at 48 px over its steep start,
+// eased to 2 by x 20.
+std::pair<double, double> topTraceWidths() {
+    return {2.25, 2.0};
 }
 
 // The columns a trace's start takes before its full width: none at 16 and
@@ -915,7 +926,9 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
         weights.push_back(strokeWeight(image, traces[n], colours[n], start, end));
     }
     for (size_t n = 1; n < weights.size(); ++n) {
-        QVERIFY2(weights[n] <= weights[n - 1] * (size >= 32 ? 1.02 : 1.05),
+        // At 32 px the top trace 2.25 px over the rose's 2 (topTraceWidths).
+        const double heavier = n == 2 && drawnAs(size) == 32 ? 1.125 : 1.0;
+        QVERIFY2(weights[n] <= weights[n - 1] * heavier * (size >= 32 ? 1.02 : 1.05),
                  qPrintable(QStringLiteral("trace %1: %2 against %3").arg(n).arg(weights[n]).arg(weights[n - 1])));
     }
     if (size >= 32) {
@@ -1357,8 +1370,12 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
 
         // A curve: its centre moves on smoothly from column to column, with
         // no run of level columns broken by a whole row's step, as a stair
-        // has; and it never falls.
-        const int body = first + capColumns(size);
+        // has; and it never falls. Its body from the first column past the
+        // fundamental's cap and its own.
+        const double capCentre = (arc.captured(1).toDouble() + arc.captured(3).toDouble()) / 2;
+        const double capRadius = std::hypot(arc.captured(1).toDouble() - arc.captured(3).toDouble(),
+                                            arc.captured(2).toDouble() - arc.captured(4).toDouble()) / 2;
+        const int body = std::max(first + capColumns(size), static_cast<int>(std::ceil(capCentre + capRadius)));
         for (int x = body + 1; x < last; ++x) {
             const double bend = columnOf(trace, x + 1).centre - 2 * columnOf(trace, x).centre + columnOf(trace, x - 1).centre;
             QVERIFY2(std::abs(bend) <= 0.3, qPrintable(QStringLiteral("%1, column %2: bends %3").arg(id).arg(x).arg(bend)));
@@ -1367,9 +1384,21 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
         }
         // An even weight: across its slope, every column of it past the cap
         // is within an eighth of its width, which is 2 px or more; no beads.
+        // The top trace from its start's 2.25 px to its end's 2, never wider
+        // than the column before by more than a rendering's few hundredths,
+        // and its start's width over its first three columns.
         QVERIFY(widths[n] >= 2.0);
+        const bool top = n + 1 == traces.size();
+        const auto [startWidth, endWidth] = topTraceWidths();
+        double before = startWidth + 0.15;
         for (int x = body; x < last; ++x) {
             const double across = widthAcross(trace, x, x);
+            if (top) {
+                QVERIFY2(across >= endWidth - 0.1 && across <= before + 0.05 && (x >= body + 3 || across >= startWidth - 0.1),
+                         qPrintable(QStringLiteral("%1, column %2: %3 px across after %4").arg(id).arg(x).arg(across).arg(before)));
+                before = across;
+                continue;
+            }
             QVERIFY2(std::abs(across - widths[n]) <= widths[n] / 8,
                      qPrintable(QStringLiteral("%1, column %2: %3 px across, not %4").arg(id).arg(x).arg(across).arg(widths[n])));
         }
@@ -1817,8 +1846,10 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
         QVERIFY2(std::abs(at(trace, last, inside) - at(referenceTrace, referenceInside.right(), referenceInside)) <= 0.01,
                  qPrintable(QStringLiteral("%1 ends at %2 of the tile, the 64 px drawing's at %3")
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
-        // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental.
-        const double taper[] = {0.65, 0.8, 1.0};
+        // Its width across, tapering 1 : 0.8 : 0.65 from the fundamental; in
+        // the 32 px slot's the top trace 1.125 times its share, as at 1x
+        // (topTraceWidths).
+        const double taper[] = {0.65 * (drawnAs(size) == 32 ? 1.125 : 1.0), 0.8, 1.0};
         const double wanted = fundamental[size == 48 ? 1 : 0] * taper[n] * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
