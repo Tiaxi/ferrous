@@ -3218,6 +3218,16 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QCOMPARE(tint(2), paletteColor("selection"));
     QVERIFY(ring(4));
     QVERIFY(!ring(2));
+    // The pointer over a selected row steps its tint toward the text, with
+    // the hover's fade, and back; the other selected row keeps its own
+    // (#373 H35 AC3).
+    QTest::mouseMove(window, queueRowPoint(view, 4, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selectionHovered"));
+    QCOMPARE(tint(2), paletteColor("selection"));
+    QCOMPARE(color(cell(2, "title")), paletteColor("now"));
+    QTest::mouseMove(window, queueRowPoint(view, 3, 0.5));
+    QTRY_COMPARE(tint(4), paletteColor("selection"));
+    QCOMPARE(tint(3), QStringLiteral("#00000000"));
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{4}))));
     QTRY_COMPARE(tint(2), QStringLiteral("#00000000"));

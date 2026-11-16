@@ -770,6 +770,8 @@ Rectangle {
                         hovered: playlistRowMouseArea.containsMouse
                         hoverColor: root.uiPalette.rowHover
                         selected: playlistRow.rowSelected
+                        // A selected row answers the pointer too.
+                        selectedHover: true
                         active: playlistView.activeFocus
                         focused: playlistRow.rowCurrent
                         // The ring stops at the scrollbar's lane while it
