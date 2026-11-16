@@ -2475,10 +2475,14 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks_data() {
 }
 
 // With nothing loaded, the visualization's level meter is its trough with
-// the -6, -12 and -24 dB marks' ticks across it, 1 px each, in the ticks'
-// colour, where they are while it plays, and no lamp, fill or peak tick
-// (#373 H30: the blank trough of the first run read as a scrollbar's): in
-// either mode and theme.
+// the -6, -12 and -24 dB marks' ticks across it, 1 px each, where they are
+// while it plays, and no lamp, fill or peak tick (#373 H30: the blank
+// trough of the first run read as a scrollbar's): in either mode and
+// theme. Before any audio, the pane at rest, the trough is the plot's
+// floor and the marks the rest lines' colour, on the spectrogram #14062e
+// and #433858 (#373 H31 Y5: the lit #30244a trough was the one instrument
+// switched on); with a track, paused or stopped, the lit trough and its
+// ticks; and with the queue cleared, the floor again.
 void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     QFETCH(bool, dark);
     QFETCH(int, mode);
@@ -2505,42 +2509,89 @@ void UiMainWindowTest::levelMeterAtRestShowsItsMarks() {
     LevelMeterItem *meter = visibleMeter();
     QVERIFY(!meter->active());
     QCOMPARE(meter->framed(), mode == 1);
-    const QColor trough = meter->property("troughColor").value<QColor>();
-    const QColor tick = meter->property("tickColor").value<QColor>();
-    // The tick as drawn over the trough.
-    const QColor drawn = QColor::fromRgbF(
-        tick.redF() * tick.alphaF() + trough.redF() * (1 - tick.alphaF()),
-        tick.greenF() * tick.alphaF() + trough.greenF() * (1 - tick.alphaF()),
-        tick.blueF() * tick.alphaF() + trough.blueF() * (1 - tick.alphaF()));
+    QObject *palette = paletteOf(window);
+    QObject *plotColors = qvariant_cast<QObject *>(
+        palette->property(mode == 0 ? "spectrogramPlot" : "waveformPlot"));
+    QVERIFY(plotColors != nullptr);
     const auto near = [](const QColor &a, const QColor &b) {
         return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2
             && std::abs(a.blue() - b.blue()) <= 2;
     };
-    QTest::qWait(50);
-    const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
-    const double scale = double(image.width()) / window->width();
-    const QRectF rect = sceneRect(meter);
-    const auto pixel = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
-    const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
-    for (int lane = 0; lane < meter->laneCount(); ++lane) {
-        const auto [top, bottom] = LevelMeterItem::laneRows(lane, meter->laneCount(), meter->height());
-        const double meterTop = rect.top() + top + LevelMeterItem::kInset;
-        const double meterBottom = rect.top() + bottom - LevelMeterItem::kInset;
-        const double scaleHeight = meterBottom - meterTop - LevelMeterItem::kLampHeight - 1;
-        const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
-        QCOMPARE(gaps.size(), std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3));
-        int tickRows = 0;
-        for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
-            const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
-                return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
-            });
-            tickRows += onTick ? 1 : 0;
-            QVERIFY2(near(pixel(x, y), onTick ? drawn : trough),
-                     qPrintable(QStringLiteral("lane %1, y %2: %3, wanted %4")
-                                    .arg(lane).arg(y - rect.top()).arg(hex(pixel(x, y)), hex(onTick ? drawn : trough))));
+    // The column's track and its marks as drawn, against `trough` and
+    // `tick` drawn over it.
+    const auto checkMarks = [&](const QColor &trough, const QColor &tick, const QString &where) {
+        QCOMPARE(meter->property("troughColor").value<QColor>(), trough);
+        QCOMPARE(meter->property("tickColor").value<QColor>(), tick);
+        const QColor drawn = QColor::fromRgbF(
+            tick.redF() * tick.alphaF() + trough.redF() * (1 - tick.alphaF()),
+            tick.greenF() * tick.alphaF() + trough.greenF() * (1 - tick.alphaF()),
+            tick.blueF() * tick.alphaF() + trough.blueF() * (1 - tick.alphaF()));
+        QTest::qWait(50);
+        const QImage image = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const double scale = double(image.width()) / window->width();
+        const QRectF rect = sceneRect(meter);
+        const auto pixel = [&](double x, double y) { return image.pixelColor(int(x * scale), int(y * scale)); };
+        const double x = rect.left() + LevelMeterItem::kTrackLeft + LevelMeterItem::kTrackWidth / 2;
+        for (int lane = 0; lane < meter->laneCount(); ++lane) {
+            const auto [top, bottom] = LevelMeterItem::laneRows(lane, meter->laneCount(), meter->height());
+            const double meterTop = rect.top() + top + LevelMeterItem::kInset;
+            const double meterBottom = rect.top() + bottom - LevelMeterItem::kInset;
+            const double scaleHeight = meterBottom - meterTop - LevelMeterItem::kLampHeight - 1;
+            const std::vector<int> gaps = LevelMeterItem::markGaps(scaleHeight);
+            QCOMPARE(gaps.size(), std::size_t(bottom - top < LevelMeterItem::kFullScaleLaneHeight ? 2 : 3));
+            int tickRows = 0;
+            for (double y = meterTop + 0.5; y < meterBottom; y += 1) {
+                const bool onTick = std::any_of(gaps.begin(), gaps.end(), [&](int gap) {
+                    return std::abs(y - (meterBottom - gap - LevelMeterItem::kMarkGap + 0.5)) < 0.01;
+                });
+                tickRows += onTick ? 1 : 0;
+                QVERIFY2(near(pixel(x, y), onTick ? drawn : trough),
+                         qPrintable(QStringLiteral("%1, lane %2, y %3: %4, wanted %5")
+                                        .arg(where).arg(lane).arg(y - rect.top())
+                                        .arg(hex(pixel(x, y)), hex(onTick ? drawn : trough))));
+            }
+            QCOMPARE(tickRows, int(gaps.size()));
         }
-        QCOMPARE(tickRows, int(gaps.size()));
+    };
+
+    // Before any audio: the floor and the rest lines' colour.
+    const QColor restTrough = plotColors->property("meterRestTrough").value<QColor>();
+    const QColor restTick = plotColors->property("meterRestTick").value<QColor>();
+    if (mode == 0) {
+        QCOMPARE(restTrough, QColor(QStringLiteral("#14062e")));
+        QCOMPARE(restTick.name(), QStringLiteral("#433858"));
+    } else {
+        QCOMPARE(restTrough, palette->property("view").value<QColor>());
+        QCOMPARE(restTick, palette->property("waveformRestLine").value<QColor>());
     }
+    QCOMPARE(restTrough, plotColors->property("plotBg").value<QColor>());
+    checkMarks(restTrough, restTick, QStringLiteral("before audio"));
+    if (QTest::currentTestFailed()) {
+        return;
+    }
+
+    // A track, paused and stopped: the lit trough and its ticks.
+    const QColor trough = plotColors->property("meterTrough").value<QColor>();
+    const QColor tick = plotColors->property("meterTick").value<QColor>();
+    QVERIFY(trough != restTrough);
+    for (const QString &state : {QStringLiteral("Paused"), QStringLiteral("Stopped")}) {
+        playTrack(bridge, state);
+        QTRY_VERIFY(visibleMeter() != nullptr
+                    && visibleMeter()->property("troughColor").value<QColor>() == trough);
+        meter = visibleMeter();
+        QVERIFY2(!meter->active(), qPrintable(state));
+        checkMarks(trough, tick, state);
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+    }
+
+    // The queue cleared: the pane at rest again.
+    bridge->setProperty("currentTrackPath", QString());
+    QTRY_VERIFY(visibleMeter() != nullptr
+                && visibleMeter()->property("troughColor").value<QColor>() == restTrough);
+    meter = visibleMeter();
+    checkMarks(restTrough, restTick, QStringLiteral("cleared"));
 }
 
 void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines_data() {

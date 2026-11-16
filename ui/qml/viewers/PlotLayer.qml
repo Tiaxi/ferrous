@@ -391,12 +391,17 @@ Item {
         backgroundColor: root.plotColors.plotBg
         seamColor: root.plotColors.plotLaneSeam
         gapColor: root.plotColors.meterSeam
-        troughColor: root.plotColors.meterTrough
+        // Before any audio, since launch or since the queue was cleared
+        // (beforeAudio: no track path, the pane at rest with its rest
+        // lines), the track is the plot's floor and its marks the rest
+        // lines' colour; from the first track on, the lit trough and its
+        // ticks, paused and stopped with a track too.
+        troughColor: root.beforeAudio ? root.plotColors.meterRestTrough : root.plotColors.meterTrough
         fillColor: root.plotColors.meterFill
         peakColor: root.plotColors.meterPeak
         clipOffColor: root.plotColors.meterClipOff
         clipColor: root.uiPalette.negative
-        tickColor: root.plotColors.meterTick
+        tickColor: root.beforeAudio ? root.plotColors.meterRestTick : root.plotColors.meterTick
         topSeamColor: root.plotColors.meterTopSeam
         // On the waveform, whose colour the bar has, the bar is framed by
         // its trough, so it reads as an instrument rather than as the
