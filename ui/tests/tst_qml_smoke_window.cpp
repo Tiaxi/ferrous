@@ -1391,7 +1391,12 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
     snapshot.metadata.present = true;
     snapshot.metadata.sourcePath = untaggedPath;
     QVERIFY(deliver(snapshot));
-    expectLines(QStringLiteral("untitled take.flac"), QString());
+    // Its file name for a title and, in the artist's row, its folder, not
+    // a tag (#373 H29 W2, H30: as the bridge gives the title, never empty).
+    QTRY_COMPARE(title->property("text").toString(), QStringLiteral("untitled take.flac"));
+    QTRY_COMPARE(artistAlbum->property("text").toString(), QStringLiteral("fixture"));
+    QCOMPARE(panel->property("artistAlbumText").toString(), QString());
+    QCOMPARE(panel->property("folderText").toString(), QStringLiteral("fixture"));
     QCOMPARE(bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
     QVERIFY(bridge.currentTrackArtist().isEmpty());
     QVERIFY(bridge.currentTrackAlbum().isEmpty());

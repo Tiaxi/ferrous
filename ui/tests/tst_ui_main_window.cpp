@@ -2368,6 +2368,17 @@ void UiMainWindowTest::nowPlayingWithoutCoverOrTagsLeavesNoBlankLines() {
     QCOMPARE(folderLine->property("text").toString(), folderName);
     QCOMPARE(colorOf(folderLine), tokenHex(window, "textSecondary"));
     QCOMPARE(QAccessible::queryAccessibleInterface(folderLine)->text(QAccessible::Name), folderName);
+    // As the app gives it: the title is the file's name, with or without
+    // its extension, never empty (#373 H30: the folder never showed).
+    for (const QString &nameTitle : {QFileInfo(kTrackPath).completeBaseName(), fileName}) {
+        bridge->setProperty("currentTrackTitle", nameTitle);
+        QTRY_COMPARE(panel->property("folderText").toString(), folderName);
+    }
+    // A real title, even one without any other tag: no folder.
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Morning Tide Field"));
+    QTRY_COMPARE(panel->property("folderText").toString(), QString());
+    bridge->setProperty("currentTrackTitle", QString());
+    QTRY_COMPARE(panel->property("folderText").toString(), folderName);
     QCOMPARE(sceneRect(cover), withCover.at(2));
     if (artLayout == QStringLiteral("wide")) {
         // Under the cover, the block keeps its height, the empty lines

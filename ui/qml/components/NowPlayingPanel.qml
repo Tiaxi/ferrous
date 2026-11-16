@@ -352,7 +352,11 @@ Item {
     // than a tag (#373 H29 W2: at 24 pt "track07" stood alone beside the
     // cover over some 140 px of empty rows). Never for a track with any
     // tag the lines show, as an album or a track number alone.
-    readonly property bool untagged: root._trimmed(root.uiBridge.currentTrackTitle).length === 0
+    // Its title is the file's own name when it has no title tag: the
+    // queue row's title or the bridge's fallback (#373 H30: the real app
+    // never left it empty, so the folder never showed).
+    readonly property bool untagged: (root._trimmed(root.uiBridge.currentTrackTitle).length === 0
+            || PathUtils.isFileNameTitle(root.uiBridge.currentTrackTitle, root.uiBridge.currentTrackPath))
         && root.artistText.length === 0 && root.albumText.length === 0 && root.detailsText.length === 0
     readonly property string folderText: root.untagged
         ? PathUtils.containingFolderName(root._trimmed(root.uiBridge.currentTrackPath)) : ""
