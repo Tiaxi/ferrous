@@ -3653,31 +3653,60 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     {
         // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
         // px read lighter than Breeze's waveform glyph beside it), round
-        // caps, at least 2 px clear between them where they start, inside
-        // the 16 px square with their caps.
+        // caps, over a 1.5 px baseline at y 14.5 from x 2 to 14, the
+        // icon's floor, both starting on it (#373 H16 I7: without it the
+        // strokes read as "//"); 1.5 px or more clear of each other
+        // everywhere, their ends 1.5 px or more clear of the baseline and
+        // each other; all inside the 16 px square with their caps.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
         QVERIFY(svg.contains(QStringLiteral("viewBox=\"0 0 16 16\"")));
-        QCOMPARE(svg.count(QStringLiteral("<path ")), 2);
+        QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
         QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
-        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 2);
-        const QRegularExpression path(QStringLiteral("d=\"M([0-9.]+) ([0-9.]+)C[^\"]* ([0-9.]+) ([0-9.]+)\""));
-        QList<QPointF> starts;
-        QList<QPointF> ends;
+        QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
+        // The baseline: with its round caps, x 2 to 14.
+        QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.5\" stroke-linecap=\"round\" d=\"M2.75 14.5H13.25\"")));
+        const QRegularExpression path(QStringLiteral(
+            "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
+        QList<QList<QPointF>> curves;
         for (auto match = path.globalMatch(svg); match.hasNext();) {
             const QRegularExpressionMatch each = match.next();
-            starts.push_back(QPointF(each.captured(1).toDouble(), each.captured(2).toDouble()));
-            ends.push_back(QPointF(each.captured(3).toDouble(), each.captured(4).toDouble()));
+            QList<QPointF> controls;
+            for (int i = 1; i <= 8; i += 2) {
+                controls.push_back(QPointF(each.captured(i).toDouble(), each.captured(i + 1).toDouble()));
+            }
+            QList<QPointF> points;
+            for (int step = 0; step <= 200; ++step) {
+                const double t = step / 200.0;
+                const double u = 1 - t;
+                points.push_back(u * u * u * controls[0] + 3 * u * u * t * controls[1] + 3 * u * t * t * controls[2]
+                                 + t * t * t * controls[3]);
+            }
+            curves.push_back(points);
         }
-        QCOMPARE(starts.size(), 2);
-        QCOMPARE(starts.at(0).x(), starts.at(1).x());
-        QVERIFY2(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75 >= 2.0,
-                 qPrintable(QStringLiteral("%1 px clear").arg(std::abs(starts.at(1).y() - starts.at(0).y()) - 1.75)));
-        for (const QPointF &point : starts + ends) {
-            QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
-            QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
+        QCOMPARE(curves.size(), 2);
+        const auto clear = [](const QList<QPointF> &a, const QList<QPointF> &b) {
+            double least = 1e9;
+            for (const QPointF &p : a) {
+                for (const QPointF &q : b) {
+                    least = std::min(least, std::hypot(p.x() - q.x(), p.y() - q.y()));
+                }
+            }
+            return least - 1.75;
+        };
+        QVERIFY2(clear(curves[0], curves[1]) >= 1.5, qPrintable(QString::number(clear(curves[0], curves[1]))));
+        for (const QList<QPointF> &curve : curves) {
+            // From the baseline, up and to the right.
+            QCOMPARE(curve.first().y(), 14.5);
+            QVERIFY(curve.first().x() >= 2.75 && curve.first().x() <= 13.25);
+            QVERIFY2(14.5 - curve.last().y() - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(curve.last().y())));
+            for (const QPointF &point : curve) {
+                QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
+                QVERIFY(point.y() - 0.875 >= 0.0 && point.y() <= 14.5);
+            }
         }
+        QVERIFY(std::abs(curves[0].last().y() - curves[1].last().y()) - 1.75 >= 1.5);
     }
     // The checked one is the mode: a neutral plate, the plot's text colour
     // at 24 % or more over the switch's plate (#373 H15 H4), with its glyph in the text colour
