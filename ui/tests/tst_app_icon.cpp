@@ -306,14 +306,18 @@ constexpr int kTopTraceHeldTo = 38;
 // A trace's width across as drawn at `x`, lowest first, `edge` the tile's
 // inner edge: its width (strokeWidths), but at 32 and 36 px the rose's
 // 2.5 px and the magenta's 2.25 eased to 2 px over their last 4 px, so that
-// they run out on two whole rows each (#373 hill climb, H24, H25).
+// they run out on two whole rows each (#373 hill climb, H24, H25), and at
+// 32 px the fundamental's 4 px eased to 3 over its last 4 px, its top edge
+// a row lower at its end, so that it opens apart from the rose, whose exit
+// is a row lower too (H26).
 double easedWidth(int size, size_t trace, double x, double edge) {
     const double width = strokeWidths(size)[trace];
-    if (!taskManagerSize(size) || trace == 0) {
+    if (!taskManagerSize(size) || (trace == 0 && size != 32)) {
         return width;
     }
+    const double end = trace == 0 ? 3.0 : 2.0;
     const double t = std::clamp((x - (edge - 4)) / 4, 0.0, 1.0);
-    return width + (2.0 - width) * t * t * (3 - 2 * t);
+    return width + (end - width) * t * t * (3 - 2 * t);
 }
 
 // The columns a trace's start takes before its full width: none at 16 and
@@ -521,6 +525,20 @@ QHash<QString, QImage> traceCoverage(const QString &path, int size) {
         traces.insert(match.captured(1), reader.read().convertToFormat(QImage::Format_ARGB32));
     }
     return traces;
+}
+
+// The tile inside the rim alone, rendered at a size: each pixel's alpha is
+// how much of it the tile covers, so that the rim's rounded corners count out.
+QImage tileCoverage(const QString &path, int size) {
+    QStringList lines = QString::fromUtf8(contentsOf(path)).split(QLatin1Char('\n'));
+    lines.removeIf([](const QString &line) {
+        return line.contains(QLatin1String("<path ")) || line.contains(QLatin1String("<rect id=\"rim\""));
+    });
+    QByteArray bytes = lines.join(QLatin1Char('\n')).toUtf8();
+    QBuffer buffer(&bytes);
+    QImageReader reader(&buffer, "svg");
+    reader.setScaledSize(QSize(size, size));
+    return reader.read().convertToFormat(QImage::Format_ARGB32);
 }
 
 // How much of a pixel a trace drawn alone covers, 0 to 1.
@@ -1408,12 +1426,16 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows_data() {
 // 32 px end under the corner, where Plasma's badge cuts it), the ends
 // 1 : 2 : 3 above the baseline, from starts as far apart. H25: at 32 and
 // 36 px the fundamental the focal stroke, 4 px, its weight on its underside,
-// and the fan opened to about twice the starts' spacing, the magenta's exit
-// a row under the top inner edge, from starts a little closer, the caps'
-// tips in one column (H24: 3 / 2.5 / 2, exits 1.6 and 1.8 times as far
-// apart as the starts, read as three near-parallel stripes); 36 px a
-// drawing of its own, the same strokes on its grid (H24); and 1.5 px or more of the tile between neighbours everywhere, 2.25 px at 30 %
-// of the way across.
+// and the fan opened, the caps' tips in one column (H24: 3 / 2.5 / 2, exits
+// 1.6 and 1.8 times as far apart as the starts, read as three near-parallel
+// stripes). H26: the magenta's exit 3 rows under the top inner edge and the
+// rose's a row lower, so that the top trace keeps 2 px of the tile over it
+// up to the rounded corner, where Plasma's playing badge sits (H25's, a row
+// under the edge, ran into the corner); the exits some 1.75 times as far
+// apart as the starts, from starts a little closer, the traces as far apart
+// as in H25. 36 px a drawing of its own, the same strokes on its grid
+// (H24); and 1.5 px or more of the tile between neighbours everywhere,
+// 2.25 px at 30 % of the way across.
 void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1423,12 +1445,12 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     // Each trace's end, its top and bottom on the inner edge, lowest first.
     using Ends = std::vector<std::pair<double, double>>;
     const Ends ends = size == 48 ? Ends{{30, 34}, {20, 22.5}, {10, 12}}
-                                 : (size == 36 ? Ends{{22, 26}, {14, 16}, {5, 7}} : Ends{{20, 24}, {12, 14}, {4, 6}});
+                                 : (size == 36 ? Ends{{22, 26}, {15, 17}, {7, 9}} : Ends{{21, 24}, {13, 15}, {6, 8}});
     // The start caps' centres, lowest first: at 48 px a pixel above H20's,
     // the fundamental's half a pixel lower, its added weight on its underside.
     const std::vector<double> starts = size == 48 ? std::vector<double>{37.25, 31.75, 26.75}
-                                                  : (size == 36 ? std::vector<double>{28.25, 23.25, 18.75}
-                                                                : std::vector<double>{25.4, 20.75, 16.4});
+                                                  : (size == 36 ? std::vector<double>{27.75, 23.0, 18.8}
+                                                                : std::vector<double>{25.1, 20.45, 16.3});
     const std::vector<double> widths = strokeWidths(size);
     const QString source = QString::fromUtf8(contentsOf(path));
     std::vector<double> startCentres;
@@ -1520,15 +1542,30 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
             QVERIFY2(touching <= 1, qPrintable(QStringLiteral("traces meet at %1, %2").arg(x).arg(y)));
         }
     }
-    // The fan opens: the exits' centres about twice as far apart as the
-    // starts', 1.85 times or more at 32 and 36 px and 2 at 48.
+    // The fan opens: the exits' centres 1.7 times or more as far apart as
+    // the starts' at 32 and 36 px, and twice at 48.
     const double exits = (ends.front().first + ends.front().second - ends.back().first - ends.back().second) / 2;
     const double fan = exits / (startCentres.front() - startCentres.back());
-    QVERIFY2(fan >= (size == 48 ? 2.0 : 1.85), qPrintable(QString::number(fan)));
-    // The tile clear above the top trace: 5 rows at 48 px, 1 at 32 and 36.
-    for (int y = inside.top(); y < inside.top() + (size == 48 ? 5 : 1); ++y) {
+    QVERIFY2(fan >= (size == 48 ? 2.0 : 1.7), qPrintable(QString::number(fan)));
+    // The tile clear above the top trace: 5 rows at 48 px, 3 at 32 and 36
+    // (#373 hill climb, H26: 1 before, and in its last column, under the
+    // tile's rounded corner, none: the trace ran into the corner where
+    // Plasma's playing badge sits).
+    for (int y = inside.top(); y < inside.top() + (size == 48 ? 5 : 3); ++y) {
         for (int x = inside.left(); x <= inside.right(); ++x) {
             QVERIFY2(alphaAt(traces.back(), x, y) <= 0.01, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
+        }
+    }
+    // In each of the top trace's last 4 columns, 2 px or more of the tile
+    // over it, the rounded corner's rim counted out.
+    if (taskManagerSize(size)) {
+        const QImage tile = tileCoverage(path, size);
+        for (int x = inside.right() - 3; x <= inside.right(); ++x) {
+            double air = 0;
+            for (int y = 0; y <= columnOf(traces.back(), x).top; ++y) {
+                air += std::max(0.0, alphaAt(tile, x, y) - alphaAt(traces.back(), x, y));
+            }
+            QVERIFY2(air >= 2.0, qPrintable(QStringLiteral("column %1: %2 px of the tile over the top trace").arg(x).arg(air)));
         }
     }
     // Apart by the tile: in every column both cross past their caps' first
