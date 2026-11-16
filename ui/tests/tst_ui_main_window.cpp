@@ -727,15 +727,25 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the 4th harmonic %1 px beside the glide's %2").arg(mark->property("fourthHarmonicStroke").toReal())
             .arg(glide);
     }
-    // The colours as drawn on the floor: the amber as at 68 %, the 3rd
+    // The colours as drawn on the floor: the amber at its value as at 68 %,
+    // some 5.1:1, but an amber, its hue and saturation the app icon's
+    // (#373 H27: #ab7a33, mixed toward the floor, read as ochre), the 3rd
     // harmonic's magenta 3.6 to 3.9:1 on the floor, and the 2nd harmonic's
     // rose a step lighter, between it and the amber, as in the app icon
     // (#373 H20: the two harmonics were one value).
     const QColor floor(QStringLiteral("#14062e"));
-    if (hex(cover->property("standInGlideColor").value<QColor>()) != QStringLiteral("#ffab7a33")) {
-        return QStringLiteral("the glide in %1").arg(hex(cover->property("standInGlideColor").value<QColor>()));
+    const QColor glideColour = cover->property("standInGlideColor").value<QColor>();
+    if (hex(glideColour) != QStringLiteral("#ffb07a1a")) {
+        return QStringLiteral("the glide in %1").arg(hex(glideColour));
     }
-    const double glideRatio = contrastRatio(cover->property("standInGlideColor").value<QColor>(), floor);
+    const QColor iconAmber(QStringLiteral("#f2b035"));
+    const QColor ochre(QStringLiteral("#ab7a33"));
+    const double glideRatio = contrastRatio(glideColour, floor);
+    if (std::abs(glideRatio - contrastRatio(ochre, floor)) > 0.1 || std::abs(glideColour.hsvHue() - iconAmber.hsvHue()) > 2
+        || glideColour.hsvSaturationF() < iconAmber.hsvSaturationF() || ochre.hsvSaturationF() >= iconAmber.hsvSaturationF()) {
+        return QStringLiteral("the glide at %1:1, hue %2, saturation %3").arg(glideRatio).arg(glideColour.hsvHue())
+            .arg(glideColour.hsvSaturationF());
+    }
     const double harmonicRatio = contrastRatio(cover->property("standInHarmonicColor").value<QColor>(), floor);
     const double highRatio = contrastRatio(cover->property("standInHighHarmonicColor").value<QColor>(), floor);
     if (highRatio < 3.6 || highRatio > 3.9) {
@@ -745,10 +755,11 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the 2nd harmonic at %1:1 on the floor, between %2 and %3").arg(harmonicRatio).arg(highRatio)
             .arg(glideRatio);
     }
-    // The 4th harmonic a dim violet, some 2.9:1, a step below the 3rd (#373
-    // H24: 2.6:1 before, lifted as the app icon's was).
+    // The 4th harmonic a dim violet, some 3.2:1, the dimmest trace, half a
+    // step or more below the 3rd (#373 H24: 2.6:1 before, lifted as the app
+    // icon's was; H27: 2.9:1 read faint at 360 px).
     const double fourthRatio = contrastRatio(cover->property("standInFourthHarmonicColor").value<QColor>(), floor);
-    if (fourthRatio < 2.8 || fourthRatio > 3.0 || fourthRatio > highRatio - 0.8) {
+    if (fourthRatio < 3.1 || fourthRatio > 3.25 || fourthRatio > highRatio - 0.5) {
         return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
     // A 1 px edge in a light theme, none in a dark one.
