@@ -44,6 +44,7 @@ private slots:
     void albumArtViewerShowsWhenItsImageCannotBeRead();
     void albumArtInfoButtonIsTintedOnlyWhileChecked();
     void windowedViewerCornerSetsTheZoomOffWithADivider();
+    void windowedViewerFadesInOverOneFloor();
     void albumArtFitsLeftOfTheDetails_data();
     void albumArtFitsLeftOfTheDetails();
     void albumArtViewerIsBlackAroundTheArtInALightTheme_data();
@@ -1298,6 +1299,57 @@ void AlbumArtSmokeTest::albumArtInfoButtonIsTintedOnlyWhileChecked() {
     QTRY_VERIFY(!readout->isVisible());
 
     QTest::keyClick(fullscreen, Qt::Key_Escape);
+    QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
+}
+
+// The windowed viewer fades in with one black floor under the art. Its
+// popup fades its children one by one, not as one layer: with a second
+// floor of its own, at half opacity the window showed through only a
+// quarter, so the window went dark before the art came in, a blink of
+// 33 ms as it opened (#373 H37). At half the popup's opacity, the window
+// beside the art shows at half.
+void AlbumArtSmokeTest::windowedViewerFadesInOverOneFloor() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString coverPath = savedCover(dir, 400, 400);
+    QVERIFY(!coverPath.isEmpty());
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadActiveMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = qvariant_cast<QObject *>(window->property("uiBridge"));
+    QObject *viewer = window->findChild<QObject *>(QStringLiteral("viewerController"));
+    auto *surface = window->findChild<QQuickItem *>(QStringLiteral("albumArtSurface"));
+    QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+    QVERIFY(bridge != nullptr && viewer != nullptr && surface != nullptr && popup != nullptr);
+    setPlayingTrack(bridge);
+    bridge->setProperty("currentTrackCoverPath", QUrl::fromLocalFile(coverPath).toString());
+    bridge->setProperty("viewerFullscreenMode", 0);
+    // A point beside the square art, clear of the corner's controls.
+    const QPoint beside(4, window->height() / 2);
+    QTRY_VERIFY(popupsSettled());
+    const QColor before = window->grabWindow().pixelColor(beside);
+
+    QVERIFY(QMetaObject::invokeMethod(viewer, "openAlbumArtViewer"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_COMPARE_WITH_TIMEOUT(surface->property("imageStatus").toInt(), 1, 5000);
+    QTRY_VERIFY(popupsSettled());
+    QQuickItem *image = itemNamed(surface, QStringLiteral("albumArtImage"));
+    QVERIFY(image != nullptr);
+    QVERIFY2(sceneRectOf(image).left() > beside.x() + 2, "the point is beside the art");
+    QCOMPARE(window->grabWindow().pixelColor(beside).rgb(), qRgb(0, 0, 0));
+
+    // Half way through its fade, as the style's transition sets it.
+    QVERIFY(popup->setProperty("opacity", 0.5));
+    const QColor half = window->grabWindow().pixelColor(beside);
+    for (const auto &[got, was] : {std::pair{half.red(), before.red()}, std::pair{half.green(), before.green()},
+                                   std::pair{half.blue(), before.blue()}}) {
+        QVERIFY2(std::abs(got - was / 2.0) <= 3,
+                 qPrintable(QStringLiteral("%1 at half of %2, not %3").arg(half.name(), before.name())
+                                .arg(QColor(before.red() / 2, before.green() / 2, before.blue() / 2).name())));
+    }
+    QVERIFY(popup->setProperty("opacity", 1.0));
+    QVERIFY(QMetaObject::invokeMethod(viewer, "closeAlbumArtViewer"));
     QTRY_VERIFY(!viewer->property("albumArtViewerOpen").toBool());
 }
 
@@ -3666,9 +3718,17 @@ void AlbumArtSmokeTest::albumArtViewerIsBlackAroundTheArtInALightTheme() {
         QVERIFY(QTest::qWaitForWindowActive(shownIn));
         QCOMPARE(shownIn->color().rgba(), qRgb(0, 0, 0));
     } else {
-        QQuickItem *background = nullptr;
-        QTRY_VERIFY((background = visibleItemNamed(window, QStringLiteral("albumArtPopupBackground"))) != nullptr);
-        QCOMPARE(colorOf(background, "color"), qRgb(0, 0, 0));
+        // The black is the art surface's floor, the popup's only one: it
+        // draws no background of its own (#373 H37).
+        QObject *popup = window->findChild<QObject *>(QStringLiteral("albumArtViewerPopup"));
+        QVERIFY(popup != nullptr);
+        auto *background = qvariant_cast<QQuickItem *>(popup->property("background"));
+        QVERIFY(background != nullptr);
+        QVERIFY(!background->flags().testFlag(QQuickItem::ItemHasContents));
+        QTRY_VERIFY(surface->isVisible());
+        QQuickItem *floor = itemNamed(surface, QStringLiteral("albumArtFloor"));
+        QVERIFY(floor != nullptr && floor->isVisible());
+        QCOMPARE(colorOf(floor, "color"), qRgb(0, 0, 0));
     }
     QTRY_VERIFY(surface->window() == shownIn && surface->isVisible());
     QCOMPARE(surface->property("fullscreen").toBool(), viewerMode == 1);
