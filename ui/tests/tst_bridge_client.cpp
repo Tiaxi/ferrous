@@ -393,6 +393,7 @@ private slots:
     void nextTrackHoldsTheTextBeforeUntilItsOwnIsKnown();
     void nextTrackWithoutTagsKeepsNoTextOfTheTrackBefore();
     void stoppingEndsTheWaitForTheTracksText();
+    void clearingTheQueueWhileStoppedLeavesNoTrack();
     void trackTextComesFromTheCurrentTracksQueueRowOnly();
     void albumArtistFollowsMatchingMetadataAcrossTracks();
     void mprisPositionReadsThePlaybackClock();
@@ -3467,6 +3468,9 @@ void BridgeClientTest::anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTr
     QTRY_VERIFY_WITH_TIMEOUT(bridge.queueLength() == 0
                                  && bridge.queueUndoKind() == BinaryBridgeCodec::QueueUndoCleared,
                              10000);
+    // Cleared while stopped, the engine has no track, nor has the client
+    // (#373 H18 C3).
+    QTRY_VERIFY_WITH_TIMEOUT(bridge.currentTrackPath().isEmpty() && bridge.currentTrackTitle().isEmpty(), 10000);
     bridge.undoQueueChange();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 4, 10000);
     // The second A comes back as the current track, stopped, so Play would
@@ -6808,6 +6812,37 @@ void BridgeClientTest::stoppingEndsTheWaitForTheTracksText() {
     QVERIFY(client.processBinarySnapshot(snapshot));
     QCOMPARE(trackText(client), (QVariantList{QStringLiteral("b.flac"), QString(), QString(), QString(),
                                               QVariant(), 0, 0}));
+}
+
+// Stop, then Clear: the engine keeps the stopped track current, then, its
+// queue empty, reports none. The client then has no track, its path and
+// text gone with it, so the now-playing card says "Nothing playing" (#373
+// H18 C3: the stopped track's path outlived the queue, and the card kept
+// the track).
+void BridgeClientTest::clearingTheQueueWhileStoppedLeavesNoTrack() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    BinaryBridgeCodec::DecodedSnapshot snapshot =
+        playingTaggedTrack(QStringLiteral("/fixture/a.flac"), QStringLiteral("A"), 2001, 3);
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("A Title"));
+
+    // Stopped: the track stays current, with its text.
+    snapshot.playback.state = 0;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QCOMPARE(client.playbackState(), QStringLiteral("Stopped"));
+    QCOMPARE(client.currentTrackPath(), QStringLiteral("/fixture/a.flac"));
+    QCOMPARE(client.currentTrackTitle(), QStringLiteral("A Title"));
+    QCOMPARE(client.currentTrackArtist(), QStringLiteral("A Artist"));
+
+    // The queue cleared: no current track, though the metadata last sent
+    // still describes the stopped one.
+    snapshot.playback.currentPath.clear();
+    snapshot.playback.currentQueueIndex = -1;
+    QVERIFY(client.processBinarySnapshot(snapshot));
+    QVERIFY(client.currentTrackPath().isEmpty());
+    QCOMPARE(trackText(client), (QVariantList{QString(), QString(), QString(), QString(), QVariant(), 0, 0}));
+    QCOMPARE(client.playbackState(), QStringLiteral("Stopped"));
 }
 
 // The text falls back to the current track's queue row, never to the row at
