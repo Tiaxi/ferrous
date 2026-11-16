@@ -443,6 +443,11 @@ double widthAcross(const QImage &trace, int start, int end) {
 }
 
 
+// The 16 and 22 px drawings at 2x, for a 16 or 22 px slot at 2x scaling.
+QString doubledPath(int size) {
+    return QStringLiteral(":/icons/hicolor/%1x%1@2/apps/ferrous.svg").arg(size);
+}
+
 void addSizeRows() {
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
@@ -476,10 +481,12 @@ private slots:
     void smallCurvesAreEvenAndEndOnWholeRows_data();
     void smallCurvesAreEvenAndEndOnWholeRows();
     void fundamentalThinsSmoothlyWithSize();
+    void doubledSlotsDrawTheSmallCompositionsAtTwice_data();
+    void doubledSlotsDrawTheSmallCompositionsAtTwice();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
-    void iconThemeGivesEachSizeItsDrawing_data() { addSizeRows(); }
+    void iconThemeGivesEachSizeItsDrawing_data();
     void iconThemeGivesEachSizeItsDrawing();
     void desktopFileNamesTheIcon();
 };
@@ -1235,6 +1242,88 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     }
 }
 
+void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
+    QTest::addColumn<int>("size");
+    QTest::addRow("16px@2") << 16;
+    QTest::addRow("22px@2") << 22;
+}
+
+// A 16 or 22 px slot at 2x scaling shows the drawing it shows at 1x, doubled
+// (#373 hill climb, H20: there the theme fell back to the 32 px drawing, with
+// three traces, or the scalable one, so a task manager's icon changed with the
+// scale): the same two traces, from the same start to the same end, as smooth
+// 4 px strokes with a round start, in a 2 px rim and twice the margin.
+void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
+    QFETCH(int, size);
+    const QString path = doubledPath(size);
+    const int doubled = 2 * size;
+    QVERIFY2(QFile::exists(path), qPrintable(path));
+    QCOMPARE(QImageReader(path).size(), QSize(doubled, doubled));
+    const QImage image = render(path, doubled);
+    const QImage single = render(FerrousAppIcon::resourcePath(size), size);
+
+    // Twice the 1x tile, its margin and its rim.
+    const QRect tile = tileOf(image);
+    const QRect singleTile = tileOf(single);
+    QCOMPARE(tile, QRect(singleTile.topLeft() * 2, singleTile.size() * 2));
+    const QPoint middle = tile.center();
+    for (int step = 0; step <= 2; ++step) {
+        QCOMPARE(near(image.pixel(middle.x(), tile.bottom() - step), kRim, 2), step < 2);
+    }
+    const QRect inside = tile.adjusted(2, 2, -2, -2);
+
+    // The 1x drawing's two traces, in its colours and order, each a filled
+    // outline of a smooth stroke with one arc, its start's round cap.
+    QXmlStreamReader svg(contentsOf(path));
+    QStringList ids;
+    while (!svg.atEnd()) {
+        if (svg.readNext() == QXmlStreamReader::StartElement && svg.name() == QLatin1String("path")) {
+            ids << svg.attributes().value(QLatin1String("id")).toString();
+            const QString d = svg.attributes().value(QLatin1String("d")).toString();
+            QCOMPARE(d.count(QLatin1Char('A')), 1);
+            QVERIFY(d.contains(QLatin1Char('C')));
+        }
+    }
+    QCOMPARE(ids, traceIds(size));
+    const std::vector<Trace> traces = tracesOf(image);
+    const std::vector<Trace> singleTraces = tracesOf(single);
+    QCOMPARE(traces.size(), static_cast<size_t>(2));
+    QCOMPARE(singleTraces.size(), static_cast<size_t>(2));
+    const QHash<QString, QImage> cover = traceCoverage(path, doubled);
+    const QHash<QString, QImage> singleCover = traceCoverage(FerrousAppIcon::resourcePath(size), size);
+    for (const QString &id : ids) {
+        const QImage &trace = cover.value(id);
+        const QImage &singleTrace = singleCover.value(id);
+        const auto [first, last] = columnsOf(trace);
+        const auto [singleFirst, singleLast] = columnsOf(singleTrace);
+        // From the 1x start column, doubled, to the tile's inner edge.
+        QCOMPARE(first, 2 * singleFirst);
+        QCOMPARE(last, inside.right());
+        QCOMPARE(last + 1, 2 * (singleLast + 1));
+        // At the end the 1x end's rows, doubled: cut on whole rows on the
+        // inner edge, so that the last column, which the stroke still climbs
+        // across, is centred on them to within a few tenths of a pixel.
+        const Column end = columnOf(trace, last);
+        const Column singleEnd = columnOf(singleTrace, singleLast);
+        QVERIFY2(std::abs(end.centre - 2 * singleEnd.centre) <= 0.3,
+                 qPrintable(QStringLiteral("%1 ends at %2, the 1x at %3").arg(id).arg(end.centre).arg(singleEnd.centre)));
+        QVERIFY2(std::abs(end.sum - 4) <= 0.15, qPrintable(QStringLiteral("%1: %2 px at its end").arg(id).arg(end.sum)));
+        // Its centre at the start, past the cap, within a device pixel of the
+        // 1x start's, doubled.
+        const double start = columnOf(trace, first + 3).centre;
+        const double singleStart = columnOf(singleTrace, singleFirst + 1).centre * 2;
+        QVERIFY2(std::abs(start - singleStart) <= 1.5,
+                 qPrintable(QStringLiteral("%1 starts at %2, the 1x at %3").arg(id).arg(start).arg(singleStart)));
+        // 4 px across, evenly, past the cap, and smooth: no step from column
+        // to column.
+        for (int x = first + 3; x < last; ++x) {
+            const double across = widthAcross(trace, x, x);
+            QVERIFY2(std::abs(across - 4) <= 0.5, qPrintable(QStringLiteral("%1, column %2: %3 px across").arg(id).arg(x).arg(across)));
+            const double bend = columnOf(trace, x + 1).centre - 2 * columnOf(trace, x).centre + columnOf(trace, x - 1).centre;
+            QVERIFY2(std::abs(bend) <= 0.3, qPrintable(QStringLiteral("%1, column %2: bends %3").arg(id).arg(x).arg(bend)));
+        }
+    }
+}
 
 void AppIconTest::windowIconHasEachSizesDrawing() {
     const QIcon icon = FerrousAppIcon::icon();
@@ -1251,11 +1340,15 @@ void AppIconTest::windowIconHasEachSizesDrawing() {
 
 void AppIconTest::everySizeInstalls_data() {
     QTest::addColumn<QString>("directory");
+    QTest::addColumn<QString>("resource");
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
-        QTest::addRow("%dpx", size) << QStringLiteral("%1x%1").arg(size) << size;
+        QTest::addRow("%dpx", size) << QStringLiteral("%1x%1").arg(size) << FerrousAppIcon::resourcePath(size) << size;
     }
-    QTest::addRow("scalable") << QStringLiteral("scalable") << 0;
+    for (const int size : {16, 22}) {
+        QTest::addRow("%dpx@2", size) << QStringLiteral("%1x%1@2").arg(size) << doubledPath(size) << 2 * size;
+    }
+    QTest::addRow("scalable") << QStringLiteral("scalable") << FerrousAppIcon::resourcePath(0) << 0;
 }
 
 void AppIconTest::everySizeInstalls() {
@@ -1263,26 +1356,41 @@ void AppIconTest::everySizeInstalls() {
         QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
     }
     QFETCH(QString, directory);
+    QFETCH(QString, resource);
     QFETCH(int, size);
     const QString path = installedIcon(directory);
     QVERIFY2(QFile::exists(path), qPrintable(path));
     // The installed file is the built-in drawing.
     const QByteArray installed = contentsOf(path);
     QVERIFY(!installed.isEmpty());
-    QCOMPARE(installed, contentsOf(FerrousAppIcon::resourcePath(size)));
+    QCOMPARE(installed, contentsOf(resource));
     const int drawn = size > 0 ? size : 64;
     const QImage image = render(path, drawn);
     QVERIFY(!image.isNull());
     QVERIFY(countWhere(image, image.rect(), [](QRgb p) { return near(p, kGlide, 24); }) >= drawn / 2);
 }
 
+void AppIconTest::iconThemeGivesEachSizeItsDrawing_data() {
+    QTest::addColumn<int>("size");
+    QTest::addColumn<int>("scale");
+    for (const int size : FerrousAppIcon::kSizes) {
+        QTest::addRow("%dpx", size) << size << 1;
+    }
+    for (const int size : {16, 22}) {
+        QTest::addRow("%dpx@2", size) << size << 2;
+    }
+}
+
+// At 1x each size's drawing, and at 2x in a 16 or 22 px slot that size's
+// drawing doubled.
 void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
     if (installPrefix().isEmpty()) {
         QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
     }
     QFETCH(int, size);
+    QFETCH(int, scale);
     // The hicolor theme's index, as the hicolor-icon-theme package has it:
-    // the fixed sizes first, then the scalable directory.
+    // each fixed size and its 2x, then the scalable directory.
     QTemporaryDir index;
     QVERIFY(index.isValid());
     QVERIFY(QDir(index.path()).mkpath(QStringLiteral("hicolor")));
@@ -1291,8 +1399,10 @@ void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
         QStringList directories;
         for (const int fixed : FerrousAppIcon::kSizes) {
             const QString directory = QStringLiteral("%1x%1/apps").arg(fixed);
-            directories << directory;
+            const QString doubled = QStringLiteral("%1x%1@2/apps").arg(fixed);
+            directories << directory << doubled;
             text += QStringLiteral("[%1]\nSize=%2\nContext=Applications\nType=Fixed\n\n").arg(directory).arg(fixed);
+            text += QStringLiteral("[%1]\nSize=%2\nScale=2\nContext=Applications\nType=Fixed\n\n").arg(doubled).arg(fixed);
         }
         directories << QStringLiteral("scalable/apps");
         text += QStringLiteral("[scalable/apps]\nMinSize=1\nSize=128\nMaxSize=256\nContext=Applications\nType=Scalable\n");
@@ -1313,8 +1423,9 @@ void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
     QIcon::setThemeName(QStringLiteral("hicolor"));
     const QIcon icon = QIcon::fromTheme(QStringLiteral("ferrous"));
     QVERIFY(!icon.isNull());
-    const QImage shown = icon.pixmap(QSize(size, size), 1.0).toImage().convertToFormat(QImage::Format_ARGB32);
-    const QImage expected = render(installedIcon(QStringLiteral("%1x%1").arg(size)), size);
+    const QImage shown = icon.pixmap(QSize(size, size), scale).toImage().convertToFormat(QImage::Format_ARGB32);
+    const QString directory = scale == 1 ? QStringLiteral("%1x%1").arg(size) : QStringLiteral("%1x%1@2").arg(size);
+    const QImage expected = render(installedIcon(directory), size * scale);
     QVERIFY2(maxDifference(shown, expected) <= 2, qPrintable(QString::number(maxDifference(shown, expected))));
 }
 

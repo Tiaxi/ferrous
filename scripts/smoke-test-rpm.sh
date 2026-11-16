@@ -88,7 +88,9 @@ podman run --rm \
         for path in /usr/bin/ferrous \
             /usr/share/applications/ferrous.desktop \
             /usr/share/icons/hicolor/16x16/apps/ferrous.svg \
+            /usr/share/icons/hicolor/16x16@2/apps/ferrous.svg \
             /usr/share/icons/hicolor/22x22/apps/ferrous.svg \
+            /usr/share/icons/hicolor/22x22@2/apps/ferrous.svg \
             /usr/share/icons/hicolor/32x32/apps/ferrous.svg \
             /usr/share/icons/hicolor/48x48/apps/ferrous.svg \
             /usr/share/icons/hicolor/64x64/apps/ferrous.svg \

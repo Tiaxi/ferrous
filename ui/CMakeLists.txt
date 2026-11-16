@@ -139,11 +139,12 @@ target_compile_definitions(ferrous PRIVATE FERROUS_APP_VERSION="${FERROUS_APP_VE
 add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
-# The app icon: a drawing of its own for each size (src/AppIcon.h), installed
+# The app icon: a drawing of its own for each size (src/AppIcon.h), and the 16
+# and 22 px drawings doubled for 2x scaling (the @2 directories), installed
 # in the hicolor icon theme and built in, for the window icon and the queue's
 # first-run image. The QML that shows it is loaded from the source directory
 # by the tests, which link this library too.
-set(FERROUS_APP_ICON_DIRS 16x16 22x22 32x32 48x48 64x64 128x128 256x256 scalable)
+set(FERROUS_APP_ICON_DIRS 16x16 16x16@2 22x22 22x22@2 32x32 48x48 64x64 128x128 256x256 scalable)
 set(FERROUS_APP_ICON_FILES "")
 foreach(_icon_dir IN LISTS FERROUS_APP_ICON_DIRS)
     list(APPEND FERROUS_APP_ICON_FILES assets/icons/hicolor/${_icon_dir}/apps/ferrous.svg)
