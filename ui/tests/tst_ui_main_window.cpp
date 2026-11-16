@@ -802,10 +802,11 @@ qreal standInMarkInk(QQuickWindow *window) {
 // columns before a fifth of the tile are floor, and a column at 30 % crosses
 // them all, the wide mark's four (H21) or the small mark's three (H22). The
 // wide mark's 4th harmonic leaves through the top edge, as in the app icon
-// (H23: it ran out on the right, under the corner), some 70 % across, where
-// the icon's does (H25: at 90 % it grazed the edge into the corner): one
-// short run of ink in the row just inside the top edge, between three fifths
-// and three quarters of the way across; the small mark leaves that row floor.
+// (H23: it ran out on the right, under the corner), some 82 % across, where
+// the icon's true 4th harmonic does (H25: at 90 % it grazed the edge into the
+// corner; H26: H25's bent up to leave 70 % across): one short run of ink in
+// the row just inside the top edge, between three quarters and nine tenths
+// of the way across; the small mark leaves that row floor.
 QString standInMarkRunsOut(QQuickWindow *window) {
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *mark = cover ? itemNamed(cover, QStringLiteral("albumArtStandInMark")) : nullptr;
@@ -854,7 +855,7 @@ QString standInMarkRunsOut(QQuickWindow *window) {
             last = x;
         }
     }
-    if (small ? topRuns != 0 : (topRuns != 1 || first < left + width * 3 / 5 || last > left + width * 3 / 4)) {
+    if (small ? topRuns != 0 : (topRuns != 1 || first < left + width * 3 / 4 || last > left + width * 9 / 10)) {
         return QStringLiteral("%1 runs in the top row, from %2 to %3 of %4 px").arg(topRuns).arg(first - left).arg(last - left).arg(width);
     }
     for (int x = left + 2; x < left + width / 5; ++x) {
