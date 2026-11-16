@@ -1543,10 +1543,13 @@ void UiDialogsTest::configureGroupsItsSettingsOnFourPages() {
     }
     // Within a group, the rows are 4 px apart; a help text is 4 px under
     // its control and 12 px above the next row.
-    QVERIFY(gapIs(named("spectrogramFpsCheckBox"), named("showLevelMeterCheckBox"), 4));
+    // The Show group's three check boxes are together, the crosshair's help
+    // after them (#373 H38: Frame rate stood apart under it).
+    QVERIFY(gapIs(named("spectrogramScaleCheckBox"), named("spectrogramCrosshairCheckBox"), 4));
+    QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), named("spectrogramFpsCheckBox"), 4));
+    QVERIFY(gapIs(named("spectrogramFpsCheckBox"), crosshairHelp, 4));
+    QVERIFY(gapIs(crosshairHelp, named("showLevelMeterCheckBox"), 12));
     QVERIFY(gapIs(named("spectrogramFrequencyCapCheckBox"), capHelp, 4));
-    QVERIFY(gapIs(named("spectrogramCrosshairCheckBox"), crosshairHelp, 4));
-    QVERIFY(gapIs(crosshairHelp, named("spectrogramFpsCheckBox"), 12));
     QVERIFY(gapIs(named("spectrogramZoomCheckBox"), zoomHelp, 4));
     QVERIFY(gapIs(zoomHelp, named("stretchShortTracksCheckBox"), 12));
     // A long help text wraps at about 440 px.
