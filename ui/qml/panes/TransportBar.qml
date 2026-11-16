@@ -996,7 +996,10 @@ ToolBar {
             // 8 px from the glyph to the groove.
             Layout.leftMargin: Math.max(0, root.volumeGlyphToSliderGap - root.smallGlyphInset)
             Layout.alignment: Qt.AlignVCenter
-            Layout.preferredWidth: root.narrow ? 72 : 96
+            // 96 px, 72 px in a narrow window; a larger font widens the
+            // groove with the thumb and the glyphs, up to half again
+            // (#373 H34 AB5: at 24 pt a 29 px thumb crowded a 96 px groove).
+            Layout.preferredWidth: volumeSlider.grooveWidth(root.narrow)
             Layout.preferredHeight: volumeSlider.boxHeight
             padding: 0
             from: 0
@@ -1017,6 +1020,9 @@ ToolBar {
             readonly property real grooveHeight: root.scaled(3)
             readonly property real grooveY: root.snapped((height - grooveHeight) / 2)
             readonly property real thumbSize: root.scaled(12)
+            function grooveWidth(narrow) {
+                return Math.round((narrow ? 72 : 96) * Math.min(1.5, root.fontScale))
+            }
             Accessible.name: I18n.i18nc("@label", "Volume")
             Accessible.description: volumeSlider.percentText
             // Every move, including a release's, sends its value, so the
@@ -1037,7 +1043,7 @@ ToolBar {
             }
 
             background: Item {
-                implicitWidth: 96
+                implicitWidth: volumeSlider.grooveWidth(false)
                 implicitHeight: volumeSlider.boxHeight
 
                 Rectangle {

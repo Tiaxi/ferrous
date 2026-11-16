@@ -465,6 +465,8 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void transportLaysOutFlatButtonsSeekTimeAndVolume();
     void narrowTransportShortensTheVolume();
+    void volumeGrooveGrowsWithTheThumb_data();
+    void volumeGrooveGrowsWithTheThumb();
     void playPauseIsOneButtonThatShowsTheState();
     void playPauseGlyphsCrossFadeWithoutABlink();
     void transportToolTipsNameTheShortcut();
@@ -1829,6 +1831,51 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QTest::keyClick(harness.window, Qt::Key_Left);
     QTRY_COMPARE(tip->property("text").toString(), QStringLiteral("Volume 70%"));
     QCOMPARE(harness.bridge->property("volume").toDouble(), 0.7);
+}
+
+void TransportStatusTest::volumeGrooveGrowsWithTheThumb_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<qreal>("expectedWidth");
+    QTest::addColumn<qreal>("thumbSize");
+    QTest::newRow("10 pt, wide") << 10.0 << 1600 << 96.0 << 12.0;
+    QTest::newRow("10 pt, narrow") << 10.0 << 1000 << 72.0 << 12.0;
+    QTest::newRow("12 pt, wide") << 12.0 << 1600 << 115.0 << 14.0;
+    QTest::newRow("24 pt, wide") << 24.0 << 1600 << 144.0 << 29.0;
+    QTest::newRow("24 pt, narrow") << 24.0 << 1000 << 108.0 << 29.0;
+}
+
+// A larger font widens the volume's groove with its thumb and the glyphs,
+// up to half again: at 24 pt, 144 px and 108 px in a narrow window (#373
+// H34 AB5: the 29 px thumb crowded a 96 px groove). The default font keeps
+// 96 px and 72 px. The groove ends on the content edge, and its background
+// is as wide as the slider.
+void TransportStatusTest::volumeGrooveGrowsWithTheThumb() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, windowWidth);
+    QFETCH(qreal, expectedWidth);
+    QFETCH(qreal, thumbSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    Harness harness;
+    QString errorText;
+    QVERIFY2(harness.load(kBreezeDark, windowWidth, &errorText), qPrintable(errorText));
+    QCOMPARE(harness.tokens->property("basePointSize").toReal(), pointSize);
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QQuickItem *volume = harness.item(QStringLiteral("volumeSlider"));
+    QQuickItem *groove = harness.item(QStringLiteral("volumeGroove"));
+    QQuickItem *thumb = harness.item(QStringLiteral("volumeThumb"));
+    QVERIFY(transport && volume && groove && thumb);
+    QCOMPARE(volume->width(), expectedWidth);
+    QCOMPARE(sceneRect(groove).width(), expectedWidth);
+    QCOMPARE(thumb->width(), thumbSize);
+    QCOMPARE(sceneRect(transport).right() - sceneRect(groove).right(), 12.0);
+    auto *background = volume->property("background").value<QQuickItem *>();
+    QVERIFY(background != nullptr);
+    QCOMPARE(background->width(), expectedWidth);
 }
 
 void TransportStatusTest::volumeMuteKeepsTheThumb_data() {
