@@ -301,6 +301,7 @@ private slots:
     void noOpNextPreservesPosition();
     void playWhilePlayingSendsOnePlayCommandAndNoError();
     void queueSnapshotKeepsRawCoverPathsInRows();
+    void queueTotalReadsAsAClockTime();
     void queuePathFallbackUsesCachedFirstIndex();
     void queueDeltasChangeOnlyTheirRowsWithoutAReset();
     void queueRowRangeMovesDecodeAndMoveTheirRowsOnce();
@@ -3017,6 +3018,38 @@ void BridgeClientTest::queueSnapshotKeepsRawCoverPathsInRows() {
     QCOMPARE(
         rows->data(rows->index(0, 0), QueueRowsModel::CoverPathRole).toString(),
         QStringLiteral("/music/Artist A/Album A/cover.jpg"));
+}
+
+// The queue's total is written as the transport and the rows write a
+// time, with no leading zero on the minutes, and as a floor in words while
+// a queued track's length is unknown (#373 H35: "01:49+?").
+void BridgeClientTest::queueTotalReadsAsAClockTime() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    QCOMPARE(client.queueDurationText(), QStringLiteral("0:00"));
+
+    BinaryBridgeCodec::DecodedSnapshot snapshot;
+    snapshot.queue.present = true;
+    snapshot.queue.len = 1;
+    snapshot.queue.selectedIndex = 0;
+    snapshot.queue.tracks.push_back(BinaryBridgeCodec::DecodedQueueTrack{
+        QStringLiteral("Track A"), QStringLiteral("Artist A"), QStringLiteral("Album A"), QString(),
+        QStringLiteral("Electronic"), 2024, 1, 109.0f, QStringLiteral("/music/Artist A/Album A/01.flac"),
+    });
+    const auto totalFor = [&](double seconds, int unknown) {
+        snapshot.queue.totalDurationSeconds = seconds;
+        snapshot.queue.unknownDurationCount = unknown;
+        client.processBinarySnapshot(snapshot);
+        return client.queueDurationText();
+    };
+    QCOMPARE(totalFor(109.0, 0), QStringLiteral("1:49"));
+    QCOMPARE(totalFor(649.0, 0), QStringLiteral("10:49"));
+    QCOMPARE(totalFor(3952.0, 0), QStringLiteral("1:05:52"));
+    const QString atLeast = totalFor(109.0, 1);
+    QVERIFY2(!atLeast.contains(QStringLiteral("+?")), qPrintable(atLeast));
+    QVERIFY2(atLeast.contains(QStringLiteral("1:49")) && !atLeast.contains(QStringLiteral("01:49")),
+             qPrintable(atLeast));
+    QCOMPARE(atLeast, QStringLiteral("at least 1:49"));
 }
 
 void BridgeClientTest::queuePathFallbackUsesCachedFirstIndex() {

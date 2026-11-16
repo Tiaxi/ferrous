@@ -5764,10 +5764,19 @@ bool BridgeClient::processBinarySnapshot(const BinaryBridgeCodec::DecodedSnapsho
     if (queue.present && !queueFits) {
         requestQueueResync();
     } else if (queueFits) {
+        // As the transport and the rows write a time: "1:49", "1:05:52",
+        // with no leading zero on the minutes; and, while a queued track's
+        // length is unknown (one that can't be read never gets one), a
+        // floor in words (#373 H35: "01:49+?").
         QString nextQueueDurationText = formatSeconds(queue.totalDurationSeconds);
-        const int queueUnknownDurationCount = std::max(0, queue.unknownDurationCount);
-        if (queueUnknownDurationCount > 0) {
-            nextQueueDurationText = QStringLiteral("%1+?").arg(nextQueueDurationText);
+        if (nextQueueDurationText.size() > 2 && nextQueueDurationText.at(0) == QLatin1Char('0')
+            && nextQueueDurationText.at(1).isDigit() && nextQueueDurationText.at(2) == QLatin1Char(':')) {
+            nextQueueDurationText.remove(0, 1);
+        }
+        if (std::max(0, queue.unknownDurationCount) > 0) {
+            nextQueueDurationText =
+                i18nc("@info queue total duration when some tracks' lengths are unknown", "at least %1",
+                      nextQueueDurationText);
         }
         if (m_queueDurationText != nextQueueDurationText) {
             m_queueDurationText = nextQueueDurationText;

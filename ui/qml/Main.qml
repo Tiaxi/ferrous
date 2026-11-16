@@ -255,7 +255,7 @@ ApplicationWindow {
         property real durationSeconds: 0
         property real volume: 1.0
         property int queueLength: 0
-        property string queueDurationText: "00:00"
+        property string queueDurationText: "0:00"
         property var queueRows: []
         property int selectedQueueIndex: -1
         property int playingQueueIndex: -1

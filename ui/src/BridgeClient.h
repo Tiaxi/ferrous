@@ -865,7 +865,7 @@ private:
     quint64 m_volumeRequestsTaken{0};
     // The rows' count, which follows the model's row signals.
     int m_queueLength{0};
-    QString m_queueDurationText{"00:00"};
+    QString m_queueDurationText{"0:00"};
     QueueRowsModel m_queueRowsModel;
     // Decodes large snapshots and frees dropped queue rows off the GUI
     // thread; stopped first when the client goes.
