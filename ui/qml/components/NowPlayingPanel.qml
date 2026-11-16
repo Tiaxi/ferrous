@@ -1048,7 +1048,8 @@ Item {
     // on a row, some 264 px of it empty beside it, and the compact one cut
     // the artist off beside a 152 px cover): the cover at the top left, as
     // high as two lines of the title (headerCoverSize), and beside it,
-    // 12 px after it and from its top, the title, on up to two lines; then,
+    // 12 px after it, the title, on up to two lines, which end on the
+    // cover's foot, a title on one line too (#373 H29 W1); then,
     // footGap under the cover, at the panel's inset and on its whole width,
     // the artist, "Album (Year)", the album cut off before its year, in
     // textSecondary, and the details, a line each, elided, stackedLineGap
@@ -1250,6 +1251,12 @@ Item {
 
         text: lineText.parts[0]
         width: owner.width
+        // On the foot of the line's seat, where it has one (see FadingLine's
+        // seatHeight): each text by its own height, so a layer that fades
+        // out stays where it showed. By the height of the laid-out text:
+        // reading implicitHeight here would lay it out from within this
+        // binding, a binding loop.
+        y: owner.seatHeight > 0 ? Math.max(0, Math.floor(owner.seatHeight - lineText.contentHeight)) : 0
         elide: Text.ElideRight
         maximumLineCount: owner.maximumLineCount
         wrapMode: owner.maximumLineCount > 1 ? Text.Wrap : Text.NoWrap
@@ -1332,6 +1339,10 @@ Item {
         // More than one where the line wraps rather than be cut off: it
         // then fades whole, as no part of it stays in place for sure.
         property int maximumLineCount: 1
+        // The height of the box at whose foot each text of the line sits,
+        // or 0 for its top: the large-font header's title seats a single
+        // line on the cover's foot (#373 H29 W1).
+        property real seatHeight: 0
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.truncated
         // The lines the playing track's text takes.
@@ -1780,6 +1791,12 @@ Item {
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
+                // In the large-font header, a title on one line on the
+                // cover's foot, where a title on two ends, so the header
+                // reads as one stack down to the lines under it (#373 H29
+                // W1: at the cover's top it left some 54 px empty beside
+                // the cover's lower half).
+                seatHeight: root.largeHeader ? root.headerCoverSize : 0
                 width: narrowColumn.width
                 // In the large-font header, the cover's height and footGap
                 // with the column's spacing under it, so the lines under the

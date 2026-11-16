@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <tuple>
 #include <initializer_list>
 
 #include "../src/InputModality.h"
@@ -2002,6 +2003,20 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(coverRect.topLeft(), panelRect.topLeft());
     QTRY_COMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
     QVERIFY(sceneRect(title).right() <= panelRect.right() - 12);
+    // A text of the title, on one line or two, ends on the cover's foot
+    // (#373 H29 W1: a title on one line sat at the cover's top, with some
+    // 54 px empty beside the cover's lower half).
+    const auto seatedProblem = [&](QQuickItem *text) -> QString {
+        const QRectF rect = sceneRect(text);
+        if (rect.left() != coverRect.right() + 12 || std::abs(rect.bottom() - coverRect.bottom()) > 1.0
+            || rect.top() < coverRect.top()) {
+            return QStringLiteral("\"%1\" on %2 line(s) at %3,%4 to %5, the cover %6 to %7")
+                .arg(text->property("text").toString()).arg(text->property("lineCount").toInt())
+                .arg(rect.left()).arg(rect.top()).arg(rect.bottom()).arg(coverRect.top()).arg(coverRect.bottom());
+        }
+        return {};
+    };
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     // At least a dozen characters beside the cover.
     QVERIFY2(title->width() >= panel->property("narrowLineMinimum").toReal(), qPrintable(QString::number(title->width())));
     // Under the cover, 8 px down, at the inset and on the whole width.
@@ -2071,9 +2086,44 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_VERIFY(artist->property("truncated").toBool());
     QCOMPARE(artist->property("lineCount").toInt(), 1);
     QTRY_VERIFY(settled());
-    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
+    QVERIFY(sceneRect(title).top() > coverRect.top() + side / 3);
     QCOMPARE(geometry(), before);
     checkFootLines();
+
+    // A track change between a title on one line and one on two fades each
+    // where it showed: the one going out keeps its place, so nothing in
+    // the fade jumps (#373 H29 W1).
+    {
+        QObject *animation = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+        const auto incomingTitle = [&]() -> QQuickItem * {
+            QQuickItem *window = itemNamed(panel, QStringLiteral("nowPlayingIncomingNarrowTitleWindow"));
+            return window != nullptr && !window->childItems().isEmpty() ? window->childItems().first() : nullptr;
+        };
+        const QString twoLines = QStringLiteral("Lantern Signal Over The Harbour At Night");
+        for (const auto &[path, next, was] :
+             {std::tuple{QStringLiteral("/music/Artist A/Album A/03.flac"), twoLines, QStringLiteral("Dusk")},
+              std::tuple{kTrackPath, QStringLiteral("Dusk"), twoLines}}) {
+            bridge->setProperty("currentTrackPath", path);
+            bridge->setProperty("currentTrackTitle", next);
+            QTRY_VERIFY(animation->property("running").toBool());
+            QVERIFY(QMetaObject::invokeMethod(animation, "pause"));
+            panel->setProperty("handover", 0.2);
+            QQuickItem *outgoing = itemNamed(panel, QStringLiteral("nowPlayingOutgoingNarrowTitle"));
+            QQuickItem *incoming = incomingTitle();
+            QVERIFY(outgoing != nullptr && incoming != nullptr);
+            QCOMPARE(outgoing->property("text").toString(), was);
+            QCOMPARE(incoming->property("text").toString(), next);
+            QCOMPARE(outgoing->property("lineCount").toInt(), was == twoLines ? 2 : 1);
+            QCOMPARE(incoming->property("lineCount").toInt(), next == twoLines ? 2 : 1);
+            QVERIFY2(seatedProblem(outgoing).isEmpty(), qPrintable(seatedProblem(outgoing)));
+            QVERIFY2(seatedProblem(incoming).isEmpty(), qPrintable(seatedProblem(incoming)));
+            QVERIFY(QMetaObject::invokeMethod(animation, "resume"));
+            QTRY_VERIFY(settled());
+            QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
+            QCOMPARE(geometry(), before);
+        }
+    }
 
     // A title alone, a short title, and none of the tags: the same block.
     bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
@@ -2085,7 +2135,7 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QTRY_COMPARE(panel->property("narrowAlbumText").toString(), QString());
     QTRY_VERIFY(settled());
     QCOMPARE(geometry(), before);
-    QCOMPARE(sceneRect(title).topLeft(), QPointF(coverRect.right() + 12, coverRect.top()));
+    QVERIFY2(seatedProblem(title).isEmpty(), qPrintable(seatedProblem(title)));
     clearTrackTags(bridge);
     QTRY_COMPARE(panel->property("artistAlbumText").toString(), QString());
     QTRY_VERIFY(settled());
@@ -3134,9 +3184,15 @@ void UiMainWindowTest::nowPlayingTakesTheNarrowLayoutWhereTheLibraryWouldBeShort
         lowest = std::max(lowest, sceneRect(line).bottom());
     }
     QQuickItem *narrowTitle = named(window, "nowPlayingNarrowTitle");
-    // Beside the large-font header's cover, from its top.
-    QCOMPARE(sceneRect(narrowTitle).top(),
-             sceneRect(panel).top() + (pointSize > 0 ? 0.0 : panel->property("narrowTextTop").toReal()));
+    // Beside the large-font header's cover, ending on its foot, a title on
+    // one line too (#373 H29 W1); beside the narrow cover, from its top.
+    if (pointSize > 0) {
+        QVERIFY(sceneRect(narrowTitle).top() >= sceneRect(panel).top());
+        QVERIFY2(std::abs(sceneRect(narrowTitle).bottom() - tile.bottom()) <= 1.0,
+                 qPrintable(QStringLiteral("%1 to %2").arg(sceneRect(narrowTitle).bottom()).arg(tile.bottom())));
+    } else {
+        QCOMPARE(sceneRect(narrowTitle).top(), sceneRect(panel).top() + panel->property("narrowTextTop").toReal());
+    }
     QVERIFY(sceneRect(narrowTitle).top() < tile.bottom());
     QCOMPARE(tile.topLeft(), sceneRect(panel).topLeft());
     QVERIFY(!panel->property("insetCover").isValid());
