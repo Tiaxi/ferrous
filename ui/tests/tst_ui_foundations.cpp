@@ -577,26 +577,22 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     }
     // The lane seam and the meter's track stand out from the floor, and the
     // meter's gaps from its track. Its fill is quieter than the plot's text.
-    // The seam reads above the rest lines at rest, #261a3e, 1.19:1 on the
-    // floor (#373 H14 G6: at 1.18:1 it was under them).
+    // The seam reads on the floor (#373 H14 G6: at 1.18:1 it did not).
     const double seamContrast = contrastRatio(colorOf(spectrogram, "plotLaneSeam"), colorOf(spectrogram, "plotBg"));
     QVERIFY2(seamContrast >= 1.33, qPrintable(QString::number(seamContrast)));
-    QVERIFY(seamContrast > contrastRatio(fromHex(QStringLiteral("#261a3e")), colorOf(spectrogram, "plotBg")) + 0.1);
-    // At rest (#373 H15 H7): the rest lines white at 28 of 255 on the floor,
-    // 1.3:1; the seam between lanes at rest in the floor's violet, a white
-    // tint of it, 1.45:1 or more and above the lines.
+    // At rest, never played (#373 H28 V4; the lines as drawn in
+    // TransportInputSmokeTest::paneAtRestIsAStereoInstrument): the seam
+    // between lanes is a cut, the plot's deep violet under the floor, the
+    // meter's seam, in the floor's hue rather than the playing seam's grey
+    // (#373 H15 H7), and well apart from the rest lines over the floor.
     {
         const QColor floor = colorOf(spectrogram, "plotBg");
-        const QColor restLine = drawnOver(QColor(255, 255, 255, 28), floor);
-        const double lines = contrastRatio(restLine, floor);
-        QVERIFY2(lines >= 1.27 && lines <= 1.33, qPrintable(QString::number(lines)));
         const QColor restSeam = colorOf(tokens, "plotRestLaneSeam");
         QCOMPARE(restSeam.alphaF(), 1.0f);
-        const double seam = contrastRatio(restSeam, floor);
-        QVERIFY2(seam >= 1.45 && seam <= 1.6, qPrintable(restSeam.name() + QStringLiteral(" ") + QString::number(seam)));
-        QVERIFY(seam > lines + 0.1);
-        // In the floor's hue, not the playing seam's grey.
-        QVERIFY2(restSeam.blue() > restSeam.green() + 20 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
+        QVERIFY(sameColor(restSeam, fromHex(QStringLiteral("#0a0318"))));
+        QVERIFY(sameColor(restSeam, colorOf(spectrogram, "meterSeam")));
+        QVERIFY2(relativeLuminance(restSeam) < relativeLuminance(floor), qPrintable(restSeam.name()));
+        QVERIFY2(restSeam.blue() > restSeam.green() + 10 && restSeam.red() > restSeam.green(), qPrintable(restSeam.name()));
     }
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "plotBg")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
