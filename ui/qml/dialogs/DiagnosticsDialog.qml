@@ -63,6 +63,8 @@ Components.DialogWindow {
         anchors.leftMargin: Kirigami.Units.gridUnit
         anchors.rightMargin: Kirigami.Units.gridUnit
         anchors.topMargin: Kirigami.Units.gridUnit
+        // The buttons have no room of their own above them.
+        anchors.bottomMargin: Kirigami.Units.gridUnit
         spacing: Kirigami.Units.largeSpacing
 
         RowLayout {

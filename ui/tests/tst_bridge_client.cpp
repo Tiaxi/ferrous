@@ -287,6 +287,7 @@ private slots:
     void anUndoOfAClearWhileStoppedKeepsTheStoppedRowOfARepeatedTrack();
     void movedRowsGoBackThroughTheBackendAndAreSelected();
     void artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn();
+    void aFailedArtworkSearchSaysSoApartFromFindingNothing();
     void artworkForATrackMovedSinceTheSearchIsRefusedAndWritesNothing();
     void aConfirmedRenameRunsOnlyThePreviewedRenames();
     void commandsOverTheBoundAreRefusedVisibly();
@@ -3697,6 +3698,69 @@ void BridgeClientTest::movedRowsGoBackThroughTheBackendAndAreSelected() {
     bridge.clearQueue();
     QTRY_COMPARE_WITH_TIMEOUT(bridge.queueLength(), 0, 10000);
     isolateBridgeClient(bridge);
+}
+
+// A search whose every request failed says so apart from finding nothing
+// (#373 H38: the dialog showed both alike): itunesArtworkFailed, with the
+// system's words in itunesArtworkErrorText and the sentence in the status
+// text. A new search, one that cannot start, and closing clear it.
+void BridgeClientTest::aFailedArtworkSearchSaysSoApartFromFindingNothing() {
+    BridgeClient client;
+    isolateBridgeClient(client);
+    // The search must not reach the network: every request fails at once.
+    client.m_itunesArtworkNetwork.setProxy(
+        QNetworkProxy(QNetworkProxy::HttpProxy, QStringLiteral("127.0.0.1"), 9));
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("a.flac"));
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("stub"), qint64(4));
+    }
+    const auto playing = [&path](const QString &album) {
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.currentPath = path;
+        snapshot.metadata.present = true;
+        snapshot.metadata.sourcePath = path;
+        snapshot.metadata.title = QStringLiteral("Song");
+        snapshot.metadata.artist = QStringLiteral("Artist");
+        snapshot.metadata.album = album;
+        return snapshot;
+    };
+    QVERIFY(client.processBinarySnapshot(playing(QStringLiteral("Album"))));
+    QVERIFY(!client.itunesArtworkFailed());
+
+    client.searchCurrentTrackArtworkSuggestions();
+    QVERIFY(client.itunesArtworkLoading());
+    QVERIFY(!client.itunesArtworkFailed());
+    QTRY_VERIFY_WITH_TIMEOUT(!client.itunesArtworkLoading(), 10000);
+    QVERIFY(client.itunesArtworkResults().isEmpty());
+    QVERIFY(client.itunesArtworkFailed());
+    const QString error = client.itunesArtworkErrorText();
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(client.itunesArtworkStatusText(), QStringLiteral("iTunes search failed: %1").arg(error));
+
+    // A new search starts afresh.
+    client.searchCurrentTrackArtworkSuggestions();
+    QVERIFY(!client.itunesArtworkFailed());
+    QVERIFY(client.itunesArtworkErrorText().isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!client.itunesArtworkLoading(), 10000);
+    QVERIFY(client.itunesArtworkFailed());
+    // Closing the dialog clears it.
+    client.clearItunesArtworkSuggestions();
+    QVERIFY(!client.itunesArtworkFailed());
+    QVERIFY(client.itunesArtworkErrorText().isEmpty());
+
+    // A search that cannot start is no failure of iTunes.
+    QTRY_VERIFY_WITH_TIMEOUT(!client.itunesArtworkLoading(), 10000);
+    QVERIFY(client.processBinarySnapshot(playing(QString())));
+    client.searchCurrentTrackArtworkSuggestions();
+    QVERIFY(!client.itunesArtworkLoading());
+    QCOMPARE(client.itunesArtworkStatusText(), QStringLiteral("Album and artist metadata are required."));
+    QVERIFY(!client.itunesArtworkFailed());
 }
 
 void BridgeClientTest::artworkGoesToTheTrackItWasSearchedForAfterPlaybackMovesOn() {

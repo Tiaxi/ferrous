@@ -17,6 +17,9 @@ Components.CompactDialogWindow {
     readonly property bool startingTrackValid: startingTrackField.acceptableInput
     readonly property bool startingDiscValid: !writeDiscCheck.checked || startingDiscField.acceptableInput
     readonly property bool inputValid: root.startingTrackValid && root.startingDiscValid
+    // A start number's field fits four digits; its error wraps under it.
+    readonly property real numberFieldWidth: root.uiPalette.gridUnit * 5
+    readonly property real errorWidth: root.uiPalette.gridUnit * 14
 
     function startingNumber(field) {
         return Number.parseInt(field.text, 10)
@@ -40,11 +43,10 @@ Components.CompactDialogWindow {
 
     objectName: "autoNumberDialog"
     title: I18n.i18nc("@title:window", "Auto Number")
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26, root.minimumWidth, root._neededWidth)
-    // The form and the check boxes whole, in the font they are in; the
-    // description above them wraps.
-    contentWidth: Math.max(autoNumberForm.implicitWidth, writeDiscCheck.implicitWidth,
-        writeTotalsCheck.implicitWidth, resetOnFolderCheck.implicitWidth, resetOnDiscCheck.implicitWidth)
+    // As wide as its form, whose check boxes do not wrap, in the font
+    // they are in; the description above it wraps (#373 H10, H38).
+    contentWidth: autoNumberForm.implicitWidth
+    defaultWidth: Math.max(root.minimumWidth, root._neededWidth)
 
     footer: Components.DialogFooter {
 
@@ -68,13 +70,21 @@ Components.CompactDialogWindow {
         }
     }
 
+    // The description starts where the form does, and is no wider, so the
+    // dialog has one left edge however wide the user makes it.
     Label {
+        objectName: "autoNumberDescription"
         Layout.fillWidth: true
+        Layout.maximumWidth: autoNumberForm.implicitWidth
+        Layout.alignment: Qt.AlignHCenter
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
         text: I18n.i18nc("@label", "Number the selected rows, or all rows if none are selected, using the current table order.")
     }
 
+    // One form in reading order: the tracks' start; the discs' option and
+    // the start it enables, then totals; then when numbering starts over.
+    // The check boxes have no labels, so they start where the fields do.
     Kirigami.FormLayout {
         id: autoNumberForm
         objectName: "autoNumberForm"
@@ -84,29 +94,44 @@ Components.CompactDialogWindow {
             id: startingTrackField
             Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First track:")
             objectName: "autoNumberStartingTrackField"
-            Layout.fillWidth: true
+            // Kirigami's form stretches a text field unless it has a
+            // maximum.
+            Layout.preferredWidth: root.numberFieldWidth
+            Layout.maximumWidth: root.numberFieldWidth
             text: "1"
             inputMethodHints: Qt.ImhDigitsOnly
             validator: IntValidator { bottom: 1; top: root.maximumNumber }
         }
         Label {
             objectName: "autoNumberStartingTrackError"
-            Layout.fillWidth: true
-            // It wraps under its field, as wide: its whole sentence, which
-            // the form counts even while it is hidden, would widen the
-            // fields' column past the window at large fonts (#373 H10).
-            Layout.maximumWidth: startingTrackField.implicitWidth
+            // It wraps under its field: its whole sentence, which the form
+            // counts even while it is hidden, would widen the fields'
+            // column past the window at large fonts (#373 H10).
+            Layout.maximumWidth: root.errorWidth
             visible: !root.startingTrackValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting track from 1 to %1.", root.maximumNumber)
         }
 
+        Components.FormGroupGap {
+            uiPalette: root.uiPalette
+        }
+
+        CheckBox {
+            id: writeDiscCheck
+            objectName: "autoNumberWriteDiscCheck"
+            checked: false
+            text: I18n.i18nc("@option:check", "Write disc numbers")
+        }
         TextField {
             id: startingDiscField
             Kirigami.FormData.label: I18n.i18nc("@label:textbox", "First disc:")
             objectName: "autoNumberStartingDiscField"
-            Layout.fillWidth: true
+            // Kirigami's form stretches a text field unless it has a
+            // maximum.
+            Layout.preferredWidth: root.numberFieldWidth
+            Layout.maximumWidth: root.numberFieldWidth
             text: "1"
             enabled: writeDiscCheck.checked
             inputMethodHints: Qt.ImhDigitsOnly
@@ -114,41 +139,35 @@ Components.CompactDialogWindow {
         }
         Label {
             objectName: "autoNumberStartingDiscError"
-            Layout.fillWidth: true
-            // It wraps under its field, as wide: its whole sentence, which
-            // the form counts even while it is hidden, would widen the
-            // fields' column past the window at large fonts (#373 H10).
-            Layout.maximumWidth: startingDiscField.implicitWidth
+            Layout.maximumWidth: root.errorWidth
             visible: !root.startingDiscValid
             wrapMode: Text.WordWrap
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
         }
-    }
+        CheckBox {
+            id: writeTotalsCheck
+            objectName: "autoNumberWriteTotalsCheck"
+            checked: false
+            text: I18n.i18nc("@option:check", "Write totals")
+        }
 
-    CheckBox {
-        id: writeDiscCheck
-        objectName: "autoNumberWriteDiscCheck"
-        checked: false
-        text: I18n.i18nc("@option:check", "Write disc numbers")
-    }
-    CheckBox {
-        id: writeTotalsCheck
-        objectName: "autoNumberWriteTotalsCheck"
-        checked: false
-        text: I18n.i18nc("@option:check", "Write totals")
-    }
-    CheckBox {
-        id: resetOnFolderCheck
-        objectName: "autoNumberResetOnFolderCheck"
-        checked: false
-        text: I18n.i18nc("@option:check", "Reset track numbers on folder or section change")
-    }
-    CheckBox {
-        id: resetOnDiscCheck
-        objectName: "autoNumberResetOnDiscCheck"
-        checked: false
-        enabled: writeDiscCheck.checked
-        text: I18n.i18nc("@option:check", "Reset track numbers when disc changes in current values")
+        Components.FormGroupGap {
+            uiPalette: root.uiPalette
+        }
+
+        CheckBox {
+            id: resetOnFolderCheck
+            objectName: "autoNumberResetOnFolderCheck"
+            checked: false
+            text: I18n.i18nc("@option:check", "Reset track numbers at each new folder or section")
+        }
+        CheckBox {
+            id: resetOnDiscCheck
+            objectName: "autoNumberResetOnDiscCheck"
+            checked: false
+            enabled: writeDiscCheck.checked
+            text: I18n.i18nc("@option:check", "Reset track numbers at each new disc")
+        }
     }
 }

@@ -490,6 +490,8 @@ private slots:
     void configureGroupsItsSettingsOnFourPages();
     void configureFitsTheVisualizationPageAtTheDefaultFont();
     void readOnlyPathsAreMiddleElidedLabelsWithATooltip();
+    void libraryFolderNameDialogShowsItsPath_data();
+    void libraryFolderNameDialogShowsItsPath();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void lastFmPageShowsOnlyTheButtonsThatApply();
@@ -504,6 +506,7 @@ private slots:
     void recentIssuesRowsSplitTheMessageAndOfferOneAction();
     void recentIssuesActionsShowTheFileOrOpenTheSettings();
     void recentIssuesClearAllDiagnosticsAndKeyboard();
+    void recentIssuesOpenWithTheirFocusShown();
     void recentIssuesAreSeenWhenThePopupCloses();
     void thePanesEndsEarlyLinkOpensItsIssue();
     void recentIssuesFollowAQueueReplacedWithOneOfTheSameLength();
@@ -516,10 +519,12 @@ private slots:
     void editTagsIsAWindowOfItsOwnThatAsksBeforeClosing();
     void editTagsColumnsFitTheDefaultWindowAndFollowTheFont();
     void editTagsOpensNoWiderThanTheMainWindow();
-    void autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts();
+    void autoNumberIsOneFormInReadingOrder_data();
+    void autoNumberIsOneFormInReadingOrder();
     void editTagsMultipleValuesPlaceholderReads();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
+    void dialogsPutTheirButtonsOnTheContentInset();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
@@ -1058,8 +1063,9 @@ void UiDialogsTest::enterInATextFieldTakesTheTextNotTheDefaultButton() {
     QCOMPARE(nameWindow->transientParent(), window);
     QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
     QTRY_VERIFY(name->hasActiveFocus());
-    // Its placeholder reads at AA, like the tag editor's (#373 H7).
-    QCOMPARE(hex(name->property("placeholderTextColor").value<QColor>()), hex(tokenOf(window, "placeholderText")));
+    // No placeholder, which read as a prompt to type a path (#373 H38):
+    // the help under it says what an empty name does.
+    QCOMPARE(name->property("placeholderText").toString(), QString());
     QSignalSpy accepted(nameDialog, SIGNAL(accepted()));
     QTest::keyClick(nameWindow, Qt::Key_J);
     QTest::keyClick(nameWindow, Qt::Key_Return);
@@ -1604,6 +1610,67 @@ void UiDialogsTest::readOnlyPathsAreMiddleElidedLabelsWithATooltip() {
     QTRY_VERIFY(!nameDialog->property("visible").toBool());
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderNameDialogShowsItsPath_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Add and Rename Library Folder show a typical folder's path whole, in a
+// path 24 grid units wide, with the help under the name on one line
+// (#373 H38: a 16-unit path elided a short one beside wide gutters). The
+// name has no placeholder, which read as a prompt to type a path; the
+// help says what an empty name does, which the library does
+// (LibraryRoot::display_name).
+void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const QString path = QStringLiteral("/home/listener/Music/Collection/Library");
+    QObject *dialog = object(window, QStringLiteral("libraryRootNameDialog"));
+    for (const QString &mode : {QStringLiteral("add"), QStringLiteral("rename")}) {
+        QVERIFY(QMetaObject::invokeMethod(window, "openLibraryRootNameDialog", Q_ARG(QVariant, mode),
+                                          Q_ARG(QVariant, path), Q_ARG(QVariant, QStringLiteral("Library"))));
+        QVERIFY(waitForDialogWindow(dialog));
+        QQuickWindow *nameWindow = windowOf(dialog);
+        QQuickItem *body = visibleNamed(nameWindow, QStringLiteral("dialogBody"));
+        QTRY_VERIFY(!layoutPending(body));
+        QQuickItem *pathLabel = visibleNamed(nameWindow, QStringLiteral("libraryRootPathField"));
+        QQuickItem *name = visibleNamed(nameWindow, QStringLiteral("libraryRootNameField"));
+        QVERIFY(pathLabel != nullptr && name != nullptr);
+        const QString where = QStringLiteral("%1: path %2 wide, window %3 wide")
+            .arg(mode).arg(pathLabel->width()).arg(nameWindow->width());
+        QVERIFY2(!pathLabel->property("truncated").toBool(), qPrintable(where));
+        const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+        const qreal inset = dialog->property("contentPadding").toReal();
+        QVERIFY2(pathLabel->width() + 0.5 >= 24 * gridUnit, qPrintable(where));
+        QVERIFY2(sceneRect(pathLabel).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        QCOMPARE(name->property("placeholderText").toString(), QString());
+        QQuickItem *help = nullptr;
+        for (QQuickItem *candidate : itemsNamed(body, QStringLiteral("formHelpTextLabel"))) {
+            if (candidate->isVisible()) {
+                help = candidate;
+            }
+        }
+        QVERIFY(help != nullptr);
+        QCOMPARE(help->property("text").toString(),
+                 QStringLiteral("Optional. Without a name, the library shows the folder’s path."));
+        if (pointSize <= 10) {
+            QCOMPARE(help->property("lineCount").toInt(), 1);
+        }
+        QVERIFY2(sceneRect(help).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        QTest::keyClick(nameWindow, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+    }
 }
 
 void UiDialogsTest::libraryFoldersActOnTheSelectedFolderAtOnce() {
@@ -2394,10 +2461,9 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     report(window, 1, 0, kStaticPath, kEndsEarly);
     QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
     QVERIFY(openIssues(window));
-    // The list takes the keyboard first; Tab goes on to the actions, Clear
-    // All and Open Diagnostics.
-    QQuickItem *view = visibleNamed(window, QStringLiteral("errorHistoryView"));
-    QTRY_VERIFY(view->hasActiveFocus());
+    // Opened other than from the keyboard, the content takes it, and Tab
+    // goes on to the actions, Open Diagnostics and Clear All.
+    QTRY_COMPARE(window->activeFocusItem(), visibleNamed(window, QStringLiteral("errorHistoryContent")));
     QList<QQuickItem *> actions;
     for (QQuickItem *item : itemsNamed(window->contentItem(), QStringLiteral("errorHistoryActionButton"))) {
         if (item->isVisible()) {
@@ -2444,6 +2510,68 @@ void UiDialogsTest::recentIssuesClearAllDiagnosticsAndKeyboard() {
     QTRY_VERIFY(copyWithoutPaths->isEnabled());
     click(diagnosticsWindow, copyWithoutPaths);
     QTRY_COMPARE(bridge->property("diagnosticsCopiesWithoutPaths").toInt(), 1);
+}
+
+// Recent Issues has the keyboard where it shows it (#373 H38): opened
+// with the pointer, it gave the newest action the keyboard for a popup's
+// reason, which draws no focus ring, and Enter pressed that unmarked
+// action. Opened from the status bar's button with the pointer, no control
+// has the keyboard, Enter and Space press nothing, and Tab marks the first
+// action. Opened from the button with the keyboard, the first action has
+// it, with its ring, and Space presses it.
+void UiDialogsTest::recentIssuesOpenWithTheirFocusShown() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 2, 0, QStringLiteral("Fixtures"), QStringLiteral("Could not read 2 files during the scan"));
+    QObject *popup = object(window, QStringLiteral("recentErrorsDialog"));
+    QObject *preferences = object(window, QStringLiteral("preferencesDialog"));
+    QQuickItem *button = nullptr;
+    QTRY_VERIFY((button = visibleNamed(window, QStringLiteral("statusBarErrorsButton"))) != nullptr);
+    const auto anyFocusShown = [&]() {
+        QQuickItem *focused = window->activeFocusItem();
+        return focused != nullptr && focused->property("visualFocus").toBool();
+    };
+
+    // With the pointer.
+    click(window, button);
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QQuickItem *content = visibleNamed(window, QStringLiteral("errorHistoryContent"));
+    QVERIFY(content != nullptr);
+    QTRY_COMPARE(window->activeFocusItem(), content);
+    QVERIFY(!anyFocusShown());
+    // Neither key that presses a button (Space, and Enter where the
+    // platform's theme says so) presses one.
+    QTest::keyClick(window, Qt::Key_Return);
+    QTest::keyClick(window, Qt::Key_Space);
+    QCoreApplication::processEvents();
+    QVERIFY(popup->property("visible").toBool());
+    QVERIFY(!preferences->property("visible").toBool());
+    QTest::keyClick(window, Qt::Key_Tab);
+    QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
+    QVERIFY(action != nullptr);
+    QTRY_VERIFY(action->hasActiveFocus());
+    QVERIFY(action->property("visualFocus").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!popup->property("visible").toBool());
+
+    // With the keyboard: Tab to the button, which presses it. (Space on
+    // it is the window's Play/Pause shortcut today, so the test presses
+    // it as its accessible action would, with the keyboard in use.)
+    QVERIFY(tabTo(window, button, 80));
+    QVERIFY(button->property("visualFocus").toBool());
+    QVERIFY(QMetaObject::invokeMethod(button, "click"));
+    QTRY_VERIFY(popup->property("opened").toBool());
+    QTRY_VERIFY((action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"))) != nullptr);
+    QTRY_VERIFY(action->hasActiveFocus());
+    QVERIFY(action->property("visualFocus").toBool());
+    QCOMPARE(action->property("text").toString(), QStringLiteral("Library Settings\u2026"));
+    QTest::keyClick(window, Qt::Key_Space);
+    QTRY_VERIFY(preferences->property("opened").toBool());
+    QCOMPARE(preferences->property("pageIndex").toInt(), 0);
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!preferences->property("visible").toBool());
 }
 
 void UiDialogsTest::recentIssuesAreSeenWhenThePopupCloses() {
@@ -3185,16 +3313,28 @@ void UiDialogsTest::editTagsOpensNoWiderThanTheMainWindow() {
     }
 }
 
-// Auto Number opens wide enough for its form and its check boxes, which do
-// not wrap, in the font they are in: at 24 pt, its fixed 26 grid units
-// left them running up to 435 px past the window (#373 H10). Its
-// description wraps within that width.
-void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
+void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Auto Number is one form in reading order (#373 H38): the tracks' start;
+// Write disc numbers, then the disc's start it enables, then totals; then
+// when numbering starts over. The check boxes have no labels and start
+// where the fields do, the description too, so the dialog has one left
+// edge; it had two, with Write disc numbers under the field it enables.
+// The start fields hold four digits, 5 grid units, and their errors wrap
+// at 14. The window is as wide as the form, in the font it is in: at
+// 24 pt, a fixed 26 grid units left the check boxes running up to 435 px
+// past it (#373 H10).
+void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
+    QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
-    QFont large = applicationFont;
-    large.setPointSizeF(24);
-    QGuiApplication::setFont(large);
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
     TagEditorController editor(nullptr);
     editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
                                    const TagEditorController::RenameGate &) { return tagRows(4); };
@@ -3214,39 +3354,80 @@ void UiDialogsTest::autoNumberHoldsItsFormAndCheckBoxesAtLargeFonts() {
     QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
     QVERIFY(body != nullptr);
     QTRY_VERIFY(!layoutPending(body));
+    const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+    QVERIFY(gridUnit > 0);
     const qreal padding = dialog->property("contentPadding").toReal();
     const QRectF inside(padding, 0, numbers->width() - 2 * padding, numbers->height());
-    int checked = 0;
-    for (const QString &name : {QStringLiteral("autoNumberForm"), QStringLiteral("autoNumberStartingTrackField"),
-                                QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberWriteTotalsCheck"),
-                                QStringLiteral("autoNumberResetOnFolderCheck"),
-                                QStringLiteral("autoNumberResetOnDiscCheck")}) {
+
+    // Every row within the window, whole, top to bottom in reading order.
+    const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteDiscCheck"),
+                            QStringLiteral("autoNumberStartingDiscField"), QStringLiteral("autoNumberWriteTotalsCheck"),
+                            QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+    QQuickItem *form = visibleNamed(numbers, QStringLiteral("autoNumberForm"));
+    QVERIFY(form != nullptr);
+    qreal top = -1;
+    qreal fieldsLeft = -1;
+    for (const QString &name : order) {
         QQuickItem *item = visibleNamed(numbers, name);
         QVERIFY2(item != nullptr, qPrintable(name));
+        QVERIFY2(form->isAncestorOf(item), qPrintable(name));
         const QRectF rect = sceneRect(item);
-        const QString where = QStringLiteral("%1 at %2..%3 (implicit %4), window %5 wide")
-            .arg(name).arg(rect.left()).arg(rect.right()).arg(item->implicitWidth()).arg(numbers->width());
+        const QString where = QStringLiteral("%1 at %2..%3, %4 (implicit %5), window %6 wide")
+            .arg(name).arg(rect.left()).arg(rect.right()).arg(rect.top()).arg(item->implicitWidth())
+            .arg(numbers->width());
         QVERIFY2(rect.left() >= inside.left() - 0.5 && rect.right() <= inside.right() + 0.5, qPrintable(where));
-        QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
-        ++checked;
+        QVERIFY2(rect.top() > top, qPrintable(where));
+        top = rect.top();
+        // One left edge: the fields' and the check boxes'.
+        if (fieldsLeft < 0) {
+            fieldsLeft = rect.left();
+        }
+        QVERIFY2(qAbs(rect.left() - fieldsLeft) <= 0.5, qPrintable(where));
+        if (name.endsWith(QStringLiteral("Field"))) {
+            QCOMPARE(item->width(), 5 * gridUnit);
+        } else {
+            QVERIFY2(item->width() + 0.5 >= item->implicitWidth(), qPrintable(where));
+            // The check boxes are the form's rows, with no labels.
+            QVERIFY2(evaluate(item, QStringLiteral("Kirigami.FormData.label")).toString().isEmpty(), qPrintable(where));
+        }
     }
-    QCOMPARE(checked, 6);
+    QCOMPARE(evaluate(visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck")), QStringLiteral("text")).toString(),
+             QStringLiteral("Reset track numbers at each new disc"));
+    // The description starts where the form's labels do and is no wider.
+    QQuickItem *description = visibleNamed(numbers, QStringLiteral("autoNumberDescription"));
+    QVERIFY(description != nullptr);
+    QCOMPARE(sceneRect(description).left(), sceneRect(form).left() + (form->width() - form->implicitWidth()) / 2);
+    QVERIFY(sceneRect(description).width() <= form->implicitWidth() + 0.5);
+    // Write disc numbers enables the disc's start and its reset.
+    QQuickItem *writeDisc = visibleNamed(numbers, QStringLiteral("autoNumberWriteDiscCheck"));
+    QVERIFY(!visibleNamed(numbers, QStringLiteral("autoNumberStartingDiscField"))->isEnabled());
+    QVERIFY(!visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck"))->isEnabled());
+    writeDisc->setProperty("checked", true);
+    QTRY_VERIFY(visibleNamed(numbers, QStringLiteral("autoNumberStartingDiscField"))->isEnabled());
+    QVERIFY(visibleNamed(numbers, QStringLiteral("autoNumberResetOnDiscCheck"))->isEnabled());
+    writeDisc->setProperty("checked", false);
+
     // A start that is not valid says so under its field, wrapped within
-    // the window.
+    // 14 grid units.
     QQuickItem *trackField = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
     trackField->setProperty("text", QStringLiteral("0"));
     QQuickItem *trackError = nullptr;
     QTRY_VERIFY((trackError = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackError"))) != nullptr);
     QTRY_VERIFY(!layoutPending(body));
+    // The form places a row it shows on its next layout.
+    QTRY_VERIFY2(qAbs(sceneRect(trackError).left() - fieldsLeft) <= 0.5,
+                 qPrintable(QStringLiteral("error at %1, fields at %2").arg(sceneRect(trackError).left()).arg(fieldsLeft)));
     const QRectF errorRect = sceneRect(trackError);
     QVERIFY2(errorRect.left() >= inside.left() - 0.5 && errorRect.right() <= inside.right() + 0.5,
              qPrintable(QStringLiteral("error at %1..%2, window %3 wide")
                             .arg(errorRect.left()).arg(errorRect.right()).arg(numbers->width())));
+    QVERIFY(errorRect.width() <= 14 * gridUnit + 0.5);
     QVERIFY(!trackError->property("truncated").toBool());
     trackField->setProperty("text", QStringLiteral("1"));
     // The window is no wider than its widest line needs, and the screen.
     QVERIFY2(numbers->width() <= qMax(qCeil(dialog->property("defaultWidth").toReal()), numbers->minimumWidth()),
              qPrintable(QString::number(numbers->width())));
+    QVERIFY(numbers->width() <= qCeil(form->implicitWidth() + 2 * padding) || numbers->width() == numbers->minimumWidth());
     QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
     QTRY_VERIFY(!dialog->property("visible").toBool());
     editor.close();
@@ -3581,6 +3762,110 @@ void UiDialogsTest::dialogsPutTheirButtonsInKdesOrder() {
         QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
         QTRY_VERIFY(!dialog->property("visible").toBool());
     }
+}
+
+// A dialog's buttons sit on its content's inset, a grid unit from the
+// window's sides and bottom, as the content is from its sides and top
+// (#373 H38: the compact dialogs' buttons were 9 px from the edges, their
+// content 19 px). Buttons that share the row, such as Configure's
+// Defaults, start on the inset too, on the same line.
+void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(2); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    editor.selectAllRows();
+    editor.applyBulkField(QStringLiteral("title"), QStringLiteral("Edited"));
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+    // A grid unit: the compact dialogs' content inset.
+    const qreal inset = object(window, QStringLiteral("quitSaveFailedDialog"))->property("contentPadding").toReal();
+    QVERIFY(inset > 0);
+
+    // The footer's buttons that show, left to right.
+    const auto buttonsOf = [](QObject *dialog) {
+        QList<QQuickItem *> buttons;
+        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
+        if (footer == nullptr) {
+            return buttons;
+        }
+        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+            for (QQuickItem *child : item->childItems()) {
+                if (!child->isVisible()) {
+                    continue;
+                }
+                if (child->inherits("QQuickAbstractButton")) {
+                    buttons.push_back(child);
+                } else {
+                    collect(child);
+                }
+            }
+        };
+        collect(footer);
+        std::sort(buttons.begin(), buttons.end(), [](QQuickItem *a, QQuickItem *b) {
+            return sceneRect(a).left() < sceneRect(b).left();
+        });
+        return buttons;
+    };
+    struct Case { const char *name; bool opened; bool leftButton; };
+    for (const Case &test : {Case{"quitSaveFailedDialog", false, false}, Case{"libraryRootNameDialog", false, false},
+                             Case{"removeLibraryRootConfirmDialog", false, false},
+                             Case{"tagEditorCloseConfirmDialog", false, false},
+                             Case{"autoNumberDialog", false, false}, Case{"renamePreviewDialog", false, false},
+                             Case{"tagEditorStatusDetailsDialog", false, false},
+                             Case{"clearDiagnosticsConfirmDialog", false, false},
+                             Case{"itunesArtworkDialog", false, false}, Case{"aboutDialog", false, true},
+                             Case{"diagnosticsDialog", true, false}, Case{"preferencesDialog", true, true},
+                             Case{"tagEditorDialog", true, true}}) {
+        const QString name = QString::fromLatin1(test.name);
+        QObject *dialog = object(window, name);
+        QVERIFY2(dialog != nullptr, test.name);
+        if (!test.opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        }
+        QVERIFY2(waitForDialogWindow(dialog), test.name);
+        QQuickWindow *dialogWindow = windowOf(dialog);
+        QTRY_VERIFY2(!buttonsOf(dialog).isEmpty(), test.name);
+        QTRY_VERIFY(!layoutPending(qvariant_cast<QQuickItem *>(dialog->property("footer"))));
+        const QList<QQuickItem *> buttons = buttonsOf(dialog);
+        const QRectF last = sceneRect(buttons.constLast());
+        const QString where = QStringLiteral("%1: %2 buttons, the last at %3,%4 %5x%6 in a window %7x%8")
+            .arg(name).arg(buttons.size()).arg(last.x()).arg(last.y()).arg(last.width()).arg(last.height())
+            .arg(dialogWindow->width()).arg(dialogWindow->height());
+        QVERIFY2(qAbs(dialogWindow->width() - last.right() - inset) <= 1.0, qPrintable(where));
+        QVERIFY2(qAbs(dialogWindow->height() - last.bottom() - inset) <= 1.0, qPrintable(where));
+        for (QQuickItem *button : buttons) {
+            QVERIFY2(qAbs(sceneRect(button).top() - last.top()) <= 1.0, qPrintable(where));
+        }
+        if (test.leftButton) {
+            QVERIFY2(qAbs(sceneRect(buttons.constFirst()).left() - inset) <= 1.0,
+                     qPrintable(where + QStringLiteral(", the first at %1").arg(sceneRect(buttons.constFirst()).left())));
+        }
+        // A compact dialog's content starts on the same inset.
+        if (QQuickItem *body = visibleNamed(dialogWindow, QStringLiteral("dialogBody"))) {
+            QCOMPARE(sceneRect(body).left(), inset);
+            QCOMPARE(sceneRect(body).top(), inset);
+            QVERIFY2(qAbs(last.top() - sceneRect(body).bottom() - inset) <= 1.0,
+                     qPrintable(where + QStringLiteral(", the content ends at %1").arg(sceneRect(body).bottom())));
+        }
+        if (!test.opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY2(!dialogWindow->isVisible(), test.name);
+        }
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+    editor.close();
 }
 
 void UiDialogsTest::dialogsUseOneCharacterEllipsesAndNoTextGlyphs() {

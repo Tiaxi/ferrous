@@ -463,7 +463,19 @@ namespace {
 // is in a view `viewWidth` wide: over the whole screen a seventh; in the
 // window a quarter of the view, between 280 and 320 px (#373 H37).
 qreal infoColumnWidthScale(bool fullscreen, qreal viewWidth) {
-    return fullscreen ? 8.0 / 7.0 : qBound(280.0, std::floor(viewWidth / 4), 320.0) / 280.0;
+    return fullscreen ? 1.2 : qBound(280.0, std::floor(viewWidth / 4), 320.0) / 280.0;
+}
+
+// The details' column's 40 characters, less its seam: of the body font in
+// a window, as much wider as the column in a wide one; over the whole
+// screen, of the details' text, 1.2 times the body font (#373 H38).
+qreal infoColumnFortyCharacters(const QFont &bodyFont, bool fullscreen, qreal viewWidth) {
+    if (fullscreen) {
+        QFont details = bodyFont;
+        details.setPointSizeF(bodyFont.pointSizeF() * 1.2);
+        return std::ceil(QFontMetricsF(details).averageCharWidth() * 40) - 1;
+    }
+    return std::ceil(QFontMetricsF(bodyFont).averageCharWidth() * 40 * infoColumnWidthScale(false, viewWidth)) - 1;
 }
 
 // The cover provider, recording the size of every image it is asked for.
@@ -760,22 +772,25 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     const qreal rhythm = surface->property("infoRowHeight").toReal();
     QCOMPARE(boxOf(folderRow).top() - boxOf(rows.last()).top(), rhythm);
     // The path from the column's start, not the values', to Copy Path at the
-    // row's end, centred on the path's line; one line, elided in its middle,
-    // so its start and its end stay.
+    // row's end, centred on the path; a long one wraps after its slashes, on
+    // up to three lines, and what does not fit is elided (#373 H38: on one
+    // line, elided in its middle, a typical one lost its folders).
     QCOMPARE(boxOf(path).left(), boxOf(folderRow).left());
     QVERIFY(boxOf(path).left() < boxOf(sourceValue).left());
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
     QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
     QVERIFY2(qAbs(boxOf(copy).center().y() - boxOf(path).center().y()) <= 0.5, "Copy Path is off the path's line");
     QCOMPARE(path->property("path").toString(), folder);
-    QCOMPARE(path->property("text").toString(), folder);
-    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideMiddle));
-    QCOMPARE(path->property("maximumLineCount").toInt(), 1);
-    QCOMPARE(path->property("lineCount").toInt(), 1);
-    QTRY_VERIFY(path->property("elided").toBool());
+    QCOMPARE(path->property("text").toString(), QString(folder).replace(QLatin1Char('/'), QStringLiteral("/\u200b")));
+    QCOMPARE(path->property("wrapMode").toInt(), int(QTextOption::WrapAtWordBoundaryOrAnywhere));
+    QCOMPARE(path->property("elide").toInt(), int(Qt::ElideRight));
+    QCOMPARE(path->property("maximumLineCount").toInt(), 3);
+    QTRY_COMPARE(path->property("lineCount").toInt(), 3);
     const QFontMetricsF pathMetrics(qvariant_cast<QFont>(path->property("font")));
-    QVERIFY(pathMetrics.horizontalAdvance(folder) > path->width());
-    QTRY_COMPARE(path->height(), std::ceil(pathMetrics.height()));
+    QVERIFY(pathMetrics.horizontalAdvance(folder) > 2 * path->width());
+    QVERIFY(path->height() >= 3 * pathMetrics.lineSpacing() - 1);
+    // Its accessible name is the path itself.
+    QCOMPARE(QAccessible::queryAccessibleInterface(path)->text(QAccessible::Name), folder);
     QTest::mouseMove(window, centerInWindow(path));
     QTRY_COMPARE(visibleTextItems(window->contentItem(), folder).size(), 1);
 
@@ -784,9 +799,22 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
                                                  {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
                                                  {QStringLiteral("width"), 1400},
                                                  {QStringLiteral("height"), 1400}});
-    QTRY_COMPARE(path->property("text").toString(), QStringLiteral("/music"));
+    QTRY_COMPARE(path->property("path").toString(), QStringLiteral("/music"));
     QTRY_VERIFY(!path->property("elided").toBool());
     QCOMPARE(path->property("lineCount").toInt(), 1);
+    // A typical path too long for a line is whole on two, broken after a
+    // slash rather than in a folder's name.
+    const QString typical = QStringLiteral("/music/The Quiet Meridian/05 - Small Hours");
+    surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), typical + QStringLiteral("/cover.jpg")},
+                                                 {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+                                                 {QStringLiteral("width"), 1400},
+                                                 {QStringLiteral("height"), 1400}});
+    QTRY_COMPARE(path->property("path").toString(), typical);
+    QVERIFY(pathMetrics.horizontalAdvance(typical) > path->width());
+    QTRY_COMPARE(path->property("lineCount").toInt(), 2);
+    QVERIFY(!path->property("elided").toBool());
+    QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("/music/The Quiet Meridian/")) <= path->width());
+    QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("05 - Small Hours")) <= path->width());
     surface->setProperty("fileInfo", details);
     QTRY_COMPARE(path->property("path").toString(), folder);
 
@@ -1498,10 +1526,13 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QCOMPARE(columnRect.top(), viewRect.top());
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
     QCOMPARE(seamRect.right(), columnRect.left());
-    // 280 px with its seam, 320 px over the whole screen and in a window
-    // 1280 px wide or more, a quarter of one between (#373 H37).
+    // 280 px with its seam, 320 px in a window 1280 px wide or more, a
+    // quarter of one between (#373 H37), and 336 px over the whole screen,
+    // for its text 1.2 times larger (#373 H38).
     QCOMPARE(columnRect.width(), std::round(280 * infoColumnWidthScale(viewerMode == 1, viewRect.width())) - 1);
-    if (viewerMode == 1 || viewRect.width() >= 1280) {
+    if (viewerMode == 1) {
+        QCOMPARE(columnRect.width(), 335.0);
+    } else if (viewRect.width() >= 1280) {
         QCOMPARE(columnRect.width(), 319.0);
     } else if (viewRect.width() <= 1120) {
         QCOMPARE(columnRect.width(), 279.0);
@@ -1622,6 +1653,8 @@ QtObject {
     property var itunesArtworkTarget: ({})
     property bool itunesArtworkLoading: false
     property string itunesArtworkStatusText: ""
+    property bool itunesArtworkFailed: false
+    property string itunesArtworkErrorText: ""
     property var preparedItunesArtwork: []
     property var appliedItunesArtwork: []
     readonly property string currentTrackPath: fake.real.currentTrackPath
@@ -1783,14 +1816,14 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     QVERIFY2(columnRect.right() - rectOf(apply).right() <= 24.0, at.constData());
     // About 40 characters of the body font wide, 280 px with its seam at
     // the default font, up to half the view, or wider for the buttons; over
-    // the whole screen, whose details' text is 1.2 times the body size, a
-    // seventh wider, 320 px. Its contents 16 px in from both edges.
+    // the whole screen, whose details' text is 1.2 times the body size, as
+    // much wider, 336 px. Its contents 16 px in from both edges.
     const bool fullscreen = column->parentItem()->property("fullscreen").toBool();
     const qreal infoScale = fullscreen ? 1.2 : 1.0;
     const qreal widthScale = infoColumnWidthScale(fullscreen, column->parentItem()->width());
     QFont font = label->property("font").value<QFont>();
     font.setPointSizeF(font.pointSizeF() / infoScale);
-    const qreal fortyCharacters = std::ceil(QFontMetricsF(font).averageCharWidth() * 40 * widthScale) - 1;
+    const qreal fortyCharacters = infoColumnFortyCharacters(font, fullscreen, column->parentItem()->width());
     const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
     QVERIFY2(column->width() >= qMax(std::round(280 * widthScale) - 1, qMin(halfTheView, fortyCharacters)) - 0.5,
              qPrintable(QStringLiteral("%1: %2 px").arg(QString::fromUtf8(at)).arg(column->width())));
@@ -1964,6 +1997,8 @@ ApplicationWindow {
         property var itunesArtworkResults: []
         property bool itunesArtworkLoading: false
         property string itunesArtworkStatusText: ""
+        property bool itunesArtworkFailed: false
+        property string itunesArtworkErrorText: ""
         signal itunesArtworkChanged()
         signal imageFileDetailsChanged(string path)
         signal snapshotChanged()
@@ -2207,10 +2242,13 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
 }
 
 void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound() {
-    // While it searches, and when it found nothing, a placeholder message
-    // where the results would be, with no frame or well around it (#373
-    // H8), and a running busy indicator above it while searching, under
-    // the current art, which stays the dialog's first line.
+    // While it searches, when it found nothing, and when the search failed,
+    // a placeholder message where the results would be, a little above
+    // their middle (#373 H38), with no frame or well around it (#373 H8),
+    // and a running busy indicator above it while searching, under the
+    // current art, which stays the dialog's first line. A failed search
+    // says so in a semibold heading, with the system's words under it, so
+    // it does not read as finding nothing (#373 H38).
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2238,13 +2276,17 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     QQuickItem *busy = itemNamed(content, QStringLiteral("itunesArtworkBusyIndicator"));
     QQuickItem *results = itemNamed(content, QStringLiteral("itunesArtworkResultsView"));
     QQuickItem *currentRow = itemNamed(content, QStringLiteral("itunesArtworkCurrentRow"));
+    QQuickItem *heading = itemNamed(content, QStringLiteral("itunesArtworkFailureHeading"));
     QVERIFY(frame != nullptr && placeholder != nullptr && message != nullptr && busy != nullptr
-            && results != nullptr && currentRow != nullptr);
+            && results != nullptr && currentRow != nullptr && heading != nullptr);
     QObject *palette = qvariant_cast<QObject *>(dialog->property("uiPalette"));
     QVERIFY(palette != nullptr);
 
-    const auto checkState = [&](bool searching, const QString &text) {
-        const QByteArray at = searching ? "searching" : "nothing found";
+    enum class State { Searching, NothingFound, Failed };
+    const auto checkState = [&](State state, const QString &text) {
+        const bool searching = state == State::Searching;
+        const bool failed = state == State::Failed;
+        const QByteArray at = searching ? "searching" : (failed ? "failed" : "nothing found");
         QTRY_VERIFY2(placeholder->isVisible(), at.constData());
         QVERIFY2(!results->isVisible(), at.constData());
         QCOMPARE(message->property("text").toString(), text);
@@ -2267,10 +2309,21 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
                      qPrintable(rect->objectName()));
         }
         // A quiet placeholder, as the queue's empty state (#373 H7, H8): a
-        // centred line in the base font, regular, in the secondary colour,
-        // with no glyph.
+        // centred line in the base font, regular, with no glyph; searching
+        // and the system's words in the secondary colour, what the search
+        // found in the text's (#373 H38).
         QCOMPARE(message->property("color").value<QColor>().rgba(),
-                 palette->property("textSecondary").value<QColor>().rgba());
+                 palette->property(searching || failed ? "textSecondary" : "text").value<QColor>().rgba());
+        QCOMPARE(heading->isVisible(), failed);
+        if (failed) {
+            QCOMPARE(heading->property("text").toString(), QStringLiteral("Couldn\u2019t search iTunes"));
+            QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
+            QCOMPARE(heading->property("color").value<QColor>().rgba(),
+                     palette->property("text").value<QColor>().rgba());
+            QCOMPARE(heading->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
+            // Laid out once it shows.
+            QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
+        }
         // The only glyph: the busy indicator's, while searching.
         int glyphs = 0;
         const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
@@ -2291,10 +2344,15 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QCOMPARE(font.weight(), QFont::Normal);
         QCOMPARE(font.pointSizeF(), QGuiApplication::font().pointSizeF());
         QCOMPARE(message->property("opacity").toReal(), 1.0);
-        // Where the results would be, centred there.
+        // Where the results would be, 3 grid units above their middle.
         QVERIFY2(sceneRectOf(frame).contains(sceneRectOf(placeholder)), at.constData());
-        QVERIFY2(qAbs(sceneRectOf(placeholder).center().y() - sceneRectOf(frame).center().y()) <= 1.0,
-                 at.constData());
+        const qreal raise = qMin(3 * dialog->property("contentPadding").toReal(),
+                                 (sceneRectOf(frame).height() - placeholder->height()) / 2);
+        QTRY_VERIFY2(qAbs(sceneRectOf(placeholder).center().y() - (sceneRectOf(frame).center().y() - raise)) <= 1.0,
+                 qPrintable(QStringLiteral("%1: at %2, the frame's middle %3")
+                                .arg(QString::fromLatin1(at)).arg(sceneRectOf(placeholder).center().y())
+                                .arg(sceneRectOf(frame).center().y())));
+        QVERIFY2(raise > 0, at.constData());
         if (searching) {
             QVERIFY2(sceneRectOf(busy).bottom() <= sceneRectOf(message).top(), at.constData());
         }
@@ -2306,11 +2364,19 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         texts.removeAll(QString());
         QCOMPARE(texts.count(text), 1);
     };
-    checkState(true, QStringLiteral("Searching iTunes…"));
+    checkState(State::Searching, QStringLiteral("Searching iTunes…"));
 
     bridge->setProperty("itunesArtworkLoading", false);
     bridge->setProperty("itunesArtworkStatusText", QStringLiteral("No iTunes artwork suggestions found."));
-    checkState(false, QStringLiteral("No iTunes artwork suggestions found."));
+    checkState(State::NothingFound, QStringLiteral("No iTunes artwork suggestions found."));
+
+    // As BridgeClient tells a failed search (BridgeClientTest::
+    // aFailedArtworkSearchSaysSoApartFromFindingNothing).
+    bridge->setProperty("itunesArtworkStatusText", QStringLiteral("iTunes search failed: Connection refused"));
+    bridge->setProperty("itunesArtworkErrorText", QStringLiteral("Connection refused"));
+    bridge->setProperty("itunesArtworkFailed", true);
+    checkState(State::Failed, QStringLiteral("Connection refused"));
+
 }
 
 namespace {
@@ -3005,10 +3071,10 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
                                     .arg(QString::fromLatin1(at)).arg(back->width()).arg(back->implicitWidth())
                                     .arg(apply->width()).arg(apply->implicitWidth())));
             // About 40 characters of the body font wide, 279 px and its seam
-            // with the usual font, a seventh wider over the whole screen, or
+            // with the usual font, 1.2 times wider over the whole screen, or
             // wider for the widest button, up to half the view.
-            const qreal fortyCharacters = std::ceil(
-                QFontMetricsF(bodyFont).averageCharWidth() * 40 * widthScale) - 1;
+            const qreal fortyCharacters = infoColumnFortyCharacters(bodyFont, fullscreenMode == 1,
+                                                                    column->parentItem()->width());
             const qreal leastWidth = std::round(280 * widthScale) - 1;
             const qreal widestButton = std::ceil(qMax(back->implicitWidth(), apply->implicitWidth())) + 2 * padding;
             const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
@@ -3866,7 +3932,7 @@ void AlbumArtSmokeTest::albumArtDetailsAreOnThePlotStripInEitherTheme() {
     QCOMPARE(colorOf(backing, "color"), colorOf(plot, "plotStrip"));
     QCOMPARE(colorOf(plot, "plotStrip"), qRgb(0x12, 0x12, 0x12));
     const QRgb strip = colorOf(backing, "color");
-    QTRY_COMPARE(column->width(), fullscreen ? 319.0 : 279.0);
+    QTRY_COMPARE(column->width(), fullscreen ? 335.0 : 279.0);
     QTRY_VERIFY(window->grabWindow().convertToFormat(QImage::Format_RGB32).pixel(100, 300) == qRgb(0, 0, 0));
     QCOMPARE(window->grabWindow().convertToFormat(QImage::Format_RGB32).pixel(
                  int(sceneRectOf(column).center().x()), 590),
