@@ -517,8 +517,8 @@ double widthAcross(const QImage &trace, int start, int end) {
 // 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
 // climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
 // rim where the 16 and 22 px slots had 2); 24 and 36 px the 22 and 32 px
-// slots' moved in (H22).
-constexpr std::array<int, 6> kDoubledSizes{16, 22, 24, 32, 36, 48};
+// slots' moved in, and 64 px its drawing doubled (H22).
+constexpr std::array<int, 7> kDoubledSizes{16, 22, 24, 32, 36, 48, 64};
 
 // The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
@@ -1730,6 +1730,7 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
     QTest::addRow("32px@2") << 32;
     QTest::addRow("36px@2") << 36;
     QTest::addRow("48px@2") << 48;
+    QTest::addRow("64px@2") << 64;
 }
 
 // A 32 or 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
@@ -1738,7 +1739,9 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition_data() {
 // rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
 // rim, its traces where the 64 px drawing has them, in proportion to the
 // tile inside the rim, and tapering as it does, from 3.8 units at 64 device
-// px and 3.6 at 96.
+// px and 3.6 at 96. The 64 px slot's (H22: the theme gave it the 128 or 256
+// px drawing, with the 4th harmonic, or the scalable one) is the 64 px
+// drawing doubled, 3.8 units at 128 device px, without the 4th harmonic.
 void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
@@ -1969,6 +1972,12 @@ void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings_data() {
     QTest::addRow("36px") << 36 << 1.0 << QStringLiteral("36x36");
     QTest::addRow("36px@2") << 36 << 2.0 << QStringLiteral("36x36@2");
     QTest::addRow("36px@1.5") << 36 << 1.5 << QStringLiteral("36x36@2");
+    // 64 px at 1.25x to 2x, where KDE's lookup took the 256 px drawing and
+    // Qt's the scalable one. (At 1x Qt's own lookup, unlike KDE's, takes
+    // the 256 px directory before the 64 px one.)
+    QTest::addRow("64px@2") << 64 << 2.0 << QStringLiteral("64x64@2");
+    QTest::addRow("64px@1.5") << 64 << 1.5 << QStringLiteral("64x64@2");
+    QTest::addRow("64px@1.25") << 64 << 1.25 << QStringLiteral("64x64@2");
     QTest::addRow("128px") << 128 << 1.0 << QStringLiteral("128x128");
 }
 
