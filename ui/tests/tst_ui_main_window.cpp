@@ -3077,10 +3077,18 @@ void UiMainWindowTest::libraryAlbumWithoutACoverShowsAPlaceholderTile() {
         QVERIFY2(distance(at(0.5, 10.5), edge) <= 3, qPrintable(at(0.5, 10.5).name()));
         QVERIFY2(distance(at(10.5, 19.5), edge) <= 3, qPrintable(at(10.5, 19.5).name()));
         QVERIFY2(distance(at(2.5, 2.5), floor) <= 3, qPrintable(at(2.5, 2.5).name()));
-        const QColor amber = at(13.5, 12.5);
+        const QColor amber = at(13.5, 13.5);
         QVERIFY2(amber.red() > 180 && amber.green() > 120 && amber.blue() < 90, qPrintable(amber.name()));
         const QColor magenta = at(15.5, 5.5);
         QVERIFY2(magenta.red() > 160 && magenta.blue() > 120 && magenta.green() < 110, qPrintable(magenta.name()));
+        // Both run out to the tile's inner edge, as the app icon's traces
+        // run out to its tile's (#373 H19): the column inside the edge has
+        // them, crisp, on their rows.
+        const QColor amberEnd = at(18.5, 12.5);
+        QVERIFY2(amberEnd.red() > 180 && amberEnd.green() > 120 && amberEnd.blue() < 90, qPrintable(amberEnd.name()));
+        const QColor magentaEnd = at(18.5, 3.5);
+        QVERIFY2(magentaEnd.red() > 160 && magentaEnd.blue() > 120 && magentaEnd.green() < 110,
+                 qPrintable(magentaEnd.name()));
     }
 
     // With a cover loaded: the cover, nothing under it, in the same place.
