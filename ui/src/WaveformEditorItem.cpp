@@ -315,6 +315,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
         m_framePainted = false;
         m_waveformPainted = false;
     }
+    m_standbyFetchFailed = false;
     // After its request for the previous file was cancelled.
     updateReaderLease();
     if (m_pictureReady) {
@@ -326,6 +327,7 @@ void WaveformEditorItem::setSourcePath(const QString &value) {
     emit sampleRateHzChanged();
     emit samplePointsVisibleChanged();
     scheduleDetailRequest();
+    updateStandbyFetch();
     update();
 }
 
@@ -353,6 +355,7 @@ void WaveformEditorItem::setOverviewCoverageSeconds(double value) {
         if (!m_zoomOutHandoffPending) invalidateCacheLocked();
     }
     emit overviewCoverageChanged();
+    updateStandbyFetch();
     update();
 }
 
@@ -364,6 +367,7 @@ void WaveformEditorItem::setOverviewComplete(bool value) {
         if (!m_zoomOutHandoffPending) invalidateCacheLocked();
     }
     emit overviewCoverageChanged();
+    updateStandbyFetch();
     update();
 }
 
@@ -449,7 +453,7 @@ void WaveformEditorItem::setPlaying(bool value) {
 
 void WaveformEditorItem::setDurationSeconds(double value) {
     { QMutexLocker lock(&m_stateMutex); value = std::max(0.0, value); if (std::abs(m_durationSeconds - value) < 0.0001) return; m_durationSeconds = value; m_zoomLevel = std::clamp(m_zoomLevel, 1.0, maximumZoomLevelLocked()); m_presentedZoomLevel = m_zoomLevel; m_zoomOutHandoffPending = false; invalidateDetailRequestLocked(); clearPendingRequestLocked(); clearDetailLocked(); m_zoomFallbackToOverview = false; invalidateCacheLocked(); }
-    emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); update();
+    emit durationSecondsChanged(); emit zoomLevelChanged(); emit samplePointsVisibleChanged(); scheduleDetailRequest(); updateStandbyFetch(); update();
 }
 
 void WaveformEditorItem::setZoomLevel(double value) {
@@ -646,7 +650,7 @@ void WaveformEditorItem::setColor(QColor Colors::*member, const QColor &value) {
     update();
 }
 
-void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); update(); }
+void WaveformEditorItem::setViewMode(int value) { value = std::clamp(value, 0, 1); { QMutexLocker lock(&m_stateMutex); if (m_viewMode == value) return; m_viewMode = value; invalidateCacheLocked(); } emit viewModeChanged(); emit channelCountChanged(); updateStandbyFetch(); update(); }
 void WaveformEditorItem::setMutedChannelsMask(qulonglong value) { { QMutexLocker lock(&m_stateMutex); if (m_mutedChannelsMask == value) return; m_mutedChannelsMask = value; invalidateCacheLocked(); } emit mutedChannelsChanged(); update(); }
 
 QList<bool> WaveformEditorItem::mutedChannels() const {
@@ -693,6 +697,7 @@ void WaveformEditorItem::setChannelCountHint(int value) {
     }
     emit channelCountHintChanged();
     emit channelCountChanged();
+    updateStandbyFetch();
     update();
 }
 
@@ -735,6 +740,7 @@ void WaveformEditorItem::geometryChange(const QRectF &newGeometry, const QRectF 
             invalidateCacheLocked();
         }
         scheduleDetailRequest();
+        updateStandbyFetch();
     }
 }
 
@@ -786,8 +792,9 @@ bool WaveformEditorItem::parseWindow(const QByteArray &bytes, DetailWindow *wind
 }
 
 void WaveformEditorItem::scheduleDetailRequest(bool immediate) {
-    // Showing it asks for what it misses then.
-    if (!shownOnScreen()) return;
+    // Showing it asks for what it misses then; hidden, it asks only for its
+    // standby detail.
+    if (!shownOnScreen() && !m_standbyFetch) return;
     const int delayMs = immediate ? 0 : 40;
     if (thread() == QThread::currentThread()
         && (!m_requestTimer.isActive()
@@ -819,7 +826,7 @@ bool WaveformEditorItem::startDetailRequest() {
     {
         QMutexLocker lock(&m_stateMutex);
         if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return false;
-        if (!shownOnScreen()) return false;
+        if (!shownOnScreen() && !m_standbyFetch) return false;
         if (m_decodeActive) {
             // A request still in flight for part of the view stays: its
             // arrival asks for what it misses. Replacing it instead would
@@ -1041,6 +1048,10 @@ bool WaveformEditorItem::startDetailRequest() {
         if (stale || parseFailed) {
             // No detail comes of it: what the item drew without is its
             // picture.
+            if (parseFailed && !shownOnScreen()) {
+                m_standbyFetchFailed = true;
+                updateStandbyFetch();
+            }
             updatePictureReady();
             return;
         }
@@ -1049,6 +1060,9 @@ bool WaveformEditorItem::startDetailRequest() {
         if (zoomChanged) emit zoomLevelChanged();
         if (pointsChanged) emit samplePointsVisibleChanged();
         if (requestFollowup) scheduleDetailRequest();
+        // Hidden, its standby detail has come: the service may let go of
+        // the file.
+        if (!shownOnScreen()) updateStandbyFetch();
         // A zoom, a track's first detail or a change of how it is drawn
         // shows at once; more of the same detail as playback moves on
         // shows with the next frame of playback.
@@ -1612,10 +1626,14 @@ void WaveformEditorItem::shownChanged() {
             emit pictureReadyChanged();
         }
         // The service keeps the coarse summaries of the current track,
-        // which show the whole track again at once, and frees the rest.
+        // which show the whole track again at once, and frees the rest,
+        // unless the picture still needs its detail.
         updateReaderLease();
+        updateStandbyFetch();
         return;
     }
+    // Shown, it asks for its detail as ever.
+    m_standbyFetch = false;
     updateReaderLease();
     bool request = false;
     bool pictureKept = false;
@@ -1648,7 +1666,41 @@ void WaveformEditorItem::shownChanged() {
 }
 
 void WaveformEditorItem::updateReaderLease() {
-    m_readerLease.setPath(shownOnScreen() ? sourcePath() : QString());
+    m_readerLease.setPath(shownOnScreen() || m_standbyFetch ? sourcePath() : QString());
+}
+
+void WaveformEditorItem::updateStandbyFetch() {
+    if (shownOnScreen()) return;
+    bool wanted = false;
+    if (!isVisible() && window() != nullptr && m_windowPresence && m_windowPresence->shown()
+        && !m_standbyFetchFailed) {
+        QMutexLocker lock(&m_stateMutex);
+        wanted = standbyFetchWantedLocked();
+    }
+    if (wanted != m_standbyFetch) {
+        m_standbyFetch = wanted;
+        updateReaderLease();
+    }
+    if (wanted) scheduleDetailRequest();
+}
+
+bool WaveformEditorItem::standbyFetchWantedLocked() const {
+    if (m_sourcePath.isEmpty() || m_durationSeconds <= 0.0 || width() < 2.0) return false;
+    // Once the track's overview has begun to come, as the plot waits for
+    // it to come in at all (WaveformSurface's awaitingData).
+    if (!m_overviewComplete && m_overviewCoverageSeconds <= 0.0) return false;
+    // The whole track, which playback does not move.
+    if (m_zoomOutHandoffPending
+        || visibleSpanForZoomLocked(m_presentedZoomLevel) < m_durationSeconds) {
+        return false;
+    }
+    // Only when the overview cannot be the picture: per channel, which it
+    // has no lanes for, and mixed of more than one channel, where it is not
+    // to the detail's scale (see overviewProvisionalLocked).
+    const bool lanes = m_viewMode == 1 && displayedChannelCountLocked() > 1;
+    if (!lanes && !overviewProvisionalLocked()) return false;
+    const auto [start, end] = visibleRangeLocked();
+    return !(detailCoversRangeLocked(start, end) && detailResolutionCoversLocked(start, end));
 }
 
 void WaveformEditorItem::handleWindowFrameSwapped() {

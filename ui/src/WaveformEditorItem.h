@@ -525,8 +525,18 @@ private:
     // The item or its window came on screen or left it.
     void shownChanged();
     // Tells the detail service which file the view reads: its source while
-    // it is shown, none otherwise.
+    // it is shown or fetches its standby detail, none otherwise.
     void updateReaderLease();
+    // Hidden in a window on screen, the item fetches the detail of its
+    // picture once, on the worker path, when its overview cannot be that
+    // picture: so that the mode switch to it has its picture at the click
+    // (#373 H18 C1: the first switch of a track to the per-channel view held
+    // the spectrogram some 200 ms for that decode, later ones a frame). It
+    // does so once the track's overview has begun to come, and only for a
+    // view of the whole track, which playback does not move: it never
+    // follows playback while hidden, and draws nothing until shown.
+    void updateStandbyFetch();
+    bool standbyFetchWantedLocked() const;
     // The window's scheduler, or the item's own outside a window.
     PlaybackFrameScheduler *frameScheduler();
     bool cacheCoversRangeLocked(double start, double end) const;
@@ -736,6 +746,12 @@ private:
     bool m_waveformPainted{false};
     // pictureReady; the GUI thread's.
     bool m_pictureReady{false};
+    // Whether the hidden item fetches its standby detail (see
+    // updateStandbyFetch); the GUI thread's. A source whose standby detail
+    // could not be read is not fetched again while hidden: shown, the item
+    // asks for its detail as ever.
+    bool m_standbyFetch{false};
+    bool m_standbyFetchFailed{false};
     int m_cachedViewportWidth{0};
     int m_cachedViewportHeight{0};
     double m_cacheStartSeconds{0.0};
