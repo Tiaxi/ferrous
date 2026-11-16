@@ -99,10 +99,16 @@ QtObject {
     // selection, yet further from the view than a hovered row: 1.52:1 /
     // 1.34:1 on the view, between rowHover's 1.45:1 / 1.31:1 and the
     // selection's 1.6:1 / 1.4:1 (#373 H34 AB2: at 20 % and 27 %, #1c3442
-    // and #cbe9f9, it was 1.40:1 / 1.27:1, under the hover). The playing
-    // amber is 6.3:1 / 5.4:1 on it. #1e3a4a / #bfe4f8.
-    readonly property color selectionInactive: ColorUtils.mixColor(
-        root.view, root.accent, root.themeIsDark ? 0.24 : 0.33)
+    // and #cbe9f9, it was 1.40:1 / 1.27:1, under the hover). It differs
+    // from the selection by its colour more than by its weight: the view
+    // mixed with 24 % / 33 % of the accent, then at 60 % of that mix's
+    // saturation and the same luminance, so it keeps its step over the
+    // hover and reads as a selection at rest rather than a second active
+    // one (#373 H36: at full saturation, #1e3a4a / #bfe4f8, it was some
+    // 1.5 / 2.8 ΔE from the selection). The playing amber is 6.2:1 /
+    // 5.4:1 on it. #283a43 / #cde2ed.
+    readonly property color selectionInactive: root._desaturated(
+        ColorUtils.mixColor(root.view, root.accent, root.themeIsDark ? 0.24 : 0.33), 0.6)
     // A selected queue row under the pointer: the text colour over the
     // selection, active or inactive, so a selected row answers the pointer
     // as the others do (#373 H35 AC3: hover changed nothing on it). See
@@ -251,6 +257,24 @@ QtObject {
     // hovered row's own on a hovered one.
     function textTertiaryOn(selected, hovered) {
         return selected ? root.textSecondary : (hovered ? root.textTertiaryHovered : root.textTertiary)
+    }
+
+    // `base` with its saturation scaled by `saturationScale` and its HSL
+    // lightness moved so that its relative luminance, and so its contrast
+    // with any colour, stays as it was.
+    function _desaturated(base, saturationScale) {
+        const target = ColorUtils.relativeLuminance(base)
+        let low = 0
+        let high = 1
+        for (let i = 0; i < 24; ++i) {
+            const middle = (low + high) / 2
+            if (ColorUtils.relativeLuminance(root._withHslLightness(base, saturationScale, middle)) < target) {
+                low = middle
+            } else {
+                high = middle
+            }
+        }
+        return root._withHslLightness(base, saturationScale, (low + high) / 2)
     }
 
     // `base` with its saturation scaled by `saturationScale` and its HSL

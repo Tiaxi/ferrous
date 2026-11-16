@@ -408,7 +408,20 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     lighterHover.setAlphaF(hover.alphaF() - 0.01f);
     QVERIFY(contrastRatio(drawnOver(lighterHover, view), view) < 1.3);
     QVERIFY(sameColor(colorOf(tokens, "hoveredRow"), drawnOver(colorOf(tokens, "rowHover"), view)));
-    QVERIFY(channelDistance(colorOf(tokens, "selectionInactive"), mixed(view, accent, dark ? 0.24 : 0.33)) <= 1);
+    // The inactive selection: the view mixed with the accent, at 60 % of
+    // that mix's saturation and the same luminance (#373 H37).
+    {
+        const QColor mix = mixed(view, accent, dark ? 0.24 : 0.33);
+        const QColor inactive = colorOf(tokens, "selectionInactive");
+        QVERIFY2(std::abs(relativeLuminance(inactive) - relativeLuminance(mix)) <= 0.002,
+                 qPrintable(inactive.name() + QStringLiteral(" vs ") + mix.name()));
+        QVERIFY2(std::abs(inactive.hslSaturationF() - 0.6 * mix.hslSaturationF()) <= 0.02,
+                 qPrintable(QStringLiteral("%1 %2 vs %3 %4").arg(inactive.name()).arg(inactive.hslSaturationF())
+                                .arg(mix.name()).arg(mix.hslSaturationF())));
+        QVERIFY(std::abs(inactive.hslHueF() - mix.hslHueF()) <= 0.01);
+        QVERIFY2(channelDistance(inactive, QColor(dark ? QStringLiteral("#283a43") : QStringLiteral("#cde2ed"))) <= 2,
+                 qPrintable(inactive.name()));
+    }
     const QColor dim = colorOf(tokens, "dim");
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
     QVERIFY(std::abs(dim.alphaF() - (dark ? 0.65 : 0.25)) < 0.002);
@@ -843,9 +856,12 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     }
 
     // Apart from the selection, active or not: neutral where they are blue.
+    // The inactive one is a quieter blue, nearer the grey (#373 H37), yet
+    // further from the view and a clear step apart.
     for (const char *selection : {"selection", "selectionInactive"}) {
         const QColor selected = colorOf(tokens, selection);
-        QVERIFY2(labDistance(hovered, selected) >= 10.0,
+        const double apart = qstrcmp(selection, "selection") == 0 ? 10.0 : 7.5;
+        QVERIFY2(labDistance(hovered, selected) >= apart,
                  qPrintable(QStringLiteral("hover %1 is %2 from %3 %4")
                                 .arg(hovered.name())
                                 .arg(labDistance(hovered, selected))
@@ -919,8 +935,9 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
                                 .arg(labDistance(selected, view))
                                 .arg(hovered.name())
                                 .arg(labDistance(hovered, view))));
-        // Hue: blue, where the hover is a neutral grey.
-        QVERIFY2(labChroma(selected) >= 10.0 && labChroma(hovered) < 3.0,
+        // Hue: blue, where the hover is a neutral grey; the inactive one
+        // a quieter blue (#373 H37).
+        QVERIFY2(labChroma(selected) >= (selected == selection ? 10.0 : 7.0) && labChroma(hovered) < 3.0,
                  qPrintable(QStringLiteral("chroma: %1 %2, hover %3 %4")
                                 .arg(selected.name())
                                 .arg(labChroma(selected))
@@ -928,6 +945,13 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
                                 .arg(labChroma(hovered))));
     }
     QVERIFY(labDistance(selection, view) > labDistance(selectionInactive, view));
+    // The inactive selection reads apart from the active one, not as a
+    // second active selection: a visible difference in colour (#373 H37:
+    // at the accent's full saturation it was 1.5 ΔE on dark).
+    QVERIFY2(labDistance(selection, selectionInactive) >= 5.0,
+             qPrintable(QStringLiteral("%1 vs %2: %3").arg(selection.name(), selectionInactive.name())
+                            .arg(labDistance(selection, selectionInactive))));
+    QVERIFY(labChroma(selectionInactive) < labChroma(selection));
     // In contrast on the view: hover < inactive < active, each a visible
     // step.
     QVERIFY2(contrastRatio(selectionInactive, view) >= contrastRatio(hovered, view) + 0.02

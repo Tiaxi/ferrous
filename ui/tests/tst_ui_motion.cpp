@@ -6206,9 +6206,13 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     QVERIFY(modeSwitch != nullptr);
     QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
     QQuickItem *laneButtons = itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).first();
-    // Each plate's fill and a glyph on it.
+    // Each plate's fill and a glyph on it. In the window, the mode switch
+    // and the viewer's controls are on the corner's one plate, which the
+    // plot layer draws (#373 H37).
+    QQuickItem *cornerPlate = wholeScreen ? nullptr : itemNamed(host->contentItem(), QStringLiteral("plotCornerPlate"));
     QList<QPair<QString, QQuickItem *>> drawn{
-        {QStringLiteral("the mode switch's plate"), itemNamed(modeSwitch, QStringLiteral("plotPlateFill"))},
+        {QStringLiteral("the mode switch's plate"),
+         itemNamed(wholeScreen ? modeSwitch : cornerPlate, QStringLiteral("plotPlateFill"))},
         {QStringLiteral("the mode switch's icon"), itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
         {QStringLiteral("the lane's plate"), itemNamed(laneButtons, QStringLiteral("plotPlateFill"))},
         {QStringLiteral("the lane's M"), itemNamed(laneButtons, QStringLiteral("plotToolButtonGlyph"))},
@@ -6219,7 +6223,7 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
                    wholeScreen ? QStringLiteral("viewerToolButtonIcon") : QStringLiteral("plotToolButtonIcon"))},
     };
     if (!wholeScreen) {
-        drawn.append({QStringLiteral("the corner plate"), itemNamed(controls, QStringLiteral("plotPlateFill"))});
+        drawn.append({QStringLiteral("the corner plate's divider"), itemsNamed(cornerPlate, QStringLiteral("plotCornerDivider")).last()});
     }
     for (const auto &[what, item] : drawn) {
         QVERIFY2(item != nullptr, qPrintable(what));

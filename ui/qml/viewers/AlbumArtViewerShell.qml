@@ -267,10 +267,15 @@ Item {
             }
         }
 
-        // The art on the media surface's black, in both themes.
-        background: Rectangle {
+        // Nothing of its own: the art's surface, which is in the popup while
+        // it shows, fading in and out too, has the media surface's black
+        // floor, in both themes. A second floor here doubled it as the popup
+        // faded: its children fade one by one, not as one layer, so two
+        // floors at half opacity left a quarter of the window, and as the
+        // viewer opened the window went dark before the art came in (#373
+        // H37: a blink of 33 ms).
+        background: Item {
             objectName: "albumArtPopupBackground"
-            color: root.uiPalette.mediaPlot.plotBg
         }
 
         // The art, under the controls' plate.
@@ -336,6 +341,7 @@ Item {
                 uiPalette: root.uiPalette
                 closeButtonName: "albumArtPopupCloseButton"
                 plotColors: root.uiPalette.mediaPlot
+                dividers: true
                 zoomLevel: root.zoomLevel
                 resetView: root.resetView
                 resetToolTip: I18n.i18nc("@info:tooltip", "Fit the Image to the Window")

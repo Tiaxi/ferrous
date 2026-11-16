@@ -9375,12 +9375,17 @@ void BridgeClientTest::searchExtendedMatchDetailsDecodeAndHighlight() {
     QString error;
     QVERIFY2(BinaryBridgeCodec::decodeSearchResultsFrame(bytes, &decoded, &error), qPrintable(error));
     QCOMPARE(decoded.rows[0].matchDetail, QStringLiteral("Comment: remaster"));
+    // A length that is not known.
+    decoded.rows[0].lengthSeconds = -1.0f;
     BridgeClient client; isolateBridgeClient(client);
     client.m_latestGlobalSearchSeqSent = 9;
     QVERIFY(client.processSearchResultsFrame(decoded));
     client.applyDeferredSearchDisplayRows();
     // Row 0 is the Tracks heading.
     QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(0), GlobalSearchResultsModel::KindRole).toString(), QStringLiteral("section"));
+    // Its length as the queue and the transport write one not known: en
+    // dashes, not hyphens (#373 H37).
+    QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::LengthTextRole).toString(), QStringLiteral("\u2013:\u2013\u2013"));
     QCOMPARE(client.m_globalSearchModel.data(client.m_globalSearchModel.index(1), GlobalSearchResultsModel::MatchDetailRole).toString(), QStringLiteral("Comment: remaster"));
     QCOMPARE(client.m_globalSearchModel.highlightText("Comment: anniversary remaster", "comment:\"anniversary remaster\""), QStringLiteral("Comment: <b>anniversary remaster</b>"));
     QCOMPARE(client.m_globalSearchModel.highlightText("live:oslo", "live:oslo"), QStringLiteral("<b>live:oslo</b>"));

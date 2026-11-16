@@ -461,6 +461,21 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     QTRY_VERIFY(dialog->property("visible").toBool());
     QCOMPARE(message->property("text").toString(), error);
     QVERIFY(window->isVisible());
+    // The heading says what happened in words; the system's error is the
+    // line below it, in the secondary colour, not the heading (#373 H37).
+    {
+        auto *heading = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedHeading"));
+        auto *messageItem = qobject_cast<QQuickItem *>(message);
+        QVERIFY(heading != nullptr && messageItem != nullptr);
+        QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
+        const QString headingText = heading->property("text").toString();
+        QVERIFY2(headingText.contains(QStringLiteral("could not be saved")), qPrintable(headingText));
+        QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
+        QVERIFY(messageItem->mapToScene(QPointF(0, 0)).y()
+                >= heading->mapToScene(QPointF(0, heading->height())).y());
+        QCOMPARE(message->property("textFormat").toInt(), int(Qt::PlainText));
+        QVERIFY(message->property("color").value<QColor>() != heading->property("color").value<QColor>());
+    }
 
     // The disk has room again.
     QVERIFY(bridge->setProperty("stateSaveError", QString()));

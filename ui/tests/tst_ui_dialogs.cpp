@@ -1262,8 +1262,11 @@ void UiDialogsTest::configureFitsItsPagesAtAnyWidth() {
 // At the default 10 pt font, Configure opens tall enough for the
 // Visualization page, its tallest, with its three subheadings: it shows
 // whole, with no vertical scroll bar, whichever page Configure opens on
-// (#373 H8: its last row was under the buttons). The pages are laid out
-// only once the window shows, so its height cannot follow them (#585).
+// (#373 H8: its last row was under the buttons), and so does every other
+// page. The pages are laid out only once they show, so its height cannot
+// follow them (#585): it is Visualization's as measured with Noto Sans,
+// 38 grid units, and a margin of 8 px (#373 H37: with Noto Sans it
+// scrolled by 8 px in 41 grid units for the whole window).
 void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
@@ -1283,6 +1286,26 @@ void UiDialogsTest::configureFitsTheVisualizationPageAtTheDefaultFont() {
         QVERIFY2(prefs->height() <= 1000 - 2 * 18 - 28, qPrintable(QString::number(prefs->height())));
         QQuickItem *stack = nullptr;
         QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+        // Room for Visualization as measured, and the margin.
+        const qreal gridUnit = paletteOf(window)->property("gridUnit").toReal();
+        QVERIFY2(stack->childItems().at(openOn)->height() >= 38 * gridUnit + 8 - 0.5,
+                 qPrintable(QString::number(stack->childItems().at(openOn)->height())));
+        // Every page whole, no vertical scroll bar.
+        for (int index = 0; index < 4; ++index) {
+            dialog->setProperty("pageIndex", index);
+            QQuickItem *page = stack->childItems().at(index);
+            QTRY_VERIFY(page->isVisible() && !layoutPending(page));
+            QVERIFY2(page->property("contentHeight").toReal() <= page->height() + 0.5,
+                     qPrintable(QStringLiteral("page %1: %2 of %3 px").arg(index)
+                                    .arg(page->property("contentHeight").toReal()).arg(page->height())));
+            for (QQuickItem *child : page->childItems()) {
+                if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("ScrollBar"))
+                    && child->property("orientation").toInt() == Qt::Vertical) {
+                    QVERIFY2(child->property("size").toReal() >= 1.0 - 1e-6 || !child->isVisible(),
+                             qPrintable(describeItem(child)));
+                }
+            }
+        }
         dialog->setProperty("pageIndex", 1);
         QQuickItem *page = stack->childItems().at(1);
         QTRY_VERIFY(page->isVisible() && !layoutPending(page));

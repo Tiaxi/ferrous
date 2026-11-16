@@ -31,6 +31,9 @@ Item {
     // Whether presses, clicks and double-clicks on the plate, between its
     // buttons too, stay on it rather than reach the view under it.
     property bool takesPointer: false
+    // Without a fill and an edge of its own, on a plate it shares with
+    // other controls, such as the windowed viewer's corner (#373 H37).
+    property bool bare: false
     property bool revealed: true
     // A level the plate fades with besides its own reveal, such as a
     // viewer's controls as they hide: from 1 to 0.
@@ -63,6 +66,7 @@ Item {
     // Outside the plate: a border drawn inside a rectangle 1 px larger.
     Rectangle {
         objectName: "plotPlateEdge"
+        visible: !root.bare
         x: -1
         y: -1
         width: parent.width + 2
@@ -75,6 +79,7 @@ Item {
 
     Rectangle {
         objectName: "plotPlateFill"
+        visible: !root.bare
         anchors.fill: parent
         radius: root.radius
         color: root.plotColors.plotPlate

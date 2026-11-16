@@ -408,6 +408,10 @@ Preferences.PreferencesPage {
         confirmText: I18n.i18nc("@action:button", "Remove Folder")
         // As the page's Remove button.
         confirmIcon: "list-remove"
+        // Its tracks leave the library, so Cancel is the default, as KDE's
+        // guidelines ask of an action that destroys (#373 H37): Enter as
+        // it shows keeps the folder.
+        destructive: true
         onConfirmed: root.uiBridge.removeLibraryRoot(rootPath)
     }
 }

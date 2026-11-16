@@ -911,8 +911,9 @@ void SearchPaletteTest::selectedHoveredAndPlayingRowsAreDrawn() {
 // The hints name what the keys do for the selected row: a result's
 // actions, "Show All" for a more row, "Search" for a recent search,
 // "Search Instead" for a suggestion, and only Esc otherwise. The key in the
-// text colour, the action in the secondary one, 22 px between pairs (#373
-// H11: 18 px).
+// text colour, the action in the secondary one; 6 px from a key to its
+// action, more than a word space, and 18 px between pairs (#373 H37: 4 px,
+// a word space, ran each pair together into one phrase).
 void SearchPaletteTest::footerNamesTheKeysForEachState() {
     Harness harness;
     QString errorText;
@@ -954,7 +955,14 @@ void SearchPaletteTest::footerNamesTheKeysForEachState() {
     QCOMPARE(hex(colorOf(keys.first())), hex(harness.token("text")));
     QCOMPARE(hex(colorOf(actions.first())), hex(harness.token("textSecondary")));
     QCOMPARE(keys.first()->property("font").value<QFont>().pointSizeF(), harness.tokens->property("smallPointSize").toReal());
-    QTRY_COMPARE(sceneRect(keys.last()).left() - sceneRect(actions.first()).right(), 22.0);
+    QTRY_COMPARE(sceneRect(keys.last()).left() - sceneRect(actions.first()).right(), 18.0);
+    QCOMPARE(sceneRect(actions.first()).left() - sceneRect(keys.first()).right(), 6.0);
+    QCOMPARE(sceneRect(actions.last()).left() - sceneRect(keys.last()).right(), 6.0);
+    {
+        const QFontMetricsF small(actions.first()->property("font").value<QFont>());
+        QVERIFY2(6.0 >= 1.4 * small.horizontalAdvance(QLatin1Char(' ')),
+                 qPrintable(QString::number(small.horizontalAdvance(QLatin1Char(' ')))));
+    }
     QCOMPARE(sceneRect(keys.first()).left() - sceneRect(harness.palette()).left(), 52.0);
 
     // No results.
@@ -1690,6 +1698,17 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
             QCOMPARE(rect.left(), titleLeft);
         }
         QVERIFY(rect.left() >= titleLeft);
+        // A key stays further from its action than the action's words
+        // from each other, at a large font too (#373 H37).
+        {
+            const auto keys = visibleNamed(hint, QStringLiteral("globalSearchKeyHintKey"));
+            const auto actions = visibleNamed(hint, QStringLiteral("globalSearchKeyHintAction"));
+            QVERIFY(keys.size() == 1 && actions.size() == 1);
+            const QFontMetricsF small(actions.first()->property("font").value<QFont>());
+            const qreal gap = sceneRect(actions.first()).left() - sceneRect(keys.first()).right();
+            QVERIFY2(gap >= 1.4 * small.horizontalAdvance(QLatin1Char(' ')),
+                     qPrintable(QStringLiteral("%1 vs a space of %2").arg(gap).arg(small.horizontalAdvance(QLatin1Char(' ')))));
+        }
     }
     QVERIFY2(lineTops.size() >= 2, qPrintable(QString::number(lineTops.size())));
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));

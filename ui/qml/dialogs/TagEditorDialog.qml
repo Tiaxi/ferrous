@@ -336,6 +336,16 @@ Components.DialogWindow {
         root.reject()
     }
 
+    // The field whose typed text differs from what it holds and is not
+    // yet applied to the tracks, or null. A field applies its text as it
+    // loses focus or on Enter; until then the text is an unsaved change
+    // too, which Save and Ctrl+S apply and save (#373 H37: they stayed
+    // disabled while the user typed, and Ctrl+S did nothing).
+    property Item pendingEditField: null
+    readonly property bool hasUnsavedChanges: root.tagEditorApi.dirty || root.pendingEditField !== null
+    readonly property bool canSave: !root.tagEditorApi.loading && !root.tagEditorApi.saving
+        && root.hasUnsavedChanges
+
     // A field commits its typed text when it loses focus.
     function commitPendingEditorEdits() {
         if (root.visible) {
@@ -344,10 +354,15 @@ Components.DialogWindow {
     }
 
     function triggerSave(closeAfterSuccess) {
-        if (root.tagEditorApi.loading || root.tagEditorApi.saving || !root.tagEditorApi.dirty) {
+        if (!root.canSave) {
             return false
         }
+        // The typed text first: it may be the only change, or none after
+        // all.
         root.commitPendingEditorEdits()
+        if (!root.tagEditorApi.dirty) {
+            return false
+        }
         root.operationInFlight = true
         root.operationText = I18n.i18nc("@info:status", "Saving tags…")
         root.closeAfterSave = closeAfterSuccess
@@ -788,6 +803,22 @@ Components.DialogWindow {
 
         required property var field
         property bool touched: false
+        // The text it shows for the tracks, before the user types.
+        property string committedText: ""
+        // Typed and not yet applied: see the dialog's pendingEditField.
+        readonly property bool pendingEdit: fieldEditor.touched && fieldEditor.text !== fieldEditor.committedText
+        onPendingEditChanged: {
+            if (fieldEditor.pendingEdit) {
+                root.pendingEditField = fieldEditor
+            } else if (root.pendingEditField === fieldEditor) {
+                root.pendingEditField = null
+            }
+        }
+        Component.onDestruction: {
+            if (root.pendingEditField === fieldEditor) {
+                root.pendingEditField = null
+            }
+        }
         property var editRowsSnapshot: []
         readonly property bool changed: root.summaryRevision >= 0
             && root.tagEditorApi.bulkFieldChanged(fieldEditor.field.key)
@@ -805,6 +836,7 @@ Components.DialogWindow {
                 return
             }
             text = mixed ? "" : value
+            committedText = text
             placeholderText = mixed ? root.keepText : ""
             editRowsSnapshot = []
             touched = false
@@ -1049,7 +1081,7 @@ Components.DialogWindow {
                     ? I18n.i18nc("@action:button", "Saving…")
                     : I18n.i18nc("@action:button", "Save")
                 icon.name: "document-save"
-                enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+                enabled: root.canSave
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
                 onClicked: root.triggerSave(false)
             }
@@ -1077,7 +1109,7 @@ Components.DialogWindow {
         Shortcut {
             sequences: ["Ctrl+S"]
             context: Qt.WindowShortcut
-            enabled: root.visible && !root.tagEditorApi.loading && !root.tagEditorApi.saving && root.tagEditorApi.dirty
+            enabled: root.visible && root.canSave
             onActivated: root.triggerSave(false)
         }
 

@@ -12,6 +12,7 @@ public:
 private slots:
     void tagEditorOpensALargeSelectionWithoutBuildingEveryRow();
     void tagEditorCancelAsksBeforeDroppingEdits();
+    void typedTextCanBeSavedBeforeTheFieldIsLeft();
     void closingTheTagEditorKeepsTheFieldBeingTyped();
     void tagEditorStaysOpenWhileSavingAndShowsTheResult();
     void closingTheWindowWithTagEditsAsksAndCancelKeepsThem();
@@ -383,6 +384,36 @@ void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
     QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorCancelButton")));
     QTRY_VERIFY(!fixture.editorShown());
     QVERIFY(!fixture.confirmShown());
+}
+
+// Text typed in a field and not yet applied is an unsaved change: Save
+// and Ctrl+S are enabled while it differs from what the field held, and
+// save it (#373 H37: they stayed disabled until the field lost focus, and
+// Ctrl+S did nothing). Typed back to what it held, there is nothing to save.
+void TagEditorSmokeTest::typedTextCanBeSavedBeforeTheFieldIsLeft() {
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(2, false));
+    auto *title = qobject_cast<QQuickItem *>(findQuickItemByObjectName(
+        fixture.tags()->contentItem(), QStringLiteral("tagEditorField_title")));
+    auto *save = qobject_cast<QQuickItem *>(findQuickItemByObjectName(
+        fixture.tags()->contentItem(), QStringLiteral("tagEditorSaveButton")));
+    QVERIFY(title != nullptr && save != nullptr);
+    QVERIFY(!save->isEnabled());
+    title->forceActiveFocus();
+    QTRY_VERIFY(title->hasActiveFocus());
+    QTest::keyClick(fixture.tags(), 'x');
+    QVERIFY(!fixture.editor.dirty());
+    QVERIFY(save->isEnabled());
+    QTest::keyClick(fixture.tags(), Qt::Key_Backspace);
+    QVERIFY(!save->isEnabled());
+    QTest::keyClick(fixture.tags(), 'y');
+    QVERIFY(save->isEnabled());
+    QVERIFY(title->hasActiveFocus());
+
+    QTest::keyClick(fixture.tags(), Qt::Key_S, Qt::ControlModifier);
+    QTRY_COMPARE(fixture.saves->saveCount(), 1);
+    QCOMPARE(fixture.editor.m_tableModel.fieldValue(0, QStringLiteral("title")), QStringLiteral("Song 0y"));
+    QTRY_VERIFY(!fixture.editor.saving());
 }
 
 void TagEditorSmokeTest::closingTheTagEditorKeepsTheFieldBeingTyped() {

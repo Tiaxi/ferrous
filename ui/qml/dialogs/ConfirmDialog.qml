@@ -11,7 +11,9 @@ import "../components" as Components
 // button keep things as they are; only the confirm button sends
 // `confirmed`, once each time the dialog shows: the window hides as it is
 // answered. The confirm button is the default one, which Enter presses,
-// unless the action destroys data: then Cancel is, as KDE's guidelines ask.
+// unless the action destroys data: then Cancel is, as KDE's guidelines ask,
+// and it has the keyboard as the dialog opens, so neither Enter nor Space
+// destroys anything until the user moves to the action (#373 H37).
 Components.CompactDialogWindow {
     id: root
 
@@ -28,6 +30,8 @@ Components.CompactDialogWindow {
     signal confirmed()
 
     onAccepted: root.confirmed()
+
+    initialFocusItem: root.destructive ? confirmDialogCancelButton : root.body
 
     footer: Components.DialogButtons {
         id: dialogButtons
