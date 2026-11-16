@@ -259,9 +259,11 @@ double fundamentalUnderside(int size) {
 
 // The smooth strokes' widths across, in device pixels, lowest first: the
 // fundamental the heaviest, the harmonics tapering above it, and never under
-// 2 px (H20). At 32 and 36 px 3 / 2.5 / 2 (#373 hill climb, H24), the rose
-// eased to 2 px into its end (easedWidth); at 48 px 4 / 2.5 / 2.25 (H25: the
-// fundamental 3 px read as one of three equal stripes), the top trace 2.25 px
+// 2 px (H20). At 32 and 36 px 4 / 2.5 / 2.25 (#373 hill climb, H25: H24's
+// 3 / 2.5 / 2 read as three near-equal stripes in the task manager), the rose
+// and the magenta eased to 2 px into their ends (easedWidth); at 48 px
+// 4 / 2.5 / 2.25 (H25: the fundamental 3 px read as one of three equal
+// stripes), the top trace 2.25 px
 // over most of its run, eased to 2 px into its end (topTraceWidths); from
 // 64 px the fundamental's fundamentalWidth and the harmonics 0.8 and 0.65 of
 // taperReference.
@@ -269,7 +271,6 @@ std::vector<double> strokeWidths(int size) {
     switch (drawnAs(size)) {
     case 32:
     case 36:
-        return {3.0, 2.5, 2.0};
     case 48:
         return {4.0, 2.5, 2.25};
     default: {
@@ -300,12 +301,12 @@ std::pair<double, double> topTraceWidths() {
 constexpr int kTopTraceHeldTo = 38;
 
 // A trace's width across as drawn at `x`, lowest first, `edge` the tile's
-// inner edge: its width (strokeWidths), but at 32 and 36 px the rose's, 2.5 px, eased
-// to 2 px over its last 4 px, so that it runs out on two whole rows as the
-// magenta does, the taper's order kept to the end (#373 hill climb, H24).
+// inner edge: its width (strokeWidths), but at 32 and 36 px the rose's
+// 2.5 px and the magenta's 2.25 eased to 2 px over their last 4 px, so that
+// they run out on two whole rows each (#373 hill climb, H24, H25).
 double easedWidth(int size, size_t trace, double x, double edge) {
     const double width = strokeWidths(size)[trace];
-    if (!taskManagerSize(size) || trace != 1) {
+    if (!taskManagerSize(size) || trace == 0) {
         return width;
     }
     const double t = std::clamp((x - (edge - 4)) / 4, 0.0, 1.0);
@@ -594,18 +595,10 @@ QString doubledPath(int size) {
 
 // The fundamental's width in a 2x slot's drawing, in the 64-unit composition's
 // units, and how far its centre sits under the series' centre line, half its
-// added weight: from the 48 px slot's the focal stroke, as at 1x (#373 hill
-// climb, H25), 4.7 units over the 48 px slot's 3.6 and 5 over the 64 px
-// drawing's 3.8.
+// added weight: the focal stroke, as at 1x (#373 hill climb, H25), 4.7 units
+// over the 48 px slot's 3.6 and 5 over the 3.8 of the others'.
 std::pair<double, double> doubledFundamental(int size) {
-    switch (size) {
-    case 48:
-        return {4.7, (4.7 - 3.6) / 2};
-    case 64:
-        return {5.0, (5.0 - 3.8) / 2};
-    default:
-        return {3.8, 0};
-    }
+    return size == 48 ? std::pair<double, double>{4.7, (4.7 - 3.6) / 2} : std::pair<double, double>{5.0, (5.0 - 3.8) / 2};
 }
 
 void addSizeRows() {
@@ -830,7 +823,9 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
     const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
-    QVERIFY2(below.height() >= (onPixelGrid(size) ? 1 : 2), qPrintable(QString::number(lowest)));
+    // At 32 and 36 px a row, under the fundamental's round start (#373 hill
+    // climb, H25: its added weight on its underside).
+    QVERIFY2(below.height() >= (onPixelGrid(size) || taskManagerSize(size) ? 1 : 2), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
     // Every mark rises: none is a flat band or line under the traces.
@@ -953,10 +948,10 @@ void AppIconTest::harmonicsFanOutFromOneStart() {
     // They fan out: the height between neighbours' centres grows from the
     // start to the end, by half or more, and never shrinks along the way by
     // more than a row of the grid's rounding (H12's traces kept one height
-    // apart). At 32 px by two fifths, measured past the caps, where the
-    // traces have opened already (#373 hill climb, H24: by a third before,
+    // apart), at 32 px too, measured past the caps, where the traces have
+    // opened already (#373 hill climb, H24: by a third, then two fifths,
     // which read as nearly parallel traces).
-    const double fan = size == 32 ? 1.4 : 1.5;
+    const double fan = 1.5;
     for (size_t n = 1; n < traces.size(); ++n) {
         const auto apart = [&](int x) { return centre(n - 1, x) - centre(n, x); };
         QVERIFY2(apart(end) >= fan * apart(start),
@@ -1408,12 +1403,13 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows_data() {
 // edge on whole rows. H21: on the 64 px composition, the magenta's end 5 px
 // under the top inner edge at 48 px and 4 at 32 (H20: 3 and 2, with the
 // 32 px end under the corner, where Plasma's badge cuts it), the ends
-// 1 : 2 : 3 above the baseline, from starts as far apart. H24 (Fable): at
-// 32 px the icon's taper, 3 / 2.5 / 2, and a wider fan from the same starts,
-// the ends a row or two higher, the magenta's 2 px under the top inner edge;
-// the exits 1.6 times or more as far apart as the starts (H23: 1.5); at 36 px
-// a drawing of its own, the same strokes on its grid, 1.8 times (H24); and
-// 1.5 px or more of the tile between neighbours everywhere, 2.25 px at 30 %
+// 1 : 2 : 3 above the baseline, from starts as far apart. H25: at 32 and
+// 36 px the fundamental the focal stroke, 4 px, its weight on its underside,
+// and the fan opened to about twice the starts' spacing, the magenta's exit
+// a row under the top inner edge, from starts a little closer, the caps'
+// tips in one column (H24: 3 / 2.5 / 2, exits 1.6 and 1.8 times as far
+// apart as the starts, read as three near-parallel stripes); 36 px a
+// drawing of its own, the same strokes on its grid (H24); and 1.5 px or more of the tile between neighbours everywhere, 2.25 px at 30 %
 // of the way across.
 void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     QFETCH(int, size);
@@ -1424,12 +1420,12 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
     // Each trace's end, its top and bottom on the inner edge, lowest first.
     using Ends = std::vector<std::pair<double, double>>;
     const Ends ends = size == 48 ? Ends{{30, 34}, {20, 22.5}, {10, 12}}
-                                 : (size == 36 ? Ends{{22, 25}, {14, 16}, {6, 8}} : Ends{{19, 22}, {12, 14}, {5, 7}});
+                                 : (size == 36 ? Ends{{22, 26}, {14, 16}, {5, 7}} : Ends{{20, 24}, {12, 14}, {4, 6}});
     // The start caps' centres, lowest first: at 48 px a pixel above H20's,
     // the fundamental's half a pixel lower, its added weight on its underside.
     const std::vector<double> starts = size == 48 ? std::vector<double>{37.25, 31.75, 26.75}
-                                                  : (size == 36 ? std::vector<double>{27.25, 22.75, 18.25}
-                                                                : std::vector<double>{24.75, 20.25, 15.75});
+                                                  : (size == 36 ? std::vector<double>{28.25, 23.25, 18.75}
+                                                                : std::vector<double>{25.4, 20.75, 16.4});
     const std::vector<double> widths = strokeWidths(size);
     const QString source = QString::fromUtf8(contentsOf(path));
     std::vector<double> startCentres;
@@ -1521,13 +1517,13 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
             QVERIFY2(touching <= 1, qPrintable(QStringLiteral("traces meet at %1, %2").arg(x).arg(y)));
         }
     }
-    // The fan opens: the exits' centres 1.6 times or more as far apart as
-    // the starts' at 32 px, 1.8 at 36 and 2 at 48.
+    // The fan opens: the exits' centres about twice as far apart as the
+    // starts', 1.85 times or more at 32 and 36 px and 2 at 48.
     const double exits = (ends.front().first + ends.front().second - ends.back().first - ends.back().second) / 2;
     const double fan = exits / (startCentres.front() - startCentres.back());
-    QVERIFY2(fan >= (size == 48 ? 2.0 : (size == 36 ? 1.8 : 1.6)), qPrintable(QString::number(fan)));
-    // The tile clear above the top trace: 5 rows at 48 px, 2 at 32 and 36.
-    for (int y = inside.top(); y < inside.top() + (size == 48 ? 5 : 2); ++y) {
+    QVERIFY2(fan >= (size == 48 ? 2.0 : 1.85), qPrintable(QString::number(fan)));
+    // The tile clear above the top trace: 5 rows at 48 px, 1 at 32 and 36.
+    for (int y = inside.top(); y < inside.top() + (size == 48 ? 5 : 1); ++y) {
         for (int x = inside.left(); x <= inside.right(); ++x) {
             QVERIFY2(alphaAt(traces.back(), x, y) <= 0.01, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
         }
@@ -1579,11 +1575,11 @@ void AppIconTest::fundamentalLeadsTheHarmonics_data() {
     QTest::addColumn<QString>("path");
     QTest::addColumn<int>("size");
     for (const int size : FerrousAppIcon::kSizes) {
-        if (size >= 48) {
+        if (size >= 32) {
             QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size) << size;
         }
     }
-    for (const int size : {48, 64}) {
+    for (const int size : {32, 36, 48, 64}) {
         QTest::addRow("%dpx@2", size) << doubledPath(size) << 2 * size;
     }
     QTest::addRow("scalable") << FerrousAppIcon::resourcePath(0) << 64;
@@ -1592,8 +1588,8 @@ void AppIconTest::fundamentalLeadsTheHarmonics_data() {
 // The fundamental is the focal stroke, as it is at 16 and 22 px: half as
 // heavy again as the rose over it, or more, and three quarters again as the
 // magenta, across their strokes over the columns all three cross at their
-// full widths (#373 hill climb, H25: from 48 px they tapered 1 : 0.8 : 0.65
-// and read as three near-equal stripes).
+// full widths (#373 hill climb, H25: from 32 px they tapered 1 : 0.83 : 0.67
+// or 1 : 0.8 : 0.65 and read as three near-equal stripes).
 void AppIconTest::fundamentalLeadsTheHarmonics() {
     QFETCH(QString, path);
     QFETCH(int, size);
