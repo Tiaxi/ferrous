@@ -1765,17 +1765,19 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic_data() {
 // At 128 and 256 px a detail tier (#373 hill climb, H21, P29 amended: the 64
 // px drawing enlarged left the upper left of the tile empty beside Breeze's
 // large icons): the faint 4th harmonic of the same glide, in violet, half
-// the width the harmonics taper from (fourthWidth), from the common start, rising 4/3 as far as the
-// 3rd harmonic over the same columns, give or take the few hundredths that
-// keep its cut clear of the badge, and cropped by the tile's top inner edge
-// as the others are by its right one: from where its upper edge meets that
-// edge, x 38 or more of the 64-unit drawing, its lower edge runs on along its
-// curve to the same row, by 44, and the cut runs along the edge between
-// them (H23: H22 cut it square across the stroke, a corner on the rim with a
-// wedge of the tile under the cut), so that nothing of it is in the corner
-// where Plasma draws a task's badge (x over 48, y under 20). Its last
-// stretch bends up, so that it meets the edge at 38 degrees or more (H25).
-// Below 128 px, and in the scalable drawing, three traces.
+// the width the harmonics taper from (fourthWidth), from the common start, a
+// true 4th harmonic: as far above the 3rd as the 3rd is above the 2nd in
+// every column, rising 4/3 as far as the 3rd, flattening as the others do
+// (#373 hill climb, H26: H25 bent its last stretch up to leave at 40
+// degrees, the only reversed curvature, and spaced it wider than the series),
+// and cropped by the tile's top inner edge as the others are by its right
+// one, where the series puts it: from where its upper edge meets that edge,
+// x 44 or more of the 64-unit drawing, its lower edge runs on along its curve
+// to the same row, by 50, and the cut runs along the edge between them (H23:
+// H22 cut it square across the stroke, a corner on the rim with a wedge of
+// the tile under the cut), so that nothing of it is in the tile's rounded
+// corner, whose arc starts at x 53, where Plasma draws a task's badge (x over
+// 51, y under 20). Below 128 px, and in the scalable drawing, three traces.
 void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     QFETCH(int, size);
     const QString path = FerrousAppIcon::resourcePath(size);
@@ -1845,18 +1847,15 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
     const double edge = 6 + 64.0 / size;
     QVERIFY2(std::abs(upper.y() - edge) <= 0.001 && std::abs(lower.y() - edge) <= 0.001,
              qPrintable(QStringLiteral("%1, %2").arg(upper.y()).arg(lower.y())));
-    // Clear of the badge's corner: the cut ends by x 44 (88 of 128 px).
-    QVERIFY2(upper.x() >= 38 && lower.x() <= 44, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
+    // Where the series puts it, clear of the corner: the cut from x 44 to 50
+    // (88 to 100 of 128 px).
+    QVERIFY2(upper.x() >= 44 && lower.x() <= 50, qPrintable(QStringLiteral("cut from %1 to %2 units").arg(upper.x()).arg(lower.x())));
     const QPointF along = upper - control;
     const double slant = std::abs(along.y()) / std::hypot(along.x(), along.y());
-    // Steep where it leaves, 38 degrees or more to the edge, so that its cut
-    // is a short one, some 5.5 px at 128 px and 11 at 256, rather than a run
-    // along the rim (#373 hill climb, H25: at 27 degrees it ran 7.5 and 15 px
-    // along it): its last stretch bends up, the rest on the harmonic series.
+    // At the series' slope there, some 23 degrees to the edge: not bent up
+    // (H25's met it at 40).
     const double angle = qRadiansToDegrees(std::asin(slant));
-    QVERIFY2(angle >= 38 && angle <= 45, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
-    QVERIFY2((lower.x() - upper.x()) * unit <= 5.8 * size / 128,
-             qPrintable(QStringLiteral("a %1 px cut").arg((lower.x() - upper.x()) * unit)));
+    QVERIFY2(angle >= 21 && angle <= 26, qPrintable(QStringLiteral("%1 degrees").arg(angle)));
     const double across = fourthWidth(size) / unit;
     QVERIFY2(std::abs((lower.x() - upper.x()) * slant - across) <= 0.1 * across,
              qPrintable(QStringLiteral("a %1 unit cut, a %2 unit stroke").arg(lower.x() - upper.x()).arg(across)));
@@ -1876,16 +1875,34 @@ void AppIconTest::detailTierAddsAFaint4thHarmonic() {
              qPrintable(QStringLiteral("%1 px of it in the top row, a %2 px cut").arg(topRow).arg((lower.x() - upper.x()) * unit)));
     // Nothing in the badge's corner.
     for (int y = 0; y < 20 * unit; ++y) {
-        for (int x = static_cast<int>(48 * unit); x < size; ++x) {
+        for (int x = static_cast<int>(51 * unit); x < size; ++x) {
             QVERIFY2(alphaAt(fourth, x, y) <= kTouched, qPrintable(QStringLiteral("%1, %2").arg(x).arg(y)));
         }
     }
 
     // 4/3 as steep as the 3rd harmonic: their rises over two thirds of the
     // way from the start to the cut.
-    const int middle = start + (static_cast<int>(upper.x() * unit) - start) * 2 / 3;
+    const int cutStart = static_cast<int>(upper.x() * unit);
+    const int middle = start + (cutStart - start) * 2 / 3;
     const double rises = (centre(fourth, start) - centre(fourth, middle)) / (centre(third, start) - centre(third, middle));
-    QVERIFY2(rises >= 1.3 && rises <= 1.45, qPrintable(QString::number(rises)));
+    QVERIFY2(rises >= 1.3 && rises <= 1.36, qPrintable(QString::number(rises)));
+    // On the series in every column up to the cut: as far above the 3rd as
+    // the 3rd is above the 2nd, to within a unit.
+    for (int x = start; x < cutStart - 1; ++x) {
+        const double gap = centre(third, x) - centre(fourth, x);
+        const double series = centre(second, x) - centre(third, x);
+        QVERIFY2(std::abs(gap - series) <= unit,
+                 qPrintable(QStringLiteral("column %1: %2 above the 3rd, which is %3 above the 2nd").arg(x).arg(gap).arg(series)));
+    }
+    // One flattening curve: over each quarter of the way to the cut it rises
+    // less than over the quarter before, and over the last one still rises.
+    const int quarter = (cutStart - 1 - start) / 4;
+    double before = size;
+    for (int q = 0; q < 4; ++q) {
+        const double rise = centre(fourth, start + q * quarter) - centre(fourth, start + (q + 1) * quarter);
+        QVERIFY2(rise > 0 && rise < before, qPrintable(QStringLiteral("quarter %1: rises %2 after %3").arg(q).arg(rise).arg(before)));
+        before = rise;
+    }
     // Half the width the harmonics taper from, over the same columns.
     const double width = widthAcross(fourth, start, middle);
     const double wanted = fourthWidth(size);
