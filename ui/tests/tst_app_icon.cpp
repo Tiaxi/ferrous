@@ -622,12 +622,12 @@ QString doubledPath(int size) {
     return QStringLiteral(":/icons/hicolor/%1x%1@2/apps/ferrous.svg").arg(size);
 }
 
-// The fundamental's width in a 2x slot's drawing, in the 64-unit composition's
-// units, and how far its centre sits under the series' centre line, half its
-// added weight: the focal stroke, as at 1x (#373 hill climb, H25), 4.7 units
-// over the 48 px slot's 3.6 and 5 over the 64 px slot's 3.8.
-std::pair<double, double> doubledFundamental(int size) {
-    return size == 48 ? std::pair<double, double>{4.7, (4.7 - 3.6) / 2} : std::pair<double, double>{5.0, (5.0 - 3.8) / 2};
+// The fundamental's width in the 64 px slot's 2x drawing, in the 64-unit
+// drawing's units, and how far its centre sits under the series' centre line,
+// half its added weight: the focal stroke, as at 1x (#373 hill climb, H25), 5
+// units over the 3.8 the harmonics taper from.
+std::pair<double, double> doubledFundamental() {
+    return {5.0, (5.0 - 3.8) / 2};
 }
 
 void addSizeRows() {
@@ -675,10 +675,9 @@ private slots:
     void detailTierAddsAFaint4thHarmonic();
     void doubledSlotsDrawTheSmallCompositionsAtTwice_data();
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
-    void doubledTaskManagerSlotsDoubleTheir1xDrawings_data();
-    void doubledTaskManagerSlotsDoubleTheir1xDrawings();
-    void doubledSlotsFrom48pxDrawThe64pxComposition_data();
-    void doubledSlotsFrom48pxDrawThe64pxComposition();
+    void doubledSlotsTo48pxDoubleTheir1xDrawings_data();
+    void doubledSlotsTo48pxDoubleTheir1xDrawings();
+    void doubled64pxSlotDrawsThe64pxDrawingDoubled();
     void sizesDrawnAsASmallerSize_data();
     void sizesDrawnAsASmallerSize();
     void windowIconHasEachSizesDrawing();
@@ -2150,10 +2149,11 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice() {
     }
 }
 
-void AppIconTest::doubledTaskManagerSlotsDoubleTheir1xDrawings_data() {
+void AppIconTest::doubledSlotsTo48pxDoubleTheir1xDrawings_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("32px@2") << 32;
     QTest::addRow("36px@2") << 36;
+    QTest::addRow("48px@2") << 48;
 }
 
 // The numbers of an SVG path's data, each with the command it belongs to and
@@ -2205,15 +2205,18 @@ QList<std::pair<QString, std::vector<PathNumber>>> shapesOf(const QString &path)
     return shapes;
 }
 
-// A 32 or 36 px slot at 2x scaling, the task manager's at 2x, shows its 1x
-// drawing doubled, as the 16 and 22 px slots do (#373 hill climb, H26: it
-// had the 64 px composition, some 35 % lighter than the 1x drawing, so a
-// slot's weight changed with the scale): every coordinate and width of the
+// A 32, 36 or 48 px slot at 2x scaling, the task manager's and the
+// launcher's at 2x, shows its 1x drawing doubled, as the 16 and 22 px slots
+// do (#373 hill climb, H26: the 32 and 36 px slots had the 64 px
+// composition, some 35 % lighter than the 1x drawing, so a slot's weight
+// changed with the scale; H27: the 48 px slot's too, its strokes 7.1, 4.4
+// and 3.6 px against the 1x drawing's 4, 2.5 and 2.25 doubled, 8, 5 and
+// 4.5): every coordinate and width of the
 // file twice the 1x file's, to within the files' rounding, the arcs' flags
 // kept, its rim 2 px; rendered, each trace from twice its 1x start to the
 // tile's inner edge, ending on twice its 1x end's rows, and twice as wide
 // across.
-void AppIconTest::doubledTaskManagerSlotsDoubleTheir1xDrawings() {
+void AppIconTest::doubledSlotsTo48pxDoubleTheir1xDrawings() {
     QFETCH(int, size);
     const QString path = doubledPath(size);
     const QString single = FerrousAppIcon::resourcePath(size);
@@ -2274,24 +2277,17 @@ void AppIconTest::doubledTaskManagerSlotsDoubleTheir1xDrawings() {
     }
 }
 
-void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition_data() {
-    QTest::addColumn<int>("size");
-    QTest::addRow("48px@2") << 48;
-    QTest::addRow("64px@2") << 64;
-}
-
-// A 48 px slot at 2x scaling has a drawing of its own (#373 hill climb,
-// H21: the theme gave it the scalable drawing, with a 1 device px rim beside
-// the 16 and 22 px slots' 2): the 64 px composition, three smooth traces
+// The 64 px slot at 2x scaling has a drawing of its own (#373 hill climb,
+// H22: the theme gave it the 128 or 256 px drawing, with the 4th harmonic,
+// or the scalable one): the 64 px drawing doubled, three smooth traces
 // rising 1 : 2 : 3 to the tile's inner edge, in twice the 1x tile and a 2 px
 // rim, its traces where the 64 px drawing has them, in proportion to the
-// tile inside the rim, and tapering as it does, from 3.6 units at 96 device
-// px. The 64 px slot's (H22: the theme gave it the 128 or 256 px drawing,
-// with the 4th harmonic, or the scalable one) is the 64 px drawing doubled,
-// 3.8 units at 128 device px, without the 4th harmonic. (The 32 and 36 px
-// slots' double their 1x drawings: doubledTaskManagerSlotsDoubleTheir1xDrawings.)
-void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition() {
-    QFETCH(int, size);
+// tile inside the rim, and tapering as it does, from 3.8 units at 128 device
+// px, without the 4th harmonic. (The 32 to 48 px slots' double their 1x
+// drawings: doubledSlotsTo48pxDoubleTheir1xDrawings; H21 to H26 the 48 px
+// slot's had the 64 px composition.)
+void AppIconTest::doubled64pxSlotDrawsThe64pxDrawingDoubled() {
+    const int size = 64;
     const QString path = doubledPath(size);
     const int doubled = 2 * size;
     QVERIFY2(QFile::exists(path), qPrintable(path));
@@ -2327,7 +2323,6 @@ void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition() {
     const QRect referenceInside = insideRim(tileOf(render(reference, 64)));
     const QHash<QString, QImage> cover = traceCoverage(path, doubled);
     const QHash<QString, QImage> referenceCover = traceCoverage(reference, 64);
-    const std::vector<double> fundamental{3.8, 3.6};
     const double unit = inside.width() / 50.0;
     for (qsizetype n = 0; n < ids.size(); ++n) {
         const QImage &trace = cover.value(ids[n]);
@@ -2337,7 +2332,7 @@ void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition() {
         // The fundamental's centre as the series puts it: less its added
         // weight's half on its underside, in each drawing's own units.
         const bool isFundamental = ids[n] == QLatin1String("fundamental");
-        const double shift = isFundamental ? doubledFundamental(size).second / 50 : 0;
+        const double shift = isFundamental ? doubledFundamental().second / 50 : 0;
         const double referenceShift = isFundamental ? fundamentalUnderside(64) / 50 : 0;
         const auto at = [](const QImage &t, int x, const QRect &in) {
             return (columnOf(t, x).centre - in.top()) / in.height();
@@ -2352,10 +2347,9 @@ void AppIconTest::doubledSlotsFrom48pxDrawThe64pxComposition() {
                  qPrintable(QStringLiteral("%1 ends at %2 of the tile, the 64 px drawing's at %3")
                                 .arg(ids[n]).arg(at(trace, last, inside)).arg(at(referenceTrace, referenceInside.right(), referenceInside))));
         // Its width across: the harmonics tapering 0.8 and 0.65 from the
-        // composition's 3.8 units (3.6 in the 48 px slot's); the fundamental
-        // heavier (doubledFundamental).
+        // composition's 3.8 units; the fundamental heavier (doubledFundamental).
         const double taper[] = {0.65, 0.8, 1.0};
-        const double wanted = (isFundamental ? doubledFundamental(size).first : fundamental[size == 48 ? 1 : 0] * taper[n]) * unit;
+        const double wanted = (isFundamental ? doubledFundamental().first : 3.8 * taper[n]) * unit;
         const double width = widthAcross(trace, first + 2 * capColumns(64), last - 1);
         QVERIFY2(std::abs(width - wanted) <= 0.08 * wanted, qPrintable(QStringLiteral("%1: %2 px across, not %3").arg(ids[n]).arg(width).arg(wanted)));
     }
