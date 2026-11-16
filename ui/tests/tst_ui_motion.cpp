@@ -1011,6 +1011,9 @@ private slots:
     void nowPlayingCoverAndStandInCrossFadeInPlace();
     void nowPlayingCoverAndStandInChangeAtOnceWithAnimationsOff();
     void nowPlayingShrinksBackIntoTheCompactRow();
+    void nowPlayingGoingIdleIsTheFirstPlayReversed_data();
+    void nowPlayingGoingIdleIsTheFirstPlayReversed();
+    void nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack();
     void nowPlayingFirstPlayBandIsNeverEmpty_data();
     void nowPlayingFirstPlayBandIsNeverEmpty();
     void nowPlayingLateCoverKeepsEveryLayerContinuous();
@@ -3507,6 +3510,207 @@ void UiMotionTest::nowPlayingShrinksBackIntoTheCompactRow() {
     QCOMPARE(panel->implicitHeight(), rest);
 }
 
+void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed_data() {
+    QTest::addColumn<bool>("narrow");
+    QTest::addColumn<bool>("withCover");
+    QTest::addColumn<bool>("runsOut");
+    for (const bool narrow : {false, true}) {
+        for (const bool withCover : {true, false}) {
+            for (const bool runsOut : {false, true}) {
+                QTest::addRow("%s, %s, %s", narrow ? "narrow" : "wide", withCover ? "cover" : "no cover",
+                              runsOut ? "queue runs out" : "stop and clear")
+                    << narrow << withCover << runsOut;
+            }
+        }
+    }
+}
+
+// Back to nothing loaded, as when Stop and Clear empty the queue or it runs
+// out, is the first Play backwards (#373 H30: the cover and the lines went
+// in one frame, the tile's own disc mark stood alone in the band as it
+// shrank, and "Nothing playing" came only at its end): the track that
+// showed, its cover or its stand-in and its lines, stays while the panel
+// shrinks, the lines fading out as they faded in, before the row comes
+// back, and the row and the cover handing over by the move's time. Every
+// frame shows that track, the two handing over, or the row: never
+// neither, never a tile with nothing of the track in it, and never the
+// disc mark, which is gone. Once shrunk, the panel holds nothing more.
+void UiMotionTest::nowPlayingGoingIdleIsTheFirstPlayReversed() {
+    QFETCH(bool, narrow);
+    QFETCH(bool, withCover);
+    QFETCH(bool, runsOut);
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    if (narrow) {
+        window->resize(1000, 720);
+        QTRY_COMPARE(window->width(), 1000);
+    }
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    // Long enough for many frames.
+    units->setLongDuration(1000);
+    units->setVeryLongDuration(2000);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *area = named(window, "nowPlayingCoverArea");
+    QQuickItem *tile = named(window, "nowPlayingCover");
+    QQuickItem *row = named(window, "nowPlayingIdleRow");
+    QQuickItem *lines = named(window, "nowPlayingLines");
+    QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(panel && area && tile && row && lines && handover && growth);
+    QTRY_COMPARE(panel->property("layoutMode").toString(), narrow ? QStringLiteral("narrow") : QStringLiteral("wide"));
+    // The disc mark is gone from the tile.
+    QVERIFY(itemNamed(window->contentItem(), QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
+    const QString cover = withCover ? covers.first : QString();
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), cover);
+    bridge->setProperty("currentTrackArtist", QStringLiteral("Artist A"));
+    QVERIFY(grown(panel));
+    QTRY_VERIFY(!handover->property("running").toBool());
+    const PanelLine title = panelLine(panel, narrow ? QStringLiteral("NarrowTitle") : QStringLiteral("Title"));
+    QCOMPARE(title.text(), QStringLiteral("First"));
+    QCOMPARE(tile->property("hasCover").toBool(), withCover);
+    QCOMPARE(tile->property("standInShown").toBool(), !withCover);
+
+    struct Frame {
+        double presence;
+        double cover;
+        double row;
+        double lines;
+        QString problem;
+    };
+    QList<Frame> frames;
+    const QMetaObject::Connection connection =
+        QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+            if (!growth->property("running").toBool() && frames.isEmpty()) {
+                return;
+            }
+            Frame frame;
+            frame.presence = panel->property("presence").toDouble();
+            frame.cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
+            frame.row = row->isVisible() ? row->opacity() : 0.0;
+            frame.lines = lines->isVisible() && title.line()->isVisible() ? lines->opacity() : 0.0;
+            // What the tile shows is the track that went: its cover, or the
+            // stand-in for one, never the tile at rest.
+            if (frame.cover > 0) {
+                const bool held = !tile->property("idle").toBool()
+                    && (withCover ? tile->property("hasCover").toBool()
+                                        && tile->property("coverPath").toString() == cover
+                                  : tile->property("standInShown").toBool());
+                if (!held) {
+                    frame.problem = QStringLiteral("the tile at %1 shows %2").arg(frame.cover)
+                        .arg(tile->property("idle").toBool() ? QStringLiteral("nothing")
+                                                             : tile->property("coverPath").toString());
+                }
+            }
+            // The lines are the track's that went, whole.
+            if (frame.lines > 0 && title.text() != QStringLiteral("First")) {
+                frame.problem = QStringLiteral("the title \"%1\" at %2").arg(title.text()).arg(frame.lines);
+            }
+            frames.push_back(frame);
+        });
+    if (runsOut) {
+        // The last track ends: no track, then stopped.
+        for (const char *property : {"currentTrackPath", "currentTrackTitle", "currentTrackArtist",
+                                     "currentTrackAlbum", "currentTrackCoverPath"}) {
+            bridge->setProperty(property, QString());
+        }
+        bridge->setProperty("playbackState", QStringLiteral("Stopped"));
+    } else {
+        clearPlayback(bridge);
+    }
+    QVERIFY(panel->property("idle").toBool());
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(panel->property("holdsTrack").toBool());
+    QVERIFY(QTest::qWaitFor([&]() { return !growth->property("running").toBool(); }, 5000));
+    QTest::qWait(50);
+    QObject::disconnect(connection);
+    QVERIFY2(frames.size() >= 10, qPrintable(QString::number(frames.size())));
+    for (qsizetype index = 0; index < frames.size(); ++index) {
+        const Frame &frame = frames.at(index);
+        const QString where = QStringLiteral("frame %1 of %2 at %3").arg(index).arg(frames.size()).arg(frame.presence);
+        QVERIFY2(frame.problem.isEmpty(), qPrintable(where + QStringLiteral(": ") + frame.problem));
+        // The track, the row, or the two handing over: never neither.
+        QVERIFY2(std::max(frame.cover, frame.row) >= 0.49,
+                 qPrintable(where + QStringLiteral(": the cover %1, the row %2").arg(frame.cover).arg(frame.row)));
+        // The lines gone before the row comes, as they come after it.
+        QVERIFY2(frame.lines <= 0 || frame.row <= 0,
+                 qPrintable(where + QStringLiteral(": the lines %1 over the row %2").arg(frame.lines).arg(frame.row)));
+        if (index > 0) {
+            const Frame &before = frames.at(index - 1);
+            QVERIFY2(frame.lines <= before.lines && frame.cover <= before.cover && frame.row >= before.row,
+                     qPrintable(where + QStringLiteral(": the lines %1 to %2, the cover %3 to %4, the row %5 to %6")
+                                    .arg(before.lines).arg(frame.lines).arg(before.cover).arg(frame.cover)
+                                    .arg(before.row).arg(frame.row)));
+        }
+    }
+    // The lines and the cover went out over the move, not at its start.
+    QVERIFY(frames.first().lines > 0.5);
+    QVERIFY(frames.first().cover == 1.0);
+    QVERIFY(std::any_of(frames.begin(), frames.end(),
+                        [](const Frame &frame) { return frame.lines > 0 && frame.lines < 1; }));
+    QVERIFY(std::any_of(frames.begin(), frames.end(),
+                        [](const Frame &frame) { return frame.cover > 0 && frame.row > 0; }));
+    QCOMPARE(frames.last().row, 1.0);
+    // Shrunk: the row alone, and nothing held.
+    QCOMPARE(panel->property("presence").toDouble(), 0.0);
+    QVERIFY(!panel->property("holdsTrack").toBool());
+    const QVariant held = panel->property("heldTrack");
+    QVERIFY(!held.isValid() || held.isNull() || held.value<QJSValue>().isNull());
+    QVERIFY(!area->isVisible());
+    QVERIFY(row->isVisible());
+    QCOMPARE(row->opacity(), 1.0);
+    QVERIFY(tile->property("idle").toBool());
+}
+
+// Play while the panel shrinks into the compact row turns the move back
+// from where it got to, into the next track: its cover and lines, not the
+// ones of the track that went, and the tile never at rest.
+void UiMotionTest::nowPlayingPlayDuringTheShrinkReversesIntoTheNextTrack() {
+    Covers covers;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY(window != nullptr);
+    Kirigami::Platform::Units *units = unitsOf(window);
+    QVERIFY(units != nullptr);
+    units->setLongDuration(1000);
+    units->setVeryLongDuration(2000);
+    QObject *bridge = bridgeOf(window);
+    QQuickItem *panel = named(window, "nowPlayingPanel");
+    QQuickItem *tile = named(window, "nowPlayingCover");
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(panel && tile && growth);
+    showTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), covers.first);
+    QVERIFY(grown(panel));
+    const PanelLine title = panelLine(panel, QStringLiteral("Title"));
+    clearPlayback(bridge);
+    QVERIFY(growth->property("running").toBool());
+    QVERIFY(QMetaObject::invokeMethod(growth, "pause"));
+    panel->setProperty("presence", 0.8);
+    QVERIFY(panel->property("holdsTrack").toBool());
+    QCOMPARE(title.text(), QStringLiteral("First"));
+    QCOMPARE(tile->property("coverPath").toString(), covers.first);
+    QVERIFY(!tile->property("idle").toBool());
+
+    showTrack(bridge, kTrackB1, QStringLiteral("Second"), QStringLiteral("Album B"), covers.second);
+    QVERIFY(!panel->property("idle").toBool());
+    QVERIFY(!panel->property("holdsTrack").toBool());
+    QVERIFY(growth->property("running").toBool());
+    QCOMPARE(growth->property("from").toDouble(), 0.8);
+    QCOMPARE(growth->property("to").toDouble(), 1.0);
+    QCOMPARE(title.text(), QStringLiteral("Second"));
+    QCOMPARE(tile->property("coverPath").toString(), covers.second);
+    QVERIFY(!tile->property("idle").toBool());
+    QVERIFY(grown(panel));
+    QCOMPARE(title.text(), QStringLiteral("Second"));
+    QCOMPARE(tile->property("coverPath").toString(), covers.second);
+    QCOMPARE(tile->opacity(), 1.0);
+}
+
 // The first track after "Nothing playing" shows its cover and lines
 // together, at once, whatever order they come in; a cover that changes
 // after that is a late one and fades.
@@ -3954,9 +4158,10 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
     QQuickItem *header = named(window, "libraryHeader");
     QObject *handover = qvariant_cast<QObject *>(panel->property("handoverAnimation"));
     QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
-    QQuickItem *placeholder = itemNamed(tile, QStringLiteral("albumArtPlaceholderGlyph"));
     QQuickItem *standIn = itemNamed(tile, QStringLiteral("albumArtStandIn"));
-    QVERIFY(handover && tile && placeholder && standIn && header);
+    QVERIFY(handover && tile && standIn && header);
+    // The tile has no mark of its own for nothing playing (#373 H30).
+    QVERIFY(itemNamed(tile, QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
     tellTrack(bridge, kTrackA1, QStringLiteral("First"), QStringLiteral("Album A"), 2005, 1, covers.first);
     QTRY_VERIFY(panelLine(panel, QStringLiteral("NarrowTitle")).line()->width() > 0);
     QVERIFY(grown(panel));
@@ -3974,7 +4179,7 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
     const double coverAt = look.at(1).second;
     QVERIFY(coverAt > 0 && coverAt < 1);
     QVERIFY(standIn->isVisible());
-    QVERIFY(!placeholder->isVisible());
+    QVERIFY(!tile->property("idle").toBool());
     const PanelLook before = panelLook(panel, kNarrowLines);
 
     tellTrack(bridge, QStringLiteral("/music/Artist A/Album C/01.flac"), QStringLiteral("Third"),
@@ -3999,12 +4204,12 @@ void UiMotionTest::nowPlayingInterruptedFadeAddsNoPlaceholderOverItself() {
         }
     }
     QCOMPARE(outgoingStandIns, 0);
-    QVERIFY(!placeholder->isVisible());
+    QVERIFY(!tile->property("idle").toBool());
 
     QVERIFY(QMetaObject::invokeMethod(handover, "resume"));
     bool placeholderShown = false;
     QVERIFY(QTest::qWaitFor([&]() {
-        placeholderShown = placeholderShown || (placeholder->isVisible() && tile->isVisible());
+        placeholderShown = placeholderShown || (tile->property("idle").toBool() && tile->isVisible());
         return !handover->property("running").toBool();
     }, 5000));
     QVERIFY(!placeholderShown);
@@ -4589,8 +4794,11 @@ void UiMotionTest::nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown() {
     Kirigami::Platform::Units *units = unitsOf(window);
     QVERIFY(units != nullptr);
     QQuickItem *standIn = itemNamed(panel, QStringLiteral("albumArtStandIn"));
-    QQuickItem *placeholder = itemNamed(panel, QStringLiteral("albumArtPlaceholderGlyph"));
-    QVERIFY(placeholder != nullptr);
+    // The tile at rest, as for nothing playing, never shows; it has no
+    // mark of its own any more (#373 H30).
+    QQuickItem *tile = itemNamed(panel, QStringLiteral("nowPlayingCover"));
+    QVERIFY(tile != nullptr);
+    QVERIFY(itemNamed(panel, QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
     QQuickItem *outgoingCover = itemNamed(panel, QStringLiteral("albumArtOutgoing"));
     QVERIFY(standIn != nullptr);
     QVERIFY(outgoingCover != nullptr);
@@ -4632,7 +4840,7 @@ void UiMotionTest::nowPlayingKeepsTheCoverUntilTheNextTracksIsKnown() {
     QCOMPARE(outgoingCover->property("coverPath").toString(), covers.second);
     bool tilePlaceholder = false;
     QVERIFY(QTest::qWaitFor([&]() {
-        tilePlaceholder = tilePlaceholder || placeholder->isVisible();
+        tilePlaceholder = tilePlaceholder || (tile->property("idle").toBool() && tile->isVisible());
         return !handover->property("running").toBool();
     }, 5000));
     QVERIFY(!tilePlaceholder);

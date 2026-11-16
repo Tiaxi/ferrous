@@ -643,9 +643,12 @@ QString standInProblem(QQuickWindow *window) {
     QQuickItem *standIn = itemNamed(cover, QStringLiteral("albumArtStandIn"));
     QQuickItem *mark = itemNamed(cover, QStringLiteral("albumArtStandInMark"));
     QQuickItem *edge = itemNamed(cover, QStringLiteral("albumArtStandInEdge"));
-    QQuickItem *glyph = itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph"));
-    if (!standIn || !mark || !edge || !glyph) {
+    if (!standIn || !mark || !edge) {
         return QStringLiteral("a part of the stand-in is missing");
+    }
+    // The tile has no disc mark of its own any more (#373 H30).
+    if (itemNamed(cover, QStringLiteral("albumArtPlaceholderGlyph")) != nullptr) {
+        return QStringLiteral("the tile still has its disc mark");
     }
     for (const char *name : {"albumArtStandInTitle", "albumArtStandInSubtitle"}) {
         if (itemNamed(cover, QString::fromLatin1(name)) != nullptr) {
@@ -680,8 +683,8 @@ QString standInProblem(QQuickWindow *window) {
     if (colorOf(cover) != QStringLiteral("#ff14062e") || colorOf(cover) != tokenHex(window, "plotFloor")) {
         return QStringLiteral("the stand-in in %1").arg(colorOf(cover));
     }
-    if (!shown(standIn) || shown(glyph) || cover->property("hasCover").toBool()) {
-        return QStringLiteral("the stand-in does not show, or the disc or a cover does");
+    if (!shown(standIn) || cover->property("idle").toBool() || cover->property("hasCover").toBool()) {
+        return QStringLiteral("the stand-in does not show, or the tile at rest or a cover does");
     }
     // The mark: its paths' square box over the whole tile, clipped to it;
     // the small tile's of three curves. Its paths run on past the tile's right

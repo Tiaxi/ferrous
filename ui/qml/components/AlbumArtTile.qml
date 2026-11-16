@@ -19,9 +19,9 @@ import FerrousUi 1.0
 // the mark of three curves, without the 4th harmonic. In a light theme a 1 px edge
 // (`standInEdgeColor`) keeps the dark tile from reading as a hole in the
 // sidebar. With nothing playing (`idle`) it shows only the placeholder
-// colour with Breeze's audio disc mark at its centre (#373 H1, H3): the
-// now-playing panel shows its compact row then, and the tile only as it
-// shrinks into it.
+// colour: the now-playing panel shows its compact row then, and while it
+// shrinks into it the tile keeps the track that went (#373 H30: the disc
+// mark it showed then stood alone in an empty band).
 //
 // The tile is a keyboard stop while a track plays: a 1 px ring shows its
 // focus while the keyboard is in use, and the Menu key or Shift+F10 opens
@@ -35,8 +35,8 @@ Rectangle {
     required property var replaceFromItunesAction
     required property var currentTrackItunesArtworkDisabledReason
     required property var openAlbumArtViewer
-    // The tile and its mark while the track has no cover, and while
-    // nothing plays: the now-playing panel passes the palette's.
+    // The tile while nothing plays: the now-playing panel passes the
+    // palette's.
     property color placeholderColor: "transparent"
     // Nothing playing: the tile shows no cover, only the placeholder.
     property bool idle: false
@@ -81,14 +81,6 @@ Rectangle {
     // The veil the pointer lays on the tile, and the keyboard focus ring.
     property color hoverVeilColor: "transparent"
     property color focusRingColor: Kirigami.Theme.focusColor
-    property color placeholderGlyphColor: Kirigami.Theme.textColor
-    // The mark's size: 48 px, and a third of a smaller tile, unless the
-    // now-playing panel sizes it from the font.
-    property real placeholderGlyphSize: Math.min(Kirigami.Units.iconSizes.large,
-        Math.round(Math.min(root.width, root.height) / 3))
-    // A disc with a note, which says music rather than a missing picture,
-    // as the album cover mark's frame did (#373 H6).
-    readonly property string placeholderGlyphSource: "media-optical-audio-symbolic"
     // What shows around a cover that does not fill the tile, or through
     // one that is partly transparent: the colour behind the tile, which the
     // now-playing panel passes. Each cover draws on it, so a cover at full
@@ -141,18 +133,6 @@ Rectangle {
         retainWhileLoading: true
         sourceSize.width: root.coverSourceSize
         sourceSize.height: root.coverSourceSize
-    }
-
-    Kirigami.Icon {
-        objectName: "albumArtPlaceholderGlyph"
-        anchors.centerIn: parent
-        width: root.placeholderGlyphSize
-        height: width
-        source: root.placeholderGlyphSource
-        roundToIconSize: false
-        isMask: true
-        color: root.placeholderGlyphColor
-        visible: root.idle
     }
 
     // The stand-in's mark and its edge: the app icon's glide and its 2nd,

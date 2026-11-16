@@ -6,7 +6,6 @@ import QtQuick.Layouts 1.15
 import org.kde.kirigami 2.20 as Kirigami
 import FerrousUi 1.0
 import "." as Components
-import "../logic/ColorUtils.js" as ColorUtils
 import "../logic/FormatUtils.js" as FormatUtils
 import "../logic/PathUtils.js" as PathUtils
 
@@ -56,7 +55,11 @@ import "../logic/PathUtils.js" as PathUtils
 //   move's last part, once it is past its fastest, so no text slides over
 //   the moving rows (#373 H12 Z7) nor pops in at its end (#373 H28 V6).
 //   Going back to nothing
-//   loaded, as when the queue is cleared, shrinks it back. With
+//   loaded, as when the queue is cleared or runs out, is the same backwards
+//   (#373 H30: the cover and lines went in one frame, the tile's own disc
+//   mark alone in the band as it shrank): the track that showed stays, its
+//   cover or stand-in and its lines (heldTrack), while it shrinks, the lines
+//   fading out as they faded in and the row back over the move's end. With
 //   animations off, both are at once.
 // - A track without a cover keeps the cover's place, wide or narrow, with
 //   a stand-in in it (#373 H11; AlbumArtTile): the plot's floor colour,
@@ -245,6 +248,23 @@ Item {
     // height the panel shrinks from, which its lines, gone with the
     // track, no longer give.
     property real heldLayoutHeight: 0
+    // The track as it last showed, {coverPath, lines} (see followTrack):
+    // what the panel shows while it shrinks into the compact row, as the
+    // bridge tells nothing of the track any more, before or after the
+    // panel is idle (#373 H30). Kept while a track plays, so that it is the
+    // one that showed whichever the bridge clears first; gone once the
+    // panel has shrunk.
+    property var heldTrack: null
+    // Whether the panel shows the track that went, as it shrinks.
+    readonly property bool holdsTrack: root.idle && root.presence > 0 && root.heldTrack !== null
+    // The lines and the cover the panel shows: the playing track's, or the
+    // one's that went while the panel shrinks.
+    readonly property var shownLines: root.holdsTrack ? root.heldTrack.lines : root.trackLines
+    readonly property string shownCoverPath: root.holdsTrack ? root.heldTrack.coverPath : root.coverPath
+    onPresenceChanged: {
+        if (root.idle && root.presence <= 0)
+            root.heldTrack = null
+    }
     readonly property NumberAnimation presenceAnimation: NumberAnimation {
         objectName: "nowPlayingPresenceAnimation"
         target: root
@@ -901,6 +921,10 @@ Item {
         }
         const was = root.shown
         root.shown = next
+        // A track, as it shows, for the panel to hold as it shrinks: only
+        // one with a path, as the bridge clears the path with the rest.
+        if (next.trackKey.length > 0)
+            root.heldTrack = { coverPath: next.coverPath, lines: next.lines }
         if (was === null || was.trackKey.length === 0 || next.trackKey.length === 0) {
             // Into or out of "Nothing playing": at once, as the idle
             // placeholder is not a cover nor its lines a track's.
@@ -1181,21 +1205,10 @@ Item {
         font.pointSize: root.uiPalette.smallPointSize
     }
 
-    // The tile's own mark, which shows only while the tile grows from the
-    // compact row before the cover is known, or shrinks into it: a third
-    // of the tile, and never over 48 px, more with a larger font. Even, so
-    // that it sits on whole pixels at the centre of the tile.
-    readonly property int coverMarkSize: 2 * Math.round(Math.min(Math.round(cover.width / 3),
-        root.uiPalette.scaledSize(Kirigami.Units.iconSizes.large)) / 2)
-    // The tile with no cover in it: the sidebar's view colour, as
-    // one surface with it (#373 H6: a lighter tile read as a broken image),
-    // and its mark, the tertiary text colour mixed into the view, neutral,
-    // at 3:1 on it, the least for a graphic to read (#373 H7: at 38% it was
-    // 2:1 and faint), with a margin rendering cannot round away.
+    // The tile with nothing in it, at rest under the compact row: the
+    // sidebar's view colour, as one surface with it (#373 H6: a lighter
+    // tile read as a broken image).
     readonly property color placeholderColor: root.uiPalette.view
-    readonly property color placeholderMarkColor: root.uiPalette.readableOn(
-        ColorUtils.mixColor(root.uiPalette.view, root.uiPalette.textTertiary, 0.38),
-        [root.uiPalette.view], 3.1)
 
     // The room the narrow lines keep, beside the cover or under it,
     // whatever the track has text for, from the fonts alone (#373 H28: it
@@ -1802,8 +1815,11 @@ Item {
             layoutSize: root.coverSize
             opacity: root.coverOpacity
             uiBridge: root.uiBridge
-            idle: root.idle
-            coverPath: root.coverPath
+            // While the panel shrinks into the compact row, the track that
+            // went, its cover or stand-in, and nothing to open or focus.
+            idle: root.idle && root.presence <= 0
+            enabled: !root.idle
+            coverPath: root.shownCoverPath
             // The size it loads its image at, whatever the place's size.
             coverSourceSize: Math.max(256, root.width)
             // No cover: the stand-in, its mark on the plot's floor, and in
@@ -1813,8 +1829,6 @@ Item {
             standInEdgeColor: root.uiPalette.themeIsDark ? "transparent" : root.uiPalette.plotFloorEdge
             // Nothing playing: the placeholder, on the sidebar.
             placeholderColor: root.placeholderColor
-            placeholderGlyphColor: root.placeholderMarkColor
-            placeholderGlyphSize: root.coverMarkSize
             hoverVeilColor: root.uiPalette.hover
             focusRingColor: root.uiPalette.focusRing
             // The sidebar's, which shows around the cover.
@@ -1894,7 +1908,7 @@ Item {
         ColumnLayout {
             id: wideColumn
             objectName: "nowPlayingWideText"
-            visible: root.wideRoom && !root.idle
+            visible: root.wideRoom && (!root.idle || root.holdsTrack)
             x: root.textInset
             // Under the cover's place, with which it moves while that grows.
             y: root._whileGrowing(root.footTop + root.wideTextTop)
@@ -1909,7 +1923,7 @@ Item {
                 id: wideTitle
                 lineKey: "title"
                 name: "Title"
-                text: root.trackLines.title
+                text: root.shownLines.title
                 pointSize: root.wideTitlePointSize
                 weight: Font.DemiBold
                 keepsRow: true
@@ -1918,14 +1932,14 @@ Item {
                 id: wideArtistAlbum
                 lineKey: "artistAlbum"
                 name: "ArtistAlbum"
-                text: root.trackLines.artistAlbum
+                text: root.shownLines.artistAlbum
                 keepsRow: true
             }
             FadingLine {
                 id: wideDetails
                 lineKey: "details"
                 name: "Details"
-                text: root.trackLines.details
+                text: root.shownLines.details
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
                 keepsRow: true
@@ -1939,7 +1953,7 @@ Item {
         Column {
             id: narrowColumn
             objectName: "nowPlayingNarrowText"
-            visible: !root.wideRoom && !root.idle
+            visible: !root.wideRoom && (!root.idle || root.holdsTrack)
             // Beside the cover or under it; in the large-font header, the
             // title beside it and the rest under it.
             x: root.narrowStacked ? root.textInset : root.narrowLayoutCoverSize + root.textInset
@@ -1960,7 +1974,7 @@ Item {
                 id: narrowTitle
                 lineKey: "title"
                 name: "NarrowTitle"
-                text: root.trackLines.title
+                text: root.shownLines.title
                 pointSize: root.titlePointSize
                 weight: Font.DemiBold
                 maximumLineCount: 2
@@ -2000,7 +2014,7 @@ Item {
                 id: narrowArtist
                 lineKey: "artist"
                 name: "NarrowArtist"
-                text: root.trackLines.artist
+                text: root.shownLines.artist
                 pointSize: root.uiPalette.smallPointSize
                 // One line, elided, with the whole of it in the tooltip.
                 // Under the cover the title and the artist share their room:
@@ -2017,7 +2031,7 @@ Item {
                 id: narrowAlbum
                 lineKey: "narrowAlbum"
                 name: "NarrowAlbum"
-                text: root.trackLines.narrowAlbum
+                text: root.shownLines.narrowAlbum
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
                 // Under the large-font header, a step below the artist and
@@ -2043,7 +2057,7 @@ Item {
                 id: narrowDetails
                 lineKey: "narrowDetails"
                 name: "NarrowDetails"
-                text: root.trackLines.narrowDetails
+                text: root.shownLines.narrowDetails
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0

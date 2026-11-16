@@ -39,6 +39,11 @@
 
 #include "QmlSmokeTest.h"
 
+#include <QImage>
+#include <QTemporaryDir>
+#include <QUrl>
+#include <algorithm>
+
 // The main window, its layout, and what survives a restart.
 class WindowSmokeTest : public QmlSmokeTest {
     Q_OBJECT
@@ -61,6 +66,7 @@ private slots:
     void drawsOffscreenUnlessAPlatformIsChosen();
     void drawingWritesNoShaderCache();
     void nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown();
+    void nowPlayingHoldsTheTrackThatWentAsItShrinks();
 };
 
 void WindowSmokeTest::loadsMainQmlWithFallbackBridge() {
@@ -1400,6 +1406,142 @@ void WindowSmokeTest::nowPlayingKeepsItsLinesUntilTheNextTracksAreKnown() {
     QCOMPARE(bridge.currentTrackTitle(), QStringLiteral("untitled take.flac"));
     QVERIFY(bridge.currentTrackArtist().isEmpty());
     QVERIFY(bridge.currentTrackAlbum().isEmpty());
+}
+
+// Stop and Clear, and the queue running out, as BridgeClient tells them:
+// one snapshot of no track, stopped, told as the playback state, then the
+// track's identity, then its metadata, each a signal of its own, the panel
+// idle from the first. While the panel shrinks into the compact row it
+// holds the track that showed, its cover and its lines, whichever of them
+// it hears of first; every frame shows that track, it and the row handing
+// over, or the row, and the tile is never at rest while it shows (#373
+// H30: the cover and the lines went in one frame, and the tile's own disc
+// mark stood alone in the band). Stop alone keeps the track.
+void WindowSmokeTest::nowPlayingHoldsTheTrackThatWentAsItShrinks() {
+    BridgeClient bridge;
+    // Only the snapshots below reach it, not the real bridge's.
+    bridge.m_bridgePollTimer.stop();
+    if (bridge.m_bridgeWakeNotifier != nullptr) {
+        bridge.m_bridgeWakeNotifier->setEnabled(false);
+        delete bridge.m_bridgeWakeNotifier;
+        bridge.m_bridgeWakeNotifier = nullptr;
+    }
+    bridge.m_bridgeWakeFd = -1;
+    bridge.shutdownBridgeGracefully();
+    if (bridge.m_ffiBridge != nullptr) {
+        ferrous_ffi_bridge_destroy(bridge.m_ffiBridge);
+        bridge.m_ffiBridge = nullptr;
+    }
+    bridge.m_connected = false;
+
+    QTemporaryDir covers;
+    QVERIFY(covers.isValid());
+    const QString coverFile = covers.filePath(QStringLiteral("cover.png"));
+    QImage image(64, 64, QImage::Format_RGB32);
+    image.fill(QColor(200, 40, 40));
+    QVERIFY(image.save(coverFile));
+    const QString coverUrl = QUrl::fromLocalFile(coverFile).toString();
+
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("bridge"), &bridge);
+    QQuickWindow *window = loadMainWindowShown(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    window->resize(1600, 1000);
+    QTRY_COMPARE(window->size(), QSize(1600, 1000));
+    auto *panel = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingPanel"));
+    auto *title = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingTitle"));
+    auto *tile = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingCover"));
+    auto *area = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingCoverArea"));
+    auto *row = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingIdleRow"));
+    auto *lines = window->findChild<QQuickItem *>(QStringLiteral("nowPlayingLines"));
+    QVERIFY(panel && title && tile && area && row && lines);
+    QVERIFY(window->findChild<QQuickItem *>(QStringLiteral("albumArtPlaceholderGlyph")) == nullptr);
+    auto *growth = qvariant_cast<QObject *>(panel->property("presenceAnimation"));
+    QVERIFY(growth != nullptr);
+    const auto deliver = [&bridge](const BinaryBridgeCodec::DecodedSnapshot &snapshot) {
+        bridge.resetPollChanges();
+        const bool applied = bridge.processBinarySnapshot(snapshot);
+        bridge.schedulePollChanges();
+        return applied;
+    };
+
+    for (const bool runsOut : {false, true}) {
+        const QString where = runsOut ? QStringLiteral("runs out") : QStringLiteral("stop and clear");
+        BinaryBridgeCodec::DecodedSnapshot snapshot;
+        snapshot.playback.present = true;
+        snapshot.playback.state = 1;
+        snapshot.playback.currentPath = QStringLiteral("/fixture/a.flac");
+        snapshot.metadata.present = true;
+        snapshot.metadata.sourcePath = snapshot.playback.currentPath;
+        snapshot.metadata.title = QStringLiteral("A Title");
+        snapshot.metadata.artist = QStringLiteral("A Artist");
+        snapshot.metadata.album = QStringLiteral("A Album");
+        snapshot.metadata.coverPath = coverUrl;
+        QVERIFY(deliver(snapshot));
+        QTRY_COMPARE(title->property("text").toString(), QStringLiteral("A Title"));
+        QTRY_COMPARE(tile->property("coverPath").toString(), coverUrl);
+        QTRY_VERIFY(panel->property("presence").toDouble() == 1.0 && !growth->property("running").toBool());
+        QTRY_COMPARE(panel->property("layoutMode").toString(), QStringLiteral("wide"));
+        QVERIFY(tile->property("hasCover").toBool());
+
+        if (!runsOut) {
+            // Stop keeps the track, and nothing moves.
+            snapshot.playback.state = 0;
+            QVERIFY(deliver(snapshot));
+            QTRY_COMPARE(bridge.playbackState(), QStringLiteral("Stopped"));
+            QTest::qWait(50);
+            QVERIFY(!panel->property("idle").toBool());
+            QVERIFY(!growth->property("running").toBool());
+            QCOMPARE(title->property("text").toString(), QStringLiteral("A Title"));
+        }
+
+        QString problem;
+        QList<std::pair<double, double>> shown;
+        double rowAtEnd = 0;
+        const QMetaObject::Connection connection =
+            QObject::connect(window, &QQuickWindow::frameSwapped, window, [&]() {
+                if (!panel->property("idle").toBool()) {
+                    return;
+                }
+                const double cover = area->isVisible() && tile->isVisible() ? tile->opacity() : 0.0;
+                const double rowShown = row->isVisible() ? row->opacity() : 0.0;
+                const double linesShown = lines->isVisible() && title->isVisible() ? lines->opacity() : 0.0;
+                shown.push_back({cover, rowShown});
+                rowAtEnd = rowShown;
+                if (!problem.isEmpty()) {
+                    return;
+                }
+                if (cover > 0 && (tile->property("idle").toBool() || !tile->property("hasCover").toBool()
+                                  || tile->property("coverPath").toString() != coverUrl)) {
+                    problem = QStringLiteral("the tile at %1 shows \"%2\"").arg(cover)
+                        .arg(tile->property("coverPath").toString());
+                } else if (linesShown > 0 && title->property("text").toString() != QStringLiteral("A Title")) {
+                    problem = QStringLiteral("the title \"%1\" at %2").arg(title->property("text").toString())
+                        .arg(linesShown);
+                } else if (std::max(cover, rowShown) < 0.49) {
+                    problem = QStringLiteral("the cover %1, the row %2").arg(cover).arg(rowShown);
+                }
+            });
+        // No track: the queue cleared, or played out.
+        snapshot.playback.state = 0;
+        snapshot.playback.currentPath.clear();
+        snapshot.metadata = {};
+        QVERIFY(deliver(snapshot));
+        QTRY_VERIFY(panel->property("idle").toBool());
+        QTRY_VERIFY(!growth->property("running").toBool() && panel->property("presence").toDouble() == 0.0);
+        QTest::qWait(50);
+        QObject::disconnect(connection);
+        QVERIFY2(problem.isEmpty(), qPrintable(where + QStringLiteral(": ") + problem));
+        QVERIFY2(shown.size() >= 3, qPrintable(where + QStringLiteral(": %1 frames").arg(shown.size())));
+        // The cover whole at the start, the row whole at the end.
+        QCOMPARE(shown.first().first, 1.0);
+        QCOMPARE(rowAtEnd, 1.0);
+        QVERIFY(bridge.currentTrackTitle().isEmpty());
+        QVERIFY(bridge.currentTrackCoverPath().isEmpty());
+        QVERIFY(!panel->property("holdsTrack").toBool());
+        QVERIFY(!area->isVisible());
+    }
 }
 
 #include "tst_qml_smoke_window.moc"
