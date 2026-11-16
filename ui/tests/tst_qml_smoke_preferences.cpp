@@ -546,10 +546,18 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QCOMPARE(confirmWindow->transientParent(), logWindow);
     QVERIFY(QTest::qWaitForWindowExposed(logWindow));
 
+    // The keyboard on Cancel, the safe answer, as it opens (#373 H37).
+    const auto keyboardOnCancel = [&]() {
+        QQuickItem *cancel = visibleItemNamed(confirmWindow, QStringLiteral("confirmDialogCancelButton"));
+        return cancel != nullptr && QTest::qWaitFor([&]() {
+            return confirmWindow->isActive() && confirmWindow->activeFocusItem() == cancel;
+        });
+    };
+
     // Escape, at once, keeps the log.
     QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QVERIFY(confirm->property("visible").toBool());
-    QVERIFY(keyboardInPopupContent(confirm));
+    QVERIFY(keyboardOnCancel());
     QTest::keyClick(confirmWindow, Qt::Key_Escape);
     QTRY_VERIFY(popupsSettled());
     QVERIFY(!confirm->property("visible").toBool());
@@ -566,8 +574,8 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
 
     // Deleting the log destroys it, so Cancel is the default button, as
     // KDE's guidelines ask, and Delete Log is not. Asked again, the
-    // question has the keyboard in its content, not on the button Tab left
-    // it on, and Enter, as it shows, answers Cancel: the log stays.
+    // question has the keyboard on Cancel, not on the button Tab left it
+    // on, and Enter or Space, as it shows, answers Cancel: the log stays.
     QVERIFY(confirm->property("destructive").toBool());
     QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
     QVERIFY(confirm->property("visible").toBool());
@@ -583,10 +591,17 @@ void PreferencesSmokeTest::enterConfirmsAsSoonAsTheConfirmationShows() {
     QVERIFY(isDefault(cancelButton));
     QVERIFY(!isDefault(deleteButton));
     QCOMPARE(deleteButton->property("text").toString(), QStringLiteral("Delete Log"));
-    QVERIFY(keyboardInPopupContent(confirm));
+    QVERIFY(keyboardOnCancel());
+    QVERIFY(!deleteButton->hasActiveFocus());
     QTest::keyClick(confirmWindow, Qt::Key_Return);
     QVERIFY(dialogClosing(confirm));
     QTRY_VERIFY(popupsSettled());
+    QCOMPARE(root->property("clears").toInt(), 0);
+    QVERIFY(clickVisibleButton(logWindow, QStringLiteral("diagnosticsClearButton")));
+    QVERIFY(keyboardOnCancel());
+    QTest::keyClick(confirmWindow, Qt::Key_Space);
+    QTRY_VERIFY(popupsSettled());
+    QVERIFY(!confirm->property("visible").toBool());
     QCOMPARE(root->property("clears").toInt(), 0);
     QCOMPARE(dialog->property("diagnosticsText").toString(), QStringLiteral("a line worth keeping"));
 
