@@ -99,15 +99,18 @@ Preferences.PreferencesPage {
         spacing: Kirigami.Units.largeSpacing
 
         // A framed list, as the app's other lists: the view colour in a
-        // 1 px seam, its rows edge to edge inside it (#373 H4).
+        // 1 px seam, its rows edge to edge inside it (#373 H4). Three rows
+        // tall at least, so a single folder sits in a visible list rather
+        // than reading as a text field (#373 H38), and up to eight before
+        // it scrolls.
         Rectangle {
             id: rootListFrame
             objectName: "libraryRootListFrame"
             readonly property int frameWidth: 1
             Layout.fillWidth: true
-            implicitHeight: rootList.visible
-                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8) + 2 * frameWidth
-                : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing
+            implicitHeight: Math.max(root.uiPalette.rowHeight * 3, rootList.visible
+                ? Math.min(rootList.contentHeight, root.uiPalette.rowHeight * 8)
+                : emptyRootsLabel.implicitHeight + 2 * Kirigami.Units.largeSpacing) + 2 * frameWidth
             color: root.uiPalette.view
             border.width: frameWidth
             border.color: root.uiPalette.seam

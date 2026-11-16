@@ -494,6 +494,8 @@ private slots:
     void libraryFolderNameDialogShowsItsPath();
     void libraryFoldersActOnTheSelectedFolderAtOnce();
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
+    void libraryFolderListIsThreeRowsTallAtLeast_data();
+    void libraryFolderListIsThreeRowsTallAtLeast();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
@@ -1786,7 +1788,8 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
         QCOMPARE(sceneRect(row).left(), sceneRect(list).left());
         QCOMPARE(sceneRect(row).right(), sceneRect(list).right());
     }
-    QCOMPARE(frame->height(), 2 * rowHeight + 2);
+    // Three rows tall, the third empty (#373 H38).
+    QCOMPARE(frame->height(), 3 * rowHeight + 2);
 
     // The look of a row: whether it has the tint, and its ring.
     const auto tintOf = [](QQuickItem *row) { return itemsNamed(row, QStringLiteral("rowBackgroundTint")).value(0); };
@@ -1846,6 +1849,69 @@ void UiDialogsTest::libraryFoldersAreAFramedListWithNoSelectionAtFirst() {
     QTRY_VERIFY(tintOf(rows.at(0))->isVisible());
     QCOMPARE(ringWidth(rows.at(0)), 1.0);
 
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast_data() {
+    QTest::addColumn<int>("folders");
+    QTest::newRow("one folder") << 1;
+    QTest::newRow("three folders") << 3;
+    QTest::newRow("nine folders") << 9;
+}
+
+// The library folder list is three rows tall at least, so that one folder
+// sits in a visible list, the view colour under it inside the frame,
+// rather than reading as a text field (#373 H38). It grows with its
+// folders up to eight rows, and then scrolls.
+void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
+    QFETCH(int, folders);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVariantList entries;
+    for (int index = 0; index < folders; ++index) {
+        const QString path = QStringLiteral("/fixture/folder%1").arg(index);
+        entries.push_back(QVariantMap{{QStringLiteral("path"), path}, {QStringLiteral("displayName"), path},
+                                      {QStringLiteral("trackCount"), index + 1}});
+    }
+    QVERIFY(bridge->setProperty("libraryRootEntries", entries));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QTRY_VERIFY(!itemsNamed(list, QStringLiteral("libraryRootRow")).isEmpty());
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(frame != nullptr);
+    const qreal rowHeight =
+        qvariant_cast<QObject *>(window->property("uiPalette"))->property("rowHeight").toReal();
+    const int rowsTall = std::clamp(folders, 3, 8);
+    QTRY_COMPARE(frame->height(), rowsTall * rowHeight + 2);
+    QCOMPARE(sceneRect(list), sceneRect(frame).adjusted(1, 1, -1, -1));
+    QCOMPARE(list->property("interactive").toBool() && list->property("contentHeight").toReal() > list->height(),
+             folders > 8);
+
+    // Under the folders, the list's own view colour, inside the frame.
+    if (folders < 3) {
+        QTRY_VERIFY(!layoutPending(frame));
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRectF frameRect = sceneRect(frame);
+        const QColor view = tokenOf(window, "view");
+        for (const qreal y : {frameRect.top() + folders * rowHeight + rowHeight / 2, frameRect.bottom() - 3}) {
+            for (const qreal x : {frameRect.left() + 4, frameRect.center().x(), frameRect.right() - 4}) {
+                const QColor pixel(shown.pixel(int(x * dpr), int(y * dpr)));
+                QVERIFY2(pixel == view, qPrintable(QStringLiteral("%1 at %2,%3, not the view's %4")
+                                                       .arg(hex(pixel)).arg(x).arg(y).arg(hex(view))));
+            }
+        }
+        // The frame's seam is drawn round it.
+        const QColor seam(shown.pixel(int(frameRect.left() * dpr), int((frameRect.bottom() - 3) * dpr)));
+        QCOMPARE(hex(seam), hex(tokenOf(window, "seam")));
+    }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }
