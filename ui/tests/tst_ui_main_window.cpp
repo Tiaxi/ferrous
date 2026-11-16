@@ -604,10 +604,10 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 
 // Why the now-playing panel does not show the stand-in for a cover, or ""
 // (#373 H11, H14 F2): the cover's place as for a cover, whole, in the
-// plot's floor colour, #14062e in both themes, with one static mark at its
-// centre, 0.55 of the tile wide and as high as the app icon's aspect makes
-// it (H19: H14 to H18 stretched the icon's curves to 2:1), the wide tile's
-// of three curves and the small one's of two, and no text at all (H12's album
+// plot's floor colour, #14062e in both themes, with one static mark, the
+// app icon's curves at its own aspect (H19: H14 to H18 stretched them to
+// 2:1) from a quarter of the way in to the tile's right edge (H20), the wide
+// tile's of three curves and the small one's of two, and no text at all (H12's album
 // title is gone: the lines under it say it); a 1 px edge in a light theme
 // only. No disc glyph, and no cover. As drawn, the mark's middle third is
 // not all floor.
@@ -660,20 +660,18 @@ QString standInProblem(QQuickWindow *window) {
     if (!shown(standIn) || shown(glyph) || cover->property("hasCover").toBool()) {
         return QStringLiteral("the stand-in does not show, or the disc or a cover does");
     }
-    // The mark: centred, 0.55 of the tile wide, at the icon's aspect, its
-    // paths' box; the small tile's of two curves. Its paths run on past its
-    // right side, cut flush there (standInMarkRunsOut).
+    // The mark: its paths' square box over the whole tile, clipped to it;
+    // the small tile's of two curves. Its paths run on past the tile's right
+    // side, cut flush there (standInMarkRunsOut).
     const QRectF tile = sceneRect(cover);
     const QRectF markRect = sceneRect(mark);
     const QSizeF box = mark->property("box").toSizeF();
-    if (box != QSizeF(240, 212)) {
+    if (box != QSizeF(1000, 1000)) {
         return QStringLiteral("the mark's paths in a %1 by %2 box").arg(box.width()).arg(box.height());
     }
-    if (!shown(mark) || !mark->clip() || std::abs(mark->width() - std::round(side * 0.55)) > 0.01
-        || std::abs(mark->height() - std::round(mark->width() * box.height() / box.width())) > 0.01
-        || (markRect.center() - tile.center()).manhattanLength() > 1.0) {
-        return QStringLiteral("the mark %1 by %2, %3 px off centre").arg(mark->width()).arg(mark->height())
-            .arg((markRect.center() - tile.center()).manhattanLength());
+    if (!shown(mark) || !mark->clip() || markRect != tile) {
+        return QStringLiteral("the mark %1 by %2 at %3, %4").arg(markRect.width()).arg(markRect.height())
+            .arg(markRect.x()).arg(markRect.y());
     }
     const bool small = cover->property("standInCompact").toBool();
     if (small != (side < 180)) {
@@ -686,25 +684,36 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the mark at %1").arg(mark->opacity());
     }
     // Its strokes by the tile's size, not scaled with it (#373 H16 I6): the
-    // glide 2 px up to 132 px, 3 px at 360; the harmonics thinner.
+    // glide 2 px up to 152 px, 4 px at 360 (H20); the harmonics tapering as
+    // the app icon's, 0.8 and 0.65 of it, the small mark's 0.75.
     const qreal glide = mark->property("glideStroke").toReal();
-    const qreal wanted = std::min(3.5, 2.0 + std::max(0.0, side - 132.0) / 228.0);
-    if (std::abs(glide - wanted) > 0.01 || (side <= 132 && glide != 2.0) || (side >= 360 && glide < 3.0)) {
+    const qreal wanted = std::min(4.5, 2.0 + std::max(0.0, side - 152.0) / 104.0);
+    if (std::abs(glide - wanted) > 0.01 || (side <= 152 && glide != 2.0) || (side >= 360 && glide < 4.0)) {
         return QStringLiteral("the glide's stroke %1 px on a %2 px tile").arg(glide).arg(side);
     }
-    if (!(mark->property("highHarmonicStroke").toReal() < glide && mark->property("harmonicStroke").toReal() < glide)) {
-        return QStringLiteral("the harmonics as heavy as the glide");
+    const qreal high = mark->property("highHarmonicStroke").toReal();
+    if (std::abs(mark->property("harmonicStroke").toReal() - 0.8 * glide) > 0.01
+        || std::abs(high - (small ? 0.75 : 0.65) * glide) > 0.01) {
+        return QStringLiteral("the harmonics %1 and %2 px beside the glide's %3").arg(mark->property("harmonicStroke").toReal())
+            .arg(high).arg(glide);
     }
-    // The colours as drawn on the floor: the amber as at 68 %, the
-    // magentas 3.6 to 3.9:1 on the floor.
+    // The colours as drawn on the floor: the amber as at 68 %, the 3rd
+    // harmonic's magenta 3.6 to 3.9:1 on the floor, and the 2nd harmonic's
+    // rose a step lighter, between it and the amber, as in the app icon
+    // (#373 H20: the two harmonics were one value).
+    const QColor floor(QStringLiteral("#14062e"));
     if (hex(cover->property("standInGlideColor").value<QColor>()) != QStringLiteral("#ffab7a33")) {
         return QStringLiteral("the glide in %1").arg(hex(cover->property("standInGlideColor").value<QColor>()));
     }
-    for (const char *name : {"standInHarmonicColor", "standInHighHarmonicColor"}) {
-        const double ratio = contrastRatio(cover->property(name).value<QColor>(), QColor(QStringLiteral("#14062e")));
-        if (ratio < 3.6 || ratio > 3.9) {
-            return QStringLiteral("%1 at %2:1 on the floor").arg(QString::fromLatin1(name)).arg(ratio);
-        }
+    const double glideRatio = contrastRatio(cover->property("standInGlideColor").value<QColor>(), floor);
+    const double harmonicRatio = contrastRatio(cover->property("standInHarmonicColor").value<QColor>(), floor);
+    const double highRatio = contrastRatio(cover->property("standInHighHarmonicColor").value<QColor>(), floor);
+    if (highRatio < 3.6 || highRatio > 3.9) {
+        return QStringLiteral("the 3rd harmonic at %1:1 on the floor").arg(highRatio);
+    }
+    if (harmonicRatio < highRatio + 0.4 || harmonicRatio > glideRatio - 0.4) {
+        return QStringLiteral("the 2nd harmonic at %1:1 on the floor, between %2 and %3").arg(harmonicRatio).arg(highRatio)
+            .arg(glideRatio);
     }
     // A 1 px edge in a light theme, none in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
@@ -748,12 +757,14 @@ qreal standInMarkInk(QQuickWindow *window) {
     return static_cast<qreal>(ink) / std::max(1, rect.width() * rect.height());
 }
 
-// Why the stand-in's mark does not run out to its right side, cut flush
-// there, as the app icon's traces run out to its tile's edge, or "" (#373
-// H19: three series ending in round caps inside the mark read as a line
-// chart): as grabbed, the column just inside its right side crosses each
-// of its curves, three or the small mark's two, and the column just past
-// it is floor.
+// Why the stand-in's mark does not run out to the tile's right edge, cut
+// flush there, as the app icon's traces run out to its tile's edge, or ""
+// (#373 H19: three series ending in round caps inside the mark read as a
+// line chart; H20: cut at three quarters of the tile, they ended in its
+// free air): as grabbed, the column just inside the tile's right edge
+// crosses each of its curves, three or the small mark's two, and they start
+// some 24 % in: the columns before a fifth of the tile are floor, and a
+// column at 30 % crosses them all.
 QString standInMarkRunsOut(QQuickWindow *window) {
     QQuickItem *cover = named(window, "nowPlayingCover");
     QQuickItem *mark = cover ? itemNamed(cover, QStringLiteral("albumArtStandInMark")) : nullptr;
@@ -762,10 +773,13 @@ QString standInMarkRunsOut(QQuickWindow *window) {
     }
     const QImage image = window->grabWindow();
     const qreal scale = static_cast<qreal>(image.width()) / window->width();
-    const QRectF rect = sceneRect(mark);
-    const int top = static_cast<int>(std::floor(rect.top() * scale));
-    const int bottom = static_cast<int>(std::ceil(rect.bottom() * scale));
+    const QRectF rect = sceneRect(cover);
+    // Inside the light theme's 1 px edge.
+    const int top = static_cast<int>(std::floor(rect.top() * scale)) + 2;
+    const int bottom = static_cast<int>(std::ceil(rect.bottom() * scale)) - 2;
+    const int left = static_cast<int>(std::floor(rect.left() * scale));
     const int right = static_cast<int>(std::ceil(rect.right() * scale));
+    const int width = right - left;
     const QColor floor(QStringLiteral("#14062e"));
     const auto runs = [&](int x) {
         int count = 0;
@@ -782,10 +796,15 @@ QString standInMarkRunsOut(QQuickWindow *window) {
     };
     const int curves = cover->property("standInCompact").toBool() ? 2 : 3;
     if (runs(right - 2) != curves) {
-        return QStringLiteral("%1 curves at the mark's right side, not %2").arg(runs(right - 2)).arg(curves);
+        return QStringLiteral("%1 curves at the tile's right edge, not %2").arg(runs(right - 2)).arg(curves);
     }
-    if (runs(right + 1) != 0) {
-        return QStringLiteral("%1 curves past the mark's right side").arg(runs(right + 1));
+    for (int x = left + 2; x < left + width / 5; ++x) {
+        if (runs(x) != 0) {
+            return QStringLiteral("a curve %1 px into the tile").arg(x - left);
+        }
+    }
+    if (runs(left + width * 3 / 10) != curves) {
+        return QStringLiteral("%1 curves at 30 %% of the tile").arg(runs(left + width * 3 / 10));
     }
     return {};
 }

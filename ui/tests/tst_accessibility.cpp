@@ -3654,14 +3654,17 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
     {
         // The glyph's 16 px source: two strokes, 1.75 px (#373 H15 H8: 1.5
         // px read lighter than Breeze's waveform glyph beside it), round
-        // caps, over a 1.5 px baseline at y 14.5 from x 2 to 14, the
-        // icon's floor, both starting on it (#373 H16 I7: without it the
-        // strokes read as "//"); 1.5 px or more clear of each other
-        // everywhere, their ends 1.5 px or more clear of the baseline and
-        // each other; all inside the 16 px square with their caps. The top
-        // one is the app icon's top harmonic, a glide (#373 H19: it rose
-        // from the baseline at 81 degrees and read as a hook): it leaves the
-        // baseline at 55 to 70 degrees and bends over to under 35.
+        // caps, from a 1.5 px lowest stroke from x 2 to 14, the icon's
+        // fundamental, both starting on it (#373 H16 I7: without it the
+        // strokes read as "//"). The lowest rises 1 px along its length,
+        // most of it in its first half, a glide (#373 H20: level, it read
+        // as a chart's baseline). The upper two are 1.5 px or more clear of
+        // each other everywhere, their ends 1.5 px or more clear of the
+        // lowest stroke's end and of each other; all inside the 16 px
+        // square with their caps. The top one is the app icon's top
+        // harmonic, a glide (#373 H19: it rose at 81 degrees and read as a
+        // hook): it starts with the lowest at 55 to 70 degrees and bends
+        // over to under 35.
         QFile file(QStringLiteral(FERROUS_UI_SOURCE_DIR "/qml/assets/spectrogram-symbolic.svg"));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString svg = QString::fromUtf8(file.readAll());
@@ -3669,8 +3672,7 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
         QCOMPARE(svg.count(QStringLiteral("<path ")), 3);
         QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.75\"")), 2);
         QCOMPARE(svg.count(QStringLiteral("stroke-linecap=\"round\"")), 3);
-        // The baseline: with its round caps, x 2 to 14.
-        QVERIFY(svg.contains(QStringLiteral("stroke-width=\"1.5\" stroke-linecap=\"round\" d=\"M2.75 14.5H13.25\"")));
+        QCOMPARE(svg.count(QStringLiteral("stroke-width=\"1.5\" stroke-linecap=\"round\" d=\"M")), 1);
         const QRegularExpression path(QStringLiteral(
             "d=\"M([0-9.]+) ([0-9.]+)C([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+) ([0-9.]+)\""));
         QList<QList<QPointF>> curves;
@@ -3691,7 +3693,26 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             }
             curves.push_back(points);
         }
-        QCOMPARE(curves.size(), 2);
+        // The lowest stroke first, then the two over it.
+        QCOMPARE(curves.size(), 3);
+        const QList<QPointF> lowest = curves.takeFirst();
+        controlPoints.removeFirst();
+        {
+            // With its round caps, x 2 to 14; rising 1 px, never falling,
+            // more in its first half than in its second.
+            QCOMPARE(lowest.first().x(), 2.75);
+            QCOMPARE(lowest.last().x(), 13.25);
+            const double rise = lowest.first().y() - lowest.last().y();
+            QVERIFY2(rise >= 0.75 && rise <= 1.25, qPrintable(QString::number(rise)));
+            const QPointF middle = lowest[lowest.size() / 2];
+            QVERIFY(lowest.first().y() - middle.y() > middle.y() - lowest.last().y());
+            for (qsizetype i = 1; i < lowest.size(); ++i) {
+                QVERIFY(lowest[i].y() <= lowest[i - 1].y() + 1e-9);
+            }
+            for (const QPointF &point : lowest) {
+                QVERIFY(point.y() + 0.75 <= 16.0);
+            }
+        }
         {
             const QList<QPointF> &top = controlPoints.first();
             const auto degrees = [](QPointF from, QPointF to) {
@@ -3712,14 +3733,20 @@ void AccessibilityTest::modeSwitchIconFollowsTheMode() {
             return least - 1.75;
         };
         QVERIFY2(clear(curves[0], curves[1]) >= 1.5, qPrintable(QString::number(clear(curves[0], curves[1]))));
+        // The top one starts with the lowest.
+        QCOMPARE(curves[0].first(), lowest.first());
         for (const QList<QPointF> &curve : curves) {
-            // From the baseline, up and to the right.
-            QCOMPARE(curve.first().y(), 14.5);
+            // From the lowest stroke, up and to the right.
+            double onIt = 1e9;
+            for (const QPointF &q : lowest) {
+                onIt = std::min(onIt, std::hypot(curve.first().x() - q.x(), curve.first().y() - q.y()));
+            }
+            QVERIFY2(onIt <= 0.05, qPrintable(QString::number(onIt)));
             QVERIFY(curve.first().x() >= 2.75 && curve.first().x() <= 13.25);
-            QVERIFY2(14.5 - curve.last().y() - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(curve.last().y())));
+            QVERIFY2(lowest.last().y() - curve.last().y() - (0.875 + 0.75) >= 1.5, qPrintable(QString::number(curve.last().y())));
             for (const QPointF &point : curve) {
                 QVERIFY(point.x() - 0.875 >= 0.0 && point.x() + 0.875 <= 16.0);
-                QVERIFY(point.y() - 0.875 >= 0.0 && point.y() <= 14.5);
+                QVERIFY(point.y() - 0.875 >= 0.0 && point.y() + 0.875 <= 16.0);
             }
         }
         QVERIFY(std::abs(curves[0].last().y() - curves[1].last().y()) - 1.75 >= 1.5);
