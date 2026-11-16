@@ -1529,9 +1529,8 @@ void BridgeClient::searchApplyWorkerLoop() {
                 item.trackNumber = row.trackNumber;
                 item.count = row.count;
                 item.lengthSeconds = row.lengthSeconds;
-                item.lengthText = row.lengthSeconds >= 0.0f
-                    ? BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds))
-                    : QStringLiteral("--:--");
+                // –:–– when not known, as the queue writes it.
+                item.lengthText = BridgeClient::formatDurationCompact(static_cast<double>(row.lengthSeconds));
 
                 QVariantMap legacyItem;
                 if (m_publishLegacySearchLists) {
@@ -4501,9 +4500,8 @@ bool BridgeClient::processSearchResultsFrame(const BinaryBridgeCodec::DecodedSea
         item.trackNumber = row.trackNumber;
         item.count = row.count;
         item.lengthSeconds = row.lengthSeconds;
-        item.lengthText = row.lengthSeconds >= 0.0f
-            ? formatDurationCompact(static_cast<double>(row.lengthSeconds))
-            : QStringLiteral("--:--");
+        // –:–– when not known, as the queue writes it.
+        item.lengthText = formatDurationCompact(static_cast<double>(row.lengthSeconds));
 
         QVariantMap legacyItem;
         if (m_publishLegacySearchLists) {
