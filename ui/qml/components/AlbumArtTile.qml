@@ -45,19 +45,22 @@ Rectangle {
     property color standInColor: "transparent"
     property color standInEdgeColor: "transparent"
     // The mark's colours, as drawn on the floor: a cover's mark, not the
-    // plot's data. The glide in the icon's amber as it was at 68 %, 5:1;
+    // plot's data. The glide in the icon's amber at the value it had at 68 %,
+    // 5.1:1, its hue and chroma kept (#373 H27: mixed toward the floor it
+    // read as ochre);
     // the harmonics in its rose and magenta, a little brighter than at
     // 68 %, the 3rd harmonic some 3.8:1 on the floor rather than 3.2 (#373
     // H16 I6), and the 2nd a step lighter between them, 4.4:1, as the
     // icon's rose is (H20: the two harmonics were one value).
-    property color standInGlideColor: "#ab7a33"
+    property color standInGlideColor: "#b07a1a"
     property color standInHarmonicColor: "#bd5872"
     property color standInHighHarmonicColor: "#b04698"
     // The wide mark's 4th harmonic, as the app icon draws it from 128 px: a
-    // faint violet, some 2.9:1 on the floor, below the 3rd harmonic's value
-    // (#373 H21 N1; H24: lifted from 2.6:1 as the icon's was, where its cut
-    // on the top edge fused with the rim).
-    property color standInFourthHarmonicColor: "#7944a4"
+    // faint violet, some 3.2:1 on the floor, the dimmest trace, below the 3rd
+    // harmonic's value (#373 H21 N1; H24: lifted from 2.6:1 as the icon's
+    // was, where its cut on the top edge fused with the rim; H27: from 2.9:1,
+    // where at 360 px it read as faint as the floor's grain).
+    property color standInFourthHarmonicColor: "#8049ac"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): on
     // the wide mark a stroke of 3.5 px at a 180 px tile, rising to 6.5 px at
