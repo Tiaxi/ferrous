@@ -1641,6 +1641,9 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QCOMPARE(artist->property("lineCount").toInt(), 1);
     QTRY_VERIFY(album->property("truncated").toBool());
     QCOMPARE(album->property("lineCount").toInt(), 1);
+    // "Album (Year)" a step below the artist (#373 H18 C2).
+    QCOMPARE(album->property("color").value<QColor>().rgba(),
+             panel->property("uiPalette").value<QObject *>()->property("textSecondary").value<QColor>().rgba());
     QTRY_COMPARE(tail->property("text").toString(), QStringLiteral(" (2024)"));
     QVERIFY(shown(tail));
     QCOMPARE(sceneRect(tail).top(), sceneRect(album).top());
@@ -1649,6 +1652,28 @@ void UiMainWindowTest::nowPlayingLargeFontCompactIsAHeaderRow() {
     QVERIFY(sceneRect(tail).left() > sceneRect(album).left() + album->width() / 2);
     QVERIFY(panel->property("textTruncated").toBool());
     QTRY_VERIFY(settled());
+    QCOMPARE(geometry(), before);
+    checkFootLines();
+
+    // Under a title on one line, an artist too long for one line takes the
+    // line the title leaves, whole, inside the cover's height; the block
+    // stays (#373 H18 C2: it was cut off with a line free).
+    bridge->setProperty("currentTrackTitle", QStringLiteral("Dusk"));
+    // The fewest words that take a second line.
+    for (QString words = QStringLiteral("Quiet"); words.size() < 200; words += QStringLiteral(" Quiet")) {
+        bridge->setProperty("currentTrackArtist", words);
+        QCoreApplication::processEvents();
+        if (artist->property("lineCount").toInt() == 2) {
+            break;
+        }
+    }
+    QTRY_COMPARE(title->property("lineCount").toInt(), 1);
+    QTRY_COMPARE(artist->property("lineCount").toInt(), 2);
+    QTRY_VERIFY2(!artist->property("truncated").toBool(), qPrintable(artist->property("text").toString()));
+    QTRY_VERIFY(settled());
+    QTRY_VERIFY2(sceneRect(artist).bottom() <= coverRect.bottom() + 1.0,
+                 qPrintable(QStringLiteral("the artist ends at %1, the cover at %2")
+                                .arg(sceneRect(artist).bottom()).arg(coverRect.bottom())));
     QCOMPARE(geometry(), before);
     checkFootLines();
 

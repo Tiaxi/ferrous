@@ -1048,11 +1048,12 @@ Item {
     // whole width (#373 H16 I1: beside a 132 px cover, six lines left the
     // cover with some 160 px empty under it, the year on a line of its own
     // and the artist cut off). The cover at the top left, the title, on up
-    // to two lines, and the artist, on one, elided, beside it, 12 px after
-    // it, from its top, the cover as high as they are at their most
-    // (compactCoverSize); then, footGap under the cover, at the panel's
-    // inset and on its whole width, "Album (Year)" on one line, the album
-    // cut off before its year, and the details, on one line. The block is
+    // to two lines, and the artist, on one, elided, or two under a title
+    // on one, beside it, 12 px after it, from its top, the cover as high as
+    // they are at their most (compactCoverSize); then, footGap under the
+    // cover, at the panel's inset and on its whole width, "Album (Year)" on
+    // one line, the album cut off before its year, in textSecondary, and
+    // the details, on one line. The block is
     // one height for every track (compactHeaderHeight): a line a track has
     // no text for keeps its row, so a track with a title alone reads as a
     // header row, and a track change does not move the library.
@@ -1285,6 +1286,8 @@ Item {
         property int maximumLineCount: 1
         readonly property bool wraps: line.maximumLineCount > 1
         readonly property bool truncated: stillText.truncated
+        // The lines the playing track's text takes.
+        readonly property int textLineCount: stillText.lineCount
 
         readonly property var before: root.outgoing !== null
             ? (root.outgoing.lines[line.lineKey] || null) : null
@@ -1747,8 +1750,12 @@ Item {
                 text: root.trackLines.artist
                 pointSize: root.uiPalette.smallPointSize
                 // Two lines under the cover; one beside it, elided, with
-                // the whole of it in the tooltip.
-                maximumLineCount: root.narrowStacked ? 2 : 1
+                // the whole of it in the tooltip. In the compact header the
+                // title and the artist share the lines beside the cover:
+                // under a title on one line, the artist may take two (#373
+                // H18 C2: a long artist was cut off with a line free).
+                maximumLineCount: root.narrowStacked
+                    || (root.compactHeader && narrowTitle.textLineCount < 2) ? 2 : 1
                 width: narrowColumn.width
                 keepsRow: root.compactHeader
             }
@@ -1771,6 +1778,10 @@ Item {
                 text: root.trackLines.narrowAlbum
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
+                // Under the compact header, a step below the artist and
+                // above the details, as the wide layout's lines are ranked
+                // (#373 H18 C2).
+                color: root.compactHeader ? root.uiPalette.textSecondary : root.uiPalette.text
                 // Under the cover, and beside it in the compact layout, the
                 // year goes onto a second line with the album's end; under
                 // the compact header, on the whole width, one line.
