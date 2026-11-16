@@ -2097,6 +2097,9 @@ void UiMainWindowTest::nowPlayingWideBlockIsOneHeightForEveryTrack() {
                              sceneRect(header), sceneRect(title), sceneRect(artistAlbum), sceneRect(details)};
     };
     QTRY_VERIFY(!handover->property("running").toBool());
+    // The sidebar lays the panel out at its height before the next frame:
+    // the last frame of the growth may still show a pixel short of it.
+    QTRY_COMPARE(panel->height(), panel->implicitHeight());
     const QList<QRectF> tagged = geometry();
     if (pointSize == 10.0) {
         QCOMPARE(tagged.first().height(), 82.0);
