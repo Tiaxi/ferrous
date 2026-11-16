@@ -552,7 +552,7 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY2(sameColor(colorOf(spectrogram, "plotText"), fromHex(QStringLiteral("#ececec"))), qPrintable(colorOf(spectrogram, "plotText").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#ececec")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "plotLink"), fromHex(QStringLiteral("#7cc8f0"))), qPrintable(colorOf(spectrogram, "plotLink").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#7cc8f0")).name(QColor::HexArgb)));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterTrough"), fromHex(QStringLiteral("#30244a"))), qPrintable(colorOf(spectrogram, "meterTrough").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#2b1f43")).name(QColor::HexArgb)));
-    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#8f87a3"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#8f87a3")).name(QColor::HexArgb)));
+    QVERIFY2(sameColor(colorOf(spectrogram, "meterFill"), fromHex(QStringLiteral("#c149a0"))), qPrintable(colorOf(spectrogram, "meterFill").name(QColor::HexArgb) + QStringLiteral(" vs #c149a0")));
     QVERIFY2(sameColor(colorOf(spectrogram, "meterPeak"), fromHex(QStringLiteral("#f4f4f6"))), qPrintable(colorOf(spectrogram, "meterPeak").name(QColor::HexArgb) + QStringLiteral(" vs ") + fromHex(QStringLiteral("#f4f4f6")).name(QColor::HexArgb)));
     // A checked button: the accent, its glyph the floor; focus: the dark
     // theme's focus ring.
@@ -586,6 +586,18 @@ void UiFoundationsTest::plotColorsFollowThePlot() {
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterTrough"), colorOf(spectrogram, "meterSeam")) >= 1.3);
     QVERIFY(contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "plotBg"))
             < contrastRatio(colorOf(spectrogram, "plotText"), colorOf(spectrogram, "plotBg")));
+    // The meter's rungs, the app icon's harmonic magenta, read on their
+    // trough, at 3:1 (#373 H15 H2: the colour map's #c20055 was 2.32:1),
+    // and are not the clip lamp's red: some 30 degrees of hue apart.
+    {
+        const double rungs = contrastRatio(colorOf(spectrogram, "meterFill"), colorOf(spectrogram, "meterTrough"));
+        QVERIFY2(rungs >= 3.0, qPrintable(QString::number(rungs)));
+        const QColor clip = colorOf(tokens, "negative");
+        const int hueApart = std::abs(colorOf(spectrogram, "meterFill").hslHue() - clip.hslHue());
+        QVERIFY2(std::min(hueApart, 360 - hueApart) >= 30,
+                 qPrintable(QStringLiteral("%1 against the clip lamp's %2")
+                                .arg(colorOf(spectrogram, "meterFill").name(), clip.name())));
+    }
     // A viewer's title strip is opaque (#373 H5: the playhead showed through
     // it): the plate on black, neutral as the plate is, and the view on the
     // waveform.

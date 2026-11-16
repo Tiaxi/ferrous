@@ -260,11 +260,12 @@ QtObject {
         plotTick: Qt.rgba(236 / 255, 236 / 255, 236 / 255, 0.75)
         plotLink: "#7cc8f0"
         // In the colour map's violet, not neutral grey, so the meter reads
-        // as part of the plot. The fill takes the colour map's colour of
-        // its level (LevelMeterItem's colorMapFill); meterFill is its
-        // colour without one. The trough is 1.3:1 on the floor.
+        // as part of the plot. The trough is 1.3:1 on the floor; the rungs
+        // are the app icon's harmonic magenta, 3.2:1 on it (#373 H15 H2:
+        // the colour map's capped #c20055 was 2.3:1) and clearly not the
+        // clip lamp's red.
         meterTrough: "#30244a"
-        meterFill: "#8f87a3"
+        meterFill: "#c149a0"
         meterSeam: "#0a0318"
         meterPeak: "#f4f4f6"
         meterClipOff: Qt.rgba(1, 1, 1, 0.2)

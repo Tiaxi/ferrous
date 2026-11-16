@@ -22,7 +22,6 @@
 #include <memory>
 #include <utility>
 #include <vector>
-#include "SpectrogramColorMap.h"
 #include "TestPlatform.h"
 #include "TestSessionIsolation.h"
 #include "WaveformReaderLog.h"
@@ -230,24 +229,6 @@ struct ReferenceMeter {
     std::size_t bins{0};
 };
 
-// The level `pixels` device pixels up a scale `scalePixels` tall: the
-// inverse of LevelMeterItem::meterPosition, by bisection.
-double levelAtPixels(double pixels, double scalePixels) {
-    double low = LevelMeterItem::kFloorDb;
-    double high = 0.0;
-    for (int i = 0; i < 60; ++i) {
-        const double middle = (low + high) / 2.0;
-        (LevelMeterItem::meterPosition(middle, scalePixels) < pixels ? low : high) = middle;
-    }
-    return (low + high) / 2.0;
-}
-
-// The colour-map fill's colour of the row `row` device pixels up a scale
-// `scalePixels` tall: the map's colour of the level at the row's middle.
-QColor rampColor(int row, double scalePixels, double dbRange) {
-    return LevelMeterItem::colorMapColor(levelAtPixels(row + 0.5, scalePixels), dbRange);
-}
-
 // Whether the row `row` device pixels up the scale, at `dpr` device pixels
 // to the logical one, is on one of the fill's rungs: 2 px of every 3 from
 // the scale's foot (#373 H14 G3).
@@ -263,14 +244,10 @@ int rungAtOrUnder(int row, double dpr) {
     return row;
 }
 
-// The colour the fill draws at `row`: on a rung, the colour map's, or
-// `fill` for a fill of one colour; between rungs, the trough.
-QColor ladderColor(int row, double dpr, double scalePixels, double dbRange, const QColor &trough,
-                   const QColor &fill = QColor()) {
-    if (!onRung(row, dpr)) {
-        return trough;
-    }
-    return fill.isValid() ? fill : rampColor(row, scalePixels, dbRange);
+// The colour the fill draws at `row`: on a rung, `fill`; between rungs,
+// the trough.
+QColor ladderColor(int row, double dpr, const QColor &trough, const QColor &fill) {
+    return onRung(row, dpr) ? fill : trough;
 }
 
 // A meter drawn offscreen at `dpr` device pixels to a logical one, through
@@ -330,9 +307,9 @@ private slots:
     void sceneGraphDrawsAColumnPerLane();
     void topSeamCrossesTheColumnOnlyWhenSet();
     void meterIsPartOfThePlot();
-    void colorMapFillIsARamp_data();
-    void colorMapFillIsARamp();
-    void loudFillIsCappedAndItsPeakIsFull();
+    void fillIsALadderOfOneColour_data();
+    void fillIsALadderOfOneColour();
+    void loudFillIsOneColourAndItsPeakIsFull();
     void stoppedMeterIsAnEmptyTrough();
     void oneLaneShowsTheLoudestChannel();
     void readoutGivesExactLevelsOnlyToReaders();
@@ -847,54 +824,12 @@ void LevelMeterTest::topSeamCrossesTheColumnOnlyWhenSet() {
 }
 
 // The meter as part of the plot (#373 H7 P11, H8): its bar out to the
-// column's right edge, with no strip of the plot's floor beside it; on the
-// spectrogram, the fill in the colour map's colour of its level, up to the
-// map's magenta, never its red, orange or yellow (#373 H14 G3); the
-// scale's ticks only while the plot shows its scale, fewer in a short
-// lane; the peak tick a mark of its own on any fill.
+// column's right edge, with no strip of the plot's floor beside it; the
+// fill of one colour from its foot to its level (#373 H15 H2: the colour
+// map's capped magenta was one colour at nearly every level, and 2.3:1 on
+// the trough); the scale's ticks only while the plot shows its scale,
+// fewer in a short lane; the peak tick a mark of its own on any fill.
 void LevelMeterTest::meterIsPartOfThePlot() {
-    // The colour map's colours, darker for quieter levels, from the
-    // spectrogram's mapping: -60 dBFS is a magenta in its default 132 dB
-    // range, at the cap already, and in a 50 dB range under its floor.
-    const QColor quiet = LevelMeterItem::colorMapColor(-60, 132);
-    const QColor middle = LevelMeterItem::colorMapColor(-40, 132);
-    const QColor loud = LevelMeterItem::colorMapColor(-3, 132);
-    const auto lightness = [](const QColor &color) { return LevelMeterItem::lightness(color); };
-    QVERIFY(lightness(quiet) <= lightness(middle) && lightness(middle) <= lightness(loud));
-    QVERIFY(lightness(LevelMeterItem::colorMapColor(-45, 50)) < lightness(LevelMeterItem::colorMapColor(-35, 50)));
-    QVERIFY2(quiet.red() > quiet.green() && quiet.blue() > quiet.green(), qPrintable(quiet.name()));
-    // Over the cap, along the ramp (#373 H9 T2, H14 G3): full scale, and
-    // every level over the cap, takes the map's own colour at the cap, its
-    // magenta at or under the stop at 0.55, not its red, orange or yellow,
-    // which was louder than the plot's data and the amber playhead.
-    const double capPosition = LevelMeterItem::kFillCapPosition;
-    QVERIFY(capPosition <= 0.55);
-    const QColor capColor = QColor::fromRgb(SpectrogramColorMap::colorAt(capPosition));
-    const QColor top = LevelMeterItem::colorMapColor(0, 132);
-    QCOMPARE(top, capColor);
-    QVERIFY2(top.red() > 0x80 && top.green() == 0 && top.blue() > 0x40 && top.blue() < top.red(),
-             qPrintable(top.name()));
-    QCOMPARE(LevelMeterItem::colorMapColor(-8, 132), capColor);
-    QCOMPARE(LevelMeterItem::colorMapColor(-15, 50), capColor);
-    // Every fill is a colour of the map: under the cap its level's own,
-    // over it the cap's, never a scaled one; none with green in it, as
-    // the map's red, orange, yellow and white have.
-    for (const double range : {50.0, 90.0, 132.0, 150.0}) {
-        for (double db = -60; db <= 0; db += 0.5) {
-            const QColor mapped = QColor::fromRgb(SpectrogramColorMap::colorOfLevel(db, range));
-            const QColor fill = LevelMeterItem::colorMapColor(db, range);
-            const QString where = QStringLiteral("%1 dB in %2: %3").arg(db).arg(range).arg(fill.name());
-            QVERIFY2(fill.green() == 0 && lightness(fill) <= lightness(capColor), qPrintable(where));
-            if (SpectrogramColorMap::position(db, range) <= capPosition) {
-                QCOMPARE(fill, mapped);
-            } else {
-                QCOMPARE(fill, capColor);
-            }
-        }
-    }
-    // In a narrower range, whose floor is nearer, a level is lower on the
-    // map, as the spectrogram draws it.
-    QVERIFY(lightness(LevelMeterItem::colorMapColor(-40, 60)) < lightness(middle));
     // The ticks: four in a full lane, two in a short one.
     QCOMPARE(LevelMeterItem::ticksDb(200), (std::vector<double>{0, -12, -24, -48}));
     QCOMPARE(LevelMeterItem::ticksDb(50), (std::vector<double>{-12, -24}));
@@ -914,7 +849,6 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     item.setClipOffColor(QColor(0x60, 0x00, 0x00));
     item.setGapColor(QColor(0x80, 0x00, 0x00));
     item.setTickColor(QColor(0x90, 0x00, 0x00));
-    item.setColorMapFill(true);
     view.show();
     QTRY_VERIFY(view.isExposed());
     for (int lanes : {1, 6}) {
@@ -954,20 +888,14 @@ void LevelMeterTest::meterIsPartOfThePlot() {
                                      qPrintable(where + QStringLiteral(": x %1").arg(x)));
                         }
                     }
-                    // The fill, a ramp of the map's colours: at its bottom
-                    // the colour of the floor's level, at its top rung that
-                    // of its own (#373 H10 V2).
+                    // The fill, of one colour: at its bottom rung and at its
+                    // top one.
                     const double scalePixels = scaleHeight * scale;
                     const int rows = qRound(LevelMeterItem::meterPosition(level, scalePixels));
                     const int topRung = rungAtOrUnder(rows - 1, scale);
-                    for (const auto &[y, row] : {std::pair{meterBottom - 0.5 / scale, 0},
-                                                 std::pair{meterBottom - (topRung + 0.5) / scale, topRung}}) {
-                        const QColor fill = color(5, y);
-                        const QColor wanted = rampColor(row, scalePixels, 132);
-                        QVERIFY2(std::abs(fill.red() - wanted.red()) <= 8 && std::abs(fill.green() - wanted.green()) <= 8
-                                     && std::abs(fill.blue() - wanted.blue()) <= 8,
-                                 qPrintable(where + QStringLiteral(": fill %1 at y %2, the map %3")
-                                                        .arg(fill.name()).arg(y).arg(wanted.name())));
+                    for (const double y : {meterBottom - 0.5 / scale, meterBottom - (topRung + 0.5) / scale}) {
+                        QVERIFY2(color(5, y) == QColor(0x40, 0x00, 0x00),
+                                 qPrintable(where + QStringLiteral(": fill %1 at y %2").arg(color(5, y).name()).arg(y)));
                     }
                     // The ticks only with the scale, where they are; the
                     // trough or the fill without.
@@ -1011,15 +939,16 @@ void LevelMeterTest::meterIsPartOfThePlot() {
     // Under the gap, the fill's rungs.
     bool rungUnder = false;
     for (const double y : {tickY + 3.5, tickY + 4.5, tickY + 5.5}) {
-        rungUnder = rungUnder || image.pixelColor(int(5 * scale), int(y * scale)).red() > 0x80;
+        rungUnder = rungUnder || image.pixelColor(int(5 * scale), int(y * scale)).red() == 0x40;
     }
     QVERIFY(rungUnder);
 }
 
-// The colour map's fill, loud, in the plot's colours (#373 H8, H14 G3): no
-// pixel of it past the map's magenta at kFillCapPosition, so the meter is
-// not louder than the plot's data; its peak tick at full brightness.
-void LevelMeterTest::loudFillIsCappedAndItsPeakIsFull() {
+// A loud fill, in the spectrogram's colours (#373 H8, H14 G3, H15 H2):
+// every rung, up to the level, in the one fill colour, the app icon's
+// magenta, the trough between them, nothing of another colour; its peak
+// tick at full brightness.
+void LevelMeterTest::loudFillIsOneColourAndItsPeakIsFull() {
     constexpr double width = LevelMeterItem::kColumnWidth;
     QQuickWindow view;
     view.resize(int(width), 300);
@@ -1027,74 +956,53 @@ void LevelMeterTest::loudFillIsCappedAndItsPeakIsFull() {
     LevelMeterItem item(view.contentItem());
     item.setSize(QSizeF(width, 300));
     item.setActive(true);
+    const QColor trough(0x30, 0x24, 0x4a);
+    const QColor fillColor(0xc1, 0x49, 0xa0);
     item.setBackgroundColor(Qt::black);
     item.setSeamColor(QColor(0x0a, 0x03, 0x18));
-    item.setTroughColor(QColor(0x2b, 0x1f, 0x43));
+    item.setTroughColor(trough);
+    item.setFillColor(fillColor);
     item.setGapColor(QColor(0x0a, 0x03, 0x18));
     item.setPeakColor(Qt::white);
     item.setClipOffColor(QColor(0x33, 0x33, 0x33));
     item.setClipColor(QColor(0xed, 0x5a, 0x6a));
-    item.setColorMapFill(true);
     view.show();
     QTRY_VERIFY(view.isExposed());
-    for (const double range : {50.0, 132.0, 150.0}) {
-        for (const double level : {-6.0, -1.0, -0.01}) {
-            item.setDbRange(range);
-            item.setLaneCount(1);
-            item.setChannelCountHint(1);
-            item.m_channels.assign(1, {});
-            item.m_channels[0].observe(level, 0);
-            item.m_shown = item.m_channels;
-            item.update();
-            const QImage image = view.grabWindow();
-            QVERIFY(!image.isNull());
-            const double scale = double(image.width()) / view.width();
-            const double meterBottom = 300 - 3;
-            const double scaleHeight = 300 - 6 - 3 - 1;
-            // On the scale, under the lamp and its gap.
-            const double tickY = std::max(3.0 + LevelMeterItem::kLampHeight + 1.0,
-                std::round(meterBottom - LevelMeterItem::meterPosition(level, scaleHeight) - 1.0));
-            const QString where = QStringLiteral("%1 dB in %2").arg(level).arg(range);
-            // The peak tick, white, across the bar.
-            for (double x = LevelMeterItem::kBarLeft + 0.5; x < width; x += 1) {
-                QVERIFY2(image.pixelColor(int(x * scale), int((tickY + 0.5) * scale)) == QColor(Qt::white),
-                         qPrintable(where));
-            }
-            // The fill, under the tick and its gap, its lightest pixel at
-            // the cap, and nothing of the map's orange or yellow in it.
-            const QColor capColor = QColor::fromRgb(SpectrogramColorMap::colorAt(LevelMeterItem::kFillCapPosition));
-            double lightest = 0.0;
-            for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); ++y) {
-                for (int x = int(LevelMeterItem::kBarLeft * scale); x < image.width(); ++x) {
-                    const QColor pixel = image.pixelColor(x, y);
-                    lightest = std::max(lightest, LevelMeterItem::lightness(pixel));
-                    QVERIFY2(pixel.green() < 0x40, qPrintable(where + QStringLiteral(": %1").arg(pixel.name())));
-                }
-            }
-            QVERIFY2(std::abs(lightest - LevelMeterItem::lightness(capColor)) < 1e-6,
-                     qPrintable(where + QStringLiteral(": %1").arg(lightest)));
-            // Each rung of the fill is the map's colour of its level, and
-            // loud, over the cap, the map's colour at the cap, unscaled
-            // (#373 H9 T2, H10 V2); the trough between the rungs.
-            const double scalePixels = scaleHeight * scale;
-            const QColor trough(0x2b, 0x1f, 0x43);
-            for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); y += 7) {
-                const QColor pixel = image.pixelColor(int(8 * scale), y);
-                const QColor wanted = ladderColor(int(meterBottom * scale) - 1 - y, scale, scalePixels, range, trough);
-                QVERIFY2(pixel == wanted, qPrintable(where + QStringLiteral(": y %1 is %2, wanted %3")
-                                                         .arg(y).arg(pixel.name(), wanted.name())));
-            }
-            const int topRow = rungAtOrUnder(int(meterBottom * scale) - 1 - int((tickY + 3) * scale), scale);
-            const QColor topmost = image.pixelColor(int(8 * scale), int(meterBottom * scale) - 1 - topRow);
-            if (SpectrogramColorMap::position(level - 1.0, range) > LevelMeterItem::kFillCapPosition) {
-                QVERIFY2(topmost == capColor, qPrintable(where + QStringLiteral(": top %1, the cap %2")
-                                                             .arg(topmost.name(), capColor.name())));
+    for (const double level : {-6.0, -1.0, -0.01}) {
+        item.setLaneCount(1);
+        item.setChannelCountHint(1);
+        item.m_channels.assign(1, {});
+        item.m_channels[0].observe(level, 0);
+        item.m_shown = item.m_channels;
+        item.update();
+        const QImage image = view.grabWindow();
+        QVERIFY(!image.isNull());
+        const double scale = double(image.width()) / view.width();
+        const double meterBottom = 300 - 3;
+        const double scaleHeight = 300 - 6 - 3 - 1;
+        // On the scale, under the lamp and its gap.
+        const double tickY = std::max(3.0 + LevelMeterItem::kLampHeight + 1.0,
+            std::round(meterBottom - LevelMeterItem::meterPosition(level, scaleHeight) - 1.0));
+        const QString where = QStringLiteral("%1 dB").arg(level);
+        // The peak tick, white, across the bar.
+        for (double x = LevelMeterItem::kBarLeft + 0.5; x < width; x += 1) {
+            QVERIFY2(image.pixelColor(int(x * scale), int((tickY + 0.5) * scale)) == QColor(Qt::white),
+                     qPrintable(where));
+        }
+        // Under the tick and its gap, the rungs in the fill's colour and
+        // the trough between them, across the bar.
+        for (int y = int((tickY + 3) * scale); y < int(meterBottom * scale); ++y) {
+            const QColor wanted = ladderColor(int(meterBottom * scale) - 1 - y, scale, trough, fillColor);
+            for (int x = int(LevelMeterItem::kBarLeft * scale); x < image.width(); ++x) {
+                const QColor pixel = image.pixelColor(x, y);
+                QVERIFY2(pixel == wanted, qPrintable(where + QStringLiteral(": %1, %2 is %3, wanted %4")
+                                                         .arg(x).arg(y).arg(pixel.name(), wanted.name())));
             }
         }
     }
 }
 
-void LevelMeterTest::colorMapFillIsARamp_data() {
+void LevelMeterTest::fillIsALadderOfOneColour_data() {
     QTest::addColumn<double>("dpr");
     QTest::addColumn<double>("level");
     for (const double dpr : {1.0, 2.0}) {
@@ -1104,13 +1012,11 @@ void LevelMeterTest::colorMapFillIsARamp_data() {
     }
 }
 
-// On the spectrogram, the fill is a ramp of the plot's colour map (#373 H10
-// V2): each row of its rungs, from the bottom up to the level, takes the
-// map's colour of the level at that row, up to the cap, and the trough
-// shows between them (#373 H14 G3); above the level, only the trough and
-// the peak tick. In a 50 dB range, where the quiet levels are under the
-// cap.
-void LevelMeterTest::colorMapFillIsARamp() {
+// The fill is a ladder of one colour (#373 H14 G3, H15 H2): each row of its
+// rungs, from the bottom up to the level, in the fill's colour, the trough
+// between them; above the level, only the trough and the peak tick; at 1x
+// and 2x.
+void LevelMeterTest::fillIsALadderOfOneColour() {
     QFETCH(double, dpr);
     QFETCH(double, level);
     constexpr double width = LevelMeterItem::kColumnWidth;
@@ -1131,8 +1037,6 @@ void LevelMeterTest::colorMapFillIsARamp() {
     item.setClipOffColor(QColor(0x60, 0x00, 0x00));
     item.setGapColor(gap);
     item.setTickColor(QColor(0x90, 0x00, 0x00));
-    item.setColorMapFill(true);
-    item.setDbRange(50);
     item.setLaneCount(1);
     item.setChannelCountHint(1);
     item.m_channels.assign(1, {});
@@ -1153,10 +1057,11 @@ void LevelMeterTest::colorMapFillIsARamp() {
     QVERIFY(rows > 10);
     const auto pixel = [&](int x, int row) { return image.pixelColor(x, meterBottom - 1 - row); };
     const int barLeft = int(LevelMeterItem::kBarLeft * dpr);
-    // Every row of the fill, across the bar: a rung's in the map's colour,
+    // Every row of the fill, across the bar: a rung's in the fill's colour,
     // a gap's the trough.
+    const QColor fill(0x40, 0x00, 0x00);
     for (int row = 0; row < rows; ++row) {
-        const QColor wanted = ladderColor(row, dpr, scalePixels, 50, trough);
+        const QColor wanted = ladderColor(row, dpr, trough, fill);
         for (int x = barLeft; x < image.width(); ++x) {
             QVERIFY2(pixel(x, row) == wanted, qPrintable(QStringLiteral("row %1, x %2: %3, wanted %4")
                 .arg(row).arg(x).arg(pixel(x, row).name(), wanted.name())));
@@ -1165,14 +1070,6 @@ void LevelMeterTest::colorMapFillIsARamp() {
     // Rungs of 2 px on a 3 px pitch, in logical pixels, from the foot.
     for (int row = 0; row < int(12 * dpr); ++row) {
         QCOMPARE(pixel(barLeft, row) != trough, int(row / dpr) % 3 < 2);
-    }
-    // A ramp: lighter towards the level, and never over the cap.
-    const auto lightness = [&](int row) { return LevelMeterItem::lightness(pixel(barLeft, rungAtOrUnder(row, dpr))); };
-    const double cap = LevelMeterItem::lightness(QColor::fromRgb(SpectrogramColorMap::colorAt(LevelMeterItem::kFillCapPosition)));
-    QVERIFY(lightness(rows / 4) <= lightness(rows / 2) && lightness(rows / 2) <= lightness(rows - 1));
-    QVERIFY(lightness(0) < lightness(rows - 1));
-    for (int row = 0; row < rows; ++row) {
-        QVERIFY2(LevelMeterItem::lightness(pixel(barLeft, row)) <= cap + 1e-6, qPrintable(QString::number(row)));
     }
     // Above the level, the trough and the peak tick only.
     int peakRows = 0;
