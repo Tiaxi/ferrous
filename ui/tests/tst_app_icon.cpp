@@ -128,13 +128,28 @@ QRect tileOf(const QImage &image) {
     return tile;
 }
 
+// The sizes drawn as a smaller size's drawing in a larger canvas, as Breeze
+// draws its 24 px icons: 24 px the 22 px drawing moved a pixel in (#373 hill
+// climb, H22). The size whose drawing a size has: its own, or that one.
+int drawnAs(int size) {
+    switch (size) {
+    case 24:
+        return 22;
+    default:
+        return size;
+    }
+}
+
 // Breeze's app-icon margin around the tile at each size: 1 px at 16, 2 px at
 // 22 and 32, 4 px at 48 and 6 px at 64, as Breeze's own app icons sit, and in
-// proportion above.
+// proportion above; 3 px at 24, the 22 px drawing's 2 and the pixel it moves
+// in.
 int breezeMargin(int size) {
     switch (size) {
     case 16:
         return 1;
+    case 24:
+        return 3;
     case 22:
     case 32:
         return 2;
@@ -145,14 +160,14 @@ int breezeMargin(int size) {
     }
 }
 
-// The sizes drawn on the pixel grid, 16 and 22 px: each trace a closed shape
+// The sizes drawn on the pixel grid, 16, 22 and 24 px: each trace a closed shape
 // with every vertex on a whole pixel, so that its flats are crisp and only
 // its climbs, a row a column at most, are antialiased (#373 hill climb,
 // H18). From 32 px, where the third trace comes in, the traces are smooth
 // curves (H20: H19's whole-pixel stairs at 32 and 48 px read as aliased
 // beside Breeze's icons, and changed idiom between 48 and 64 px).
 bool onPixelGrid(int size) {
-    return size <= 22;
+    return size <= 24;
 }
 
 // The traces' colours, lowest first: the fundamental and two harmonics from
@@ -199,9 +214,10 @@ QStringList traceIds(int size) {
 // How tall each trace is in every column on the pixel grid, lowest first:
 // two 2 px strokes at 16 and 22 px (H18: a 1 px harmonic broke into dots),
 // the fundamental 3 px at 22 px, so that the amber outweighs the magenta
-// harmonic that rises across more of the tile (#373 hill climb, H21).
+// harmonic that rises across more of the tile (#373 hill climb, H21), and
+// so at 24 px, the 22 px drawing.
 std::vector<int> strokeHeights(int size) {
-    if (size == 22) {
+    if (drawnAs(size) == 22) {
         return {3, 2};
     }
     return {2, 2};
@@ -495,8 +511,9 @@ double widthAcross(const QImage &trace, int start, int end) {
 // The sizes with a drawing of their own for their slot at 2x scaling: 16 and
 // 22 px doubled, and 32 and 48 px with the 64 px composition (#373 hill
 // climb, H21: Qt's theme took the scalable drawing there, with a 1 device px
-// rim where the 16 and 22 px slots had 2).
-constexpr std::array<int, 4> kDoubledSizes{16, 22, 32, 48};
+// rim where the 16 and 22 px slots had 2); 24 px the 22 px slot's moved in
+// (H22).
+constexpr std::array<int, 5> kDoubledSizes{16, 22, 24, 32, 48};
 
 // The drawing for a size's slot at 2x scaling.
 QString doubledPath(int size) {
@@ -546,11 +563,15 @@ private slots:
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
     void doubledSlotsFrom32pxDrawThe64pxComposition_data();
     void doubledSlotsFrom32pxDrawThe64pxComposition();
+    void sizesDrawnAsASmallerSize_data();
+    void sizesDrawnAsASmallerSize();
     void windowIconHasEachSizesDrawing();
     void everySizeInstalls_data();
     void everySizeInstalls();
     void iconThemeGivesEachSizeItsDrawing_data();
     void iconThemeGivesEachSizeItsDrawing();
+    void hicolorsOwnIndexPicksTheSlotsDrawings_data();
+    void hicolorsOwnIndexPicksTheSlotsDrawings();
     void desktopFileNamesTheIcon();
 };
 
@@ -579,7 +600,7 @@ void AppIconTest::everySizeIsBuiltIn() {
     QCOMPARE(tile.top(), all.bottom() - tile.bottom());
 
     QVERIFY(QFile::exists(FerrousAppIcon::resourcePath(0)));
-    QCOMPARE(FerrousAppIcon::resourcePath(24), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
+    QCOMPARE(FerrousAppIcon::resourcePath(40), QStringLiteral(":/icons/hicolor/scalable/apps/ferrous.svg"));
 }
 
 // The tile has a rim lighter than itself just inside its edge, so that it
@@ -716,7 +737,7 @@ void AppIconTest::tracesStandOnThePlainTile() {
     const int top = lowest + (onPixelGrid(size) ? 1 : 2);
     const int corner = std::max(2, size / 8);
     const QRect below(tile.left() + corner, top, tile.width() - 2 * corner, insideRim(tile).bottom() - top + 1);
-    QVERIFY2(below.height() >= (size > 22 ? 2 : 1), qPrintable(QString::number(lowest)));
+    QVERIFY2(below.height() >= (onPixelGrid(size) ? 1 : 2), qPrintable(QString::number(lowest)));
     QCOMPARE(countWhere(image, below, [](QRgb p) { return near(p, kTile, 4); }), below.width() * below.height());
 
     // Every mark rises: none is a flat band or line under the traces.
@@ -1382,11 +1403,12 @@ void AppIconTest::smallCurvesAreEvenAndEndOnWholeRows() {
 // a share of the tile inside the rim, falls from each size to the next
 // (#373 hill climb, H19: at 48 px it dipped below 64 px's, and 32 px read
 // bolder than 48). From 22 px: at 16 px the grid's 2 px is the least a
-// stroke can be, and 22 px's 3 px is a larger share (H21).
+// stroke can be, and 22 px's 3 px is a larger share (H21). A size drawn as a
+// smaller size's drawing, moved in, has that one's (sizesDrawnAsASmallerSize).
 void AppIconTest::fundamentalThinsSmoothlyWithSize() {
     double before = -1;
     for (const int size : FerrousAppIcon::kSizes) {
-        if (size == 16) {
+        if (size == 16 || drawnAs(size) != size) {
             continue;
         }
         const QString path = FerrousAppIcon::resourcePath(size);
@@ -1615,6 +1637,7 @@ void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
     QTest::addColumn<int>("size");
     QTest::addRow("16px@2") << 16;
     QTest::addRow("22px@2") << 22;
+    QTest::addRow("24px@2") << 24;
 }
 
 // A 16 or 22 px slot at 2x scaling shows the drawing it shows at 1x, doubled
@@ -1773,6 +1796,47 @@ void AppIconTest::doubledSlotsFrom32pxDrawThe64pxComposition() {
     }
 }
 
+void AppIconTest::sizesDrawnAsASmallerSize_data() {
+    QTest::addColumn<QString>("path");
+    QTest::addColumn<QString>("from");
+    QTest::addColumn<int>("size");
+    QTest::addColumn<int>("smaller");
+    QTest::addRow("24px") << FerrousAppIcon::resourcePath(24) << FerrousAppIcon::resourcePath(22) << 24 << 22;
+    QTest::addRow("24px@2") << doubledPath(24) << doubledPath(22) << 48 << 44;
+}
+
+// The 24 px drawing is the 22 px one moved a pixel in on a 24 px canvas, as
+// Breeze draws its 24 px icons, and its 2x the 22 px slot's 2x moved two
+// (#373 hill climb, H22: the slot took the 32 px drawing scaled down, three
+// thin traces, or the 22 px one scaled up): pixel for pixel the same,
+// moved, with nothing else on the canvas.
+void AppIconTest::sizesDrawnAsASmallerSize() {
+    QFETCH(QString, path);
+    QFETCH(QString, from);
+    QFETCH(int, size);
+    QFETCH(int, smaller);
+    QCOMPARE(QImageReader(path).size(), QSize(size, size));
+    const QImage image = render(path, size);
+    const QImage source = render(from, smaller);
+    const int offset = (size - smaller) / 2;
+    int largest = 0;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const QPoint at(x - offset, y - offset);
+            const QRgb expected = source.rect().contains(at) ? source.pixel(at) : qRgba(0, 0, 0, 0);
+            const QRgb shown = image.pixel(x, y);
+            if (qAlpha(expected) == 0 && qAlpha(shown) == 0) {
+                continue;
+            }
+            largest = std::max({largest, std::abs(qRed(shown) - qRed(expected)), std::abs(qGreen(shown) - qGreen(expected)),
+                                std::abs(qBlue(shown) - qBlue(expected)), std::abs(qAlpha(shown) - qAlpha(expected))});
+        }
+    }
+    QVERIFY2(largest <= 2, qPrintable(QString::number(largest)));
+    // Its tile in the canvas's middle, the margin the moved pixels wider.
+    QCOMPARE(tileOf(image), tileOf(source).translated(offset, offset));
+}
+
 void AppIconTest::windowIconHasEachSizesDrawing() {
     const QIcon icon = FerrousAppIcon::icon();
     QVERIFY(!icon.isNull());
@@ -1874,6 +1938,83 @@ void AppIconTest::iconThemeGivesEachSizeItsDrawing() {
     const QImage shown = icon.pixmap(QSize(size, size), scale).toImage().convertToFormat(QImage::Format_ARGB32);
     const QString directory = scale == 1 ? QStringLiteral("%1x%1").arg(size) : QStringLiteral("%1x%1@2").arg(size);
     const QImage expected = render(installedIcon(directory), size * scale);
+    QVERIFY2(maxDifference(shown, expected) <= 2, qPrintable(QString::number(maxDifference(shown, expected))));
+}
+
+void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings_data() {
+    QTest::addColumn<int>("size");
+    QTest::addColumn<qreal>("scale");
+    QTest::addColumn<QString>("directory");
+    for (const int size : {16, 22, 32, 48}) {
+        QTest::addRow("%dpx", size) << size << 1.0 << QStringLiteral("%1x%1").arg(size);
+        QTest::addRow("%dpx@2", size) << size << 2.0 << QStringLiteral("%1x%1@2").arg(size);
+        QTest::addRow("%dpx@1.5", size) << size << 1.5 << QStringLiteral("%1x%1@2").arg(size);
+    }
+    // The 22 px directories reach to 24 px, and come first.
+    QTest::addRow("24px") << 24 << 1.0 << QStringLiteral("22x22");
+    QTest::addRow("24px@2") << 24 << 2.0 << QStringLiteral("22x22@2");
+    QTest::addRow("128px") << 128 << 1.0 << QStringLiteral("128x128");
+}
+
+// The hicolor theme's own index, as the hicolor-icon-theme package has it
+// (0.18): its application directories are "Threshold" ones, each serving
+// its size and 2 px either side, and its 256 and 512 px ones scalable from
+// 64 px. Qt's theme lookup, and KDE's, which a Plasma session uses (the
+// same slots, checked by hand), take the first directory that serves a
+// size, at the scale rounded up: so a slot at 1.25x or 1.5x takes the 2x
+// drawing. A 24 px slot takes the 22 px drawing (#373 hill climb, H22: the
+// 24 px directories come after it), as Breeze's own application icons,
+// which have no 24 px drawing, show theirs.
+void AppIconTest::hicolorsOwnIndexPicksTheSlotsDrawings() {
+    if (installPrefix().isEmpty()) {
+        QSKIP("FERROUS_APP_ICON_INSTALL_PREFIX names no install; CTest installs one");
+    }
+    QFETCH(int, size);
+    QFETCH(qreal, scale);
+    QFETCH(QString, directory);
+    QTemporaryDir index;
+    QVERIFY(index.isValid());
+    QVERIFY(QDir(index.path()).mkpath(QStringLiteral("hicolor")));
+    {
+        QString text;
+        QStringList directories;
+        for (const int fixed : {16, 22, 24, 32, 36, 48, 64, 72, 96, 128, 192, 256, 512}) {
+            for (const int dirScale : {1, 2}) {
+                const QString name = QStringLiteral("%1x%1%2/apps").arg(fixed).arg(dirScale == 2 ? QStringLiteral("@2") : QString());
+                directories << name;
+                text += QStringLiteral("[%1]\n").arg(name);
+                if (fixed >= 256) {
+                    text += QStringLiteral("MinSize=64\nSize=%1\nMaxSize=%1\n").arg(fixed);
+                } else {
+                    text += QStringLiteral("Size=%1\n").arg(fixed);
+                }
+                if (dirScale == 2) {
+                    text += QStringLiteral("Scale=2\n");
+                }
+                text += QStringLiteral("Context=Applications\nType=%1\n\n").arg(fixed >= 256 ? QStringLiteral("Scalable") : QStringLiteral("Threshold"));
+            }
+        }
+        directories << QStringLiteral("scalable/apps");
+        text += QStringLiteral("[scalable/apps]\nMinSize=1\nSize=128\nMaxSize=256\nContext=Applications\nType=Scalable\n");
+        text.prepend(QStringLiteral("[Icon Theme]\nName=Hicolor\nDirectories=%1\n\n").arg(directories.join(QLatin1Char(','))));
+        QFile theme(index.filePath(QStringLiteral("hicolor/index.theme")));
+        QVERIFY(theme.open(QIODevice::WriteOnly));
+        QVERIFY(theme.write(text.toUtf8()) > 0);
+    }
+    const QStringList searchPaths = QIcon::themeSearchPaths();
+    const QString themeName = QIcon::themeName();
+    const auto restoreTheme = qScopeGuard([&]() {
+        QIcon::setThemeName(themeName);
+        QIcon::setThemeSearchPaths(searchPaths);
+    });
+    QIcon::setThemeSearchPaths({index.path(), QDir(installPrefix()).filePath(QStringLiteral("share/icons"))});
+    QIcon::setThemeName(QStringLiteral("hicolor"));
+    const QIcon icon = QIcon::fromTheme(QStringLiteral("ferrous"));
+    QVERIFY(!icon.isNull());
+    const QImage shown = icon.pixmap(QSize(size, size), scale).toImage().convertToFormat(QImage::Format_ARGB32);
+    const int device = qRound(size * scale);
+    QCOMPARE(shown.size(), QSize(device, device));
+    const QImage expected = render(installedIcon(directory), device);
     QVERIFY2(maxDifference(shown, expected) <= 2, qPrintable(QString::number(maxDifference(shown, expected))));
 }
 

@@ -91,6 +91,8 @@ podman run --rm \
             /usr/share/icons/hicolor/16x16@2/apps/ferrous.svg \
             /usr/share/icons/hicolor/22x22/apps/ferrous.svg \
             /usr/share/icons/hicolor/22x22@2/apps/ferrous.svg \
+            /usr/share/icons/hicolor/24x24/apps/ferrous.svg \
+            /usr/share/icons/hicolor/24x24@2/apps/ferrous.svg \
             /usr/share/icons/hicolor/32x32/apps/ferrous.svg \
             /usr/share/icons/hicolor/32x32@2/apps/ferrous.svg \
             /usr/share/icons/hicolor/48x48/apps/ferrous.svg \

@@ -13,8 +13,12 @@
 // :/icons/hicolor/scalable/apps/ferrous.svg.
 namespace FerrousAppIcon {
 
-// The pixel sizes with a drawing of their own, smallest first.
-inline constexpr std::array<int, 7> kSizes{16, 22, 32, 48, 64, 128, 256};
+// The pixel sizes with a drawing of their own, smallest first. The 24 px one
+// is the 22 px drawing in a 24 px canvas, as Breeze draws its 24 px icons:
+// the window icon's 24 px slot takes it where it took the 32 px drawing,
+// scaled down. (The hicolor theme's index, whose 22 px directories reach to
+// 24 px, gives the theme's 24 px slot the 22 px drawing first.)
+inline constexpr std::array<int, 8> kSizes{16, 22, 24, 32, 48, 64, 128, 256};
 
 // The built-in drawing for a size in kSizes; any other size gets the
 // scalable drawing.
