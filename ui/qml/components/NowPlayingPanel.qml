@@ -402,6 +402,16 @@ Item {
         && root.artistText.length === 0 && root.albumText.length === 0 && root.detailsText.length === 0
     readonly property string folderText: root.untagged
         ? PathUtils.containingFolderName(root._trimmed(root.uiBridge.currentTrackPath)) : ""
+    // What a file without tags is, for its details line: its container
+    // and its length, "FLAC · 0:40", or the one of them the bridge knows,
+    // in the details' style (#373 H31 Y2: at 24 pt the tag-less card stood
+    // some 100 px empty under the folder). Only for such a file.
+    readonly property string fileFactsText: root.untagged
+        ? root._joined([root._trimmed(root.uiBridge.currentTrackFormatLabel),
+                        root.uiBridge.durationSeconds > 0
+                            ? FormatUtils.formatClockTime(root.uiBridge.durationSeconds) : ""],
+                       root.lineSeparators.details)
+        : ""
     // The mark that starts a line's text where it is the folder's rather
     // than a tag's: the line draws it in textSecondary, without the mark
     // (LineText), and it fades whole, as nothing of it stays in place.
@@ -460,10 +470,10 @@ Item {
     readonly property var trackLines: ({
         title: root.titleText,
         artistAlbum: root._folderLine(root.artistAlbumText),
-        details: root.shownDetailsText,
+        details: root.untagged ? root.fileFactsText : root.shownDetailsText,
         artist: root._folderLine(root.artistText),
         narrowAlbum: root.narrowAlbumText,
-        narrowDetails: root.shownNarrowDetailsText
+        narrowDetails: root.untagged ? root.fileFactsText : root.shownNarrowDetailsText
     })
 
     // A track change fades (#373 Motion), line by line: a line that differs
@@ -1126,7 +1136,8 @@ Item {
     // textSecondary, and the details, a line each, elided, stackedLineGap
     // apart. The block is one height for every track (largeHeaderHeight):
     // a line a track has no text for keeps its row, so a track change does
-    // not move the library. Where the title would have under
+    // not move the library; but a file without tags shows no album, and
+    // its details, the file's facts, follow its folder (fileFactsText). Where the title would have under
     // narrowLineMinimum beside the cover, the lines go under it instead
     // (narrowStacked).
     readonly property bool largeHeader: !root.wideRoom && root.largeFont
@@ -2037,10 +2048,12 @@ Item {
                 // leaves when the artist takes one (#373 H28); elsewhere one
                 // line, the album cut off before its year.
                 maximumLineCount: root.narrowLinesWrap ? 2 : 1
-                // Under the large-font header, at the panel's inset.
+                // Under the large-font header, at the panel's inset. Its row
+                // is kept, but for a file without tags, whose details,
+                // the file's facts, follow its folder (#373 H31 Y2).
                 x: root.largeHeader ? root.textInset - narrowColumn.x : 0
                 width: root.largeHeader ? root.footLineWidth : narrowColumn.width
-                keepsRow: root.largeHeader
+                keepsRow: root.largeHeader && !root._isFolderLine(root.shownLines.artist)
 
                 HoverHandler {
                     id: albumHover
@@ -2084,8 +2097,9 @@ Item {
         visible: liveText.hovered && root.textTruncated
         delay: Kirigami.Units.toolTipDelay
         text: root.wideRoom
-            ? root._joined([root.titleText, root.artistAlbumText, root.folderText, root.detailsText], "\n")
+            ? root._joined([root.titleText, root.artistAlbumText, root.folderText, root.detailsText,
+                            root.fileFactsText], "\n")
             : root._joined([root.titleText, root.artistText, root.folderText, root.narrowAlbumText,
-                            root.narrowDetailsText], "\n")
+                            root.narrowDetailsText, root.fileFactsText], "\n")
     }
 }
