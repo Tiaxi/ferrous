@@ -174,17 +174,26 @@ Components.DialogWindow {
         font: root.uiPalette.baseFont
     }
 
-    // 49 by 41 grid units, or the page list and 39 of them for the pages
-    // when the list is wider, or wider for every page's wide layout; and
-    // the tallest page, Visualization with its three subheadings, whole at
-    // the default font (665 px of 678 at 10 pt), or taller for the page it
-    // opens on: the pages are laid out only once the window shows (#585),
-    // so the height cannot follow the page it is not on. A larger font
-    // makes the window larger, within the screen; it lays its pages out
-    // for the room it has, and the user may make it larger.
+    // 49 grid units wide, or the page list and 39 of them for the pages
+    // when the list is wider, or wider for every page's wide layout. As
+    // tall as the tallest page, Visualization with its three subheadings,
+    // measured whole at the default font, with the buttons under it and a
+    // margin for a font whose lines run taller for its size; or taller for
+    // the page it opens on. The height cannot follow the pages it is not
+    // on (#585): a page out of view has its form's rows hidden, and
+    // Kirigami's FormLayout leaves hidden rows out of its height, so only
+    // the page in view has one. A larger font makes the window larger,
+    // within the screen; it lays its pages out for the room it has, and
+    // the user may make it larger.
     defaultWidth: Math.max(Kirigami.Units.gridUnit * 49, root.pageListWidth + 1
         + Math.max(Kirigami.Units.gridUnit * 39, pagesLoader.item ? pagesLoader.item.wideWidth : 0))
-    defaultHeight: Math.max(Kirigami.Units.gridUnit * 41,
+    // Visualization's height at 10 pt: 684 px with Noto Sans, 38 grid
+    // units of the window's font, which it grows with (#373 H37: in 41 of
+    // Kirigami's, which do not, for the whole window, it scrolled by 8 px,
+    // and at 24 pt by half its height).
+    readonly property real tallestPageHeight: root.uiPalette.gridUnit * 38
+    defaultHeight: Math.max(Math.ceil(root.tallestPageHeight + Kirigami.Units.largeSpacing)
+            + preferencesFooter.implicitHeight,
         preferencesContent.implicitHeight + preferencesFooter.implicitHeight)
     // The page list, and a page with room for its widest control.
     minimumWidth: Math.ceil(root.pageListWidth + 1 + Math.max(Kirigami.Units.gridUnit * 20,
