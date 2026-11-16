@@ -607,7 +607,8 @@ QList<QQuickItem *> shownLines(QQuickWindow *window) {
 // plot's floor colour, #14062e in both themes, with one static mark, the
 // app icon's curves at its own aspect (H19: H14 to H18 stretched them to
 // 2:1) from a quarter of the way in to the tile's right edge (H20), the wide
-// tile's of three curves and the small one's of two, and no text at all (H12's album
+// tile's of four curves (H21: the faint 4th harmonic, as the icon's 128 and
+// 256 px drawings) and the small one's of two, and no text at all (H12's album
 // title is gone: the lines under it say it); a 1 px edge in a light theme
 // only. No disc glyph, and no cover. As drawn, the mark's middle third is
 // not all floor.
@@ -697,6 +698,11 @@ QString standInProblem(QQuickWindow *window) {
         return QStringLiteral("the harmonics %1 and %2 px beside the glide's %3").arg(mark->property("harmonicStroke").toReal())
             .arg(high).arg(glide);
     }
+    // The wide mark's 4th harmonic half the glide's width, as in the icon.
+    if (std::abs(mark->property("fourthHarmonicStroke").toReal() - 0.5 * glide) > 0.01) {
+        return QStringLiteral("the 4th harmonic %1 px beside the glide's %2").arg(mark->property("fourthHarmonicStroke").toReal())
+            .arg(glide);
+    }
     // The colours as drawn on the floor: the amber as at 68 %, the 3rd
     // harmonic's magenta 3.6 to 3.9:1 on the floor, and the 2nd harmonic's
     // rose a step lighter, between it and the amber, as in the app icon
@@ -714,6 +720,11 @@ QString standInProblem(QQuickWindow *window) {
     if (harmonicRatio < highRatio + 0.4 || harmonicRatio > glideRatio - 0.4) {
         return QStringLiteral("the 2nd harmonic at %1:1 on the floor, between %2 and %3").arg(harmonicRatio).arg(highRatio)
             .arg(glideRatio);
+    }
+    // The 4th harmonic a dim violet, some 2.6:1, a step below the 3rd.
+    const double fourthRatio = contrastRatio(cover->property("standInFourthHarmonicColor").value<QColor>(), floor);
+    if (fourthRatio < 2.4 || fourthRatio > 2.8 || fourthRatio > highRatio - 0.8) {
+        return QStringLiteral("the 4th harmonic at %1:1 on the floor").arg(fourthRatio);
     }
     // A 1 px edge in a light theme, none in a dark one.
     if (tokenOf(window, "plotFloorEdge").alpha() != 255) {
@@ -762,7 +773,7 @@ qreal standInMarkInk(QQuickWindow *window) {
 // (#373 H19: three series ending in round caps inside the mark read as a
 // line chart; H20: cut at three quarters of the tile, they ended in its
 // free air): as grabbed, the column just inside the tile's right edge
-// crosses each of its curves, three or the small mark's two, and they start
+// crosses each of its curves, four (H21) or the small mark's two, and they start
 // some 24 % in: the columns before a fifth of the tile are floor, and a
 // column at 30 % crosses them all.
 QString standInMarkRunsOut(QQuickWindow *window) {
@@ -794,7 +805,7 @@ QString standInMarkRunsOut(QQuickWindow *window) {
         }
         return count;
     };
-    const int curves = cover->property("standInCompact").toBool() ? 2 : 3;
+    const int curves = cover->property("standInCompact").toBool() ? 2 : 4;
     if (runs(right - 2) != curves) {
         return QStringLiteral("%1 curves at the tile's right edge, not %2").arg(runs(right - 2)).arg(curves);
     }
