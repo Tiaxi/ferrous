@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 22 px, on the pixel grid in Breeze's 2 px margin, inside a 1 px mid-violet rim: two strokes, the glide in amber and its 3rd harmonic in magenta, each 2 px tall, from a common start at the lower left, two clear rows apart at the start, rising 1 : 3 and fanning apart, each a closed shape with every vertex on a whole pixel: crisp flats and 45 degree climbs, square at the start. The traces run out flush to the tile's inner edge on the right, a crop of an endless spectrogram rather than a chart's series ending in the tile (#373 hill climb, H8 to H18; H19: one drawing from 16 to 48 px, the traces run out to the edge) -->
+<!-- Ferrous, 22 px, on the pixel grid in Breeze's 2 px margin, inside a 1 px mid-violet rim: two strokes, the glide in amber, 3 px tall, and its 3rd harmonic in magenta, 2 px tall, from a common start at the lower left, a clear row or more apart, rising 1 : 3 and fanning apart, each a closed shape with every vertex on a whole pixel: crisp flats and 45 degree climbs, square at the start. The traces run out flush to the tile's inner edge on the right, a crop of an endless spectrogram rather than a chart's series ending in the tile (#373 hill climb, H8 to H19; H21: a lighter magenta start, the amber 3 px tall so that it outweighs the harmonic) -->
 <svg width="22" height="22" viewBox="0 0 22 22" xmlns="http://www.w3.org/2000/svg">
   <rect id="rim" fill="#5a3fb0" x="2" y="2" width="18" height="18" rx="2"/>
   <rect id="tile" fill="#3a1490" x="3" y="3" width="16" height="16" rx="1"/>
-  <path id="h3" fill="#e055b4" d="M4 11 8 7 9 7 10 6 11 6 12 5 14 5 15 4 19 4 19 6 16 6 15 7 13 7 12 8 11 8 10 9 9 9 4 14Z"/>
-  <path id="fundamental" fill="#f2b035" d="M4 16 6 16 7 15 9 15 10 14 13 14 14 13 19 13 19 15 15 15 14 16 11 16 10 17 8 17 7 18 4 18Z"/>
+  <path id="h3" fill="#e055b4" d="M4 12 10 6 11 6 12 5 14 5 15 4 19 4 19 6 16 6 15 7 13 7 12 8 11 8 10 9 9 9 4 14Z"/>
+  <path id="fundamental" fill="#f2b035" d="M4 15 6 15 7 14 9 14 10 13 13 13 14 12 19 12 19 15 15 15 14 16 11 16 10 17 8 17 7 18 4 18Z"/>
 </svg>

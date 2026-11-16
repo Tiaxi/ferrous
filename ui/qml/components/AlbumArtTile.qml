@@ -53,12 +53,17 @@ Rectangle {
     property color standInGlideColor: "#ab7a33"
     property color standInHarmonicColor: "#bd5872"
     property color standInHighHarmonicColor: "#b04698"
+    // The wide mark's 4th harmonic, as the app icon draws it from 128 px: a
+    // faint violet, some 2.6:1 on the floor, below the 3rd harmonic's value
+    // (#373 H21 N1).
+    property color standInFourthHarmonicColor: "#723b9f"
     // The mark's strokes, by the tile's size, so they weigh alike at every
     // size (#373 H16 I6: drawn from one file they were 1.6 to 3.2 px): the
-    // glide's 2 px up to a 152 px tile, rising to 4 px at 360 as the mark
-    // grew to the tile's edge (H20); the harmonics 0.8 and 0.65 of it on
-    // the wide mark, as the app icon tapers them, 0.75 on the small.
-    readonly property real standInStroke: Math.min(4.5, 2 + Math.max(0, root.layoutSize - 152) / 104)
+    // glide's 3 px up to a 152 px tile, rising to 6.5 px at 360 (H21: H20's
+    // 2 and 4 px read faint); the harmonics 0.8, 0.65 and 0.5 of it on the
+    // wide mark, as the app icon tapers them, the small mark's upper trace
+    // 2.5 px.
+    readonly property real standInStroke: Math.min(6.5, 3 + Math.max(0, root.layoutSize - 152) * 3.5 / 208)
     readonly property bool standInShown: !root.idle && root.coverPath.length === 0
     // The tile's size once in place: the now-playing panel keeps it while
     // the tile grows or shrinks, so that the mark is neither drawn again
@@ -144,9 +149,10 @@ Rectangle {
         visible: root.idle
     }
 
-    // The stand-in's mark and its edge: the app icon's glide and its 2nd and
-    // 3rd harmonics (ferrous.svg's own curves, #373 H19: H14 to H18
-    // stretched them to 2:1), rising 1 : 2 : 3 from a common start at the
+    // The stand-in's mark and its edge: the app icon's glide and its 2nd,
+    // 3rd and faint 4th harmonics (ferrous.svg's own curves, #373 H19: H14
+    // to H18 stretched them to 2:1; H21: the 4th, as the icon's 128 and 256
+    // px drawings have it), rising 1 : 2 : 3 : 4 from a common start at the
     // lower left, or in a small tile the glide and its 3rd harmonic, as the
     // icon's small sizes draw them (#373 H14 F2). They start a quarter of
     // the way in and, as in the icon, run out to the tile's right edge, cut
@@ -163,13 +169,15 @@ Rectangle {
             objectName: "albumArtStandInMark"
             // The paths' own box, the whole tile, 1000 units a side: the
             // icon's 64-unit drawing at 12.3 units to the icon's one, from a
-            // start 240 units in, its ink centred on the tile's height. The
-            // paths run on past the tile's right side, and the clip cuts
-            // them there.
+            // start 240 units in, the ink of its lower three traces centred
+            // on the tile's height, so that the small mark's two stay
+            // centred, the 4th harmonic above them. The paths run on past
+            // the tile's right side, and the clip cuts them there.
             readonly property size box: Qt.size(1000, 1000)
             readonly property real glideStroke: root.standInStroke
             readonly property real harmonicStroke: root.standInStroke * 0.8
-            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 0.75 : 0.65)
+            readonly property real highHarmonicStroke: root.standInStroke * (root.standInCompact ? 2.5 / 3 : 0.65)
+            readonly property real fourthHarmonicStroke: root.standInStroke * 0.5
             anchors.fill: parent
             clip: true
             preferredRendererType: Shape.CurveRenderer
@@ -179,6 +187,17 @@ Rectangle {
             // The paths' scale to the mark's size: their strokes do not scale.
             readonly property size pathScale: Qt.size(mark.width / mark.box.width, mark.height / mark.box.height)
 
+            ShapePath {
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                scale: mark.pathScale
+                strokeColor: root.standInCompact ? "transparent" : root.standInFourthHarmonicColor
+                strokeWidth: mark.fourthHarmonicStroke
+                PathSvg {
+                    path: "M240.35 534.90 C243.92 528.53 247.48 522.42 251.05 516.52 C256.39 507.68 261.74 499.32 267.09 491.36 C276.00 478.10 284.91 465.93 293.82 454.56 C306.29 438.64 318.77 424.29 331.24 411.03 C347.28 393.97 363.32 378.71 379.36 364.67 C400.74 345.94 422.13 329.38 443.51 314.22 C468.46 296.53 493.41 280.77 518.36 266.30 C550.44 247.70 582.51 231.23 614.59 216.15 C650.23 199.39 685.87 184.37 721.52 170.53 C766.07 153.23 810.62 137.77 855.17 123.56 C913.45 104.97 971.72 88.51 1030.00 73.44"
+                }
+            }
             ShapePath {
                 fillColor: "transparent"
                 capStyle: ShapePath.RoundCap
