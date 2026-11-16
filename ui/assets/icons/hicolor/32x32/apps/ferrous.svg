@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, 32 px, drawn on the pixel grid in Breeze's 2 px margin, inside a 1 px rim lighter than the tile: the glide and its 2nd and 3rd harmonics, 3/2/2 px stairs, 2 clear rows apart at their common start and 6 at the end, rising 1 : 2 : 3, climbing a row a column at most (#373 hill climb, H8 to H13) -->
+<!-- Ferrous, 32 px, drawn on the pixel grid in Breeze's 2 px margin, inside a 1 px mid-violet rim: the glide and its 2nd and 3rd harmonics, 3/2/2 px stairs, 2 clear rows apart at their common start and 6 at the end, rising 1 : 2 : 3, climbing a row a column at most (#373 hill climb, H8 to H13) -->
 <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-  <rect id="rim" fill="#6a4ad0" x="2" y="2" width="28" height="28" rx="2.5"/>
+  <rect id="rim" fill="#5a3fb0" x="2" y="2" width="28" height="28" rx="2.5"/>
   <rect id="tile" fill="#3a1490" x="3" y="3" width="26" height="26" rx="1.5"/>
   <path id="h3" fill="#e055b4" d="M23 4h4v1h-4z M20 5h7v1h-7z M17 6h6v1h-6z M15 7h5v1h-5z M13 8h4v1h-4z M12 9h3v1h-3z M11 10h2v1h-2z M10 11h2v1h-2z M9 12h2v1h-2z M8 13h2v1h-2z M7 14h2v1h-2z M6 15h2v1h-2z M5 16h2v1h-2z M5 17h1v1h-1z"/>
   <path id="h2" fill="#f25a7e" d="M21 12h6v1h-6z M17 13h10v1h-10z M14 14h7v1h-7z M12 15h5v1h-5z M10 16h4v1h-4z M8 17h4v1h-4z M7 18h3v1h-3z M6 19h2v1h-2z M5 20h2v1h-2z M5 21h1v1h-1z"/>
