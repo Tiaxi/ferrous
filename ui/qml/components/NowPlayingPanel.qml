@@ -29,8 +29,11 @@ import "../logic/FormatUtils.js" as FormatUtils
 //   it, then 12 px before the seam. Under it, the
 //   title and the artist wrap onto a second line rather than be cut off,
 //   and the lines are 4 px apart. Beside the cover in a wide sidebar (the
-//   compact layout, as at 24 pt) the cover is about three of the lines
-//   high, up to 132 px, and the block keeps six lines' room. A sidebar too short for the wide layout
+//   compact layout) the block keeps six lines' room; with a font too
+//   large for four lines beside the 96 px cover, as 24 pt, it is a header
+//   row instead, the cover with the title and the artist beside it, and
+//   the album and the details under it on the whole width (see
+//   compactHeader). A sidebar too short for the wide layout
 //   to leave the library about six rows, as with a large font or a short
 //   window, takes it too (#373 H6), with the lines beside the cover
 //   however far past it they run, as its room beside it is wide (#373 H10).
@@ -103,16 +106,16 @@ Item {
         && root.availableHeight - root.wideReservedHeight < root.libraryReserve
     readonly property int textInset: 12
     readonly property int narrowCoverSize: 96
-    // The compact layout's cover (see compactLayout): about three of the
-    // lines beside it high, the title's first, the gap under it and two
-    // small ones, from the fonts alone, at least the narrow 96 px and at
-    // most compactCoverMaximum (#373 H15 H1: at 24 pt a 96 px cover stood
-    // as a thumbnail by a block of seven lines, some 145 px of it blank
-    // under a common track).
-    readonly property int compactCoverMaximum: 132
-    readonly property real compactCoverSize: Math.min(root.compactCoverMaximum,
-        Math.max(root.narrowCoverSize, Math.round(narrowTitleMetrics.height + root.narrowTitleGap
-                                                  + 2 * narrowLineMetrics.height)))
+    // The compact layout's cover (see compactLayout): the narrow 96 px,
+    // and with a font too large for the four lines beside it
+    // (compactHeader), as high as the lines beside it at their most, two
+    // of the title, the gap and one of the artist, from the fonts alone,
+    // so that it spans them (#373 H16 I1: a 132 px cover beside six lines
+    // left some 160 px empty under it).
+    readonly property real compactCoverSize: root.largeFont
+        ? Math.max(root.narrowCoverSize, Math.round(narrowTitleProbe.implicitHeight
+                                                    + root.narrowTitleGap + narrowLineProbe.implicitHeight))
+        : root.narrowCoverSize
     // The cover of the narrow layout: the compact one's beside the compact
     // lines, the 96 px one otherwise.
     readonly property real narrowLayoutCoverSize: root.compactLayout ? root.compactCoverSize
@@ -348,7 +351,7 @@ Item {
     readonly property string shownDetailsText: root._fittingDetails(
         root.yearText, root.lineSeparators.details, Math.max(0, root.width - 2 * root.textInset))
     readonly property string shownNarrowDetailsText: root._fittingDetails(
-        "", root.lineSeparators.narrowDetails, narrowColumn.width)
+        "", root.lineSeparators.narrowDetails, root.compactHeader ? root.footLineWidth : narrowColumn.width)
 
     // The lines the panel shows, wide and narrow.
     readonly property var trackLines: ({
@@ -622,14 +625,15 @@ Item {
     // cover at 24 pt a long title was cut off), under the narrow cover the
     // artist too, and under it and beside it in the compact layout the
     // album with its year (#373 H14 F7, G2: at 24 pt a long album kept a
-    // fifth of its text). Beside the compact cover the artist takes one
-    // line, elided, with the whole of it in the tooltip (#373 H15 H1). The
-    // album line fades whole wherever it shows, as its year stands apart
-    // from it (_albumAndYear).
+    // fifth of its text), but under the header row (compactHeader), where
+    // it has the whole width, one line, its year whole after it. Beside the
+    // compact cover the artist takes one line, elided, with the whole of it
+    // in the tooltip (#373 H15 H1). The album line fades whole wherever it
+    // shows, as its year stands apart from it (_albumAndYear).
     readonly property var wrappingLines: root.wideRoom ? ({})
         : (root.narrowStacked ? ({ title: true, artist: true, narrowAlbum: true })
                               : ({ title: true, narrowAlbum: true }))
-    readonly property bool narrowLinesWrap: root.narrowStacked || root.compactLayout
+    readonly property bool narrowLinesWrap: root.narrowStacked || (root.compactLayout && !root.compactHeader)
     readonly property int stackedLineGap: 4
 
     // Whether the line of `key` fades whole, as one, going from `before` to
@@ -971,8 +975,10 @@ Item {
     }
     // The 1 px seam at the panel's foot, where the library starts.
     readonly property int seamHeight: 1
-    // The top of the lines beside the narrow cover.
+    // The top of the lines beside the narrow cover; beside the compact
+    // header's cover, at its top (besideTextTop).
     readonly property int narrowTextTop: 10
+    readonly property int besideTextTop: root.compactHeader ? 0 : root.narrowTextTop
     // Where the line under the cover starts down: under the cover's
     // place, and while the track's layout grows from the compact
     // row, or shrinks into it, never above the row's foot, so the lines do
@@ -1019,6 +1025,26 @@ Item {
     readonly property bool compactLayout: !root.wideRoom && !root.narrow && !root.narrowStacked
     readonly property real compactLinesHeight: root.narrowTextTop + narrowTitleProbe.implicitHeight
         + root.narrowTitleGap + narrowTwoLinesProbe.implicitHeight + 2 * narrowLineProbe.implicitHeight
+    // A font too large for the four lines beside the 96 px cover, as 24 pt:
+    // from the fonts alone, so a track does not switch it.
+    readonly property bool largeFont: root.narrowLinesHeight > root.narrowCoverSize
+    // The compact layout with a large font: a header row and lines on the
+    // whole width (#373 H16 I1: beside a 132 px cover, six lines left the
+    // cover with some 160 px empty under it, the year on a line of its own
+    // and the artist cut off). The cover at the top left, the title, on up
+    // to two lines, and the artist, on one, elided, beside it, 12 px after
+    // it, from its top, the cover as high as they are at their most
+    // (compactCoverSize); then, footGap under the cover, at the panel's
+    // inset and on its whole width, "Album (Year)" on one line, the album
+    // cut off before its year, and the details, on one line. The block is
+    // one height for every track (compactHeaderHeight): a line a track has
+    // no text for keeps its row, so a track with a title alone reads as a
+    // header row, and a track change does not move the library.
+    readonly property bool compactHeader: root.compactLayout && root.largeFont
+    readonly property int footGap: 8
+    readonly property real footLineWidth: Math.max(0, root.width - 2 * root.textInset)
+    readonly property real compactHeaderHeight: root.compactCoverSize + root.footGap
+        + 2 * narrowLineProbe.implicitHeight
 
     FontMetrics {
         id: narrowTitleMetrics
@@ -1061,7 +1087,8 @@ Item {
         font.pointSize: root.uiPalette.smallPointSize
     }
     // Two lines of the narrow title and of the small lines, and one of
-    // these, which the compact layout keeps room for.
+    // these, which the compact layout keeps room for, and which the compact
+    // header's cover spans (two of the title, one small one).
     LineProbe {
         id: narrowTitleProbe
         text: "X\nX"
@@ -1098,6 +1125,7 @@ Item {
     // cover's height, and more when the lines need it.
     readonly property real narrowLayoutHeight: (root.narrowStacked
             ? root.narrowCoverSize + root.textInset + liveText.narrowHeight
+            : root.compactHeader ? root.compactHeaderHeight
             : Math.max(root.narrowLayoutCoverSize, root.compactLayout ? root.compactLinesHeight
                                                                 : root.narrowTextTop + liveText.narrowHeight))
         + root.textInset + root.seamHeight
@@ -1601,6 +1629,7 @@ Item {
             : (narrowTitle.truncated || narrowArtist.truncated
                 || narrowAlbum.truncated || narrowDetails.truncated)
         readonly property bool hovered: wideHover.hovered || narrowHover.hovered
+            || albumHover.hovered || detailsHover.hovered
         readonly property Item wideItem: wideColumn
         readonly property Item narrowItem: narrowColumn
 
@@ -1668,7 +1697,7 @@ Item {
             // text does not show where the row's does.
             y: root._whileGrowing(root.narrowStacked
                 ? root.footTop + root.textInset
-                : root.narrowTextTop + Math.round((1 - root.presence) * root.idleRowHeight))
+                : root.besideTextTop + Math.round((1 - root.presence) * root.idleRowHeight))
             width: Math.max(0, root.width - root.textInset - narrowColumn.x)
             spacing: root.narrowStacked ? root.stackedLineGap : 0
 
@@ -1689,6 +1718,7 @@ Item {
             // Beside the cover, narrowTitleGap between the title and the
             // artist; under it the column's spacing.
             Item {
+                id: titleGap
                 visible: !root.narrowStacked
                     && (narrowArtist.visible || narrowAlbum.visible || narrowDetails.visible)
                 width: 1
@@ -1704,6 +1734,19 @@ Item {
                 // the whole of it in the tooltip.
                 maximumLineCount: root.narrowStacked ? 2 : 1
                 width: narrowColumn.width
+                keepsRow: root.compactHeader
+            }
+            // In the compact header, what is left of the cover's height
+            // and footGap under it, so the lines under it start there
+            // whatever the title and the artist take.
+            Item {
+                objectName: "nowPlayingHeaderFoot"
+                visible: root.compactHeader
+                width: 1
+                height: Math.max(0, root.compactCoverSize + root.footGap
+                    - (narrowTitle.visible ? narrowTitle.height : 0)
+                    - (titleGap.visible ? titleGap.height : 0)
+                    - (narrowArtist.visible ? narrowArtist.height : 0))
             }
             FadingLine {
                 id: narrowAlbum
@@ -1713,9 +1756,17 @@ Item {
                 keepsTail: true
                 pointSize: root.uiPalette.smallPointSize
                 // Under the cover, and beside it in the compact layout, the
-                // year goes onto a second line with the album's end.
+                // year goes onto a second line with the album's end; under
+                // the compact header, on the whole width, one line.
                 maximumLineCount: root.narrowLinesWrap ? 2 : 1
-                width: narrowColumn.width
+                // Under the compact header, at the panel's inset.
+                x: root.compactHeader ? root.textInset - narrowColumn.x : 0
+                width: root.compactHeader ? root.footLineWidth : narrowColumn.width
+                keepsRow: root.compactHeader
+
+                HoverHandler {
+                    id: albumHover
+                }
             }
             FadingLine {
                 id: narrowDetails
@@ -1724,7 +1775,13 @@ Item {
                 text: root.trackLines.narrowDetails
                 pointSize: root.uiPalette.smallPointSize
                 color: root.uiPalette.textTertiary
-                width: narrowColumn.width
+                x: root.compactHeader ? root.textInset - narrowColumn.x : 0
+                width: root.compactHeader ? root.footLineWidth : narrowColumn.width
+                keepsRow: root.compactHeader
+
+                HoverHandler {
+                    id: detailsHover
+                }
             }
         }
     }
