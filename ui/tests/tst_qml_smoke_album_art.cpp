@@ -458,6 +458,13 @@ Window {
 
 namespace {
 
+// How much wider than at its 280 px the album art viewer's details column
+// is in a view `viewWidth` wide: over the whole screen a seventh; in the
+// window a quarter of the view, between 280 and 320 px (#373 H37).
+qreal infoColumnWidthScale(bool fullscreen, qreal viewWidth) {
+    return fullscreen ? 8.0 / 7.0 : qBound(280.0, std::floor(viewWidth / 4), 320.0) / 280.0;
+}
+
 // The cover provider, recording the size of every image it is asked for.
 class RecordingCoverImageProvider final : public CoverImageProvider {
 public:
@@ -1439,8 +1446,14 @@ void AlbumArtSmokeTest::albumArtFitsLeftOfTheDetails() {
     QCOMPARE(columnRect.top(), viewRect.top());
     QCOMPARE(columnRect.bottom(), viewRect.bottom());
     QCOMPARE(seamRect.right(), columnRect.left());
-    // 280 px with its seam, 320 px over the whole screen.
-    QCOMPARE(columnRect.width(), viewerMode == 1 ? 319.0 : 279.0);
+    // 280 px with its seam, 320 px over the whole screen and in a window
+    // 1280 px wide or more, a quarter of one between (#373 H37).
+    QCOMPARE(columnRect.width(), std::round(280 * infoColumnWidthScale(viewerMode == 1, viewRect.width())) - 1);
+    if (viewerMode == 1 || viewRect.width() >= 1280) {
+        QCOMPARE(columnRect.width(), 319.0);
+    } else if (viewRect.width() <= 1120) {
+        QCOMPARE(columnRect.width(), 279.0);
+    }
     const QRectF left(viewRect.left(), viewRect.top(), seamRect.left() - viewRect.left(), viewRect.height());
     QTRY_VERIFY2(qAbs(paintedArt().center().x() - left.center().x()) < 0.5,
                  qPrintable(describe(view()) + QStringLiteral(" / %1").arg(left.center().x())));
@@ -1722,7 +1735,7 @@ void checkPreviewControlsInTheDetails(QQuickWindow *host, const QString &prefix,
     // seventh wider, 320 px. Its contents 16 px in from both edges.
     const bool fullscreen = column->parentItem()->property("fullscreen").toBool();
     const qreal infoScale = fullscreen ? 1.2 : 1.0;
-    const qreal widthScale = fullscreen ? 8.0 / 7.0 : 1.0;
+    const qreal widthScale = infoColumnWidthScale(fullscreen, column->parentItem()->width());
     QFont font = label->property("font").value<QFont>();
     font.setPointSizeF(font.pointSizeF() / infoScale);
     const qreal fortyCharacters = std::ceil(QFontMetricsF(font).averageCharWidth() * 40 * widthScale) - 1;
@@ -2899,7 +2912,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
             // The details' size: the body size, 1.2 times it over the whole
             // screen.
             const qreal infoScale = fullscreenMode == 1 ? 1.2 : 1.0;
-            const qreal widthScale = fullscreenMode == 1 ? 8.0 / 7.0 : 1.0;
+            const qreal widthScale = infoColumnWidthScale(fullscreenMode == 1, column->parentItem()->width());
             QFont bodyFont = qvariant_cast<QFont>(back->property("font"));
             bodyFont.setPointSizeF(bodyFont.pointSizeF() / infoScale);
             if (pointSize > 0) {
@@ -2937,7 +2950,7 @@ void AlbumArtSmokeTest::itunesPreviewButtonsStackWhenTheyDoNotFitSideBySide() {
             const qreal halfTheView = std::floor(column->parentItem()->width() / 2);
             QCOMPARE(columnRect.width(), qMax(leastWidth, qMin(halfTheView, qMax(fortyCharacters, widestButton))));
             if (pointSize == 0) {
-                QCOMPARE(columnRect.width(), fullscreenMode == 1 ? 319.0 : 279.0);
+                QCOMPARE(columnRect.width(), leastWidth);
             }
             // The footer's buttons, under the details, inside the column.
             QQuickItem *footer = visibleItemNamed(host, QStringLiteral("albumArtPreviewFooter"));

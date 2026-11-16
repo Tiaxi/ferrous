@@ -14,8 +14,8 @@ import "../logic/WheelUtils.js" as WheelUtils
 
 // The album art viewer's view: the art on black, fitted, zoomed and
 // panned; while `infoVisible`, a column of the image's details, about 40
-// characters wide, 280 px with its 1 px seam at the default font, over its
-// right edge. The view is a media surface, dark in both themes, as the
+// characters wide, 280 px with its 1 px seam at the default font, up to
+// 320 px in a wide view, over its right edge. The view is a media surface, dark in both themes, as the
 // spectrogram viewer is (UiPalette's mediaPlot): the art on the plot's
 // floor, the details on its strip colour, in the plot's text colours.
 // Over the whole screen, the details are a step larger, read from further
@@ -548,7 +548,9 @@ Item {
     // widest word.
     // The column is about 40 characters wide, 280 px with its seam at the
     // default font, up to two fifths of the view, and never under 280 px;
-    // over the whole screen, a seventh wider, 320 px, for its larger text,
+    // in a wide view, a quarter of it, up to 320 px, a seventh wider, so the
+    // details are not crammed beside a wide art (#373 H37: 280 px in a
+    // 1600 px window); over the whole screen 320 px, for its larger text,
     // which the column's room to spare at the desktop size takes the rest
     // of.
     // During a preview, it is wider for its buttons if they need it, up to
@@ -557,8 +559,10 @@ Item {
     Item {
         id: infoColumn
         objectName: "albumArtInfoColumn"
-        readonly property real widthScale: root.fullscreen ? 8 / 7 : 1
-        // Without its seam: 279 px, or 319 px over the whole screen.
+        readonly property real widthScale: root.fullscreen
+            ? 8 / 7 : Math.max(280, Math.min(320, Math.floor(root.width / 4))) / 280
+        // Without its seam: 279 px, 319 px in a view 1280 px wide or more
+        // and over the whole screen.
         readonly property real minimumWidth: Math.round(280 * infoColumn.widthScale) - 1
         readonly property real fortyCharacters: Math.max(infoColumn.minimumWidth,
             Math.ceil(infoFontMetrics.averageCharacterWidth * 40 * infoColumn.widthScale) - 1)
