@@ -14,11 +14,11 @@
 namespace FerrousAppIcon {
 
 // The pixel sizes with a drawing of their own, smallest first. The 24 px one
-// is the 22 px drawing in a 24 px canvas, as Breeze draws its 24 px icons,
-// and the 36 px one the 32 px drawing in a 36 px canvas: the window icon's
-// 24 and 36 px slots take them where they took the 32 and 48 px drawings,
+// is the 22 px drawing in a 24 px canvas, as Breeze draws its 24 px icons:
+// the window icon's 24 px slot takes it where it took the 32 px drawing,
 // scaled down. (The hicolor theme's index, whose 22 px directories reach to
-// 24 px, gives the theme's 24 px slot the 22 px drawing first.)
+// 24 px, gives the theme's 24 px slot the 22 px drawing first.) The 36 px
+// one is drawn on its own grid, as the 32 px one is.
 inline constexpr std::array<int, 9> kSizes{16, 22, 24, 32, 36, 48, 64, 128, 256};
 
 // The built-in drawing for a size in kSizes; any other size gets the

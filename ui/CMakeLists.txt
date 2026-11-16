@@ -140,7 +140,7 @@ add_dependencies(ferrous ferrous_rust_bridge)
 ferrous_enable_strict_warnings(ferrous)
 
 # The app icon: a drawing of its own for each size (src/AppIcon.h), the 24
-# and 36 px ones the 22 and 32 px drawings in a larger canvas, and for 2x
+# px one the 22 px drawing in a larger canvas, and for 2x
 # scaling the 16 and 22 px drawings doubled, the 64 px composition in the 32,
 # 36 and 48 px slots and the 64 px drawing doubled in its own (the @2
 # directories; none for 24 px, whose slot the hicolor theme's 22 px
