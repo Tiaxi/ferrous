@@ -175,7 +175,7 @@ std::vector<int> strokeHeights() {
 // from the fundamental up, as a harmonic's energy falls with its number, and
 // never under 2 px (H20: at 32 and 48 px a stroke's own widths, 3 / 2 / 2 and
 // 3 / 2.5 / 2; from 64 px 1 : 0.8 : 0.65 of the fundamental's 3.8 units at
-// 64 px, 3.4 at 128 and 3.0 at 256).
+// 64 px and 3.4 at 128 and 256, where H19's 3.0 read thin beside 128 px).
 std::vector<double> strokeWidths(int size) {
     switch (size) {
     case 32:
@@ -183,7 +183,7 @@ std::vector<double> strokeWidths(int size) {
     case 48:
         return {3.0, 2.5, 2.0};
     default: {
-        const double fundamental = size == 64 ? 3.8 : size == 128 ? 3.4 : 3.0;
+        const double fundamental = size == 64 ? 3.8 : 3.4;
         const double unit = size / 64.0;
         return {fundamental * unit, fundamental * 0.8 * unit, fundamental * 0.65 * unit};
     }
@@ -482,6 +482,8 @@ private slots:
     void smallCurvesAreEvenAndEndOnWholeRows_data();
     void smallCurvesAreEvenAndEndOnWholeRows();
     void fundamentalThinsSmoothlyWithSize();
+    void topTraceClearsTheCornerFrom64px_data();
+    void topTraceClearsTheCornerFrom64px();
     void doubledSlotsDrawTheSmallCompositionsAtTwice_data();
     void doubledSlotsDrawTheSmallCompositionsAtTwice();
     void windowIconHasEachSizesDrawing();
@@ -1249,6 +1251,44 @@ void AppIconTest::fundamentalThinsSmoothlyWithSize() {
                  qPrintable(QStringLiteral("%1 px: %2 of the tile after %3").arg(size).arg(share).arg(before)));
         before = share;
     }
+}
+
+void AppIconTest::topTraceClearsTheCornerFrom64px_data() {
+    QTest::addColumn<int>("size");
+    for (const int size : FerrousAppIcon::kSizes) {
+        if (size >= 64) {
+            QTest::addRow("%dpx", size) << size;
+        }
+    }
+}
+
+// From 64 px the traces' ends sit 0.94 as high above the 64-unit drawing's
+// baseline, y 55.5, as in H19, their starts where they were, so that the top
+// trace runs out to the tile's edge some 3 units below its rounded corner
+// rather than into it (#373 hill climb, H20): at the edge their centres are
+// at 55.5 - 0.94 k 14.17 units, 1 : 2 : 3 above the baseline, and the top
+// trace's ink starts 2.5 units or more below the corner's arc, which ends 4
+// units below the tile's inner edge.
+void AppIconTest::topTraceClearsTheCornerFrom64px() {
+    QFETCH(int, size);
+    const QString path = FerrousAppIcon::resourcePath(size);
+    const double unit = size / 64.0;
+    const QRect inside = insideRim(tileOf(render(path, size)), size);
+    const QHash<QString, QImage> cover = traceCoverage(path, size);
+    const QStringList ids = traceIds(size);
+    for (qsizetype n = 0; n < ids.size(); ++n) {
+        const int k = static_cast<int>(ids.size() - n);
+        const QImage &trace = cover.value(ids[n]);
+        const Column end = columnOf(trace, inside.right());
+        const double centre = end.centre / unit;
+        const double expected = 55.5 - 0.94 * k * (55.5 - 13) / 3;
+        QVERIFY2(std::abs(centre - expected) <= 0.4,
+                 qPrintable(QStringLiteral("%1 ends at %2 units, not %3").arg(ids[n]).arg(centre).arg(expected)));
+    }
+    const Column top = columnOf(cover.value(QStringLiteral("h3")), inside.right());
+    const double cornerEnd = inside.top() + 4 * unit;
+    QVERIFY2(top.top >= cornerEnd + 2.5 * unit,
+             qPrintable(QStringLiteral("the top trace from row %1, the corner to %2").arg(top.top).arg(cornerEnd)));
 }
 
 void AppIconTest::doubledSlotsDrawTheSmallCompositionsAtTwice_data() {
