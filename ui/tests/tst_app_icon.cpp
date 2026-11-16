@@ -617,6 +617,8 @@ private slots:
     void hicolorsOwnIndexPicksTheSlotsDrawings_data();
     void hicolorsOwnIndexPicksTheSlotsDrawings();
     void desktopFileNamesTheIcon();
+    void commentsDescribeTheDrawingNotItsHistory_data();
+    void commentsDescribeTheDrawingNotItsHistory();
 };
 
 void AppIconTest::everySizeIsBuiltIn() {
@@ -2209,6 +2211,32 @@ void AppIconTest::desktopFileNamesTheIcon() {
     QVERIFY2(QFile::exists(path), qPrintable(path));
     const QStringList lines = QString::fromUtf8(contentsOf(path)).split(QLatin1Char('\n'));
     QVERIFY(lines.contains(QStringLiteral("Icon=ferrous")));
+}
+
+void AppIconTest::commentsDescribeTheDrawingNotItsHistory_data() {
+    QTest::addColumn<QString>("path");
+    for (const int size : FerrousAppIcon::kSizes) {
+        QTest::addRow("%dpx", size) << FerrousAppIcon::resourcePath(size);
+    }
+    for (const int size : kDoubledSizes) {
+        QTest::addRow("%dpx@2", size) << doubledPath(size);
+    }
+    QTest::addRow("scalable") << FerrousAppIcon::resourcePath(0);
+}
+
+// Each drawing's comment says how it is built, the rule its size follows and
+// which slot it serves, and nothing of the design rounds it came from: the
+// drawings ship, and are judged blind.
+void AppIconTest::commentsDescribeTheDrawingNotItsHistory() {
+    QFETCH(QString, path);
+    const QString source = QString::fromUtf8(contentsOf(path));
+    const qsizetype open = source.indexOf(QLatin1String("<!--"));
+    QVERIFY(open >= 0);
+    const QString comment = source.mid(open, source.indexOf(QLatin1String("-->"), open) - open);
+    QVERIFY(comment.contains(QLatin1String("Ferrous")));
+    static const QRegularExpression history(QStringLiteral("#373|hill climb|\\bH[0-9]+\\b"));
+    const QRegularExpressionMatch match = history.match(comment);
+    QVERIFY2(!match.hasMatch(), qPrintable(match.captured(0)));
 }
 
 int main(int argc, char **argv) {

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ferrous, the 22 px drawing at 2x (44 px), in Breeze's 4 px margin, inside a 2 px mid-violet rim: the 22 px composition doubled as smooth curves, two strokes 6 and 4 px wide, the glide in amber and its 3rd harmonic in magenta, from a common start at the lower left, rising 1 : 3 with a round cap at the start, running out flush to the tile's inner edge on whole rows (#373 hill climb, H20: the same drawing in a 22 px slot at 1x and 2x; H21: as the 1x drawing, a lighter magenta start, the amber 6 px wide) -->
+<!-- Ferrous, the 22 px slot at 2x (44 px), in Breeze's 4 px margin, inside a 2 px mid-violet rim: the 22 px composition doubled as smooth curves, the glide in amber, 6 px wide, and its 3rd harmonic in magenta, 4 px wide, from a common start at the lower left, rising 1 : 3 with a round cap at the start, running out flush to the tile's inner edge on whole rows. Hicolor's 22 px directories also serve a 24 px slot at 2x with it. -->
 <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg">
   <rect id="rim" fill="#5a3fb0" x="4" y="4" width="36" height="36" rx="4"/>
   <rect id="tile" fill="#3a1490" x="6" y="6" width="32" height="32" rx="2"/>
