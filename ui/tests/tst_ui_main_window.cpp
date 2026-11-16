@@ -23,6 +23,7 @@
 #include <QQmlComponent>
 #include <QQmlListReference>
 #include <QQmlContext>
+#include <QQmlExpression>
 #include <QQmlProperty>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -955,6 +956,7 @@ private slots:
     void collapsedArtistMarkFollowsTheBackendsGroupingNotItsPath();
     void libraryRowsShowHoverSelectionAndTheCurrentRow();
     void queueRowTintsRunToThePaneEdgeUnderTheScrollBar();
+    void transportIsWindowChromeInTheHeaderColours();
     void listsRingARowAsTheKeyboardComesIn();
     void listsRingTheCurrentRowOnlyForTheKeyboard();
     void unreadableTracksAreMarkedFromTheIssueHistory();
@@ -4674,6 +4676,47 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
     QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+}
+
+// The transport is window chrome in the theme's Header colour set, as
+// Breeze's toolbars and the menu bar above it are (#373 H13 P24): its
+// background, and the seek bar's and waveform's, are the menu bar's, from
+// the platform theme rather than a fixed colour.
+void UiMainWindowTest::transportIsWindowChromeInTheHeaderColours() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QQuickItem *transport = named(window, "transportBar");
+    QQuickItem *menuBar = named(window, "mainMenuBar");
+    QQuickItem *background = named(window, "transportBackground");
+    QQuickItem *seekBackground = named(window, "seekBackground");
+    QVERIFY(transport && menuBar && background && seekBackground);
+    QQmlExpression colorSet(qmlContext(transport), transport,
+                            QStringLiteral("Kirigami.Theme.colorSet === Kirigami.Theme.Header && !Kirigami.Theme.inherit"));
+    bool undefined = false;
+    const QVariant inHeader = colorSet.evaluate(&undefined);
+    QVERIFY2(!colorSet.hasError() && !undefined, qPrintable(colorSet.error().toString()));
+    QVERIFY(inHeader.toBool());
+
+    auto *menuBackground = menuBar->property("background").value<QQuickItem *>();
+    QVERIFY(menuBackground != nullptr);
+    const QColor header = menuBackground->property("color").value<QColor>();
+    QCOMPARE(transport->property("chromeColor").value<QColor>(), header);
+    QCOMPARE(background->property("color").value<QColor>(), header);
+    QCOMPARE(seekBackground->property("color").value<QColor>(), header);
+    QCOMPARE(named(window, "seekWaveform")->property("bgColor").value<QColor>(), header);
+    // As drawn: one band from the menu bar through the transport.
+    QTest::qWait(50);
+    const QImage image = window->grabWindow();
+    const qreal scale = image.width() / qreal(window->width());
+    const auto pixel = [&](const QPointF &at) {
+        return image.pixelColor(int(std::floor(at.x() * scale)), int(std::floor(at.y() * scale)));
+    };
+    const QRectF menuRect = sceneRect(menuBar);
+    const QRectF transportRect = sceneRect(transport);
+    QCOMPARE(pixel(QPointF(menuRect.right() - 4.5, menuRect.center().y())).rgb(), header.rgb());
+    QCOMPARE(pixel(QPointF(transportRect.center().x(), transportRect.top() + 2.5)).rgb(), header.rgb());
 }
 
 // The queue's selection tint runs to the pane's right edge, with no

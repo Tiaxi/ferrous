@@ -12,6 +12,10 @@ import "../logic/KeyUtils.js" as KeyUtils
 
 // The transport (#373): Previous, Play/Pause, Stop and Next as flat 32 px
 // tool buttons, the seek waveform, the time and the volume, on the chrome.
+// The chrome is the theme's Header colour set, as Breeze's toolbars and
+// the menu bar above it are, so the two read as one band of window chrome
+// (#373 H13 P24): #292c30 / #dee0e2 in Breeze, and the window colour while
+// the window is inactive, as Breeze's Header set has it.
 // The glyphs and buttons grow with a font larger than the default, and are
 // drawn at the size they are given, not rounded down to a theme icon size.
 ToolBar {
@@ -59,20 +63,32 @@ ToolBar {
     // The narrow window's transport: a shorter volume slider.
     readonly property bool narrow: root.width < 1200
 
+    // The transport's chrome: the Header colour set's background.
+    Kirigami.Theme.colorSet: Kirigami.Theme.Header
+    Kirigami.Theme.inherit: false
+    readonly property color chromeColor: Kirigami.Theme.backgroundColor
+    // The hover and pressed tints of its buttons, as the window's, but as
+    // strong on this chrome: 1.3:1 and 1.65:1 on it.
+    readonly property color hoverTint: root.uiPalette.hoverOn(root.chromeColor)
+    readonly property color pressedTint: root.uiPalette.pressedOn(root.chromeColor)
+
     // The seek bar's colours. The waveform is `wave`, a little quieter on
-    // the chrome; the unplayed part is the same at 50% (dark) or 62%
-    // (light), which is at least 3:1 on the chrome, as measured for Breeze.
+    // the chrome (dark) or a little darker (light); the unplayed part is the
+    // same at 50% (dark) or 62% (light), raised where that is under 3.2:1
+    // on the chrome, a margin over 3:1 that rendering cannot round away
+    // (#373 H13 P24: today's tones were 2.99:1 / 2.72:1 on the Header
+    // colours). In Breeze, played is 8.2:1 / 7.4:1 and unplayed 3.2:1 /
+    // 3.3:1 on the active Header colours, about 2.5:1 / 2.3:1 apart.
     readonly property bool themeIsDark: root.uiPalette.themeIsDark
     readonly property color seekPlayedColor: root.themeIsDark
-        ? ColorUtils.mixColor(root.uiPalette.wave, root.uiPalette.chrome, 0.12)
-        : ColorUtils.mixColor(root.uiPalette.wave, root.uiPalette.text, 0.2)
-    // Raised where a theme's colours need more to keep 3:1.
+        ? ColorUtils.mixColor(root.uiPalette.wave, root.chromeColor, 0.12)
+        : ColorUtils.mixColor(root.uiPalette.wave, root.uiPalette.text, 0.3)
     readonly property real seekUnplayedOpacity: ColorUtils.opacityForContrast(
-        root.seekPlayedColor, root.uiPalette.chrome, root.themeIsDark ? 0.5 : 0.62, 3.0)
+        root.seekPlayedColor, root.chromeColor, root.themeIsDark ? 0.5 : 0.62, 3.2)
     // The chrome over the unplayed part, which leaves the waveform at that
     // opacity on the chrome.
     readonly property color seekUnplayedCover: ColorUtils.withAlpha(
-        root.uiPalette.chrome, 1 - root.seekUnplayedOpacity)
+        root.chromeColor, 1 - root.seekUnplayedOpacity)
     // The playhead: the amber of `now`, cased by a line of the opposite
     // brightness on each side, so it stands apart from the played part by
     // its brightness and not only by its hue.
@@ -89,7 +105,7 @@ ToolBar {
     // stays at the volume a mute put aside.
     readonly property color volumeFilledColor: root.seekPlayedColor
     readonly property color volumeUnfilledColor: ColorUtils.mixColor(
-        root.uiPalette.chrome, root.seekPlayedColor, root.seekUnplayedOpacity)
+        root.chromeColor, root.seekPlayedColor, root.seekUnplayedOpacity)
 
     // The window's device pixels to a logical one, which fractional scaling
     // can make differ from its screen's. Qt before 6.11 gives only the
@@ -158,7 +174,8 @@ ToolBar {
     bottomPadding: 0
     // Chrome. The seam under it is the main window's.
     background: Rectangle {
-        color: root.uiPalette.chrome
+        objectName: "transportBackground"
+        color: root.chromeColor
     }
 
     // A slider whose held arrow keys are one gesture, as a drag is. Qt's
@@ -226,8 +243,8 @@ ToolBar {
             anchors.fill: parent
             radius: 3
             color: buttonBackground.button.down
-                ? root.uiPalette.pressed
-                : root.uiPalette.hover
+                ? root.pressedTint
+                : root.hoverTint
             opacity: buttonBackground.button.hovered || buttonBackground.button.down ? 1 : 0
             visible: opacity > 0
 
@@ -572,7 +589,7 @@ ToolBar {
                 Rectangle {
                     objectName: "seekBackground"
                     anchors.fill: parent
-                    color: root.uiPalette.chrome
+                    color: root.chromeColor
                 }
 
                 // Without a track: a 1 px line through the middle. With
@@ -607,7 +624,7 @@ ToolBar {
                     positionSeconds: root.displayedPositionSeconds
                     durationSeconds: root.uiBridge.durationSeconds
                     barColor: root.seekPlayedColor
-                    bgColor: root.uiPalette.chrome
+                    bgColor: root.chromeColor
                     // Past the waveform's end, as without one.
                     emptyLineColor: root.seekEmptyLineColor
                 }

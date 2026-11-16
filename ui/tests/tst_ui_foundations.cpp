@@ -282,6 +282,8 @@ private slots:
     void tokensMeetTheirContrast();
     void plotColorsFollowThePlot_data();
     void plotColorsFollowThePlot();
+    void hoverAndPressedTintsOnAnotherBackground_data();
+    void hoverAndPressedTintsOnAnotherBackground();
     void rowBackgroundShowsEachState_data();
     void rowBackgroundShowsEachState();
     void rowBackgroundDrawsTheRingAndTintAsOneRectangle();
@@ -772,6 +774,45 @@ const QString kRowItems = QStringLiteral(R"QML(
 )QML");
 
 } // namespace
+
+void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground_data() {
+    QTest::addColumn<bool>("dark");
+    QTest::addColumn<QString>("background");
+    QTest::addColumn<int>("hoverPercent");
+    QTest::addColumn<int>("pressedPercent");
+    // Breeze's Header colours, the transport's (#373 H13 P24).
+    QTest::newRow("breeze dark header") << true << QStringLiteral("#292c30") << 9 << 16;
+    QTest::newRow("breeze light header") << false << QStringLiteral("#dee0e2") << 15 << 26;
+}
+
+// The hover and pressed tints on another background than the view are as
+// strong on it as `hover` and `pressed` are on the view: 1.3:1 and 1.65:1.
+void UiFoundationsTest::hoverAndPressedTintsOnAnotherBackground() {
+    QFETCH(bool, dark);
+    QFETCH(QString, background);
+    QFETCH(int, hoverPercent);
+    QFETCH(int, pressedPercent);
+    QQmlEngine engine;
+    QString errorText;
+    const std::unique_ptr<QObject> root =
+        createWindow(engine, themedWindowQml(dark ? kBreezeDark : kBreezeLight, QString()), &errorText);
+    QVERIFY2(root != nullptr, qPrintable(errorText));
+    QObject *tokens = root->property("tokens").value<QObject *>();
+    QVERIFY(tokens != nullptr);
+    const QColor under = fromHex(background);
+    const auto tint = [tokens, &under](const char *function) {
+        QVariant color;
+        QMetaObject::invokeMethod(tokens, function, Q_RETURN_ARG(QVariant, color), Q_ARG(QVariant, QVariant(under)));
+        return color.value<QColor>();
+    };
+    const QColor hover = tint("hoverOn");
+    const QColor pressed = tint("pressedOn");
+    QCOMPARE(channelDistance(hover, colorOf(tokens, "text")), 0);
+    QCOMPARE(std::lround(hover.alphaF() * 100), long(hoverPercent));
+    QCOMPARE(std::lround(pressed.alphaF() * 100), long(pressedPercent));
+    QVERIFY(contrastRatio(drawnOver(hover, under), under) >= 1.3);
+    QVERIFY(contrastRatio(drawnOver(pressed, under), under) >= 1.65);
+}
 
 void UiFoundationsTest::rowBackgroundShowsEachState_data() {
     QTest::addColumn<bool>("dark");

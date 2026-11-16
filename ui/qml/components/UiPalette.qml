@@ -124,6 +124,16 @@ QtObject {
     // and 25% on light, where black reads much sooner.
     readonly property color dim: Qt.rgba(0, 0, 0, root.themeIsDark ? 0.65 : 0.25)
 
+    // The hover and pressed tints on another opaque `background` than the
+    // view, such as the transport's Header chrome: as strong on it as
+    // `hover` and `pressed` are on the view.
+    function hoverOn(background) {
+        return root._tintOf(root.text, background, 1.3)
+    }
+    function pressedOn(background) {
+        return root._tintOf(root.text, background, 1.65)
+    }
+
     // The link on `background`, such as a hover tint drawn over the window
     // colour: the link, darker or lighter where it falls short of 4.5:1 on it.
     function linkOn(background) {

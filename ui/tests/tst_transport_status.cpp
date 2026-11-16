@@ -90,19 +90,22 @@ struct Scheme {
     QString highlight;
     QString negative;
     QString button;
+    // The Header colour set's background, which the transport takes, as
+    // Kirigami's platform theme gives it.
+    QString header;
 };
 
 const Scheme kBreezeDark{QStringLiteral("#202326"), QStringLiteral("#141618"), QStringLiteral("#fcfcfc"),
                          QStringLiteral("#a1a9b1"), QStringLiteral("#3daee9"), QStringLiteral("#da4453"),
-                         QStringLiteral("#292c30")};
+                         QStringLiteral("#292c30"), QStringLiteral("#292c30")};
 // A dark scheme with a darker accent, whose waveform needs more than 50%
 // to keep 3:1.
 const Scheme kPurpleDark{QStringLiteral("#2a2e32"), QStringLiteral("#1b1e20"), QStringLiteral("#eff0f1"),
                          QStringLiteral("#a1a9b1"), QStringLiteral("#9b59b6"), QStringLiteral("#da4453"),
-                         QStringLiteral("#31363b")};
+                         QStringLiteral("#31363b"), QStringLiteral("#31363b")};
 const Scheme kBreezeLight{QStringLiteral("#eff0f1"), QStringLiteral("#ffffff"), QStringLiteral("#232629"),
                           QStringLiteral("#707d8a"), QStringLiteral("#3daee9"), QStringLiteral("#da4453"),
-                          QStringLiteral("#fcfcfc")};
+                          QStringLiteral("#fcfcfc"), QStringLiteral("#dee0e2")};
 
 // A window in `scheme` with the transport and the status bar over a fake
 // bridge and an error controller.
@@ -213,6 +216,9 @@ ApplicationWindow {
             Panes.TransportBar {
                 objectName: "transportBar"
                 width: parent.width
+                // The Header colour set's background, as the platform
+                // theme gives it to the transport's colour set.
+                Kirigami.Theme.backgroundColor: "%9"
                 uiBridge: bridge
                 uiPalette: tokens
                 previousAction: previousAction
@@ -262,6 +268,7 @@ ApplicationWindow {
         .arg(scheme.window, scheme.view, scheme.text, scheme.inactiveText, scheme.highlight, scheme.negative,
              scheme.button)
         .arg(width)
+        .arg(scheme.header)
         .toUtf8();
 }
 
@@ -316,6 +323,11 @@ struct Harness {
 
     QColor token(const char *name) const {
         return tokens->property(name).value<QColor>();
+    }
+
+    // The transport's chrome: its Header colour set's background.
+    QColor transportChrome() const {
+        return item(QStringLiteral("transportBar"))->property("chromeColor").value<QColor>();
     }
 };
 
@@ -790,20 +802,25 @@ void TransportStatusTest::transportToolTipsNameTheShortcut() {
 
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn_data() {
     QTest::addColumn<int>("scheme");
+    QTest::addColumn<double>("opacity");
     QTest::addColumn<double>("measured");
-    QTest::newRow("breeze dark") << 0 << 3.35;
-    QTest::newRow("breeze light") << 1 << 3.16;
-    // Not measured by the design: the opacity rises to keep 3:1.
-    QTest::newRow("dark, purple accent") << 2 << 0.0;
+    // On the Header colours (#373 H13 P24: the tones before were 2.99:1
+    // and 2.72:1 on them).
+    QTest::newRow("breeze dark") << 0 << 0.5 << 3.21;
+    QTest::newRow("breeze light") << 1 << 0.65 << 3.26;
+    // Not measured by the design: the opacity rises to keep 3.2:1.
+    QTest::newRow("dark, purple accent") << 2 << 0.0 << 0.0;
 }
 
-// The played part is `wave` mixed 12% toward the chrome (dark) or 20%
-// toward the text (light); the unplayed part is it at 50% or 62%, which is
-// at least 3:1 on the chrome. The playhead is a 2 px amber line across the
+// The played part is `wave` mixed 12% toward the chrome (dark) or 30%
+// toward the text (light); the unplayed part is it at 50% or 62%, raised
+// to be 3.2:1 on the chrome, a margin over 3:1. The chrome is the
+// transport's Header colour. The playhead is a 2 px amber line across the
 // 28 px bar, past the ±12 px waveform, with a casing on each side that
 // stands apart from the played part. Measured in the drawn window.
 void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QFETCH(int, scheme);
+    QFETCH(double, opacity);
     QFETCH(double, measured);
     const Scheme &colors = scheme == 0 ? kBreezeDark : (scheme == 1 ? kBreezeLight : kPurpleDark);
     const bool dark = scheme != 1;
@@ -824,17 +841,20 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QTRY_VERIFY(!emptyLine->isVisible());
     QVERIFY(unplayed->isVisible() && line->isVisible());
 
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     const QColor wave = harness.token("wave");
     const QColor text = harness.token("text");
-    const QColor expectedPlayed = dark ? mixed(wave, chrome, 0.12) : mixed(wave, text, 0.2);
+    // The transport's chrome is the scheme's Header colour, not the
+    // window's.
+    QVERIFY(sameColor(chrome, QColor(colors.header)));
+    const QColor expectedPlayed = dark ? mixed(wave, chrome, 0.12) : mixed(wave, text, 0.3);
     QVERIFY2(channelDistance(transport->property("seekPlayedColor").value<QColor>(), expectedPlayed) <= 1,
              qPrintable(transport->property("seekPlayedColor").value<QColor>().name()));
-    const qreal opacity = transport->property("seekUnplayedOpacity").toReal();
-    if (measured > 0) {
-        QCOMPARE(opacity, dark ? 0.5 : 0.62);
+    const qreal unplayedOpacity = transport->property("seekUnplayedOpacity").toReal();
+    if (opacity > 0) {
+        QVERIFY2(std::abs(unplayedOpacity - opacity) < 0.001, qPrintable(QString::number(unplayedOpacity)));
     } else {
-        QVERIFY2(opacity > 0.5 && opacity < 0.7, qPrintable(QString::number(opacity)));
+        QVERIFY2(unplayedOpacity > 0.5 && unplayedOpacity < 0.75, qPrintable(QString::number(unplayedOpacity)));
     }
     QVERIFY(sameColor(line->property("color").value<QColor>(), harness.token("now")));
     QVERIFY(sameColor(casing->property("color").value<QColor>(),
@@ -861,7 +881,7 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
     QVERIFY2(channelDistance(drawnChrome, chrome) <= 1, qPrintable(drawnChrome.name()));
     QVERIFY2(channelDistance(drawnPlayed, expectedPlayed) <= 2,
              qPrintable(drawnPlayed.name() + QStringLiteral(" vs ") + expectedPlayed.name()));
-    const QColor expectedUnplayed = mixed(chrome, expectedPlayed, opacity);
+    const QColor expectedUnplayed = mixed(chrome, expectedPlayed, unplayedOpacity);
     QVERIFY2(channelDistance(drawnUnplayed, expectedUnplayed) <= 2,
              qPrintable(drawnUnplayed.name() + QStringLiteral(" vs ") + expectedUnplayed.name()));
     QVERIFY2(channelDistance(drawnLine, harness.token("now")) <= 1, qPrintable(drawnLine.name()));
@@ -871,7 +891,7 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
         const QColor playedEdge = pixelAt(image, QPointF(wave_.left() + wave_.width() * 0.25, y), scale);
         const QColor unplayedEdge = pixelAt(image, QPointF(wave_.left() + wave_.width() * 0.75, y), scale);
         QVERIFY2(channelDistance(playedEdge, expectedPlayed) <= 2, qPrintable(playedEdge.name()));
-        QVERIFY2(channelDistance(unplayedEdge, mixed(chrome, expectedPlayed, opacity)) <= 2,
+        QVERIFY2(channelDistance(unplayedEdge, mixed(chrome, expectedPlayed, unplayedOpacity)) <= 2,
                  qPrintable(unplayedEdge.name()));
     }
     for (const qreal y : {wave_.top() - 0.5, wave_.bottom() + 0.5}) {
@@ -879,10 +899,13 @@ void TransportStatusTest::seekWaveformMeetsItsContrastAsDrawn() {
         QVERIFY2(channelDistance(outside, chrome) <= 1, qPrintable(outside.name()));
     }
 
-    // The unplayed part is at least 3:1 on the chrome, as the design
-    // measured it (3.35:1 dark, 3.16:1 light), and the played part more.
+    // The unplayed part is at least 3:1 on the chrome (3.21:1 dark, 3.26:1
+    // light on the Header colours), and the played part more, a clear step
+    // apart, so the two tones stay two.
     const double unplayedContrast = contrastRatio(drawnUnplayed, drawnChrome);
-    QVERIFY2(unplayedContrast >= 3.0, qPrintable(describe(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
+    QVERIFY2(unplayedContrast >= 3.15, qPrintable(describe(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
+    QVERIFY2(measured <= 0 || contrastRatio(drawnPlayed, drawnUnplayed) >= 2.2,
+             qPrintable(describe(QStringLiteral("played on unplayed"), drawnPlayed, drawnUnplayed)));
     QVERIFY2(measured <= 0 || std::abs(unplayedContrast - measured) < 0.1,
              qPrintable(describe(QStringLiteral("unplayed"), drawnUnplayed, drawnChrome)));
     QVERIFY2(contrastRatio(drawnPlayed, drawnChrome) >= 4.5,
@@ -996,8 +1019,8 @@ void TransportStatusTest::seekFocusDrawsOneRingAroundTheBar() {
     QCOMPARE(outer, bar.adjusted(-5, -5, 5, 5));
     const QColor ringColor = evaluateOn(ring, QStringLiteral("border.color")).value<QColor>();
     QVERIFY(sameColor(ringColor, harness.token("focusRing")));
-    QVERIFY2(contrastRatio(ringColor, harness.token("chrome")) >= 3.0,
-             qPrintable(describe(QStringLiteral("focus ring"), ringColor, harness.token("chrome"))));
+    QVERIFY2(contrastRatio(ringColor, harness.transportChrome()) >= 3.0,
+             qPrintable(describe(QStringLiteral("focus ring"), ringColor, harness.transportChrome())));
     // Left and Right seek by 5 s.
     QTest::keyClick(harness.window, Qt::Key_Right);
     const QVariantList seeks = harness.root->property("seeks").value<QJSValue>().toVariant().toList();
@@ -1034,7 +1057,7 @@ void TransportStatusTest::volumeGlyphHasTheTransportsWeight() {
     }
     QVERIFY(nextGlyph != nullptr);
     QCOMPARE(muteGlyph->size(), nextGlyph->size());
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     // The pixels drawn at least half as strongly as the glyph's strongest,
     // so that how a mask is coloured doesn't count: offscreen, without the
     // desktop's platform theme, Kirigami draws a mask file uncoloured, which
@@ -1139,7 +1162,7 @@ void TransportStatusTest::transportGlyphsDrawOnOneScale() {
     // As drawn: the pixels at least half as strong as the glyph's strongest,
     // so that how a mask is coloured offscreen doesn't count; their count
     // and the rows they span, in scene pixels.
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     struct Ink {
         int pixels = 0;
         int height = 0;
@@ -1213,7 +1236,7 @@ void TransportStatusTest::transportButtonsDrawTheAppsFocusRing() {
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     for (const QString &name : {QStringLiteral("transportButton_previous"), QStringLiteral("transportButton_playPause"),
                                 QStringLiteral("transportButton_stop"), QStringLiteral("transportButton_next"),
                                 QStringLiteral("muteButton")}) {
@@ -1238,7 +1261,8 @@ void TransportStatusTest::transportButtonsDrawTheAppsFocusRing() {
         button->setProperty("hoverEnabled", true);
         QTest::mouseMove(harness.window, sceneCentre(button));
         QTRY_VERIFY2(hover->isVisible() && hover->opacity() == 1.0, qPrintable(name));
-        QVERIFY(sameColor(hover->property("color").value<QColor>(), harness.token("hover")));
+        QVERIFY(sameColor(hover->property("color").value<QColor>(),
+                          harness.item(QStringLiteral("transportBar"))->property("hoverTint").value<QColor>()));
         QVERIFY(!ring->isVisible());
         QTest::mouseMove(harness.window, QPoint(10, harness.window->height() - 10));
         QTRY_VERIFY2(!hover->isVisible(), qPrintable(name));
@@ -1270,22 +1294,31 @@ void TransportStatusTest::transportPressedReadsApartFromHover_data() {
 
 // A pressed transport button reads apart from a hovered one (#373 H5: the
 // press, text 10%, was the hover's tint in the dark and lighter than it in
-// the light): the pressed tint, 17% / 25% text, a clear step past the
-// hover's 10% / 14%, as drawn on the chrome. The status bar's buttons
-// share it.
+// the light): the pressed tint a clear step past the hover's, as drawn on
+// the transport's Header chrome, each as strong on it as the window's on
+// the view (#373 H13 P24): 1.3:1 and 1.65:1, 9% / 15% and 16% / 26% text
+// in Breeze. The status bar's buttons, on the window colour, take the
+// window's tints.
 void TransportStatusTest::transportPressedReadsApartFromHover() {
     QFETCH(bool, dark);
     Harness harness;
     QString errorText;
     QVERIFY2(harness.load(dark ? kBreezeDark : kBreezeLight, 1600, &errorText), qPrintable(errorText));
-    const QColor chrome = harness.token("chrome");
-    const QColor hover = harness.token("hover");
-    const QColor pressed = harness.token("pressed");
-    QCOMPARE(std::lround(pressed.alphaF() * 100), dark ? 17L : 25L);
-    QCOMPARE(std::lround(hover.alphaF() * 100), dark ? 10L : 14L);
+    const QColor chrome = harness.transportChrome();
+    QQuickItem *transport = harness.item(QStringLiteral("transportBar"));
+    QVERIFY(transport != nullptr);
+    const QColor hover = transport->property("hoverTint").value<QColor>();
+    const QColor pressed = transport->property("pressedTint").value<QColor>();
+    QCOMPARE(std::lround(pressed.alphaF() * 100), dark ? 16L : 26L);
+    QCOMPARE(std::lround(hover.alphaF() * 100), dark ? 9L : 15L);
     QVERIFY(sameColor(QColor::fromRgbF(pressed.redF(), pressed.greenF(), pressed.blueF()), harness.token("text")));
+    QVERIFY(sameColor(QColor::fromRgbF(hover.redF(), hover.greenF(), hover.blueF()), harness.token("text")));
     const QColor hoverDrawn = drawnOver(hover, chrome);
     const QColor pressedDrawn = drawnOver(pressed, chrome);
+    QVERIFY2(contrastRatio(hoverDrawn, chrome) >= 1.3,
+             qPrintable(describe(QStringLiteral("hover on the chrome"), hoverDrawn, chrome)));
+    QVERIFY2(contrastRatio(pressedDrawn, chrome) >= 1.65,
+             qPrintable(describe(QStringLiteral("pressed on the chrome"), pressedDrawn, chrome)));
     QVERIFY2(contrastRatio(pressedDrawn, hoverDrawn) >= 1.2,
              qPrintable(describe(QStringLiteral("pressed on hover"), pressedDrawn, hoverDrawn)));
 
@@ -1310,7 +1343,9 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
     QTRY_VERIFY(channelDistance(pixelAt(grabbed(harness.window, &scale), corner, scale), pressedDrawn) <= 2);
     QTest::mouseRelease(harness.window, Qt::LeftButton, Qt::NoModifier, sceneCentre(button));
 
-    // The status bar's issues button and Last.fm slot take the same tint.
+    // The status bar's issues button and Last.fm slot take the window's.
+    const QColor windowPressed = harness.token("pressed");
+    QCOMPARE(std::lround(windowPressed.alphaF() * 100), dark ? 17L : 25L);
     QVERIFY(QMetaObject::invokeMethod(harness.errors, "report", Q_ARG(QVariant, 1), Q_ARG(QVariant, 0),
                                       Q_ARG(QVariant, QString()), Q_ARG(QVariant, QStringLiteral("first"))));
     takeWarnings(); // The controller logs each report as a warning.
@@ -1325,7 +1360,7 @@ void TransportStatusTest::transportPressedReadsApartFromHover() {
         QTRY_VERIFY2(statusButton->isVisible(), qPrintable(name));
         // No press of the issues button, which would open them.
         statusButton->setProperty("down", true);
-        QTRY_VERIFY2(sameColor(statusBackground->property("color").value<QColor>(), pressed), qPrintable(name));
+        QTRY_VERIFY2(sameColor(statusBackground->property("color").value<QColor>(), windowPressed), qPrintable(name));
         // An invalid value resets it, to follow the press again.
         statusButton->setProperty("down", QVariant());
     }
@@ -1409,7 +1444,7 @@ void TransportStatusTest::seekEmptyLineRunsPastAnEarlyEndingWaveform() {
     QCOMPARE(waveform->property("emptyLineColor").value<QColor>(),
              harness.item(QStringLiteral("transportBar"))->property("seekEmptyLineColor").value<QColor>());
     harness.root->setProperty("positionSeconds", 0.0);
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     const QRectF bar = sceneRect(seek);
     const QRectF wave = sceneRect(waveform);
     QCOMPARE(wave.left(), bar.left());
@@ -1684,7 +1719,7 @@ void TransportStatusTest::volumeDrawsGrooveHoverAndFocus() {
     QQuickItem *ring = harness.item(QStringLiteral("volumeFocusRing"));
     QObject *tip = harness.root->findChild<QObject *>(QStringLiteral("volumeToolTip"));
     QVERIFY(transport && volume && groove && fill && thumb && ring && tip);
-    const QColor chrome = harness.token("chrome");
+    const QColor chrome = harness.transportChrome();
     const QColor played = transport->property("seekPlayedColor").value<QColor>();
     const QColor unplayed = mixed(chrome, played, transport->property("seekUnplayedOpacity").toDouble());
 

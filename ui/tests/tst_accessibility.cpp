@@ -2301,9 +2301,10 @@ void AccessibilityTest::seekTouchShowsNoHoverTime() {
 namespace {
 
 // The transport bar under a palette of the given colours, as Kirigami's
-// theme and the window's palette give them.
+// theme and the window's palette give them, and the transport's Header
+// colour set's background, `header`.
 QByteArray paletteTransportHarnessQml(const QString &window, const QString &base, const QString &alternateBase,
-                                      const QString &text, const QString &highlight) {
+                                      const QString &text, const QString &highlight, const QString &header) {
     return QStringLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
@@ -2354,6 +2355,9 @@ ApplicationWindow {
 
         Panes.TransportBar {
             width: parent.width
+            // The Header colour set's background, as the platform theme
+            // gives it to the transport.
+            Kirigami.Theme.backgroundColor: "%6"
             uiBridge: bridge
             uiPalette: uiPalette
             previousAction: previousAction
@@ -2372,7 +2376,7 @@ ApplicationWindow {
     }
 }
 )QML")
-        .arg(window, base, alternateBase, text, highlight)
+        .arg(window, base, alternateBase, text, highlight, header)
         .toUtf8();
 }
 
@@ -2407,13 +2411,16 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar_data() {
     QTest::addColumn<QString>("alternateBase");
     QTest::addColumn<QString>("text");
     QTest::addColumn<QString>("highlight");
+    QTest::addColumn<QString>("header");
     QTest::addColumn<bool>("dark");
-    QTest::newRow("breeze light") << "#eff0f1" << "#ffffff" << "#f7f7f7" << "#232629" << "#3daee9" << false;
-    QTest::newRow("breeze dark") << "#202326" << "#141618" << "#1d1f22" << "#fcfcfc" << "#3daee9" << true;
+    QTest::newRow("breeze light") << "#eff0f1" << "#ffffff" << "#f7f7f7" << "#232629" << "#3daee9" << "#dee0e2"
+                                  << false;
+    QTest::newRow("breeze dark") << "#202326" << "#141618" << "#1d1f22" << "#fcfcfc" << "#3daee9" << "#292c30"
+                                 << true;
     QTest::newRow("light, orange accent") << "#f3eee4" << "#fffbf2" << "#ece4d6" << "#1d1b16" << "#f67400"
-                                          << false;
+                                          << "#e6dccb" << false;
     QTest::newRow("dark, purple accent") << "#2a2e32" << "#1b1e20" << "#232629" << "#eff0f1" << "#9b59b6"
-                                         << true;
+                                         << "#31363b" << true;
 }
 
 void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
@@ -2422,11 +2429,12 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QFETCH(QString, alternateBase);
     QFETCH(QString, text);
     QFETCH(QString, highlight);
+    QFETCH(QString, header);
     QFETCH(bool, dark);
     QQmlEngine engine;
     QString errorText;
-    QScopedPointer<QObject> root(
-        createQml(engine, paletteTransportHarnessQml(window, base, alternateBase, text, highlight), &errorText));
+    QScopedPointer<QObject> root(createQml(
+        engine, paletteTransportHarnessQml(window, base, alternateBase, text, highlight, header), &errorText));
     auto *quickWindow = qobject_cast<QQuickWindow *>(root.data());
     QVERIFY2(quickWindow != nullptr, qPrintable(errorText));
     QVERIFY(QTest::qWaitForWindowExposed(quickWindow));
@@ -2454,12 +2462,13 @@ void AccessibilityTest::seekBarPlayheadContrastsWithTheBar() {
     QCOMPARE(casing.rgb() & 0xffffff, dark ? 0x000000u : 0xffffffu);
     QVERIFY(casing.alphaF() > 0.5f && casing.alphaF() < 1.0f);
 
-    // The bar is the chrome; the waveform is drawn on it, and the unplayed
-    // part is the chrome over it.
+    // The bar is the transport's chrome, its Header colour (#373 H13 P24);
+    // the waveform is drawn on it, and the unplayed part is the chrome over
+    // it.
     const QColor chrome = background->property("color").value<QColor>();
     const QColor played = waveform->property("barColor").value<QColor>();
     const QColor cover = unplayed->property("color").value<QColor>();
-    QCOMPARE(chrome, palette->property("chrome").value<QColor>());
+    QCOMPARE(chrome, QColor::fromString(header));
     QCOMPARE(waveform->property("bgColor").value<QColor>(), chrome);
     QCOMPARE(chrome.alphaF(), 1.0f);
     QCOMPARE(played.alphaF(), 1.0f);
@@ -3335,6 +3344,7 @@ static QByteArray lightHarnessQml() {
     return QByteArrayLiteral(R"QML(
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import org.kde.kirigami 2.20 as Kirigami
 import "components" as Components
 import "dialogs" as Dialogs
 import "panes" as Panes
@@ -3377,6 +3387,8 @@ ApplicationWindow {
 
     Panes.TransportBar {
         width: parent.width
+        // The theme's Header colour, a step darker than its window colour.
+        Kirigami.Theme.backgroundColor: "#e6dccb"
         uiBridge: bridge
         uiPalette: uiPalette
         previousAction: previousAction
@@ -3479,14 +3491,15 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
         return a.red() == b.red() && a.green() == b.green() && a.blue() == b.blue();
     };
 
-    // The seek bar.
+    // The seek bar, on the transport's chrome: the theme's Header colour
+    // (#373 H13 P24).
+    const QColor header(QStringLiteral("#e6dccb"));
     QQuickItem *background = visibleItemNamed(window, QStringLiteral("seekBackground"));
     QVERIFY(background != nullptr);
-    QCOMPARE(background->property("color").value<QColor>(), QColor(QStringLiteral("#f3eee4")));
-    QCOMPARE(background->property("color").value<QColor>(), paletteColor("chrome"));
+    QCOMPARE(background->property("color").value<QColor>(), header);
     QQuickItem *unplayed = visibleItemNamed(window, QStringLiteral("seekUnplayed"));
     QVERIFY(unplayed != nullptr);
-    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), paletteColor("chrome")));
+    QVERIFY(sameRgb(unplayed->property("color").value<QColor>(), header));
     QQuickItem *playhead = visibleItemNamed(window, QStringLiteral("seekPlayhead"));
     QQuickItem *playheadLine = visibleItemNamed(window, QStringLiteral("seekPlayheadLine"));
     QVERIFY(playhead != nullptr && playheadLine != nullptr);
@@ -3503,14 +3516,14 @@ void AccessibilityTest::lightPaletteLeavesNoFixedColours() {
     };
     findWaveforms(window->contentItem());
     QCOMPARE(waveforms.size(), 1);
-    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), paletteColor("chrome"));
-    // The theme's `wave`, mixed 20% toward the text on a light theme.
+    QCOMPARE(waveforms.first()->property("bgColor").value<QColor>(), header);
+    // The theme's `wave`, mixed 30% toward the text on a light theme.
     const QColor wave = paletteColor("wave");
     const QColor text = paletteColor("text");
     const QColor played = waveforms.first()->property("barColor").value<QColor>();
-    QVERIFY2(std::abs(played.redF() - (wave.redF() * 0.8 + text.redF() * 0.2)) < 0.01
-                 && std::abs(played.greenF() - (wave.greenF() * 0.8 + text.greenF() * 0.2)) < 0.01
-                 && std::abs(played.blueF() - (wave.blueF() * 0.8 + text.blueF() * 0.2)) < 0.01,
+    QVERIFY2(std::abs(played.redF() - (wave.redF() * 0.7 + text.redF() * 0.3)) < 0.01
+                 && std::abs(played.greenF() - (wave.greenF() * 0.7 + text.greenF() * 0.3)) < 0.01
+                 && std::abs(played.blueF() - (wave.blueF() * 0.7 + text.blueF() * 0.3)) < 0.01,
              qPrintable(played.name()));
     QQuickItem *mute = visibleItemNamed(window, QStringLiteral("muteButton"));
     QVERIFY(mute != nullptr);
