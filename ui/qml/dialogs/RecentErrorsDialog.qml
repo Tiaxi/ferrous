@@ -153,9 +153,12 @@ Popup {
     focus: true
     // Above the viewer popups.
     z: 100
-    // 460 px, or as wide as the header needs at a larger font, which puts
-    // its title, how many are new and Clear All on one line (#373 H10).
-    width: Math.min(Math.max(460, Math.ceil(errorHistoryHeader.implicitWidth
+    // 460 px with the default font, as much wider as a larger font makes
+    // the text (#373 H45: at 24 pt it kept 460 px, and its heading wrapped
+    // after four words), or as wide as the header needs, which puts its
+    // title, how many are new and Clear All on one line (#373 H10); within
+    // the window.
+    width: Math.min(Math.max(root.uiPalette.scaledSize(460), Math.ceil(errorHistoryHeader.implicitWidth
             + errorHistoryHeader.Layout.leftMargin + errorHistoryHeader.Layout.rightMargin)),
         root.hostWidth - 2 * root.edgeMargin)
     height: Math.min(root.implicitHeight, root.hostHeight - root.statusBarClearance - root.edgeMargin)
@@ -384,12 +387,19 @@ Popup {
                             anchors.rightMargin: Kirigami.Units.largeSpacing + Kirigami.Units.smallSpacing
                             spacing: Kirigami.Units.largeSpacing + 2
 
+                            // The only mark between an error and a notice: as
+                            // large as a line of text holds, and centred on the
+                            // category's lowercase, the middle of its x-height,
+                            // 2 px under the line's top with the default font
+                            // (#373 H45: it stayed 16 px at the top of a 24 pt
+                            // line).
                             Kirigami.Icon {
                                 objectName: "errorHistoryGlyph"
                                 Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: 2
-                                implicitWidth: Kirigami.Units.iconSizes.small
-                                implicitHeight: Kirigami.Units.iconSizes.small
+                                Layout.topMargin: Math.round(categoryLabel.y + categoryLabel.baselineOffset
+                                    - categoryMetrics.xHeight / 2 - implicitHeight / 2)
+                                implicitWidth: root.uiPalette.labelIconSize
+                                implicitHeight: root.uiPalette.labelIconSize
                                 source: historyRow.glyph === ErrorUtils.GlyphOffline
                                     ? Qt.resolvedUrl("../assets/status-offline.svg")
                                     : (historyRow.glyph === ErrorUtils.GlyphInformation
@@ -414,6 +424,7 @@ Popup {
                                     spacing: Kirigami.Units.largeSpacing
 
                                     Label {
+                                        id: categoryLabel
                                         objectName: "errorHistoryCategory"
                                         Layout.fillWidth: true
                                         text: historyRow.categoryText
@@ -422,6 +433,11 @@ Popup {
                                         font.pointSize: root.uiPalette.smallPointSize
                                         color: root.uiPalette.textTertiary
                                         Accessible.ignored: true
+
+                                        FontMetrics {
+                                            id: categoryMetrics
+                                            font: categoryLabel.font
+                                        }
                                     }
 
                                     Label {
@@ -485,11 +501,14 @@ Popup {
                                     // Link-coloured small text on a flat button: the style
                                     // draws the text of its own background, so both are
                                     // drawn here.
-                                    // The tint under the text while hovered or pressed;
-                                    // the link is darker where the tint takes it under
+                                    // The tint under the text while hovered or pressed,
+                                    // the press a clear step past the hover, 1.65:1 on
+                                    // the popup's window colour, as the transport's
+                                    // (#373 H45: at 10% it read as the hover); the
+                                    // link is darker where the tint takes it under
                                     // 4.5:1 on the window colour.
                                     readonly property color tint: actionButton.down
-                                        ? ColorUtils.withAlpha(root.uiPalette.text, 0.10)
+                                        ? root.uiPalette.pressedOn(root.uiPalette.chrome)
                                         : (actionButton.hovered ? root.uiPalette.hover : "transparent")
                                     contentItem: Label {
                                         text: actionButton.text
@@ -506,8 +525,13 @@ Popup {
                                         border.width: actionButton.visualFocus ? 2 : 0
                                         border.color: root.uiPalette.focusRing
 
+                                        // The hover and the release fade; the press
+                                        // shows on its first frame. The button tells
+                                        // `pressed` before `down`, which the tint
+                                        // follows, so the fade is off by the time the
+                                        // tint turns.
                                         Behavior on color {
-                                            enabled: Kirigami.Units.shortDuration > 0
+                                            enabled: Kirigami.Units.shortDuration > 0 && !actionButton.pressed
                                             ColorAnimation {
                                                 duration: Kirigami.Units.shortDuration
                                                 easing.type: Easing.OutCubic

@@ -3212,13 +3212,14 @@ void LibraryQueueSmokeTest::queueRowsShowTheirStatesInThePaletteColours() {
     QTRY_COMPARE(glyphName(3), QString());
 
     // Highlighted rows, the playing one among them: the inactive tint while
-    // the queue has no focus, and tertiary text steps up to secondary.
+    // the queue has no focus, and tertiary text steps up to the selected
+    // row's own.
     QVERIFY(QMetaObject::invokeMethod(controller, "setSelectedIndices",
         Q_ARG(QVariant, QVariant(QVariantList{2, 4}))));
     QTRY_COMPARE(tint(4), paletteColor("selectionInactive"));
     QCOMPARE(tint(2), paletteColor("selectionInactive"));
     QCOMPARE(tint(3), QStringLiteral("#00000000"));
-    QCOMPARE(color(cell(4, "order")), paletteColor("textSecondary"));
+    QCOMPARE(color(cell(4, "order")), paletteColor("textTertiarySelected"));
     QCOMPARE(color(cell(3, "order")), paletteColor("textTertiary"));
     QCOMPARE(color(cell(2, "title")), paletteColor("now"));
     QVERIFY(!ring(4));

@@ -1502,7 +1502,7 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     auto *summary = fixture.window->findChild<QQuickItem *>(QStringLiteral("renamePreviewSummary"));
     QVERIFY(summary != nullptr);
     QCOMPARE(summary->property("text").toString(),
-             QStringLiteral("1 file will be renamed. 1 file can't be renamed and keeps its name."));
+             QStringLiteral("1 file will be renamed. 1 file can\u2019t be renamed and keeps its name."));
     // The lead, semibold, as every dialog's first sentence is (#373 H40).
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     const QVariantList rows = previewDialog->property("rows").toList();
@@ -1823,19 +1823,24 @@ void TagEditorSmokeTest::saveDetailsReadAsAReport() {
              sceneRectOf(summary).left());
 
     // As tall as all that, with a grid unit's room above the buttons, up to
-    // 29 grid units, past which the details scroll.
+    // 29 grid units scaled with the font, past which the details scroll.
     QQuickItem *close = visibleItemNamed(detailsWindow, QStringLiteral("tagEditorStatusDetailsCloseButton"));
     QVERIFY(close != nullptr);
     const qreal gridUnit = details->property("contentPadding").toReal();
+    QVariant scaledLimit;
+    QVERIFY(QMetaObject::invokeMethod(qvariant_cast<QObject *>(details->property("uiPalette")), "scaledSize",
+                                      Q_RETURN_ARG(QVariant, scaledLimit), Q_ARG(QVariant, QVariant(gridUnit * 29))));
+    const qreal limit = scaledLimit.toReal();
+    QVERIFY(limit >= gridUnit * 29);
     QTRY_VERIFY(text->height() > 0);
     const qreal textBottom = sceneRectOf(text).top() + text->property("contentHeight").toReal();
     const QString where = QStringLiteral("text to %1, Close from %2 in a window %3 px tall")
         .arg(textBottom).arg(sceneRectOf(close).top()).arg(detailsWindow->height());
-    if (pointSize == 0 || detailsWindow->height() < gridUnit * 29) {
-        QVERIFY2(detailsWindow->height() < gridUnit * 29, qPrintable(where));
+    if (pointSize == 0 || detailsWindow->height() < limit) {
+        QVERIFY2(detailsWindow->height() < limit, qPrintable(where));
         QVERIFY2(std::abs(sceneRectOf(close).top() - textBottom - gridUnit) <= 1.0, qPrintable(where));
     } else {
-        QCOMPARE(detailsWindow->height(), int(gridUnit * 29));
+        QCOMPARE(detailsWindow->height(), int(limit));
         QVERIFY2(textBottom > sceneRectOf(close).top() - gridUnit, qPrintable(where));
     }
     QCOMPARE(sceneRectOf(summary).top(), gridUnit);

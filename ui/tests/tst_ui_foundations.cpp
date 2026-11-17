@@ -428,11 +428,11 @@ void UiFoundationsTest::tokensFollowTheBreezeColours() {
     QCOMPARE(channelDistance(dim, QColor(Qt::black)), 0);
     QVERIFY(std::abs(dim.alphaF() - (dark ? 0.65 : 0.25)) < 0.002);
 
-    // Tertiary text steps up to secondary on a selected row.
+    // Tertiary text steps up to the selected row's own on a selected row.
     QVariant stepped;
     QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, stepped),
                                       Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant(false))));
-    QCOMPARE(stepped.value<QColor>(), colorOf(tokens, "textSecondary"));
+    QCOMPARE(stepped.value<QColor>(), colorOf(tokens, "textTertiarySelected"));
     QVariant plain;
     QVERIFY(QMetaObject::invokeMethod(tokens, "textTertiaryOn", Q_RETURN_ARG(QVariant, plain),
                                       Q_ARG(QVariant, QVariant(false)), Q_ARG(QVariant, QVariant(false))));
@@ -870,20 +870,27 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
                                 .arg(QLatin1String(selection), selected.name())));
     }
 
-    // A row's texts on it.
+    // A row's texts on it; its tertiary figures with the margin that
+    // subpixel antialiasing takes from small figures (#373 H45).
     const QColor tertiaryHovered = colorOf(tokens, "textTertiaryHovered");
-    const QList<std::pair<const char *, double>> texts{
-        {"text", 4.5}, {"textColumn", 4.5}, {"textSecondary", 4.5}, {"now", 4.5}, {"textTertiaryHovered", 4.6}};
+    const double figureContrast = tokens->property("rowFigureContrast").toDouble();
+    QCOMPARE(figureContrast, 5.4);
+    const QList<std::pair<const char *, double>> texts{{"text", 4.5},
+                                                       {"textColumn", 4.5},
+                                                       {"textSecondary", 4.5},
+                                                       {"now", 4.5},
+                                                       {"textTertiaryHovered", figureContrast}};
     for (const auto &[token, minimum] : texts) {
         QVERIFY2(contrastRatio(colorOf(tokens, token), hovered) >= minimum,
                  qPrintable(describe(QLatin1String(token), colorOf(tokens, token), hovered)));
     }
     // The tertiary colour keeps its step below the secondary elsewhere:
     // only a hovered row's is stronger, where the plain one falls short of
-    // 4.6:1 on it, as on dark; on light's fainter hover it already reads.
+    // the margin on it, as in both Breeze themes; it stays under the text.
     QCOMPARE(sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")),
-             contrastRatio(colorOf(tokens, "textTertiary"), hovered) >= 4.6);
-    QCOMPARE(sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")), !dark);
+             contrastRatio(colorOf(tokens, "textTertiary"), hovered) >= figureContrast);
+    QVERIFY(!sameColor(tertiaryHovered, colorOf(tokens, "textTertiary")));
+    QVERIFY(contrastRatio(tertiaryHovered, hovered) < contrastRatio(text, hovered) - 4);
     QVERIFY2(std::abs(contrastRatio(colorOf(tokens, "textTertiary"), view) - 6.2) <= 0.15,
              qPrintable(describe(QStringLiteral("tertiary"), colorOf(tokens, "textTertiary"), view)));
     const auto tertiaryOn = [tokens](bool selected, bool rowHovered) {
@@ -894,7 +901,7 @@ void UiFoundationsTest::listRowHoverStandsOutAndApart() {
     };
     QVERIFY(sameColor(tertiaryOn(false, false), colorOf(tokens, "textTertiary")));
     QVERIFY(sameColor(tertiaryOn(false, true), tertiaryHovered));
-    QVERIFY(sameColor(tertiaryOn(true, true), colorOf(tokens, "textSecondary")));
+    QVERIFY(sameColor(tertiaryOn(true, true), colorOf(tokens, "textTertiarySelected")));
 }
 
 void UiFoundationsTest::selectionOutweighsRowHover_data() {
@@ -979,6 +986,12 @@ void UiFoundationsTest::selectionOutweighsRowHover() {
         for (const auto &[what, color] : texts) {
             QVERIFY2(contrastRatio(color, selected) >= 4.5, qPrintable(describe(what, color, selected)));
         }
+        // The number with the margin that small figures lose to subpixel
+        // antialiasing, and under the text (#373 H45).
+        const double figureContrast = tokens->property("rowFigureContrast").toDouble();
+        QVERIFY2(contrastRatio(number.value<QColor>(), selected) >= figureContrast,
+                 qPrintable(describe(QStringLiteral("selected number"), number.value<QColor>(), selected)));
+        QVERIFY(contrastRatio(number.value<QColor>(), selected) < contrastRatio(colorOf(tokens, "text"), selected) - 4);
     }
 }
 
@@ -1083,6 +1096,11 @@ void UiFoundationsTest::selectedQueueRowAnswersHover() {
         QVERIFY(contrastRatio(selectedHovered, text) < contrastRatio(selected, text));
         for (const auto &[what, color] : texts) {
             QVERIFY2(contrastRatio(color, selectedHovered) >= 4.5, qPrintable(describe(what, color, selectedHovered)));
+        }
+        const double figureContrast = tokens->property("rowFigureContrast").toDouble();
+        for (const QColor &under : {selected, selectedHovered}) {
+            QVERIFY2(contrastRatio(number.value<QColor>(), under) >= figureContrast,
+                     qPrintable(describe(QStringLiteral("selected number"), number.value<QColor>(), under)));
         }
     }
 

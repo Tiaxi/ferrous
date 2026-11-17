@@ -25,10 +25,12 @@ Components.DialogWindow {
     minimumWidth: Math.ceil(Math.max(Kirigami.Units.gridUnit * 30, Math.max(diagnosticsLogActions.implicitWidth,
         diagnosticsReadActions.implicitWidth) + 2 * Kirigami.Units.gridUnit))
     minimumHeight: Kirigami.Units.gridUnit * 18
-    // Wide enough for the actions in one row.
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 54,
+    // Wide enough for the actions in one row. Its size with the default
+    // font grows with a larger one, within the screen, so the log shows as
+    // many of its lines, as long.
+    defaultWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 54),
         Math.ceil(diagnosticsToolbar.implicitWidth + 2 * Kirigami.Units.gridUnit))
-    defaultHeight: Kirigami.Units.gridUnit * 38
+    defaultHeight: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 38)
 
     function syncDiagnosticsText() {
         root.diagnosticsText = root.uiBridge.diagnosticsText || ""
@@ -130,12 +132,14 @@ Components.DialogWindow {
 
                 // One verb for one act: it deletes the log, as its question
                 // and its confirming button say (#373 H38: it was Clear…).
+                // No ellipsis: its confirmation asks for nothing more, as
+                // KDE's guidelines have it (#373 H45).
                 Button {
                     objectName: "diagnosticsClearButton"
                     icon.width: dialogButtons.glyphSize
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-delete"
-                    text: I18n.i18nc("@action:button", "Delete Log\u2026")
+                    text: I18n.i18nc("@action:button", "Delete Log")
                     enabled: (root.diagnosticsText || "").length > 0
                     onClicked: clearDiagnosticsConfirmDialog.open()
                 }

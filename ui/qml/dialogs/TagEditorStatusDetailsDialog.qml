@@ -61,11 +61,13 @@ Components.DialogWindow {
     title: I18n.i18nc("@title:window", "Tag Editor Details")
     minimumWidth: Kirigami.Units.gridUnit * 20
     minimumHeight: Kirigami.Units.gridUnit * 9
-    defaultWidth: Kirigami.Units.gridUnit * 36
+    // Its width and its limit below with the default font grow with a
+    // larger one, within the screen.
+    defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 36)
     // As tall as the summary and the details at the width it opens at,
     // each time it opens, up to a limit (#373 H40: it opened 522 px tall
     // for six lines).
-    defaultHeight: Math.min(Kirigami.Units.gridUnit * 29,
+    defaultHeight: Math.min(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 29),
         root.contentPadding
         + (summary.text.length > 0 ? Math.ceil(summarySizer.implicitHeight) + root.contentSpacing : 0)
         + Math.ceil(detailsSizer.implicitHeight) + detailsText.topPadding + detailsText.bottomPadding

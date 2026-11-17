@@ -20,6 +20,12 @@ Components.CompactDialogWindow {
     // A start number's field fits four digits; its error wraps under it.
     readonly property real numberFieldWidth: root.uiPalette.gridUnit * 5
     readonly property real errorWidth: root.uiPalette.gridUnit * 14
+    // Breeze draws a check box's 16 px box in the middle of its 20 px
+    // indicator, which leaves room for the focus frame: the check boxes,
+    // box and text, move left by that room, so their boxes start where the
+    // fields' frames do (#373 H45: they were 2 px in). A style whose box
+    // fills its indicator needs none.
+    readonly property real checkBoxInset: Math.max(0, (writeTotalsCheck.indicator.width - 16) / 2)
 
     function startingNumber(field) {
         return Number.parseInt(field.text, 10)
@@ -121,6 +127,7 @@ Components.CompactDialogWindow {
         // when it writes disc numbers.
         CheckBox {
             id: writeTotalsCheck
+            leftPadding: -root.checkBoxInset
             objectName: "autoNumberWriteTotalsCheck"
             checked: false
             text: I18n.i18nc("@option:check", "Write totals")
@@ -132,6 +139,7 @@ Components.CompactDialogWindow {
 
         CheckBox {
             id: writeDiscCheck
+            leftPadding: -root.checkBoxInset
             objectName: "autoNumberWriteDiscCheck"
             checked: false
             text: I18n.i18nc("@option:check", "Write disc numbers")
@@ -159,6 +167,7 @@ Components.CompactDialogWindow {
         }
         CheckBox {
             id: resetOnDiscCheck
+            leftPadding: -root.checkBoxInset
             objectName: "autoNumberResetOnDiscCheck"
             checked: false
             enabled: writeDiscCheck.checked
@@ -171,6 +180,7 @@ Components.CompactDialogWindow {
 
         CheckBox {
             id: resetOnFolderCheck
+            leftPadding: -root.checkBoxInset
             objectName: "autoNumberResetOnFolderCheck"
             checked: false
             text: I18n.i18nc("@option:check", "Reset track numbers at each new folder or section")

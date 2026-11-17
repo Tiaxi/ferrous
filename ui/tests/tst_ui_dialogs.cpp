@@ -4,6 +4,8 @@
 // and the smaller dialogs, from the QML sources with the fallback bridge.
 
 #include <QApplication>
+#include <QStyle>
+#include <QStyleFactory>
 #include <QClipboard>
 #include <QColor>
 #include <QElapsedTimer>
@@ -547,6 +549,12 @@ private slots:
     void dialogsHoldTheirContentsWithALargeFont();
     void compactDialogsKeepTheirMeasureWithALargeFont_data();
     void compactDialogsKeepTheirMeasureWithALargeFont();
+    void dialogGlyphsAndMeasuresFollowTheFont_data();
+    void dialogGlyphsAndMeasuresFollowTheFont();
+    void recentIssuesLinkPressShowsAtOnce();
+    void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
+    void autoNumberCheckBoxesStartOnTheFieldsEdge();
+    void dialogListNumbersReadAsDrawn();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -919,7 +927,8 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn_data() {
 }
 
 // The library's folders have their paths in one column: the names' column
-// is as wide as the widest name, up to 8 grid units, so every path starts
+// is as wide as the widest name, up to 8 grid units scaled with the font
+// (UiPalette.scaledSize), so every path starts
 // at one x, a row without a name included (#373 H43: each path began where
 // its own name ended). A single folder's row is as it was, and a list
 // without names has no names' column.
@@ -953,9 +962,13 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QObject *dialog = openPreferences(window, 0);
     QVERIFY(dialog != nullptr);
     QQuickWindow *prefs = windowOf(dialog);
-    // The cap is in Kirigami's grid units, as the page sets it.
-    const qreal gridUnit = evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
-    QVERIFY(gridUnit > 0);
+    // The cap is in Kirigami's grid units, scaled with the font, as the
+    // page sets it.
+    const qreal nameCap = evaluate(dialog, QStringLiteral("uiPalette.scaledSize(Kirigami.Units.gridUnit * 8)")).toReal();
+    QVERIFY(nameCap > 0);
+    if (pointSize <= 0) {
+        QCOMPARE(nameCap, 8 * evaluate(dialog, QStringLiteral("Kirigami.Units.gridUnit")).toReal());
+    }
     QQuickItem *list = nullptr;
     QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
 
@@ -990,21 +1003,21 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QList<Row> rows;
     QTRY_VERIFY((rows = rowsOf(4)).size() == 4);
     const qreal pathX = sceneRect(rows.at(0).path).left();
-    const qreal column = std::min(rows.at(1).name->implicitWidth(), 8 * gridUnit);
+    const qreal column = std::min(rows.at(1).name->implicitWidth(), nameCap);
     for (const Row &row : rows) {
         QVERIFY2(qAbs(sceneRect(row.path).left() - pathX) < 0.5, qPrintable(describeItem(row.path)));
         QVERIFY2(row.name->isVisible(), qPrintable(describeItem(row.name)));
         QVERIFY2(qAbs(row.name->width() - column) < 0.5, qPrintable(describeItem(row.name)));
-        // A name elides only past 8 grid units, as the widest does at 24 pt.
-        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > 8 * gridUnit + 0.5);
+        // A name elides only past the cap.
+        QCOMPARE(row.name->property("truncated").toBool(), row.name->implicitWidth() > nameCap + 0.5);
     }
     QCOMPARE(rows.at(1).name->property("text").toString(), QStringLiteral("Second Shelf Wide"));
     QCOMPARE(rows.at(2).name->property("text").toString(), QString());
     // The unnamed row's path is its only text: in the text's colour.
     QCOMPARE(hex(rows.at(2).path->property("color").value<QColor>()), hex(tokenOf(window, "text")));
 
-    // A name wider than 8 grid units elides at that width, and the paths
-    // follow it.
+    // A name wider than the cap elides at that width, and the paths follow
+    // it.
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
         folder(QStringLiteral("/fixture/one"), QStringLiteral("Shelf")),
         folder(QStringLiteral("/fixture/two"),
@@ -1012,7 +1025,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     }));
     QTRY_VERIFY((rows = rowsOf(2)).size() == 2);
     QTRY_VERIFY(rows.at(1).name->property("truncated").toBool());
-    QVERIFY2(qAbs(rows.at(1).name->width() - 8 * gridUnit) < 0.5, qPrintable(describeItem(rows.at(1).name)));
+    QVERIFY2(qAbs(rows.at(1).name->width() - nameCap) < 0.5, qPrintable(describeItem(rows.at(1).name)));
     QVERIFY2(qAbs(sceneRect(rows.at(0).path).left() - sceneRect(rows.at(1).path).left()) < 0.5,
              qPrintable(describeItem(rows.at(0).path)));
 
@@ -2476,7 +2489,7 @@ void UiDialogsTest::aboutKdeHasAboutsHeadingAndPage() {
     QTRY_VERIFY(!layoutPending(view));
     // The heading, as About's.
     QCOMPARE(sceneRect(icon), aboutIcon);
-    QCOMPARE(icon->width(), 48.0);
+    QCOMPARE(icon->width(), evaluate(kdeDialog, QStringLiteral("uiPalette.scaledSize(48)")).toReal());
     QCOMPARE(sceneRect(name).topLeft(), aboutName.topLeft());
     QCOMPARE(sceneRect(motto).left(), aboutVersion.left());
     QCOMPARE(name->property("font").value<QFont>().pointSizeF(), nameFont.pointSizeF());
@@ -3094,7 +3107,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // Diagnostics has one verb for deleting its log and one row of actions
 // under the log's path (#373 H38: Clear… asked to delete the log, and the
 // actions were over two rows with two ragged right edges): Reload and
-// Delete Log… on the left, Open Folder, Copy All and Copy Log Without
+// Delete Log on the left, Open Folder, Copy All and Copy Log Without
 // Paths on the right, ending where the log's frame does. The log's scroll
 // bars are inside its frame, and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
@@ -3138,8 +3151,9 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     }
     QTRY_VERIFY(!layoutPending(frame) && !layoutPending(buttons.constFirst()));
 
-    // One verb: Delete Log…, which asks Delete Diagnostics Log.
-    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log…"));
+    // One verb: Delete Log, which asks Delete Diagnostics Log, with no
+    // ellipsis: the confirmation asks for nothing more (#373 H45).
+    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log"));
     QCOMPARE(evaluate(buttons.at(1), QStringLiteral("icon.name")).toString(), QStringLiteral("edit-delete"));
     QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
     QVERIFY(confirm != nullptr);
@@ -5194,6 +5208,457 @@ void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
     QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
     QTRY_VERIFY(!confirmWindow->isVisible());
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+}
+
+void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialogs' glyphs beside text are as large as a line of the font holds
+// (UiPalette.labelIconSize, Kirigami's size for labels), and their measures
+// tuned at 10 pt grow with the font (UiPalette.scaledSize); the default
+// 10 pt font draws them as they were (#373 H45: at 24 pt Configure's folder list
+// stopped at its buttons and cut the path beside free room, with a 16 px
+// folder glyph; Recent Issues kept 460 px and a 16 px severity glyph;
+// About's icon stayed 48 px).
+void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    // KDE's default font, at the size of the row.
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    const bool large = pointSize > 10;
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *palette = paletteOf(window);
+    const qreal labelIcon = palette->property("labelIconSize").toReal();
+    const qreal fontScale = palette->property("fontScale").toReal();
+    const auto scaled = [&](qreal size) { return std::max(size, qreal(std::round(size * fontScale))); };
+    const qreal gridUnit = evaluate(palette, QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+    if (large) {
+        QCOMPARE(labelIcon, evaluate(palette, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal());
+        QVERIFY2(labelIcon >= 32, qPrintable(QString::number(labelIcon)));
+        QCOMPARE(fontScale, pointSize / 10);
+    } else {
+        QCOMPARE(labelIcon, 16.0);
+        QCOMPARE(fontScale, 1.0);
+    }
+
+    // Configure's library folders: the list as wide as 29 grid units scaled
+    // with the font where the page has the room, the folder glyph as large
+    // as the row's text holds, and the note under a folder on its text's x.
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/a/folder/with/a/rather/long/path/to/its/music")},
+                    {QStringLiteral("name"), QStringLiteral("Shelf")},
+                    {QStringLiteral("trackCount"), 3},
+                    {QStringLiteral("unwatchedReason"), QStringLiteral("a network share")}},
+    }));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QQuickWindow *prefs = windowOf(preferences);
+    prefs->resize(2400, prefs->height());
+    QTRY_COMPARE(prefs->width(), 2400);
+    QQuickItem *frame = nullptr;
+    QQuickItem *buttons = nullptr;
+    QTRY_VERIFY((frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"))) != nullptr);
+    QTRY_VERIFY((buttons = visibleNamed(prefs, QStringLiteral("libraryRootAddButton"))) != nullptr);
+    const qreal listWidth = std::max(scaled(29 * gridUnit),
+                                     buttons->parentItem()->implicitWidth());
+    QTRY_COMPARE(frame->width(), listWidth);
+    if (!large) {
+        QCOMPARE(listWidth, 29 * gridUnit);
+    }
+    QQuickItem *row = nullptr;
+    QTRY_VERIFY((row = visibleNamed(prefs, QStringLiteral("libraryRootRow"))) != nullptr && !layoutPending(row));
+    QQuickItem *folderIcon = itemsNamed(row, QStringLiteral("libraryRootIcon")).value(0);
+    QQuickItem *name = itemsNamed(row, QStringLiteral("libraryRootName")).value(0);
+    QQuickItem *path = itemsNamed(row, QStringLiteral("libraryRootPath")).value(0);
+    QQuickItem *note = itemsNamed(row, QStringLiteral("libraryRootUnwatchedLabel")).value(0);
+    QVERIFY(folderIcon != nullptr && name != nullptr && path != nullptr && note != nullptr);
+    QCOMPARE(folderIcon->width(), labelIcon);
+    QCOMPARE(folderIcon->height(), labelIcon);
+    // Drawn in one colour at either size: Breeze's 32 px folder is in full
+    // colour.
+    {
+        QTRY_VERIFY(folderIcon->property("valid").toBool());
+        QTest::qWait(50);
+        const QImage shown = prefs->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const qreal dpr = shown.devicePixelRatio();
+        const QRect pixels = QRectF(sceneRect(folderIcon).topLeft() * dpr, sceneRect(folderIcon).size() * dpr).toRect();
+        int saturated = 0;
+        for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+            for (int x = pixels.left(); x <= pixels.right(); ++x) {
+                saturated += QColor(shown.pixel(x, y)).hsvSaturation() > 80;
+            }
+        }
+        QVERIFY2(saturated == 0, qPrintable(QStringLiteral("%1 coloured pixels").arg(saturated)));
+    }
+    QVERIFY(note->isVisible());
+    QVERIFY2(qAbs(sceneRect(note).left() - sceneRect(name).left()) < 0.5,
+             qPrintable(describeItem(note) + QStringLiteral(" / ") + describeItem(name)));
+    // With the room, the path is whole.
+    QTRY_VERIFY2(!path->property("truncated").toBool(),
+                 qPrintable(describeItem(path)));
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+
+    // Recent Issues: 460 px scaled with the font, within the window, and
+    // its severity glyph as large as a line holds, centred on the
+    // category's lowercase.
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QObject *issues = object(window, QStringLiteral("recentErrorsDialog"));
+    QVERIFY(issues != nullptr);
+    const qreal edgeMargin = issues->property("edgeMargin").toReal();
+    const qreal issuesWidth = issues->property("width").toReal();
+    if (large) {
+        QVERIFY2(issuesWidth >= std::min(scaled(460), window->width() - 2 * edgeMargin) - 0.5,
+                 qPrintable(QString::number(issuesWidth)));
+        QVERIFY2(issuesWidth <= window->width() - 2 * edgeMargin + 0.5, qPrintable(QString::number(issuesWidth)));
+    } else {
+        QCOMPARE(issuesWidth, 460.0);
+    }
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(window->contentItem(), QStringLiteral("errorHistoryRow"))).size(), 1);
+    QQuickItem *glyph = itemsNamed(rows.first(), QStringLiteral("errorHistoryGlyph")).value(0);
+    QQuickItem *category = itemsNamed(rows.first(), QStringLiteral("errorHistoryCategory")).value(0);
+    QVERIFY(glyph != nullptr && category != nullptr);
+    QTRY_VERIFY(!layoutPending(rows.first()));
+    QCOMPARE(glyph->width(), labelIcon);
+    QCOMPARE(glyph->height(), labelIcon);
+    const qreal xMiddle = sceneRect(category).top() + category->baselineOffset()
+        - QFontMetricsF(category->property("font").value<QFont>()).xHeight() / 2;
+    QVERIFY2(qAbs(sceneRect(glyph).center().y() - xMiddle) <= 0.5,
+             qPrintable(describeItem(glyph) + QStringLiteral(", the category's x-height centred at %1").arg(xMiddle)));
+    if (!large && QFontInfo(category->property("font").value<QFont>()).family() == QStringLiteral("Noto Sans")) {
+        // Where it was with the default font: 2 px under the line's top.
+        QCOMPARE(sceneRect(glyph).top() - sceneRect(category).top(), 2.0);
+    }
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_VERIFY(!issues->property("visible").toBool());
+
+    // About's icon, 48 px with the default font, larger with a larger one.
+    QObject *about = object(window, QStringLiteral("aboutDialog"));
+    QVERIFY(about != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(about, "open"));
+    QVERIFY(waitForDialogWindow(about));
+    QQuickItem *icon = visibleNamed(windowOf(about), QStringLiteral("aboutIcon"));
+    QVERIFY(icon != nullptr);
+    QCOMPARE(icon->width(), scaled(48));
+    QCOMPARE(icon->height(), scaled(48));
+    if (large) {
+        QVERIFY(icon->width() > 48);
+    }
+    QVERIFY(QMetaObject::invokeMethod(about, "close"));
+    QTRY_VERIFY(!about->property("visible").toBool());
+}
+
+// A Recent Issues link's press reads as a press: its tint is a clear step
+// past the hover, 1.65:1 on the popup's window colour as the transport's
+// buttons' (#373 H45: at 10% it read as the hover), and it shows on its
+// first frame, with no fade while the button is down; the hover and the
+// release fade.
+void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    report(window, 1, 0, kStaticPath, kEndsEarly);
+    QVERIFY(openIssues(window));
+    QQuickItem *action = visibleNamed(window, QStringLiteral("errorHistoryActionButton"));
+    QVERIFY(action != nullptr);
+    auto *background = qvariant_cast<QQuickItem *>(action->property("background"));
+    QVERIFY(background != nullptr);
+    const auto colorOf = [&]() { return background->property("color").value<QColor>(); };
+    QObject *palette = paletteOf(window);
+    const QColor chrome = tokenOf(window, "chrome");
+    const QColor pressed = evaluate(palette, QStringLiteral("pressedOn(chrome)")).value<QColor>();
+    const QColor hover = tokenOf(window, "hover");
+    QVERIFY(pressed.isValid() && pressed.alpha() > 0);
+    // A step past the hover on the window colour.
+    const double pressedRatio = contrastRatio(drawnOver(pressed, chrome), chrome);
+    const double hoverRatio = contrastRatio(drawnOver(hover, chrome), chrome);
+    QVERIFY2(pressedRatio >= 1.65, qPrintable(QString::number(pressedRatio)));
+    QVERIFY2(pressedRatio >= hoverRatio + 0.25,
+             qPrintable(QStringLiteral("pressed %1:1, hover %2:1").arg(pressedRatio).arg(hoverRatio)));
+
+    const QPoint centre = action->mapToScene(QPointF(action->width() / 2, action->height() / 2)).toPoint();
+    QCOMPARE(colorOf().alpha(), 0);
+    // The press: the pressed tint at once, before any frame of a fade.
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+    QVERIFY(action->property("down").toBool());
+    QCOMPARE(hex(colorOf()), hex(pressed));
+    const QImage frame = window->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const QPointF inside = action->mapToScene(QPointF(2, action->height() / 2)) * frame.devicePixelRatio();
+    // Drawn in that first frame, give or take the blend's rounding.
+    const QColor drawn(frame.pixel(inside.toPoint()));
+    const QColor expected = drawnOver(pressed, chrome);
+    QVERIFY2(qAbs(drawn.red() - expected.red()) <= 3 && qAbs(drawn.green() - expected.green()) <= 3
+                 && qAbs(drawn.blue() - expected.blue()) <= 3,
+             qPrintable(QStringLiteral("%1, not %2").arg(hex(drawn), hex(expected))));
+    // The release, off the button so it does nothing: a fade back.
+    const QPoint away = action->mapToScene(QPointF(action->width() / 2, -action->height())).toPoint();
+    QTest::mouseMove(window, away);
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, away);
+    QTRY_VERIFY(!action->property("down").toBool());
+    if (evaluate(palette, QStringLiteral("Kirigami.Units.shortDuration")).toInt() > 0) {
+        QVERIFY2(colorOf() != pressed && colorOf().alpha() > 0, qPrintable(hex(colorOf())));
+    }
+    QTRY_COMPARE(colorOf().alpha(), 0);
+}
+
+void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge_data() {
+    QTest::addColumn<QString>("widgetStyle");
+    QTest::newRow("default style") << QString();
+    QTest::newRow("Breeze") << QStringLiteral("Breeze");
+}
+
+// Auto Number's check boxes are drawn from the fields' left edge: their
+// boxes start in the column the fields' frames do. Breeze draws a 16 px box
+// in the middle of a 20 px indicator, which left them 2 px in (#373 H45).
+void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
+    QFETCH(QString, widgetStyle);
+    const QString previousStyle = QApplication::style()->name();
+    const auto restoreStyle = qScopeGuard([&] { QApplication::setStyle(previousStyle); });
+    if (!widgetStyle.isEmpty()) {
+        if (!QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+            QSKIP("The Breeze widget style is not installed.");
+        }
+        QApplication::setStyle(widgetStyle);
+    }
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    QQuickItem *field = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
+    QVERIFY(field != nullptr);
+    QTest::qWait(100);
+    const QImage shown = numbers->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const qreal dpr = shown.devicePixelRatio();
+    // The first column, from a little left of `item`, drawn in other than
+    // the window's colour on the line through its middle.
+    const auto inkStart = [&](QQuickItem *item) {
+        const QRectF rect = sceneRect(item);
+        const int y = int((rect.top() + rect.height() / 2) * dpr);
+        const QRgb window = shown.pixel(1, y);
+        for (int x = std::max(0, int((rect.left() - 8) * dpr)); x < int(rect.right() * dpr); ++x) {
+            const QColor pixel(shown.pixel(x, y));
+            const QColor background(window);
+            if (qAbs(pixel.red() - background.red()) + qAbs(pixel.green() - background.green())
+                    + qAbs(pixel.blue() - background.blue()) > 24) {
+                return x;
+            }
+        }
+        return -1;
+    };
+    const int fieldInk = inkStart(field);
+    QVERIFY(fieldInk >= 0);
+    for (const QString &name : {QStringLiteral("autoNumberWriteTotalsCheck"), QStringLiteral("autoNumberWriteDiscCheck"),
+                                QStringLiteral("autoNumberResetOnDiscCheck"), QStringLiteral("autoNumberResetOnFolderCheck")}) {
+        QQuickItem *check = visibleNamed(numbers, name);
+        QVERIFY2(check != nullptr, qPrintable(name));
+        auto *indicator = qvariant_cast<QQuickItem *>(check->property("indicator"));
+        QVERIFY(indicator != nullptr);
+        // The box's own column, in the indicator.
+        const int boxInk = inkStart(indicator);
+        QVERIFY2(boxInk == fieldInk, qPrintable(QStringLiteral("%1: its box from x %2, the field's frame from %3 (%4)")
+                                                    .arg(name).arg(boxInk).arg(fieldInk).arg(describeItem(indicator))));
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!numbers->isVisible());
+    editor.close();
+}
+
+namespace {
+
+// The strongest ink of `text` as drawn in `shown`: the pixel in its box
+// furthest in contrast from `background`, as the reviews measure it.
+std::pair<double, QColor> strongestInk(const QImage &shown, QQuickItem *text, const QColor &background) {
+    const qreal dpr = shown.devicePixelRatio();
+    const QRect pixels = QRectF(sceneRect(text).topLeft() * dpr, sceneRect(text).size() * dpr).toAlignedRect()
+        .intersected(shown.rect());
+    double best = 1;
+    QColor ink = background;
+    for (int y = pixels.top(); y <= pixels.bottom(); ++y) {
+        for (int x = pixels.left(); x <= pixels.right(); ++x) {
+            const QColor pixel(shown.pixel(x, y));
+            const double ratio = contrastRatio(pixel, background);
+            if (ratio > best) {
+                best = ratio;
+                ink = pixel;
+            }
+        }
+    }
+    return {best, ink};
+}
+
+// The colour drawn at `scenePoint` of `window`.
+QColor drawnAt(const QImage &shown, const QPointF &scenePoint) {
+    return QColor(shown.pixel((scenePoint * shown.devicePixelRatio()).toPoint()));
+}
+
+} // namespace
+
+// The quiet numbers of the dialogs' lists read at 4.5:1 or more as drawn,
+// on their row at rest, under the pointer and selected, with the list
+// focused or not: Configure's library folders' track counts and Edit
+// Tags' track numbers (#373 H45: in Breeze Light, "3 tracks" on a hovered
+// folder drew at 4.48:1 and a selected row's "1" at 4.39:1, their
+// colours at 4.64:1 and 5.08:1, which small figures lose to subpixel
+// antialiasing). Their colours are rowFigureContrast on the row as drawn,
+// which keeps that margin, and quieter than the text.
+void UiDialogsTest::dialogListNumbersReadAsDrawn() {
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(3); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    const QColor text = tokenOf(window, "text");
+    const double figureContrast = paletteOf(window)->property("rowFigureContrast").toDouble();
+    QVERIFY(figureContrast >= 5.0);
+    QStringList failures;
+    // Measures `number` on its row, whose background shows at `clear`.
+    const auto check = [&](QQuickWindow *shownIn, QQuickItem *number, const QPointF &clear, const QString &where) {
+        const QImage shown = shownIn->grabWindow().convertToFormat(QImage::Format_RGB32);
+        const QColor background = drawnAt(shown, clear);
+        const QString name = QStringLiteral("%1: \"%2\"").arg(where, number->property("text").toString());
+        const auto [ratio, ink] = strongestInk(shown, number, background);
+        if (ratio < 4.5) {
+            failures << QStringLiteral("%1 drawn %2 on %3, %4:1").arg(name, ink.name(), background.name())
+                            .arg(ratio, 0, 'f', 2);
+        }
+        const QColor color = number->property("color").value<QColor>();
+        const double declared = contrastRatio(color, background);
+        // Half a step of a colour channel's rounding either way.
+        if (declared < figureContrast - 0.05) {
+            failures << QStringLiteral("%1 is %2 on %3, %4:1").arg(name, color.name(), background.name())
+                            .arg(declared, 0, 'f', 2);
+        }
+        if (declared >= contrastRatio(text, background)) {
+            failures << QStringLiteral("%1 (%2) is not quieter than the text (%3)").arg(name, color.name(), text.name());
+        }
+    };
+
+    // Configure's library folders.
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("name"), QStringLiteral("Shelf")},
+                    {QStringLiteral("trackCount"), 3}},
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/two")}, {QStringLiteral("trackCount"), 180}},
+    }));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QQuickWindow *prefs = windowOf(preferences);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    QList<QQuickItem *> folders;
+    QTRY_COMPARE((folders = itemsNamed(list, QStringLiteral("libraryRootRow"))).size(), 2);
+    std::sort(folders.begin(), folders.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    QTRY_VERIFY(!layoutPending(folders.at(1)));
+    // Whether a row's hover tint has faded all the way in or out.
+    const auto settled = [](QQuickItem *row) {
+        for (QQuickItem *tint : itemsNamed(row, QStringLiteral("rowBackgroundHover"))) {
+            if (tint->opacity() != (tint->parentItem()->property("hovered").toBool() ? 1.0 : 0.0)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto folderCheck = [&](const QString &state) {
+        for (QQuickItem *row : folders) {
+            QTRY_VERIFY(settled(row));
+        }
+        for (QQuickItem *row : folders) {
+            QQuickItem *count = itemsNamed(row, QStringLiteral("libraryRootTrackCount")).value(0);
+            QVERIFY(count != nullptr);
+            // Between the path and the count.
+            const QPointF clear(sceneRect(count).left() - 3, sceneRect(count).center().y());
+            check(prefs, count, clear, QStringLiteral("library folder, %1").arg(state));
+        }
+    };
+    folderCheck(QStringLiteral("at rest"));
+    for (QQuickItem *row : folders) {
+        QTest::mouseMove(prefs, sceneRect(row).center().toPoint());
+        QTRY_VERIFY(row->property("hovered").toBool());
+        QTRY_VERIFY(settled(row));
+        folderCheck(QStringLiteral("hovered"));
+    }
+    click(prefs, folders.at(1));
+    QTRY_VERIFY(folders.at(1)->property("highlighted").toBool() && list->hasActiveFocus());
+    QTRY_VERIFY(settled(folders.at(1)));
+    folderCheck(QStringLiteral("selected, hovered"));
+    QTest::mouseMove(prefs, QPoint(2, 2));
+    QTRY_VERIFY(!folders.at(1)->property("hovered").toBool() && settled(folders.at(1)));
+    folderCheck(QStringLiteral("selected"));
+    visibleNamed(prefs, QStringLiteral("libraryWatchCheckBox"))->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!list->hasActiveFocus());
+    folderCheck(QStringLiteral("selected, the list unfocused"));
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+
+    // Edit Tags' track numbers.
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    QVERIFY(waitForDialogWindow(object(window, QStringLiteral("tagEditorDialog"))));
+    QQuickWindow *tags = windowOf(object(window, QStringLiteral("tagEditorDialog")));
+    QQuickItem *table = visibleNamed(tags, QStringLiteral("tagEditorTable"));
+    QVERIFY(table != nullptr);
+    QList<QQuickItem *> rows;
+    QTRY_COMPARE((rows = itemsNamed(table, QStringLiteral("tagEditorRow"))).size(), 3);
+    std::sort(rows.begin(), rows.end(), [](QQuickItem *a, QQuickItem *b) { return a->y() < b->y(); });
+    QTRY_VERIFY(!layoutPending(rows.at(0)));
+    const auto rowCheck = [&](const QString &state) {
+        for (QQuickItem *row : rows) {
+            QTRY_VERIFY(settled(row));
+        }
+        for (QQuickItem *row : rows) {
+            QQuickItem *number = itemsNamed(row, QStringLiteral("tagEditorCell_trackNo")).value(0);
+            QVERIFY(number != nullptr);
+            // The cell's left padding, clear of the number at its right.
+            const QPointF clear(sceneRect(number).left() + 2, sceneRect(number).center().y());
+            check(tags, number, clear, QStringLiteral("track number, %1").arg(state));
+        }
+    };
+    rowCheck(QStringLiteral("at rest"));
+    for (QQuickItem *row : rows) {
+        // Over its cells: the row's tint shows there too.
+        QTest::mouseMove(tags, sceneRect(row).center().toPoint());
+        QTRY_VERIFY(itemsNamed(row, QStringLiteral("rowBackgroundHover")).value(0)->opacity() == 1.0);
+        rowCheck(QStringLiteral("hovered"));
+    }
+    click(tags, rows.at(0));
+    QTRY_VERIFY(rows.at(0)->property("selected").toBool() && table->hasActiveFocus());
+    rowCheck(QStringLiteral("selected, hovered"));
+    QTest::mouseMove(tags, QPoint(2, 2));
+    QTRY_VERIFY(settled(rows.at(0)) && itemsNamed(rows.at(0), QStringLiteral("rowBackgroundHover")).value(0)->opacity() == 0);
+    rowCheck(QStringLiteral("selected"));
+    visibleNamed(tags, QStringLiteral("tagEditorField_title"))->forceActiveFocus(Qt::TabFocusReason);
+    QTRY_VERIFY(!table->hasActiveFocus());
+    rowCheck(QStringLiteral("selected, the table unfocused"));
+    QVERIFY2(failures.isEmpty(), qPrintable(failures.join(QLatin1Char('\n'))));
+    editor.close();
 }
 
 int main(int argc, char **argv) {

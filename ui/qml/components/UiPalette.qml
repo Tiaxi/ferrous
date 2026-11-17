@@ -35,19 +35,31 @@ QtObject {
     // Counts, years and track numbers. #91989f / #59626d: lightened or
     // darkened from the mix to be 4.6:1 on the view's hover tint, a margin over
     // 4.5:1 that rendering cannot round away (6.2:1 on view in both).
-    // On a selected row, use textTertiaryOn(true): it is 3.7:1 on the
-    // focused tint.
-    // On a hovered list row, whose tint is stronger, use
-    // textTertiaryOn(false, true).
+    // On a row, use textTertiaryOn(selected, hovered): on a selected row
+    // it is 3.7:1 on the focused tint, and short of rowFigureContrast on a
+    // hovered one.
     readonly property color textTertiary: root.readableOn(root.themeIsDark
         ? ColorUtils.mixColor(root._inactiveText, root.view, 0.134)
         : ColorUtils.mixColor(root._inactiveText, root.text, 0.185),
         [root.view, ColorUtils.drawnOver(root.hover, root.view)], 4.6)
+    // The contrast of a row's tertiary figures on a hovered or selected
+    // row's tint. Small figures drawn with subpixel antialiasing reach a
+    // strongest pixel lighter than their colour, by up to 14% in contrast
+    // (#373 H45: in Breeze Light a selected row's 5.08:1 "1" drew at
+    // 4.39:1, a hovered row's 4.64:1 "3 tracks" at 4.48:1): at 5.4:1 they
+    // draw at 4.5:1 or more. They stay well under the text's contrast.
+    readonly property real rowFigureContrast: 5.4
     // Tertiary text on a hovered list row: lightened or darkened to be
-    // 4.6:1 on it, only there, so the rest keeps its step below the
-    // secondary colour. #9ca2a8 / #59626d: the light hover is as faint as
-    // a button's, which the tertiary colour already reads on.
-    readonly property color textTertiaryHovered: root.readableOn(root.textTertiary, [root.hoveredRow], 4.6)
+    // rowFigureContrast on it, only there, so the rest keeps its step below
+    // the secondary colour.
+    readonly property color textTertiaryHovered: root.readableOn(root.textTertiary, [root.hoveredRow],
+        root.rowFigureContrast)
+    // Tertiary text on a selected row, the pointer over it or not, and the
+    // list focused or not: the secondary colour, darkened or lightened to
+    // be rowFigureContrast on each selection tint.
+    readonly property color textTertiarySelected: root.readableOn(root.textSecondary,
+        [root.selection, root.selectionInactive, root.selectionHovered, root.selectionInactiveHovered],
+        root.rowFigureContrast)
     // A field's placeholder, such as Edit Tags' "Multiple values", which
     // tells what saving does: the theme's own placeholder colour, its
     // inactive text, darkened or lightened where it is under 4.6:1 on the
@@ -253,10 +265,10 @@ QtObject {
         return 0
     }
 
-    // Tertiary text steps up to secondary on a selected row, and to the
-    // hovered row's own on a hovered one.
+    // Tertiary text steps up to the selected row's own on a selected row,
+    // and to the hovered row's own on a hovered one.
     function textTertiaryOn(selected, hovered) {
-        return selected ? root.textSecondary : (hovered ? root.textTertiaryHovered : root.textTertiary)
+        return selected ? root.textTertiarySelected : (hovered ? root.textTertiaryHovered : root.textTertiary)
     }
 
     // `base` with its saturation scaled by `saturationScale` and its HSL
@@ -602,6 +614,13 @@ QtObject {
     // the glyph and 4 px around it.
     readonly property int toolIconSize: root.scaledSize(Kirigami.Units.iconSizes.small)
     readonly property int toolButtonSize: Math.max(24, root.toolIconSize + 8)
+    // A glyph beside a line of text, a list row's or a button caption's:
+    // the largest icon size a line of the font holds, 16 px with the
+    // default 10 pt font and 32 px at 24 pt. The dialogs' measures that
+    // bound text, tuned at 10 pt, follow the font through scaledSize(), so
+    // the default font draws every dialog as it was (#373 H45: glyphs and
+    // widths stayed at their 10 pt sizes at 24 pt).
+    readonly property int labelIconSize: Kirigami.Units.iconSizes.sizeForLabels
 
     readonly property FontMetrics _baseFontMetrics: FontMetrics {
         font: root.baseFont

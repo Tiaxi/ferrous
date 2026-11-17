@@ -405,10 +405,11 @@ QVariantMap readImageFileDetails(const QString &path) {
 QString BridgeClient::itunesArtworkFoundText(int count) {
     // Only the small previews are fetched with the results; a full-size
     // image comes when the user previews or applies it (#373 H6: once
-    // "loads on preview/apply").
+    // "loads on preview/apply"). Short enough for one line in the dialog at
+    // 24 pt (#373 H45: "it." wrapped alone onto a second line).
     return i18ncp("@info:status",
                   "Found %1 suggestion. Its full-size image downloads when you preview or apply it.",
-                  "Found %1 suggestions. Each full-size image downloads when you preview or apply it.",
+                  "Found %1 suggestions. Full-size images download when you preview or apply one.",
                   count);
 }
 

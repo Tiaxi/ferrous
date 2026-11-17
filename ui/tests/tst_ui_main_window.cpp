@@ -4763,7 +4763,7 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QTRY_VERIFY(tint->isVisible());
     QCOMPARE(colorOf(tint), tokenHex(window, "selectionInactive"));
     QCOMPARE(QQmlProperty(tint, QStringLiteral("border.width")).read().toReal(), 0.0);
-    QCOMPARE(colorOf(year), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(year), tokenHex(window, "textTertiarySelected"));
     // With focus from the keyboard: the tint, and the ring on the current
     // row as one rectangle.
     view->forceActiveFocus(Qt::TabFocusReason);
@@ -4778,7 +4778,7 @@ void UiMainWindowTest::libraryRowsShowHoverSelectionAndTheCurrentRow() {
     QQuickItem *trackTint = itemNamed(track, QStringLiteral("rowBackgroundTint"));
     QTRY_COMPARE(QQmlProperty(trackTint, QStringLiteral("border.width")).read().toReal(), 1.0);
     QTRY_VERIFY(!tint->isVisible());
-    QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(itemNamed(track, QStringLiteral("libraryRowNumber"))), tokenHex(window, "textTertiarySelected"));
 }
 
 // A queue row under the pointer takes the lists' hover tint, about 1.45:1
@@ -4827,7 +4827,7 @@ void UiMainWindowTest::queueRowHoverIsTheListsTint() {
     QVERIFY(tint != nullptr && shown(tint));
     QVERIFY(tint->z() >= hover->z());
     QCOMPARE(tint->property("color").value<QColor>().alpha(), 255);
-    QCOMPARE(colorOf(number), tokenHex(window, "textSecondary"));
+    QCOMPARE(colorOf(number), tokenHex(window, "textTertiarySelected"));
     QTest::mouseMove(window, QPoint(window->width() - 10, window->height() - 60));
     QTRY_VERIFY(!hover->isVisible());
 }
