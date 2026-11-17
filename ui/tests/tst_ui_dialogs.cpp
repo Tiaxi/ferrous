@@ -2523,15 +2523,16 @@ void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
     QVERIFY2(sceneRect(visibleNamed(window, QStringLiteral("errorHistoryNewCount"))).right()
                  <= sceneRect(clearAll).left() + 0.5,
              "the new count runs into Clear All");
-    // Open Diagnostics… keeps its icon, beside its caption.
+    // Open Diagnostics… is a caption alone, as Clear All is, on the
+    // header's text's x: ⓘ marks a notice in the list, and marked this
+    // button too (#373 H40).
     QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
-    const QList<QQuickItem *> icons = itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon"));
-    QVERIFY(icons.size() == 1 && icons.first()->isVisible());
-    QCOMPARE(icons.first()->property("source").toString(), QStringLiteral("help-about"));
-    QVERIFY(sceneRect(icons.first()).right()
-            <= sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first()).left());
     QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
-    QVERIFY(!itemsNamed(clear, QStringLiteral("textToolButtonIcon")).first()->isVisible());
+    for (QQuickItem *button : {diagnostics, clear}) {
+        QVERIFY(!itemsNamed(button, QStringLiteral("textToolButtonIcon")).first()->isVisible());
+    }
+    QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first()).left(),
+             sceneRect(visibleNamed(window, QStringLiteral("errorHistoryTitle"))).left());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
 }

@@ -537,12 +537,13 @@ Popup {
                 root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
         }
 
+        // A caption alone, as Clear All is, on the header's x: ⓘ marks a
+        // notice in the list (#373 H40: it marked this button too).
         Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
-            Layout.leftMargin: Kirigami.Units.smallSpacing + 2
+            Layout.leftMargin: errorHistoryHeader.Layout.leftMargin - diagnosticsButton.leftPadding
             flat: true
-            icon.name: "help-about"
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
             enabled: !closingState.closing
             onClicked: {
