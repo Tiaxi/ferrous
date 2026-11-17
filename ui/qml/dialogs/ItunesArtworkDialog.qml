@@ -731,14 +731,17 @@ Components.DialogWindow {
                     visible: running
                 }
 
-                // A failed search's glyph, in the spinner's place and size.
+                // A failed search's glyph, in the spinner's place and size:
+                // the app's own warning mark, as the status bar and the
+                // queue draw it (Breeze's dialog-warning as a mask fills
+                // its "!", leaving a plain triangle; #373 H35, H41).
                 Kirigami.Icon {
                     objectName: "itunesArtworkFailureIcon"
                     Layout.alignment: Qt.AlignHCenter
                     Layout.preferredWidth: Kirigami.Units.iconSizes.medium
                     Layout.preferredHeight: Kirigami.Units.iconSizes.medium
                     visible: placeholder.failed
-                    source: "dialog-warning-symbolic"
+                    source: Qt.resolvedUrl("../assets/status-warning.svg")
                     isMask: true
                     color: root.uiPalette.textSecondary
                     Accessible.ignored: true

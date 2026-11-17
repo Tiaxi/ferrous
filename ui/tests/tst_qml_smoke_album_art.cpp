@@ -2448,7 +2448,10 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
         QVERIFY2(warning != nullptr, at.constData());
         QCOMPARE(warning->isVisible(), failed);
         if (failed) {
-            QCOMPARE(warning->property("source").toString(), QStringLiteral("dialog-warning-symbolic"));
+            // The app's own warning mark, whose "!" survives the mask
+            // (#373 H41: dialog-warning drew a plain triangle).
+            QVERIFY2(warning->property("source").toString().endsWith(QStringLiteral("assets/status-warning.svg")),
+                     qPrintable(warning->property("source").toString()));
             QVERIFY(warning->property("isMask").toBool());
             QCOMPARE(warning->property("color").value<QColor>().rgba(),
                      palette->property("textSecondary").value<QColor>().rgba());
