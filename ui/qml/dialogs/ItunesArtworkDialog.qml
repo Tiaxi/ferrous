@@ -535,17 +535,25 @@ Components.DialogWindow {
                         : root.imageDetailsText(root.currentArtworkInfo))
             }
 
-            // Where the results' Preview is: before Apply, clear of the
-            // scrollbar lane.
+            // Where the results' Preview is, before Apply and clear of the
+            // scrollbar lane, while it searches and once it has rows, so
+            // nothing moves as they arrive. With no rows to line up with,
+            // when it found nothing or failed, on the content's right
+            // inset, as Close under it (#373 H43: it hung on the absent
+            // column, 117 px short of Close).
             Button {
                 id: currentArtworkPreviewButton
                 objectName: "itunesArtworkCurrentPreviewButton"
+                readonly property bool inResultsColumn: itunesArtworkResultsView.count > 0
+                    || root.uiBridge.itunesArtworkLoading === true
                 // No Alt shortcut: the rows repeat Preview and Apply, which would
                 // each take another letter, and a hidden button has none, so
                 // Apply's measure would differ from the rows' by the mnemonic.
                 Kirigami.MnemonicData.enabled: false
-                x: parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
-                    - applyMetrics.implicitWidth - root.actionSpacing - width
+                x: currentArtworkPreviewButton.inResultsColumn
+                    ? parent.width - 1 - itunesArtworkResultsView.scrollbarLane - root.sideInset
+                        - applyMetrics.implicitWidth - root.actionSpacing - width
+                    : parent.width - width
                 y: Math.round((parent.height - height) / 2)
                 flat: true
                 display: AbstractButton.TextBesideIcon
