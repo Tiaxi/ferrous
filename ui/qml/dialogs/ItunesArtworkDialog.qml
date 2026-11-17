@@ -649,7 +649,7 @@ Components.DialogWindow {
                     }
 
                     // The secondary line: the artist and the image's
-                    // details; while the high-resolution image loads, that;
+                    // details; while the full-size image loads, that;
                     // when it failed, why.
                     ArtworkText {
                         id: suggestionText
@@ -662,7 +662,7 @@ Components.DialogWindow {
                         details: suggestionRow.assetError.length > 0 && !suggestionRow.assetLoading
                             ? suggestionRow.assetError
                             : [suggestionRow.artistName, suggestionRow.assetLoading
-                                ? I18n.i18nc("@label", "Loading high-resolution artwork…")
+                                ? I18n.i18nc("@label", "Loading full-size image…")
                                 : root.imageDetailsText(suggestionRow.modelData)]
                                 .filter(Boolean).join(" · ")
                         detailsColor: suggestionRow.assetError.length > 0 && !suggestionRow.assetLoading

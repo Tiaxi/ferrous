@@ -35,6 +35,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <tuple>
 
 #include "../src/AboutComponents.h"
 #include "../src/InputModality.h"
@@ -542,6 +543,8 @@ private slots:
     void editTagsNumberPairsShowMultipleValuesWhole_data();
     void editTagsNumberPairsShowMultipleValuesWhole();
     void editTagsFileColumnsGiveWayBeforeTheTags();
+    void editTagsStatusSaysWhatFailedWhole_data();
+    void editTagsStatusSaysWhatFailedWhole();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsPutTheirButtonsOnTheContentInset();
     void dialogButtonGlyphsFollowTheFont_data();
@@ -2869,15 +2872,29 @@ void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
     QVERIFY2(sceneRect(visibleNamed(window, QStringLiteral("errorHistoryNewCount"))).right()
                  <= sceneRect(clearAll).left() + 0.5,
              "the new count runs into Clear All");
-    // Open Diagnostics… is a caption alone, as Clear All is, on the
-    // header's text's x: ⓘ marks a notice in the list, and marked this
-    // button too (#373 H40).
+    // Each carries a glyph, as every dialog action does (#373 H46: without
+    // one, Clear All read as a label of the header), as large as a line of
+    // their text holds: Clear All its own, Open Diagnostics… that of Help's
+    // Diagnostics…, not ⓘ, which marks a notice in the list (#373 H40).
+    // Open Diagnostics… starts on the header's text's x.
     QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
     QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QCOMPARE(evaluate(clear, QStringLiteral("icon.name")).toString(), QStringLiteral("edit-clear-history"));
+    QCOMPARE(evaluate(diagnostics, QStringLiteral("icon.name")).toString(), QStringLiteral("view-list-details"));
+    QCOMPARE(evaluate(object(window, QStringLiteral("diagnosticsAction")), QStringLiteral("icon.name")).toString(),
+             QStringLiteral("view-list-details"));
+    const qreal labelIcon = paletteOf(window)->property("labelIconSize").toReal();
+    QVERIFY2(labelIcon >= 32, qPrintable(QString::number(labelIcon)));
     for (QQuickItem *button : {diagnostics, clear}) {
-        QVERIFY(!itemsNamed(button, QStringLiteral("textToolButtonIcon")).first()->isVisible());
+        QQuickItem *glyph = itemsNamed(button, QStringLiteral("textToolButtonIcon")).first();
+        QQuickItem *caption = itemsNamed(button, QStringLiteral("textToolButtonCaption")).first();
+        QTRY_VERIFY(glyph->isVisible() && glyph->property("valid").toBool());
+        QCOMPARE(glyph->width(), labelIcon);
+        QCOMPARE(glyph->height(), labelIcon);
+        QVERIFY(sceneRect(glyph).right() <= sceneRect(caption).left());
+        QVERIFY(sceneRect(button).contains(sceneRect(glyph)));
     }
-    QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first()).left(),
+    QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon")).first()).left(),
              sceneRect(visibleNamed(window, QStringLiteral("errorHistoryTitle"))).left());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());
@@ -4240,9 +4257,9 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
 
 // Track's field says that its files' numbers differ, whole: "Multiple
 // values" where it fits, as with the default font, and "Mixed" in the
-// narrower field of a larger font; the fields keep their width, which the
-// table needs (#373 H45: "Multiple values" elided in a 124 px field at
-// 24 pt).
+// narrower field of a larger font, as every field of the form then says;
+// the fields keep their width, which the table needs (#373 H45: "Multiple
+// values" elided in a 124 px field at 24 pt).
 void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -4279,9 +4296,23 @@ void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
     QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
     const QString expected = pointSize <= 10 ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
     QTRY_COMPARE(number->property("placeholderText").toString(), expected);
-    // A field with the room says it whole.
-    QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_title"))->property("placeholderText").toString(),
-             QStringLiteral("Multiple values"));
+    // Every field whose files differ says it in the same word, the short
+    // one once a number field needs it, wide fields too (#373 H46:
+    // "Multiple values" and "Mixed" in one form at 24 pt).
+    int mixedFields = 0;
+    for (const char *key : {"title", "artist", "album", "albumArtist", "genre", "year", "trackNo",
+                            "totalTracks", "discNo", "totalDiscs", "comment"}) {
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + QLatin1String(key));
+        QVERIFY2(field != nullptr, key);
+        if (!editor.bulkValueMixed(QLatin1String(key))) {
+            QCOMPARE(field->property("placeholderText").toString(), QString());
+            continue;
+        }
+        ++mixedFields;
+        QCOMPARE(field->property("placeholderText").toString(), expected);
+    }
+    QVERIFY(editor.bulkValueMixed(QStringLiteral("title")));
+    QVERIFY2(mixedFields >= 2, qPrintable(QString::number(mixedFields)));
     QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
     QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
     QVERIFY(title != nullptr && total != nullptr);
@@ -4552,6 +4583,88 @@ void UiDialogsTest::editTagsFileColumnsGiveWayBeforeTheTags() {
                                          {});
     QTRY_COMPARE(columnWidth(QStringLiteral("status")), 120.0);
     QVERIFY2(table->property("contentWidth").toReal() <= table->width() + 0.5, qPrintable(describeColumns()));
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
+}
+
+void UiDialogsTest::editTagsStatusSaysWhatFailedWhole_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A row whose save failed says "Not saved" in its Status cell, and one
+// whose rename failed "Not renamed", whole, in the negative colour, with
+// the system's words in its tooltip and for screen readers (they are in
+// Details… too); the column holds them whole at either font and width
+// (#373 H46: the system's text was elided to "failed to …").
+void UiDialogsTest::editTagsStatusSaysWhatFailedWhole() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *tags = windowOf(dialog);
+    const QStringList paths = editor.loadedPaths();
+    QVERIFY(paths.size() >= 2);
+    const QString saveError = QStringLiteral("failed to create temporary file in /fixture/a/rather/long/folder/"
+                                             "for/the/save: Permission denied (os error 13)");
+    const QString renameError = QStringLiteral("a file of that name is already there");
+    editor.setCell(0, QStringLiteral("genre"), QStringLiteral("Jazz"));
+    editor.m_tableModel.applySaveResults({{paths.at(0), saveError}}, {});
+    editor.m_tableModel.applyRenameResults({}, {{paths.at(1), renameError}});
+    QVERIFY(editor.hasRowErrors());
+    QObject *palette = paletteOf(window);
+    const QString negative = hex(palette->property("negative").value<QColor>());
+    // The Status cell of the row at `index`.
+    const auto statusCell = [&](int index) -> QQuickItem * {
+        for (QQuickItem *row : itemsNamed(tags->contentItem(), QStringLiteral("tagEditorRow"))) {
+            if (row->property("index").toInt() == index) {
+                return itemsNamed(row, QStringLiteral("tagEditorCell_status")).value(0);
+            }
+        }
+        return nullptr;
+    };
+    for (const QSize size : {QSize(1600, 1000), QSize(1000, 720)}) {
+        tags->resize(size);
+        QTRY_COMPARE(tags->contentItem()->width(), qreal(size.width()));
+        QQuickItem *saved = nullptr;
+        QQuickItem *renamed = nullptr;
+        QTRY_VERIFY((saved = statusCell(0)) != nullptr && (renamed = statusCell(1)) != nullptr
+                    && saved->width() > 0 && !layoutPending(saved));
+        for (const auto &[cell, text, error] : {std::tuple{saved, QStringLiteral("Not saved"), saveError},
+                                                std::tuple{renamed, QStringLiteral("Not renamed"), renameError}}) {
+            const QString at = QStringLiteral("%1 pt, %2 px: %3").arg(pointSize).arg(size.width()).arg(describeItem(cell));
+            QCOMPARE(cell->property("text").toString(), text);
+            QTRY_VERIFY2(!cell->property("truncated").toBool(), qPrintable(at));
+            QCOMPARE(hex(cell->property("color").value<QColor>()), negative);
+            QCOMPARE(cell->property("toolTipText").toString(), error);
+            QCOMPARE(evaluate(cell, QStringLiteral("Accessible.description")).toString(), error);
+        }
+        // A row with no failure says nothing there.
+        QQuickItem *other = statusCell(2);
+        QVERIFY(other != nullptr);
+        QCOMPARE(other->property("text").toString(), QString());
+        QCOMPARE(other->property("toolTipText").toString(), QString());
+    }
+    // With the default font, Status is as wide as it was.
+    if (pointSize <= 10) {
+        tags->resize(2000, tags->height());
+        QTRY_COMPARE(statusCell(0)->width(), 120.0);
+    }
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
 }
@@ -5314,8 +5427,12 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     font.setPointSizeF(pointSize);
     QGuiApplication::setFont(font);
     const bool large = pointSize > 10;
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(8); };
     LibraryTreeModel libraryModel;
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
     QQuickWindow *window = loadMainWindow(engine, libraryModel);
     QVERIFY2(window != nullptr, "Main.qml failed to show");
     QObject *palette = paletteOf(window);
@@ -5449,6 +5566,41 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     }
     QVERIFY(QMetaObject::invokeMethod(about, "close"));
     QTRY_VERIFY(!about->property("visible").toBool());
+
+    // Edit Tags: a changed field's Revert, in the field, has a glyph as
+    // large as a line holds, as the column's Revert has, and 16 px with the
+    // default font (#373 H46: 16 px beside 32 px text at 24 pt).
+    QObject *tagDialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(tagDialog != nullptr);
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && tagDialog->property("opened").toBool());
+    QQuickWindow *tags = windowOf(tagDialog);
+    QVERIFY(QTest::qWaitForWindowActive(tags));
+    editor.selectAllRows();
+    QQuickItem *field = nullptr;
+    QTRY_VERIFY((field = visibleNamed(tags, QStringLiteral("tagEditorField_genre"))) != nullptr);
+    QQuickItem *revert = named(tags, QStringLiteral("tagEditorRevert_genre"));
+    QVERIFY(revert != nullptr);
+    field->forceActiveFocus();
+    QTest::keyClick(tags, Qt::Key_A, Qt::ControlModifier);
+    for (const char letter : QByteArrayLiteral("Ambient")) {
+        QTest::keyClick(tags, letter);
+    }
+    QTest::keyClick(tags, Qt::Key_Tab);
+    QTRY_VERIFY(revert->isVisible());
+    const qreal smallSpacing = evaluate(palette, QStringLiteral("Kirigami.Units.smallSpacing")).toReal();
+    QCOMPARE(revert->width(), labelIcon + 2 * smallSpacing);
+    QCOMPARE(revert->height(), revert->width());
+    QCOMPARE(evaluate(revert, QStringLiteral("icon.width")).toReal(), labelIcon);
+    QCOMPARE(evaluate(revert, QStringLiteral("icon.height")).toReal(), labelIcon);
+    if (!large) {
+        // As it was with the default font.
+        QCOMPARE(revert->width(), 24.0);
+    }
+    // Within the field, clear of its text.
+    QVERIFY2(sceneRect(field).contains(sceneRect(revert)),
+             qPrintable(describeItem(revert) + QStringLiteral(" / ") + describeItem(field)));
+    QCOMPARE(field->property("rightPadding").toReal(), revert->width() + smallSpacing);
 }
 
 // A Recent Issues link's press reads as a press: its tint is a clear step

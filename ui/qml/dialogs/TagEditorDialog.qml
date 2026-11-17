@@ -39,12 +39,21 @@ Components.DialogWindow {
     // The status of a row with unsaved edits: its mark's tooltip and
     // description, and its Status cell while that column shows.
     readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
+    // The Status cell of a row whose save or rename failed: why is in its
+    // tooltip and in Details… (#373 H46: the system's own words, elided to
+    // "failed to …").
+    readonly property string notSavedText: I18n.i18nc("@item tag editor row status: saving the file's tags failed", "Not saved")
+    readonly property string notRenamedText: I18n.i18nc("@item tag editor row status: renaming the file failed", "Not renamed")
     // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
     // The same, in a number field too narrow for it, as Track and Disc's
     // with a large font (#373 H45: "Multiple values" elided in their 124 px
     // fields at 24 pt; widening them took the table's room).
     readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
+    // Every field of the form says it in the same word: the short one in
+    // all of them once a number field needs it (#373 H46: "Multiple values"
+    // and "Mixed" in one form at 24 pt).
+    readonly property bool keepShortInForm: trackPair.needsKeepShort || discPair.needsKeepShort
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -92,7 +101,7 @@ Components.DialogWindow {
         { key: "fileName", label: I18n.i18nc("@title:column", "File Name"), width: 220, give: 1, least: 140, stretch: true, path: true },
         { key: "formatKind", label: I18n.i18nc("@title:column file format", "Format"), width: 56, sample: "FLAC" },
         { key: "directory", label: I18n.i18nc("@title:column", "Folder"), width: 156, give: 1, least: 100, stretch: true, path: true },
-        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, sample: root.modifiedText, onlyWithStatus: true }
+        { key: "status", label: I18n.i18nc("@title:column", "Status"), width: 120, give: 1, least: 0, samples: [root.modifiedText, root.notSavedText, root.notRenamedText], onlyWithStatus: true }
     ]
     // Whether a row has a status to read: a save or rename that failed for
     // it.
@@ -118,7 +127,10 @@ Components.DialogWindow {
         columnValueMetrics.font
         const header = columnHeaderMetrics.advanceWidth(column.label)
             + (root.fieldAt(column.key) !== null && root.columnMarked(column.key) ? root.columnRevertRoom : 0)
-        const value = column.sample ? columnValueMetrics.advanceWidth(column.sample) : 0
+        const samples = column.samples || (column.sample ? [column.sample] : [])
+        const value = samples.reduce(function(widest, sample) {
+            return Math.max(widest, columnValueMetrics.advanceWidth(sample))
+        }, 0)
         return Math.ceil(Math.max(header, value)) + 2 * Kirigami.Units.largeSpacing
     }
     // Each column's width with room enough, or none for Status while no
@@ -645,7 +657,10 @@ Components.DialogWindow {
             return extra && extra.length > 0 ? [value].concat(extra).join("; ") : value
         }
         case "status":
-            return row.errorText.length > 0 ? row.errorText : (row.dirty ? root.modifiedText : "")
+            if (row.errorText.length > 0) {
+                return row.renameFailed ? root.notRenamedText : root.notSavedText
+            }
+            return row.dirty ? root.modifiedText : ""
         case "trackNo":
         case "discNo":
             // As the queue shows a number: "1", whatever the tag pads it to.
@@ -837,6 +852,8 @@ Components.DialogWindow {
         property bool mixed: false
         readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
             <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
+        // Its files differ, and it is too narrow to say so whole.
+        readonly property bool needsKeepShort: fieldEditor.compact && fieldEditor.mixed && !fieldEditor.keepTextFits
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
@@ -880,9 +897,7 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
-        placeholderText: fieldEditor.mixed
-            ? (fieldEditor.compact && !fieldEditor.keepTextFits ? root.keepShortText : root.keepText)
-            : ""
+        placeholderText: fieldEditor.mixed ? (root.keepShortInForm ? root.keepShortText : root.keepText) : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -929,11 +944,16 @@ Components.DialogWindow {
             anchors.right: parent.right
             anchors.rightMargin: 2
             anchors.verticalCenter: parent.verticalCenter
-            width: Kirigami.Units.iconSizes.small + 2 * Kirigami.Units.smallSpacing
+            // Its glyph as large as a line of the field's text holds, as
+            // the column's Revert: 16 px with the default font (#373 H46:
+            // 16 px beside 32 px text at 24 pt).
+            width: root.uiPalette.labelIconSize + 2 * Kirigami.Units.smallSpacing
             height: width
             visible: fieldEditor.changed
             enabled: !root.busy
             icon.name: "edit-undo"
+            icon.width: root.uiPalette.labelIconSize
+            icon.height: root.uiPalette.labelIconSize
             display: AbstractButton.IconOnly
             text: I18n.i18nc("@action:button %1 is a tag field", "Revert %1", fieldEditor.field.label)
             ToolTip.visible: hovered || visualFocus
@@ -1186,8 +1206,8 @@ Components.DialogWindow {
                 FieldRow { field: root.fieldAt("albumArtist") }
                 FieldRow { field: root.fieldAt("genre") }
                 FieldRow { field: root.fieldAt("year") }
-                NumberPair { first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
-                NumberPair { first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
+                NumberPair { id: trackPair; first: root.fieldAt("trackNo"); second: root.fieldAt("totalTracks") }
+                NumberPair { id: discPair; first: root.fieldAt("discNo"); second: root.fieldAt("totalDiscs") }
                 FieldRow { field: root.fieldAt("comment") }
             }
         }
@@ -1326,6 +1346,7 @@ Components.DialogWindow {
                     required property bool dirty
                     required property bool selected
                     required property string errorText
+                    required property bool renameFailed
                     required property var extraValues
                     readonly property bool current: ListView.isCurrentItem && tagEditorTable.activeFocus
                     // Unsaved edits, typed text included.
@@ -1384,7 +1405,7 @@ Components.DialogWindow {
                                 rightPadding: Kirigami.Units.largeSpacing
                                 text: root.cellText(modelData.key, tableRow)
                                 font.features: modelData.number ? root.uiPalette.tabularFigures : ({})
-                                color: modelData.key === "status" && tableRow.errorText.length > 0
+                                color: tableCell.failureCell
                                     ? root.uiPalette.negative
                                     : (modelData.number
                                         ? root.uiPalette.textTertiaryOn(tableRow.selected, rowHover.hovered)
@@ -1398,10 +1419,15 @@ Components.DialogWindow {
                                 // tooltip while it is cut short.
                                 elide: Text.ElideRight
                                 // The # cell of a row with unsaved edits
-                                // says what its mark means.
+                                // says what its mark means, and the Status
+                                // cell of a row that failed, why.
+                                readonly property bool failureCell: modelData.key === "status"
+                                    && tableRow.errorText.length > 0
                                 readonly property string toolTipText: modelData.path && tableCell.truncated
                                     ? (modelData.key === "directory" ? tableRow.directory : tableCell.text)
-                                    : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : "")
+                                    : (tableCell.failureCell ? tableRow.errorText
+                                        : (modelData.key === "trackNo" && tableRow.marked ? root.modifiedText : ""))
+                                Accessible.description: tableCell.failureCell ? tableRow.errorText : ""
 
                                 HoverHandler {
                                     id: cellHover
@@ -1499,6 +1525,7 @@ Components.DialogWindow {
         id: pair
         required property var first
         required property var second
+        readonly property bool needsKeepShort: firstField.needsKeepShort || secondField.needsKeepShort
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
@@ -1508,6 +1535,7 @@ Components.DialogWindow {
         }
 
         TagField {
+            id: firstField
             field: pair.first
             compact: true
             Layout.fillWidth: true
@@ -1522,6 +1550,7 @@ Components.DialogWindow {
         }
 
         TagField {
+            id: secondField
             field: pair.second
             compact: true
             Layout.fillWidth: true

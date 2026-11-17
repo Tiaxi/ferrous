@@ -419,7 +419,7 @@ QString BridgeClient::itunesArtworkPendingDetailsText() {
 }
 
 QString BridgeClient::itunesArtworkLoadingDetailsText() {
-    return i18nc("@info:status", "Loading high-resolution artwork…");
+    return i18nc("@info:status", "Loading full-size image…");
 }
 
 QString BridgeClient::itunesArtworkUrl(const QString &artworkUrl100) {
@@ -462,7 +462,7 @@ BridgeClient::ItunesArtworkAssetJobResult BridgeClient::processItunesArtworkAsse
     result.candidateIndex = candidateIndex;
 
     if (payload.isEmpty()) {
-        result.errorMessage = i18nc("@info", "Failed to load high-resolution artwork.");
+        result.errorMessage = i18nc("@info", "Failed to load the full-size image.");
         return result;
     }
     if (tempDirPath.trimmed().isEmpty()) {
@@ -988,10 +988,10 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
         row.insert(QStringLiteral("assetReady"), false);
         row.insert(
             QStringLiteral("assetError"),
-            i18nc("@info", "No high-resolution artwork URL was available."));
+            i18nc("@info", "No full-size image is available."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1003,7 +1003,7 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             i18nc("@info", "Failed to prepare temporary artwork cache."));
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(candidateIndex, row);
         return;
     }
@@ -1037,15 +1037,15 @@ void BridgeClient::startItunesArtworkAssetDownload(int candidateIndex) {
             row.insert(QStringLiteral("assetError"), message);
             row.insert(
                 QStringLiteral("detailStatusText"),
-                i18nc("@info", "High-resolution artwork could not be loaded."));
+                i18nc("@info", "The full-size image could not be loaded."));
             updateItunesArtworkResult(candidateIndex, row);
         };
 
         if (error != QNetworkReply::NoError || payload.isEmpty()) {
             failCandidate(
                 errorText.trimmed().isEmpty()
-                    ? i18nc("@info", "Failed to load high-resolution artwork.")
-                    : i18nc("@info", "Failed to load high-resolution artwork: %1", errorText));
+                    ? i18nc("@info", "Failed to load the full-size image.")
+                    : i18nc("@info", "Failed to load the full-size image: %1", errorText));
             return;
         }
 
@@ -1088,7 +1088,7 @@ void BridgeClient::applyItunesArtworkAssetJobResult(ItunesArtworkAssetJobResult 
         row.insert(QStringLiteral("assetError"), result.errorMessage);
         row.insert(
             QStringLiteral("detailStatusText"),
-            i18nc("@info", "High-resolution artwork could not be loaded."));
+            i18nc("@info", "The full-size image could not be loaded."));
         updateItunesArtworkResult(result.candidateIndex, row);
         return;
     }

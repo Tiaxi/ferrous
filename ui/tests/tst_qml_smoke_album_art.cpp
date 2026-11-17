@@ -2364,12 +2364,12 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     rows[0] = ready;
     QVariantMap loading = rows[1].toMap();
     loading.insert(QStringLiteral("assetLoading"), true);
-    loading.insert(QStringLiteral("detailStatusText"), QStringLiteral("Loading high-resolution artwork..."));
+    loading.insert(QStringLiteral("detailStatusText"), QStringLiteral("Loading full-size image..."));
     rows[1] = loading;
     QVariantMap failed = rows[2].toMap();
     failed.insert(QStringLiteral("assetError"), QStringLiteral("The artwork could not be downloaded."));
     failed.insert(QStringLiteral("detailStatusText"),
-                  QStringLiteral("High-resolution artwork could not be loaded."));
+                  QStringLiteral("The full-size image could not be loaded."));
     rows[2] = failed;
 
     QQmlApplicationEngine engine;
@@ -2438,7 +2438,7 @@ void AlbumArtSmokeTest::itunesArtworkResultsAreAFlatList() {
     const QString itunesSize = QLocale().toString(1200.0, 'f', 0);
     const QStringList expectedDetails{
         QStringLiteral("The Quiet Meridian · %1 × %1 px · JPEG · 412 KiB").arg(itunesSize),
-        QStringLiteral("The Quiet Meridian · Loading high-resolution artwork…"),
+        QStringLiteral("The Quiet Meridian · Loading full-size image…"),
         QStringLiteral("The artwork could not be downloaded."),
     };
     for (int i = 0; i < rowItems.size(); ++i) {
@@ -3019,7 +3019,7 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
                  qPrintable(QStringLiteral("%1: %2 px").arg(action->objectName()).arg(action->implicitWidth())));
     }
 
-    // A result whose high-resolution image loads says so beside the
+    // A result whose full-size image loads says so beside the
     // artist, whole: at 24 pt on two lines, inside the row, and on one
     // with the default font (#373 H45: elided at 24 pt).
     QObject *bridge = qvariant_cast<QObject *>(opened.root->property("bridge"));
@@ -3044,12 +3044,14 @@ void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
         return false;
     }());
     QCOMPARE(loadingDetails->property("text").toString(),
-             QStringLiteral("The Quiet Meridian \u00b7 Loading high-resolution artwork\u2026"));
+             QStringLiteral("The Quiet Meridian \u00b7 Loading full-size image\u2026"));
     const QString loadingAt = QStringLiteral("details %1 in the row %2, %3 lines")
         .arg(describeRect(sceneRectOf(loadingDetails)), describeRect(sceneRectOf(loadingRow)))
         .arg(loadingDetails->property("lineCount").toInt());
     QTRY_VERIFY2(!loadingDetails->property("truncated").toBool(), qPrintable(loadingAt));
-    QCOMPARE(loadingDetails->property("lineCount").toInt(), large ? 2 : 1);
+    // On one line with the default font; at 24 pt on two where it needs
+    // them ("Loading full-size image…" fits on one beside the artist).
+    QVERIFY2(loadingDetails->property("lineCount").toInt() <= (large ? 2 : 1), qPrintable(loadingAt));
     QQuickItem *loadingTitle = itemNamed(loadingRow, QStringLiteral("itunesArtworkResultTitle"));
     QVERIFY(loadingTitle != nullptr);
     QVERIFY2(sceneRectOf(loadingTitle).top() >= sceneRectOf(loadingRow).top() + 8 - 0.5
