@@ -107,8 +107,10 @@ Preferences.PreferencesPage {
     // need: a long path elides.
     ColumnLayout {
         Kirigami.FormData.label: I18n.i18nc("@label", "Library folders:")
-        // Next to the label's first line.
-        Kirigami.FormData.labelAlignment: Qt.AlignTop
+        // On the first folder's line: the form centres its label on the
+        // line's height, at its top (#373 H47: at the list's top, the label
+        // was 5 px above the folder's name).
+        Kirigami.FormData.buddyFor: firstRootLine
         Layout.fillWidth: true
         Layout.minimumWidth: rootButtons.implicitWidth
         Layout.preferredWidth: Math.max(root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 16), rootButtons.implicitWidth)
@@ -131,6 +133,16 @@ Preferences.PreferencesPage {
             color: root.uiPalette.view
             border.width: frameWidth
             border.color: root.uiPalette.seam
+
+            // Where the first folder's line is, inside the frame, a row tall:
+            // the form's label sits beside it, on its folder's baseline.
+            Item {
+                id: firstRootLine
+                objectName: "libraryFirstRootLine"
+                y: rootListFrame.frameWidth
+                width: parent.width
+                height: root.uiPalette.rowHeight
+            }
 
             // Measures the folder names as the rows draw them.
             Repeater {
@@ -313,27 +325,27 @@ Preferences.PreferencesPage {
                             }
                         }
 
-                        Label {
+                        // A path or a system error in the reasons wraps
+                        // as a message's does.
+                        Components.MessageLabel {
                             objectName: "libraryRootUnwatchedLabel"
                             Layout.fillWidth: true
                             Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.unwatchedReason.length > 0
-                            text: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status", "Not watched for changes: %1", rootRow.unwatchedReason)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.textSecondary
                         }
 
                         // Stays until a rescan of the whole folder finds nothing wrong.
-                        Label {
+                        Components.MessageLabel {
                             objectName: "libraryRootScanProblemLabel"
                             Layout.fillWidth: true
                             Layout.leftMargin: 2 * Kirigami.Units.largeSpacing + 4 + root.uiPalette.labelIconSize
                             Layout.rightMargin: Kirigami.Units.largeSpacing + 2
                             visible: rootRow.scanProblem.length > 0
-                            text: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
-                            wrapMode: Text.Wrap
+                            message: I18n.i18nc("@info:status problem the last library scan found", "Last scan: %1", rootRow.scanProblem)
                             font.pointSize: root.uiPalette.smallPointSize
                             color: root.uiPalette.negative
                             Accessible.role: Accessible.AlertMessage

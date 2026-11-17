@@ -272,8 +272,25 @@ void ErrorsSmokeTest::aLongErrorIsShownWhole() {
     QCOMPARE(errorHistoryMessages(errors), QStringList{message});
     QVERIFY(QMetaObject::invokeMethod(errors, "historyRequested"));
     QTRY_VERIFY(dialog->property("opened").toBool());
-    QTRY_COMPARE(visibleTextItems(popupContent(dialog), message).size(), 1);
-    QQuickItem *row = visibleTextItems(popupContent(dialog), message).first();
+    // The message's label, which shows it with its path broken between
+    // folders and its "(os error 28)" whole (#373 H47).
+    const auto messageLabels = [&] {
+        QList<QQuickItem *> labels;
+        for (const QString &name : {QStringLiteral("errorHistoryHeading"), QStringLiteral("errorHistoryMessage")}) {
+            for (QQuickItem *label : visibleItemsNamed(popupContent(dialog), name)) {
+                if (label->property("message").toString() == message) {
+                    labels << label;
+                }
+            }
+        }
+        return labels;
+    };
+    QTRY_COMPARE(messageLabels().size(), 1);
+    QQuickItem *row = messageLabels().first();
+    const QString shown = row->property("text").toString();
+    QCOMPARE(QString(shown).remove(QChar(0x200b)).remove(QChar(0x2060)).replace(QChar(0x00a0), QLatin1Char(' ')),
+             message);
+    QVERIFY(shown.contains(QStringLiteral("(os\u00a0error\u00a028)")));
     QVERIFY(!row->property("truncated").toBool());
     QTRY_VERIFY(row->property("lineCount").toInt() > 1);
     QVERIFY(row->property("contentWidth").toReal() <= row->width() + 1);
@@ -459,7 +476,13 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
     window->close();
 
     QTRY_VERIFY(dialog->property("visible").toBool());
-    QCOMPARE(message->property("text").toString(), error);
+    // The error as it is; shown with its path broken between folders and
+    // its "(os error 28)" whole (#373 H47).
+    QCOMPARE(message->property("message").toString(), error);
+    QCOMPARE(message->property("text").toString().remove(QChar(0x200b)).remove(QChar(0x2060))
+                 .replace(QChar(0x00a0), QLatin1Char(' ')),
+             error);
+    QVERIFY(message->property("text").toString().contains(QStringLiteral("(os\u00a0error\u00a028)")));
     QVERIFY(window->isVisible());
     // The heading says what happened in words; the system's error is the
     // line below it, in the secondary colour, not the heading (#373 H37).
