@@ -1502,7 +1502,7 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     auto *summary = fixture.window->findChild<QQuickItem *>(QStringLiteral("renamePreviewSummary"));
     QVERIFY(summary != nullptr);
     QCOMPARE(summary->property("text").toString(),
-             QStringLiteral("1 file will be renamed. 1 file can't be renamed and keeps its name."));
+             QStringLiteral("1 file will be renamed. 1 file can\u2019t be renamed and keeps its name."));
     // The lead, semibold, as every dialog's first sentence is (#373 H40).
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     const QVariantList rows = previewDialog->property("rows").toList();

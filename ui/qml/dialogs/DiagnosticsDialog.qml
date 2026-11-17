@@ -132,12 +132,14 @@ Components.DialogWindow {
 
                 // One verb for one act: it deletes the log, as its question
                 // and its confirming button say (#373 H38: it was Clear…).
+                // No ellipsis: its confirmation asks for nothing more, as
+                // KDE's guidelines have it (#373 H45).
                 Button {
                     objectName: "diagnosticsClearButton"
                     icon.width: dialogButtons.glyphSize
                     icon.height: dialogButtons.glyphSize
                     icon.name: "edit-delete"
-                    text: I18n.i18nc("@action:button", "Delete Log\u2026")
+                    text: I18n.i18nc("@action:button", "Delete Log")
                     enabled: (root.diagnosticsText || "").length > 0
                     onClicked: clearDiagnosticsConfirmDialog.open()
                 }

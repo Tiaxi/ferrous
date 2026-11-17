@@ -823,8 +823,8 @@ Components.DialogWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album's cover image, replacing a cover "
-            + "image that is there, or embeds it in the album's tracks in place of their artwork. "
+        details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album’s cover image, replacing a cover "
+            + "image that is there, or embeds it in the album’s tracks in place of their artwork. "
             + "It keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         confirmIcon: "document-replace"

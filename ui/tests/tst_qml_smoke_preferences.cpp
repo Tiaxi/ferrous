@@ -375,6 +375,10 @@ ApplicationWindow {
     QObject *dialog = qvariant_cast<QObject *>(root->property("dialog"));
     QObject *confirm = root->findChild<QObject *>(QStringLiteral("replaceCoverConfirmDialog"));
     QVERIFY(dialog != nullptr && confirm != nullptr);
+    // Typographic apostrophes, as everywhere else (#373 H45).
+    const QString details = confirm->property("details").toString();
+    QVERIFY2(!details.contains(QLatin1Char('\'')) && details.contains(QStringLiteral("album\u2019s cover image")),
+             qPrintable(details));
     // Replace from iTunes has a window of its own, which its question opens
     // in.
     auto *dialogWindow = qobject_cast<QQuickWindow *>(dialog);

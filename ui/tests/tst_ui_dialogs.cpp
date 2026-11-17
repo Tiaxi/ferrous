@@ -4,6 +4,8 @@
 // and the smaller dialogs, from the QML sources with the fallback bridge.
 
 #include <QApplication>
+#include <QStyle>
+#include <QStyleFactory>
 #include <QClipboard>
 #include <QColor>
 #include <QElapsedTimer>
@@ -550,6 +552,8 @@ private slots:
     void dialogGlyphsAndMeasuresFollowTheFont_data();
     void dialogGlyphsAndMeasuresFollowTheFont();
     void recentIssuesLinkPressShowsAtOnce();
+    void autoNumberCheckBoxesStartOnTheFieldsEdge_data();
+    void autoNumberCheckBoxesStartOnTheFieldsEdge();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -3102,7 +3106,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // Diagnostics has one verb for deleting its log and one row of actions
 // under the log's path (#373 H38: Clear… asked to delete the log, and the
 // actions were over two rows with two ragged right edges): Reload and
-// Delete Log… on the left, Open Folder, Copy All and Copy Log Without
+// Delete Log on the left, Open Folder, Copy All and Copy Log Without
 // Paths on the right, ending where the log's frame does. The log's scroll
 // bars are inside its frame, and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
@@ -3146,8 +3150,9 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
     }
     QTRY_VERIFY(!layoutPending(frame) && !layoutPending(buttons.constFirst()));
 
-    // One verb: Delete Log…, which asks Delete Diagnostics Log.
-    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log…"));
+    // One verb: Delete Log, which asks Delete Diagnostics Log, with no
+    // ellipsis: the confirmation asks for nothing more (#373 H45).
+    QCOMPARE(buttons.at(1)->property("text").toString(), QStringLiteral("Delete Log"));
     QCOMPARE(evaluate(buttons.at(1), QStringLiteral("icon.name")).toString(), QStringLiteral("edit-delete"));
     QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
     QVERIFY(confirm != nullptr);
@@ -5405,6 +5410,82 @@ void UiDialogsTest::recentIssuesLinkPressShowsAtOnce() {
         QVERIFY2(colorOf() != pressed && colorOf().alpha() > 0, qPrintable(hex(colorOf())));
     }
     QTRY_COMPARE(colorOf().alpha(), 0);
+}
+
+void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge_data() {
+    QTest::addColumn<QString>("widgetStyle");
+    QTest::newRow("default style") << QString();
+    QTest::newRow("Breeze") << QStringLiteral("Breeze");
+}
+
+// Auto Number's check boxes are drawn from the fields' left edge: their
+// boxes start in the column the fields' frames do. Breeze draws a 16 px box
+// in the middle of a 20 px indicator, which left them 2 px in (#373 H45).
+void UiDialogsTest::autoNumberCheckBoxesStartOnTheFieldsEdge() {
+    QFETCH(QString, widgetStyle);
+    const QString previousStyle = QApplication::style()->name();
+    const auto restoreStyle = qScopeGuard([&] { QApplication::setStyle(previousStyle); });
+    if (!widgetStyle.isEmpty()) {
+        if (!QStyleFactory::keys().contains(widgetStyle, Qt::CaseInsensitive)) {
+            QSKIP("The Breeze widget style is not installed.");
+        }
+        QApplication::setStyle(widgetStyle);
+    }
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QObject *dialog = object(window, QStringLiteral("autoNumberDialog"));
+    QVERIFY(dialog != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+    QVERIFY(waitForDialogWindow(dialog));
+    QQuickWindow *numbers = windowOf(dialog);
+    QQuickItem *body = visibleNamed(numbers, QStringLiteral("dialogBody"));
+    QVERIFY(body != nullptr);
+    QTRY_VERIFY(!layoutPending(body));
+    QQuickItem *field = visibleNamed(numbers, QStringLiteral("autoNumberStartingTrackField"));
+    QVERIFY(field != nullptr);
+    QTest::qWait(100);
+    const QImage shown = numbers->grabWindow().convertToFormat(QImage::Format_RGB32);
+    const qreal dpr = shown.devicePixelRatio();
+    // The first column, from a little left of `item`, drawn in other than
+    // the window's colour on the line through its middle.
+    const auto inkStart = [&](QQuickItem *item) {
+        const QRectF rect = sceneRect(item);
+        const int y = int((rect.top() + rect.height() / 2) * dpr);
+        const QRgb window = shown.pixel(1, y);
+        for (int x = std::max(0, int((rect.left() - 8) * dpr)); x < int(rect.right() * dpr); ++x) {
+            const QColor pixel(shown.pixel(x, y));
+            const QColor background(window);
+            if (qAbs(pixel.red() - background.red()) + qAbs(pixel.green() - background.green())
+                    + qAbs(pixel.blue() - background.blue()) > 24) {
+                return x;
+            }
+        }
+        return -1;
+    };
+    const int fieldInk = inkStart(field);
+    QVERIFY(fieldInk >= 0);
+    for (const QString &name : {QStringLiteral("autoNumberWriteTotalsCheck"), QStringLiteral("autoNumberWriteDiscCheck"),
+                                QStringLiteral("autoNumberResetOnDiscCheck"), QStringLiteral("autoNumberResetOnFolderCheck")}) {
+        QQuickItem *check = visibleNamed(numbers, name);
+        QVERIFY2(check != nullptr, qPrintable(name));
+        auto *indicator = qvariant_cast<QQuickItem *>(check->property("indicator"));
+        QVERIFY(indicator != nullptr);
+        // The box's own column, in the indicator.
+        const int boxInk = inkStart(indicator);
+        QVERIFY2(boxInk == fieldInk, qPrintable(QStringLiteral("%1: its box from x %2, the field's frame from %3 (%4)")
+                                                    .arg(name).arg(boxInk).arg(fieldInk).arg(describeItem(indicator))));
+    }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!numbers->isVisible());
+    editor.close();
 }
 
 int main(int argc, char **argv) {

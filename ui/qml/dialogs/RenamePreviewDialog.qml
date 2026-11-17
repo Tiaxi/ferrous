@@ -39,8 +39,8 @@ Components.DialogWindow {
         }
         let text = I18n.i18ncp("@info", "%1 file will be renamed.", "%1 files will be renamed.", root.renameCount)
         if (root.refusedCount > 0) {
-            text += " " + I18n.i18ncp("@info", "%1 file can't be renamed and keeps its name.",
-                "%1 files can't be renamed and keep their names.", root.refusedCount)
+            text += " " + I18n.i18ncp("@info", "%1 file can’t be renamed and keeps its name.",
+                "%1 files can’t be renamed and keep their names.", root.refusedCount)
         }
         return text
     }
