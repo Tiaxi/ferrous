@@ -539,6 +539,8 @@ private slots:
     void autoNumberIsOneFormInReadingOrder_data();
     void autoNumberIsOneFormInReadingOrder();
     void editTagsMultipleValuesPlaceholderReads();
+    void editTagsNumberPairsShowMultipleValuesWhole_data();
+    void editTagsNumberPairsShowMultipleValuesWhole();
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsPutTheirButtonsOnTheContentInset();
@@ -1037,7 +1039,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     QQuickItem *single = rows.at(0).name;
     QTRY_VERIFY(qAbs(single->width() - single->implicitWidth()) <= 1);
     QVERIFY(!single->property("truncated").toBool());
-    const qreal nameToPath = sceneRect(rows.at(0).path).left() - sceneRect(single).right();
+    const qreal iconToName = sceneRect(single).left() - sceneRect(rows.at(0).icon).right();
 
     // Without names, no names' column: the path where a name would start.
     QVERIFY(bridge->setProperty("libraryRootEntries", QVariantList{
@@ -1048,7 +1050,7 @@ void UiDialogsTest::libraryFolderPathsShareOneColumn() {
     for (const Row &row : rows) {
         QVERIFY2(!row.name->isVisible(), qPrintable(describeItem(row.name)));
         QVERIFY(row.icon != nullptr);
-        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - nameToPath) < 0.5,
+        QVERIFY2(qAbs(sceneRect(row.path).left() - sceneRect(row.icon).right() - iconToName) < 0.5,
                  qPrintable(describeItem(row.path)));
     }
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
@@ -3824,10 +3826,13 @@ void UiDialogsTest::editTagsIsAWindowOfItsOwnThatAsksBeforeClosing() {
     QTRY_VERIFY(!confirm->property("visible").toBool());
     QVERIFY(tags->isVisible());
     QVERIFY(editor.dirty());
-    // Escape asks too; Discard closes.
+    // Escape asks too; Discard closes, the tag editor, as the question
+    // says (#373 H45: "Discard closes the dialog" read as the question).
     QVERIFY(QTest::qWaitForWindowActive(tags));
     QTest::keyClick(tags, Qt::Key_Escape);
     QVERIFY(waitForDialogWindow(confirm));
+    QCOMPARE(visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDetails"))->property("text").toString(),
+             QStringLiteral("Save writes the current edits. Discard drops every unsaved change and closes the tag editor."));
     click(windowOf(confirm), visibleNamed(windowOf(confirm), QStringLiteral("tagEditorCloseConfirmDiscardButton")));
     QTRY_VERIFY(!tags->isVisible());
     QVERIFY(!editor.isOpen());
@@ -4223,6 +4228,83 @@ void UiDialogsTest::editTagsMultipleValuesPlaceholderReads() {
     // A field whose files agree has no placeholder.
     QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_artist"))->property("placeholderText").toString(),
              QString());
+    editor.close();
+    QTRY_VERIFY(!tags->isVisible());
+}
+
+void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Track's field says that its files' numbers differ, whole: "Multiple
+// values" where it fits, as with the default font, and "Mixed" in the
+// narrower field of a larger font; the fields keep their width, which the
+// table needs (#373 H45: "Multiple values" elided in a 124 px field at
+// 24 pt).
+void UiDialogsTest::editTagsNumberPairsShowMultipleValuesWhole() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRowsOfAnAlbum(4); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel, 1600, 1000);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *dialog = object(window, QStringLiteral("tagEditorDialog"));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading());
+    QVERIFY(waitForDialogWindow(dialog));
+    editor.selectAllRows();
+    QVERIFY(editor.bulkValueMixed(QStringLiteral("trackNo")));
+    QQuickWindow *tags = windowOf(dialog);
+    // The fields' width as it was: 19 grid units with the default font,
+    // or what the labels and 16 characters need.
+    {
+        const qreal gridUnit = evaluate(paletteOf(window), QStringLiteral("Kirigami.Units.gridUnit")).toReal();
+        const qreal leastWidth = dialog->property("fieldsMinimumWidth").toReal();
+        QCOMPARE(dialog->property("fieldsWidth").toReal(), std::max(19 * gridUnit, leastWidth));
+        if (pointSize <= 10) {
+            QCOMPARE(dialog->property("fieldsWidth").toReal(), 19 * gridUnit);
+        }
+    }
+    QQuickItem *number = nullptr;
+    QTRY_VERIFY((number = visibleNamed(tags, QStringLiteral("tagEditorField_trackNo"))) != nullptr);
+    const QString expected = pointSize <= 10 ? QStringLiteral("Multiple values") : QStringLiteral("Mixed");
+    QTRY_COMPARE(number->property("placeholderText").toString(), expected);
+    // A field with the room says it whole.
+    QCOMPARE(visibleNamed(tags, QStringLiteral("tagEditorField_title"))->property("placeholderText").toString(),
+             QStringLiteral("Multiple values"));
+    QQuickItem *title = visibleNamed(tags, QStringLiteral("tagEditorField_title"));
+    QQuickItem *total = visibleNamed(tags, QStringLiteral("tagEditorField_totalTracks"));
+    QVERIFY(title != nullptr && total != nullptr);
+    QTRY_VERIFY(!layoutPending(number));
+    // The style's placeholder text, as drawn.
+    QQuickItem *placeholder = nullptr;
+    const std::function<void(QQuickItem *)> find = [&](QQuickItem *item) {
+        for (QQuickItem *child : item->childItems()) {
+            if (placeholder == nullptr && child->inherits("QQuickText")
+                && child->property("text").toString() == expected) {
+                placeholder = child;
+            }
+            find(child);
+        }
+    };
+    find(number);
+    QVERIFY(placeholder != nullptr && placeholder->isVisible());
+    const QString at = QStringLiteral("%1 in %2, total %3, title %4")
+        .arg(describeItem(placeholder), describeItem(number), describeItem(total), describeItem(title));
+    QTRY_VERIFY2(!placeholder->property("truncated").toBool(), qPrintable(at));
+    // A total that differs would show it whole too: the two alike.
+    QVERIFY2(std::abs(number->width() - total->width()) <= 1.0, qPrintable(at));
+    QCOMPARE(sceneRect(total).right(), sceneRect(title).right());
     editor.close();
     QTRY_VERIFY(!tags->isVisible());
 }
@@ -5302,6 +5384,16 @@ void UiDialogsTest::dialogGlyphsAndMeasuresFollowTheFont() {
     QVERIFY(note->isVisible());
     QVERIFY2(qAbs(sceneRect(note).left() - sceneRect(name).left()) < 0.5,
              qPrintable(describeItem(note) + QStringLiteral(" / ") + describeItem(name)));
+    // The name and the path 10 px apart, scaled with the font (#373 H45:
+    // 10 px between them at 24 pt).
+    {
+        const qreal rowSpacing = evaluate(palette, QStringLiteral("Kirigami.Units.largeSpacing")).toReal() + 2;
+        QCOMPARE(rowSpacing, 10.0);
+        // Within the pixel the name's measured width leaves.
+        const qreal gap = sceneRect(path).left() - sceneRect(name).right();
+        QVERIFY2(gap >= scaled(rowSpacing) && gap < scaled(rowSpacing) + 1,
+                 qPrintable(QStringLiteral("%1 px").arg(gap)));
+    }
     // With the room, the path is whole.
     QTRY_VERIFY2(!path->property("truncated").toBool(),
                  qPrintable(describeItem(path)));

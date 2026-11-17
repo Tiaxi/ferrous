@@ -41,6 +41,10 @@ Components.DialogWindow {
     readonly property string modifiedText: I18n.i18nc("@item tag editor row status", "Modified")
     // Shown in a field whose rows hold different values, which saving keeps.
     readonly property string keepText: I18n.i18nc("@info:placeholder the selected files keep their different values", "Multiple values")
+    // The same, in a number field too narrow for it, as Track and Disc's
+    // with a large font (#373 H45: "Multiple values" elided in their 124 px
+    // fields at 24 pt; widening them took the table's room).
+    readonly property string keepShortText: I18n.i18nc("@info:placeholder short for Multiple values, in a narrow number field: the selected files keep their different values", "Mixed")
     readonly property bool statusHasFailure: root.tagEditorApi.statusIsError === true
     readonly property bool busy: root.operationInFlight || root.tagEditorApi.loading || root.tagEditorApi.saving
     // Bumped whenever the selection or the edits change, for the bindings
@@ -826,6 +830,13 @@ Components.DialogWindow {
         id: fieldEditor
 
         required property var field
+        // A number field, which says that its files differ in the short
+        // words where the whole ones do not fit.
+        property bool compact: false
+        // Its files hold different values, which saving keeps.
+        property bool mixed: false
+        readonly property bool keepTextFits: fieldMetrics.advanceWidth(root.keepText)
+            <= fieldEditor.width - fieldEditor.leftPadding - fieldEditor.rightPadding
         property bool touched: false
         // The text it shows for the tracks, before the user types.
         property string committedText: ""
@@ -860,7 +871,7 @@ Components.DialogWindow {
             }
             text = mixed ? "" : value
             committedText = text
-            placeholderText = mixed ? root.keepText : ""
+            fieldEditor.mixed = mixed
             editRowsSnapshot = []
             touched = false
         }
@@ -869,6 +880,9 @@ Components.DialogWindow {
         Layout.fillWidth: true
         selectByMouse: true
         persistentSelection: true
+        placeholderText: fieldEditor.mixed
+            ? (fieldEditor.compact && !fieldEditor.keepTextFits ? root.keepShortText : root.keepText)
+            : ""
         placeholderTextColor: root.uiPalette.placeholderText
         rightPadding: fieldEditor.changed
             ? revertButton.width + Kirigami.Units.smallSpacing
@@ -1495,6 +1509,7 @@ Components.DialogWindow {
 
         TagField {
             field: pair.first
+            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }
@@ -1508,6 +1523,7 @@ Components.DialogWindow {
 
         TagField {
             field: pair.second
+            compact: true
             Layout.fillWidth: true
             Layout.preferredWidth: Kirigami.Units.gridUnit * 3
         }

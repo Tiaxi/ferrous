@@ -348,9 +348,10 @@ Components.DialogWindow {
     readonly property real actionSpacing: Kirigami.Units.largeSpacing
     readonly property real textActionsGap: 16
     // A row, the current art's or a result's: the thumbnail, or the title
-    // and a line of details, or the buttons, whichever is tallest, with
-    // 8 px above and below; 80 px with the default font.
-    readonly property real rowHeight: Math.max(root.thumbnailSize, 2 * lineMetrics.implicitHeight + 2,
+    // and up to two lines of details, or the buttons, whichever is
+    // tallest, with 8 px above and below; 80 px with the default font,
+    // where the thumbnail is the tallest.
+    readonly property real rowHeight: Math.max(root.thumbnailSize, 3 * lineMetrics.implicitHeight + 2,
         applyMetrics.implicitHeight) + 2 * root.rowPadding
     // What the search found, on a line with 8 px above and below.
     readonly property real headingHeight: lineMetrics.implicitHeight + 2 * Kirigami.Units.largeSpacing
@@ -424,8 +425,10 @@ Components.DialogWindow {
         }
     }
 
-    // A row's text: the title, then one secondary line, elided, with the
-    // whole of it in a tooltip when it does not fit.
+    // A row's text: the title, elided, then the secondary line, which
+    // wraps to a second line where it does not fit, as with a large font
+    // (#373 H45: the artist and "Loading high-resolution artwork…" elided
+    // at 24 pt), and elides past that, with the whole of it in a tooltip.
     component ArtworkText: Column {
         property string title: ""
         property string details: ""
@@ -451,6 +454,8 @@ Components.DialogWindow {
             text: parent.details
             color: parent.detailsColor
             font.features: root.uiPalette.tabularFigures
+            wrapMode: Text.Wrap
+            maximumLineCount: 2
             elide: Text.ElideRight
             ToolTip.text: text
             ToolTip.visible: detailsHover.hovered && truncated
@@ -643,7 +648,7 @@ Components.DialogWindow {
                         source: (suggestionRow.modelData && (suggestionRow.modelData.previewSource || "")) || ""
                     }
 
-                    // One secondary line: the artist and the image's
+                    // The secondary line: the artist and the image's
                     // details; while the high-resolution image loads, that;
                     // when it failed, why.
                     ArtworkText {
@@ -745,12 +750,14 @@ Components.DialogWindow {
                 visible: itunesArtworkResultsView.count === 0
                     && (placeholder.searching || placeholderMessage.text.length > 0)
 
-                // The style's spinner, 32 px: the state's one glyph.
+                // The style's spinner, 32 px with the default font and
+                // larger with a larger one, as the text under it (#373 H45:
+                // 32 px over 24 pt text): the state's one glyph.
                 BusyIndicator {
                     objectName: "itunesArtworkBusyIndicator"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
                     running: placeholder.searching
                     visible: running
                 }
@@ -762,8 +769,8 @@ Components.DialogWindow {
                 Kirigami.Icon {
                     objectName: "itunesArtworkFailureIcon"
                     Layout.alignment: Qt.AlignHCenter
-                    Layout.preferredWidth: Kirigami.Units.iconSizes.medium
-                    Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                    Layout.preferredWidth: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
+                    Layout.preferredHeight: root.uiPalette.scaledSize(Kirigami.Units.iconSizes.medium)
                     visible: placeholder.failed
                     source: Qt.resolvedUrl("../assets/status-warning.svg")
                     isMask: true
@@ -823,9 +830,12 @@ Components.DialogWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album’s cover image, replacing a cover "
-            + "image that is there, or embeds it in the album’s tracks in place of their artwork. "
-            + "It keeps no copy of the current album art.")
+        // Two short sentences, as the backend applies it: to the folder's
+        // cover image where the folder has one, otherwise embedded in the
+        // album's tracks (artwork::apply_artwork_to_track; #373 H45: one
+        // sentence of 31 words).
+        details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
+            + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         confirmIcon: "document-replace"
         // The current album art is gone once replaced.

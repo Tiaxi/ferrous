@@ -33,16 +33,32 @@ Components.DialogWindow {
         return count
     }
 
-    function summaryText() {
+    // The summary's sentences: how many files are renamed, then how many
+    // can't be; or why no new name could be worked out.
+    function summarySentences() {
         if (root.errorText.length > 0) {
-            return I18n.i18nc("@info", "The new names could not be worked out: %1", root.errorText)
+            return [I18n.i18nc("@info", "The new names could not be worked out: %1", root.errorText)]
         }
-        let text = I18n.i18ncp("@info", "%1 file will be renamed.", "%1 files will be renamed.", root.renameCount)
+        const sentences = [I18n.i18ncp("@info", "%1 file will be renamed.", "%1 files will be renamed.",
+            root.renameCount)]
         if (root.refusedCount > 0) {
-            text += " " + I18n.i18ncp("@info", "%1 file can’t be renamed and keeps its name.",
-                "%1 files can’t be renamed and keep their names.", root.refusedCount)
+            sentences.push(I18n.i18ncp("@info", "%1 file can’t be renamed and keeps its name.",
+                "%1 files can’t be renamed and keep their names.", root.refusedCount))
         }
-        return text
+        return sentences
+    }
+
+    // Each sentence on a line of its own, as wide as the window opens for
+    // it, so none wraps a word onto a line alone.
+    function summaryText() {
+        return root.summarySentences().join("\n")
+    }
+
+    // A file's line: its name and its new name, or that it keeps its name.
+    function rowText(row) {
+        return row.unchanged
+            ? I18n.i18nc("@item file name", "%1 (keeps its name)", row.oldName)
+            : I18n.i18nc("@item old file name, new file name", "%1 → %2", row.oldName, row.newName || "")
     }
 
     objectName: "renamePreviewDialog"
@@ -52,9 +68,34 @@ Components.DialogWindow {
     readonly property Item body: renamePreviewContent
     minimumWidth: Kirigami.Units.gridUnit * 24
     minimumHeight: Kirigami.Units.gridUnit * 9
-    // Its width and its limit below with the default font grow with a
-    // larger one, within the screen.
-    defaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)
+    // As wide as its widest line, each time it opens: a file's line, a
+    // sentence of the summary, the message that nothing is renamed, or the
+    // buttons; no narrower than its minimum, and no wider than 42 grid
+    // units, which grow with a larger font, within the screen, where a
+    // longer line elides in its middle (#373 H45: a fixed 756 px held
+    // 390 px of lines, and 1814 px at 24 pt, wider than Edit Tags under it).
+    // Only the first rows are measured: more scroll, and a list that long
+    // opens at its limit anyway.
+    readonly property real maximumDefaultWidth: root.uiPalette.scaledSize(Kirigami.Units.gridUnit * 42)
+    readonly property int measuredRowLimit: 400
+    readonly property real widestContentLine: {
+        if (root.rows.length === 0 && root.errorText.length === 0) {
+            return Math.max(emptyTitleMetrics.advanceWidth(emptyTitle.text),
+                emptyTextMetrics.advanceWidth(emptyText.text))
+        }
+        let widest = 0
+        const sentences = root.summarySentences()
+        for (let i = 0; i < sentences.length; ++i) {
+            widest = Math.max(widest, summaryMetrics.advanceWidth(sentences[i]))
+        }
+        const measured = Math.min(root.rows.length, root.measuredRowLimit)
+        for (let j = 0; j < measured; ++j) {
+            widest = Math.max(widest, rowMetrics.advanceWidth(root.rowText(root.rows[j])) + root.listGutter)
+        }
+        return widest
+    }
+    defaultWidth: Math.min(root.maximumDefaultWidth,
+        Math.max(Math.ceil(2 * root.contentPadding + root.widestContentLine), dialogButtons.implicitWidth))
     readonly property real contentSpacing: 10
     // The room right of the rows for the list's scroll bar, and a refused
     // file's error's indent under its name.
@@ -117,6 +158,27 @@ Components.DialogWindow {
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             onClicked: root.reject()
         }
+    }
+
+    // The content's lines, in their fonts, for the width it opens at.
+    FontMetrics {
+        id: summaryMetrics
+        font: summary.font
+    }
+
+    FontMetrics {
+        id: rowMetrics
+        font: nameLineSizer.font
+    }
+
+    FontMetrics {
+        id: emptyTitleMetrics
+        font: emptyTitle.font
+    }
+
+    FontMetrics {
+        id: emptyTextMetrics
+        font: emptyText.font
     }
 
     // The content's text at the width the window opens at, in the content's
@@ -270,12 +332,10 @@ Components.DialogWindow {
                 spacing: 0
 
                 Label {
+                    objectName: "renamePreviewRowName"
                     Layout.fillWidth: true
                     elide: Text.ElideMiddle
-                    text: modelData.unchanged
-                        ? I18n.i18nc("@item file name", "%1 (keeps its name)", modelData.oldName)
-                        : I18n.i18nc("@item old file name, new file name", "%1 → %2",
-                            modelData.oldName, modelData.newName || "")
+                    text: root.rowText(modelData)
                     color: modelData.ok
                         ? (modelData.unchanged ? root.uiPalette.textSecondary : root.uiPalette.text)
                         : root.uiPalette.negative

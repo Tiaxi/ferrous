@@ -411,8 +411,11 @@ ApplicationWindow {
     QCOMPARE(confirm->property("message").toString(),
              QStringLiteral("Replace the album art of “Album A” by Artist A?"));
     QVERIFY(applied().isEmpty());
-    QVERIFY2(confirm->property("details").toString().contains(QStringLiteral("keeps no copy")),
-             qPrintable(confirm->property("details").toString()));
+    // What Replace does, in two short sentences (#373 H45: one sentence of
+    // 31 words): the folder's cover image, or the tracks' embedded art.
+    QCOMPARE(confirm->property("details").toString(),
+             QStringLiteral("The new artwork replaces the album\u2019s cover image file or, if it has none, the artwork "
+                            "embedded in its tracks. Ferrous keeps no copy of the current album art."));
     // A window of its own above Replace from iTunes' (#373 H5), with
     // Replace's icon beside Cancel's.
     auto *confirmWindow = qobject_cast<QQuickWindow *>(confirm);
