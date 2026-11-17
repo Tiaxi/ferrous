@@ -39,6 +39,8 @@ private slots:
     void itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWithNothingFound();
     void itunesArtworkActionsFollowTheTextFont();
     void itunesArtworkListIsAsTallAsItsRows();
+    void itunesArtworkScalesAsAWholeWithTheFont_data();
+    void itunesArtworkScalesAsAWholeWithTheFont();
     void albumArtDetailsLieOverTheArt();
     void albumArtDetailsLabelsStayWholeWithLargerFonts();
     void albumArtFolderPathTakesTheLinesItNeedsAtLargeFonts();
@@ -2847,6 +2849,110 @@ void AlbumArtSmokeTest::itunesArtworkListIsAsTallAsItsRows() {
         }
         QTRY_COMPARE(view->property("contentHeight").toReal() > view->height() + 0.5, count > 5);
         QTRY_COMPARE(view->property("scrollbarLane").toReal() > 0, count > 5);
+    }
+}
+
+void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialog scales as a whole with the font: the thumbnails, the current
+// art's too, stay 64 px at 10 pt and grow to half as tall again as a
+// row's title and details with a larger font; the actions' glyphs are
+// Kirigami's size for labels, 16 px at 10 pt; and the dialog opens
+// 920 px wide at 10 pt and no wider than 1280 px with a larger font.
+// At 24 pt, 64 px thumbnails stood under 92 px of text, 16 px glyphs
+// beside 32 px captions, in a 1964 px window (#373 H42).
+void AlbumArtSmokeTest::itunesArtworkScalesAsAWholeWithTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QQmlApplicationEngine engine;
+    OpenItunesArtworkDialog opened;
+    QVERIFY(openItunesArtworkDialog(engine, dir, 2, nullptr, opened));
+    QTRY_VERIFY(popupsSettled());
+    dropSizeHintMessages();
+    const bool large = pointSize > 10;
+
+    // Kirigami's size for labels, which the dialog's actions take.
+    const qreal forLabels = opened.dialog->property("actionIconSize").toReal();
+    if (large) {
+        QVERIFY2(forLabels >= 32, qPrintable(QString::number(forLabels)));
+    } else {
+        QCOMPARE(forLabels, 16.0);
+    }
+
+    const qreal defaultWidth = opened.dialog->property("defaultWidth").toReal();
+    if (large) {
+        QCOMPARE(defaultWidth, 1280.0);
+    } else {
+        QCOMPARE(defaultWidth, 920.0);
+    }
+
+    // At its opening width, which the offscreen screen is too narrow for
+    // at 24 pt.
+    opened.dialogWindow->setWidth(qCeil(defaultWidth));
+    QTRY_COMPARE(opened.content->width(), opened.dialogWindow->width() - 2 * opened.dialog->property("contentPadding").toReal());
+    QQuickItem *currentRow = itemNamed(opened.content, QStringLiteral("itunesArtworkCurrentRow"));
+    QVERIFY(currentRow != nullptr);
+    QList<QQuickItem *> rows = visibleItemsNamed(opened.content, QStringLiteral("itunesArtworkResultRow"));
+    QCOMPARE(rows.size(), 2);
+    rows.prepend(currentRow);
+    const qreal thumbnailSize = opened.dialog->property("thumbnailSize").toReal();
+    for (QQuickItem *row : rows) {
+        const bool current = row == currentRow;
+        QQuickItem *thumbnail = itemNamed(row, current ? QStringLiteral("itunesArtworkCurrentThumbnail")
+                                                       : QStringLiteral("itunesArtworkResultThumbnail"));
+        QQuickItem *title = itemNamed(row, current ? QStringLiteral("itunesArtworkCurrentTitle")
+                                                   : QStringLiteral("itunesArtworkResultTitle"));
+        QQuickItem *details = itemNamed(row, current ? QStringLiteral("itunesArtworkCurrentDetails")
+                                                     : QStringLiteral("itunesArtworkResultDetails"));
+        QVERIFY(thumbnail != nullptr && title != nullptr && details != nullptr);
+        const qreal textHeight = sceneRectOf(details).bottom() - sceneRectOf(title).top();
+        const QString at = QStringLiteral("%1: thumbnail %2, title %3, details %4, window %5")
+            .arg(row->objectName(), describeRect(sceneRectOf(thumbnail)), describeRect(sceneRectOf(title)),
+                 describeRect(sceneRectOf(details)))
+            .arg(opened.dialogWindow->width());
+        QCOMPARE(thumbnail->width(), thumbnailSize);
+        QCOMPARE(thumbnail->height(), thumbnailSize);
+        if (large) {
+            QVERIFY2(thumbnail->height() >= 1.5 * textHeight - 1, qPrintable(at));
+        } else {
+            QCOMPARE(thumbnail->height(), 64.0);
+        }
+        // The thumbnail and the text stay on one centre line, in the row.
+        QVERIFY2(qAbs(sceneRectOf(thumbnail).center().y() - sceneRectOf(row).center().y()) <= 1.0, qPrintable(at));
+        QVERIFY2(sceneRectOf(row).contains(sceneRectOf(thumbnail)), qPrintable(at));
+        QVERIFY2(sceneRectOf(title).left() >= sceneRectOf(thumbnail).right() + 12 - 0.5, qPrintable(at));
+        QVERIFY2(!title->property("truncated").toBool(), qPrintable(at));
+    }
+    if (!large) {
+        QCOMPARE(opened.dialog->property("rowHeight").toReal(), 80.0);
+    }
+
+    // Every action's glyph is the size for labels, and the style draws
+    // it so: the button is as wide as the glyph and its caption need.
+    QList<QQuickItem *> actions{itemNamed(currentRow, QStringLiteral("itunesArtworkCurrentPreviewButton"))};
+    for (QQuickItem *row : rows.mid(1)) {
+        actions << itemNamed(row, QStringLiteral("itunesArtworkPreviewButton"))
+                << itemNamed(row, QStringLiteral("itunesArtworkApplyButton"));
+    }
+    for (QQuickItem *action : actions) {
+        QVERIFY(action != nullptr);
+        QQmlExpression iconWidth(qmlContext(action), action, QStringLiteral("icon.width"));
+        QQmlExpression iconHeight(qmlContext(action), action, QStringLiteral("icon.height"));
+        QCOMPARE(iconWidth.evaluate().toReal(), forLabels);
+        QCOMPARE(iconHeight.evaluate().toReal(), forLabels);
+        const QFontMetricsF metrics(qvariant_cast<QFont>(action->property("font")));
+        QVERIFY2(action->implicitWidth() >= metrics.horizontalAdvance(action->property("text").toString()) + forLabels,
+                 qPrintable(QStringLiteral("%1: %2 px").arg(action->objectName()).arg(action->implicitWidth())));
     }
 }
 

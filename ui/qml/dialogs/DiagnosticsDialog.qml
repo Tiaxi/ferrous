@@ -216,8 +216,14 @@ Components.DialogWindow {
                     wrapMode: TextEdit.NoWrap
                     font: Kirigami.Theme.fixedWidthFont
                     persistentSelection: true
-                    // The frame round the view is the log's.
+                    // The frame round the view is the log's; the text
+                    // stands 8 px clear of its sides and 6 px of its top
+                    // and bottom (#373 H42: 5 px, nearly on the frame).
                     background: null
+                    leftPadding: Kirigami.Units.largeSpacing
+                    rightPadding: Kirigami.Units.largeSpacing
+                    topPadding: Kirigami.Units.smallSpacing + 2
+                    bottomPadding: Kirigami.Units.smallSpacing + 2
 
                     MouseArea {
                         anchors.fill: parent

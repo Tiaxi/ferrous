@@ -502,6 +502,8 @@ private slots:
     void libraryFolderListIsThreeRowsTallAtLeast();
     void lastFmPageShowsOnlyTheButtonsThatApply();
     void lastFmScrobblingNeedsABuildWithLastFm();
+    void lastFmAccountIsAGroupApart_data();
+    void lastFmAccountIsAGroupApart();
     void aboutShowsTheIconVersionTabsAndCopiesTheVersion();
     void aboutKdeHasAboutsHeadingAndPage_data();
     void aboutKdeHasAboutsHeadingAndPage();
@@ -1842,6 +1844,15 @@ void UiDialogsTest::libraryFolderNameDialogShowsItsPath() {
             QCOMPARE(help->property("lineCount").toInt(), 1);
         }
         QVERIFY2(sceneRect(help).right() <= nameWindow->width() - inset + 0.5, qPrintable(where));
+        // The help text ends the form at the dialogs' inset above the
+        // buttons, as a confirmation's last line does (#373 H42: 35 px
+        // apart, with the help text's room to a next row and the form's
+        // empty last row under it).
+        QQuickItem *accept = visibleNamed(nameWindow, QStringLiteral("libraryRootNameAcceptButton"));
+        QVERIFY(accept != nullptr);
+        const qreal aboveButtons = sceneRect(accept).top() - sceneRect(help).bottom();
+        QVERIFY2(qAbs(aboveButtons - inset) < 1,
+                 qPrintable(QStringLiteral("%1: %2 px above the buttons, not %3").arg(mode).arg(aboveButtons).arg(inset)));
         QTest::keyClick(nameWindow, Qt::Key_Escape);
         QTRY_VERIFY(!dialog->property("visible").toBool());
     }
@@ -2153,6 +2164,74 @@ void UiDialogsTest::lastFmScrobblingNeedsABuildWithLastFm() {
     // A build with Last.fm lets it be turned on.
     QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
     QTRY_VERIFY(box->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::lastFmAccountIsAGroupApart_data() {
+    QTest::addColumn<bool>("connected");
+    QTest::newRow("connected") << true;
+    QTest::newRow("not connected") << false;
+}
+
+// The Last.fm page's account stands apart from the scrobbling group above
+// it, as General's groups are: 16 px from the group's last row, the status
+// check box when connected or the help text without it, where the rows
+// within the group are 4 px apart (#373 H42: Account stood 4 px under the
+// status check box, closer than the help text above it).
+void UiDialogsTest::lastFmAccountIsAGroupApart() {
+    QFETCH(bool, connected);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *bridge = bridgeOf(window);
+    QVERIFY(bridge->setProperty("lastFmBuildConfigured", true));
+    if (connected) {
+        QVERIFY(bridge->setProperty("lastFmAuthState", 2));
+        QVERIFY(bridge->setProperty("lastFmUsername", QStringLiteral("listener")));
+    }
+    QObject *dialog = openPreferences(window, 2);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *stack = nullptr;
+    QTRY_VERIFY((stack = visibleNamed(prefs, QStringLiteral("preferencesPages"))) != nullptr);
+    const auto gap = [](QQuickItem *above, QQuickItem *below) {
+        return sceneRect(below).top() - sceneRect(above).bottom();
+    };
+    // General's room between its groups: from the viewers' last row to the
+    // desktop integration's subheading.
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(2)));
+    QQuickItem *sleep = visibleNamed(prefs, QStringLiteral("preventDisplaySleepInFullscreenCheckBox"));
+    QQuickItem *headingRow = visibleNamed(prefs, QStringLiteral("desktopIntegrationHeading"));
+    QVERIFY(sleep != nullptr && headingRow != nullptr);
+    QQuickItem *heading = itemsNamed(headingRow, QStringLiteral("formSubheading")).value(0);
+    QVERIFY(heading != nullptr);
+    const qreal generalGroupGap = gap(sleep, heading);
+    QVERIFY2(qAbs(generalGroupGap - 16) < 1, qPrintable(QString::number(generalGroupGap)));
+
+    dialog->setProperty("pageIndex", 3);
+    QQuickItem *account = nullptr;
+    QTRY_VERIFY((account = visibleNamed(prefs, QStringLiteral("lastFmAccountLabel"))) != nullptr);
+    QTRY_VERIFY(!layoutPending(stack->childItems().at(3)));
+    QQuickItem *box = visibleNamed(prefs, QStringLiteral("lastFmScrobblingCheckBox"));
+    QQuickItem *helpRow = visibleNamed(prefs, QStringLiteral("lastFmScrobblingHelp"));
+    QVERIFY(box != nullptr && helpRow != nullptr);
+    QQuickItem *help = itemsNamed(helpRow, QStringLiteral("formHelpTextLabel")).value(0);
+    QQuickItem *progress = visibleNamed(prefs, QStringLiteral("lastFmShowScrobbleProgressCheckBox"));
+    QVERIFY(help != nullptr);
+    QCOMPARE(progress != nullptr, connected);
+    QQuickItem *groupEnd = connected ? progress : help;
+    // Within the group: the help text 4 px under its check box, and the
+    // status check box 12 px under the help text.
+    QVERIFY2(qAbs(gap(box, help) - 4) < 1, qPrintable(describeItem(help)));
+    if (connected) {
+        QVERIFY2(qAbs(gap(help, progress) - 12) < 1, qPrintable(describeItem(progress)));
+    }
+    const qreal accountGap = gap(groupEnd, account);
+    QVERIFY2(qAbs(accountGap - generalGroupGap) < 1,
+             qPrintable(QStringLiteral("%1 px, General's %2 px: %3, %4")
+                            .arg(accountGap).arg(generalGroupGap).arg(describeItem(groupEnd), describeItem(account))));
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }
@@ -2890,7 +2969,7 @@ void UiDialogsTest::diagnosticsActionsShareOneRow_data() {
 // actions were over two rows with two ragged right edges): Reload and
 // Delete Log… on the left, Open Folder, Copy All and Copy Log Without
 // Paths on the right, ending where the log's frame does. The log's scroll
-// bars are inside its frame.
+// bars are inside its frame, and its text clear of the frame.
 void UiDialogsTest::diagnosticsActionsShareOneRow() {
     QFETCH(qreal, pointSize);
     const QFont applicationFont = QGuiApplication::font();
@@ -2975,6 +3054,26 @@ void UiDialogsTest::diagnosticsActionsShareOneRow() {
         QVERIFY2(within(sceneRect(scrollBar), sceneRect(frame).adjusted(1, 1, -1, -1)),
                  qPrintable(QString::fromLatin1(bar) + QStringLiteral(" ") + describeItem(scrollBar)));
     }
+    // The log's text stands 8 px clear of the frame's sides and 6 px of
+    // its top and bottom, inside its 1 px edge (#373 H42: 5 px, nearly on
+    // the frame).
+    QQuickItem *textArea = visibleNamed(diagnostics, QStringLiteral("diagnosticsTextArea"));
+    QVERIFY(textArea != nullptr);
+    QCOMPARE(textArea->property("leftPadding").toReal(), 8.0);
+    QCOMPARE(textArea->property("rightPadding").toReal(), 8.0);
+    QCOMPARE(textArea->property("topPadding").toReal(), 6.0);
+    QCOMPARE(textArea->property("bottomPadding").toReal(), 6.0);
+    QObject *flickable = qvariant_cast<QObject *>(scrollView->property("contentItem"));
+    QVERIFY(flickable != nullptr);
+    QVERIFY(flickable->setProperty("contentX", 0.0) && flickable->setProperty("contentY", 0.0));
+    QRectF firstCharacter;
+    QVERIFY(QMetaObject::invokeMethod(textArea, "positionToRectangle", Q_RETURN_ARG(QRectF, firstCharacter),
+                                      Q_ARG(int, 0)));
+    const QPointF textStart = textArea->mapToScene(firstCharacter.topLeft());
+    QVERIFY2(qAbs(textStart.x() - (sceneRect(frame).left() + 1) - 8) < 0.5
+                 && qAbs(textStart.y() - (sceneRect(frame).top() + 1) - 6) < 0.5,
+             qPrintable(QStringLiteral("text at %1,%2 in the frame %3")
+                            .arg(textStart.x()).arg(textStart.y()).arg(describeItem(frame))));
     // Made as narrow as it goes, the actions on the right go under the
     // others, at the same right edge, each whole and none over another.
     diagnostics->resize(diagnostics->minimumWidth(), diagnostics->height());
