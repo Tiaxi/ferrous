@@ -1063,6 +1063,8 @@ Components.DialogWindow {
         Button {
             objectName: "tagEditorReloadButton"
             Layout.bottomMargin: dialogButtons.bottomPadding
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
             text: I18n.i18nc("@action:button", "Reload")
             icon.name: "view-refresh"
             enabled: !root.tagEditorApi.loading && !root.tagEditorApi.saving

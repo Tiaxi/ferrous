@@ -336,12 +336,17 @@ Preferences.PreferencesPage {
             }
         }
 
+        // The folders' actions, their glyphs as large as their captions'
+        // font calls for, as the dialogs' buttons (#373 H43).
         RowLayout {
             id: rootButtons
+            readonly property real glyphSize: Kirigami.Units.iconSizes.sizeForLabels
             spacing: Kirigami.Units.largeSpacing
 
             Button {
                 objectName: "libraryRootAddButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "folder-add"
                 text: I18n.i18nc("@action:button", "Add…")
                 Accessible.name: I18n.i18nc("@action:button", "Add Library Folder")
@@ -350,6 +355,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRenameButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "edit-rename"
                 text: I18n.i18nc("@action:button", "Rename…")
                 enabled: root.currentRoot !== null
@@ -358,6 +365,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRescanButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 icon.name: "view-refresh"
                 text: I18n.i18nc("@action:button", "Rescan")
                 enabled: root.currentRoot !== null
@@ -366,6 +375,8 @@ Preferences.PreferencesPage {
 
             Button {
                 objectName: "libraryRootRemoveButton"
+                icon.width: rootButtons.glyphSize
+                icon.height: rootButtons.glyphSize
                 // Removing from the list: the files stay on disk.
                 icon.name: "list-remove"
                 text: I18n.i18nc("@action:button", "Remove")

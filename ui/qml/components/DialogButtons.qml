@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import QtQml.Models
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Window 2.15
@@ -15,12 +16,18 @@ import "../logic/KeyUtils.js" as KeyUtils
 // window's sides and bottom, as the content is from its sides and top;
 // the content's own inset under it is the room above them (#373 H38).
 // Buttons that share the row with the box, such as Defaults, take its
-// `inset` as their side margin and its bottomPadding under them.
+// `inset` as their side margin and its bottomPadding under them, and its
+// `glyphSize` as their glyphs' size.
+//
+// The buttons' glyphs are as large as their captions' font calls for,
+// Kirigami's size for labels: 16 px with the default font, larger with a
+// larger one, as the iTunes rows' (#373 H43: 16 px beside 24 pt captions).
 DialogButtonBox {
     id: root
 
     property Item primary: null
     readonly property real inset: Kirigami.Units.gridUnit
+    readonly property real glyphSize: Kirigami.Units.iconSizes.sizeForLabels
 
     leftPadding: root.inset
     rightPadding: root.inset
@@ -44,6 +51,27 @@ DialogButtonBox {
             return tallest
         }
         when: root.contentItem !== null && root.contentChildren.length > 0
+    }
+
+    // Each button's glyph, at the row's size.
+    Instantiator {
+        model: root.contentChildren
+        delegate: Binding {
+            required property Item modelData
+            target: modelData
+            property: "icon.width"
+            value: root.glyphSize
+        }
+    }
+
+    Instantiator {
+        model: root.contentChildren
+        delegate: Binding {
+            required property Item modelData
+            target: modelData
+            property: "icon.height"
+            value: root.glyphSize
+        }
     }
 
     function _indexOfButton(button) {

@@ -540,6 +540,8 @@ private slots:
     void editTagsFileColumnsGiveWayBeforeTheTags();
     void dialogsPutTheirButtonsInKdesOrder();
     void dialogsPutTheirButtonsOnTheContentInset();
+    void dialogButtonGlyphsFollowTheFont_data();
+    void dialogButtonGlyphsFollowTheFont();
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
@@ -4606,6 +4608,131 @@ void UiDialogsTest::dialogsPutTheirButtonsOnTheContentInset() {
             QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
             QTRY_VERIFY2(!dialogWindow->isVisible(), test.name);
         }
+    }
+    QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
+    editor.close();
+}
+
+void UiDialogsTest::dialogButtonGlyphsFollowTheFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// The dialogs' buttons have glyphs as large as their captions' font calls
+// for, Kirigami's size for labels: 16 px with the default font, larger at
+// 24 pt, as the iTunes rows' (#373 H43: the footers kept 16 px glyphs
+// beside 24 pt captions). So do Configure's Defaults, the library
+// folders' buttons and the Diagnostics actions.
+void UiDialogsTest::dialogButtonGlyphsFollowTheFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    TagEditorController editor(nullptr);
+    editor.m_executeOperation = [](TagEditorController::Operation, const QByteArray &,
+                                   const TagEditorController::RenameGate &) { return tagRows(2); };
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("tagEditor"), &editor);
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", QVariantList{
+        QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/one")}, {QStringLiteral("trackCount"), 3}},
+    }));
+    QVERIFY(editor.openForPaths({QStringLiteral("/fixture/Album")}));
+    QTRY_VERIFY(!editor.loading() && object(window, QStringLiteral("tagEditorDialog"))->property("opened").toBool());
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *preferences = openPreferences(window, 0);
+    QVERIFY(preferences != nullptr);
+    QTRY_VERIFY(object(window, QStringLiteral("removeLibraryRootConfirmDialog")) != nullptr);
+    const qreal forLabels = evaluate(preferences, QStringLiteral("Kirigami.Units.iconSizes.sizeForLabels")).toReal();
+    if (pointSize > 0) {
+        QVERIFY2(forLabels > 16, qPrintable(QString::number(forLabels)));
+    } else {
+        QCOMPARE(forLabels, 16.0);
+    }
+    const auto glyphIs = [&](QQuickItem *button, const QString &where) {
+        const QString name = evaluate(button, QStringLiteral("icon.name")).toString();
+        const qreal width = evaluate(button, QStringLiteral("icon.width")).toReal();
+        const qreal height = evaluate(button, QStringLiteral("icon.height")).toReal();
+        if (name.isEmpty() || (width == forLabels && height == forLabels)) {
+            return true;
+        }
+        qWarning().noquote() << QStringLiteral("%1: %2 has a %3x%4 glyph, not %5")
+                                    .arg(where, describeItem(button)).arg(width).arg(height).arg(forLabels);
+        return false;
+    };
+    // The visible buttons under an item.
+    const auto buttonsIn = [](QQuickItem *root) {
+        QList<QQuickItem *> buttons;
+        std::function<void(QQuickItem *)> collect = [&](QQuickItem *item) {
+            for (QQuickItem *child : item->childItems()) {
+                if (!child->isVisible()) {
+                    continue;
+                }
+                if (child->inherits("QQuickAbstractButton")) {
+                    buttons.push_back(child);
+                } else {
+                    collect(child);
+                }
+            }
+        };
+        if (root != nullptr) {
+            collect(root);
+        }
+        return buttons;
+    };
+
+    int glyphs = 0;
+    for (const char *dialogName : {"quitSaveFailedDialog", "libraryRootNameDialog", "removeLibraryRootConfirmDialog",
+                                   "tagEditorCloseConfirmDialog", "autoNumberDialog", "renamePreviewDialog",
+                                   "tagEditorStatusDetailsDialog", "clearDiagnosticsConfirmDialog",
+                                   "itunesArtworkDialog", "aboutDialog", "diagnosticsDialog", "preferencesDialog",
+                                   "tagEditorDialog"}) {
+        const QString name = QString::fromLatin1(dialogName);
+        QObject *dialog = object(window, name);
+        QVERIFY2(dialog != nullptr, dialogName);
+        const bool opened = dialog->property("opened").toBool();
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+        }
+        QVERIFY2(waitForDialogWindow(dialog), dialogName);
+        auto *footer = qvariant_cast<QQuickItem *>(dialog->property("footer"));
+        QTRY_VERIFY2(!buttonsIn(footer).isEmpty(), dialogName);
+        for (QQuickItem *button : buttonsIn(footer)) {
+            QVERIFY(glyphIs(button, name));
+            ++glyphs;
+        }
+        if (!opened) {
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY2(!windowOf(dialog)->isVisible(), dialogName);
+        }
+    }
+    QVERIFY(glyphs >= 20);
+
+    // Beside the footers: the library folders' buttons and the Diagnostics
+    // actions.
+    QQuickWindow *prefs = windowOf(preferences);
+    for (const char *buttonName : {"libraryRootAddButton", "libraryRootRenameButton", "libraryRootRescanButton",
+                                   "libraryRootRemoveButton"}) {
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY2((button = visibleNamed(prefs, QString::fromLatin1(buttonName))) != nullptr, buttonName);
+        QVERIFY(glyphIs(button, QStringLiteral("Library")));
+    }
+    QQuickWindow *diagnosticsWindow = windowOf(diagnostics);
+    for (const char *buttonName : {"diagnosticsReloadButton", "diagnosticsClearButton", "diagnosticsOpenFolderButton",
+                                   "diagnosticsCopyAllButton", "diagnosticsCopyWithoutPathsButton"}) {
+        QQuickItem *button = visibleNamed(diagnosticsWindow, QString::fromLatin1(buttonName));
+        QVERIFY2(button != nullptr, buttonName);
+        QVERIFY(glyphIs(button, QStringLiteral("Diagnostics")));
     }
     QVERIFY(QMetaObject::invokeMethod(preferences, "reject"));
     QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));

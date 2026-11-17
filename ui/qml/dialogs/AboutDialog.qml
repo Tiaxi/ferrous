@@ -122,6 +122,8 @@ Components.DialogWindow {
             objectName: "aboutCopyVersionButton"
             Layout.leftMargin: dialogButtons.inset
             Layout.bottomMargin: dialogButtons.bottomPadding
+            icon.width: dialogButtons.glyphSize
+            icon.height: dialogButtons.glyphSize
             icon.name: "edit-copy"
             text: I18n.i18nc("@action:button", "Copy Version Information")
             onClicked: root.copyVersionInformation()
