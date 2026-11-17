@@ -823,9 +823,12 @@ Components.DialogWindow {
         uiPalette: root.uiPalette
         windowRoot: root
         title: I18n.i18nc("@title:window", "Replace Album Art")
-        details: I18n.i18nc("@info", "Ferrous saves the new artwork as the album’s cover image, replacing a cover "
-            + "image that is there, or embeds it in the album’s tracks in place of their artwork. "
-            + "It keeps no copy of the current album art.")
+        // Two short sentences, as the backend applies it: to the folder's
+        // cover image where the folder has one, otherwise embedded in the
+        // album's tracks (artwork::apply_artwork_to_track; #373 H45: one
+        // sentence of 31 words).
+        details: I18n.i18nc("@info", "The new artwork replaces the album’s cover image file or, if it has none, "
+            + "the artwork embedded in its tracks. Ferrous keeps no copy of the current album art.")
         confirmText: I18n.i18nc("@action:button", "Replace")
         confirmIcon: "document-replace"
         // The current album art is gone once replaced.
