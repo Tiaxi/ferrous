@@ -12,6 +12,13 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the runs of its earlier commits. Every
+# other run, such as each push to main or a release, is in a group of its own
+# and always finishes.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 jobs:
   rust-backend:
     name: "Rust Backend Checks${{ matrix.toolchain == 'fedora' && ' (Fedora Rust)' || '' }}${{ matrix.fedora != '44' && format(' (Fedora {0}{1})', matrix.fedora, matrix.experimental && ', non-blocking' || '') || '' }}"
@@ -215,6 +222,7 @@ jobs:
             cmake \
             ninja-build \
             gcc-c++ \
+            ccache \
             rust \
             cargo \
             pkgconf-pkg-config \
@@ -249,14 +257,35 @@ jobs:
           key: profile-logs-${{ matrix.profile_logs }}
           workspaces: ". -> ui/build/cargo"
 
-      - name: Configure UI
-        run: >-
-          cmake -S ui -B ui/build -G Ninja
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }}
+      # ccache keeps the C++ objects of earlier runs, so a run compiles only
+      # what its change affects. A cache cannot be overwritten, so each run
+      # saves one of its own and restores the newest that it may read: its
+      # branch's, or else main's. ccache is for CI only; the app's build does
+      # not need it.
+      - name: Cache C++ objects
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: v0-ccache-ui-fedora-44-${{ matrix.build_type }}-
 
+      - name: Configure UI
+        run: |
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_MAXSIZE=1G"
+          } >> "$GITHUB_ENV"
+          cmake -S ui -B ui/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DFERROUS_ENABLE_PROFILE_LOGS=${{ matrix.profile_logs }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      # With every CPU of the runner; Cargo does the same.
       - name: Build UI
-        run: cmake --build ui/build -j2
+        run: |
+          ccache --zero-stats
+          cmake --build ui/build --parallel "$(nproc)"
+          ccache --show-stats
 
       - name: Isolate test user directories
         run: |
