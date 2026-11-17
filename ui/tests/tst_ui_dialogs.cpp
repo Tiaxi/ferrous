@@ -2869,15 +2869,29 @@ void UiDialogsTest::recentIssuesActionsAreInTheTextFont() {
     QVERIFY2(sceneRect(visibleNamed(window, QStringLiteral("errorHistoryNewCount"))).right()
                  <= sceneRect(clearAll).left() + 0.5,
              "the new count runs into Clear All");
-    // Open Diagnostics… is a caption alone, as Clear All is, on the
-    // header's text's x: ⓘ marks a notice in the list, and marked this
-    // button too (#373 H40).
+    // Each carries a glyph, as every dialog action does (#373 H46: without
+    // one, Clear All read as a label of the header), as large as a line of
+    // their text holds: Clear All its own, Open Diagnostics… that of Help's
+    // Diagnostics…, not ⓘ, which marks a notice in the list (#373 H40).
+    // Open Diagnostics… starts on the header's text's x.
     QQuickItem *diagnostics = visibleNamed(window, QStringLiteral("errorHistoryDiagnosticsButton"));
     QQuickItem *clear = visibleNamed(window, QStringLiteral("errorHistoryClearButton"));
+    QCOMPARE(evaluate(clear, QStringLiteral("icon.name")).toString(), QStringLiteral("edit-clear-history"));
+    QCOMPARE(evaluate(diagnostics, QStringLiteral("icon.name")).toString(), QStringLiteral("view-list-details"));
+    QCOMPARE(evaluate(object(window, QStringLiteral("diagnosticsAction")), QStringLiteral("icon.name")).toString(),
+             QStringLiteral("view-list-details"));
+    const qreal labelIcon = paletteOf(window)->property("labelIconSize").toReal();
+    QVERIFY2(labelIcon >= 32, qPrintable(QString::number(labelIcon)));
     for (QQuickItem *button : {diagnostics, clear}) {
-        QVERIFY(!itemsNamed(button, QStringLiteral("textToolButtonIcon")).first()->isVisible());
+        QQuickItem *glyph = itemsNamed(button, QStringLiteral("textToolButtonIcon")).first();
+        QQuickItem *caption = itemsNamed(button, QStringLiteral("textToolButtonCaption")).first();
+        QTRY_VERIFY(glyph->isVisible() && glyph->property("valid").toBool());
+        QCOMPARE(glyph->width(), labelIcon);
+        QCOMPARE(glyph->height(), labelIcon);
+        QVERIFY(sceneRect(glyph).right() <= sceneRect(caption).left());
+        QVERIFY(sceneRect(button).contains(sceneRect(glyph)));
     }
-    QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonCaption")).first()).left(),
+    QCOMPARE(sceneRect(itemsNamed(diagnostics, QStringLiteral("textToolButtonIcon")).first()).left(),
              sceneRect(visibleNamed(window, QStringLiteral("errorHistoryTitle"))).left());
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_VERIFY(!object(window, QStringLiteral("recentErrorsDialog"))->property("visible").toBool());

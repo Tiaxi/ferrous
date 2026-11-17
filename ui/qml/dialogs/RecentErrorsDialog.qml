@@ -314,6 +314,9 @@ Popup {
                 id: errorHistoryClearButton
                 objectName: "errorHistoryClearButton"
                 text: I18n.i18nc("@action:button", "Clear All")
+                // A glyph, as every dialog action has: without one it read
+                // as a label of the header (#373 H46).
+                icon.name: "edit-clear-history"
                 flat: true
                 enabled: !closingState.closing
                 onClicked: root.errorController.clear()
@@ -561,14 +564,16 @@ Popup {
                 root.uiPalette.chrome, root.uiPalette.text, Kirigami.Theme.frameContrast)
         }
 
-        // A caption alone, as Clear All is, on the header's x: ⓘ marks a
-        // notice in the list (#373 H40: it marked this button too).
+        // On the header's x, with the glyph of Help's Diagnostics…, as Clear
+        // All has its own (#373 H46: they were the only dialog actions with
+        // none). Not ⓘ, which marks a notice in the list (#373 H40).
         Components.TextToolButton {
             id: diagnosticsButton
             objectName: "errorHistoryDiagnosticsButton"
             Layout.leftMargin: errorHistoryHeader.Layout.leftMargin - diagnosticsButton.leftPadding
             flat: true
             text: I18n.i18nc("@action:button", "Open Diagnostics…")
+            icon.name: "view-list-details"
             enabled: !closingState.closing
             onClicked: {
                 root.chosenAction = { kind: "diagnostics", subject: "" }
