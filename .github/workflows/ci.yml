@@ -301,9 +301,8 @@ jobs:
       - name: Run UI smoke tests
         # TEMPORARY, for measuring: every CPU, each test four times.
         run: |
-          echo "CPUs: $(nproc)"; free -m
+          echo "CPUs: $(nproc)"; grep -E 'MemTotal|MemAvailable' /proc/meminfo
           ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)" --repeat until-fail:4
-          free -m
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |
