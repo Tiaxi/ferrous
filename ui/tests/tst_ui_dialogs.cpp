@@ -512,6 +512,8 @@ private slots:
     void libraryFoldersAreAFramedListWithNoSelectionAtFirst();
     void libraryFolderListIsThreeRowsTallAtLeast_data();
     void libraryFolderListIsThreeRowsTallAtLeast();
+    void libraryFoldersLabelSitsOnTheFirstFoldersBaseline_data();
+    void libraryFoldersLabelSitsOnTheFirstFoldersBaseline();
     void quitFailureBreaksItsPathOnlyBetweenFolders_data();
     void quitFailureBreaksItsPathOnlyBetweenFolders();
     void breakableTextKeepsNamesAndErrorCodesWhole();
@@ -2250,6 +2252,91 @@ void UiDialogsTest::libraryFolderListIsThreeRowsTallAtLeast() {
         const QColor seam(shown.pixel(int(frameRect.left() * dpr), int((frameRect.bottom() - 3) * dpr)));
         QCOMPARE(hex(seam), hex(tokenOf(window, "seam")));
     }
+    QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
+    QTRY_VERIFY(!prefs->isVisible());
+}
+
+void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::addColumn<int>("folders");
+    QTest::newRow("10 pt, one folder") << 10.0 << 1;
+    QTest::newRow("10 pt, three folders") << 10.0 << 3;
+    QTest::newRow("24 pt, one folder") << 24.0 << 1;
+    QTest::newRow("24 pt, three folders") << 24.0 << 3;
+}
+
+// The form's "Library folders:" sits on the first folder's line, its
+// baseline on the folder's name's (#373 H47: at the list's top, 5 px above
+// the name, at 10 and at 24 pt).
+void UiDialogsTest::libraryFoldersLabelSitsOnTheFirstFoldersBaseline() {
+    QFETCH(qreal, pointSize);
+    QFETCH(int, folders);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font = applicationFont;
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QVariantList entries;
+    for (int index = 0; index < folders; ++index) {
+        entries.push_back(QVariantMap{{QStringLiteral("path"), QStringLiteral("/fixture/folder%1").arg(index)},
+                                      {QStringLiteral("name"), QStringLiteral("Shelf %1").arg(index + 1)},
+                                      {QStringLiteral("trackCount"), index + 1}});
+    }
+    QVERIFY(bridgeOf(window)->setProperty("libraryRootEntries", entries));
+    QObject *dialog = openPreferences(window, 0);
+    QVERIFY(dialog != nullptr);
+    QQuickWindow *prefs = windowOf(dialog);
+    QQuickItem *list = nullptr;
+    QTRY_VERIFY((list = visibleNamed(prefs, QStringLiteral("libraryRootList"))) != nullptr);
+    // The first folder's name, once its row is laid out at the list's top.
+    QQuickItem *firstName = nullptr;
+    QTRY_VERIFY([&] {
+        const QList<QQuickItem *> rows = itemsNamed(list, QStringLiteral("libraryRootRow"));
+        if (rows.size() != folders) {
+            return false;
+        }
+        for (QQuickItem *row : rows) {
+            if (layoutPending(row)) {
+                return false;
+            }
+            if (qFuzzyIsNull(row->y())) {
+                firstName = itemsNamed(row, QStringLiteral("libraryRootName")).value(0);
+            }
+        }
+        return firstName != nullptr && firstName->isVisible();
+    }());
+    QCOMPARE(firstName->property("text").toString(), QStringLiteral("Shelf 1"));
+    // The form's label for the list.
+    QQuickItem *label = nullptr;
+    QTRY_VERIFY([&] {
+        const std::function<QQuickItem *(QQuickItem *)> find = [&](QQuickItem *item) -> QQuickItem * {
+            if (item->isVisible() && item->property("text").toString() == QStringLiteral("Library folders:")) {
+                return item;
+            }
+            for (QQuickItem *child : item->childItems()) {
+                if (QQuickItem *found = find(child)) {
+                    return found;
+                }
+            }
+            return nullptr;
+        };
+        label = find(prefs->contentItem());
+        return label != nullptr && !layoutPending(label);
+    }());
+    // Beside the list, its baseline on the name's, within a pixel.
+    QQuickItem *frame = visibleNamed(prefs, QStringLiteral("libraryRootListFrame"));
+    QVERIFY(frame != nullptr);
+    QVERIFY(sceneRect(label).right() <= sceneRect(frame).left());
+    const auto baselineOf = [](QQuickItem *item) {
+        return item->mapToScene(QPointF(0, item->baselineOffset())).y();
+    };
+    QTRY_VERIFY2(std::abs(baselineOf(label) - baselineOf(firstName)) <= 1.0,
+                 qPrintable(QStringLiteral("the label's baseline at %1, the first folder's at %2")
+                                .arg(baselineOf(label)).arg(baselineOf(firstName))));
     QVERIFY(QMetaObject::invokeMethod(dialog, "reject"));
     QTRY_VERIFY(!prefs->isVisible());
 }
