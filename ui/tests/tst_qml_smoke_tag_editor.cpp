@@ -3,6 +3,7 @@
 #include "FlacFixture.h"
 #include "QmlSmokeTest.h"
 
+#include <QJSValue>
 #include <QQuickTextDocument>
 #include <QTextBlock>
 #include <QTextDocument>
@@ -56,6 +57,8 @@ private slots:
     void saveDetailsReadAsAReport();
     void renamePreviewOpensAsTallAsItsList_data();
     void renamePreviewOpensAsTallAsItsList();
+    void renamePreviewOpensAsWideAsItsLines_data();
+    void renamePreviewOpensAsWideAsItsLines();
 };
 
 namespace {
@@ -1502,7 +1505,7 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     auto *summary = fixture.window->findChild<QQuickItem *>(QStringLiteral("renamePreviewSummary"));
     QVERIFY(summary != nullptr);
     QCOMPARE(summary->property("text").toString(),
-             QStringLiteral("1 file will be renamed. 1 file can\u2019t be renamed and keeps its name."));
+             QStringLiteral("1 file will be renamed.\n1 file can\u2019t be renamed and keeps its name."));
     // The lead, semibold, as every dialog's first sentence is (#373 H40).
     QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     const QVariantList rows = previewDialog->property("rows").toList();
@@ -1907,6 +1910,133 @@ void TagEditorSmokeTest::renamePreviewOpensAsTallAsItsList() {
             .arg(opening).arg(listBottom).arg(sceneRectOf(cancel).top()).arg(previewWindow->height());
         QVERIFY2(previewWindow->height() < gridUnit * 29, qPrintable(where));
         QVERIFY2(std::abs(sceneRectOf(cancel).top() - listBottom - gridUnit) <= 1.0, qPrintable(where));
+        QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
+        QTRY_VERIFY(!previewDialog->property("visible").toBool());
+    }
+}
+
+void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("10 pt") << 10.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// Rename Files opens as wide as its widest line: a file's line, with the
+// list's gutter, a sentence of the summary, or the buttons, within its
+// minimum and 42 grid units scaled with the font, where longer lines elide
+// in their middle; each time it opens, so long names widen it and short
+// ones bring it back (#373 H45: a fixed 756 px held 390 px of lines at
+// 10 pt, and 1814 px at 24 pt held 950).
+void TagEditorSmokeTest::renamePreviewOpensAsWideAsItsLines() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    QFont font(QStringLiteral("Noto Sans"));
+    font.setPointSizeF(pointSize);
+    QGuiApplication::setFont(font);
+    constexpr int kFiles = 12;
+    TagEditorWindow fixture;
+    QVERIFY(fixture.open(kFiles, false));
+    const QByteArray loadResponse = tagEditorLoadResponse(kFiles);
+    // Every file renamed, to a short name or a long one; the last can't be.
+    const auto previewOf = [](bool longNames) {
+        QJsonArray results;
+        for (int i = 0; i < kFiles; ++i) {
+            const QString directory = QStringLiteral("/fixture/Album %1").arg(i / 10, 3, 10, QLatin1Char('0'));
+            const QString path = QStringLiteral("%1/%2 Song.flac").arg(directory).arg(i % 10 + 1, 2, 10, QLatin1Char('0'));
+            const QString name = longNames
+                ? QStringLiteral("%1 An Unusually Long Song Title for a Preview Row, Extended Remaster with "
+                                 "Bonus Material and Alternate Takes.flac").arg(i + 1, 2, 10, QLatin1Char('0'))
+                : QStringLiteral("%1 Tune.flac").arg(i + 1, 2, 10, QLatin1Char('0'));
+            QJsonObject result{{QStringLiteral("path"), path},
+                               {QStringLiteral("newPath"), directory + QLatin1Char('/') + name},
+                               {QStringLiteral("ok"), i < kFiles - 1}};
+            if (i == kFiles - 1) {
+                result.insert(QStringLiteral("error"), QStringLiteral("a file of that name is already there"));
+            }
+            results.push_back(result);
+        }
+        return QJsonDocument(QJsonObject{{QStringLiteral("results"), results},
+                                         {QStringLiteral("successfulPaths"), QJsonArray()}})
+            .toJson(QJsonDocument::Compact);
+    };
+    bool longNames = false;
+    fixture.editor.m_executeOperation = [&](TagEditorController::Operation operation, const QByteArray &,
+                                            const TagEditorController::RenameGate &) {
+        return operation == TagEditorController::Operation::PreviewRename ? previewOf(longNames) : loadResponse;
+    };
+    fixture.editor.selectAllRows();
+    QObject *previewDialog = fixture.window->findChild<QObject *>(QStringLiteral("renamePreviewDialog"));
+    QVERIFY(previewDialog != nullptr);
+    QObject *palette = qvariant_cast<QObject *>(previewDialog->property("uiPalette"));
+    QVERIFY(palette != nullptr);
+    const qreal fontScale = palette->property("fontScale").toReal();
+    const qreal gridUnit = previewDialog->property("contentPadding").toReal();
+    const qreal limit = std::max(42 * gridUnit, qreal(std::round(42 * gridUnit * fontScale)));
+    QCOMPARE(previewDialog->property("maximumDefaultWidth").toReal(), limit);
+    const qreal gutter = previewDialog->property("listGutter").toReal();
+
+    int shortWidth = 0;
+    for (const bool longOpening : {false, true, false}) {
+        longNames = longOpening;
+        const QString at = longNames ? QStringLiteral("long names") : QStringLiteral("short names");
+        QVERIFY(clickButton(fixture.window, QStringLiteral("tagEditorRenameButton")));
+        QTRY_VERIFY(previewDialog->property("opened").toBool());
+        QQuickWindow *previewWindow = dialogWindowOf(previewDialog);
+        QVERIFY(QTest::qWaitForWindowExposed(previewWindow));
+        QQuickItem *list = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewList"));
+        QQuickItem *summary = visibleItemNamed(previewWindow, QStringLiteral("renamePreviewSummary"));
+        auto *footer = qobject_cast<QQuickItem *>(qvariant_cast<QObject *>(previewDialog->property("footer")));
+        QVERIFY(list != nullptr && summary != nullptr && footer != nullptr);
+        QTRY_COMPARE(list->property("count").toInt(), kFiles);
+        QTRY_VERIFY(!visibleItemsNamed(list, QStringLiteral("renamePreviewRowName")).isEmpty());
+        // Its widest line, measured as the labels draw them.
+        const QFontMetricsF rowMetrics(qvariant_cast<QFont>(
+            visibleItemsNamed(list, QStringLiteral("renamePreviewRowName")).first()->property("font")));
+        const QVariantList rows = previewDialog->property("rows").toList();
+        QCOMPARE(rows.size(), kFiles);
+        qreal widest = 0;
+        for (const QVariant &row : rows) {
+            QVariant text;
+            QVERIFY(QMetaObject::invokeMethod(previewDialog, "rowText", Q_RETURN_ARG(QVariant, text),
+                                              Q_ARG(QVariant, row)));
+            widest = std::max(widest, rowMetrics.horizontalAdvance(text.toString()) + gutter);
+        }
+        QVariant sentences;
+        QVERIFY(QMetaObject::invokeMethod(previewDialog, "summarySentences", Q_RETURN_ARG(QVariant, sentences)));
+        const QFontMetricsF summaryMetrics(qvariant_cast<QFont>(summary->property("font")));
+        const QStringList summarySentences = sentences.value<QJSValue>().isArray()
+            ? sentences.value<QJSValue>().toVariant().toStringList() : sentences.toStringList();
+        QCOMPARE(summarySentences.size(), 2);
+        for (const QString &sentence : summarySentences) {
+            widest = std::max(widest, summaryMetrics.horizontalAdvance(sentence));
+        }
+        const qreal fitted = std::max(std::ceil(2 * gridUnit + widest), footer->implicitWidth());
+        const qreal defaultWidth = previewDialog->property("defaultWidth").toReal();
+        const QString where = QStringLiteral("%1: widest line %2, default width %3, window %4, limit %5")
+            .arg(at).arg(widest).arg(defaultWidth).arg(previewWindow->width()).arg(limit);
+        QCOMPARE(defaultWidth, std::min(limit, fitted));
+        QCOMPARE(previewWindow->width(), qCeil(previewDialog->property("openingWidth").toReal()));
+        // Each sentence of the summary on a line of its own, whole.
+        QTRY_COMPARE(summary->property("lineCount").toInt(), summarySentences.size());
+        if (longNames) {
+            // At its limit, or the screen's room, where the names elide.
+            QVERIFY2(fitted > limit, qPrintable(where));
+            QVERIFY2(previewWindow->width() > shortWidth, qPrintable(where));
+        } else {
+            // Short names are whole, in a window no wider than they need.
+            QVERIFY2(fitted < limit, qPrintable(where));
+            QVERIFY2(previewWindow->width() <= std::max(previewWindow->minimumWidth(), qCeil(fitted)),
+                     qPrintable(where));
+            for (QQuickItem *name : visibleItemsNamed(list, QStringLiteral("renamePreviewRowName"))) {
+                QTRY_VERIFY2(!name->property("truncated").toBool(),
+                         qPrintable(where + QStringLiteral(": ") + name->property("text").toString()));
+            }
+            if (shortWidth > 0) {
+                QCOMPARE(previewWindow->width(), shortWidth);
+            }
+            shortWidth = previewWindow->width();
+        }
         QVERIFY(clickVisibleButton(previewWindow, QStringLiteral("renamePreviewCancelButton")));
         QTRY_VERIFY(!previewDialog->property("visible").toBool());
     }
