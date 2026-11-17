@@ -1139,7 +1139,8 @@ void BridgeClientTest::tagEditorShowsRefusedEditsAndKeepsTheFile() {
     // The same, in sections, for the Details window to set out.
     QCOMPARE(editor.statusDetailSections(),
              (QVariantList{QVariantMap{{QStringLiteral("heading"), QStringLiteral("Failed:")},
-                                       {QStringLiteral("items"), QStringList{QStringLiteral("song.flac: ") + error}}}}));
+                                       {QStringLiteral("items"), QStringList{QStringLiteral("song.flac: ") + error}},
+                                       {QStringLiteral("failed"), true}}}));
     QVERIFY(file.open(QIODevice::ReadOnly));
     QCOMPARE(file.readAll(), flac);
     file.close();

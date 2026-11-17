@@ -10,7 +10,9 @@ import "../components" as Components
 // Shown while quitting waits for a tag save or rename to finish: what it
 // waits for, semibold, beside the spinner, the files under its text, and,
 // once it offers to quit anyway, why, in the secondary colour, as the
-// explanation of a confirmation is (#373 H40).
+// explanation of a confirmation is (#373 H40), on the files' left edge, so
+// all but the spinner start on one line (#373 H40: the explanation was on
+// the window's edge, under the spinner).
 Components.CompactDialogWindow {
     id: root
 
@@ -27,7 +29,9 @@ Components.CompactDialogWindow {
 
     objectName: "tagEditorQuitWaitDialog"
     title: I18n.i18nc("@title:window", "Finishing Tag Changes")
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26, root.minimumWidth)
+    // Wider by the text's indent, so the explanation keeps its lines.
+    readonly property real textIndent: busyIndicator.implicitWidth + statusRow.spacing
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26 + root.textIndent, root.minimumWidth)
 
     onRejected: root.stopQuittingRequested()
 
@@ -80,7 +84,7 @@ Components.CompactDialogWindow {
         objectName: "tagEditorQuitWaitFiles"
         Layout.fillWidth: true
         // Under the status's text, not the spinner.
-        Layout.leftMargin: busyIndicator.implicitWidth + statusRow.spacing
+        Layout.leftMargin: root.textIndent
         visible: root.files.length > 0
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
@@ -94,6 +98,7 @@ Components.CompactDialogWindow {
     Label {
         objectName: "tagEditorQuitWaitMessage"
         Layout.fillWidth: true
+        Layout.leftMargin: root.textIndent
         visible: root.offerChoice
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary

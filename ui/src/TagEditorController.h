@@ -28,8 +28,8 @@ class TagEditorController final : public QObject {
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
     Q_PROPERTY(QString statusDetails READ statusDetails NOTIFY statusChanged)
     // statusDetails' sections, for the Details window to set out: each a
-    // map of its `heading`, such as "Failed:", and its `items`, one line
-    // for each file.
+    // map of its `heading`, such as "Failed:", its `items`, one line for
+    // each file, and `failed`, whether it lists the files that failed.
     Q_PROPERTY(QVariantList statusDetailSections READ statusDetailSections NOTIFY statusChanged)
     // Whether the status reports something that failed.
     Q_PROPERTY(bool statusIsError READ statusIsError NOTIFY statusChanged)

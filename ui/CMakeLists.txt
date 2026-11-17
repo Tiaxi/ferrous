@@ -274,6 +274,7 @@ qt_add_qml_module(ferrous_ui_qml
         qml/logic/ListRows.js
         qml/logic/PathUtils.js
         qml/logic/PlotLanes.js
+        qml/logic/VisualizationModes.js
         qml/logic/WheelUtils.js
 )
 

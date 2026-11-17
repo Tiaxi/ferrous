@@ -3,6 +3,7 @@
 import QtQuick 2.15
 import FerrousUi 1.0
 import "." as Components
+import "../logic/VisualizationModes.js" as VisualizationModes
 
 // The visualization's mode switch: two tool buttons on one plate,
 // Spectrogram and Waveform, the current one checked, as a neutral plate
@@ -47,15 +48,7 @@ Components.PlotPlate {
 
     Repeater {
         id: buttons
-        // The spectrogram's glyph is the app icon's glide and harmonic,
-        // which says frequency over time (#373 H14 G7: Breeze's bar chart
-        // said statistics); the waveform's is Breeze's.
-        model: [
-            { name: I18n.i18nc("@option:radio visualization mode", "Spectrogram"),
-              iconName: "", iconSource: Qt.resolvedUrl("../assets/spectrogram-symbolic.svg") },
-            { name: I18n.i18nc("@option:radio visualization mode", "Waveform"),
-              iconName: "waveform", iconSource: "" }
-        ]
+        model: VisualizationModes.modes(String(Qt.resolvedUrl("../assets/")))
 
         delegate: Components.PlotToolButton {
             required property int index

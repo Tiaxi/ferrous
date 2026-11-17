@@ -87,6 +87,8 @@ Components.CompactDialogWindow {
         objectName: "tagEditorCloseConfirmMessage"
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
+        // The lead, semibold, as every dialog's first sentence is (#373 H40).
+        font.weight: Font.DemiBold
         text: root.forQuit
             ? I18n.i18nc("@info", "Save tag changes before quitting Ferrous?")
             : (root.forReload

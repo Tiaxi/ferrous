@@ -6,7 +6,9 @@
 #include <QFontMetricsF>
 #include <QQmlContext>
 #include <QQmlExpression>
+#include <QTextLayout>
 #include <QTextOption>
+#include <algorithm>
 #include <cmath>
 
 // The album art viewer: its zoom and details, and the iTunes artwork
@@ -780,7 +782,23 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QCOMPARE(boxOf(copy).right(), boxOf(folderRow).right());
     QCOMPARE(boxOf(copy).left() - boxOf(path).right(), 4.0);
     QCOMPARE(path->property("path").toString(), folder);
-    QCOMPARE(path->property("text").toString(), QString(folder).replace(QLatin1Char('/'), QStringLiteral("/\u200b")));
+    // Its lines break after a slash, where a zero-width space follows each;
+    // in a name that fits on a line, the spaces are no-break spaces and a
+    // word joiner follows a hyphen; a name wider than the line breaks
+    // between its words, rather than anywhere.
+    const auto breaksAtSlashesOnly = [path](const QString &text) {
+        const QFontMetricsF metrics(qvariant_cast<QFont>(path->property("font")));
+        QStringList names = text.split(QLatin1Char('/'));
+        for (QString &name : names) {
+            if (metrics.horizontalAdvance(name + QLatin1Char('/')) <= path->width()) {
+                name.replace(QLatin1Char(' '), QChar(0x00a0)).replace(QLatin1Char('-'), QStringLiteral("-\u2060"));
+            }
+        }
+        return names.join(QStringLiteral("/\u200b"));
+    };
+    QCOMPARE(path->property("text").toString(), breaksAtSlashesOnly(folder));
+    QVERIFY(path->property("text").toString().contains(
+        QStringLiteral("/\u200bThe\u00a0Quiet\u00a0Meridian/\u200bSmall Hours (Remastered Deluxe")));
     QCOMPARE(path->property("wrapMode").toInt(), int(QTextOption::WrapAtWordBoundaryOrAnywhere));
     QCOMPARE(path->property("elide").toInt(), int(Qt::ElideRight));
     QCOMPARE(path->property("maximumLineCount").toInt(), 3);
@@ -842,6 +860,68 @@ void AlbumArtSmokeTest::albumArtDetailsLieOverTheArt() {
     QVERIFY(!path->property("elided").toBool());
     QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("/music/The Quiet Meridian/")) <= path->width());
     QVERIFY(pathMetrics.horizontalAdvance(QStringLiteral("05 - Small Hours")) <= path->width());
+
+    // Over the whole screen, a path of three lines breaks between its
+    // folders, not inside one's name (#373 H40: "…/2005 - Small" broke
+    // before "Hours"). The lines are laid out as Qt's text lays out the
+    // label's, from a text and the label's font and width.
+    const auto linesOf = [path](const QString &text) {
+        QTextLayout layout(text, qvariant_cast<QFont>(path->property("font")));
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        layout.setTextOption(option);
+        QStringList lines;
+        layout.beginLayout();
+        for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+            line.setLineWidth(path->width());
+            lines << text.mid(line.textStart(), line.textLength())
+                         .remove(QChar(0x200b))
+                         .remove(QChar(0x2060))
+                         .replace(QChar(0x00a0), QLatin1Char(' '));
+        }
+        layout.endLayout();
+        return lines;
+    };
+    surface->setProperty("fullscreen", true);
+    const QString fixtureFolder =
+        QStringLiteral("/mnt/ferrous/council/inventory/fixtures/library/The Quiet Meridian/2005 - Small Hours");
+    surface->setProperty("fileInfo", QVariantMap{{QStringLiteral("path"), fixtureFolder + QStringLiteral("/cover.jpg")},
+                                                 {QStringLiteral("fileName"), QStringLiteral("cover.jpg")},
+                                                 {QStringLiteral("width"), 1400},
+                                                 {QStringLiteral("height"), 1400}});
+    QTRY_COMPARE(path->property("path").toString(), fixtureFolder);
+    // The column at its width over the whole screen, at the view's edge,
+    // and the details laid out in it.
+    QTRY_COMPARE(boxOf(copy).width(), 29.0);
+    QTRY_COMPARE(sceneRectOf(column), QRectF(665, 0, 335, 600));
+    QTRY_VERIFY(boxOf(folderRow).right() < sceneRectOf(column).right() && boxOf(folderRow).width() > 280);
+    QTRY_COMPARE(path->property("text").toString(), breaksAtSlashesOnly(fixtureFolder));
+    const QStringList lines = linesOf(path->property("text").toString());
+    QTRY_COMPARE(path->property("lineCount").toInt(), lines.size());
+    QVERIFY(!path->property("elided").toBool());
+    QVERIFY2(lines.size() == 3 && lines.last().endsWith(QStringLiteral("2005 - Small Hours")),
+             qPrintable(lines.join(QLatin1Char('|'))));
+    for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
+        QVERIFY2(lines.at(i).endsWith(QLatin1Char('/')), qPrintable(lines.join(QLatin1Char('|'))));
+    }
+    // With its spaces and hyphens as they are, a line would break inside a
+    // name.
+    const QStringList withSpaces = linesOf(QString(fixtureFolder).replace(QLatin1Char('/'), QStringLiteral("/\u200b")));
+    QVERIFY2(std::any_of(withSpaces.cbegin(), withSpaces.cend() - 1,
+                         [](const QString &line) { return !line.endsWith(QLatin1Char('/')); }),
+             qPrintable(withSpaces.join(QLatin1Char('|'))));
+    // The copy, the tooltip and the accessible name keep the path as it is.
+    QCOMPARE(QAccessible::queryAccessibleInterface(path)->text(QAccessible::Name), fixtureFolder);
+    QTest::mouseMove(window, centerInWindow(path));
+    QTRY_COMPARE(visibleTextItems(window->contentItem(), fixtureFolder).size(), 1);
+    QGuiApplication::clipboard()->clear();
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centerInWindow(copy));
+    QTRY_COMPARE(QGuiApplication::clipboard()->text(), fixtureFolder);
+    surface->setProperty("fullscreen", false);
+    QTRY_COMPARE(boxOf(copy).width(), 24.0);
+    // The details laid out again in the column, at its width in a window.
+    QTRY_COMPARE(sceneRectOf(column), QRectF(721, 0, 279, 600));
+    QTRY_VERIFY(sceneRectOf(column).contains(boxOf(copy)));
     surface->setProperty("fileInfo", details);
     QTRY_COMPARE(path->property("path").toString(), folder);
 
@@ -1949,6 +2029,9 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
         QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
                  qPrintable(text));
         QVERIFY(sceneRectOf(message).bottom() <= sceneRectOf(details).top());
+        // The question leads, semibold, the details regular (#373 H40).
+        QCOMPARE(message->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(details->property("font").value<QFont>().weight(), QFont::Normal);
     }
     QVERIFY(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogConfirmButton")));
     QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{index}));
@@ -2281,7 +2364,8 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
     // and a running busy indicator above it while searching, under the
     // current art, which stays the dialog's first line. A failed search
     // says so in a semibold heading, with the system's words under it, so
-    // it does not read as finding nothing (#373 H38).
+    // it does not read as finding nothing (#373 H38), and a warning glyph
+    // in the spinner's place (#373 H40).
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
     const QString coverUrl = QUrl::fromLocalFile(savedCover(dir)).toString();
@@ -2357,7 +2441,27 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             // Laid out once it shows.
             QTRY_VERIFY2(sceneRectOf(heading).bottom() <= sceneRectOf(message).top(), at.constData());
         }
-        // The only glyph: the busy indicator's, while searching.
+        // A failed search has a warning glyph where the spinner is while
+        // searching: 32 px, a mask in the secondary colour, above the
+        // heading (#373 H40); nothing found has none.
+        QQuickItem *warning = itemNamed(content, QStringLiteral("itunesArtworkFailureIcon"));
+        QVERIFY2(warning != nullptr, at.constData());
+        QCOMPARE(warning->isVisible(), failed);
+        if (failed) {
+            QCOMPARE(warning->property("source").toString(), QStringLiteral("dialog-warning-symbolic"));
+            QVERIFY(warning->property("isMask").toBool());
+            QCOMPARE(warning->property("color").value<QColor>().rgba(),
+                     palette->property("textSecondary").value<QColor>().rgba());
+            QTRY_COMPARE(sceneRectOf(warning).size(), QSizeF(32, 32));
+            QCOMPARE(sceneRectOf(warning).top(), sceneRectOf(placeholder).top());
+            QCOMPARE(sceneRectOf(warning).center().x(), sceneRectOf(placeholder).center().x());
+            QVERIFY2(sceneRectOf(warning).bottom() < sceneRectOf(heading).top(), at.constData());
+        }
+        if (searching) {
+            QCOMPARE(sceneRectOf(busy).top(), sceneRectOf(placeholder).top());
+        }
+        // The only glyph: the busy indicator's while searching, the
+        // warning's when the search failed.
         int glyphs = 0;
         const std::function<void(QQuickItem *)> countGlyphs = [&](QQuickItem *item) {
             if (!item->isVisible()) {
@@ -2371,7 +2475,7 @@ void AlbumArtSmokeTest::itunesArtworkDialogShowsAPlaceholderWhileSearchingAndWit
             }
         };
         countGlyphs(placeholder);
-        QCOMPARE(glyphs, searching ? 1 : 0);
+        QCOMPARE(glyphs, searching || failed ? 1 : 0);
         QCOMPARE(message->property("horizontalAlignment").toInt(), int(Qt::AlignHCenter));
         const QFont font = message->property("font").value<QFont>();
         QCOMPARE(font.weight(), QFont::Normal);

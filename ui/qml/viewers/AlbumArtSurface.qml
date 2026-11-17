@@ -845,9 +845,21 @@ Item {
                             anchors.left: parent.left
                             anchors.right: copyPathButton.left
                             anchors.rightMargin: folderPathRow.spacing
-                            // A zero-width space after each slash: the lines
-                            // break there rather than within a folder's name.
-                            text: folderPathLabel.path.replace(/\//g, "/\u200b")
+                            // The lines break only between folders: a
+                            // zero-width space after each slash is a break
+                            // point, and in a folder's name that fits on a
+                            // line the spaces are no-break spaces and a word
+                            // joiner follows each hyphen or dash, after which
+                            // a line may otherwise break (#373 H40: "…/2005 -
+                            // Small" broke before "Hours"). A name wider than
+                            // the line breaks between its words. The
+                            // tooltip, Copy Path and the accessible name keep
+                            // the path as it is.
+                            text: folderPathLabel.path.split("/").map(function(name) {
+                                return folderPathMetrics.advanceWidth(name + "/") <= folderPathLabel.width
+                                    ? name.replace(/ /g, "\u00a0").replace(/[-\u2010\u2012\u2013\u2014]/g, "$&\u2060")
+                                    : name
+                            }).join("/\u200b")
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
@@ -862,6 +874,11 @@ Item {
 
                             HoverHandler {
                                 id: folderPathHover
+                            }
+
+                            FontMetrics {
+                                id: folderPathMetrics
+                                font: folderPathLabel.font
                             }
                         }
 

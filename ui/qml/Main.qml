@@ -1854,6 +1854,7 @@ ApplicationWindow {
             openIssues: function() { errorController.historyRequested() }
             zoomLevel: visualizationSurface.zoomLevel
             resetZoom: visualizationSurface.resetZoom
+            controlsInViewer: spectrogramViewerShell.controlsInStrip
         }
     }
 
@@ -1878,6 +1879,8 @@ ApplicationWindow {
         positionText: playbackController.positionText
         cornerRightMargin: (plotLayer.meterShown ? plotLayer.meterWidth : 0) + plotLayer.plateInset
         stripEnabled: root.uiBridge.showFullscreenTitleStrip
+        zoomLevel: visualizationSurface.zoomLevel
+        resetZoom: visualizationSurface.resetZoom
     }
 
     Dialogs.ItunesArtworkDialog {

@@ -57,6 +57,10 @@ Item {
     // main pane and in both viewers alike: [Zoom ↺] [mode] [✕ of a viewer].
     property real zoomLevel: 1.0
     property var resetZoom: null
+    // Whether the viewer shows the mode switch and the zoom in its own
+    // controls, the fullscreen viewer's title strip: then they are not on
+    // the plot, and its corner is the view's (#373 H40).
+    property bool controlsInViewer: false
     // In the windowed viewer, whose Close is right of the mode switch, the
     // corner is one plate: the zoom, the mode switch and the viewer's own
     // controls on it, each group set off by a 1 px divider, rather than a
@@ -86,12 +90,14 @@ Item {
     // What the mode switch takes of the top right corner, with the gap
     // beside it and the zoom readout left of it while that shows, and the
     // plates' 1 px edges outside them, for the plot's own overlays to keep
-    // clear of.
-    readonly property size reservedCorner: Qt.size(
-        modeSwitch.anchors.rightMargin + modeSwitch.width
-            + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0) + 1,
-        modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
-                                                zoomPlate.visible ? zoomPlate.height : 0) + 1)
+    // clear of; with them in the viewer's strip, only the meter's column.
+    readonly property size reservedCorner: root.controlsInViewer
+        ? Qt.size(root.meterWidth, 0)
+        : Qt.size(
+            modeSwitch.anchors.rightMargin + modeSwitch.width
+                + (zoomPlate.visible ? zoomPlate.anchors.rightMargin + zoomPlate.width : 0) + 1,
+            modeSwitch.anchors.topMargin + Math.max(modeSwitch.height,
+                                                    zoomPlate.visible ? zoomPlate.height : 0) + 1)
 
     // Lanes shorter than this, such as each of 5.1's in the main window,
     // have compact heads (#373 H8): 72 px with the default font, where a
@@ -219,8 +225,9 @@ Item {
         anchors.topMargin: root.topInset + root.plateInset
         anchors.rightMargin: (root.meterShown ? root.meterWidth : 0) + root.plateInset + root.trailingInset
         // In a viewer, it hides and shows with the viewer's controls, at
-        // their level; hidden, it takes no pointer.
-        visible: root.controlsVisible || root.controlsLevel > 0
+        // their level; hidden, it takes no pointer. In the fullscreen
+        // viewer's strip instead, it is not here.
+        visible: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
         revealed: root.controlsAutoHide || root.beforeAudio || root.paneHovered || root.hoveredLane >= 0
             || modeSwitch.pointerHovered || modeSwitch.focusInside
         fadeLevel: root.controlsLevel
@@ -246,7 +253,7 @@ Item {
         // On the windowed viewer's one plate, the divider's 1 px apart.
         anchors.rightMargin: root.cornerJoined ? 1 : 4
         bare: root.cornerJoined
-        available: root.controlsVisible || root.controlsLevel > 0
+        available: !root.controlsInViewer && (root.controlsVisible || root.controlsLevel > 0)
         fadeLevel: root.controlsLevel
         plotColors: root.plotColors
         uiPalette: root.uiPalette

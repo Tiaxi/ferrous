@@ -9,11 +9,13 @@ import "../components" as Components
 
 // The whole of the tag editor's last status, such as each file a save
 // could not write, in a window of its own over the editor: the editor's
-// summary, semibold, then each section of the details, its heading
-// semibold over its files, each file 16 px in, the lines it wraps to
-// under its own start (#373 H40: it was the plain text, every line at
-// the heading's x past the first). It opens as tall as they are, up to
-// a limit.
+// summary, semibold, the lead, then each section of the details, its
+// heading over its files, each file 16 px in, in the text's colour, the
+// lines it wraps to under its own start (#373 H40: it was the plain text,
+// every line at the heading's x past the first). The heading of what
+// failed is semibold, in the negative colour; that of what succeeded is
+// regular, secondary, so the summary leads (#373 H40: all three were
+// semibold). It opens as tall as they are, up to a limit.
 Components.DialogWindow {
     id: root
 
@@ -22,24 +24,33 @@ Components.DialogWindow {
     readonly property real contentPadding: Kirigami.Units.gridUnit
     readonly property real contentSpacing: Kirigami.Units.largeSpacing
     // TagEditorController.statusDetailSections as rich text: each heading
-    // a paragraph, semibold, each item one of its own, indented, with a
-    // line's room before each section after the first.
+    // a paragraph, each item one of its own, indented, with 12 px before
+    // each section after the first (#373 H40: a grid unit, 18 px).
     readonly property string detailsHtml: {
         const sections = root.tagEditorApi.statusDetailSections || []
         const indent = root.uiPalette.scaledSize(16)
-        const sectionGap = Math.round(root.uiPalette.gridUnit)
+        const sectionGap = root.uiPalette.scaledSize(12)
+        const textColor = root.cssColor(root.uiPalette.text)
         let html = ""
         for (let i = 0; i < sections.length; ++i) {
             const section = sections[i] || {}
-            html += "<p style=\"margin-top:" + (i > 0 ? sectionGap : 0) + "px; margin-bottom:0px;"
-                + " font-weight:600\">" + root.escaped(section.heading) + "</p>"
+            const headingStyle = section.failed === true
+                ? "font-weight:600; color:" + root.cssColor(root.uiPalette.negative)
+                : "font-weight:400; color:" + root.cssColor(root.uiPalette.textSecondary)
+            html += "<p style=\"margin-top:" + (i > 0 ? sectionGap : 0) + "px; margin-bottom:0px; "
+                + headingStyle + "\">" + root.escaped(section.heading) + "</p>"
             const items = section.items || []
             for (let j = 0; j < items.length; ++j) {
-                html += "<p style=\"margin-top:0px; margin-bottom:0px; margin-left:" + indent + "px\">"
-                    + root.escaped(String(items[j] || "").trim()) + "</p>"
+                html += "<p style=\"margin-top:0px; margin-bottom:0px; margin-left:" + indent + "px; color:"
+                    + textColor + "\">" + root.escaped(String(items[j] || "").trim()) + "</p>"
             }
         }
         return html
+    }
+
+    // A colour as rich text's CSS takes it, opaque.
+    function cssColor(color) {
+        return Qt.rgba(color.r, color.g, color.b, 1).toString()
     }
 
     function escaped(value) {

@@ -128,6 +128,7 @@ Components.DialogWindow {
             width: parent.width
             wrapMode: Text.Wrap
             text: root.summaryText()
+            font: summary.font
         }
 
         // A file's line, elided to one.
@@ -187,10 +188,13 @@ Components.DialogWindow {
 
         spacing: root.contentSpacing
 
+        // The lead, semibold, as every dialog's first sentence is (#373 H40).
         Label {
+            id: summary
             objectName: "renamePreviewSummary"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
+            font.weight: Font.DemiBold
             text: root.summaryText()
             visible: root.rows.length > 0 || root.errorText.length > 0
             color: root.errorText.length > 0 ? root.uiPalette.negative : root.uiPalette.text

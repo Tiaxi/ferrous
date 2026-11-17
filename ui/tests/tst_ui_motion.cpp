@@ -6029,7 +6029,15 @@ void UiMotionTest::viewerControlsFadeWithTheStrip() {
                                                                        : QStringLiteral("spectrogramPopupControls"));
     QQuickItem *modeSwitch = itemNamed(host->contentItem(), QStringLiteral("visualizationModeSwitch"));
     QVERIFY(controls && modeSwitch);
-    QList<QQuickItem *> followers{modeSwitch};
+    // Over the whole screen, the mode switch is in the strip (#373 H40),
+    // which it fades with as its part; in the window, it is the plot's.
+    QList<QQuickItem *> followers;
+    if (wholeScreen) {
+        QVERIFY(controls->isAncestorOf(itemNamed(controls, QStringLiteral("spectrogramStripModeSwitch"))));
+        QVERIFY(!modeSwitch->isVisible());
+    } else {
+        followers << modeSwitch;
+    }
     QTRY_COMPARE(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")).size(), 2);
     followers.append(itemsNamed(host->contentItem(), QStringLiteral("plotLaneButtons")));
     // The pointer resting on the view, which reveals the mode switch.
@@ -6210,11 +6218,14 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     // Each plate's fill and a glyph on it. In the window, the mode switch
     // and the viewer's controls are on the corner's one plate, which the
     // plot layer draws (#373 H37).
+    // Over the whole screen, the mode switch is on the strip (#373 H40),
+    // with no plate of its own.
     QQuickItem *cornerPlate = wholeScreen ? nullptr : itemNamed(host->contentItem(), QStringLiteral("plotCornerPlate"));
     QList<QPair<QString, QQuickItem *>> drawn{
-        {QStringLiteral("the mode switch's plate"),
-         itemNamed(wholeScreen ? modeSwitch : cornerPlate, QStringLiteral("plotPlateFill"))},
-        {QStringLiteral("the mode switch's icon"), itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
+        {QStringLiteral("the mode switch's icon"),
+         wholeScreen ? itemNamed(itemNamed(controls, QStringLiteral("spectrogramStripModeButton0")),
+                                 QStringLiteral("viewerToolButtonIcon"))
+                     : itemNamed(modeSwitch, QStringLiteral("plotToolButtonIcon"))},
         {QStringLiteral("the lane's plate"), itemNamed(laneButtons, QStringLiteral("plotPlateFill"))},
         {QStringLiteral("the lane's M"), itemNamed(laneButtons, QStringLiteral("plotToolButtonGlyph"))},
         {QStringLiteral("the viewer's controls"), controls},
@@ -6224,7 +6235,11 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
                    wholeScreen ? QStringLiteral("viewerToolButtonIcon") : QStringLiteral("plotToolButtonIcon"))},
     };
     if (!wholeScreen) {
+        drawn.append({QStringLiteral("the mode switch's plate"), itemNamed(cornerPlate, QStringLiteral("plotPlateFill"))});
         drawn.append({QStringLiteral("the corner plate's divider"), itemsNamed(cornerPlate, QStringLiteral("plotCornerDivider")).last()});
+    } else {
+        drawn.append({QStringLiteral("the strip's divider before Close"),
+                      itemNamed(controls, QStringLiteral("viewerControlsCloseDivider"))});
     }
     for (const auto &[what, item] : drawn) {
         QVERIFY2(item != nullptr, qPrintable(what));
@@ -6232,7 +6247,9 @@ void UiMotionTest::viewerPlatesAndGlyphsRevealOnOneLevel() {
     // The pointer resting on the first lane, away from every control.
     const QPoint onLane(host->width() / 2, host->height() / 4);
     QTest::mouseMove(host, onLane);
-    QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    if (!wholeScreen) {
+        QTRY_COMPARE(modeSwitch->opacity(), 1.0);
+    }
     QTRY_COMPARE(laneButtons->opacity(), 1.0);
 
     QString failure;
