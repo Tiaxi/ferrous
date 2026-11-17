@@ -66,9 +66,10 @@ Components.CompactDialogWindow {
             // below (#373 H38: the list in it left "saved." alone on a
             // second line). The lead, semibold, as every dialog's first
             // sentence is (#373 H40: the three lines read as one grey
-            // block).
+            // block). It says what happened, not again what the title says
+            // (#373 H41: "could not be saved" twice).
             font.weight: Font.DemiBold
-            text: I18n.i18nc("@info", "Some recent changes could not be saved.")
+            text: I18n.i18nc("@info", "Some recent changes were not saved.")
         }
 
         Label {
@@ -88,7 +89,9 @@ Components.CompactDialogWindow {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         color: root.uiPalette.textSecondary
-        text: I18n.i18nc("@info", "They can include settings, queue changes and Last.fm scrobbles. Retry "
-            + "saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
+        // It names what it speaks of, rather than "They", which could be
+        // read as the error above it (#373 H41).
+        text: I18n.i18nc("@info", "Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
+            + "Retry saves again, for example after freeing disk space. Quit Anyway closes Ferrous and loses them.")
     }
 }

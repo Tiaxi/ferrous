@@ -84,9 +84,10 @@ Components.CompactDialogWindow {
 
     // One form in reading order, in three groups a FormGroupGap apart, the
     // form's own row spacing within them: the tracks' start and totals;
-    // the discs' option and the start it enables; then when numbering
-    // starts over. The check boxes have no labels, so they start where the
-    // fields do.
+    // the discs' option, and the start and the reset at each disc that it
+    // enables (#373 H41: the reset was in the last group, apart from the
+    // option that enables it); then the reset at each folder. The check
+    // boxes have no labels, so they start where the fields do.
     Kirigami.FormLayout {
         id: autoNumberForm
         objectName: "autoNumberForm"
@@ -156,6 +157,13 @@ Components.CompactDialogWindow {
             color: root.uiPalette.negative
             text: I18n.i18nc("@info", "Enter a starting disc from 1 to %1.", root.maximumNumber)
         }
+        CheckBox {
+            id: resetOnDiscCheck
+            objectName: "autoNumberResetOnDiscCheck"
+            checked: false
+            enabled: writeDiscCheck.checked
+            text: I18n.i18nc("@option:check", "Reset track numbers at each new disc")
+        }
 
         Components.FormGroupGap {
             uiPalette: root.uiPalette
@@ -166,13 +174,6 @@ Components.CompactDialogWindow {
             objectName: "autoNumberResetOnFolderCheck"
             checked: false
             text: I18n.i18nc("@option:check", "Reset track numbers at each new folder or section")
-        }
-        CheckBox {
-            id: resetOnDiscCheck
-            objectName: "autoNumberResetOnDiscCheck"
-            checked: false
-            enabled: writeDiscCheck.checked
-            text: I18n.i18nc("@option:check", "Reset track numbers at each new disc")
         }
     }
 }

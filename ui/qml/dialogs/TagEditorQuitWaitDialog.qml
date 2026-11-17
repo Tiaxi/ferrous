@@ -29,9 +29,11 @@ Components.CompactDialogWindow {
 
     objectName: "tagEditorQuitWaitDialog"
     title: I18n.i18nc("@title:window", "Finishing Tag Changes")
-    // Wider by the text's indent, so the explanation keeps its lines.
+    // Wider by the text's indent, so the explanation keeps its lines, at
+    // the measure of a compact dialog with a larger font.
     readonly property real textIndent: busyIndicator.implicitWidth + statusRow.spacing
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26 + root.textIndent, root.minimumWidth)
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 26 + root.textIndent, root.measureWidth + root.textIndent,
+                           root.minimumWidth)
 
     onRejected: root.stopQuittingRequested()
 

@@ -539,6 +539,8 @@ private slots:
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
+    void compactDialogsKeepTheirMeasureWithALargeFont_data();
+    void compactDialogsKeepTheirMeasureWithALargeFont();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -3686,8 +3688,9 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
     }
     QVERIFY2(tags->width() <= qCeil(held), qPrintable(QStringLiteral("holds %1: ").arg(held) + describeColumns()));
     QCOMPARE(qreal(tags->width()), dialog->property("fittedWidth").toReal());
-    // "of" is 4 px from the field on either side of it (#373 H11), and the
-    // number as far from its label as the other fields are from theirs.
+    // "of" is 4 px from the field on either side of it (#373 H11), the
+    // number as far from its label as the other fields are from theirs, and
+    // the total ends where they do.
     for (const auto &[number, total] : {std::pair{QStringLiteral("trackNo"), QStringLiteral("totalTracks")},
                                         std::pair{QStringLiteral("discNo"), QStringLiteral("totalDiscs")}}) {
         QQuickItem *of = visibleNamed(tags, QStringLiteral("tagEditorOf_") + number);
@@ -3698,6 +3701,11 @@ void UiDialogsTest::editTagsColumnsFitTheDefaultWindowAndFollowTheFont() {
         QCOMPARE(sceneRect(of).left() - sceneRect(numberField).right(), 4.0);
         QCOMPARE(sceneRect(totalField).left() - sceneRect(of).right(), 4.0);
         QCOMPARE(sceneRect(numberField).left(), sceneRect(titleField).left());
+        // The pair ends on the fields' edge, the two fields alike in width
+        // (#373 H41: it ended 35 px short).
+        QCOMPARE(sceneRect(totalField).right(), sceneRect(titleField).right());
+        QVERIFY2(std::abs(numberField->width() - totalField->width()) <= 1.0,
+                 qPrintable(QStringLiteral("%1: %2 and %3").arg(number).arg(numberField->width()).arg(totalField->width())));
     }
     // Status takes no room, and shows no header, while no row has a status.
     QQuickItem *status = named(tags, QStringLiteral("tagEditorColumn_status"));
@@ -3813,8 +3821,9 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder_data() {
 // Auto Number is one form in reading order (#373 H38): the tracks' start
 // and Write totals, which writes the tracks' totals with or without the
 // discs' (under the disc's start, it read as a disc option); Write disc
-// numbers, then the disc's start it enables; then when numbering starts
-// over. The groups are a FormGroupGap apart, 16 px with the default font,
+// numbers, then the disc's start and the reset at each disc, which it
+// enables (#373 H41: the reset was in the last group, apart from it); then
+// the reset at each folder. The groups are a FormGroupGap apart, 16 px with the default font,
 // and their rows the form's row spacing, 4 px. The check boxes have no labels and start
 // where the fields do, the description too, so the dialog has one left
 // edge; it had two, with Write disc numbers under the field it enables.
@@ -3856,7 +3865,7 @@ void UiDialogsTest::autoNumberIsOneFormInReadingOrder() {
     // Every row within the window, whole, top to bottom in reading order.
     const QStringList order{QStringLiteral("autoNumberStartingTrackField"), QStringLiteral("autoNumberWriteTotalsCheck"),
                             QStringLiteral("autoNumberWriteDiscCheck"), QStringLiteral("autoNumberStartingDiscField"),
-                            QStringLiteral("autoNumberResetOnFolderCheck"), QStringLiteral("autoNumberResetOnDiscCheck")};
+                            QStringLiteral("autoNumberResetOnDiscCheck"), QStringLiteral("autoNumberResetOnFolderCheck")};
     // The rows that start a group.
     const QStringList groupStarts{QStringLiteral("autoNumberWriteDiscCheck"),
                                   QStringLiteral("autoNumberResetOnFolderCheck")};
@@ -4699,6 +4708,12 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
         QVERIFY2(sceneRect(label).right() <= sceneRect(field).left(), qPrintable(key));
         QVERIFY2(sceneRect(field).right() < sceneRect(table).left(), qPrintable(key));
     }
+    // Track and Disc end where the other fields do, at a large font too.
+    for (const QString &total : {QStringLiteral("totalTracks"), QStringLiteral("totalDiscs")}) {
+        QQuickItem *field = visibleNamed(tags, QStringLiteral("tagEditorField_") + total);
+        QVERIFY2(field != nullptr, qPrintable(total));
+        QCOMPARE(sceneRect(field).right(), sceneRect(title).right());
+    }
 
     // The table's headers whole, with their Revert beside them once the
     // edits change their column: at 24 pt Year and Disc elided to a letter.
@@ -4772,6 +4787,62 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     }
     editor.close();
     QTRY_VERIFY(!tagEditor->property("visible").toBool());
+}
+
+void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A compact dialog's measure is about 46 characters of the body font: at
+// 24 pt, a confirmation's question is on one line, rather than broken
+// after 28 characters in the 450 px it had (#373 H41). With the default
+// font, it opens at 450 px, as before.
+void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(confirm, "open"));
+    QVERIFY(waitForDialogWindow(confirm));
+    QQuickWindow *confirmWindow = windowOf(confirm);
+    QQuickItem *message = visibleNamed(confirmWindow, QStringLiteral("confirmDialogMessage"));
+    QVERIFY(message != nullptr);
+    QCOMPARE(message->property("text").toString(), QStringLiteral("Delete the diagnostics log?"));
+    const QFontMetricsF body(paletteOf(window)->property("baseFont").value<QFont>());
+    const qreal padding = confirm->property("contentPadding").toReal();
+    const qreal measure = confirm->property("measureWidth").toReal();
+    QCOMPARE(measure, std::ceil(46 * body.averageCharWidth() + 2 * padding));
+    if (pointSize > 0) {
+        // The measure, wider than 450 px, within the screen's room.
+        QVERIFY2(measure > 450, qPrintable(QString::number(measure)));
+        QCOMPARE(confirmWindow->width(), int(measure));
+    } else {
+        QVERIFY2(measure < 450, qPrintable(QString::number(measure)));
+        QCOMPARE(confirmWindow->width(), 450);
+    }
+    // The question on one line, and nothing cut short or over an edge.
+    QTRY_COMPARE(message->property("lineCount").toInt(), 1);
+    const QStringList crossing = itemsCrossingWindow(confirmWindow, false);
+    QVERIFY2(crossing.isEmpty(), qPrintable(crossing.join(QLatin1Char('\n'))));
+    QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
+    QTRY_VERIFY(!confirmWindow->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
 }
 
 int main(int argc, char **argv) {

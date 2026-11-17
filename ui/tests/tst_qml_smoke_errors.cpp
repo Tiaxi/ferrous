@@ -469,9 +469,11 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
         QVERIFY(heading != nullptr && messageItem != nullptr);
         QTRY_VERIFY(heading->isVisible() && messageItem->isVisible());
         const QString headingText = heading->property("text").toString();
-        // It says so once, on one line; what the changes can be is in
-        // the text below (#373 H38).
-        QCOMPARE(headingText, QStringLiteral("Some recent changes could not be saved."));
+        // It says so once, on one line, and not in the title's words
+        // again; what the changes can be is in the text below (#373 H38,
+        // H41).
+        QCOMPARE(headingText, QStringLiteral("Some recent changes were not saved."));
+        QVERIFY(!headingText.contains(QStringLiteral("could not be saved")));
         QCOMPARE(heading->property("lineCount").toInt(), 1);
         // The lead, semibold, as every dialog's first sentence is (#373
         // H40); the error and what follows regular, secondary.
@@ -480,9 +482,9 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
         auto *details = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedDetails"));
         QVERIFY(details != nullptr);
         QCOMPARE(details->property("text").toString(),
-                 QStringLiteral("They can include settings, queue changes and Last.fm scrobbles. Retry saves "
-                                "again, for example after freeing disk space. Quit Anyway closes Ferrous and "
-                                "loses them."));
+                 QStringLiteral("Unsaved changes can include settings, queue changes and Last.fm scrobbles. "
+                                "Retry saves again, for example after freeing disk space. Quit Anyway closes "
+                                "Ferrous and loses them."));
         QVERIFY(details->mapToScene(QPointF(0, 0)).y() >= messageItem->mapToScene(QPointF(0, messageItem->height())).y());
         QVERIFY2(!headingText.contains(QStringLiteral("os error")), qPrintable(headingText));
         QVERIFY(messageItem->mapToScene(QPointF(0, 0)).y()

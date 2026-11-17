@@ -499,6 +499,7 @@ private slots:
     void clearUsesTheBreezeIconAndNoTextGlyphs();
     void textMeetsItsContrastAsDrawn_data();
     void textMeetsItsContrastAsDrawn();
+    void largeFontRowsAndFooterHoldTheirText_data();
     void largeFontRowsAndFooterHoldTheirText();
     void glyphsTargetsAndThumbnailsFollowTheFont_data();
     void glyphsTargetsAndThumbnailsFollowTheFont();
@@ -1611,11 +1612,23 @@ bool within(const QRectF &inner, const QRectF &outer) {
 
 } // namespace
 
+void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText_data() {
+    QTest::addColumn<int>("windowWidth");
+    QTest::addColumn<bool>("footerWraps");
+    QTest::newRow("1600 px") << 1600 << false;
+    QTest::newRow("narrow") << 560 << true;
+}
+
 // At 24 pt, the field, the rows and the headings are as tall as their text
-// needs, and the footer's key hints wrap inside the 800 px palette, which
-// grows to hold their lines. With the default font, the sizes stay those
-// of the design, as the tests above pin.
+// needs, and the palette, its title column and its help are as much wider
+// as the font is larger (#373 H41: at 800 px, titles were elided beside
+// empty room and the footer wrapped). The footer's key hints stay on one
+// line where the window has the room, and wrap inside the palette, which
+// grows to hold their lines, where it has not. With the default font, the
+// sizes stay those of the design, as the tests above pin.
 void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
+    QFETCH(int, windowWidth);
+    QFETCH(bool, footerWraps);
     const QFont applicationFont = QGuiApplication::font();
     const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
     QFont large = applicationFont;
@@ -1623,13 +1636,23 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QGuiApplication::setFont(large);
     Harness harness;
     QString errorText;
-    QVERIFY2(harness.load(kBreezeDark, &errorText), qPrintable(errorText));
+    QVERIFY2(harness.load(kBreezeDark, &errorText, windowWidth, 1000), qPrintable(errorText));
     QCOMPARE(harness.tokens->property("basePointSize").toReal(), 24.0);
     QVERIFY(harness.open());
-    harness.search(QStringLiteral("meridian"), meridianRows(harness.coverUrl), {1, 2, 4});
+    auto fixtureRows = meridianRows(harness.coverUrl);
+    // A title too long for 300 px at 24 pt that fits the wider column.
+    fixtureRows[3].label = QStringLiteral("Meridian Line, Second Take");
+    harness.search(QStringLiteral("meridian"), fixtureRows, {1, 2, 4});
     QTRY_VERIFY(harness.view()->isVisible());
     const QRectF frame = sceneRect(harness.palette());
-    QCOMPARE(frame.width(), 800.0);
+    QCOMPARE(frame.width(), std::min(std::round(800.0 * 2.4), windowWidth - 32.0));
+    if (!footerWraps) {
+        QCOMPARE(harness.dialog->property("titleWidth").toReal(), std::round(300.0 * 2.4));
+    }
+    // The syntax help as much wider, inside the palette.
+    QObject *help = harness.dialog->findChild<QObject *>(QStringLiteral("globalSearchHelp"));
+    QVERIFY(help != nullptr);
+    QCOMPARE(help->property("width").toReal(), std::min(std::round(480.0 * 2.4), frame.width() - 32.0));
 
     // The field holds its line.
     const QFontMetricsF fieldMetrics(harness.field()->property("font").value<QFont>());
@@ -1649,6 +1672,12 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
         const QString kind = harness.model.rowDataAt(i).value(QStringLiteral("kind")).toString();
         if (kind == QStringLiteral("item") && titleLeft < 0) {
             titleLeft = sceneRect(visibleNamed(row, QStringLiteral("globalSearchResultTitle")).first()).left();
+        }
+        if (kind == QStringLiteral("item") && !footerWraps) {
+            // No title is elided that its column could hold.
+            for (QQuickItem *run : visibleNamed(row, QStringLiteral("globalSearchResultTitle"))) {
+                QVERIFY2(!run->property("truncated").toBool(), qPrintable(run->property("text").toString()));
+            }
         }
         if (kind == QStringLiteral("section")) {
             QQuickItem *heading = visibleChildNamed(row, QStringLiteral("globalSearchSectionHeading"));
@@ -1676,8 +1705,9 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
     QVERIFY(rows >= 3);
     QVERIFY(headings >= 1);
 
-    // The footer's four pairs wrap to more than one line, every pair
-    // whole and inside the palette, and the footer is as tall as its lines.
+    // The footer's four pairs on one line, or wrapped to more than one in
+    // a narrow window, every pair whole and inside the palette, and the
+    // footer is as tall as its lines.
     // Each line starts where the results' titles do (#373 H12).
     QTRY_COMPARE(harness.hints().size(), 4);
     QQuickItem *footer = harness.item(QStringLiteral("globalSearchFooter"));
@@ -1710,7 +1740,11 @@ void SearchPaletteTest::largeFontRowsAndFooterHoldTheirText() {
                      qPrintable(QStringLiteral("%1 vs a space of %2").arg(gap).arg(small.horizontalAdvance(QLatin1Char(' ')))));
         }
     }
-    QVERIFY2(lineTops.size() >= 2, qPrintable(QString::number(lineTops.size())));
+    if (footerWraps) {
+        QVERIFY2(lineTops.size() >= 2, qPrintable(QString::number(lineTops.size())));
+    } else {
+        QCOMPARE(lineTops.size(), 1);
+    }
     QQuickItem *hairline = harness.item(QStringLiteral("globalSearchFooterHairline"));
     QCOMPARE(sceneRect(hairline).bottom(), footerRect.top());
     QVERIFY(frame.bottom() <= harness.window->height() - 32.0);

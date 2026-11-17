@@ -120,9 +120,11 @@ Item {
     // they are shown.
     readonly property real infoReserve: Math.round(root.infoReveal * (infoColumn.width + 1))
     // The space the art fits in, across: the whole view, or while the
-    // details show the space left of their seam, during a preview less 24 px
-    // on each side.
-    readonly property real artMargin: root.previewActive ? 24 * root.infoReveal : 0
+    // details show the space left of their seam less 16 px on each side,
+    // during a preview 24 px, so the art never touches their seam (#373
+    // H41: a wide window's art met it). The gutter eases with the details'
+    // reveal, as their reserve does.
+    readonly property real artMargin: (root.previewActive ? 24 : 16) * root.infoReveal
     readonly property real fitLeft: root.artMargin
     readonly property real fitWidth: Math.max(1, albumArtViewport.width - root.infoReserve - 2 * root.artMargin)
     readonly property real fitCenterX: root.fitLeft + root.fitWidth / 2
@@ -800,9 +802,12 @@ Item {
                 // the path across the column's whole width, with Copy Path
                 // at its end (#373 H12: in the grid, the path had the
                 // values' part of the row and broke onto a second line). A
-                // long path wraps after a slash, on up to three lines, and
-                // what does not fit is elided (#373 H38: on one line, it
-                // was cut to its start and its last folder's end).
+                // long path wraps after a slash, on the lines it needs up to
+                // eight, and what does not fit is elided (#373 H38: on one
+                // line, it was cut to its start and its last folder's end;
+                // H41: on three, a large font cut a typical path short over
+                // an empty column). During a preview, under the candidate's
+                // label and Apply, it takes up to three.
                 ColumnLayout {
                     id: folderRow
                     objectName: "albumArtFolderRow"
@@ -867,7 +872,7 @@ Item {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             elide: Text.ElideRight
-                            maximumLineCount: 3
+                            maximumLineCount: root.previewActive ? 3 : 8
                             font.pointSize: root.infoPointSize
                             color: root.plot.plotText
                             Accessible.name: folderPathLabel.path
