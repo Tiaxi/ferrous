@@ -299,7 +299,11 @@ jobs:
       # Two at a time, half the runner's CPUs, as scripts/run-tests.sh
       # chooses; each test program has directories of its own.
       - name: Run UI smoke tests
-        run: ctest --test-dir ui/build --output-on-failure --parallel 2
+        # TEMPORARY, for measuring: every CPU, each test four times.
+        run: |
+          echo "CPUs: $(nproc)"; free -m
+          ctest --test-dir ui/build --output-on-failure --parallel "$(nproc)" --repeat until-fail:4
+          free -m
 
       - name: Compare native waveform and spectrogram rendering and texture reuse
         run: |
