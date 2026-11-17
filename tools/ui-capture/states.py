@@ -628,7 +628,7 @@ def _grab_window(r, tag, settle=True):
     if settle:  # (a caller that reads live values settles first itself, so nothing waits between its read and the grab)
         r.s.settle_opacity()
     p = os.path.join(raw, f"{tag}_{r.s.suffix}.png")
-    res = r.s.cmd(f"grab {p}")
+    res = r.s.raw_grab(p)
     if not str(res).startswith("ok"):
         raise RuntimeError(f"grab {tag}: {res}")
     from PIL import Image
@@ -640,7 +640,7 @@ def _save_shot(r, img, area, state, desc):
     img.save(os.path.join(os.environ["SHOT_OUT"], name + ".png"))
     r.s.index.append(dict(file=name + ".png", area=area, state=state, theme=r.s.tag, scale=r.s.scale,
                           size=f"{r.s.size[0]}x{r.s.size[1]}", image=f"{img.width}x{img.height}",
-                          renderer=r.s.renderer, window="main", desc=desc))
+                          renderer=r.s.renderer, window="main", desc=desc, sources=r.s.take_sources()))
 
 
 QUEUE_END_JS = ("(function(){var v=" + FIND + "('playlistView');if(!v)return '';var q=v.mapToItem(null,0,0);var bot=q.y+v.height;"
@@ -2499,6 +2499,7 @@ def m_icons(r, arg):
             im.save(os.path.join(out, name + ".png"))
             r.s.index.append(dict(file=name + ".png", area="icon", state="app-icon" + ("-zoom4" if zoom != 1 else ""),
                                   theme=tag, scale=1, size=f"{im.width}x{im.height}", renderer=r.s.renderer,
+                                  sources=r.s.take_sources(),
                                   desc=f"App icon per-size SVGs (16-256 px) rendered by Qt's SVG plugin on a Breeze "
                                        f"{tag} window colour{' , 4x nearest-neighbour zoom' if zoom != 1 else ''}"))
 
@@ -3805,6 +3806,7 @@ def m_appicon5(r, arg):
     ap = os.path.join(os.environ["SHOT_OUT"], f"dialog_about-window_{r.s.suffix}.png")
     tb_note = "no About window shot"
     if os.path.exists(ap):
+        r.s.source_shot(os.path.basename(ap))
         A = Image.open(ap).convert("RGB")
         a_ = np.asarray(A).astype(int)
         top = a_[:48, :80]
@@ -4178,6 +4180,7 @@ def m_appicon6(r, arg):
     d.text((24 + 128 + 20, 104), desc.group(1) if desc else "", fill=B["text"], font=fr)
     ap = os.path.join(os.environ["SHOT_OUT"], f"dialog_about-window_{r.s.suffix}.png")
     if os.path.exists(ap):
+        r.s.source_shot(os.path.basename(ap))
         real = Image.open(ap).convert("RGB")
         hdr = real.crop((0, 36, min(real.width, 300), 104))
         A2 = Image.new("RGB", (A.width + hdr.width + 30, A.height + 20), B["window"])
@@ -4663,6 +4666,7 @@ def m_appicon9(r, arg):
     ap = os.path.join(os.environ["SHOT_OUT"], f"dialog_about-window_{r.s.suffix}.png")
     if not os.path.exists(ap):
         raise FileNotFoundError(f"appicon9: no About window shot {ap}")
+    r.s.source_shot(os.path.basename(ap))
     tb = Image.open(ap).convert("RGB").crop((0, 0, 330, 34))
     d.text((10, y), "title bar (KWin's Breeze decoration, this run's About window), 16 px", fill=B["text"], font=fr)
     S.paste(tb, (10, y + 16))
@@ -5314,7 +5318,7 @@ def m_icons_ab(r, arg):
     name = "iconab_a-vs-b_dark"
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="iconab", state="a-vs-b", theme="dark", scale=1,
-                          size=f"{S.width}x{S.height}", renderer=r.s.renderer,
+                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, sources=r.s.take_sources(),
                           desc=(f"App icon, {ICON_A_LABEL} (this source) vs {ICON_B_LABEL} ({ICON_B_DIR}), 1x at 16-128 "
                                 "px and 4x of 16-32 px on Breeze Dark and Light (Qt's SVG renderer)") if ICON_AB else
                           "App icon (installed, this source), 1x at 16-128 px and 4x of 16-48 px on Breeze Dark and Light"
@@ -5353,7 +5357,7 @@ def m_closeups(r, arg):
         p = os.path.join(raw, f"{tag}_{r.s.suffix}.png")
         if settle:
             r.s.settle_opacity()
-        r.s.cmd(f"grab {p}")
+        r.s.raw_grab(p)
         tips = [q for q in r.s.popups() if q.get("tooltip") and q["opacity"] > 0.02]
         if tips:  # loudly: a "1 px band" in a pressed crop was once the tooltip's edge fading in
             raise RuntimeError(f"closeups: a tooltip shows in the {tag} grab (opacity {tips[0]['opacity']:.2f}, "
@@ -5483,7 +5487,7 @@ def m_closeups(r, arg):
     name = f"closeup_controls_{r.s.suffix}"
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="closeup", state="controls", theme=r.s.tag, scale=r.s.scale,
-                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main",
+                          size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main", sources=r.s.take_sources(),
                           desc=f"Close-ups at {Z}x: a transport button at rest, hovered and pressed with sampled fills; "
                                "the level meter's top at 2x on the spectrogram (scale on, off), the waveform and paused; the queue thumb above it"))
 
@@ -5524,7 +5528,7 @@ def m_ring_progression(r, arg):
             r.s.settle_opacity()
             box, bar, scan = need("scrobbleIndicatorBox"), need("statusBar"), need("statusBarScanBar")
             p = os.path.join(raw, f"ring_{r.s.suffix}_{len(cells)}.png")
-            r.s.cmd(f"grab {p}")
+            r.s.raw_grab(p)
             im = Image.open(p).convert("RGB")
             x, y, w, h = [int(round(v * sc)) for v in box]
             pad = 4 * sc
@@ -5568,6 +5572,7 @@ def m_ring_progression(r, arg):
     S.save(os.path.join(out, name + ".png"))
     r.s.index.append(dict(file=name + ".png", area="scrobblering", state="progression", theme=r.s.tag,
                           scale=r.s.scale, size=f"{S.width}x{S.height}", renderer=r.s.renderer, window="main",
+                          sources=r.s.take_sources(),
                           desc="Scrobble indicator, every state, beside a running library scan's bar: the status bar's "
                                "right end at 1x, the indicator (glyph and bar) at 6x (states injected)"))
 

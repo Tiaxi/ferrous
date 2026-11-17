@@ -816,14 +816,80 @@ def _private_names(rd, entries):
     return names
 
 
+def _walk_names_home(rd, rel):
+    """Whether the layout walk at rd/rel records a text that names the home folder (as _home_boxes reads it)."""
+    for w in json.load(open(os.path.join(rd, rel)))["windows"]:
+        for t in w.get("texts", []):
+            if t.get("home") or _has_home(t.get("text")) or _has_home(t.get("shown_text")):
+                return True
+    return False
+
+
+def privacy_evidence(rd, entries):
+    """Fails closed: the privacy check reads the home folder's texts from the layout walks and recordings' traces,
+    so an image without them is not "checked" but unverified, and fails the pack (exit 3, nothing published).
+    - a shot needs its layout walk (missing with SHOT_LAYOUT=0, or when the probe could not write it);
+    - a composite (cut from grabs with no entry of their own) needs `sources`: the walk of every grab it was cut
+      from, or a shot it reuses, none of them naming the home folder (a composite cannot be painted: its crops'
+      offsets are not recorded); `sources=[]` is an image with no app pixels (an icon rendered from its SVGs);
+    - a recording needs its item trace and must have been made at the neutral paths (neutral_ns.sh): its trace
+      names no texts, so at the real paths (SHOT_NEUTRAL=0) a home-folder text in a frame could go unseen.
+    Returns (failures, counts)."""
+    fails = []
+    n = Counter()
+    by_file = {e["file"]: e for e in entries}
+    has_walk = lambda e: bool(e.get("layout")) and os.path.exists(os.path.join(rd, e["layout"]))
+    for e in entries:
+        if not os.path.exists(os.path.join(rd, "shots", e["file"])):
+            continue  # (not an image this round publishes: a geometry-only entry)
+        if has_walk(e):
+            n["shots"] += 1
+            continue
+        if "sources" not in e:
+            fails.append(f"privacy: {e['file']} is unverified: it has no layout walk (SHOT_LAYOUT=0, or the probe "
+                         "could not write it)")
+            continue
+        bad = []
+        for src in e["sources"]:
+            if src is None:
+                bad.append("a grab without its layout walk")
+            elif src.startswith("shot:"):
+                se = by_file.get(src[5:])
+                if se is None or not has_walk(se):
+                    bad.append(f"{src[5:]} without its layout walk")
+                elif _walk_names_home(rd, se["layout"]):
+                    bad.append(f"{src[5:]}, which shows a home-folder text")
+            elif not os.path.exists(os.path.join(rd, src)):
+                bad.append(f"{src} missing")
+            elif _walk_names_home(rd, src):
+                bad.append(f"{src}, which shows a home-folder text")
+        if bad:
+            fails.append(f"privacy: composite {e['file']} is unverified: cut from {'; '.join(sorted(set(bad))[:3])}")
+        else:
+            n["composites"] += 1
+    for d in sorted(glob.glob(os.path.join(rd, "strips-raw", "*"))):
+        if not os.path.exists(os.path.join(d, "frames.tsv")):
+            continue
+        meta = json.load(open(os.path.join(d, "meta.json"))) if os.path.exists(os.path.join(d, "meta.json")) else {}
+        if not os.path.exists(os.path.join(d, "opacity.tsv")):
+            fails.append(f"privacy: recording {os.path.basename(d)} is unverified: it has no item trace (opacity.tsv)")
+        elif not meta.get("neutral"):
+            fails.append(f"privacy: recording {os.path.basename(d)} is unverified: recorded at the real paths "
+                         "(SHOT_NEUTRAL=0, or before its meta.json said), where its frames cannot be checked")
+        else:
+            n["recordings"] += 1
+    return fails, n
+
+
 def redact_round(rd, entries):
     """Paints the home folder out of the round's own images before anything is made of them: every shot in
     place (shots/), and every recorded frame (strips-raw/) where an item that names it (by name: _private_names) is
     shown, from the recording's item trace (its rect and opacity at that frame). Then checks: every such box in
     every shot and frame is painted, else the pack fails (a privacy check on the recorded texts and their rects; no
-    OCR). Returns the failures."""
+    OCR), and every image has the evidence the check needs (privacy_evidence), else it fails as unverified.
+    Returns the failures."""
     import motion_strip
-    fails = []
+    fails, counts = privacy_evidence(rd, entries)
     for e in entries:
         boxes, _ = _home_boxes(rd, e)
         if not boxes:
@@ -869,8 +935,10 @@ def redact_round(rd, entries):
             bad = [b for b in boxes if not _box_painted(im, b, fills)]
             if bad:
                 fails.append(f"privacy: {os.path.basename(d)}/{f[4]} still shows a home-folder item at {bad[:2]}")
-    print(f"pack: privacy: home-folder texts painted out of the shots and {n_frames} recorded frames"
-          + (f"; {len(fails)} FAILED" if fails else "; check passed"))
+    print(f"pack: privacy: checked {counts['shots']} shots by their layout walks, {counts['composites']} composites by "
+          f"their sources' walks and {counts['recordings']} recordings (neutral paths, traced); home-folder texts "
+          f"painted out of the shots and {n_frames} recorded frames"
+          + (f"; {len(fails)} FAILED or unverified" if fails else "; check passed"))
     return fails
 
 

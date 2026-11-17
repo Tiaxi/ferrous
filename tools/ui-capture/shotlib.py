@@ -53,6 +53,7 @@ class Session:
         self.scale = scale
         self.size = size
         self.index = []
+        self.composite_sources = []  # raw_grab/source_shot since the last composite entry (take_sources)
         self.suffix = f"{tag}_{scale}x_{size[0]}x{size[1]}" + suffix_extra
         t_app = time.time()
         prefix = os.environ.get("SHOT_RUN_PREFIX", "run")
@@ -461,6 +462,30 @@ class Session:
             if not any(body in t for t in texts):
                 raise RuntimeError(f"dialog check: '{title}' does not show '{body}' (texts: {texts[:4]})")
 
+    # --- privacy evidence for composites: images a macro cuts from grabs that have no index entry of their own.
+    # pack.py's privacy check needs, for every image it publishes, the layout walk of what it shows; a composite's
+    # entry lists its sources (take_sources), and an entry with neither a walk nor sources fails the check.
+    def raw_grab(self, path, win=""):
+        """Grabs the window to `path` with its layout walk beside it (path[:-4] + ".layout.json"; none when
+        SHOT_LAYOUT=0) and records it as a source of the next composite entry. Returns the probe's reply."""
+        walk = None if os.environ.get("SHOT_LAYOUT", "1") == "0" else path[:-4] + ".layout.json"
+        r = self.cmd(f"grab{('@' + win) if win else ''} {path}" + (f" {walk}" if walk else ""), timeout=30)
+        if str(r).startswith("ok"):
+            walked = walk is not None and "layout not written" not in str(r)
+            # (None: a source without a walk, which the privacy check fails)
+            self.composite_sources.append(os.path.relpath(walk, os.path.dirname(OUT.rstrip("/"))) if walked else None)
+        return r
+
+    def source_shot(self, file):
+        """Records an indexed shot (shots/FILE) that the next composite entry reuses pixels of."""
+        self.composite_sources.append("shot:" + file)
+
+    def take_sources(self):
+        """The sources recorded since the last composite entry, for its `sources` (and forgets them). Sources a
+        macro grabbed but never used go to the next composite: checked more than needed, never less."""
+        s, self.composite_sources = self.composite_sources, []
+        return s
+
     def layout_path(self, file):
         """Where the layout checker's walk for this shot goes (None when SHOT_LAYOUT=0)."""
         if os.environ.get("SHOT_LAYOUT", "1") == "0":
@@ -507,8 +532,11 @@ class Session:
         self.t_stripsave = getattr(self, "t_stripsave", 0) + time.time() - ts
         print(f"  strip {name}: {r}", flush=True)
         with open(os.path.join(d, "meta.json"), "w") as f:
+            # neutral: recorded with the work folder at /mnt/ferrous (neutral_ns.sh), which the privacy check needs:
+            # a recording's trace names no texts, so frames recorded at the real paths cannot be checked
             json.dump(dict(name=name, theme=self.tag, desc=desc, crop=crop, scale=self.scale,
-                           size=list(self.size), opts=opts, variant=self.suffix, items=items), f)
+                           size=list(self.size), opts=opts, variant=self.suffix, items=items,
+                           neutral=bool(os.environ.get("SHOT_NEUTRAL_WORK"))), f)
         return d
 
     def save_index(self, label):

@@ -85,8 +85,8 @@ into an existing round (wiping nothing) and rebuild its sheets and `INDEX.md`. `
 sessions (at most 4).
 
 The exit status is not 0 when a state failed (`failures.txt`, 4), a check in the pack failed (a dialog shot not
-of its dialog, a missing core image, an image over its size, a home-folder path left in a shot: 3), or
-`CONTRAST.md` is incomplete (5).
+of its dialog, a missing core image, an image over its size, a home-folder path left in a shot, an image the
+privacy check cannot verify: 3), or `CONTRAST.md` is incomplete (5).
 
 ### What a run does
 
@@ -164,6 +164,17 @@ work folder is bind-mounted at `/mnt/ferrous`, so the folder rows, the art viewe
 log name no home folder. As a second guard, the probe records every text that names the real home folder with its
 rect, and `pack.py` paints those out of every shot and frame and fails if any remain.
 
+The check fails closed: an image without the evidence it reads is unverified, and an unverified image fails the
+pack like a path left in a shot (exit 3; a focus-only run then publishes nothing). The evidence is:
+
+- for a shot, its layout walk, so `SHOT_LAYOUT=0` fails the check;
+- for a composite (an image a macro cuts from grabs that have no entry of their own, such as the 1:1 sheets), the
+  layout walk of every grab it was cut from, none of which may name the home folder, since a composite cannot be
+  painted;
+- for a recording, its item trace, and the neutral paths: the trace records where items are, not their text, so
+  frames recorded with `SHOT_NEUTRAL=0` cannot be checked. A run at the real paths therefore fails the check
+  whenever it records a transition.
+
 ## Known traps
 
 - **Always rebuild.** The build step always runs. Never point `SHOT_APP` at a binary someone else may rebuild
@@ -177,7 +188,8 @@ rect, and `pack.py` paints those out of every shot and frame and fails if any re
   (`SHOT_WORK`). Use `SHOT_BUILD_WRAPPER` to keep the compile step in line with your other builds.
 - **Neutral paths need user namespaces.** `neutral_ns.sh` needs unprivileged user and mount namespaces (on by
   default on Fedora); the work folder must not be under `/mnt`, which the namespace covers. Paths outside the work
-  folder (such as the source tree) stay real. `SHOT_NEUTRAL=0` runs without; the pack then paints the paths out.
+  folder (such as the source tree) stay real. `SHOT_NEUTRAL=0` runs without; the pack then paints the paths out
+  of the shots, but it cannot check recordings, so its privacy check fails when there are any (see Privacy).
 - **Offscreen and private only.** Each app runs in its own `dbus-run-session` with a private bus socket and its
   own XDG folders, so the single-instance handoff and MPRIS never reach a Ferrous you are running; the driver
   records the private bus's names at start, and the template scan refuses to run if a Ferrous or MPRIS name is
