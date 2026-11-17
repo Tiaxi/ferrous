@@ -36,11 +36,18 @@ DialogWindow {
     // The height that holds the content at the window's width.
     readonly property int fittedHeight: Math.ceil(2 * root.contentPadding + body.implicitHeight + root._footerHeight)
 
+    // The measure of its text: about 46 characters of the body font, so
+    // that a larger font keeps a lead on a line and a body of a few lines,
+    // rather than a few words to the line (#373 H41: at 24 pt, 450 px held
+    // 28 characters). With the default font, 25 grid units, 450 px, hold
+    // more.
+    readonly property int measureWidth: Math.ceil(46 * bodyMetrics.averageCharacterWidth + 2 * root.contentPadding)
+
     // Its minimum stays put: the window system takes a new one as a new
-    // window. Its width is the buttons' and the content's at least, as it
-    // opens.
+    // window. Its width is the measure, and the buttons' and the content's
+    // at least, as it opens, within the screen.
     minimumWidth: Kirigami.Units.gridUnit * 18
-    defaultWidth: Math.max(Kirigami.Units.gridUnit * 25, root._neededWidth)
+    defaultWidth: Math.max(Kirigami.Units.gridUnit * 25, root.measureWidth, root._neededWidth)
     readonly property int _neededWidth: Math.ceil(Math.max(root._footerWidth,
         root.contentWidth > 0 ? root.contentWidth + 2 * root.contentPadding : 0))
     defaultHeight: root.fittedHeight
@@ -65,6 +72,11 @@ DialogWindow {
                 root.initialFocusItem.forceActiveFocus(Qt.PopupFocusReason)
             }
         }
+    }
+
+    FontMetrics {
+        id: bodyMetrics
+        font: root.uiPalette.baseFont
     }
 
     ColumnLayout {

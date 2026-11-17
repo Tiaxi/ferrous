@@ -539,6 +539,8 @@ private slots:
     void dialogsUseOneCharacterEllipsesAndNoTextGlyphs();
     void dialogsShareOneHeadingStyle();
     void dialogsHoldTheirContentsWithALargeFont();
+    void compactDialogsKeepTheirMeasureWithALargeFont_data();
+    void compactDialogsKeepTheirMeasureWithALargeFont();
 };
 
 void UiDialogsTest::initTestCase() {
@@ -4772,6 +4774,62 @@ void UiDialogsTest::dialogsHoldTheirContentsWithALargeFont() {
     }
     editor.close();
     QTRY_VERIFY(!tagEditor->property("visible").toBool());
+}
+
+void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont_data() {
+    QTest::addColumn<qreal>("pointSize");
+    QTest::newRow("default font") << 0.0;
+    QTest::newRow("24 pt") << 24.0;
+}
+
+// A compact dialog's measure is about 46 characters of the body font: at
+// 24 pt, a confirmation's question is on one line, rather than broken
+// after 28 characters in the 450 px it had (#373 H41). With the default
+// font, it opens at 450 px, as before.
+void UiDialogsTest::compactDialogsKeepTheirMeasureWithALargeFont() {
+    QFETCH(qreal, pointSize);
+    const QFont applicationFont = QGuiApplication::font();
+    const auto restoreFont = qScopeGuard([&] { QGuiApplication::setFont(applicationFont); });
+    if (pointSize > 0) {
+        QFont large = applicationFont;
+        large.setPointSizeF(pointSize);
+        QGuiApplication::setFont(large);
+    }
+    LibraryTreeModel libraryModel;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = loadMainWindow(engine, libraryModel);
+    QVERIFY2(window != nullptr, "Main.qml failed to show");
+    QObject *diagnostics = object(window, QStringLiteral("diagnosticsDialog"));
+    QVERIFY(diagnostics != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "open"));
+    QVERIFY(waitForDialogWindow(diagnostics));
+    QObject *confirm = object(window, QStringLiteral("clearDiagnosticsConfirmDialog"));
+    QVERIFY(confirm != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(confirm, "open"));
+    QVERIFY(waitForDialogWindow(confirm));
+    QQuickWindow *confirmWindow = windowOf(confirm);
+    QQuickItem *message = visibleNamed(confirmWindow, QStringLiteral("confirmDialogMessage"));
+    QVERIFY(message != nullptr);
+    QCOMPARE(message->property("text").toString(), QStringLiteral("Delete the diagnostics log?"));
+    const QFontMetricsF body(paletteOf(window)->property("baseFont").value<QFont>());
+    const qreal padding = confirm->property("contentPadding").toReal();
+    const qreal measure = confirm->property("measureWidth").toReal();
+    QCOMPARE(measure, std::ceil(46 * body.averageCharWidth() + 2 * padding));
+    if (pointSize > 0) {
+        // The measure, wider than 450 px, within the screen's room.
+        QVERIFY2(measure > 450, qPrintable(QString::number(measure)));
+        QCOMPARE(confirmWindow->width(), int(measure));
+    } else {
+        QVERIFY2(measure < 450, qPrintable(QString::number(measure)));
+        QCOMPARE(confirmWindow->width(), 450);
+    }
+    // The question on one line, and nothing cut short or over an edge.
+    QTRY_COMPARE(message->property("lineCount").toInt(), 1);
+    const QStringList crossing = itemsCrossingWindow(confirmWindow, false);
+    QVERIFY2(crossing.isEmpty(), qPrintable(crossing.join(QLatin1Char('\n'))));
+    QVERIFY(QMetaObject::invokeMethod(confirm, "reject"));
+    QTRY_VERIFY(!confirmWindow->isVisible());
+    QVERIFY(QMetaObject::invokeMethod(diagnostics, "reject"));
 }
 
 int main(int argc, char **argv) {
