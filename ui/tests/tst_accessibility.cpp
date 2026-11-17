@@ -2402,7 +2402,11 @@ void AccessibilityTest::seekTouchShowsNoHoverTimeAfterTheMouseMoved() {
     // With a finger held off the bar, the mouse moves, and the finger
     // then slides onto the bar: the window's pointer is the finger again.
     h.touch().press(0, h.offBar, h.window);
-    QTest::mouseMove(h.window, h.empty);
+    // A move to where the cursor already is would be dropped by Qt, so
+    // the mouse goes one pixel along, and the bar's hover is the mouse's
+    // again before the finger moves.
+    QTest::mouseMove(h.window, h.empty + QPoint(1, 0));
+    QVERIFY(h.hover->property("enabled").toBool());
     h.touch().move(0, (h.offBar + h.onBar) / 2, h.window);
     h.touch().move(0, h.onBar, h.window);
     QVERIFY(h.drawFrame());
