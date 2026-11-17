@@ -2029,6 +2029,9 @@ void applyItunesCandidateFromPreview(QQuickWindow *window, QObject *dialog, QObj
         QVERIFY2(text.startsWith(QStringLiteral("Replace the ")) && text.contains(QStringLiteral("album art")) && message->height() > 0,
                  qPrintable(text));
         QVERIFY(sceneRectOf(message).bottom() <= sceneRectOf(details).top());
+        // The question leads, semibold, the details regular (#373 H40).
+        QCOMPARE(message->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(details->property("font").value<QFont>().weight(), QFont::Normal);
     }
     QVERIFY(clickVisibleButton(replaceQuestion(window), QStringLiteral("confirmDialogConfirmButton")));
     QTRY_COMPARE(fake->property("appliedItunesArtwork").toList(), (QVariantList{index}));

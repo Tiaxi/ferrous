@@ -64,7 +64,10 @@ Components.CompactDialogWindow {
             wrapMode: Text.WordWrap
             // Short enough for one line: what it can be is in the text
             // below (#373 H38: the list in it left "saved." alone on a
-            // second line).
+            // second line). The lead, semibold, as every dialog's first
+            // sentence is (#373 H40: the three lines read as one grey
+            // block).
+            font.weight: Font.DemiBold
             text: I18n.i18nc("@info", "Some recent changes could not be saved.")
         }
 

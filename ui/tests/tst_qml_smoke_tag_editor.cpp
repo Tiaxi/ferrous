@@ -374,6 +374,11 @@ void TagEditorSmokeTest::tagEditorCancelAsksBeforeDroppingEdits() {
     // Cancel asks, as the close button and Escape do.
     QTRY_VERIFY(fixture.confirmShown());
     QCOMPARE(fixture.confirmMessage(), QStringLiteral("Save changes before closing the tag editor?"));
+    // The question leads, semibold, as every dialog's first sentence is
+    // (#373 H40).
+    QCOMPARE(fixture.window->findChild<QObject *>(QStringLiteral("tagEditorCloseConfirmMessage"))
+                 ->property("font").value<QFont>().weight(),
+             QFont::DemiBold);
     QVERIFY(fixture.editorShown());
     QVERIFY(fixture.editor.isOpen());
 
@@ -1487,6 +1492,8 @@ void TagEditorSmokeTest::renameFilesShowsTheNewNamesAndCancelRenamesNothing() {
     QVERIFY(summary != nullptr);
     QCOMPARE(summary->property("text").toString(),
              QStringLiteral("1 file will be renamed. 1 file can't be renamed and keeps its name."));
+    // The lead, semibold, as every dialog's first sentence is (#373 H40).
+    QCOMPARE(summary->property("font").value<QFont>().weight(), QFont::DemiBold);
     const QVariantList rows = previewDialog->property("rows").toList();
     QCOMPARE(rows.size(), 2);
     QCOMPARE(rows[0].toMap().value(QStringLiteral("oldName")).toString(), QStringLiteral("01 Song.flac"));

@@ -473,6 +473,10 @@ void ErrorsSmokeTest::failedSaveBeforeQuitShowsTheErrorAndRetrySaves() {
         // the text below (#373 H38).
         QCOMPARE(headingText, QStringLiteral("Some recent changes could not be saved."));
         QCOMPARE(heading->property("lineCount").toInt(), 1);
+        // The lead, semibold, as every dialog's first sentence is (#373
+        // H40); the error and what follows regular, secondary.
+        QCOMPARE(heading->property("font").value<QFont>().weight(), QFont::DemiBold);
+        QCOMPARE(messageItem->property("font").value<QFont>().weight(), QFont::Normal);
         auto *details = window->findChild<QQuickItem *>(QStringLiteral("quitSaveFailedDetails"));
         QVERIFY(details != nullptr);
         QCOMPARE(details->property("text").toString(),
